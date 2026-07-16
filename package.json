@@ -1,7 +1,7 @@
 {
   "name": "canopy",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,8 +9,8 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "tauri": "tauri",
-    "build:hook": "cargo build --manifest-path src-tauri/Cargo.toml --bin canopy-hook && node scripts/prepare-sidecar.mjs",
-    "build:hook:release": "cargo build --manifest-path src-tauri/Cargo.toml --bin canopy-hook --release && node scripts/prepare-sidecar.mjs --release"
+    "build:hook": "node scripts/prepare-sidecar.mjs",
+    "build:hook:release": "node scripts/prepare-sidecar.mjs --release"
   },
   "dependencies": {
     "@codingame/monaco-vscode-files-service-override": "~25.1.2",

@@ -1,0 +1,102 @@
+# Builds and releases Canopy for macOS and Linux.
+#
+# Tauri cannot cross-compile between operating systems (the linkers and the
+# system webview are native), so each OS builds on its own runner. Windows and
+# the Homebrew cask are deliberately not here yet.
+#
+# Trigger: push a tag (`git tag v0.1.0 && git push --tags`), or run it by hand
+# from the Actions tab to get artifacts without cutting a release.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# tauri-action creates the release and uploads assets.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      # One platform failing shouldn't bin the artifacts of the others.
+      fail-fast: false
+      matrix:
+        include:
+          # macOS: both arches are built on the arm64 runner. Rust cross-compiles
+          # to Intel fine, and prepare-sidecar.mjs builds the hook helper for the
+          # same --target so an Intel app never ships an arm64 helper.
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            args: "--target aarch64-apple-darwin"
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+            args: "--target x86_64-apple-darwin"
+          # 22.04, not latest: the glibc you build against is the *floor* for
+          # what users can run. Building on 24.04 would exclude 22.04 users.
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            args: ""
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            xdg-utils \
+            build-essential \
+            curl wget file libssl-dev libgtk-3-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          key: ${{ matrix.target }}
+
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the update artifacts. Without this the build still succeeds but
+          # produces no .sig, and installed copies will refuse the update.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Apple signing + notarisation. When these are unset the mac build is
+          # unsigned: it runs here, but Gatekeeper blocks it on other people's
+          # machines. Set them before shipping to anyone else.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          releaseName: "Canopy __VERSION__"
+          releaseBody: "See the assets below to download and install."
+          # Draft: a release is public the moment it publishes, and the tag is
+          # the only gate. Review before it reaches anyone.
+          releaseDraft: true
+          prerelease: false
+          # Writes latest.json, which plugins.updater.endpoints points at.
+          includeUpdaterJson: true
+          args: ${{ matrix.args }}
