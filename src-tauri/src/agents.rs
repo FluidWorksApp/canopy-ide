@@ -319,6 +319,49 @@ pub fn session_forget(session_id: String) -> Result<(), String> {
     }
 }
 
+/// Where an agent's `--resume` has to run, and whether there is anything to
+/// resume.
+///
+/// Claude files a conversation under its *project root*, not the directory the
+/// agent happened to be in: a session run in `product-demo/packages/db` lands in
+/// the bucket for `product-demo`. Resuming from the recorded cwd therefore looks
+/// in a bucket that does not exist and reports "No conversation found".
+///
+/// The bucket name is the path with `/` replaced by `-`, which is lossy —
+/// real directories contain dashes, so decoding it is guesswork. Instead we walk
+/// *up* from the recorded cwd and re-encode each ancestor until one matches the
+/// bucket, which recovers the exact path unambiguously.
+fn resume_location(digest: &serde_json::Value) -> (String, bool) {
+    let cwd = digest["cwd"].as_str().unwrap_or("").to_string();
+    let Some(transcript) = digest["transcript_path"].as_str() else {
+        // Agents other than claude may not report one. Don't block restore on a
+        // check we can't perform.
+        return (cwd, true);
+    };
+    let bucket = std::path::Path::new(transcript)
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let mut root = cwd.clone();
+    let mut probe = std::path::PathBuf::from(&cwd);
+    loop {
+        if probe.to_string_lossy().replace('/', "-") == bucket {
+            root = probe.to_string_lossy().to_string();
+            break;
+        }
+        if !probe.pop() {
+            break; // no ancestor matches; fall back to the recorded cwd
+        }
+    }
+
+    // No transcript means no conversation was ever persisted — the agent was
+    // started but never actually talked to, or it died before writing. Every
+    // `--resume` against it fails, so callers must not offer the button.
+    (root, std::path::Path::new(transcript).exists())
+}
+
 /// Live digests of agent sessions, for showing the user exactly what would be
 /// shared, and for restoring sessions after a crash.
 #[tauri::command]
@@ -334,7 +377,12 @@ pub fn session_digests() -> Result<Vec<serde_json::Value>, String> {
             continue;
         }
         if let Ok(raw) = std::fs::read_to_string(entry.path()) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                let (root, resumable) = resume_location(&v);
+                if let Some(map) = v.as_object_mut() {
+                    map.insert("resume_cwd".into(), serde_json::json!(root));
+                    map.insert("resumable".into(), serde_json::json!(resumable));
+                }
                 out.push(v);
             }
         }

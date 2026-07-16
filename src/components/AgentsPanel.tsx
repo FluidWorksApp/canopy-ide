@@ -248,15 +248,19 @@ export function AgentsPanel({
           </div>
           {restorable.map((d) => {
             const agentId = d.agent ?? "agent";
-            const cmd = restoreCommand(agentId, d.session_id);
-            const dir = (d.cwd ?? "").split("/").filter(Boolean).pop() ?? "";
+            // resume_cwd, not cwd: claude looks the conversation up under its
+            // project root, so resuming from the subdirectory the agent ran in
+            // reports "No conversation found".
+            const runIn = d.resume_cwd || d.cwd || "";
+            const cmd = d.resumable === false ? null : restoreCommand(agentId, d.session_id);
+            const dir = runIn.split("/").filter(Boolean).pop() ?? "";
             const last = (d.prompts ?? []).at(-1);
             return (
               <div key={d.session_id} className="restore-row">
                 <div className="restore-main">
                   <span className="agent-name">{agentId}</span>
                   {dir && (
-                    <span className="agent-dir" title={d.cwd}>
+                    <span className="agent-dir" title={runIn}>
                       {dir}
                     </span>
                   )}
@@ -271,13 +275,18 @@ export function AgentsPanel({
                     <button
                       className="btn-mini"
                       title={cmd}
-                      onClick={() => onRestore?.(d.cwd ?? "", cmd, agentId, agentId)}
+                      onClick={() => onRestore?.(runIn, cmd, agentId, agentId)}
                     >
                       Restore
                     </button>
+                  ) : d.resumable === false ? (
+                    // The agent wrote no transcript, so every --resume against
+                    // this id fails. Say so rather than hand over a button whose
+                    // only outcome is a red error in a terminal.
+                    <span className="restore-unsupported" title={d.cwd}>
+                      no saved history — can't resume
+                    </span>
                   ) : (
-                    // Better to say why than to offer a button that would
-                    // silently start a fresh session and call it a restore.
                     <span
                       className="restore-unsupported"
                       title={`${agentId} cannot reopen a specific past session by id`}

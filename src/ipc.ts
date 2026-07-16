@@ -313,6 +313,12 @@ export interface SessionDigest {
   updated?: number;
   prompts?: string[];
   files?: string[];
+  /** Directory the agent's resume must run in — claude files a conversation
+   *  under its project root, not the directory the agent ran in. Derived in
+   *  agents.rs; may differ from `cwd`. */
+  resume_cwd?: string;
+  /** False when no transcript was ever persisted, so every --resume would fail. */
+  resumable?: boolean;
 }
 
 /** Publish which projects share context between their agent sessions. The hook
