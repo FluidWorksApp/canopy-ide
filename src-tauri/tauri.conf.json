@@ -45,6 +45,18 @@
     "copyright": "Copyright 2026 Cause Connect Pte Ltd. All rights reserved.",
     "licenseFile": "../LICENSE.md",
     "shortDescription": "Local-first, memory-light IDE for coding agents",
-    "longDescription": "Canopy is a local-first, memory-light IDE built around coding agents and git worktrees. Terminal-first, offline-capable, no Electron."
+    "longDescription": "Canopy is a local-first, memory-light IDE built around coding agents and git worktrees. Terminal-first, offline-capable, no Electron.",
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERBNzgwMDkzNjE1MjNGNzMKUldSelAxSmhrd0I0MnFXeDc1MUhINWI1Mm1JTDdiT2RSMnZrSkxvVnVzTHUyb08xc2l1NjN1WkkK",
+      "endpoints": [
+        "https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

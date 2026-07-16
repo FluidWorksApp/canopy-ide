@@ -16,6 +16,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         true,
         &[
             &PredefinedMenuItem::about(app, None, None)?,
+            &MenuItem::with_id(app, "check-updates", "Check for Updates…", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::hide(app, None)?,
             &PredefinedMenuItem::separator(app)?,
@@ -107,6 +108,10 @@ fn js_log(level: String, message: String) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // Self-update (see plugins.updater in tauri.conf.json) and the restart
+        // that has to follow an install.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(pty::PtyManager::default())
         .manage(fsx::WorkspaceManager::default())
         .manage(lsp::LspManager::default())

@@ -19,6 +19,7 @@ import { ProjectView } from "./components/ProjectView";
 import { ProjectDialog } from "./components/ProjectDialog";
 import { Welcome } from "./components/Welcome";
 import { stopWorkspaceServers } from "./lsp/client";
+import { checkForUpdate, installUpdate, type UpdateInfo } from "./updater";
 
 /** Tell the hook helper which projects share context between their sessions.
  *  Every project is listed with its opt-in state, so turning sharing off
@@ -44,6 +45,8 @@ export default function App() {
   const [hookPath, setHookPath] = useState<string | null>(null);
   const [zen, setZen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [updateAvail, setUpdateAvail] = useState<UpdateInfo | null>(null);
+  const [updateProgress, setUpdateProgress] = useState<number | null>(null);
 
   const wsRef = useRef(ws);
   wsRef.current = ws;
@@ -172,6 +175,17 @@ export default function App() {
             if (active) void closeProjectRef.current(active);
           } else if (e.payload === "toggle-zen") {
             toggleZen("menu");
+          } else if (e.payload === "check-updates") {
+            void checkForUpdate()
+              .then(async (u) => {
+                if (u) {
+                  setUpdateAvail(u);
+                  return;
+                }
+                const { getVersion } = await import("@tauri-apps/api/app");
+                setNotice(`Canopy is up to date (${await getVersion()}).`);
+              })
+              .catch((err) => setNotice(`Update check failed: ${err}`));
           } else if (e.payload === "new-project") {
             setDialog({ mode: "new" });
           } else if (e.payload === "open-project") {
@@ -393,6 +407,48 @@ export default function App() {
           />
         ))}
       </div>
+
+      {updateAvail && (
+        <div className="update-toast">
+          <div className="update-head">
+            <strong>Canopy {updateAvail.version}</strong> is available
+          </div>
+          {updateAvail.notes && <div className="update-notes">{updateAvail.notes}</div>}
+          {updateProgress === null ? (
+            <div className="update-actions">
+              {/* Never install without asking: the terminals hold live agent
+                  sessions whose scrollback exists nowhere else, and installing
+                  relaunches the app. */}
+              <button
+                className="btn btn-accent"
+                onClick={() => {
+                  setUpdateProgress(0);
+                  void installUpdate(setUpdateProgress).catch((err) => {
+                    setUpdateProgress(null);
+                    setUpdateAvail(null);
+                    setNotice(`Update failed: ${err}`);
+                  });
+                }}
+              >
+                Install and restart
+              </button>
+              <button className="btn" onClick={() => setUpdateAvail(null)}>
+                Later
+              </button>
+            </div>
+          ) : (
+            <div className="update-progress">
+              <div
+                className="update-bar"
+                style={{ width: `${Math.round(updateProgress * 100)}%` }}
+              />
+              <span className="update-pct">
+                {Math.round(updateProgress * 100)}% — Canopy will restart itself
+              </span>
+            </div>
+          )}
+        </div>
+      )}
 
       {notice && (
         <div className="notice" onClick={() => setNotice(null)} title="dismiss">
