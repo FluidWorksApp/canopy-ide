@@ -1,0 +1,356 @@
+//! PTY management: spawn, stream, resize, kill.
+//!
+//! Design:
+//! - One reader thread per session does blocking reads from the PTY master into a
+//!   shared `pending` buffer.
+//! - One flusher thread per session drains `pending` every FLUSH_INTERVAL (coalescing
+//!   many small reads into one IPC message) and sends raw bytes over a `Channel`.
+//! - Backpressure: `outstanding` counts bytes sent to the WebView but not yet acked
+//!   (the frontend acks after xterm.js consumes a chunk). When pending + outstanding
+//!   exceeds `high_water`, the reader stops reading — the kernel PTY buffer fills and
+//!   the child blocks on write. Memory stays bounded; nothing is dropped.
+//! - Teardown: kill the child's whole process group, reader hits EOF, flusher drains,
+//!   reaps the child, removes the session, emits `pty:exit`. No zombies, no leaks.
+
+use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use serde::Serialize;
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+use tauri::ipc::{Channel, InvokeResponseBody};
+use tauri::{AppHandle, Emitter, State};
+
+const FLUSH_INTERVAL: Duration = Duration::from_millis(10);
+const READ_BUF_SIZE: usize = 64 * 1024;
+const DEFAULT_HIGH_WATER: usize = 2 * 1024 * 1024;
+
+pub struct Session {
+    pub id: u32,
+    pub pid: Option<u32>,
+    pub title: Mutex<String>,
+    pub cwd: String,
+    writer: Mutex<Box<dyn Write + Send>>,
+    master: Mutex<Box<dyn MasterPty + Send>>,
+    killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    child: Mutex<Option<Box<dyn Child + Send + Sync>>>,
+    shutdown: AtomicBool,
+    eof: AtomicBool,
+    pending: Mutex<Vec<u8>>,
+    outstanding: AtomicUsize,
+    high_water: usize,
+}
+
+#[derive(Default)]
+pub struct PtyManager {
+    sessions: Arc<Mutex<HashMap<u32, Arc<Session>>>>,
+    next_id: AtomicU32,
+}
+
+#[derive(Serialize, Clone)]
+pub struct PtyExit {
+    pub id: u32,
+    pub exit_code: Option<u32>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct SpawnResult {
+    pub id: u32,
+    pub pid: Option<u32>,
+}
+
+impl PtyManager {
+    pub fn sessions(&self) -> Arc<Mutex<HashMap<u32, Arc<Session>>>> {
+        self.sessions.clone()
+    }
+
+    /// Kill every session; called on app exit so no child processes outlive us.
+    pub fn kill_all(&self) {
+        let sessions: Vec<Arc<Session>> = self
+            .sessions
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        for s in sessions {
+            s.terminate();
+        }
+    }
+}
+
+impl Session {
+    fn terminate(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        // Kill the whole process group: the shell is the session leader of the PTY,
+        // so this also takes down grandchildren that hold the slave fd open.
+        #[cfg(unix)]
+        if let Some(pid) = self.pid {
+            unsafe {
+                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        let _ = self.killer.lock().unwrap().kill();
+    }
+}
+
+#[tauri::command]
+pub fn pty_spawn(
+    app: AppHandle,
+    state: State<'_, PtyManager>,
+    cols: u16,
+    rows: u16,
+    cwd: Option<String>,
+    shell: Option<String>,
+    high_water: Option<usize>,
+    on_data: Channel<InvokeResponseBody>,
+) -> Result<SpawnResult, String> {
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| e.to_string())?;
+
+    // Allocated before spawn so the child can carry its own session id in env.
+    let id = state.next_id.fetch_add(1, Ordering::SeqCst) + 1;
+
+    let shell = shell.unwrap_or_else(default_shell);
+    let mut cmd = CommandBuilder::new(&shell);
+    // Login shell so the user's PATH / prompt setup loads, matching a real terminal.
+    #[cfg(unix)]
+    cmd.args(["-l"]);
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    // Agent CLI hooks inherit these and use them to (a) prove the event came
+    // from a terminal we own and (b) name the tab it came from.
+    cmd.env("CANOPY", "1");
+    cmd.env("CANOPY_PTY", id.to_string());
+    let cwd = cwd
+        .or_else(|| dirs_home())
+        .unwrap_or_else(|| "/".to_string());
+    cmd.cwd(&cwd);
+
+    let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    drop(pair.slave);
+
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| e.to_string())?;
+    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+
+    let pid = child.process_id();
+    let killer = child.clone_killer();
+
+    let session = Arc::new(Session {
+        id,
+        pid,
+        title: Mutex::new(shell.clone()),
+        cwd,
+        writer: Mutex::new(writer),
+        master: Mutex::new(pair.master),
+        killer: Mutex::new(killer),
+        child: Mutex::new(Some(child)),
+        shutdown: AtomicBool::new(false),
+        eof: AtomicBool::new(false),
+        pending: Mutex::new(Vec::new()),
+        outstanding: AtomicUsize::new(0),
+        high_water: high_water.unwrap_or(DEFAULT_HIGH_WATER),
+    });
+
+    state.sessions.lock().unwrap().insert(id, session.clone());
+
+    // Reader thread: blocking reads -> pending buffer, with backpressure.
+    {
+        let session = session.clone();
+        thread::Builder::new()
+            .name(format!("pty-reader-{id}"))
+            .spawn(move || {
+                let mut buf = [0u8; READ_BUF_SIZE];
+                loop {
+                    if session.shutdown.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    // Backpressure: stop reading while the WebView is behind. The
+                    // kernel PTY buffer fills and the child blocks — bounded memory.
+                    loop {
+                        let queued = session.pending.lock().unwrap().len()
+                            + session.outstanding.load(Ordering::SeqCst);
+                        if queued <= session.high_water
+                            || session.shutdown.load(Ordering::SeqCst)
+                        {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    match reader.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            session.pending.lock().unwrap().extend_from_slice(&buf[..n]);
+                        }
+                    }
+                }
+                session.eof.store(true, Ordering::SeqCst);
+            })
+            .expect("spawn pty reader thread");
+    }
+
+    // Flusher thread: coalesce pending bytes into batched IPC messages; on EOF,
+    // drain, reap the child, clean up the session, emit pty:exit.
+    {
+        let session = session.clone();
+        let sessions = state.sessions.clone();
+        thread::Builder::new()
+            .name(format!("pty-flush-{id}"))
+            .spawn(move || {
+                loop {
+                    thread::sleep(FLUSH_INTERVAL);
+                    let chunk = {
+                        let mut pending = session.pending.lock().unwrap();
+                        if pending.is_empty() {
+                            None
+                        } else {
+                            Some(std::mem::take(&mut *pending))
+                        }
+                    };
+                    match chunk {
+                        Some(data) => {
+                            session.outstanding.fetch_add(data.len(), Ordering::SeqCst);
+                            if on_data.send(InvokeResponseBody::Raw(data)).is_err() {
+                                // WebView side is gone; stop streaming.
+                                session.terminate();
+                            }
+                        }
+                        None => {
+                            if session.eof.load(Ordering::SeqCst)
+                                || session.shutdown.load(Ordering::SeqCst)
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+                // Reap the child so it never lingers as a zombie.
+                let exit_code = session
+                    .child
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .and_then(|mut c| c.wait().ok())
+                    .map(|status| status.exit_code());
+                sessions.lock().unwrap().remove(&session.id);
+                let _ = app.emit("pty:exit", PtyExit {
+                    id: session.id,
+                    exit_code,
+                });
+            })
+            .expect("spawn pty flusher thread");
+    }
+
+    Ok(SpawnResult { id, pid })
+}
+
+#[tauri::command]
+pub fn pty_write(state: State<'_, PtyManager>, id: u32, data: String) -> Result<(), String> {
+    let session = get_session(&state, id)?;
+    let result = session
+        .writer
+        .lock()
+        .unwrap()
+        .write_all(data.as_bytes())
+        .map_err(|e| e.to_string());
+    result
+}
+
+/// Frontend ack after xterm.js consumes a chunk — releases backpressure.
+#[tauri::command]
+pub fn pty_ack(state: State<'_, PtyManager>, id: u32, bytes: usize) -> Result<(), String> {
+    if let Ok(session) = get_session(&state, id) {
+        let mut current = session.outstanding.load(Ordering::SeqCst);
+        loop {
+            let next = current.saturating_sub(bytes);
+            match session.outstanding.compare_exchange(
+                current,
+                next,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn pty_resize(state: State<'_, PtyManager>, id: u32, cols: u16, rows: u16) -> Result<(), String> {
+    let session = get_session(&state, id)?;
+    let result = session
+        .master
+        .lock()
+        .unwrap()
+        .resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| e.to_string());
+    result
+}
+
+/// Called by the frontend at boot: any session alive at that moment belongs to
+/// a previous page (webview reloads destroy JS state without unmounting), so
+/// reap them all. Prevents orphaned shells across dev reloads / Cmd+R.
+#[tauri::command]
+pub fn pty_kill_all(state: State<'_, PtyManager>) {
+    state.kill_all();
+}
+
+#[tauri::command]
+pub fn pty_kill(state: State<'_, PtyManager>, id: u32) -> Result<(), String> {
+    let session = get_session(&state, id)?;
+    session.terminate();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn pty_set_title(state: State<'_, PtyManager>, id: u32, title: String) -> Result<(), String> {
+    let session = get_session(&state, id)?;
+    *session.title.lock().unwrap() = title;
+    Ok(())
+}
+
+fn get_session(state: &State<'_, PtyManager>, id: u32) -> Result<Arc<Session>, String> {
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| format!("no pty session {id}"))
+}
+
+fn default_shell() -> String {
+    #[cfg(unix)]
+    {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
+    }
+    #[cfg(windows)]
+    {
+        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
+    }
+}
+
+fn dirs_home() -> Option<String> {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()
+}

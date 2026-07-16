@@ -1,0 +1,412 @@
+// Shell: project tabs on top; each open project is a fully mounted (hidden
+// when inactive) ProjectView so its terminals keep running across switches.
+import { useCallback, useEffect, useRef, useState } from "react";
+import * as ipc from "./ipc";
+import {
+  emptyWorkspace,
+  exportProject,
+  exportWorkspace,
+  importFile,
+  loadWorkspace,
+  newProjectId,
+  saveWorkspace,
+  type Project,
+  type WorkspaceState,
+} from "./projects";
+import type { AgentEventEntry } from "./types";
+import { derivePending, pendingForRoots } from "./notifications";
+import { ProjectView } from "./components/ProjectView";
+import { ProjectDialog } from "./components/ProjectDialog";
+import { Welcome } from "./components/Welcome";
+import { stopWorkspaceServers } from "./lsp/client";
+
+/** Tell the hook helper which projects share context between their sessions.
+ *  Every project is listed with its opt-in state, so turning sharing off
+ *  actively revokes it rather than just omitting the entry. */
+function publishScopes(state: WorkspaceState) {
+  void ipc
+    .setContextScopes(
+      state.projects.map((p) => ({
+        name: p.name,
+        roots: p.components.map((c) => c.path),
+        enabled: Boolean(p.shareContext),
+      })),
+    )
+    .catch(() => {});
+}
+
+export default function App() {
+  const [ws, setWs] = useState<WorkspaceState>(emptyWorkspace);
+  const [loaded, setLoaded] = useState(false);
+  const [dialog, setDialog] = useState<{ mode: "new" } | { mode: "edit"; project: Project } | null>(null);
+  const [stats, setStats] = useState<ipc.SessionStats[]>([]);
+  const [agentEvents, setAgentEvents] = useState<AgentEventEntry[]>([]);
+  const [hookPath, setHookPath] = useState<string | null>(null);
+  const [zen, setZen] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const wsRef = useRef(ws);
+  wsRef.current = ws;
+  // One press can reach us from both the menu accelerator and the webview key
+  // handler; without this they'd cancel each other and focus mode would look
+  // stuck. First one wins, the echo inside the window is ignored.
+  // File menu. The workspace already auto-persists to
+  // ~/.canopy/projects.json — these are explicit open/export on top.
+  const openProjectFromDisk = useCallback(async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const dir = await open({ directory: true, title: "Open project folder" });
+    if (typeof dir !== "string") return;
+    // Reuse a project already pointing at this folder instead of duplicating it.
+    const existing = wsRef.current.projects.find((p) =>
+      p.components.some((c) => c.path === dir),
+    );
+    if (existing) {
+      await openProjectRef.current(existing.id);
+      return;
+    }
+    const name = dir.slice(dir.lastIndexOf("/") + 1) || dir;
+    await saveProjectRef.current({
+      id: newProjectId(),
+      name,
+      components: [{ label: name, path: dir, commands: [] }],
+    });
+  }, []);
+
+  const saveProjectAs = useCallback(async () => {
+    const state = wsRef.current;
+    const project = state.projects.find((p) => p.id === state.activeId);
+    if (!project) return;
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const path = await save({
+      title: "Save project",
+      defaultPath: `${project.name}.canopy-project.json`,
+      filters: [{ name: "canopy project", extensions: ["json"] }],
+    });
+    if (!path) return;
+    await exportProject(path, project).catch((e) => setNotice(String(e)));
+  }, []);
+
+  const saveWorkspaceAs = useCallback(async () => {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const path = await save({
+      title: "Save workspace",
+      defaultPath: "workspace.canopy.json",
+      filters: [{ name: "canopy workspace", extensions: ["json"] }],
+    });
+    if (!path) return;
+    await exportWorkspace(path, wsRef.current).catch((e) => setNotice(String(e)));
+  }, []);
+
+  const openWorkspaceFile = useCallback(async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const path = await open({
+      title: "Open workspace or project",
+      filters: [{ name: "canopy", extensions: ["json"] }],
+    });
+    if (typeof path !== "string") return;
+    let file: { projects: Project[]; openIds: string[] };
+    try {
+      file = await importFile(path);
+    } catch (err) {
+      setNotice(String(err instanceof Error ? err.message : err));
+      return;
+    }
+    // Merge rather than replace: importing a workspace must never silently
+    // discard projects the user already has. Same id = same project, updated.
+    const state = wsRef.current;
+    const byId = new Map(state.projects.map((p) => [p.id, p]));
+    for (const p of file.projects) byId.set(p.id, p);
+    const projects = [...byId.values()];
+    const openIds = [...new Set([...state.openIds, ...file.openIds])];
+    for (const id of file.openIds) {
+      const project = projects.find((p) => p.id === id);
+      for (const c of project?.components ?? []) {
+        await ipc.workspaceAdd(c.path).catch(() => {});
+      }
+    }
+    wsRef.current = { ...state, projects, openIds };
+    updateRef.current({
+      projects,
+      openIds,
+      activeId: file.openIds[0] ?? state.activeId,
+    });
+  }, []);
+
+  const lastZenToggle = useRef(0);
+  const toggleZen = useCallback((_source: string) => {
+    const now = Date.now();
+    if (now - lastZenToggle.current < 250) return;
+    lastZenToggle.current = now;
+    setZen((v) => !v);
+  }, []);
+  // menu handler is registered before these are defined
+  const closeProjectRef = useRef<(id: string) => Promise<void>>(async () => {});
+  const openProjectRef = useRef<(id: string) => Promise<void>>(async () => {});
+  const saveProjectRef = useRef<(p: Project) => Promise<void>>(async () => {});
+  const updateRef = useRef<(patch: Partial<WorkspaceState>) => void>(() => {});
+
+  // Load persisted workspace; re-register watchers/scopes for open projects.
+  useEffect(() => {
+    void loadWorkspace().then(async (state) => {
+      for (const id of state.openIds) {
+        const project = state.projects.find((p) => p.id === id);
+        for (const c of project?.components ?? []) {
+          await ipc.workspaceAdd(c.path).catch(() => {});
+        }
+      }
+      setWs(state);
+      publishScopes(state);
+      setLoaded(true);
+    });
+    const subs = [
+      ipc.onPtyStats(setStats),
+      ipc.onAgentEvent((raw) =>
+        setAgentEvents((prev) => [...prev.slice(-199), { raw, ts: Date.now() }]),
+      ),
+      // Native menu accelerators (Cmd+W etc.) → scoped in-app actions. The
+      // visible ProjectView handles tab-level ones; close-project is ours.
+      import("@tauri-apps/api/event").then(({ listen }) =>
+        listen<string>("menu", (e) => {
+          if (e.payload === "close-project") {
+            const active = wsRef.current.activeId;
+            if (active) void closeProjectRef.current(active);
+          } else if (e.payload === "toggle-zen") {
+            toggleZen("menu");
+          } else if (e.payload === "new-project") {
+            setDialog({ mode: "new" });
+          } else if (e.payload === "open-project") {
+            void openProjectFromDisk();
+          } else if (e.payload === "save-project") {
+            void saveProjectAs();
+          } else if (e.payload === "open-workspace") {
+            void openWorkspaceFile();
+          } else if (e.payload === "save-workspace") {
+            void saveWorkspaceAs();
+          } else {
+            window.dispatchEvent(new CustomEvent(`menu:${e.payload}`));
+          }
+        }),
+      ),
+    ];
+    // Auto-inject agent hooks (idempotent) so tool events stream in without setup.
+    void import("@tauri-apps/api/core").then(({ invoke }) => {
+      void invoke("setup_agent_hooks", { agent: "claude" }).catch(() => {});
+      void invoke("setup_agent_hooks", { agent: "codex" }).catch(() => {});
+    });
+    // Focus mode is reachable two ways: the native menu accelerator, and a
+    // webview key handler. Belt and braces — the accelerator is what the menu
+    // advertises, but a native Cmd+Shift+Enter can be swallowed before it
+    // reaches the menu, which left users stuck inside focus mode with no way
+    // back out. The dedupe below means whichever arrives first wins and a
+    // second path firing for the same press can't toggle it straight back.
+    const keys = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setZen(false);
+      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.code === "Enter") {
+        e.preventDefault();
+        toggleZen("keydown");
+      }
+    };
+    window.addEventListener("keydown", keys);
+    void ipc.hookBridgePath().then(setHookPath);
+    return () => {
+      window.removeEventListener("keydown", keys);
+      subs.forEach((s) => void s.then((fn) => fn()));
+    };
+  }, []);
+
+  const update = useCallback((patch: Partial<WorkspaceState>) => {
+    setWs((prev) => {
+      const next = { ...prev, ...patch };
+      void saveWorkspace(next);
+      publishScopes(next);
+      return next;
+    });
+  }, []);
+
+  const openProject = useCallback(
+    async (id: string) => {
+      const project = wsRef.current.projects.find((p) => p.id === id);
+      if (!project) return;
+      if (!wsRef.current.openIds.includes(id)) {
+        for (const c of project.components) {
+          await ipc.workspaceAdd(c.path).catch((e) => console.warn("scope add failed", e));
+        }
+        update({ openIds: [...wsRef.current.openIds, id], activeId: id });
+      } else {
+        update({ activeId: id });
+      }
+    },
+    [update],
+  );
+
+  const closeProject = useCallback(
+    async (id: string) => {
+      const state = wsRef.current;
+      const project = state.projects.find((p) => p.id === id);
+      const openIds = state.openIds.filter((x) => x !== id);
+      // Drop watchers/scopes not used by any other open project.
+      const stillUsed = new Set(
+        openIds.flatMap(
+          (x) => state.projects.find((p) => p.id === x)?.components.map((c) => c.path) ?? [],
+        ),
+      );
+      for (const c of project?.components ?? []) {
+        if (!stillUsed.has(c.path)) {
+          await ipc.workspaceRemove(c.path).catch(() => {});
+          await stopWorkspaceServers(c.path);
+        }
+      }
+      update({
+        openIds,
+        activeId: state.activeId === id ? (openIds[openIds.length - 1] ?? null) : state.activeId,
+      });
+    },
+    [update],
+  );
+  closeProjectRef.current = closeProject;
+  openProjectRef.current = openProject;
+  updateRef.current = update;
+
+  const saveProject = useCallback(
+    async (project: Project) => {
+      const state = wsRef.current;
+      const exists = state.projects.some((p) => p.id === project.id);
+      const projects = exists
+        ? state.projects.map((p) => (p.id === project.id ? project : p))
+        : [...state.projects, project];
+      update({ projects });
+      setDialog(null);
+      if (state.openIds.includes(project.id)) {
+        // components may have changed; ensure scopes exist
+        for (const c of project.components) {
+          await ipc.workspaceAdd(c.path).catch(() => {});
+        }
+      } else {
+        // ref may lag one render; recompute from the fresh list
+        wsRef.current = { ...state, projects };
+        await openProject(project.id);
+      }
+    },
+    [update, openProject],
+  );
+
+  saveProjectRef.current = saveProject;
+
+  const deleteProject = useCallback(
+    (id: string) => {
+      const state = wsRef.current;
+      if (state.openIds.includes(id)) void closeProject(id);
+      update({ projects: state.projects.filter((p) => p.id !== id) });
+    },
+    [update, closeProject],
+  );
+
+  if (!loaded) return null;
+
+  const openProjects = ws.openIds
+    .map((id) => ws.projects.find((p) => p.id === id))
+    .filter((p): p is Project => Boolean(p));
+  const allPending = derivePending(agentEvents);
+  const pendingCount = (p: Project) =>
+    pendingForRoots(allPending, p.components.map((c) => c.path)).length;
+
+  return (
+    <div className={`app ${zen ? "zen" : ""}`}>
+      {/* Focus mode: chrome slides away but stays reachable — hovering the top
+          edge brings the project tabs and the tab strip back. */}
+      {zen && <div className="zen-hotzone" />}
+      <div className="titlebar">
+        <div className="project-tabs">
+          {openProjects.map((p) => (
+            <div
+              key={p.id}
+              className={`project-tab ${p.id === ws.activeId ? "project-tab-active" : ""}`}
+              onClick={() => update({ activeId: p.id })}
+              title={p.components.map((c) => c.path).join("\n")}
+            >
+              <span>{p.name}</span>
+              {pendingCount(p) > 0 && (
+                <span className="badge badge-urgent" title="agent needs your input">
+                  {pendingCount(p)}
+                </span>
+              )}
+              <span
+                className="tab-close"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void closeProject(p.id);
+                }}
+              >
+                ✕
+              </span>
+            </div>
+          ))}
+          <button className="btn-icon" title="New project" onClick={() => setDialog({ mode: "new" })}>
+            ＋
+          </button>
+        </div>
+        <div className="titlebar-spacer" />
+        {ws.projects.length > openProjects.length && (
+          <select
+            className="project-select"
+            value=""
+            onChange={(e) => {
+              if (e.target.value) void openProject(e.target.value);
+            }}
+          >
+            <option value="">Open project…</option>
+            {ws.projects
+              .filter((p) => !ws.openIds.includes(p.id))
+              .map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+          </select>
+        )}
+      </div>
+
+      <div className="app-body">
+        {openProjects.length === 0 && (
+          <Welcome
+            projects={ws.projects}
+            onOpen={(id) => void openProject(id)}
+            onNew={() => setDialog({ mode: "new" })}
+            onDelete={deleteProject}
+          />
+        )}
+        {openProjects.map((p) => (
+          <ProjectView
+            key={p.id}
+            project={p}
+            visible={p.id === ws.activeId}
+            zen={zen}
+            stats={stats}
+            events={agentEvents}
+            hookPath={hookPath}
+            onEdit={() => setDialog({ mode: "edit", project: p })}
+            onNotice={setNotice}
+            onShareContext={(on) =>
+              void saveProject({ ...p, shareContext: on })
+            }
+          />
+        ))}
+      </div>
+
+      {notice && (
+        <div className="notice" onClick={() => setNotice(null)} title="dismiss">
+          {notice}
+        </div>
+      )}
+
+      {dialog && (
+        <ProjectDialog
+          existing={dialog.mode === "edit" ? dialog.project : undefined}
+          onSave={(p) => void saveProject(p)}
+          onCancel={() => setDialog(null)}
+        />
+      )}
+    </div>
+  );
+}

@@ -1,0 +1,43 @@
+[package]
+name = "canopy"
+version = "0.1.0"
+description = "Local-first, memory-light, vibe-coding-first IDE"
+authors = ["sam@fluidwords.app"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.77.2"
+# The crate ships two binaries (the app + the hook helper), so `cargo run` —
+# which `tauri dev` uses — must be told which one is the app.
+default-run = "canopy"
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+# Standalone helper the agent-CLI hooks invoke. Kept out of the app binary so a
+# hook costs a ~1ms process start, not a whole Tauri runtime.
+[[bin]]
+name = "canopy-hook"
+path = "src/bin/canopy_hook.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.11.3", features = [] }
+tauri-plugin-log = "2"
+tauri-plugin-dialog = "2"
+# PTY: cross-platform pseudo-terminal, the core of the terminal feature
+portable-pty = "0.9"
+# File watching for external-change detection (diff-first workflow)
+notify = "8"
+# Process-tree inspection for the runaway guard + agent detection
+sysinfo = "0.33"
+trash = "5.2.3"
+
+# Unix signals for killing whole PTY process groups (no zombies)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
