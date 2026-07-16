@@ -8,7 +8,9 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "build:hook": "cargo build --manifest-path src-tauri/Cargo.toml --bin canopy-hook && node scripts/prepare-sidecar.mjs",
+    "build:hook:release": "cargo build --manifest-path src-tauri/Cargo.toml --bin canopy-hook --release && node scripts/prepare-sidecar.mjs --release"
   },
   "dependencies": {
     "@codingame/monaco-vscode-files-service-override": "~25.1.2",

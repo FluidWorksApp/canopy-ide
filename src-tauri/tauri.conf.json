@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeDevCommand": "npm run build:hook && npm run dev",
+    "beforeBuildCommand": "npm run build:hook:release && npm run build"
   },
   "app": {
     "windows": [
@@ -37,6 +37,9 @@
     ],
     "android": {
       "debugApplicationIdSuffix": ".debug"
-    }
+    },
+    "externalBin": [
+      "binaries/canopy-hook"
+    ]
   }
 }

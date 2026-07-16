@@ -26,3 +26,6 @@ dist-ssr
 # Aider local chat history (not part of the project)
 .aider.chat.history.md
 .aider*
+
+# Sidecar binaries staged by scripts/prepare-sidecar.mjs (built artifacts)
+/src-tauri/binaries/

@@ -337,6 +337,17 @@ fn setup_claude_hooks(home: &str, bridge: &str) -> Result<String, String> {
     // PTYs we spawn export (pty.rs), so foreign sessions are ignored entirely.
     let _ = bridge; // the helper resolves the bus path itself
     let helper = helper_path()?;
+    // Never register a hook pointing at a binary that isn't there. Claude runs
+    // hook commands without reporting failures, so a missing helper is not an
+    // error the user would ever see — it just looks like the feature silently
+    // does nothing. Refuse loudly instead.
+    if !helper.exists() {
+        return Err(format!(
+            "hook helper missing at {} — hooks not installed (build it with \
+             `cargo build --bin canopy-hook`)",
+            helper.display()
+        ));
+    }
     // Substrings identifying a hook entry as one of ours, across every version
     // we have shipped: the original inline shell command wrote to
     // agent-events.jsonl, later ones invoke the helper binary out of our state
