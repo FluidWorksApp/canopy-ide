@@ -46,7 +46,11 @@
     "licenseFile": "../LICENSE.md",
     "shortDescription": "Local-first, memory-light IDE for coding agents",
     "longDescription": "Canopy is a local-first, memory-light IDE built around coding agents and git worktrees. Terminal-first, offline-capable, no Electron.",
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": true,
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "entitlements": "entitlements.plist"
+    }
   },
   "plugins": {
     "updater": {

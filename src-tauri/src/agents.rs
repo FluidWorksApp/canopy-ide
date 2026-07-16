@@ -293,8 +293,34 @@ pub fn set_context_scopes(scopes: serde_json::Value) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// Delete one session's digest — the user removing a restorable session they
+/// no longer care about. Scoped by construction: the id becomes a file name
+/// inside our own sessions dir, and anything with a path separator or `..` is
+/// refused rather than allowed to escape it.
+#[tauri::command]
+pub fn session_forget(session_id: String) -> Result<(), String> {
+    if session_id.is_empty()
+        || session_id.contains('/')
+        || session_id.contains('\\')
+        || session_id.contains("..")
+    {
+        return Err("invalid session id".into());
+    }
+    let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
+    let path = std::path::PathBuf::from(&home)
+        .join(".canopy")
+        .join("sessions")
+        .join(format!("{session_id}.json"));
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        // Already gone is the desired end state, not a failure.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// Live digests of agent sessions, for showing the user exactly what would be
-/// shared. Nothing about this should be invisible.
+/// shared, and for restoring sessions after a crash.
 #[tauri::command]
 pub fn session_digests() -> Result<Vec<serde_json::Value>, String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;

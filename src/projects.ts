@@ -152,18 +152,77 @@ export interface AgentCli {
    *  registered under the same `id` in components/icons.tsx. */
   icon: string;
   install: string;
+  /**
+   * Command that reopens an earlier conversation *by its session id*, or
+   * undefined when the CLI cannot do that.
+   *
+   * Only fill this in for syntax verified against the CLI's own help or arg
+   * parser. A wrong flag doesn't error — it silently starts a *fresh* session
+   * while the UI claims the context was restored, which is worse than offering
+   * nothing. Two CLIs genuinely cannot do this and stay undefined on purpose:
+   *   - gemini: `--resume` takes a list *index* or "latest", not a session id.
+   *   - aider: only `--restore-chat-history`, and it is per-directory.
+   *
+   * Callers must never invoke this with an empty id: `amp threads continue`
+   * with no id silently continues the most recent thread, and `codex resume`
+   * with no id opens an interactive picker that just hangs in a PTY nobody is
+   * watching. See restoreCommand().
+   */
+  resume?: (sessionId: string) => string;
 }
 
 export const AGENT_CLIS: AgentCli[] = [
-  { id: "claude", name: "Claude Code", bin: "claude", icon: "✳", install: "npm install -g @anthropic-ai/claude-code" },
-  { id: "codex", name: "Codex CLI", bin: "codex", icon: "⌬", install: "npm install -g @openai/codex" },
-  { id: "amp", name: "Amp", bin: "amp", icon: "⚡", install: "npm install -g @sourcegraph/amp" },
+  {
+    id: "claude",
+    name: "Claude Code",
+    bin: "claude",
+    icon: "✳",
+    install: "npm install -g @anthropic-ai/claude-code",
+    // Verified: `-r, --resume [value]  Resume a conversation by session ID`.
+    resume: (id) => `claude --resume ${id}`,
+  },
+  {
+    id: "codex",
+    name: "Codex CLI",
+    bin: "codex",
+    icon: "⌬",
+    install: "npm install -g @openai/codex",
+    // Verified: `codex resume <SESSION_ID>` — subcommand, id is positional and
+    // takes a UUID or a session name.
+    resume: (id) => `codex resume ${id}`,
+  },
+  {
+    id: "amp",
+    name: "Amp",
+    bin: "amp",
+    icon: "⚡",
+    install: "npm install -g @sourcegraph/amp",
+    // Verified: `amp threads continue <threadId>`; thread ids look like T-<uuid>.
+    resume: (id) => `amp threads continue ${id}`,
+  },
   { id: "aider", name: "Aider", bin: "aider", icon: "a", install: "python3 -m pip install -U aider-chat" },
   { id: "gemini", name: "Gemini CLI", bin: "gemini", icon: "✦", install: "npm install -g @google/gemini-cli" },
-  { id: "opencode", name: "OpenCode", bin: "opencode", icon: "▣", install: "npm install -g opencode-ai" },
+  {
+    id: "opencode",
+    name: "OpenCode",
+    bin: "opencode",
+    icon: "▣",
+    install: "npm install -g opencode-ai",
+    // Verified: `-s, --session <id>` = "session id to continue". Treat the id as
+    // opaque — enumerate via `opencode session list --format json`.
+    resume: (id) => `opencode --session ${id}`,
+  },
   // oh-my-pi. NB: the bare `omp` npm package is an unrelated squat — the
   // official installer is the omp.sh script.
-  { id: "omp", name: "oh-my-pi", bin: "omp", icon: "π", install: "curl -fsSL https://omp.sh/install | sh" },
+  {
+    id: "omp",
+    name: "oh-my-pi",
+    bin: "omp",
+    icon: "π",
+    install: "curl -fsSL https://omp.sh/install | sh",
+    // Verified: `-r, --resume=<value>  Resume a session (by ID prefix, path...)`.
+    resume: (id) => `omp --resume ${id}`,
+  },
 ];
 
 export async function checkInstalledClis(): Promise<Record<string, boolean>> {
@@ -174,4 +233,20 @@ export async function checkInstalledClis(): Promise<Record<string, boolean>> {
   } catch {
     return {};
   }
+}
+
+/**
+ * The command that reopens `sessionId` for `agentId`, or null when that agent
+ * can't reopen a specific session (gemini resumes by list index; aider only
+ * restores per-directory history).
+ *
+ * The empty-id check is not defensive padding. `amp threads continue` with no
+ * id silently continues the *most recent* thread, and `codex resume` with no id
+ * opens an interactive picker that hangs forever in a PTY nobody is watching.
+ * Both would look like "restore worked" while doing something else entirely.
+ */
+export function restoreCommand(agentId: string, sessionId: string): string | null {
+  const id = sessionId.trim();
+  if (!id) return null;
+  return AGENT_CLIS.find((c) => c.id === agentId)?.resume?.(id) ?? null;
 }

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for Developer ID distribution (not the App Store).
+
+  Deliberately NOT sandboxed. An IDE has to read and write the user's source
+  tree wherever it lives, spawn their shell, and run agent CLIs from their PATH;
+  com.apple.security.app-sandbox would confine all of that to a container and
+  break the entire product. Sandboxing is mandatory for the App Store, and
+  irrelevant for Developer ID + notarisation, which is how Canopy ships.
+
+  Notarisation does require the hardened runtime, which is what the rest of this
+  file relaxes — narrowly.
+-->
+<plist version="1.0">
+<dict>
+	<!--
+	  JavaScriptCore compiles JS to native code. Monaco is large enough that the
+	  interpreter fallback is not an option, and the hardened runtime blocks
+	  writable-executable memory unless asked.
+	-->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+
+	<!--
+	  The whole point of the app: PTYs run the user's login shell, which runs
+	  claude/codex/node/etc. Those are third-party binaries signed by other
+	  teams (or unsigned). Without this the hardened runtime's library
+	  validation refuses to let them load into processes we spawn.
+	-->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+
+	<!--
+	  A login shell sets DYLD_* and friends for its children; the hardened
+	  runtime strips them by default, which breaks version managers (nvm, rbenv,
+	  asdf) that people's dotfiles depend on.
+	-->
+	<key>com.apple.security.cs.allow-dyld-environment-variables</key>
+	<true/>
+</dict>
+</plist>

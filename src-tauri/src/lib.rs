@@ -200,6 +200,7 @@ pub fn run() {
             agents::hook_bridge_path,
             agents::set_context_scopes,
             agents::session_digests,
+            agents::session_forget,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

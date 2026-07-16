@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
+import { restoreCommand } from "../projects";
 import type { PendingItem } from "../notifications";
 
 const AGENT_PATTERN =
@@ -17,7 +18,21 @@ interface AgentsPanelProps {
   roots: string[];
   shareContext: boolean;
   onShareContext: (on: boolean) => void;
+  /** Session ids currently attached to a live terminal in this app run. */
+  liveSessionIds?: string[];
+  /** Reopen a past agent session: runs `cmd` in `cwd` as a new terminal. */
+  onRestore?: (cwd: string, cmd: string, title: string, agentId: string) => void;
 }
+
+/** Compact relative age; the panel is narrow and "3h" beats a timestamp. */
+const ago = (secs?: number) => {
+  if (!secs) return "";
+  const d = Math.max(0, Math.floor(Date.now() / 1000) - secs);
+  if (d < 60) return "just now";
+  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
+  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
+  return `${Math.floor(d / 86400)}d ago`;
+};
 
 const fmtMem = (bytes: number) =>
   bytes > 1024 * 1024 * 1024
@@ -32,6 +47,8 @@ export function AgentsPanel({
   roots,
   shareContext,
   onShareContext,
+  liveSessionIds = [],
+  onRestore,
 }: AgentsPanelProps) {
   const [showHookHelp, setShowHookHelp] = useState(false);
   const [setupResult, setSetupResult] = useState<string | null>(null);
@@ -39,10 +56,10 @@ export function AgentsPanel({
   const [showShared, setShowShared] = useState(false);
   const settings = getSettings();
 
-  // What sharing would actually expose, refreshed while the panel is open.
-  // Nothing here should be invisible to the person whose prompts they are.
+  // Loaded regardless of the sharing toggle: these digests are also the crash
+  // record that "Restore sessions" reads. Sharing is about what agents see of
+  // each other; restore is about what the *user* lost when the IDE died.
   useEffect(() => {
-    if (!shareContext) return;
     const load = () =>
       void ipc
         .sessionDigests()
@@ -57,7 +74,7 @@ export function AgentsPanel({
     load();
     const t = setInterval(load, 4000);
     return () => clearInterval(t);
-  }, [shareContext, roots.join("\n")]);
+  }, [roots.join("\n")]);
 
   const autoSetup = async (agent: string) => {
     try {
@@ -74,6 +91,29 @@ export function AgentsPanel({
   // near-identical numbers — the only difference being that the session total
   // also counts the shell wrapping the agent. The session is the real unit:
   // it's what you kill, and what has a directory.
+  // Sessions that exist on disk but have no live terminal — what you lost when
+  // the IDE or the machine died. Newest first: that's the one you were most
+  // likely mid-thought in.
+  //
+  // Requires at least one prompt. A session where the agent started but was
+  // never typed into has no conversation for the CLI to reopen — verified:
+  // `claude --resume` on such an id answers "No conversation found with session
+  // ID", because the transcript is only created once there is something to
+  // record. Listing those would offer a button that can only fail, on sessions
+  // with nothing worth restoring anyway.
+  const restorable = useMemo(
+    () =>
+      digests
+        .filter(
+          (d) =>
+            d.session_id &&
+            !liveSessionIds.includes(d.session_id) &&
+            (d.prompts?.length ?? 0) > 0,
+        )
+        .sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0)),
+    [digests, liveSessionIds.join(",")],
+  );
+
   const sessions = useMemo(
     () =>
       stats.map((s) => {
@@ -194,6 +234,74 @@ export function AgentsPanel({
           </p>
         )}
       </div>
+
+      {restorable.length > 0 && (
+        <>
+          <div className="side-panel-head">
+            <span>Restore sessions</span>
+            <span className="badge">{restorable.length}</span>
+          </div>
+          <div className="restore-help">
+            Agent sessions from this project that aren't open right now. They survive
+            a crash or restart — reopening runs the agent's own resume so it comes
+            back with its history.
+          </div>
+          {restorable.map((d) => {
+            const agentId = d.agent ?? "agent";
+            const cmd = restoreCommand(agentId, d.session_id);
+            const dir = (d.cwd ?? "").split("/").filter(Boolean).pop() ?? "";
+            const last = (d.prompts ?? []).at(-1);
+            return (
+              <div key={d.session_id} className="restore-row">
+                <div className="restore-main">
+                  <span className="agent-name">{agentId}</span>
+                  {dir && (
+                    <span className="agent-dir" title={d.cwd}>
+                      {dir}
+                    </span>
+                  )}
+                  {d.branch && <span className="share-branch">⎇ {d.branch}</span>}
+                  <span className="agent-session">{ago(d.updated)}</span>
+                </div>
+                {/* The last prompt is how you recognise which session this was —
+                    a bare uuid tells you nothing. */}
+                <div className="restore-prompt">{last}</div>
+                <div className="restore-actions">
+                  {cmd ? (
+                    <button
+                      className="btn-mini"
+                      title={cmd}
+                      onClick={() => onRestore?.(d.cwd ?? "", cmd, agentId, agentId)}
+                    >
+                      Restore
+                    </button>
+                  ) : (
+                    // Better to say why than to offer a button that would
+                    // silently start a fresh session and call it a restore.
+                    <span
+                      className="restore-unsupported"
+                      title={`${agentId} cannot reopen a specific past session by id`}
+                    >
+                      no resume support
+                    </span>
+                  )}
+                  <button
+                    className="btn-mini"
+                    title="Forget this session — removes it from this list"
+                    onClick={() => {
+                      void ipc.sessionForget(d.session_id).then(() =>
+                        setDigests((prev) => prev.filter((x) => x.session_id !== d.session_id)),
+                      );
+                    }}
+                  >
+                    Forget
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </>
+      )}
 
       <div className="side-panel-head">
         <span>Sessions</span>

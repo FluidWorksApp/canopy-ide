@@ -2574,3 +2574,48 @@ textarea,
   color: var(--text-dim);
   font-size: 11px;
 }
+
+/* Restore sessions — agent sessions that outlived their terminal. */
+.restore-help {
+  padding: 0 10px 8px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.restore-row {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.restore-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* The last prompt is what makes a session recognisable; give it room to be
+   read but never let it push the panel wide. */
+.restore-prompt {
+  margin: 3px 0 5px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.restore-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.restore-unsupported {
+  color: var(--text-dim);
+  font-size: 10px;
+  font-style: italic;
+}

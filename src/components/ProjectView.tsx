@@ -2,7 +2,7 @@
 // agents) + the main area where the TERMINAL is the hero. Terminals and files
 // are sub-tabs; terminals stay mounted so TUIs keep running. Bottom status tray
 // shows git branch, agents, model, tokens, cost.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import * as ipc from "../ipc";
 import { modelFor, monaco } from "../monaco-setup";
@@ -457,6 +457,23 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
   // Hooks are global, so the raw stream carries every agent on the machine.
   // Everything below this line sees only what our own terminals raised.
   const projectEvents = eventsForProject(events, ptyIds, roots);
+  // Session ids seen on this project's live terminals during this app run. A
+  // digest not in here has no terminal — either it ended, or the IDE died with
+  // it running, which is exactly the case restore exists for. Derived from
+  // events rather than stored, because pty ids restart from 1 each launch and
+  // would otherwise collide with a previous run's.
+  const liveSessionIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const e of projectEvents) {
+      try {
+        const sid = (JSON.parse(e.raw) as { session_id?: unknown }).session_id;
+        if (typeof sid === "string" && sid) ids.add(sid);
+      } catch {
+        // a malformed line shouldn't hide every restorable session
+      }
+    }
+    return [...ids];
+  }, [projectEvents]);
   const runningAgents = projectStats.flatMap((s) =>
     s.procs
       .filter((p) => AGENT_PATTERN.test(p.name))
@@ -977,6 +994,10 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
           roots={roots}
           shareContext={Boolean(project.shareContext)}
           onShareContext={onShareContext}
+          liveSessionIds={liveSessionIds}
+          onRestore={(cwd, cmd, title, agentId) =>
+            addTerminal(cwd, cmd, title, AGENT_CLIS.find((c) => c.id === agentId)?.icon)
+          }
         />
       )}
     </div>

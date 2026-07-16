@@ -322,3 +322,7 @@ export const setContextScopes = (
 ) => invoke<void>("set_context_scopes", { scopes });
 
 export const sessionDigests = () => invoke<SessionDigest[]>("session_digests");
+
+/** Drop a session the user no longer wants offered for restore. */
+export const sessionForget = (sessionId: string) =>
+  invoke<void>("session_forget", { sessionId });
