@@ -1378,6 +1378,8 @@ body,
   display: flex;
   align-items: center;
   gap: 8px;
+  /* let the directory chip ellipsize instead of pushing the row wide */
+  min-width: 0;
 }
 
 .agent-name {
@@ -2505,4 +2507,18 @@ textarea,
 
 .ctx-item:hover:not(:disabled) .ctx-hint {
   color: var(--bg);
+}
+
+/* Which directory a session is running in — the difference between two
+   otherwise identical `claude` rows. */
+.agent-dir {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-raised);
+  color: var(--accent);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
 }

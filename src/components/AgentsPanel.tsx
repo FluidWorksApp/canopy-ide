@@ -1,9 +1,8 @@
-// Agent management: detect agent CLIs inside terminal process trees, show
-// CPU/memory (runaway guard), kill processes, and surface hook-bridge events.
+// Agent management: one row per terminal session, named after the agent CLI
+// detected inside its process tree, with CPU/memory for the runaway guard.
 import { useEffect, useMemo, useState } from "react";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
-import type { AgentEventEntry } from "../types";
 import type { PendingItem } from "../notifications";
 
 const AGENT_PATTERN =
@@ -11,7 +10,6 @@ const AGENT_PATTERN =
 
 interface AgentsPanelProps {
   stats: ipc.SessionStats[];
-  events: AgentEventEntry[];
   hookPath: string | null;
   pending?: PendingItem[];
   onJumpToTerminal?: (item: PendingItem) => void;
@@ -28,7 +26,6 @@ const fmtMem = (bytes: number) =>
 
 export function AgentsPanel({
   stats,
-  events,
   hookPath,
   pending = [],
   onJumpToTerminal,
@@ -71,13 +68,25 @@ export function AgentsPanel({
     }
   };
 
-  const agents = useMemo(
+  // One row per terminal session, named after the agent running inside it.
+  // "Running agents" and "Terminal sessions" used to be separate lists built
+  // from the same `stats`, so a terminal running claude appeared twice with
+  // near-identical numbers — the only difference being that the session total
+  // also counts the shell wrapping the agent. The session is the real unit:
+  // it's what you kill, and what has a directory.
+  const sessions = useMemo(
     () =>
-      stats.flatMap((s) =>
-        s.procs
-          .filter((p) => AGENT_PATTERN.test(p.name) || AGENT_PATTERN.test(p.cmd.split(" ")[0] ?? ""))
-          .map((p) => ({ session: s, proc: p })),
-      ),
+      stats.map((s) => {
+        const agent = s.procs.find(
+          (p) => AGENT_PATTERN.test(p.name) || AGENT_PATTERN.test(p.cmd.split(" ")[0] ?? ""),
+        );
+        return {
+          session: s,
+          agent,
+          // Where it's running — the thing that tells two `claude` rows apart.
+          dir: (s.cwd || "").split("/").filter(Boolean).pop() ?? "",
+        };
+      }),
     [stats],
   );
 
@@ -187,7 +196,7 @@ export function AgentsPanel({
       </div>
 
       <div className="side-panel-head">
-        <span>Running agents</span>
+        <span>Sessions</span>
         <button
           className="btn-icon"
           title="How to hook up agent CLIs"
@@ -211,101 +220,44 @@ export function AgentsPanel({
         </div>
       )}
 
-      {agents.length === 0 ? (
+      {sessions.length === 0 ? (
         <div className="tree-empty">
-          No agents detected. Launch <code>claude</code>, <code>codex</code>, etc. in a
-          terminal below.
+          Nothing running. Launch <code>claude</code>, <code>codex</code>, etc. from the ＋
+          menu or by right-clicking a component.
         </div>
       ) : (
-        agents.map(({ session, proc }) => (
-          <div key={proc.pid} className="agent-row">
-            <div className="agent-main">
-              <span className="agent-name">{proc.name}</span>
-              <span className="agent-session">term #{session.id}</span>
+        sessions.map(({ session: s, agent, dir }) => {
+          const runaway =
+            s.total_cpu > settings.runawayCpuPercent ||
+            s.total_mem_bytes > settings.runawayMemBytes;
+          return (
+            <div key={s.id} className={`agent-row ${runaway ? "agent-runaway" : ""}`}>
+              <div className="agent-main">
+                <span className="agent-name">{agent?.name ?? s.title}</span>
+                {dir && (
+                  <span className="agent-dir" title={s.cwd}>
+                    {dir}
+                  </span>
+                )}
+                <span className="agent-session">term #{s.id}</span>
+                {runaway && <span className="runaway-badge">runaway?</span>}
+              </div>
+              <div className="agent-stats">
+                <span>{s.total_cpu.toFixed(0)}% cpu</span>
+                <span>{fmtMem(s.total_mem_bytes)}</span>
+                <span>{s.procs.length} procs</span>
+                <button
+                  className="btn-icon btn-danger"
+                  title={`Kill terminal #${s.id}${agent ? ` and the ${agent.name} running in it` : ""}`}
+                  onClick={() => void ipc.ptyKill(s.id)}
+                >
+                  ✕
+                </button>
+              </div>
             </div>
-            <div className="agent-stats">
-              <span>{proc.cpu.toFixed(0)}% cpu</span>
-              <span>{fmtMem(proc.mem_bytes)}</span>
-              <button
-                className="btn-icon btn-danger"
-                title="Kill this agent process"
-                onClick={() => void ipc.killProcess(proc.pid)}
-              >
-                ✕
-              </button>
-            </div>
-          </div>
-        ))
+          );
+        })
       )}
-
-      <div className="side-panel-head">
-        <span>Terminal sessions</span>
-      </div>
-      {stats.map((s) => {
-        const runaway =
-          s.total_cpu > settings.runawayCpuPercent ||
-          s.total_mem_bytes > settings.runawayMemBytes;
-        return (
-          <div key={s.id} className={`agent-row ${runaway ? "agent-runaway" : ""}`}>
-            <div className="agent-main">
-              <span className="agent-name">{s.title}</span>
-              {runaway && <span className="runaway-badge">runaway?</span>}
-            </div>
-            <div className="agent-stats">
-              <span>{s.total_cpu.toFixed(0)}% cpu</span>
-              <span>{fmtMem(s.total_mem_bytes)}</span>
-              <span>{s.procs.length} procs</span>
-              <button
-                className="btn-icon btn-danger"
-                title="Kill entire session"
-                onClick={() => void ipc.ptyKill(s.id)}
-              >
-                ✕
-              </button>
-            </div>
-          </div>
-        );
-      })}
-
-      {events.length > 0 && (
-        <>
-          <div className="side-panel-head">
-            <span>Hook events</span>
-          </div>
-          <div className="agent-events">
-            {events.slice(-50).reverse().map((e, i) => (
-              <EventRow key={events.length - i} entry={e} />
-            ))}
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-function EventRow({ entry }: { entry: AgentEventEntry }) {
-  let label = entry.raw;
-  try {
-    const parsed = JSON.parse(entry.raw);
-    // Support both our generic shape and Claude Code's native hook payload.
-    const file = parsed.file ?? parsed.tool_input?.file_path;
-    label = [
-      parsed.agent ?? (parsed.session_id ? "claude" : undefined),
-      parsed.event ?? parsed.hook_event_name,
-      parsed.tool ?? parsed.tool_name,
-      typeof file === "string" ? file.split("/").pop() : undefined,
-    ]
-      .filter(Boolean)
-      .join(" · ");
-  } catch {
-    // show raw line
-  }
-  return (
-    <div className="event-row" title={entry.raw}>
-      <span className="event-time">
-        {new Date(entry.ts).toLocaleTimeString()}
-      </span>
-      <span className="event-label">{label}</span>
     </div>
   );
 }

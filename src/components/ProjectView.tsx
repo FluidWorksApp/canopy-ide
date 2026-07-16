@@ -971,7 +971,6 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
       {sideTab === "agents" && (
         <AgentsPanel
           stats={projectStats}
-          events={projectEvents}
           hookPath={hookPath}
           pending={pending}
           onJumpToTerminal={jumpToTerminal}
