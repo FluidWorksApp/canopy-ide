@@ -28,6 +28,7 @@ import {
 import { viewerKindFor } from "./viewers";
 import { ensureLanguageServer } from "../lsp/client";
 import { Term, type TermHandle } from "./Term";
+import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { FileTree } from "./FileTree";
 import { FileView } from "./FileView";
 import { ChangesPanel } from "./ChangesPanel";
@@ -497,8 +498,11 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
 
   // Launch an agent CLI in the project's first component — or, if it isn't on
   // PATH, run its install command in a terminal and re-probe afterwards.
-  const launchCli = (cli: AgentCli) => {
-    const cwd = components[0]?.path;
+  /** Launch an agent CLI. `at` defaults to the first component; right-clicking a
+   *  component header passes that component's path so it starts in the right
+   *  directory rather than wherever the ＋ menu would have put it. */
+  const launchCli = (cli: AgentCli, at?: string) => {
+    const cwd = at ?? components[0]?.path;
     if (!cwd) return;
     if (installed[cli.bin]) {
       addTerminal(cwd, cli.bin, cli.name, cli.icon);
@@ -507,6 +511,26 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
       setTimeout(() => void checkInstalledClis().then(setInstalled), 60_000);
     }
   };
+
+  /** The launcher list — shell plus every agent CLI — for a given directory.
+   *  Shared by the ＋ menu, the empty-state grid and the component right-click
+   *  menu so the three can't drift apart. */
+  const launcherItems = (cwd: string): MenuItem[] => [
+    {
+      label: "Shell",
+      icon: <TerminalIcon size={15} />,
+      onClick: () => addTerminal(cwd),
+    },
+    { label: "", separator: true },
+    ...AGENT_CLIS.map((cli) => ({
+      label: cli.name,
+      icon: <AgentIcon id={cli.id} size={15} />,
+      hint: installed[cli.bin] ? undefined : "install",
+      onClick: () => launchCli(cli, cwd),
+    })),
+  ];
+
+  const compMenu = useContextMenu();
 
   const mainArea = (
     <div className="project-main">
@@ -761,6 +785,14 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
 
   const sidePanel = (
     <div className="sidebar">
+      {compMenu.menu && (
+        <ContextMenu
+          x={compMenu.menu.x}
+          y={compMenu.menu.y}
+          items={compMenu.menu.items}
+          onClose={compMenu.close}
+        />
+      )}
       {sideTab === "files" && (
         <div className="components-panel">
           <div className="side-panel-head">
@@ -793,6 +825,7 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
               <div
                 className="component-header"
                 onClick={() => setOpenSections((prev) => ({ ...prev, [c.path]: !sectionOpen(c.path) }))}
+                onContextMenu={(e) => compMenu.open(e, launcherItems(c.path))}
               >
                 <span className="tree-chevron">{sectionOpen(c.path) ? "▾" : "▸"}</span>
                 <span className="component-title">{c.label}</span>

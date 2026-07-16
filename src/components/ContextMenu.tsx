@@ -2,7 +2,7 @@
 // Element, or macOS's Look Up / Translate over selected text) is meaningless in
 // a desktop IDE, so the app suppresses it globally (see main.tsx) and shows
 // this instead.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 export interface MenuItem {
   label: string;
@@ -11,6 +11,10 @@ export interface MenuItem {
   /** Renders a divider; label is ignored. */
   separator?: boolean;
   disabled?: boolean;
+  /** Leading glyph — the launcher menu uses the agent brand marks. */
+  icon?: ReactNode;
+  /** Trailing note, dimmed and right-aligned (e.g. "install"). */
+  hint?: string;
 }
 
 interface ContextMenuProps {
@@ -81,7 +85,9 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
               onClose();
             }}
           >
-            {item.label}
+            {item.icon != null && <span className="ctx-icon">{item.icon}</span>}
+            <span className="ctx-label">{item.label}</span>
+            {item.hint && <span className="ctx-hint">{item.hint}</span>}
           </button>
         ),
       )}

@@ -26,6 +26,9 @@ body,
   overflow: hidden;
   background: var(--bg);
   color: var(--text);
+  /* App chrome is not a document — see the selection rules further down. */
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .app {
@@ -2449,4 +2452,57 @@ body,
   height: 1px;
   margin: 4px 6px;
   background: var(--border);
+}
+
+/* Selection: this is an app, not a document.
+   Dragging across the file tree or double-clicking a component name used to
+   select the label text like a web page — noise no IDE has. Chrome is
+   unselectable by default; anything the user actually reads or copies opts back
+   in below. Monaco and xterm manage their own selection and must not be
+   disabled here. */
+input,
+textarea,
+[contenteditable="true"],
+.monaco-editor,
+.xterm,
+.diff-view,
+.markdown-body,
+.docx-body,
+.json-view,
+.sheet-view,
+.notebook {
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: auto;
+}
+
+/* Context-menu rows: icon + label + trailing hint. */
+.ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ctx-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  align-items: center;
+  justify-content: center;
+}
+
+.ctx-label {
+  flex: 1 1 auto;
+}
+
+.ctx-hint {
+  flex: 0 0 auto;
+  padding-left: 12px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.ctx-item:hover:not(:disabled) .ctx-hint {
+  color: var(--bg);
 }
