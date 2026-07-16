@@ -26,6 +26,12 @@ use tauri::{AppHandle, Emitter, State};
 const FLUSH_INTERVAL: Duration = Duration::from_millis(10);
 const READ_BUF_SIZE: usize = 64 * 1024;
 const DEFAULT_HIGH_WATER: usize = 2 * 1024 * 1024;
+/// How long a terminal's process group gets to exit on SIGTERM before we force
+/// it. Agent CLIs use this window to flush their conversation transcript and run
+/// their stop hooks — the difference between a session you can resume later and
+/// one whose history never existed. Long enough for that, short enough that
+/// quitting the app never feels stuck.
+const GRACE: Duration = Duration::from_millis(2500);
 
 pub struct Session {
     pub id: u32,
@@ -66,7 +72,11 @@ impl PtyManager {
         self.sessions.clone()
     }
 
-    /// Kill every session; called on app exit so no child processes outlive us.
+    /// Stop every session; called on app exit so no child processes outlive us.
+    ///
+    /// Signals them all first and *then* waits once, rather than terminating them
+    /// one at a time: the grace period is for agents to flush their transcripts,
+    /// and serialising it would cost GRACE per terminal on every quit.
     pub fn kill_all(&self) {
         let sessions: Vec<Arc<Session>> = self
             .sessions
@@ -75,21 +85,85 @@ impl PtyManager {
             .values()
             .cloned()
             .collect();
-        for s in sessions {
-            s.terminate();
+        for s in &sessions {
+            s.request_stop();
+        }
+        let deadline = std::time::Instant::now() + GRACE;
+        while std::time::Instant::now() < deadline {
+            if sessions.iter().all(|s| !s.alive()) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        for s in &sessions {
+            s.force();
         }
     }
 }
 
 impl Session {
+    /// Ask the process group to exit, and force it only if it refuses.
+    ///
+    /// This used to send SIGKILL outright. SIGKILL is uncatchable, so agent CLIs
+    /// never got to shut down: Claude Code writes its conversation transcript and
+    /// runs its Stop hook on the way out, and killing it dead meant a session with
+    /// real work in it left *no transcript at all* — `claude --resume` on it
+    /// answers "No conversation found". Closing a tab silently destroyed the
+    /// conversation inside it.
     fn terminate(&self) {
+        self.request_stop();
+        self.await_exit(GRACE);
+        self.force();
+    }
+
+    /// SIGTERM the whole process group. The shell is the PTY's session leader, so
+    /// the signal reaches grandchildren — the agent — as well.
+    fn request_stop(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
-        // Kill the whole process group: the shell is the session leader of the PTY,
-        // so this also takes down grandchildren that hold the slave fd open.
         #[cfg(unix)]
         if let Some(pid) = self.pid {
             unsafe {
-                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                libc::killpg(pid as libc::pid_t, libc::SIGTERM);
+            }
+        }
+    }
+
+    /// Whether any process in the group is still alive. Signal 0 tests for
+    /// existence without delivering anything.
+    fn alive(&self) -> bool {
+        #[cfg(unix)]
+        {
+            match self.pid {
+                Some(pid) => unsafe { libc::killpg(pid as libc::pid_t, 0) == 0 },
+                None => false,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
+    /// Poll for a clean exit for up to `grace`. Polling rather than waiting on the
+    /// child keeps a wedged agent from hanging app shutdown.
+    fn await_exit(&self, grace: Duration) {
+        let deadline = std::time::Instant::now() + grace;
+        while std::time::Instant::now() < deadline {
+            if !self.alive() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Last resort, for a process group that ignored SIGTERM.
+    fn force(&self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.pid {
+            if self.alive() {
+                unsafe {
+                    libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                }
             }
         }
         let _ = self.killer.lock().unwrap().kill();
