@@ -1,7 +1,7 @@
 Canopy — a local-first, memory-light, vibe-coding-first IDE.
 
-Licensor: CauseConnect (sam@fluidwords.app)
-Copyright 2026 CauseConnect. All rights reserved.
+Licensor: Cause Connect Pte Ltd (sam@fluidwords.app)
+Copyright 2026 Cause Connect Pte Ltd. All rights reserved.
 
 Canopy is source-available, not open source: you may read, modify, and share
 it freely for any noncommercial purpose, but commercial use requires a separate

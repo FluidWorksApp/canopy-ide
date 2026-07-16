@@ -1,4 +1,4 @@
-# canopy
+# Canopy
 
 A local-first, memory-light desktop IDE built for **vibe coding**: you drive changes
 through agent CLIs (Claude Code, Codex, aider, …) in a first-class terminal, and the
@@ -147,3 +147,24 @@ Design rules:
 | `mermaid` | diagram blocks in markdown (lazy-loaded on first use) |
 | `xlsx` (SheetJS, cdn dist) | spreadsheet parsing (lazy-loaded) |
 | `@tauri-apps/plugin-dialog` | native folder picker |
+
+## License
+
+Canopy is **source-available, not open source**: free for any noncommercial
+purpose, but commercial use requires a separate license.
+
+- Licensed under [PolyForm Noncommercial 1.0.0](./LICENSE.md)
+  (SPDX: `PolyForm-Noncommercial-1.0.0`).
+- **Permitted**: personal use, hobby projects, study, research, and use by
+  charities, schools, and government institutions.
+- **Not permitted without a separate license**: any use for commercial
+  advantage or monetary compensation, including use inside a for-profit
+  company. Contact sam@fluidwords.app for commercial terms.
+
+The license explicitly does not limit any fair-use rights you have by law.
+
+Third-party components keep their own licenses — see
+[THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md). Notably, Canopy bundles
+jschardet (LGPL-2.1-or-later) as a separately replaceable chunk.
+
+Copyright 2026 Cause Connect Pte Ltd.
