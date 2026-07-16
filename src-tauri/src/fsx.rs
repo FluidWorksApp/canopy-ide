@@ -192,12 +192,24 @@ pub struct GitStatus {
 
 /// Git status for a workspace root (ignored + untracked + modified), absolute
 /// paths. Uses the git CLI — no libgit2 dependency, works with any git setup.
+/// A `git` invocation that never takes optional locks.
+///
+/// `git status` refreshes the index as a side effect, which takes index.lock.
+/// This is polled per repo every few seconds, so without this it intermittently
+/// breaks any *other* git write happening at that moment — the user's own
+/// commit in a terminal, or an agent's — with "Unable to create index.lock".
+/// Read-only callers have no business taking that lock.
+fn git_ro(dir: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    cmd.env("GIT_OPTIONAL_LOCKS", "0");
+    cmd.arg("-C").arg(dir);
+    cmd
+}
+
 #[tauri::command]
 pub fn git_status(state: State<'_, WorkspaceManager>, path: String) -> Result<GitStatus, String> {
     let dir = check_scope(&state, Path::new(&path))?;
-    let top = match std::process::Command::new("git")
-        .args(["-C"])
-        .arg(&dir)
+    let top = match git_ro(&dir)
         .args(["rev-parse", "--show-toplevel"])
         .output()
     {
@@ -206,17 +218,13 @@ pub fn git_status(state: State<'_, WorkspaceManager>, path: String) -> Result<Gi
         }
         _ => return Ok(GitStatus::default()),
     };
-    let branch = std::process::Command::new("git")
-        .args(["-C"])
-        .arg(&dir)
+    let branch = git_ro(&dir)
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .output()
         .ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-    let out = std::process::Command::new("git")
-        .args(["-C"])
-        .arg(&dir)
+    let out = git_ro(&dir)
         .args(["status", "--porcelain", "-z", "--ignored"])
         .output()
         .map_err(|e| e.to_string())?;
@@ -254,9 +262,7 @@ pub fn git_head_content(
 ) -> Result<Option<String>, String> {
     let file = check_scope(&state, Path::new(&path))?;
     let parent = file.parent().ok_or("no parent dir")?;
-    let top = match std::process::Command::new("git")
-        .args(["-C"])
-        .arg(parent)
+    let top = match git_ro(parent)
         .args(["rev-parse", "--show-toplevel"])
         .output()
     {
@@ -269,9 +275,7 @@ pub fn git_head_content(
         Ok(r) => r.to_string_lossy().to_string(),
         Err(_) => return Ok(None),
     };
-    let out = std::process::Command::new("git")
-        .args(["-C"])
-        .arg(&top)
+    let out = git_ro(&top)
         .arg("show")
         .arg(format!("HEAD:{rel}"))
         .output()

@@ -87,6 +87,18 @@ fn git(repo: &Path) -> Command {
     // No TTY in a GUI app: prompting would hang forever, so make git fail with
     // a real message instead. The user's credential helper still works.
     cmd.env("GIT_TERMINAL_PROMPT", "0");
+    // Don't take locks we don't need. `git status` normally refreshes the index
+    // as a side effect, which takes index.lock — and this panel polls status
+    // every few seconds, per repo. That races anything else touching the repo:
+    // the user's own `git commit` in a terminal, or an agent's, fails with
+    // "Unable to create index.lock: File exists" purely because we happened to
+    // be looking. Same switch VS Code uses (--no-optional-locks).
+    //
+    // This only skips *optional* locks. Commit, stage and checkout take
+    // required locks and still work; the cost is that status may report
+    // stat-dirty files it would otherwise have quietly re-checked, which is a
+    // fair trade for never breaking someone else's write.
+    cmd.env("GIT_OPTIONAL_LOCKS", "0");
     cmd.arg("-C").arg(repo);
     cmd
 }
