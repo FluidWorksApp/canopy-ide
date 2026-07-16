@@ -100,3 +100,23 @@ jobs:
           # Writes latest.json, which plugins.updater.endpoints points at.
           includeUpdaterJson: true
           args: ${{ matrix.args }}
+
+      # `tauri build` exits 0 even when signing fails ("a public key has been
+      # found, but no private key"), so a missing or bad secret would publish a
+      # release whose update artifacts have no .sig — and every installed copy
+      # would silently refuse to update. Fail here instead.
+      - name: Verify updater artifacts are signed
+        shell: bash
+        run: |
+          root="src-tauri/target/${{ matrix.target }}/release/bundle"
+          [ -d "$root" ] || root="src-tauri/target/release/bundle"
+          echo "looking under $root"
+          sigs=$(find "$root" -name '*.sig' | wc -l | tr -d ' ')
+          find "$root" -name '*.sig' -print
+          if [ "$sigs" -eq 0 ]; then
+            echo "::error::No .sig produced — updater artifacts are unsigned."
+            echo "Set the TAURI_SIGNING_PRIVATE_KEY secret (and"
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD, empty string if the key has none)."
+            exit 1
+          fi
+          echo "$sigs updater signature(s) present"
