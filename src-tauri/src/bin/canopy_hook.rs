@@ -136,14 +136,34 @@ fn update_digest(
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| {
+            // First sighting of this session. `launch_cwd` and `surface` are
+            // written here and never again — see below.
             serde_json::json!({
                 "session_id": session_id,
                 "prompts": [],
                 "files": [],
+                "launch_cwd": cwd,
+                // Which terminal owns this session. Inherited from the env we
+                // set at pty spawn, so it survives the user typing `claude`
+                // themselves rather than using a launcher. Binding a session to
+                // a surface any other way means guessing — matching on terminal
+                // titles or picking the newest file by mtime both silently
+                // attach to the wrong session.
+                "surface": std::env::var("CANOPY_PTY").ok(),
             })
         });
 
+    // `cwd` is where the agent is *now* and moves as it cds. `launch_cwd` is
+    // where it started and must not: agents that namespace a conversation by
+    // directory (claude, gemini, cursor) only find it again from there, so
+    // resuming from a drifted cwd fails with "No conversation found". Starting
+    // at a repo root and moving into a worktree is routine, which makes this
+    // the normal case rather than an edge one.
     digest["cwd"] = serde_json::json!(cwd);
+    if digest.get("launch_cwd").and_then(|v| v.as_str()).is_none() {
+        // Digest predates this field, or was created by an older build.
+        digest["launch_cwd"] = serde_json::json!(cwd);
+    }
     digest["updated"] = serde_json::json!(now_secs());
     if let Some(t) = event["transcript_path"].as_str() {
         digest["transcript_path"] = serde_json::json!(t);

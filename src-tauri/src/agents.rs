@@ -365,7 +365,13 @@ fn transcript_bucket(session_id: &str) -> Option<String> {
 /// the hook reported: the hook fires at SessionStart, so its path is only a
 /// promise of where the file will go, and it is written before any cd.
 fn resume_location(digest: &serde_json::Value) -> (String, bool) {
-    let cwd = digest["cwd"].as_str().unwrap_or("").to_string();
+    // Prefer where the session was launched. `cwd` follows the agent as it cds,
+    // and is only a fallback for digests written before launch_cwd existed.
+    let cwd = digest["launch_cwd"]
+        .as_str()
+        .or_else(|| digest["cwd"].as_str())
+        .unwrap_or("")
+        .to_string();
     let Some(session_id) = digest["session_id"].as_str() else {
         // Agents other than claude don't report one. Don't block restore on a
         // check we can't perform.
