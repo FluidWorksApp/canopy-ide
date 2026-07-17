@@ -2534,6 +2534,34 @@ textarea,
 
 /* Which directory a session is running in — the difference between two
    otherwise identical `claude` rows. */
+/* The branch an agent is working on. Same chip family as the directory, dimmer
+   colour: it qualifies the location rather than competing with it. */
+.agent-branch {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 130px;
+}
+
+/* The last thing the human asked this session for. Two lines: enough to
+   recognise the task, not so much that a row becomes a paragraph. Full text is
+   in the title attribute. */
+.agent-task {
+  margin: 3px 0 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 /* A port this session is listening on. Green because it is a live service,
    not a location — it reads differently from the directory chip beside it. */
 .agent-port {

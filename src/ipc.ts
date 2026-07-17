@@ -322,6 +322,15 @@ export interface SessionDigest {
   updated?: number;
   prompts?: string[];
   files?: string[];
+  /** Where the session was launched. Pinned at first sighting and never
+   *  updated, unlike `cwd`, which follows the agent as it cds. */
+  launch_cwd?: string;
+  /** The terminal that owns this session — our PTY id, inherited through the
+   *  spawn env, as a string. Present only for sessions started under a Canopy
+   *  terminal. This is the deterministic session -> surface binding: matching
+   *  on titles or newest-file-by-mtime guesses, and a wrong guess attaches to
+   *  someone else's conversation. */
+  surface?: string;
   /** Directory the agent's resume must run in — claude files a conversation
    *  under its project root, not the directory the agent ran in. Derived in
    *  agents.rs; may differ from `cwd`. */

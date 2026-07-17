@@ -114,21 +114,31 @@ export function AgentsPanel({
     [digests, liveSessionIds.join(",")],
   );
 
-  const sessions = useMemo(
-    () =>
-      stats.map((s) => {
-        const agent = s.procs.find(
-          (p) => AGENT_PATTERN.test(p.name) || AGENT_PATTERN.test(p.cmd.split(" ")[0] ?? ""),
-        );
-        return {
-          session: s,
-          agent,
-          // Where it's running — the thing that tells two `claude` rows apart.
-          dir: (s.cwd || "").split("/").filter(Boolean).pop() ?? "",
-        };
-      }),
-    [stats],
-  );
+  const sessions = useMemo(() => {
+    // Terminal -> the agent conversation running in it, by the surface id the
+    // hook recorded from our spawn env. An exact identity, not a guess: two
+    // claudes in the same directory are indistinguishable by cwd, and matching
+    // on titles or newest-file-by-mtime attaches to the wrong one silently.
+    // Newest wins if a terminal has hosted more than one session in its life.
+    const bySurface = new Map<string, ipc.SessionDigest>();
+    for (const d of digests) {
+      if (!d.surface) continue;
+      const prev = bySurface.get(d.surface);
+      if (!prev || (d.updated ?? 0) > (prev.updated ?? 0)) bySurface.set(d.surface, d);
+    }
+    return stats.map((s) => {
+      const agent = s.procs.find(
+        (p) => AGENT_PATTERN.test(p.name) || AGENT_PATTERN.test(p.cmd.split(" ")[0] ?? ""),
+      );
+      return {
+        session: s,
+        agent,
+        digest: bySurface.get(String(s.id)),
+        // Where it's running — the thing that tells two `claude` rows apart.
+        dir: (s.cwd || "").split("/").filter(Boolean).pop() ?? "",
+      };
+    });
+  }, [stats, digests]);
 
   return (
     <div className="side-panel">
@@ -343,7 +353,7 @@ export function AgentsPanel({
           menu or by right-clicking a component.
         </div>
       ) : (
-        sessions.map(({ session: s, agent, dir }) => {
+        sessions.map(({ session: s, agent, dir, digest }) => {
           const runaway =
             s.total_cpu > settings.runawayCpuPercent ||
             s.total_mem_bytes > settings.runawayMemBytes;
@@ -356,6 +366,13 @@ export function AgentsPanel({
                     {dir}
                   </span>
                 )}
+                {/* Which branch this agent is editing — the difference between
+                    two identical-looking rows working on different things. */}
+                {digest?.branch && (
+                  <span className="agent-branch" title={`On branch ${digest.branch}`}>
+                    {digest.branch}
+                  </span>
+                )}
                 <span className="agent-session">term #{s.id}</span>
                 {/* A dev server in here, without opening the tab to find out. */}
                 {s.ports?.map((p) => (
@@ -365,6 +382,14 @@ export function AgentsPanel({
                 ))}
                 {runaway && <span className="runaway-badge">runaway?</span>}
               </div>
+              {/* What the human last asked for. The highest-signal line about a
+                  session: "fix the login redirect" identifies it in a way that
+                  cpu, memory and a directory never will. */}
+              {digest?.prompts?.length ? (
+                <div className="agent-task" title={digest.prompts[digest.prompts.length - 1]}>
+                  {digest.prompts[digest.prompts.length - 1]}
+                </div>
+              ) : null}
               <div className="agent-stats">
                 <span>{s.total_cpu.toFixed(0)}% cpu</span>
                 <span>{fmtMem(s.total_mem_bytes)}</span>
