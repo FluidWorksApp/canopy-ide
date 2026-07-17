@@ -1,0 +1,73 @@
+/* Every button starts from .cn-btn. That is the whole point of this file: in
+   the hand-rolled CSS this replaces, `.btn-mini` and `.btn-icon` carried only
+   size tweaks, so the 17 call sites that used `class="btn-mini"` on its own
+   rendered as native browser buttons. Here the base is not optional — a
+   variant/size can only ever ride on top of it. */
+.cn-btn {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.cn-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.cn-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ---------- variants: what the button means ---------- */
+
+.cn-btn-accent {
+  background: var(--accent);
+  color: var(--on-accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+/* Quiet destructive: reads as normal until hovered. */
+.cn-btn-danger:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+/* Loud destructive: for the confirming button in a delete dialog. */
+.cn-btn-danger-solid {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--on-danger);
+}
+
+/* ---------- sizes: how much room it takes ---------- */
+
+.cn-btn-mini {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+/* Chromeless — an icon glyph that happens to be clickable. Legitimately drops
+   the base's background and border; it is a size, not a broken variant. */
+.cn-btn-icon {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 2px 6px;
+}
+
+.cn-btn-icon:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--bg-raised);
+  border-color: transparent;
+}
+
+.cn-btn-icon.cn-btn-danger:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: transparent;
+}

@@ -1,0 +1,54 @@
+/* Two dialog weights share one backdrop treatment.
+   Modal   — a task you work in (a form). Wide, scrolls, z-index 100.
+   Confirm — a question you answer. Narrow, sits ABOVE a modal (z-index 400),
+             because a confirm is routinely raised from inside one. */
+.cn-backdrop {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 100;
+}
+
+.cn-backdrop-confirm {
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 400;
+}
+
+.cn-modal {
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px 22px;
+  width: 520px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.cn-modal h3 {
+  margin: 0 0 14px;
+}
+
+.cn-confirm {
+  max-width: 420px;
+  padding: 16px 18px;
+  border-radius: 8px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  font-size: 13px;
+}
+
+/* Secondary line — the consequence, under the question. */
+.cn-dialog-sub {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.cn-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}

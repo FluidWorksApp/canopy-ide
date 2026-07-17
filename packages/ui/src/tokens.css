@@ -1,0 +1,26 @@
+/* Canopy design tokens — the single source of colour for the whole system.
+   Every component in this package styles itself from these variables only, so
+   a consumer can retheme by redefining them and nothing else. */
+:root {
+  /* surfaces, back to front */
+  --bg: #1a1b26;
+  --bg-alt: #16161e;
+  --bg-raised: #1f2335;
+  --border: #2a2e42;
+
+  /* text */
+  --text: #c9d1d9;
+  --text-dim: #787f97;
+
+  /* status — accent doubles as the primary action colour */
+  --accent: #7aa2f7;
+  --danger: #f7768e;
+  --ok: #9ece6a;
+  --warn: #e0af68;
+
+  /* Ink for text sitting ON a filled accent/danger surface. Previously
+     hardcoded per-rule (#12131c, #1a1b26); named here so a retheme can't
+     leave unreadable text behind. */
+  --on-accent: #12131c;
+  --on-danger: #1a1b26;
+}

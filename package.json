@@ -1,6 +1,9 @@
 {
   "name": "canopy",
   "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
   "version": "0.1.0",
   "type": "module",
   "scripts": {
