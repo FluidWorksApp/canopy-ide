@@ -149,7 +149,29 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       return false;
     });
 
-    fit.fit();
+    // The pty owns the size; this only proposes one.
+    //
+    // fit.fit() resizes the grid locally and tells the pty afterwards, which
+    // means the two disagree for a moment on every resize — and the shell lays
+    // its line out against the pty's winsize, so during that window a redraw
+    // wraps at the wrong column and smears. Worse, a terminal mounted in a
+    // hidden tab (every inactive tab is display:none) measures nothing:
+    // proposeDimensions returns NaN, and `NaN < 10` is false, so the obvious
+    // guard doesn't catch it.
+    //
+    // So: propose -> pty applies and reports back -> resize the grid to that.
+    // One authority, and a hidden tab simply proposes nothing.
+    const propose = (): { cols: number; rows: number } | null => {
+      const d = fit.proposeDimensions();
+      if (!d || !Number.isFinite(d.cols) || !Number.isFinite(d.rows)) return null;
+      if (d.cols < 1 || d.rows < 1) return null;
+      return { cols: d.cols, rows: d.rows };
+    };
+    const applyGeometry = (g: { cols: number; rows: number }) => {
+      if (term.cols !== g.cols || term.rows !== g.rows) term.resize(g.cols, g.rows);
+    };
+
+    const initial = propose();
 
     let disposed = false;
     let unlistenExit: (() => void) | undefined;
@@ -157,8 +179,10 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     void ipc
       .ptySpawn(
         {
-          cols: term.cols,
-          rows: term.rows,
+          // 0 tells Rust to fall back to 80x24; the first resize once the tab is
+          // visible corrects it.
+          cols: initial?.cols ?? 0,
+          rows: initial?.rows ?? 0,
           cwd,
           highWater: settings.ptyHighWater,
         },
@@ -180,6 +204,10 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
           return;
         }
         ptyIdRef.current = result.id;
+        // Adopt whatever the pty opened at, including the 80x24 fallback when we
+        // proposed nothing — better a grid that matches the shell than one that
+        // looks right and wraps wrong.
+        applyGeometry(result);
         onSpawned(result.id);
         if (initialCommand) {
           void ipc.ptyWrite(result.id, `${initialCommand}\r`);
@@ -200,17 +228,27 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       if (ptyIdRef.current != null) void ipc.ptySetTitle(ptyIdRef.current, title);
     });
 
-    // Debounced resize: fit() locally, then tell the PTY so the child gets
-    // a matching SIGWINCH.
+    // Debounced resize: propose, let the pty apply it and SIGWINCH the child,
+    // then match the grid to what it confirmed. A hidden tab proposes nothing
+    // and is left alone until it is shown, which fires this again.
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     const observer = new ResizeObserver(() => {
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
-        if (el.clientWidth === 0 || el.clientHeight === 0) return;
-        fit.fit();
-        if (ptyIdRef.current != null) {
-          void ipc.ptyResize(ptyIdRef.current, term.cols, term.rows);
+        const next = propose();
+        if (!next) return;
+        if (ptyIdRef.current == null) {
+          // Still spawning; the size we asked for is already in flight.
+          applyGeometry(next);
+          return;
         }
+        void ipc
+          .ptyResize(ptyIdRef.current, next.cols, next.rows)
+          .then(applyGeometry)
+          .catch(() => {
+            // The pty is gone (exited between the observer firing and this
+            // call). Nothing to keep in sync with.
+          });
       }, 50);
     });
     observer.observe(el);

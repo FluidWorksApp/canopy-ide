@@ -6,7 +6,13 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 // ---------- PTY ----------
 
-export interface SpawnResult {
+/** The size a pty agreed to. It is the authority, not the webview — see ptyResize. */
+export interface PtyGeometry {
+  cols: number;
+  rows: number;
+}
+
+export interface SpawnResult extends PtyGeometry {
   id: number;
   pid: number | null;
 }
@@ -27,8 +33,9 @@ export const ptyWrite = (id: number, data: string) =>
   invoke<void>("pty_write", { id, data });
 export const ptyAck = (id: number, bytes: number) =>
   invoke<void>("pty_ack", { id, bytes });
+/** Resize the pty; resolves with the size it actually took (clamped to >= 1). */
 export const ptyResize = (id: number, cols: number, rows: number) =>
-  invoke<void>("pty_resize", { id, cols, rows });
+  invoke<PtyGeometry>("pty_resize", { id, cols, rows });
 export const ptyKill = (id: number) => invoke<void>("pty_kill", { id });
 export const ptyKillAll = () => invoke<void>("pty_kill_all");
 export const ptySetTitle = (id: number, title: string) =>

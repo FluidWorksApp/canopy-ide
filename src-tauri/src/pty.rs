@@ -65,6 +65,21 @@ pub struct PtyExit {
 pub struct SpawnResult {
     pub id: u32,
     pub pid: Option<u32>,
+    /// The size the pty was actually opened at — see PtyGeometry.
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// The size a pty agreed to, which is not always the size that was asked for.
+///
+/// The pty is the authority here, not the webview. The shell lays out its line
+/// against the winsize we set via TIOCSWINSZ, so a terminal rendering at a width
+/// the pty never agreed to wraps every redraw against the wrong column and
+/// smears the line. Callers set their grid from what the pty confirms.
+#[derive(Serialize, Clone)]
+pub struct PtyGeometry {
+    pub cols: u16,
+    pub rows: u16,
 }
 
 impl PtyManager {
@@ -181,6 +196,13 @@ pub fn pty_spawn(
     high_water: Option<usize>,
     on_data: Channel<InvokeResponseBody>,
 ) -> Result<SpawnResult, String> {
+    // Clamp for the same reason pty_resize does: a terminal spawned into a
+    // hidden tab measures 0, and a zero-column pty is meaningless. 80x24 is the
+    // conventional fallback, and the frontend corrects it the moment the tab is
+    // shown and the resize round-trips.
+    let cols = if cols == 0 { 80 } else { cols };
+    let rows = if rows == 0 { 24 } else { rows };
+
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -327,7 +349,7 @@ pub fn pty_spawn(
             .expect("spawn pty flusher thread");
     }
 
-    Ok(SpawnResult { id, pid })
+    Ok(SpawnResult { id, pid, cols, rows })
 }
 
 #[tauri::command]
@@ -364,9 +386,21 @@ pub fn pty_ack(state: State<'_, PtyManager>, id: u32, bytes: usize) -> Result<()
 }
 
 #[tauri::command]
-pub fn pty_resize(state: State<'_, PtyManager>, id: u32, cols: u16, rows: u16) -> Result<(), String> {
+/// Resize the pty, and report the size it actually took.
+///
+/// Sizes are clamped, not rejected: a hidden or zero-width container proposes 0
+/// (or a NaN that arrives as 0), and a zero-column pty is meaningless — the
+/// shell divides by it to lay out a line. Clamping keeps a tab that is resized
+/// while hidden from poisoning the winsize.
+pub fn pty_resize(
+    state: State<'_, PtyManager>,
+    id: u32,
+    cols: u16,
+    rows: u16,
+) -> Result<PtyGeometry, String> {
+    let (cols, rows) = (cols.max(1), rows.max(1));
     let session = get_session(&state, id)?;
-    let result = session
+    session
         .master
         .lock()
         .unwrap()
@@ -376,8 +410,8 @@ pub fn pty_resize(state: State<'_, PtyManager>, id: u32, cols: u16, rows: u16) -
             pixel_width: 0,
             pixel_height: 0,
         })
-        .map_err(|e| e.to_string());
-    result
+        .map_err(|e| e.to_string())?;
+    Ok(PtyGeometry { cols, rows })
 }
 
 /// Called by the frontend at boot: any session alive at that moment belongs to
