@@ -114,25 +114,35 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // with typed characters. Writing to the PTY directly from here opens a
     // second, racing channel: the bytes then land wherever they land, which is
     // how an earlier attempt at this ended up typing "^E^E" into the prompt.
-    const NATURAL_EDIT: Record<string, string> = {
+    // Cursor motion ONLY. Nothing here may delete: every entry is a movement
+    // widget, so a bug in this handler can misplace the cursor but can never
+    // destroy a line. An earlier version mapped kill widgets too (ESC d
+    // kill-word, C-k kill-line, C-u kill-whole-line) and one of them was
+    // mis-keyed — on a Mac the key labelled "delete" reports key="Backspace",
+    // while key="Delete" is fn+delete — so a destructive sequence sat armed on
+    // a key nobody meant to press. The deletes were never the valuable part:
+    // xterm already sends ESC+DEL for Option+Backspace, which zsh binds to
+    // backward-kill-word. Leave killing to the keys that already work.
+    const CURSOR_MOTION: Record<string, string> = {
       "alt+ArrowLeft": "\x1bb", // backward-word
       "alt+ArrowRight": "\x1bf", // forward-word
-      "alt+Delete": "\x1bd", // kill-word (forward)
-      "meta+ArrowLeft": "\x01", // beginning-of-line  (C-a)
-      "meta+ArrowRight": "\x05", // end-of-line        (C-e)
-      // C-u. NB: in zsh this is kill-whole-line, NOT bash's backward-kill-line
-      // — it clears the entire line, not just the part before the cursor. zsh
-      // binds nothing to backward-kill-line, so there is no closer match; iTerm2
-      // sends C-u here too and inherits the same behaviour.
-      "meta+Backspace": "\x15",
-      "meta+Delete": "\x0b", // kill-line          (C-k)
+      "meta+ArrowLeft": "\x01", // beginning-of-line (C-a)
+      "meta+ArrowRight": "\x05", // end-of-line       (C-e)
     };
     term.attachCustomKeyEventHandler((ev) => {
       if (ev.type !== "keydown" || ev.ctrlKey) return true;
-      // Only claim the combos above: Cmd+C/V/T/W and Option+letter (accents,
-      // and Meta-prefixed keys via macOptionIsMeta) must keep their meaning.
-      const mod = ev.metaKey ? "meta" : ev.altKey ? "alt" : null;
-      const seq = mod && NATURAL_EDIT[`${mod}+${ev.key}`];
+      // Never touch a key that is mid-composition. Option+letter starts a dead
+      // key on a US layout (Option+e = acute), and WebKit then reports a
+      // collapsed, length-2 ev.key and stops honouring preventDefault. Bailing
+      // lets xterm's own dead-key handling run — it is downstream of this
+      // handler, so returning false here would skip it and strand the
+      // composition, making the next keypress behave as if Option were held.
+      if (ev.isComposing || ev.keyCode === 229) return true;
+      // Only arrows, and only with exactly one of Cmd/Option. `ev.key` for an
+      // arrow is always a multi-char name, so a composed character can never
+      // collide with these entries.
+      if (ev.altKey === ev.metaKey) return true;
+      const seq = CURSOR_MOTION[`${ev.metaKey ? "meta" : "alt"}+${ev.key}`];
       if (!seq) return true;
       ev.preventDefault();
       term.input(seq);
