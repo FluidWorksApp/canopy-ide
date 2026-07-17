@@ -319,47 +319,79 @@ pub fn session_forget(session_id: String) -> Result<(), String> {
     }
 }
 
+/// Claude's project-bucket name for a directory: every non-alphanumeric
+/// character becomes `-`. Not just `/` — dots and underscores are rewritten
+/// too, so `/a/b/.claude/worktrees/x` encodes to `-a-b--claude-worktrees-x`
+/// (note the double hyphen where `/.` was). Only replacing `/` silently breaks
+/// every worktree, because they all live under a dotted directory.
+///
+/// Lossy, therefore one-way: `-`, `_` and `.` all encode to `-`, so a bucket
+/// name cannot be decoded back into a path. Candidates get encoded and
+/// compared; a bucket is never decoded.
+fn claude_bucket(path: &str) -> String {
+    path.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// The bucket that actually holds `session_id`'s transcript, found by scanning
+/// the project dirs for the file itself.
+///
+/// Deterministic: an exact filename match on a uuid. Never newest-by-mtime and
+/// never a title match — those guess, and a wrong guess resumes a stranger's
+/// conversation.
+fn transcript_bucket(session_id: &str) -> Option<String> {
+    let root = std::path::PathBuf::from(std::env::var("HOME").ok()?).join(".claude/projects");
+    let name = format!("{session_id}.jsonl");
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        if entry.path().join(&name).exists() {
+            return Some(entry.file_name().to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
 /// Where an agent's `--resume` has to run, and whether there is anything to
 /// resume.
 ///
-/// Claude files a conversation under its *project root*, not the directory the
-/// agent happened to be in: a session run in `product-demo/packages/db` lands in
-/// the bucket for `product-demo`. Resuming from the recorded cwd therefore looks
-/// in a bucket that does not exist and reports "No conversation found".
+/// Claude files a conversation under the directory the session was *launched*
+/// in, and `--resume` only finds it from that same directory. The cwd a hook
+/// reports drifts when the agent cds mid-session — starting at a repo root and
+/// moving into a worktree is routine — so resuming from the reported cwd fails
+/// with "No conversation found". Walk *up* from it instead, re-encoding each
+/// ancestor until one matches the bucket that really holds the transcript.
 ///
-/// The bucket name is the path with `/` replaced by `-`, which is lossy —
-/// real directories contain dashes, so decoding it is guesswork. Instead we walk
-/// *up* from the recorded cwd and re-encode each ancestor until one matches the
-/// bucket, which recovers the exact path unambiguously.
+/// That bucket is found on disk rather than taken from the `transcript_path`
+/// the hook reported: the hook fires at SessionStart, so its path is only a
+/// promise of where the file will go, and it is written before any cd.
 fn resume_location(digest: &serde_json::Value) -> (String, bool) {
     let cwd = digest["cwd"].as_str().unwrap_or("").to_string();
-    let Some(transcript) = digest["transcript_path"].as_str() else {
-        // Agents other than claude may not report one. Don't block restore on a
+    let Some(session_id) = digest["session_id"].as_str() else {
+        // Agents other than claude don't report one. Don't block restore on a
         // check we can't perform.
         return (cwd, true);
     };
-    let bucket = std::path::Path::new(transcript)
-        .parent()
-        .and_then(|p| p.file_name())
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
 
-    let mut root = cwd.clone();
+    // Nothing on disk anywhere: the agent started but was never talked to, or
+    // died before writing. Every `--resume` against it fails, so callers must
+    // not offer the button.
+    let Some(bucket) = transcript_bucket(session_id) else {
+        return (cwd, false);
+    };
+
     let mut probe = std::path::PathBuf::from(&cwd);
     loop {
-        if probe.to_string_lossy().replace('/', "-") == bucket {
-            root = probe.to_string_lossy().to_string();
-            break;
+        if claude_bucket(&probe.to_string_lossy()) == bucket {
+            return (probe.to_string_lossy().to_string(), true);
         }
         if !probe.pop() {
-            break; // no ancestor matches; fall back to the recorded cwd
+            // The transcript exists, but no ancestor of the recorded cwd maps
+            // to its bucket — it was launched outside this path entirely.
+            // Resume from here would fail, so say so rather than offer a button
+            // that reports "No conversation found".
+            return (cwd, false);
         }
     }
-
-    // No transcript means no conversation was ever persisted — the agent was
-    // started but never actually talked to, or it died before writing. Every
-    // `--resume` against it fails, so callers must not offer the button.
-    (root, std::path::Path::new(transcript).exists())
 }
 
 /// Live digests of agent sessions, for showing the user exactly what would be
@@ -600,5 +632,40 @@ pub fn kill_process(pid: u32) -> Result<(), String> {
     #[cfg(windows)]
     {
         Err("not implemented on windows".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::claude_bucket;
+
+    /// Encodings taken from real bucket directories under ~/.claude/projects.
+    /// Every one of these is a path our own users hit; the `.claude/worktrees`
+    /// case is the isolation model, and `/` -> `-` alone gets all three wrong.
+    #[test]
+    fn bucket_encodes_every_non_alphanumeric() {
+        assert_eq!(
+            claude_bucket("/Users/s/Documents/GitHub/coraa-app/coraa-agent/.claude/worktrees/brs"),
+            "-Users-s-Documents-GitHub-coraa-app-coraa-agent--claude-worktrees-brs",
+            "a dot must encode to '-', giving '--claude' where '/.' was"
+        );
+        assert_eq!(
+            claude_bucket("/private/var/folders/d1/2vxk8gl_1mxz/T/coraa-wp"),
+            "-private-var-folders-d1-2vxk8gl-1mxz-T-coraa-wp",
+            "an underscore must encode to '-'"
+        );
+        assert_eq!(
+            claude_bucket("/Users/s/Documents/GitHub/product-demo"),
+            "-Users-s-Documents-GitHub-product-demo",
+            "an existing hyphen survives unchanged"
+        );
+    }
+
+    /// The encoding is many-to-one, which is why a bucket name is never decoded
+    /// back into a path — candidates are encoded and compared instead.
+    #[test]
+    fn bucket_encoding_is_lossy() {
+        assert_eq!(claude_bucket("/a/b-c"), claude_bucket("/a/b_c"));
+        assert_eq!(claude_bucket("/a/b.c"), claude_bucket("/a/b-c"));
     }
 }
