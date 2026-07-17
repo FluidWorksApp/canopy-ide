@@ -8,7 +8,6 @@ import {
 } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { WebglAddon } from "@xterm/addon-webgl";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { SerializeAddon } from "@xterm/addon-serialize";
@@ -80,17 +79,65 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     term.loadAddon(new SerializeAddon());
     term.open(el);
 
-    // WebGL renderer for throughput; xterm 6 falls back to the DOM renderer
-    // if WebGL is unavailable or the context is lost (canvas addon is gone in 6.x).
-    if (settings.webgl) {
-      try {
-        const webgl = new WebglAddon();
-        webgl.onContextLoss(() => webgl.dispose());
-        term.loadAddon(webgl);
-      } catch {
-        // DOM renderer remains active
-      }
-    }
+    // No WebGL renderer. @xterm/addon-webgl 0.19.0 corrupts rendering on
+    // WKWebView/macOS: a stale texture binding after an atlas page swap makes
+    // the GPU sample the wrong page, so xterm's buffer is correct while the
+    // screen shows ghosts, stale glyphs or blanked rows. It masquerades as
+    // broken keyboard input — a character is deleted but never repaints, so
+    // arrow keys look like they destroy the line. See xtermjs/xterm.js#5847
+    // (Tauri + WKWebView + Retina — our exact stack) and #5816. Fixed by PR
+    // #5883, but that is beta-only: addon-webgl 0.20.0-beta peers on xterm
+    // 6.1.0-beta, so taking it means moving the whole core onto betas. Not
+    // worth it to speed up a shell prompt — xterm 6's DOM renderer is correct.
+    // Deleted rather than made a setting: stored settings win over DEFAULTS, so
+    // a `webgl: false` default would silently do nothing for existing users.
+
+    // macOS natural text editing — the same mapping iTerm2 ships under that name.
+    //
+    // xterm.js's defaults are wrong for a Mac shell, and actively destructive.
+    // From its own Keyboard.ts, with `modifiers = alt?2 | meta?8`:
+    //   Option+Arrow  -> ESC[1;3D / ESC[1;3C
+    //   Option/Cmd+Del -> ESC[3;3~ / ESC[3;9~
+    //   Cmd+Arrow     -> nothing at all (`if (ev.metaKey) break`), and the
+    //                    un-cancelled event then reaches the WebView, which
+    //                    applies macOS text editing to xterm's hidden textarea.
+    // zsh binds NONE of those CSI forms (`bindkey "^[[1;3D"` => undefined-key).
+    // Given one, zle discards the part it matched and SELF-INSERTS the rest, so
+    // Option+Left literally types "3D" into your command. Verified against a
+    // real login zsh: each sequence below does exactly what its name says.
+    //
+    // Deliberately absent: Option+Backspace. xterm already sends ESC+DEL for it
+    // (case 8), which zsh binds to backward-kill-word — it works, so leave it.
+    //
+    // These MUST go through term.input(). It feeds xterm's own ordered input
+    // path (-> onData -> the single ptyWrite stream), keeping them in sequence
+    // with typed characters. Writing to the PTY directly from here opens a
+    // second, racing channel: the bytes then land wherever they land, which is
+    // how an earlier attempt at this ended up typing "^E^E" into the prompt.
+    const NATURAL_EDIT: Record<string, string> = {
+      "alt+ArrowLeft": "\x1bb", // backward-word
+      "alt+ArrowRight": "\x1bf", // forward-word
+      "alt+Delete": "\x1bd", // kill-word (forward)
+      "meta+ArrowLeft": "\x01", // beginning-of-line  (C-a)
+      "meta+ArrowRight": "\x05", // end-of-line        (C-e)
+      // C-u. NB: in zsh this is kill-whole-line, NOT bash's backward-kill-line
+      // — it clears the entire line, not just the part before the cursor. zsh
+      // binds nothing to backward-kill-line, so there is no closer match; iTerm2
+      // sends C-u here too and inherits the same behaviour.
+      "meta+Backspace": "\x15",
+      "meta+Delete": "\x0b", // kill-line          (C-k)
+    };
+    term.attachCustomKeyEventHandler((ev) => {
+      if (ev.type !== "keydown" || ev.ctrlKey) return true;
+      // Only claim the combos above: Cmd+C/V/T/W and Option+letter (accents,
+      // and Meta-prefixed keys via macOptionIsMeta) must keep their meaning.
+      const mod = ev.metaKey ? "meta" : ev.altKey ? "alt" : null;
+      const seq = mod && NATURAL_EDIT[`${mod}+${ev.key}`];
+      if (!seq) return true;
+      ev.preventDefault();
+      term.input(seq);
+      return false;
+    });
 
     fit.fit();
 

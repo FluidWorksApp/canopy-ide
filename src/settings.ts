@@ -1,7 +1,6 @@
 // Small persistent settings, stored in localStorage. Keep this flat and cheap.
 export interface Settings {
   scrollback: number;
-  webgl: boolean;
   fontSize: number;
   // Runaway-process guard thresholds (per PTY session process tree)
   runawayCpuPercent: number;
@@ -9,9 +8,12 @@ export interface Settings {
   ptyHighWater: number;
 }
 
+// NB: stored settings override these (see getSettings), so flipping a default
+// does nothing for anyone who already has the key in localStorage. A setting
+// that must actually change for existing users has to be removed outright —
+// which is exactly why `webgl` is gone rather than defaulted to false.
 const DEFAULTS: Settings = {
   scrollback: 10_000,
-  webgl: true,
   fontSize: 13,
   runawayCpuPercent: 300,
   runawayMemBytes: 4 * 1024 * 1024 * 1024,
