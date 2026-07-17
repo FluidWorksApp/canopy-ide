@@ -29,10 +29,12 @@ interface TermProps {
   onSpawned: (ptyId: number) => void;
   onExited: (exitCode: number | null) => void;
   onTitle?: (title: string) => void;
+  /** The program in this terminal asked for attention — see the OSC handlers. */
+  onNotify?: (message: string) => void;
 }
 
 export const Term = forwardRef<TermHandle, TermProps>(function Term(
-  { cwd, active, initialCommand, onSpawned, onExited, onTitle },
+  { cwd, active, initialCommand, onSpawned, onExited, onTitle, onNotify },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -228,6 +230,45 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       if (ptyIdRef.current != null) void ipc.ptySetTitle(ptyIdRef.current, title);
     });
 
+    // Desktop notifications, straight out of the byte stream.
+    //
+    // This is how a terminal program says "I need you" — and it costs nothing
+    // per agent, because the agent CLIs already emit these. Anything that can
+    // write to a tty gets it for free: `printf '\e]9;done\a'` from a shell
+    // script raises the same signal claude does. The alternative — teaching the
+    // app about each agent's output format — would need per-agent parsing that
+    // breaks whenever one of them changes a string.
+    //
+    // Three spellings of the same idea, none standard:
+    //   OSC 9  ;<body>                 iTerm2 / Windows Terminal
+    //   OSC 777;notify;<title>;<body>  urxvt, adopted by kitty and others
+    //   OSC 99 ;<meta>;<body>          kitty's own, which chunks long bodies
+    // Return false so the sequence still reaches the renderer: swallowing it
+    // would suppress whatever else a program layers on the same OSC.
+    const oscSubs = [
+      term.parser.registerOscHandler(9, (data) => {
+        const body = data.trim();
+        if (body) onNotify?.(body);
+        return false;
+      }),
+      term.parser.registerOscHandler(777, (data) => {
+        // notify;<title>;<body> — the body is optional, so fall back to title.
+        const parts = data.split(";");
+        if (parts[0] !== "notify") return false;
+        const body = (parts[2] ?? parts[1] ?? "").trim();
+        if (body) onNotify?.(body);
+        return false;
+      }),
+      term.parser.registerOscHandler(99, (data) => {
+        // <metadata>:<body>. Kitty splits long bodies across several sequences
+        // keyed by an id; we take the payload as-is rather than reassemble --
+        // a truncated first chunk is still a usable "look at me".
+        const body = data.split(";").slice(1).join(";").trim();
+        if (body) onNotify?.(body);
+        return false;
+      }),
+    ];
+
     // Debounced resize: propose, let the pty apply it and SIGWINCH the child,
     // then match the grid to what it confirmed. A hidden tab proposes nothing
     // and is left alone until it is shown, which fires this again.
@@ -259,6 +300,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       observer.disconnect();
       dataSub.dispose();
       titleSub.dispose();
+      oscSubs.forEach((s) => s.dispose());
       unlistenExit?.();
       if (ptyIdRef.current != null) void ipc.ptyKill(ptyIdRef.current);
       term.dispose();

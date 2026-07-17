@@ -58,6 +58,10 @@ interface TermSubTab {
   exited?: boolean;
   /** Bumped to force a fresh Term (and a fresh PTY) on re-run. */
   epoch?: number;
+  /** The last thing this terminal asked attention for (OSC 9/99/777), and
+   *  whether it is still unread. Cleared when the tab is looked at. */
+  notice?: string;
+  unread?: boolean;
 }
 
 interface FileSubTab {
@@ -212,6 +216,19 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
   useEffect(() => {
     void checkInstalledClis().then(setInstalled);
   }, []);
+
+  // Looking at a tab is what marks it read. As an effect rather than something
+  // hung off the tab's onClick, so every route in — clicking, Ctrl+Tab cycling,
+  // a jump from the agents panel, closing the tab in front of it — clears the
+  // ring without each one having to remember to.
+  useEffect(() => {
+    if (!visible || !activeTabId) return;
+    setTabs((prev) =>
+      prev.some((t) => t.id === activeTabId && t.type === "terminal" && t.unread)
+        ? prev.map((t) => (t.id === activeTabId ? ({ ...t, unread: false } as SubTab) : t))
+        : prev,
+    );
+  }, [activeTabId, visible, tabs]);
 
   // Menu shortcuts — only the visible project reacts.
   const activeTabIdRef = useRef(activeTabId);
@@ -564,11 +581,13 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
             .map((tab) => (
               <div
                 key={tab.id}
-                className={`tab ${tab.id === activeTabId ? "tab-active" : ""}`}
+                className={`tab ${tab.id === activeTabId ? "tab-active" : ""} ${
+                  tab.type === "terminal" && tab.unread ? "tab-unread" : ""
+                }`}
                 onClick={() => setActiveTabId(tab.id)}
                 title={
                   tab.type === "terminal"
-                    ? `${tab.command ?? ""} — ${tab.cwd}`
+                    ? `${tab.notice ? `${tab.notice}\n` : ""}${tab.command ?? ""} — ${tab.cwd}`
                     : tab.type === "pr"
                       ? `${tab.pr.title} — ${tab.pr.url}`
                       : tab.file.path
@@ -748,6 +767,14 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
                   else closeTab(tab.id);
                 }}
                 onTitle={(title) => patchTab(tab.id, { title: title || tab.command || "shell" })}
+                onNotify={(notice) =>
+                  // Only unread if you aren't already looking at it — a ring on
+                  // the tab you're watching is noise.
+                  patchTab(tab.id, {
+                    notice,
+                    unread: !(tab.id === activeTabId && visible),
+                  })
+                }
               />
             </div>
           ))}

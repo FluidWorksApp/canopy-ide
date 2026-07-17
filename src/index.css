@@ -943,6 +943,29 @@ body,
   opacity: 0.5;
 }
 
+/* A program in this terminal asked for attention (OSC 9/99/777) and nobody has
+   looked yet. Deliberately not animated: several agents can be waiting at once,
+   and a row of blinking tabs is a slot machine, not a signal. The dot carries
+   the message in its title attribute. */
+.tab-unread {
+  color: var(--text);
+}
+
+.tab-unread::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: 0 0 auto;
+}
+
+/* Active wins: if you are already looking at it, it is read, and the dot is
+   about to clear anyway. */
+.tab-active.tab-unread::before {
+  display: none;
+}
+
 .tab-close {
   color: var(--text-dim);
   font-size: 10px;
