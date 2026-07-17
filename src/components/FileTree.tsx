@@ -9,7 +9,8 @@ interface FileTreeProps {
   roots: string[];
   changedPaths: Set<string>;
   onOpenFile: (path: string) => void;
-  onRemoveRoot: (root: string) => void;
+  /** Only meaningful with the root header shown — that's the sole caller of it. */
+  onRemoveRoot?: (root: string) => void;
   /** Surface an error/result message (rename clashes, delete failures, ...). */
   onNotice?: (msg: string) => void;
   /** Render root contents directly (the caller already shows a labeled header). */
@@ -76,6 +77,45 @@ export function FileTree({
     name: string;
     isDir: boolean;
   } | null>(null);
+  // autoFocus loses the race when this dialog mounts while the context menu is
+  // still unmounting, which left Enter going nowhere and no way to submit.
+  const promptInput = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (!prompt) return;
+    const el = promptInput.current;
+    if (!el) return;
+    el.focus();
+    // Select the basename, not the extension — renames usually keep the suffix.
+    const dot = prompt.value.lastIndexOf(".");
+    el.setSelectionRange(0, dot > 0 ? dot : prompt.value.length);
+    // Re-focus only when a dialog opens, not on every keystroke.
+  }, [prompt?.kind, prompt?.path, prompt?.dir]);
+
+  const promptReady = (() => {
+    if (!prompt) return false;
+    const name = prompt.value.trim();
+    if (!name || name.includes("/")) return false;
+    if (prompt.kind === "rename" && `${prompt.dir}/${name}` === prompt.path) return false;
+    return true;
+  })();
+
+  const submitPrompt = () => {
+    if (!prompt || !promptReady) return;
+    const name = prompt.value.trim();
+    const target = `${prompt.dir}/${name}`;
+    const { kind, path, dir } = prompt;
+    setPrompt(null);
+    if (kind === "new-file") {
+      void run("Create file", async () => {
+        await ipc.fsCreateFile(target);
+        onOpenFile(target);
+      }, dir);
+    } else if (kind === "new-dir") {
+      void run("Create folder", () => ipc.fsCreateDir(target), dir);
+    } else if (path) {
+      void run("Rename", () => ipc.fsRename(path, target), dir);
+    }
+  };
   // path -> load/expand state for every directory we've touched
   const [dirs, setDirs] = useState<Record<string, DirState>>({});
   const [git, setGit] = useState<Record<string, GitInfo>>({});
@@ -292,7 +332,14 @@ export function FileTree({
 
       {prompt && (
         <div className="confirm-backdrop" onMouseDown={() => setPrompt(null)}>
-          <div className="confirm" onMouseDown={(e) => e.stopPropagation()}>
+          <form
+            className="confirm"
+            onMouseDown={(e) => e.stopPropagation()}
+            onSubmit={(e) => {
+              e.preventDefault();
+              submitPrompt();
+            }}
+          >
             <p>
               {prompt.kind === "rename"
                 ? "Rename"
@@ -303,36 +350,23 @@ export function FileTree({
             </p>
             <input
               className="git-branch-input"
-              autoFocus
+              ref={promptInput}
               value={prompt.value}
               placeholder={prompt.kind === "new-dir" ? "folder name" : "name.ext"}
               onChange={(e) => setPrompt({ ...prompt, value: e.target.value })}
               onKeyDown={(e) => {
                 if (e.key === "Escape") setPrompt(null);
-                if (e.key !== "Enter") return;
-                const name = prompt.value.trim();
-                if (!name) return;
-                const target = `${prompt.dir}/${name}`;
-                const dir = prompt.dir;
-                setPrompt(null);
-                if (prompt.kind === "new-file") {
-                  void run("Create file", async () => {
-                    await ipc.fsCreateFile(target);
-                    onOpenFile(target);
-                  }, dir);
-                } else if (prompt.kind === "new-dir") {
-                  void run("Create folder", () => ipc.fsCreateDir(target), dir);
-                } else if (prompt.path) {
-                  void run("Rename", () => ipc.fsRename(prompt.path!, target), dir);
-                }
               }}
             />
             <div className="confirm-actions">
-              <button className="btn" onClick={() => setPrompt(null)}>
+              <button type="button" className="btn" onClick={() => setPrompt(null)}>
                 Cancel
               </button>
+              <button type="submit" className="btn btn-accent" disabled={!promptReady}>
+                {prompt.kind === "rename" ? "Rename" : "Create"}
+              </button>
             </div>
-          </div>
+          </form>
         </div>
       )}
 
@@ -379,7 +413,7 @@ export function FileTree({
                 title="Remove from workspace"
                 onClick={(e) => {
                   e.stopPropagation();
-                  onRemoveRoot(root);
+                  onRemoveRoot?.(root);
                 }}
               >
                 ✕

@@ -139,6 +139,11 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
             disabled={!valid}
             onClick={() =>
               onSave({
+                // Spread first: this dialog only edits name/components, and the
+                // caller replaces the whole project object. Rebuilding from
+                // scratch silently dropped fields it doesn't own (shareContext),
+                // which revoked the hook scope on every Save.
+                ...existing,
                 id: existing?.id ?? newProjectId(),
                 name: name.trim(),
                 components,

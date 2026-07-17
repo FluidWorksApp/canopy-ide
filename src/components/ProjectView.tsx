@@ -142,6 +142,11 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
   });
   const roots = components.map((c) => c.path);
   const rootsKey = roots.join("\n");
+  // Cmd+T's listener is registered once; without this it closes over the
+  // components from mount and opens shells in the main checkout even after a
+  // worktree is activated — disagreeing with the panel's own terminal button.
+  const componentsRef = useRef(components);
+  componentsRef.current = components;
 
   // ---------- terminals ----------
 
@@ -217,7 +222,8 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
       if (activeTabIdRef.current) closeTabRef.current(activeTabIdRef.current);
     };
     const newTerminalHandler = () => {
-      if (components[0]) addTerminal(components[0].path);
+      const first = componentsRef.current[0];
+      if (first) addTerminal(first.path);
     };
     const toggleSidebarHandler = () => setCollapsed((v) => !v);
     const quickOpen = () => setPalette("files");
@@ -954,7 +960,7 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
                     roots={[c.path]}
                     changedPaths={changedPaths}
                     onOpenFile={(p) => void openFile(p)}
-                    onRemoveRoot={() => {}}
+                    onNotice={onNotice}
                     hideRootHeader
                   />
                 </>
