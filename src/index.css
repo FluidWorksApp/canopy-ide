@@ -2534,6 +2534,18 @@ textarea,
 
 /* Which directory a session is running in — the difference between two
    otherwise identical `claude` rows. */
+/* A port this session is listening on. Green because it is a live service,
+   not a location — it reads differently from the directory chip beside it. */
+.agent-port {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg-raised);
+  color: var(--ok);
+  font-size: 10px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
 .agent-dir {
   padding: 1px 6px;
   border-radius: 4px;

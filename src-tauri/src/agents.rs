@@ -17,6 +17,10 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::pty::PtyManager;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Check listening ports every Nth poll. lsof forks a process, so it is the
+/// costliest thing in the monitor loop, and a dev server's port changes roughly
+/// once per session — 10s is far tighter than the fact ever moves.
+const PORT_EVERY: u64 = 5;
 
 #[derive(Serialize, Clone)]
 pub struct ProcInfo {
@@ -44,9 +48,66 @@ pub struct SessionStats {
     pub total_cpu: f32,
     pub total_mem_bytes: u64,
     pub procs: Vec<ProcInfo>,
+    /// TCP ports anything under this session is listening on, ascending.
+    ///
+    /// The highest-value fact about a terminal that isn't its output: it says
+    /// "there is a dev server in here, on 5173" without you opening the tab and
+    /// reading scrollback. Empty unless something is actually listening.
+    pub ports: Vec<u16>,
 }
 
 static MONITOR_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// TCP listening ports for `pids`, as pid -> ports.
+///
+/// One lsof for every session rather than one per session: spawning a process
+/// per terminal per poll would cost more than everything else the monitor does.
+/// -F emits a stable machine format (a leading-letter field per line) instead of
+/// the human table, whose columns shift with content.
+///
+/// Errors are swallowed to an empty map by design — lsof is missing on some
+/// systems and refuses to answer for other users' processes. Ports are a garnish
+/// on a status row, and no row should disappear because a port lookup failed.
+#[cfg(unix)]
+fn listening_ports(pids: &[u32]) -> HashMap<u32, Vec<u16>> {
+    let mut out: HashMap<u32, Vec<u16>> = HashMap::new();
+    if pids.is_empty() {
+        return out;
+    }
+    let list = pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",");
+    let Ok(res) = std::process::Command::new("lsof")
+        .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", &list, "-Fpn"])
+        .output()
+    else {
+        return out;
+    };
+    let mut pid = 0_u32;
+    for line in String::from_utf8_lossy(&res.stdout).lines() {
+        let (tag, val) = line.split_at(1);
+        match tag {
+            // Fields stream in order: a p<pid> line, then the n<addr> lines
+            // belonging to it, until the next p.
+            "p" => pid = val.parse().unwrap_or(0),
+            "n" => {
+                // "127.0.0.1:5173", "*:8080", "[::1]:3000" — the port is after
+                // the last colon in every form.
+                if let Some(port) = val.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()) {
+                    let ports = out.entry(pid).or_default();
+                    if !ports.contains(&port) {
+                        ports.push(port);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+#[cfg(not(unix))]
+fn listening_ports(_pids: &[u32]) -> HashMap<u32, Vec<u16>> {
+    HashMap::new()
+}
 
 pub fn start_monitor(app: AppHandle) {
     if MONITOR_STARTED.swap(true, Ordering::SeqCst) {
@@ -56,6 +117,8 @@ pub fn start_monitor(app: AppHandle) {
         .name("pty-monitor".into())
         .spawn(move || {
             let mut sys = System::new();
+            let mut tick: u64 = 0;
+            let mut last_ports: HashMap<u32, Vec<u16>> = HashMap::new();
             loop {
                 thread::sleep(POLL_INTERVAL);
                 let manager = app.state::<PtyManager>();
@@ -158,8 +221,43 @@ pub fn start_monitor(app: AppHandle) {
                         total_cpu: procs.iter().map(|p| p.cpu).sum(),
                         total_mem_bytes: procs.iter().map(|p| p.mem_bytes).sum(),
                         procs,
+                        ports: Vec::new(),
                     });
                 }
+
+                // Ports last, and only every PORT_EVERY-th tick: lsof forks a
+                // process, which is the most expensive thing in this loop, while
+                // a dev server's port changes about once a session. One call
+                // covers every pid of every session — a call per session would
+                // put the cost back.
+                if tick % PORT_EVERY == 0 {
+                    let all: Vec<u32> = stats.iter().flat_map(|s| s.procs.iter().map(|p| p.pid)).collect();
+                    let by_pid = listening_ports(&all);
+                    if !by_pid.is_empty() {
+                        for s in stats.iter_mut() {
+                            let mut ports: Vec<u16> = s
+                                .procs
+                                .iter()
+                                .filter_map(|p| by_pid.get(&p.pid))
+                                .flatten()
+                                .copied()
+                                .collect();
+                            ports.sort_unstable();
+                            ports.dedup();
+                            s.ports = ports;
+                        }
+                    }
+                    last_ports = stats.iter().map(|s| (s.id, s.ports.clone())).collect();
+                } else {
+                    // Carry the last reading through the ticks that skip lsof,
+                    // so the port doesn't blink out of the UI between polls.
+                    for s in stats.iter_mut() {
+                        if let Some(p) = last_ports.get(&s.id) {
+                            s.ports = p.clone();
+                        }
+                    }
+                }
+                tick = tick.wrapping_add(1);
                 let _ = app.emit("pty:stats", &stats);
             }
         })

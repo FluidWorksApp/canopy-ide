@@ -357,6 +357,12 @@ export function AgentsPanel({
                   </span>
                 )}
                 <span className="agent-session">term #{s.id}</span>
+                {/* A dev server in here, without opening the tab to find out. */}
+                {s.ports?.map((p) => (
+                  <span key={p} className="agent-port" title={`Listening on port ${p}`}>
+                    :{p}
+                  </span>
+                ))}
                 {runaway && <span className="runaway-badge">runaway?</span>}
               </div>
               <div className="agent-stats">

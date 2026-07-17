@@ -165,6 +165,8 @@ export interface SessionStats {
   total_cpu: number;
   total_mem_bytes: number;
   procs: ProcInfo[];
+  /** TCP ports anything in this session is listening on, ascending. */
+  ports: number[];
 }
 export const onPtyStats = (cb: (stats: SessionStats[]) => void): Promise<UnlistenFn> =>
   listen<SessionStats[]>("pty:stats", (event) => cb(event.payload));
