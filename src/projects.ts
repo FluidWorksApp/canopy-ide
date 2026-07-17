@@ -201,7 +201,25 @@ export const AGENT_CLIS: AgentCli[] = [
     resume: (id) => `amp threads continue ${id}`,
   },
   { id: "aider", name: "Aider", bin: "aider", icon: "a", install: "python3 -m pip install -U aider-chat" },
+  // Still shipping weekly (v0.51.0, Jul 2026), but since 2026-06-18 the "Login
+  // with Google" path is dead for individuals — it fails with "This client is
+  // no longer supported ... migrate to the Antigravity suite". The CLI itself
+  // is fine on an API key: export GEMINI_API_KEY from aistudio.google.com. Use
+  // a new key; unrestricted standard keys are rejected as of 2026-06-19.
+  // Resume takes a list index rather than an id, so it can't restore a session.
   { id: "gemini", name: "Gemini CLI", bin: "gemini", icon: "✦", install: "npm install -g @google/gemini-cli" },
+  // Google's named successor to Gemini CLI. Ships as a single Go binary — the
+  // npm package some guides cite doesn't exist.
+  {
+    id: "agy",
+    name: "Antigravity CLI",
+    bin: "agy",
+    icon: "◇",
+    install: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+    // Verified: `--conversation <uuid>` resumes by id (`-c` takes the most
+    // recent). It is NOT `--resume`.
+    resume: (id) => `agy --conversation ${id}`,
+  },
   {
     id: "opencode",
     name: "OpenCode",
