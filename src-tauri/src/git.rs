@@ -158,7 +158,7 @@ fn head_branch(repo: &Path) -> (Option<String>, bool) {
 /// The distinct repos backing a project's components. Several components often
 /// live in one repo (a monorepo), so they're grouped rather than listed twice.
 #[tauri::command]
-pub fn git_repos(
+pub async fn git_repos(
     state: State<'_, WorkspaceManager>,
     components: Vec<(String, String)>, // (label, path)
 ) -> Result<Vec<RepoInfo>, String> {
@@ -191,7 +191,7 @@ pub fn git_repos(
 /// Porcelain v1 `-z` parse. Index and worktree columns are separate: a file can
 /// be both staged and modified again, and it must appear in both lists.
 #[tauri::command]
-pub fn git_repo_status(
+pub async fn git_repo_status(
     state: State<'_, WorkspaceManager>,
     repo: String,
 ) -> Result<RepoStatus, String> {
@@ -273,7 +273,7 @@ pub fn git_repo_status(
 // ---------- branches ----------
 
 #[tauri::command]
-pub fn git_branches(
+pub async fn git_branches(
     state: State<'_, WorkspaceManager>,
     repo: String,
 ) -> Result<Vec<BranchInfo>, String> {
@@ -317,7 +317,7 @@ pub fn git_branches(
 }
 
 #[tauri::command]
-pub fn git_checkout(
+pub async fn git_checkout(
     state: State<'_, WorkspaceManager>,
     repo: String,
     branch: String,
@@ -337,7 +337,7 @@ pub fn git_checkout(
 // ---------- staging ----------
 
 #[tauri::command]
-pub fn git_stage(
+pub async fn git_stage(
     state: State<'_, WorkspaceManager>,
     repo: String,
     paths: Vec<String>,
@@ -354,7 +354,7 @@ pub fn git_stage(
 }
 
 #[tauri::command]
-pub fn git_unstage(
+pub async fn git_unstage(
     state: State<'_, WorkspaceManager>,
     repo: String,
     paths: Vec<String>,
@@ -372,7 +372,7 @@ pub fn git_unstage(
 /// Throw away working-tree changes. Destructive and unrecoverable — the UI must
 /// confirm before calling this.
 #[tauri::command]
-pub fn git_discard(
+pub async fn git_discard(
     state: State<'_, WorkspaceManager>,
     repo: String,
     paths: Vec<String>,
@@ -388,7 +388,7 @@ pub fn git_discard(
 }
 
 #[tauri::command]
-pub fn git_commit(
+pub async fn git_commit(
     state: State<'_, WorkspaceManager>,
     repo: String,
     message: String,
@@ -450,7 +450,7 @@ fn run_net(cmd: &mut Command) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn git_fetch(state: State<'_, WorkspaceManager>, repo: String) -> Result<String, String> {
+pub async fn git_fetch(state: State<'_, WorkspaceManager>, repo: String) -> Result<String, String> {
     let top = repo_path(&state, &repo)?;
     let mut cmd = git(&top);
     cmd.args(["fetch", "--prune"]);
@@ -458,7 +458,7 @@ pub fn git_fetch(state: State<'_, WorkspaceManager>, repo: String) -> Result<Str
 }
 
 #[tauri::command]
-pub fn git_pull(state: State<'_, WorkspaceManager>, repo: String) -> Result<String, String> {
+pub async fn git_pull(state: State<'_, WorkspaceManager>, repo: String) -> Result<String, String> {
     let top = repo_path(&state, &repo)?;
     let mut cmd = git(&top);
     // --ff-only: never create a surprise merge commit on the user's behalf.
@@ -468,7 +468,7 @@ pub fn git_pull(state: State<'_, WorkspaceManager>, repo: String) -> Result<Stri
 }
 
 #[tauri::command]
-pub fn git_push(
+pub async fn git_push(
     state: State<'_, WorkspaceManager>,
     repo: String,
     set_upstream: bool,
@@ -494,7 +494,7 @@ pub fn git_push(
 /// worktree-vs-index. Untracked files have no git diff, so they're rendered as
 /// an all-additions diff against nothing.
 #[tauri::command]
-pub fn git_diff(
+pub async fn git_diff(
     state: State<'_, WorkspaceManager>,
     repo: String,
     path: String,
@@ -524,7 +524,7 @@ pub fn git_diff(
 }
 
 #[tauri::command]
-pub fn git_log(
+pub async fn git_log(
     state: State<'_, WorkspaceManager>,
     repo: String,
     limit: Option<u32>,
@@ -589,7 +589,7 @@ fn gh_in(repo: &Path) -> Command {
 }
 
 #[tauri::command]
-pub fn gh_available() -> bool {
+pub async fn gh_available() -> bool {
     Command::new("gh")
         .arg("--version")
         .output()
@@ -598,7 +598,7 @@ pub fn gh_available() -> bool {
 }
 
 #[tauri::command]
-pub fn gh_pr_list(
+pub async fn gh_pr_list(
     state: State<'_, WorkspaceManager>,
     repo: String,
 ) -> Result<Vec<PrInfo>, String> {
@@ -647,7 +647,7 @@ pub fn gh_pr_list(
 }
 
 #[tauri::command]
-pub fn gh_pr_diff(
+pub async fn gh_pr_diff(
     state: State<'_, WorkspaceManager>,
     repo: String,
     number: u32,
@@ -659,7 +659,7 @@ pub fn gh_pr_diff(
 }
 
 #[tauri::command]
-pub fn gh_pr_body(
+pub async fn gh_pr_body(
     state: State<'_, WorkspaceManager>,
     repo: String,
     number: u32,
@@ -674,7 +674,7 @@ pub fn gh_pr_body(
 /// real repository, so the UI confirms before it ever reaches here — and the
 /// action is never inferred, only taken when explicitly chosen.
 #[tauri::command]
-pub fn gh_pr_review(
+pub async fn gh_pr_review(
     state: State<'_, WorkspaceManager>,
     repo: String,
     number: u32,
@@ -706,7 +706,7 @@ pub fn gh_pr_review(
 }
 
 #[tauri::command]
-pub fn gh_pr_checkout(
+pub async fn gh_pr_checkout(
     state: State<'_, WorkspaceManager>,
     repo: String,
     number: u32,
@@ -745,7 +745,7 @@ pub struct WorktreeInfo {
 /// `key [value]` lines. Attribute lines (bare/detached/locked/prunable) may
 /// appear with or without a value.
 #[tauri::command]
-pub fn git_worktrees(
+pub async fn git_worktrees(
     state: State<'_, WorkspaceManager>,
     repo: String,
 ) -> Result<Vec<WorktreeInfo>, String> {
@@ -831,7 +831,7 @@ pub fn git_worktrees(
 /// branch off the current HEAD. A branch can only be checked out in one
 /// worktree at a time — git enforces that, and we surface its error verbatim.
 #[tauri::command]
-pub fn git_worktree_add(
+pub async fn git_worktree_add(
     state: State<'_, WorkspaceManager>,
     repo: String,
     path: String,
@@ -858,7 +858,7 @@ pub fn git_worktree_add(
 /// Remove a worktree. Destructive when it holds uncommitted work, so `force` is
 /// only ever passed after the UI has confirmed with the dirty count in hand.
 #[tauri::command]
-pub fn git_worktree_remove(
+pub async fn git_worktree_remove(
     state: State<'_, WorkspaceManager>,
     repo: String,
     path: String,
@@ -877,7 +877,7 @@ pub fn git_worktree_remove(
 
 /// Drop administrative records for worktrees whose directories are gone.
 #[tauri::command]
-pub fn git_worktree_prune(
+pub async fn git_worktree_prune(
     state: State<'_, WorkspaceManager>,
     repo: String,
 ) -> Result<String, String> {

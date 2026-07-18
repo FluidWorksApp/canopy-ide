@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as ipc from "../ipc";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
+import { useEscape } from "../useEscape";
 import { fileIconUrl } from "./fileIcons";
 
 interface FileTreeProps {
@@ -77,6 +78,13 @@ export function FileTree({
     name: string;
     isDir: boolean;
   } | null>(null);
+  useEscape(
+    () => {
+      setConfirmDelete(null);
+      setPrompt(null);
+    },
+    confirmDelete != null || prompt != null,
+  );
   // autoFocus loses the race when this dialog mounts while the context menu is
   // still unmounting, which left Enter going nowhere and no way to submit.
   const promptInput = useRef<HTMLInputElement>(null);

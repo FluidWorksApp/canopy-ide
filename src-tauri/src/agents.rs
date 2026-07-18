@@ -315,7 +315,7 @@ pub fn start_hook_bridge(app: AppHandle) {
 }
 
 #[tauri::command]
-pub fn hook_bridge_path() -> Option<String> {
+pub async fn hook_bridge_path() -> Option<String> {
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok()?;
     Some(
         std::path::PathBuf::from(home)
@@ -330,7 +330,7 @@ pub fn hook_bridge_path() -> Option<String> {
 /// config so its events stream into our bridge file. Idempotent (skips if the
 /// bridge path is already referenced).
 #[tauri::command]
-pub fn setup_agent_hooks(agent: String) -> Result<String, String> {
+pub async fn setup_agent_hooks(agent: String) -> Result<String, String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
     let bridge = format!("{home}/.canopy/agent-events.jsonl");
     match agent.as_str() {
@@ -380,7 +380,7 @@ pub fn install_hook_helper() -> Result<(), String> {
 /// unless a project turns it on — one session's prompts landing in another's
 /// context is a privacy decision the user makes, not a default.
 #[tauri::command]
-pub fn set_context_scopes(scopes: serde_json::Value) -> Result<(), String> {
+pub async fn set_context_scopes(scopes: serde_json::Value) -> Result<(), String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
     let dir = std::path::PathBuf::from(&home).join(".canopy");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -396,7 +396,7 @@ pub fn set_context_scopes(scopes: serde_json::Value) -> Result<(), String> {
 /// inside our own sessions dir, and anything with a path separator or `..` is
 /// refused rather than allowed to escape it.
 #[tauri::command]
-pub fn session_forget(session_id: String) -> Result<(), String> {
+pub async fn session_forget(session_id: String) -> Result<(), String> {
     if session_id.is_empty()
         || session_id.contains('/')
         || session_id.contains('\\')
@@ -501,7 +501,7 @@ fn resume_location(digest: &serde_json::Value) -> (String, bool) {
 /// Live digests of agent sessions, for showing the user exactly what would be
 /// shared, and for restoring sessions after a crash.
 #[tauri::command]
-pub fn session_digests() -> Result<Vec<serde_json::Value>, String> {
+pub async fn session_digests() -> Result<Vec<serde_json::Value>, String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
     let dir = std::path::PathBuf::from(&home).join(".canopy").join("sessions");
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -658,7 +658,7 @@ pub struct ClaudeSessionStats {
 /// (~/.claude/projects/**/*.jsonl — the path arrives via hook events).
 /// Powers the status tray (model / tokens / cost).
 #[tauri::command]
-pub fn claude_session_stats(transcript_path: String) -> Result<ClaudeSessionStats, String> {
+pub async fn claude_session_stats(transcript_path: String) -> Result<ClaudeSessionStats, String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
     let path = std::path::Path::new(&transcript_path)
         .canonicalize()
@@ -694,7 +694,7 @@ pub fn claude_session_stats(transcript_path: String) -> Result<ClaudeSessionStat
 /// Check which commands exist on the user's login-shell PATH (GUI apps don't
 /// inherit it). Used by the agent-CLI launcher to offer launch vs. install.
 #[tauri::command]
-pub fn which_check(commands: Vec<String>) -> HashMap<String, bool> {
+pub async fn which_check(commands: Vec<String>) -> HashMap<String, bool> {
     let mut result: HashMap<String, bool> =
         commands.iter().map(|c| (c.clone(), false)).collect();
     #[cfg(unix)]
@@ -723,7 +723,7 @@ pub fn which_check(commands: Vec<String>) -> HashMap<String, bool> {
 /// Kill an arbitrary process (used by the Agents panel / runaway guard for
 /// killing a specific process inside a session without tearing the session down).
 #[tauri::command]
-pub fn kill_process(pid: u32) -> Result<(), String> {
+pub async fn kill_process(pid: u32) -> Result<(), String> {
     #[cfg(unix)]
     {
         let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };

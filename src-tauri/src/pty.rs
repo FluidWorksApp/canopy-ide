@@ -425,7 +425,16 @@ pub fn pty_kill_all(state: State<'_, PtyManager>) {
 #[tauri::command]
 pub fn pty_kill(state: State<'_, PtyManager>, id: u32) -> Result<(), String> {
     let session = get_session(&state, id)?;
-    session.terminate();
+    // Return at once and tear down on a detached thread. terminate() blocks for
+    // up to GRACE (2.5s) waiting for the agent to flush its transcript before
+    // the final SIGKILL — and this command runs on the main thread, so doing
+    // that wait inline froze the whole UI on every tab close. The frontend
+    // already drops the tab optimistically; the read loop still emits pty:exit
+    // and reaps the session once the child actually exits. SIGTERM is delivered
+    // synchronously inside terminate() before the grace poll, so the shell
+    // starts shutting down immediately regardless of when this thread is
+    // scheduled.
+    thread::spawn(move || session.terminate());
     Ok(())
 }
 

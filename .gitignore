@@ -29,3 +29,8 @@ dist-ssr
 
 # Sidecar binaries staged by scripts/prepare-sidecar.mjs (built artifacts)
 /src-tauri/binaries/
+
+# design-sync: staged scripts, build output, and all sync state/inputs
+/.ds-sync/
+/ds-bundle/
+/.design-sync/

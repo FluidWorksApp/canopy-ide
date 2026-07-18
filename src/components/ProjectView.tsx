@@ -18,7 +18,7 @@ import {
   StopIcon,
   TerminalIcon,
 } from "./icons";
-import type { AgentEventEntry, ChangeEntry, OpenFile } from "../types";
+import type { AgentEventEntry, OpenFile } from "../types";
 import {
   derivePending,
   eventsForProject,
@@ -31,7 +31,8 @@ import { Term, type TermHandle } from "./Term";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { FileTree } from "./FileTree";
 import { FileView } from "./FileView";
-import { ChangesPanel } from "./ChangesPanel";
+import { ChangesPanel, type ChangeGroup } from "./ChangesPanel";
+import { useEscape } from "../useEscape";
 import { AgentsPanel } from "./AgentsPanel";
 import { StatusBar } from "./StatusBar";
 import { Palette, type PaletteMode } from "./Palette";
@@ -44,7 +45,11 @@ interface TermSubTab {
   id: string;
   type: "terminal";
   cwd: string;
+  /** Auto title, tracked from the shell/OSC. Shown unless the user renamed. */
   title: string;
+  /** User-set name (double-click the tab). Wins over `title` for display and
+   *  survives the shell repainting its own title; cleared by renaming to empty. */
+  customTitle?: string;
   ptyId: number | null;
   command?: string;
   icon?: string;
@@ -114,7 +119,16 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
   const [collapsed, setCollapsed] = useState(false);
   const [tabs, setTabs] = useState<SubTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
-  const [changes, setChanges] = useState<ChangeEntry[]>([]);
+  // Change feed comes from git, grouped by component (see refreshChanges).
+  const [changeGroups, setChangeGroups] = useState<ChangeGroup[]>([]);
+  const [changesLoading, setChangesLoading] = useState(false);
+  // Which tab is being renamed inline, and the working text. Null = none.
+  const [renamingTabId, setRenamingTabId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  // Right-click on the empty area below the file list creates here (the last
+  // component's root — the tree that space sits under). Null = closed.
+  const [rootCreate, setRootCreate] = useState<{ dir: string; kind: "file" | "dir"; value: string } | null>(null);
+  useEscape(() => setRootCreate(null), rootCreate != null);
   const [cliMenuOpen, setCliMenuOpen] = useState(false);
   const [installed, setInstalled] = useState<Record<string, boolean>>({});
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
@@ -429,17 +443,61 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
 
   // ---------- diff-first: external changes scoped to this project ----------
 
+  // The change feed is whatever git reports as changed, one group per
+  // component. Git — not the raw fs watcher — is the source of truth, so the
+  // list already honours .gitignore (including nested ones like
+  // src-tauri/.gitignore) and never shows build output, object files or the
+  // editor's atomic-write temp files. Two components resolving to the same repo
+  // are collapsed to the first, so a file is never listed twice.
+  const refreshChanges = useCallback(async () => {
+    const comps = componentsRef.current;
+    setChangesLoading(true);
+    try {
+      const results = await Promise.all(
+        comps.map((c) =>
+          ipc
+            .gitRepoStatus(c.path)
+            .then((s) => {
+              const files = [...s.conflicted, ...s.staged, ...s.unstaged, ...s.untracked];
+              const seen = new Set<string>();
+              const unique = files.filter((f) => {
+                if (seen.has(f.path)) return false;
+                seen.add(f.path);
+                return true;
+              });
+              return { component: c.label, repo: s.path, files: unique } as ChangeGroup;
+            })
+            .catch(() => null),
+        ),
+      );
+      const seenRepo = new Set<string>();
+      const groups = results.filter(
+        (g): g is ChangeGroup =>
+          g != null && g.files.length > 0 && !seenRepo.has(g.repo) && (seenRepo.add(g.repo), true),
+      );
+      setChangeGroups(groups);
+    } finally {
+      setChangesLoading(false);
+    }
+  }, []);
+
+  // Query git on mount and whenever the component set changes.
   useEffect(() => {
+    void refreshChanges();
+  }, [refreshChanges, rootsKey]);
+
+  // The fs watcher no longer *builds* the feed — it only triggers a debounced
+  // re-query of git, and live-diffs files that are already open in a tab.
+  useEffect(() => {
+    let gitTimer: ReturnType<typeof setTimeout> | undefined;
     const unlisten = ipc.onFsChange(async (e) => {
+      clearTimeout(gitTimer);
+      gitTimer = setTimeout(() => void refreshChanges(), 400);
       const now = Date.now();
       for (const path of e.paths) {
         if (!roots.some((r) => path.startsWith(r + "/"))) continue;
         const saved = recentSaves.current.get(path);
         if (saved && now - saved < 1500) continue;
-        setChanges((prev) => [
-          { path, kind: e.kind, ts: now },
-          ...prev.filter((c) => c.path !== path),
-        ]);
         const file = findFile(path);
         if (!file || e.kind === "remove") continue;
         try {
@@ -460,9 +518,12 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
         }
       }
     });
-    return () => void unlisten.then((fn) => fn());
+    return () => {
+      clearTimeout(gitTimer);
+      void unlisten.then((fn) => fn());
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rootsKey, patchFile]);
+  }, [rootsKey, patchFile, refreshChanges]);
 
   // ---------- render ----------
 
@@ -502,7 +563,8 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
       .filter((p) => AGENT_PATTERN.test(p.name))
       .map((p) => ({ name: p.name, cpu: p.cpu })),
   );
-  const changedPaths = new Set(changes.map((c) => c.path));
+  const changedPaths = new Set(changeGroups.flatMap((g) => g.files.map((f) => f.abs)));
+  const changeCount = changeGroups.reduce((n, g) => n + g.files.length, 0);
   const sectionOpen = (path: string) => openSections[path] ?? true;
   const pending = pendingForRoots(derivePending(projectEvents), roots);
 
@@ -571,9 +633,47 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
   ];
 
   const compMenu = useContextMenu();
+  const tabMenu = useContextMenu();
+
+  const submitRootCreate = async () => {
+    if (!rootCreate) return;
+    const name = rootCreate.value.trim();
+    const { dir, kind } = rootCreate;
+    setRootCreate(null);
+    if (!name || name.includes("/")) return;
+    const target = `${dir}/${name}`;
+    try {
+      if (kind === "file") {
+        await ipc.fsCreateFile(target);
+        void openFile(target);
+      } else {
+        await ipc.fsCreateDir(target);
+      }
+    } catch (e) {
+      onNotice(String(e));
+    }
+  };
+
+  const startRename = (tab: TermSubTab) => {
+    setRenamingTabId(tab.id);
+    setRenameDraft(tab.customTitle ?? tab.title);
+  };
+  // Empty draft clears the custom name and falls back to the auto title.
+  const commitRename = () => {
+    if (renamingTabId) patchTab(renamingTabId, { customTitle: renameDraft.trim() || undefined });
+    setRenamingTabId(null);
+  };
 
   const mainArea = (
     <div className="project-main">
+      {tabMenu.menu && (
+        <ContextMenu
+          x={tabMenu.menu.x}
+          y={tabMenu.menu.y}
+          items={tabMenu.menu.items}
+          onClose={tabMenu.close}
+        />
+      )}
       <div className="pane-bar">
         <div className="tabs">
           {tabs
@@ -584,7 +684,23 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
                 className={`tab ${tab.id === activeTabId ? "tab-active" : ""} ${
                   tab.type === "terminal" && tab.unread ? "tab-unread" : ""
                 }`}
-                onClick={() => setActiveTabId(tab.id)}
+                onClick={(e) => {
+                  // e.detail is the click count and fires even though app chrome
+                  // is user-select:none — unlike dblclick, which WebKit drops on
+                  // non-selectable text. Second click on a terminal tab renames.
+                  if (tab.type === "terminal" && e.detail === 2) startRename(tab);
+                  else setActiveTabId(tab.id);
+                }}
+                onContextMenu={(e) => {
+                  const items: MenuItem[] =
+                    tab.type === "terminal"
+                      ? [
+                          { label: "Rename", onClick: () => startRename(tab) },
+                          { label: "Close", danger: true, onClick: () => closeTab(tab.id) },
+                        ]
+                      : [{ label: "Close", danger: true, onClick: () => closeTab(tab.id) }];
+                  tabMenu.open(e, items);
+                }}
                 title={
                   tab.type === "terminal"
                     ? `${tab.notice ? `${tab.notice}\n` : ""}${tab.command ?? ""} — ${tab.cwd}`
@@ -600,13 +716,36 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
                 ) : (
                   tab.file.external != null && <span className="tab-external">●</span>
                 )}
-                <span className="tab-title">
-                  {tab.type === "terminal"
-                    ? tab.title
-                    : tab.type === "pr"
-                      ? `#${tab.pr.number} ${tab.pr.title}`
-                      : `${tab.file.name}${tab.file.dirty ? " •" : ""}`}
-                </span>
+                {tab.type === "terminal" && renamingTabId === tab.id ? (
+                  <input
+                    className="tab-rename-input"
+                    autoFocus
+                    value={renameDraft}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => setRenameDraft(e.target.value)}
+                    onBlur={commitRename}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        commitRename();
+                      } else if (e.key === "Escape") {
+                        e.preventDefault();
+                        setRenamingTabId(null);
+                      }
+                    }}
+                  />
+                ) : (
+                  <span
+                    className="tab-title"
+                    title={tab.type === "terminal" ? "Double-click or right-click to rename" : undefined}
+                  >
+                    {tab.type === "terminal"
+                      ? (tab.customTitle ?? tab.title)
+                      : tab.type === "pr"
+                        ? `#${tab.pr.number} ${tab.pr.title}`
+                        : `${tab.file.name}${tab.file.dirty ? " •" : ""}`}
+                  </span>
+                )}
                 <span
                   className="tab-close"
                   onClick={(e) => {
@@ -843,8 +982,52 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
           onClose={compMenu.close}
         />
       )}
+      {rootCreate && (
+        <div className="confirm-backdrop" onMouseDown={() => setRootCreate(null)}>
+          <div className="confirm" onMouseDown={(e) => e.stopPropagation()}>
+            <p>
+              New {rootCreate.kind === "dir" ? "folder" : "file"} in{" "}
+              <strong>{rootCreate.dir.split("/").pop()}</strong>
+            </p>
+            <input
+              autoFocus
+              className="git-branch-input"
+              placeholder={rootCreate.kind === "dir" ? "folder name" : "name.ext"}
+              value={rootCreate.value}
+              onChange={(e) => setRootCreate((p) => (p ? { ...p, value: e.target.value } : p))}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void submitRootCreate();
+                }
+              }}
+            />
+            <div className="confirm-actions">
+              <button className="btn" onClick={() => setRootCreate(null)}>
+                Cancel
+              </button>
+              <button className="btn btn-accent" onClick={() => void submitRootCreate()}>
+                Create
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {sideTab === "files" && (
-        <div className="components-panel">
+        <div
+          className="components-panel"
+          // The empty area below the file list still belongs to the last
+          // component's tree. FileTree rows/containers stopPropagation, so this
+          // fires only for genuinely blank space.
+          onContextMenu={(e) => {
+            const dir = components[components.length - 1]?.path;
+            if (!dir) return;
+            compMenu.open(e, [
+              { label: "New File…", onClick: () => setRootCreate({ dir, kind: "file", value: "" }) },
+              { label: "New Folder…", onClick: () => setRootCreate({ dir, kind: "dir", value: "" }) },
+            ]);
+          }}
+        >
           <div className="side-panel-head">
             <span>Components</span>
             <button className="btn-icon" title="Edit project" onClick={onEdit}>
@@ -1013,9 +1196,10 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
       )}
       {sideTab === "changes" && (
         <ChangesPanel
-          changes={changes}
+          groups={changeGroups}
+          loading={changesLoading}
           onOpen={(p) => void openFile(p, { diff: true })}
-          onClear={() => setChanges([])}
+          onRefresh={() => void refreshChanges()}
         />
       )}
       {sideTab === "agents" && (
@@ -1057,8 +1241,8 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
               }}
             >
               {t.icon}
-              {t.key === "changes" && changes.length > 0 && (
-                <span className="rail-badge">{Math.min(changes.length, 99)}</span>
+              {t.key === "changes" && changeCount > 0 && (
+                <span className="rail-badge">{Math.min(changeCount, 99)}</span>
               )}
               {t.key === "agents" && pending.length > 0 && (
                 <span className="rail-badge rail-badge-urgent">{pending.length}</span>

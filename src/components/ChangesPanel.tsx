@@ -1,39 +1,72 @@
-// Session change feed: files modified on disk while the IDE is open —
-// the heart of the diff-first workflow.
-import type { ChangeEntry } from "../types";
+// Session change view: the files git reports as changed, grouped by the
+// component they live in. Git is the source of truth — not the raw fs watcher —
+// so this list already excludes everything in .gitignore (build output, object
+// files, editor temp files) and reflects real staged/unstaged/untracked state.
+import type { FileChange } from "../ipc";
 
-interface ChangesPanelProps {
-  changes: ChangeEntry[];
-  onOpen: (path: string) => void;
-  onClear: () => void;
+export interface ChangeGroup {
+  /** Component label this repo is shown under. */
+  component: string;
+  /** Resolved git top-level for the component. */
+  repo: string;
+  files: FileChange[];
 }
 
-export function ChangesPanel({ changes, onOpen, onClear }: ChangesPanelProps) {
+interface ChangesPanelProps {
+  groups: ChangeGroup[];
+  /** Whether a git query is in flight (first paint / manual refresh). */
+  loading: boolean;
+  onOpen: (path: string) => void;
+  onRefresh: () => void;
+}
+
+const kindClass = (f: FileChange) =>
+  f.conflicted ? "conflicted" : f.untracked ? "untracked" : f.staged ? "staged" : "unstaged";
+
+// Two-letter porcelain code -> single badge letter, matching git's own status.
+const badge = (f: FileChange) => {
+  if (f.conflicted) return "!";
+  if (f.untracked) return "A";
+  const code = f.status.trim();
+  return code[0] === "?" ? "A" : (code[0] ?? "M");
+};
+
+export function ChangesPanel({ groups, loading, onOpen, onRefresh }: ChangesPanelProps) {
+  const total = groups.reduce((n, g) => n + g.files.length, 0);
   return (
     <div className="side-panel">
       <div className="side-panel-head">
-        <span>{changes.length} changed file{changes.length === 1 ? "" : "s"}</span>
-        {changes.length > 0 && (
-          <button className="btn-icon" title="Clear list" onClick={onClear}>
-            ✕
-          </button>
-        )}
+        <span>
+          {total} changed file{total === 1 ? "" : "s"}
+        </span>
+        <button className="icon-btn" title="Refresh" onClick={onRefresh}>
+          ↻
+        </button>
       </div>
-      {changes.length === 0 ? (
+      {total === 0 ? (
         <div className="tree-empty">
-          No external changes yet. Run an agent in the terminal — its edits will
-          show up here as diffs.
+          {loading
+            ? "Checking for changes…"
+            : "Working tree clean. Edits made by agents or by you show up here as diffs against HEAD."}
         </div>
       ) : (
-        changes.map((c) => (
-          <div key={c.path} className="change-row" onClick={() => onOpen(c.path)}>
-            <span className={`change-kind change-${c.kind}`}>
-              {c.kind === "create" ? "A" : c.kind === "remove" ? "D" : "M"}
-            </span>
-            <span className="change-name">{c.path.split("/").pop()}</span>
-            <span className="change-dir" title={c.path}>
-              {c.path.split("/").slice(-3, -1).join("/")}
-            </span>
+        groups.map((g) => (
+          <div key={g.repo} className="change-group">
+            <div className="git-section-head change-group-head">
+              {g.component} ({g.files.length})
+            </div>
+            {g.files.map((f) => (
+              <div
+                key={f.path}
+                className="change-row"
+                title={`${f.status.trim() || "??"} ${f.path}`}
+                onClick={() => onOpen(f.abs)}
+              >
+                <span className={`change-kind change-${kindClass(f)}`}>{badge(f)}</span>
+                <span className="change-name">{f.path.split("/").pop()}</span>
+                <span className="change-dir">{f.path.split("/").slice(0, -1).join("/")}</span>
+              </div>
+            ))}
           </div>
         ))
       )}

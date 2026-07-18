@@ -40,7 +40,15 @@ pub(crate) fn check_scope(state: &State<'_, WorkspaceManager>, path: &Path) -> R
         let Some(name) = existing.file_name().map(|n| n.to_owned()) else {
             return Err("invalid path".into());
         };
-        suffix = PathBuf::from(&name).join(suffix);
+        // Prepend the component WITHOUT join("") on the first pass: joining an
+        // empty PathBuf appends a trailing separator, so a single new file came
+        // out as "name/" and every create/rename wrote to a directory path,
+        // failing with ENOENT. Build the suffix slash-free instead.
+        suffix = if suffix.as_os_str().is_empty() {
+            PathBuf::from(&name)
+        } else {
+            Path::new(&name).join(&suffix)
+        };
         existing = existing
             .parent()
             .ok_or_else(|| "invalid path".to_string())?
@@ -60,7 +68,7 @@ pub(crate) fn check_scope(state: &State<'_, WorkspaceManager>, path: &Path) -> R
 }
 
 #[tauri::command]
-pub fn workspace_add(
+pub async fn workspace_add(
     app: AppHandle,
     state: State<'_, WorkspaceManager>,
     path: String,
@@ -113,7 +121,7 @@ pub fn workspace_add(
 }
 
 #[tauri::command]
-pub fn workspace_remove(state: State<'_, WorkspaceManager>, path: String) -> Result<(), String> {
+pub async fn workspace_remove(state: State<'_, WorkspaceManager>, path: String) -> Result<(), String> {
     let canonical = PathBuf::from(&path)
         .canonicalize()
         .map_err(|e| e.to_string())?;
@@ -123,6 +131,9 @@ pub fn workspace_remove(state: State<'_, WorkspaceManager>, path: String) -> Res
     Ok(())
 }
 
+// Stays sync: an in-memory Vec read with no IO, so it never blocks. (Async
+// commands that borrow State must return a Result; this returns a bare Vec, and
+// there is no reason to wrap it just to move a lock-and-clone off the main thread.)
 #[tauri::command]
 pub fn workspace_list(state: State<'_, WorkspaceManager>) -> Vec<String> {
     state
@@ -135,7 +146,7 @@ pub fn workspace_list(state: State<'_, WorkspaceManager>) -> Vec<String> {
 }
 
 #[tauri::command]
-pub fn fs_read_dir(
+pub async fn fs_read_dir(
     state: State<'_, WorkspaceManager>,
     path: String,
 ) -> Result<Vec<DirEntry>, String> {
@@ -158,7 +169,7 @@ pub fn fs_read_dir(
 
 /// Returns raw file bytes (no base64) via tauri::ipc::Response.
 #[tauri::command]
-pub fn fs_read_file(
+pub async fn fs_read_file(
     state: State<'_, WorkspaceManager>,
     path: String,
 ) -> Result<tauri::ipc::Response, String> {
@@ -168,7 +179,7 @@ pub fn fs_read_file(
 }
 
 #[tauri::command]
-pub fn fs_write_file(
+pub async fn fs_write_file(
     state: State<'_, WorkspaceManager>,
     path: String,
     content: String,
@@ -207,7 +218,7 @@ fn git_ro(dir: &Path) -> std::process::Command {
 }
 
 #[tauri::command]
-pub fn git_status(state: State<'_, WorkspaceManager>, path: String) -> Result<GitStatus, String> {
+pub async fn git_status(state: State<'_, WorkspaceManager>, path: String) -> Result<GitStatus, String> {
     let dir = check_scope(&state, Path::new(&path))?;
     let top = match git_ro(&dir)
         .args(["rev-parse", "--show-toplevel"])
@@ -256,7 +267,7 @@ pub fn git_status(state: State<'_, WorkspaceManager>, path: String) -> Result<Gi
 /// Content of a file at git HEAD — the baseline for proper diffs of modified
 /// files. None when the file is untracked or the dir isn't a repo.
 #[tauri::command]
-pub fn git_head_content(
+pub async fn git_head_content(
     state: State<'_, WorkspaceManager>,
     path: String,
 ) -> Result<Option<String>, String> {
@@ -299,7 +310,7 @@ fn store_path() -> Result<std::path::PathBuf, String> {
 /// Persisted workspace state: projects, their labeled component dirs, and
 /// which projects are open. Schema is owned by the frontend.
 #[tauri::command]
-pub fn store_load() -> Result<String, String> {
+pub async fn store_load() -> Result<String, String> {
     let path = store_path()?;
     if !path.exists() {
         return Ok("null".into());
@@ -308,7 +319,7 @@ pub fn store_load() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn store_save(data: String) -> Result<(), String> {
+pub async fn store_save(data: String) -> Result<(), String> {
     let path = store_path()?;
     std::fs::write(&path, data).map_err(|e| e.to_string())
 }
@@ -319,7 +330,7 @@ pub fn store_save(data: String) -> Result<(), String> {
 // directory traversal helpers) rather than exposing general unscoped file IO.
 
 #[tauri::command]
-pub fn workspace_export(path: String, data: String) -> Result<(), String> {
+pub async fn workspace_export(path: String, data: String) -> Result<(), String> {
     let path = PathBuf::from(&path);
     if path.extension().and_then(|e| e.to_str()) != Some("json") {
         return Err("workspace files must be .json".into());
@@ -328,7 +339,7 @@ pub fn workspace_export(path: String, data: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn workspace_import(path: String) -> Result<String, String> {
+pub async fn workspace_import(path: String) -> Result<String, String> {
     let path = PathBuf::from(&path);
     if path.extension().and_then(|e| e.to_str()) != Some("json") {
         return Err("workspace files must be .json".into());
@@ -391,7 +402,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>, limit: usize, depth: usize) {
 /// Flat file list under the given roots — the corpus for quick-open (Cmd+P).
 /// Bounded so a huge tree can't balloon the heap or the IPC payload.
 #[tauri::command]
-pub fn fs_list_files(
+pub async fn fs_list_files(
     state: State<'_, WorkspaceManager>,
     roots: Vec<String>,
     limit: Option<usize>,
@@ -415,7 +426,7 @@ pub struct SearchHit {
 /// Literal, case-insensitive content search across the roots (Cmd+Shift+F).
 /// Binary files are skipped; results are capped.
 #[tauri::command]
-pub fn fs_search(
+pub async fn fs_search(
     state: State<'_, WorkspaceManager>,
     roots: Vec<String>,
     query: String,
@@ -463,7 +474,7 @@ pub fn fs_search(
 }
 
 #[tauri::command]
-pub fn fs_stat(
+pub async fn fs_stat(
     state: State<'_, WorkspaceManager>,
     path: String,
 ) -> Result<serde_json::Value, String> {
@@ -485,7 +496,7 @@ pub fn fs_stat(
 /// Create an empty file. Fails if it already exists rather than truncating —
 /// "New File" must never silently destroy an existing one.
 #[tauri::command]
-pub fn fs_create_file(state: State<'_, WorkspaceManager>, path: String) -> Result<String, String> {
+pub async fn fs_create_file(state: State<'_, WorkspaceManager>, path: String) -> Result<String, String> {
     let target = check_scope(&state, Path::new(&path))?;
     if target.exists() {
         return Err(format!("{} already exists", target.display()));
@@ -498,7 +509,7 @@ pub fn fs_create_file(state: State<'_, WorkspaceManager>, path: String) -> Resul
 }
 
 #[tauri::command]
-pub fn fs_create_dir(state: State<'_, WorkspaceManager>, path: String) -> Result<String, String> {
+pub async fn fs_create_dir(state: State<'_, WorkspaceManager>, path: String) -> Result<String, String> {
     let target = check_scope(&state, Path::new(&path))?;
     if target.exists() {
         return Err(format!("{} already exists", target.display()));
@@ -510,7 +521,7 @@ pub fn fs_create_dir(state: State<'_, WorkspaceManager>, path: String) -> Result
 /// Rename/move within the workspace. Both ends are scope-checked, so a rename
 /// can't be used to write outside the opened project.
 #[tauri::command]
-pub fn fs_rename(
+pub async fn fs_rename(
     state: State<'_, WorkspaceManager>,
     from: String,
     to: String,
@@ -528,14 +539,14 @@ pub fn fs_rename(
 /// misclick away from losing work that may not be committed; the trash makes it
 /// recoverable, which `std::fs::remove_*` never is.
 #[tauri::command]
-pub fn fs_trash(state: State<'_, WorkspaceManager>, path: String) -> Result<(), String> {
+pub async fn fs_trash(state: State<'_, WorkspaceManager>, path: String) -> Result<(), String> {
     let target = check_scope(&state, Path::new(&path))?;
     trash::delete(&target).map_err(|e| e.to_string())
 }
 
 /// Show the file in the OS file manager.
 #[tauri::command]
-pub fn fs_reveal(state: State<'_, WorkspaceManager>, path: String) -> Result<(), String> {
+pub async fn fs_reveal(state: State<'_, WorkspaceManager>, path: String) -> Result<(), String> {
     let target = check_scope(&state, Path::new(&path))?;
     #[cfg(target_os = "macos")]
     let mut cmd = {
@@ -561,7 +572,7 @@ pub fn fs_reveal(state: State<'_, WorkspaceManager>, path: String) -> Result<(),
 
 /// Duplicate a file or directory next to itself.
 #[tauri::command]
-pub fn fs_duplicate(state: State<'_, WorkspaceManager>, path: String) -> Result<String, String> {
+pub async fn fs_duplicate(state: State<'_, WorkspaceManager>, path: String) -> Result<String, String> {
     let src = check_scope(&state, Path::new(&path))?;
     let stem = src.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     let ext = src.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();

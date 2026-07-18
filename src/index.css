@@ -218,6 +218,20 @@ body,
   font-weight: 700;
 }
 
+/* Inline rename editor, sized to sit in place of the tab title. */
+.tab-rename-input {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-raised);
+  border: 1px solid var(--accent, #7aa2f7);
+  border-radius: 3px;
+  padding: 0 4px;
+  margin: -1px 0;
+  width: 10ch;
+  min-width: 4ch;
+  outline: none;
+}
+
 .components-panel {
   overflow-y: auto;
   flex: 1;
@@ -1378,6 +1392,23 @@ body,
   color: var(--danger);
 }
 
+/* git-status kinds, matching GitPanel's colour language */
+.change-staged {
+  color: var(--ok);
+}
+
+.change-unstaged {
+  color: var(--warn);
+}
+
+.change-untracked {
+  color: var(--ok);
+}
+
+.change-conflicted {
+  color: var(--danger);
+}
+
 .change-name {
   white-space: nowrap;
 }
@@ -1388,6 +1419,13 @@ body,
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* one section per component in the change feed */
+.change-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 /* ---------- agents panel ---------- */

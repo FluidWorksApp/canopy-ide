@@ -29,17 +29,25 @@ export async function ptySpawn(
   return invoke("pty_spawn", { ...opts, onData: channel });
 }
 
+// Write/ack/kill/set-title can always lose a race with the session's own exit:
+// the Rust reaper removes the session and emits pty:exit while a final ack or
+// write is still in flight, and that call then rejects with "no pty session N".
+// Every caller is fire-and-forget — a session that is already gone needs
+// nothing — so the rejection is swallowed here rather than at a dozen call
+// sites, where one missed `void` becomes an unhandled rejection in the log.
+// ptyResize is not in this set: it resolves with data its caller uses.
+const gone = (p: Promise<void>) => p.catch(() => {});
 export const ptyWrite = (id: number, data: string) =>
-  invoke<void>("pty_write", { id, data });
+  gone(invoke<void>("pty_write", { id, data }));
 export const ptyAck = (id: number, bytes: number) =>
-  invoke<void>("pty_ack", { id, bytes });
+  gone(invoke<void>("pty_ack", { id, bytes }));
 /** Resize the pty; resolves with the size it actually took (clamped to >= 1). */
 export const ptyResize = (id: number, cols: number, rows: number) =>
   invoke<PtyGeometry>("pty_resize", { id, cols, rows });
-export const ptyKill = (id: number) => invoke<void>("pty_kill", { id });
+export const ptyKill = (id: number) => gone(invoke<void>("pty_kill", { id }));
 export const ptyKillAll = () => invoke<void>("pty_kill_all");
 export const ptySetTitle = (id: number, title: string) =>
-  invoke<void>("pty_set_title", { id, title });
+  gone(invoke<void>("pty_set_title", { id, title }));
 
 export interface PtyExit {
   id: number;

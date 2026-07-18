@@ -3,6 +3,7 @@ import { useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type { Component, Project } from "../projects";
 import { newProjectId } from "../projects";
+import { useEscape } from "../useEscape";
 
 interface ProjectDialogProps {
   existing?: Project;
@@ -64,6 +65,8 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
     );
 
   const valid = name.trim().length > 0 && components.length > 0;
+
+  useEscape(onCancel);
 
   return (
     <div className="modal-backdrop" onClick={onCancel}>

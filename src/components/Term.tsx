@@ -12,8 +12,16 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import "@xterm/xterm/css/xterm.css";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
+
+/** Quote a dropped path for the shell, the way iTerm2/Terminal.app do. Paths
+ *  that are pure safe chars pass through bare; anything else is single-quoted,
+ *  which neutralizes every shell metacharacter except the quote itself. */
+const SAFE_PATH = /^[A-Za-z0-9_\-./~+@%:=,]+$/;
+const shellQuote = (p: string) =>
+  SAFE_PATH.test(p) ? p : `'${p.replaceAll("'", `'\\''`)}'`;
 
 export interface TermHandle {
   clearScrollback: () => void;
@@ -40,6 +48,9 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const ptyIdRef = useRef<number | null>(null);
+  // Mirrored so the mount-once drop listener can see the current value.
+  const activeRef = useRef(active);
+  activeRef.current = active;
 
   useImperativeHandle(ref, () => ({
     clearScrollback: () => termRef.current?.clear(),
@@ -269,6 +280,28 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       }),
     ];
 
+    // OS file drops. Tauri intercepts these at the native layer (dragDropEnabled
+    // defaults on), so the HTML5 drop event never fires in the webview and the
+    // only way to receive a dropped file is this event. It is window-global —
+    // every Term hears every drop — so exactly one may act: the active one
+    // (there is one per app: visible project x active tab). Routed through
+    // term.paste(), which takes xterm's ordered input path (like the key
+    // handler above) and wraps the text in bracketed-paste markers, so zsh and
+    // TUIs treat it as pasted text rather than typed keystrokes.
+    let unlistenDrop: (() => void) | undefined;
+    void getCurrentWebview()
+      .onDragDropEvent((e) => {
+        if (e.payload.type !== "drop" || !activeRef.current) return;
+        const paths = e.payload.paths;
+        if (!paths.length) return;
+        term.paste(paths.map(shellQuote).join(" ") + " ");
+        term.focus();
+      })
+      .then((un) => {
+        if (disposed) un();
+        else unlistenDrop = un;
+      });
+
     // Debounced resize: propose, let the pty apply it and SIGWINCH the child,
     // then match the grid to what it confirmed. A hidden tab proposes nothing
     // and is left alone until it is shown, which fires this again.
@@ -301,6 +334,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       dataSub.dispose();
       titleSub.dispose();
       oscSubs.forEach((s) => s.dispose());
+      unlistenDrop?.();
       unlistenExit?.();
       if (ptyIdRef.current != null) void ipc.ptyKill(ptyIdRef.current);
       term.dispose();

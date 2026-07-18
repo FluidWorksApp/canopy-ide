@@ -56,6 +56,21 @@ export function AgentsPanel({
   const [showShared, setShowShared] = useState(false);
   const settings = getSettings();
 
+  // What the hook would actually inject — mirrors PEER_MAX_AGE_SECS in
+  // canopy_hook.rs, which drops peers quiet for longer than this. The panel
+  // must apply the same cutoff or it claims long-dead sessions are shared:
+  // a digest outlives its terminal (that's what makes restore work), and one
+  // whose terminal died without a Stop event even stays "active" on disk.
+  // `digests` itself stays unfiltered — it is also the crash-restore record.
+  const PEER_MAX_AGE_SECS = 8 * 3600;
+  const shared = useMemo(
+    () =>
+      digests.filter(
+        (d) => Date.now() / 1000 - (d.updated ?? 0) <= PEER_MAX_AGE_SECS,
+      ),
+    [digests],
+  );
+
   // Loaded regardless of the sharing toggle: these digests are also the crash
   // record that "Restore sessions" reads. Sharing is about what agents see of
   // each other; restore is about what the *user* lost when the IDE died.
@@ -220,15 +235,15 @@ export function AgentsPanel({
               sessions outside this project are never included.
             </p>
             <button className="btn-mini" onClick={() => setShowShared((v) => !v)}>
-              {showShared ? "Hide" : "Show"} what's shared ({digests.length})
+              {showShared ? "Hide" : "Show"} what's shared ({shared.length})
             </button>
             {showShared &&
-              (digests.length === 0 ? (
+              (shared.length === 0 ? (
                 <p className="share-none">
                   Nothing yet — a session appears here once it runs a prompt.
                 </p>
               ) : (
-                digests.map((d) => (
+                shared.map((d) => (
                   <div key={d.session_id} className="share-digest">
                     <div className="share-digest-head">
                       {d.cwd?.split("/").pop()}
