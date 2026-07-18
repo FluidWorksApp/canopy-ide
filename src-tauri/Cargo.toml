@@ -3,7 +3,7 @@ name = "canopy"
 version = "0.1.0"
 description = "Local-first, memory-light, vibe-coding-first IDE"
 authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
-license = "PolyForm-Noncommercial-1.0.0"
+license = "MIT"
 edition = "2021"
 rust-version = "1.77.2"
 # The crate ships two binaries (the app + the hook helper), so `cargo run` —
