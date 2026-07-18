@@ -15,7 +15,7 @@
 // the file next to the app binary (Canopy.app/Contents/MacOS/canopy-hook),
 // which is exactly where install_hook_helper() looks.
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdirSync, existsSync } from "node:fs";
+import { copyFileSync, mkdirSync, existsSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -39,21 +39,33 @@ if (!triple) {
   process.exit(1);
 }
 
+const ext = process.platform === "win32" ? ".exe" : "";
+const destDir = join(root, "src-tauri", "binaries");
+const dest = join(destDir, `canopy-hook-${triple}${ext}`);
+
+// Bootstrap the sidecar's own existence check. Building --bin canopy-hook
+// compiles the canopy crate, whose tauri build.rs validates that every
+// externalBin (binaries/canopy-hook-<triple>) already exists — but that file is
+// exactly what this build produces. On a fresh checkout binaries/ is empty (it
+// is gitignored), so without a placeholder the build fails before it can ever
+// create the binary: "resource path binaries/canopy-hook-<triple> doesn't
+// exist". Stage an empty placeholder first to satisfy the check; the real
+// binary overwrites it below. (Locally this is invisible because a prior build
+// already left the file in place.)
+mkdirSync(destDir, { recursive: true });
+if (!existsSync(dest)) writeFileSync(dest, "");
+
 const args = ["build", "--manifest-path", manifest, "--bin", "canopy-hook", "--target", triple];
 if (release) args.push("--release");
 console.log(`prepare-sidecar: cargo ${args.join(" ")}`);
 execFileSync("cargo", args, { stdio: "inherit" });
 
 // Passing --target always nests output under target/<triple>/<profile>/.
-const ext = process.platform === "win32" ? ".exe" : "";
 const src = join(root, "src-tauri", "target", triple, profile, `canopy-hook${ext}`);
 if (!existsSync(src)) {
   console.error(`prepare-sidecar: expected ${src} after build`);
   process.exit(1);
 }
 
-const destDir = join(root, "src-tauri", "binaries");
-mkdirSync(destDir, { recursive: true });
-const dest = join(destDir, `canopy-hook-${triple}${ext}`);
 copyFileSync(src, dest);
 console.log(`prepare-sidecar: staged ${dest} (${profile}, ${triple})`);
