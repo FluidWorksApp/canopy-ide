@@ -4,6 +4,7 @@
 // so hooks, credential helpers and SSH config all behave identically.
 import { useCallback, useEffect, useState } from "react";
 import * as ipc from "../ipc";
+import { useEscape } from "../useEscape";
 import { CheckIcon, FailIcon, RestartIcon } from "./icons";
 
 interface GitPanelProps {
@@ -46,6 +47,7 @@ export function GitPanel({
   const [busy, setBusy] = useState<string | null>(null);
   const [branchFilter, setBranchFilter] = useState("");
   const [confirm, setConfirm] = useState<{ text: string; run: () => void } | null>(null);
+  useEscape(() => setConfirm(null), confirm != null);
 
   const key = components.map((c) => c.path).join("\n");
 
@@ -122,7 +124,9 @@ export function GitPanel({
     if (section === "worktrees") void loadWorktrees();
   }, [section, loadWorktrees]);
 
-  /** Run a git action, surface its real output, and refresh. */
+  /** Run a git action, surface its real output, and refresh. Used for the
+   *  heavier, less frequent operations (commit, sync, checkout) where the user
+   *  is waiting on the result anyway. */
   const act = async (label: string, fn: () => Promise<unknown>) => {
     setBusy(label);
     try {
@@ -134,6 +138,47 @@ export function GitPanel({
     } finally {
       setBusy(null);
     }
+  };
+
+  /** Optimistic file action: move the row to where it will land *now*, run the
+   *  git command in the background, then reconcile against the real status.
+   *  That reconcile doubles as the rollback — a failed stage/discard simply
+   *  reappears where it was, with the error surfaced. No busy spinner: the
+   *  point is that the click feels instant. `to` is the bucket the file moves
+   *  to, or null when it leaves the working tree entirely (discard/untracked). */
+  const optimisticFile = (
+    path: string,
+    to: "staged" | "unstaged" | null,
+    fn: () => Promise<unknown>,
+  ) => {
+    setStatus((prev) => {
+      if (!prev) return prev;
+      const source = [
+        ...prev.conflicted,
+        ...prev.staged,
+        ...prev.unstaged,
+        ...prev.untracked,
+      ].find((f) => f.path === path);
+      const without = (arr: ipc.FileChange[]) => arr.filter((f) => f.path !== path);
+      const next: ipc.RepoStatus = {
+        ...prev,
+        staged: without(prev.staged),
+        unstaged: without(prev.unstaged),
+        untracked: without(prev.untracked),
+        conflicted: without(prev.conflicted),
+      };
+      if (source && to === "staged") next.staged = [...next.staged, { ...source, staged: true }];
+      if (source && to === "unstaged")
+        next.unstaged = [...next.unstaged, { ...source, staged: false }];
+      return next;
+    });
+    void fn()
+      .then((out) => {
+        if (typeof out === "string" && out.trim()) onNotice(out.trim().split("\n")[0]);
+      })
+      .catch((err) => onNotice(String(err)))
+      // Reconcile on success (confirm) and failure (revert) alike.
+      .finally(() => void refresh());
   };
 
   if (repos.length === 0) {
@@ -169,7 +214,7 @@ export function GitPanel({
           <button
             className="icon-btn"
             title="Unstage"
-            onClick={() => repo && void act("unstage", () => ipc.gitUnstage(repo, [f.path]))}
+            onClick={() => repo && optimisticFile(f.path, "unstaged", () => ipc.gitUnstage(repo, [f.path]))}
           >
             −
           </button>
@@ -182,7 +227,7 @@ export function GitPanel({
                 onClick={() =>
                   setConfirm({
                     text: `Discard all changes to ${f.path}? This cannot be undone.`,
-                    run: () => repo && void act("discard", () => ipc.gitDiscard(repo, [f.path])),
+                    run: () => repo && optimisticFile(f.path, null, () => ipc.gitDiscard(repo, [f.path])),
                   })
                 }
               >
@@ -192,7 +237,7 @@ export function GitPanel({
             <button
               className="icon-btn"
               title="Stage"
-              onClick={() => repo && void act("stage", () => ipc.gitStage(repo, [f.path]))}
+              onClick={() => repo && optimisticFile(f.path, "staged", () => ipc.gitStage(repo, [f.path]))}
             >
               +
             </button>

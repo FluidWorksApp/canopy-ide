@@ -3,6 +3,7 @@ import { useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type { Component, Project } from "../projects";
 import { newProjectId } from "../projects";
+import { useEscape } from "../useEscape";
 
 interface ProjectDialogProps {
   existing?: Project;
@@ -64,6 +65,8 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
     );
 
   const valid = name.trim().length > 0 && components.length > 0;
+
+  useEscape(onCancel);
 
   return (
     <div className="modal-backdrop" onClick={onCancel}>
@@ -139,6 +142,11 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
             disabled={!valid}
             onClick={() =>
               onSave({
+                // Spread first: this dialog only edits name/components, and the
+                // caller replaces the whole project object. Rebuilding from
+                // scratch silently dropped fields it doesn't own (shareContext),
+                // which revoked the hook scope on every Save.
+                ...existing,
                 id: existing?.id ?? newProjectId(),
                 name: name.trim(),
                 components,

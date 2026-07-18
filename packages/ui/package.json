@@ -1,0 +1,36 @@
+{
+  "name": "@canopy/ui",
+  "version": "0.1.0",
+  "description": "Canopy's design system: tokens and the presentational primitives the IDE is built from.",
+  "license": "SEE LICENSE IN ../../LICENSE.md",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/canopy-ui.js",
+  "module": "./dist/canopy-ui.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/canopy-ui.js"
+    },
+    "./styles.css": "./dist/canopy-ui.css"
+  },
+  "sideEffects": [
+    "*.css"
+  ],
+  "scripts": {
+    "build": "vite build && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.build.json --noEmit"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.7",
+    "typescript": "~6.0.2",
+    "vite": "^8.1.1"
+  }
+}

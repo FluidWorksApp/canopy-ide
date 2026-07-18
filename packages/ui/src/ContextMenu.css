@@ -1,0 +1,81 @@
+/* The two .ctx-item blocks in the app's stylesheet are merged here — they were
+   split across the file and had to be read together to know what an item was. */
+.cn-ctx-menu {
+  position: fixed;
+  z-index: 500;
+  min-width: 180px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-raised);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.cn-ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.cn-ctx-item:hover:not(:disabled),
+.cn-ctx-item:focus-visible {
+  background: var(--accent);
+  color: var(--bg);
+  outline: none;
+}
+
+.cn-ctx-item:disabled {
+  color: var(--text-dim);
+  cursor: default;
+}
+
+.cn-ctx-danger {
+  color: var(--danger);
+}
+
+.cn-ctx-danger:hover:not(:disabled) {
+  background: var(--danger);
+  color: var(--bg);
+}
+
+.cn-ctx-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+
+.cn-ctx-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  align-items: center;
+  justify-content: center;
+}
+
+.cn-ctx-label {
+  flex: 1 1 auto;
+}
+
+.cn-ctx-hint {
+  flex: 0 0 auto;
+  padding-left: 12px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+/* The hint has to invert with its row, or it stays dim against the accent fill. */
+.cn-ctx-item:hover:not(:disabled) .cn-ctx-hint {
+  color: var(--bg);
+}

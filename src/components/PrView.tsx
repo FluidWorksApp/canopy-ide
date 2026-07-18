@@ -3,6 +3,7 @@
 // can't be re-expanded into whole files, so Monaco's DiffEditor (which needs
 // both sides in full) structurally can't render one.
 import { useEffect, useState } from "react";
+import { useEscape } from "../useEscape";
 import { DiffView, DiffModeEnum } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import * as ipc from "../ipc";
@@ -32,6 +33,7 @@ export function PrView({ repo, pr, onNotice }: PrViewProps) {
   const [comment, setComment] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<Review | null>(null);
+  useEscape(() => setConfirm(null), confirm != null);
   const [done, setDone] = useState<string | null>(null);
 
   useEffect(() => {

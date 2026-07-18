@@ -17,6 +17,10 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::pty::PtyManager;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Check listening ports every Nth poll. lsof forks a process, so it is the
+/// costliest thing in the monitor loop, and a dev server's port changes roughly
+/// once per session — 10s is far tighter than the fact ever moves.
+const PORT_EVERY: u64 = 5;
 
 #[derive(Serialize, Clone)]
 pub struct ProcInfo {
@@ -44,9 +48,66 @@ pub struct SessionStats {
     pub total_cpu: f32,
     pub total_mem_bytes: u64,
     pub procs: Vec<ProcInfo>,
+    /// TCP ports anything under this session is listening on, ascending.
+    ///
+    /// The highest-value fact about a terminal that isn't its output: it says
+    /// "there is a dev server in here, on 5173" without you opening the tab and
+    /// reading scrollback. Empty unless something is actually listening.
+    pub ports: Vec<u16>,
 }
 
 static MONITOR_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// TCP listening ports for `pids`, as pid -> ports.
+///
+/// One lsof for every session rather than one per session: spawning a process
+/// per terminal per poll would cost more than everything else the monitor does.
+/// -F emits a stable machine format (a leading-letter field per line) instead of
+/// the human table, whose columns shift with content.
+///
+/// Errors are swallowed to an empty map by design — lsof is missing on some
+/// systems and refuses to answer for other users' processes. Ports are a garnish
+/// on a status row, and no row should disappear because a port lookup failed.
+#[cfg(unix)]
+fn listening_ports(pids: &[u32]) -> HashMap<u32, Vec<u16>> {
+    let mut out: HashMap<u32, Vec<u16>> = HashMap::new();
+    if pids.is_empty() {
+        return out;
+    }
+    let list = pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",");
+    let Ok(res) = std::process::Command::new("lsof")
+        .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", &list, "-Fpn"])
+        .output()
+    else {
+        return out;
+    };
+    let mut pid = 0_u32;
+    for line in String::from_utf8_lossy(&res.stdout).lines() {
+        let (tag, val) = line.split_at(1);
+        match tag {
+            // Fields stream in order: a p<pid> line, then the n<addr> lines
+            // belonging to it, until the next p.
+            "p" => pid = val.parse().unwrap_or(0),
+            "n" => {
+                // "127.0.0.1:5173", "*:8080", "[::1]:3000" — the port is after
+                // the last colon in every form.
+                if let Some(port) = val.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()) {
+                    let ports = out.entry(pid).or_default();
+                    if !ports.contains(&port) {
+                        ports.push(port);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+#[cfg(not(unix))]
+fn listening_ports(_pids: &[u32]) -> HashMap<u32, Vec<u16>> {
+    HashMap::new()
+}
 
 pub fn start_monitor(app: AppHandle) {
     if MONITOR_STARTED.swap(true, Ordering::SeqCst) {
@@ -56,6 +117,8 @@ pub fn start_monitor(app: AppHandle) {
         .name("pty-monitor".into())
         .spawn(move || {
             let mut sys = System::new();
+            let mut tick: u64 = 0;
+            let mut last_ports: HashMap<u32, Vec<u16>> = HashMap::new();
             loop {
                 thread::sleep(POLL_INTERVAL);
                 let manager = app.state::<PtyManager>();
@@ -158,8 +221,43 @@ pub fn start_monitor(app: AppHandle) {
                         total_cpu: procs.iter().map(|p| p.cpu).sum(),
                         total_mem_bytes: procs.iter().map(|p| p.mem_bytes).sum(),
                         procs,
+                        ports: Vec::new(),
                     });
                 }
+
+                // Ports last, and only every PORT_EVERY-th tick: lsof forks a
+                // process, which is the most expensive thing in this loop, while
+                // a dev server's port changes about once a session. One call
+                // covers every pid of every session — a call per session would
+                // put the cost back.
+                if tick % PORT_EVERY == 0 {
+                    let all: Vec<u32> = stats.iter().flat_map(|s| s.procs.iter().map(|p| p.pid)).collect();
+                    let by_pid = listening_ports(&all);
+                    if !by_pid.is_empty() {
+                        for s in stats.iter_mut() {
+                            let mut ports: Vec<u16> = s
+                                .procs
+                                .iter()
+                                .filter_map(|p| by_pid.get(&p.pid))
+                                .flatten()
+                                .copied()
+                                .collect();
+                            ports.sort_unstable();
+                            ports.dedup();
+                            s.ports = ports;
+                        }
+                    }
+                    last_ports = stats.iter().map(|s| (s.id, s.ports.clone())).collect();
+                } else {
+                    // Carry the last reading through the ticks that skip lsof,
+                    // so the port doesn't blink out of the UI between polls.
+                    for s in stats.iter_mut() {
+                        if let Some(p) = last_ports.get(&s.id) {
+                            s.ports = p.clone();
+                        }
+                    }
+                }
+                tick = tick.wrapping_add(1);
                 let _ = app.emit("pty:stats", &stats);
             }
         })
@@ -217,7 +315,7 @@ pub fn start_hook_bridge(app: AppHandle) {
 }
 
 #[tauri::command]
-pub fn hook_bridge_path() -> Option<String> {
+pub async fn hook_bridge_path() -> Option<String> {
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok()?;
     Some(
         std::path::PathBuf::from(home)
@@ -232,7 +330,7 @@ pub fn hook_bridge_path() -> Option<String> {
 /// config so its events stream into our bridge file. Idempotent (skips if the
 /// bridge path is already referenced).
 #[tauri::command]
-pub fn setup_agent_hooks(agent: String) -> Result<String, String> {
+pub async fn setup_agent_hooks(agent: String) -> Result<String, String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
     let bridge = format!("{home}/.canopy/agent-events.jsonl");
     match agent.as_str() {
@@ -282,7 +380,7 @@ pub fn install_hook_helper() -> Result<(), String> {
 /// unless a project turns it on — one session's prompts landing in another's
 /// context is a privacy decision the user makes, not a default.
 #[tauri::command]
-pub fn set_context_scopes(scopes: serde_json::Value) -> Result<(), String> {
+pub async fn set_context_scopes(scopes: serde_json::Value) -> Result<(), String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
     let dir = std::path::PathBuf::from(&home).join(".canopy");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -298,7 +396,7 @@ pub fn set_context_scopes(scopes: serde_json::Value) -> Result<(), String> {
 /// inside our own sessions dir, and anything with a path separator or `..` is
 /// refused rather than allowed to escape it.
 #[tauri::command]
-pub fn session_forget(session_id: String) -> Result<(), String> {
+pub async fn session_forget(session_id: String) -> Result<(), String> {
     if session_id.is_empty()
         || session_id.contains('/')
         || session_id.contains('\\')
@@ -319,53 +417,91 @@ pub fn session_forget(session_id: String) -> Result<(), String> {
     }
 }
 
+/// Claude's project-bucket name for a directory: every non-alphanumeric
+/// character becomes `-`. Not just `/` — dots and underscores are rewritten
+/// too, so `/a/b/.claude/worktrees/x` encodes to `-a-b--claude-worktrees-x`
+/// (note the double hyphen where `/.` was). Only replacing `/` silently breaks
+/// every worktree, because they all live under a dotted directory.
+///
+/// Lossy, therefore one-way: `-`, `_` and `.` all encode to `-`, so a bucket
+/// name cannot be decoded back into a path. Candidates get encoded and
+/// compared; a bucket is never decoded.
+fn claude_bucket(path: &str) -> String {
+    path.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// The bucket that actually holds `session_id`'s transcript, found by scanning
+/// the project dirs for the file itself.
+///
+/// Deterministic: an exact filename match on a uuid. Never newest-by-mtime and
+/// never a title match — those guess, and a wrong guess resumes a stranger's
+/// conversation.
+fn transcript_bucket(session_id: &str) -> Option<String> {
+    let root = std::path::PathBuf::from(std::env::var("HOME").ok()?).join(".claude/projects");
+    let name = format!("{session_id}.jsonl");
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        if entry.path().join(&name).exists() {
+            return Some(entry.file_name().to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
 /// Where an agent's `--resume` has to run, and whether there is anything to
 /// resume.
 ///
-/// Claude files a conversation under its *project root*, not the directory the
-/// agent happened to be in: a session run in `product-demo/packages/db` lands in
-/// the bucket for `product-demo`. Resuming from the recorded cwd therefore looks
-/// in a bucket that does not exist and reports "No conversation found".
+/// Claude files a conversation under the directory the session was *launched*
+/// in, and `--resume` only finds it from that same directory. The cwd a hook
+/// reports drifts when the agent cds mid-session — starting at a repo root and
+/// moving into a worktree is routine — so resuming from the reported cwd fails
+/// with "No conversation found". Walk *up* from it instead, re-encoding each
+/// ancestor until one matches the bucket that really holds the transcript.
 ///
-/// The bucket name is the path with `/` replaced by `-`, which is lossy —
-/// real directories contain dashes, so decoding it is guesswork. Instead we walk
-/// *up* from the recorded cwd and re-encode each ancestor until one matches the
-/// bucket, which recovers the exact path unambiguously.
+/// That bucket is found on disk rather than taken from the `transcript_path`
+/// the hook reported: the hook fires at SessionStart, so its path is only a
+/// promise of where the file will go, and it is written before any cd.
 fn resume_location(digest: &serde_json::Value) -> (String, bool) {
-    let cwd = digest["cwd"].as_str().unwrap_or("").to_string();
-    let Some(transcript) = digest["transcript_path"].as_str() else {
-        // Agents other than claude may not report one. Don't block restore on a
+    // Prefer where the session was launched. `cwd` follows the agent as it cds,
+    // and is only a fallback for digests written before launch_cwd existed.
+    let cwd = digest["launch_cwd"]
+        .as_str()
+        .or_else(|| digest["cwd"].as_str())
+        .unwrap_or("")
+        .to_string();
+    let Some(session_id) = digest["session_id"].as_str() else {
+        // Agents other than claude don't report one. Don't block restore on a
         // check we can't perform.
         return (cwd, true);
     };
-    let bucket = std::path::Path::new(transcript)
-        .parent()
-        .and_then(|p| p.file_name())
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
 
-    let mut root = cwd.clone();
+    // Nothing on disk anywhere: the agent started but was never talked to, or
+    // died before writing. Every `--resume` against it fails, so callers must
+    // not offer the button.
+    let Some(bucket) = transcript_bucket(session_id) else {
+        return (cwd, false);
+    };
+
     let mut probe = std::path::PathBuf::from(&cwd);
     loop {
-        if probe.to_string_lossy().replace('/', "-") == bucket {
-            root = probe.to_string_lossy().to_string();
-            break;
+        if claude_bucket(&probe.to_string_lossy()) == bucket {
+            return (probe.to_string_lossy().to_string(), true);
         }
         if !probe.pop() {
-            break; // no ancestor matches; fall back to the recorded cwd
+            // The transcript exists, but no ancestor of the recorded cwd maps
+            // to its bucket — it was launched outside this path entirely.
+            // Resume from here would fail, so say so rather than offer a button
+            // that reports "No conversation found".
+            return (cwd, false);
         }
     }
-
-    // No transcript means no conversation was ever persisted — the agent was
-    // started but never actually talked to, or it died before writing. Every
-    // `--resume` against it fails, so callers must not offer the button.
-    (root, std::path::Path::new(transcript).exists())
 }
 
 /// Live digests of agent sessions, for showing the user exactly what would be
 /// shared, and for restoring sessions after a crash.
 #[tauri::command]
-pub fn session_digests() -> Result<Vec<serde_json::Value>, String> {
+pub async fn session_digests() -> Result<Vec<serde_json::Value>, String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
     let dir = std::path::PathBuf::from(&home).join(".canopy").join("sessions");
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -522,7 +658,7 @@ pub struct ClaudeSessionStats {
 /// (~/.claude/projects/**/*.jsonl — the path arrives via hook events).
 /// Powers the status tray (model / tokens / cost).
 #[tauri::command]
-pub fn claude_session_stats(transcript_path: String) -> Result<ClaudeSessionStats, String> {
+pub async fn claude_session_stats(transcript_path: String) -> Result<ClaudeSessionStats, String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
     let path = std::path::Path::new(&transcript_path)
         .canonicalize()
@@ -558,7 +694,7 @@ pub fn claude_session_stats(transcript_path: String) -> Result<ClaudeSessionStat
 /// Check which commands exist on the user's login-shell PATH (GUI apps don't
 /// inherit it). Used by the agent-CLI launcher to offer launch vs. install.
 #[tauri::command]
-pub fn which_check(commands: Vec<String>) -> HashMap<String, bool> {
+pub async fn which_check(commands: Vec<String>) -> HashMap<String, bool> {
     let mut result: HashMap<String, bool> =
         commands.iter().map(|c| (c.clone(), false)).collect();
     #[cfg(unix)]
@@ -587,7 +723,7 @@ pub fn which_check(commands: Vec<String>) -> HashMap<String, bool> {
 /// Kill an arbitrary process (used by the Agents panel / runaway guard for
 /// killing a specific process inside a session without tearing the session down).
 #[tauri::command]
-pub fn kill_process(pid: u32) -> Result<(), String> {
+pub async fn kill_process(pid: u32) -> Result<(), String> {
     #[cfg(unix)]
     {
         let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
@@ -600,5 +736,40 @@ pub fn kill_process(pid: u32) -> Result<(), String> {
     #[cfg(windows)]
     {
         Err("not implemented on windows".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::claude_bucket;
+
+    /// Encodings taken from real bucket directories under ~/.claude/projects.
+    /// Every one of these is a path our own users hit; the `.claude/worktrees`
+    /// case is the isolation model, and `/` -> `-` alone gets all three wrong.
+    #[test]
+    fn bucket_encodes_every_non_alphanumeric() {
+        assert_eq!(
+            claude_bucket("/Users/s/Documents/GitHub/coraa-app/coraa-agent/.claude/worktrees/brs"),
+            "-Users-s-Documents-GitHub-coraa-app-coraa-agent--claude-worktrees-brs",
+            "a dot must encode to '-', giving '--claude' where '/.' was"
+        );
+        assert_eq!(
+            claude_bucket("/private/var/folders/d1/2vxk8gl_1mxz/T/coraa-wp"),
+            "-private-var-folders-d1-2vxk8gl-1mxz-T-coraa-wp",
+            "an underscore must encode to '-'"
+        );
+        assert_eq!(
+            claude_bucket("/Users/s/Documents/GitHub/product-demo"),
+            "-Users-s-Documents-GitHub-product-demo",
+            "an existing hyphen survives unchanged"
+        );
+    }
+
+    /// The encoding is many-to-one, which is why a bucket name is never decoded
+    /// back into a path — candidates are encoded and compared instead.
+    #[test]
+    fn bucket_encoding_is_lossy() {
+        assert_eq!(claude_bucket("/a/b-c"), claude_bucket("/a/b_c"));
+        assert_eq!(claude_bucket("/a/b.c"), claude_bucket("/a/b-c"));
     }
 }

@@ -218,6 +218,20 @@ body,
   font-weight: 700;
 }
 
+/* Inline rename editor, sized to sit in place of the tab title. */
+.tab-rename-input {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-raised);
+  border: 1px solid var(--accent, #7aa2f7);
+  border-radius: 3px;
+  padding: 0 4px;
+  margin: -1px 0;
+  width: 10ch;
+  min-width: 4ch;
+  outline: none;
+}
+
 .components-panel {
   overflow-y: auto;
   flex: 1;
@@ -943,6 +957,29 @@ body,
   opacity: 0.5;
 }
 
+/* A program in this terminal asked for attention (OSC 9/99/777) and nobody has
+   looked yet. Deliberately not animated: several agents can be waiting at once,
+   and a row of blinking tabs is a slot machine, not a signal. The dot carries
+   the message in its title attribute. */
+.tab-unread {
+  color: var(--text);
+}
+
+.tab-unread::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: 0 0 auto;
+}
+
+/* Active wins: if you are already looking at it, it is read, and the dot is
+   about to clear anyway. */
+.tab-active.tab-unread::before {
+  display: none;
+}
+
 .tab-close {
   color: var(--text-dim);
   font-size: 10px;
@@ -1355,6 +1392,23 @@ body,
   color: var(--danger);
 }
 
+/* git-status kinds, matching GitPanel's colour language */
+.change-staged {
+  color: var(--ok);
+}
+
+.change-unstaged {
+  color: var(--warn);
+}
+
+.change-untracked {
+  color: var(--ok);
+}
+
+.change-conflicted {
+  color: var(--danger);
+}
+
 .change-name {
   white-space: nowrap;
 }
@@ -1365,6 +1419,13 @@ body,
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* one section per component in the change feed */
+.change-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 /* ---------- agents panel ---------- */
@@ -2511,6 +2572,46 @@ textarea,
 
 /* Which directory a session is running in — the difference between two
    otherwise identical `claude` rows. */
+/* The branch an agent is working on. Same chip family as the directory, dimmer
+   colour: it qualifies the location rather than competing with it. */
+.agent-branch {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 130px;
+}
+
+/* The last thing the human asked this session for. Two lines: enough to
+   recognise the task, not so much that a row becomes a paragraph. Full text is
+   in the title attribute. */
+.agent-task {
+  margin: 3px 0 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* A port this session is listening on. Green because it is a live service,
+   not a location — it reads differently from the directory chip beside it. */
+.agent-port {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg-raised);
+  color: var(--ok);
+  font-size: 10px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
 .agent-dir {
   padding: 1px 6px;
   border-radius: 4px;

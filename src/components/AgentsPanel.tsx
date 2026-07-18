@@ -56,6 +56,21 @@ export function AgentsPanel({
   const [showShared, setShowShared] = useState(false);
   const settings = getSettings();
 
+  // What the hook would actually inject — mirrors PEER_MAX_AGE_SECS in
+  // canopy_hook.rs, which drops peers quiet for longer than this. The panel
+  // must apply the same cutoff or it claims long-dead sessions are shared:
+  // a digest outlives its terminal (that's what makes restore work), and one
+  // whose terminal died without a Stop event even stays "active" on disk.
+  // `digests` itself stays unfiltered — it is also the crash-restore record.
+  const PEER_MAX_AGE_SECS = 8 * 3600;
+  const shared = useMemo(
+    () =>
+      digests.filter(
+        (d) => Date.now() / 1000 - (d.updated ?? 0) <= PEER_MAX_AGE_SECS,
+      ),
+    [digests],
+  );
+
   // Loaded regardless of the sharing toggle: these digests are also the crash
   // record that "Restore sessions" reads. Sharing is about what agents see of
   // each other; restore is about what the *user* lost when the IDE died.
@@ -102,33 +117,55 @@ export function AgentsPanel({
   // record. Listing those would offer a button that can only fail, on sessions
   // with nothing worth restoring anyway.
   const restorable = useMemo(
-    () =>
-      digests
+    () => {
+      // Having spoken is not the same as being alive. liveSessionIds only knows
+      // which sessions emitted a hook event during this app run, so one that has
+      // since exited stays "live" on that signal forever and never offers its
+      // Restore button. A session whose terminal is gone is dead, whatever it
+      // said earlier: `surface` is the pty id the hook recorded from our spawn
+      // env, so this is an identity check, and a pty absent from stats is
+      // genuinely gone because the monitor emits from the live session map.
+      // Sessions with no surface started outside a Canopy terminal and can only
+      // be judged by the event signal.
+      const alivePtys = new Set(stats.map((s) => String(s.id)));
+      const dead = (d: ipc.SessionDigest) => !!d.surface && !alivePtys.has(d.surface);
+      return digests
         .filter(
           (d) =>
             d.session_id &&
-            !liveSessionIds.includes(d.session_id) &&
+            (dead(d) || !liveSessionIds.includes(d.session_id)) &&
             (d.prompts?.length ?? 0) > 0,
         )
-        .sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0)),
-    [digests, liveSessionIds.join(",")],
+        .sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0));
+    },
+    [digests, stats, liveSessionIds.join(",")],
   );
 
-  const sessions = useMemo(
-    () =>
-      stats.map((s) => {
-        const agent = s.procs.find(
-          (p) => AGENT_PATTERN.test(p.name) || AGENT_PATTERN.test(p.cmd.split(" ")[0] ?? ""),
-        );
-        return {
-          session: s,
-          agent,
-          // Where it's running — the thing that tells two `claude` rows apart.
-          dir: (s.cwd || "").split("/").filter(Boolean).pop() ?? "",
-        };
-      }),
-    [stats],
-  );
+  const sessions = useMemo(() => {
+    // Terminal -> the agent conversation running in it, by the surface id the
+    // hook recorded from our spawn env. An exact identity, not a guess: two
+    // claudes in the same directory are indistinguishable by cwd, and matching
+    // on titles or newest-file-by-mtime attaches to the wrong one silently.
+    // Newest wins if a terminal has hosted more than one session in its life.
+    const bySurface = new Map<string, ipc.SessionDigest>();
+    for (const d of digests) {
+      if (!d.surface) continue;
+      const prev = bySurface.get(d.surface);
+      if (!prev || (d.updated ?? 0) > (prev.updated ?? 0)) bySurface.set(d.surface, d);
+    }
+    return stats.map((s) => {
+      const agent = s.procs.find(
+        (p) => AGENT_PATTERN.test(p.name) || AGENT_PATTERN.test(p.cmd.split(" ")[0] ?? ""),
+      );
+      return {
+        session: s,
+        agent,
+        digest: bySurface.get(String(s.id)),
+        // Where it's running — the thing that tells two `claude` rows apart.
+        dir: (s.cwd || "").split("/").filter(Boolean).pop() ?? "",
+      };
+    });
+  }, [stats, digests]);
 
   return (
     <div className="side-panel">
@@ -198,15 +235,15 @@ export function AgentsPanel({
               sessions outside this project are never included.
             </p>
             <button className="btn-mini" onClick={() => setShowShared((v) => !v)}>
-              {showShared ? "Hide" : "Show"} what's shared ({digests.length})
+              {showShared ? "Hide" : "Show"} what's shared ({shared.length})
             </button>
             {showShared &&
-              (digests.length === 0 ? (
+              (shared.length === 0 ? (
                 <p className="share-none">
                   Nothing yet — a session appears here once it runs a prompt.
                 </p>
               ) : (
-                digests.map((d) => (
+                shared.map((d) => (
                   <div key={d.session_id} className="share-digest">
                     <div className="share-digest-head">
                       {d.cwd?.split("/").pop()}
@@ -343,7 +380,7 @@ export function AgentsPanel({
           menu or by right-clicking a component.
         </div>
       ) : (
-        sessions.map(({ session: s, agent, dir }) => {
+        sessions.map(({ session: s, agent, dir, digest }) => {
           const runaway =
             s.total_cpu > settings.runawayCpuPercent ||
             s.total_mem_bytes > settings.runawayMemBytes;
@@ -356,9 +393,30 @@ export function AgentsPanel({
                     {dir}
                   </span>
                 )}
+                {/* Which branch this agent is editing — the difference between
+                    two identical-looking rows working on different things. */}
+                {digest?.branch && (
+                  <span className="agent-branch" title={`On branch ${digest.branch}`}>
+                    {digest.branch}
+                  </span>
+                )}
                 <span className="agent-session">term #{s.id}</span>
+                {/* A dev server in here, without opening the tab to find out. */}
+                {s.ports?.map((p) => (
+                  <span key={p} className="agent-port" title={`Listening on port ${p}`}>
+                    :{p}
+                  </span>
+                ))}
                 {runaway && <span className="runaway-badge">runaway?</span>}
               </div>
+              {/* What the human last asked for. The highest-signal line about a
+                  session: "fix the login redirect" identifies it in a way that
+                  cpu, memory and a directory never will. */}
+              {digest?.prompts?.length ? (
+                <div className="agent-task" title={digest.prompts[digest.prompts.length - 1]}>
+                  {digest.prompts[digest.prompts.length - 1]}
+                </div>
+              ) : null}
               <div className="agent-stats">
                 <span>{s.total_cpu.toFixed(0)}% cpu</span>
                 <span>{fmtMem(s.total_mem_bytes)}</span>
