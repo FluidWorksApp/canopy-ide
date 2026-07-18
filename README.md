@@ -8,6 +8,23 @@ No Electron. No VS Code fork. No extension host. No server — fully offline.
 Everything native runs as a child process of the app. See [SPEC.md](./SPEC.md) for the
 full product spec.
 
+## Download
+
+[![Latest release](https://img.shields.io/github/v/release/FluidWorksApp/canopy-ide?sort=semver&label=latest)](https://github.com/FluidWorksApp/canopy-ide/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE.md)
+
+Grab the newest build from the [**releases page**](https://github.com/FluidWorksApp/canopy-ide/releases/latest):
+
+| Platform | File | Updates |
+|---|---|---|
+| macOS (Apple Silicon / Intel) | `.dmg` | in-app auto-update |
+| Linux | `.AppImage` | in-app auto-update |
+| Linux | `.deb` / `.rpm` | via your package manager |
+
+The macOS build is signed and notarized. Prefer building it yourself? See
+[Build & run](#build--run) below, or [RELEASING.md](./RELEASING.md) for the
+signed-release process.
+
 ## Build & run
 
 Prerequisites: Rust (stable), Node 20+. For TypeScript language features:
@@ -150,18 +167,8 @@ Design rules:
 
 ## License
 
-Canopy is **source-available, not open source**: free for any noncommercial
-purpose, but commercial use requires a separate license.
-
-- Licensed under [PolyForm Noncommercial 1.0.0](./LICENSE.md)
-  (SPDX: `PolyForm-Noncommercial-1.0.0`).
-- **Permitted**: personal use, hobby projects, study, research, and use by
-  charities, schools, and government institutions.
-- **Not permitted without a separate license**: any use for commercial
-  advantage or monetary compensation, including use inside a for-profit
-  company. Contact sam@fluidwords.app for commercial terms.
-
-The license explicitly does not limit any fair-use rights you have by law.
+Canopy is **open source**, released under the [MIT License](./LICENSE.md)
+(SPDX: `MIT`) — free to use, modify, and distribute, including commercially.
 
 Third-party components keep their own licenses — see
 [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md). Notably, Canopy bundles

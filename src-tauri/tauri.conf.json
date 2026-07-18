@@ -42,7 +42,7 @@
       "binaries/canopy-hook"
     ],
     "publisher": "Cause Connect Pte Ltd",
-    "copyright": "Copyright 2026 Cause Connect Pte Ltd. All rights reserved.",
+    "copyright": "Copyright 2026 Cause Connect Pte Ltd. MIT licensed.",
     "licenseFile": "../LICENSE.md",
     "shortDescription": "Local-first, memory-light IDE for coding agents",
     "longDescription": "Canopy is a local-first, memory-light IDE built around coding agents and git worktrees. Terminal-first, offline-capable, no Electron.",
