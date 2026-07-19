@@ -1,0 +1,42 @@
+name: Bug report
+description: Something isn't working the way it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. For **security** issues, please
+        don't open an issue — see [SECURITY.md](../../SECURITY.md) and report privately.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+      placeholder: Steps to reproduce, ideally numbered.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Canopy version
+      description: Shown in the app / release you installed (e.g. 0.1.0). Or the commit if building from source.
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Anything from the terminal, the app, or a screenshot that helps.
+      render: shell
+    validations:
+      required: false
