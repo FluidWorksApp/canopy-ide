@@ -324,6 +324,97 @@ pub async fn store_save(data: String) -> Result<(), String> {
     std::fs::write(&path, data).map_err(|e| e.to_string())
 }
 
+// ---------- background image (chrome wallpaper) ----------
+//
+// A single image lives in ~/.canopy/backgrounds/, copied there from wherever
+// the user picked it — same "outside workspace scope, native-dialog path is
+// the consent" reasoning as workspace_export/import above. Kept to exactly
+// one file (uploading a new one replaces it) rather than a gallery, and read
+// back through a path-free command: the frontend never gets to name a path
+// here, it can only ask "what's the current one" — no traversal surface.
+
+fn backgrounds_dir() -> Result<PathBuf, String> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| "no home dir".to_string())?;
+    let dir = PathBuf::from(home).join(".canopy").join("backgrounds");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+fn clear_backgrounds_dir(dir: &Path) -> Result<(), String> {
+    for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())?.flatten() {
+        let _ = std::fs::remove_file(entry.path());
+    }
+    Ok(())
+}
+
+fn mime_for(ext: &str) -> &'static str {
+    match ext.to_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Copy a user-picked image into ~/.canopy/backgrounds/, replacing whatever
+/// was there. Returns its MIME type so the frontend can build a Blob without
+/// a second round trip.
+#[tauri::command]
+pub async fn background_set(path: String) -> Result<String, String> {
+    let src = PathBuf::from(&path);
+    if !src.is_file() {
+        return Err("not a file".into());
+    }
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let mime = mime_for(&ext);
+    if mime == "application/octet-stream" {
+        return Err(format!("unsupported image type: .{ext}"));
+    }
+    let dir = backgrounds_dir()?;
+    clear_backgrounds_dir(&dir)?;
+    std::fs::copy(&src, dir.join(format!("background.{ext}"))).map_err(|e| e.to_string())?;
+    Ok(mime.to_string())
+}
+
+#[tauri::command]
+pub async fn background_clear() -> Result<(), String> {
+    clear_backgrounds_dir(&backgrounds_dir()?)
+}
+
+fn current_background_file() -> Result<Option<PathBuf>, String> {
+    let dir = backgrounds_dir()?;
+    Ok(std::fs::read_dir(&dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.is_file()))
+}
+
+#[tauri::command]
+pub async fn background_exists() -> Result<bool, String> {
+    Ok(current_background_file()?.is_some())
+}
+
+/// The current background's raw bytes — read back with no path argument at
+/// all, so there's nothing here for a caller to point at another file with.
+/// Errors if nothing's set; the frontend checks background_exists() (or its
+/// own cached settings flag) first.
+#[tauri::command]
+pub async fn background_bytes() -> Result<tauri::ipc::Response, String> {
+    let file = current_background_file()?.ok_or_else(|| "no background set".to_string())?;
+    let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 // Workspace/project export + import. These deliberately sit outside the
 // workspace scope check: the path comes from a native save/open dialog the user
 // just drove, which is the consent. They're kept narrow (JSON text only, no

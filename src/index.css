@@ -1,4 +1,12 @@
+/* ---------- theme ----------
+   Every color in this file (with a handful of deliberate exceptions — a docx
+   page, an embedded HTML preview, a notebook image cell — which stay a fixed
+   "paper" white the way a real document does, regardless of app theme) is one
+   of these custom properties. Switching themes is one attribute flip on
+   <html data-theme="…"> (see settings.ts applyTheme()); nothing re-renders. */
 :root {
+  /* Default: the original palette, unchanged, plus --on-accent factored out of
+     what used to be five separate hardcoded #12131c's. */
   --bg: #1a1b26;
   --bg-alt: #16161e;
   --bg-raised: #1f2335;
@@ -9,25 +17,115 @@
   --danger: #f7768e;
   --ok: #9ece6a;
   --warn: #e0af68;
+  /* Text color for content sitting on a filled --accent/--ok/--warn/--danger
+     surface (buttons, badges) — those are all light/saturated, so this stays
+     dark across every theme below except the ones that invert it. */
+  --on-accent: #12131c;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 13px;
   color-scheme: dark;
 }
 
-/* Day theme (Tokyo Night Day-ish). Everything reads these variables, so the
-   whole chrome flips here; xterm and Monaco get matching palettes from
-   themes.ts because neither reads CSS variables. */
-:root[data-theme="light"] {
-  --bg: #e6e7ed;
-  --bg-alt: #dcdee6;
-  --bg-raised: #f2f3f7;
-  --border: #c3c7d4;
-  --text: #343b58;
-  --text-dim: #6c7086;
-  --danger: #c53b53;
-  --ok: #587539;
-  --warn: #8f5e15;
+/* Gotham — dark charcoal/gunmetal + gold, pure color-and-type personality
+   (no logos, no marks, nothing but a palette — same idea as a "Dracula" or
+   "Nord" published editor theme). */
+:root[data-theme="gotham"] {
+  --bg: #0d0f12;
+  --bg-alt: #101317;
+  --bg-raised: #171b20;
+  --border: #2b2f36;
+  --text: #e8e6df;
+  --text-dim: #8b8d93;
+  --accent: #d4af37;
+  --danger: #e0483e;
+  --ok: #4caf7d;
+  --warn: #e2943a;
+  --on-accent: #14110a;
+  color-scheme: dark;
+}
+
+/* Daylight — a clean light theme: the other kind of "fun alternate" from a
+   dark-charcoal reskin, and a real contrast test for every --on-accent /
+   --text-dim pairing in the app. */
+:root[data-theme="daylight"] {
+  --bg: #f5f6f8;
+  --bg-alt: #eceef1;
+  --bg-raised: #ffffff;
+  --border: #d8dbe0;
+  --text: #1c1f26;
+  --text-dim: #62687a;
+  --accent: #3b6fd6;
+  --danger: #c9414f;
+  --ok: #2f9e5c;
+  --warn: #a5690f;
+  --on-accent: #ffffff;
   color-scheme: light;
+}
+
+/* Custom — Default's palette as the base; --accent/--on-accent are
+   overridden inline by applyTheme() (settings.ts) from the user's picked
+   color, computed there rather than here since it's a runtime value. */
+:root[data-theme="custom"] {
+  --bg: #1a1b26;
+  --bg-alt: #16161e;
+  --bg-raised: #1f2335;
+  --border: #2a2e42;
+  --text: #c9d1d9;
+  --text-dim: #787f97;
+  --danger: #f7768e;
+  --ok: #9ece6a;
+  --warn: #e0af68;
+  color-scheme: dark;
+}
+
+/* ---------- chrome wallpaper ----------
+   .app-bg is always mounted but inert (background-image: none) until
+   background.ts sets --chrome-bg-image, which happens only once an image is
+   actually on disk. The html[data-canopy-bg="1"] overrides below are the only
+   thing that makes any *other* element transparent, and only while a
+   wallpaper is active — with nothing set, every rule here is a no-op and the
+   app looks exactly as it did before this feature existed. */
+.app-bg {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image: var(--chrome-bg-image, none);
+  background-size: cover;
+  background-position: center;
+  filter: blur(var(--chrome-bg-blur, 0px));
+}
+
+.app-bg::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--bg);
+  opacity: var(--chrome-bg-dim, 1);
+}
+
+/* html and body themselves (a z-index:-1 element still sits above the page's
+   canvas paint, which is what html/body's own background actually becomes —
+   leaving them opaque would hide the image completely regardless of anything
+   else here), #root (what the welcome screen's background comes from — it
+   sets none of its own), the titlebar, icon rail, the sidebar AND its
+   content pane (git panel / file tree — deliberately not given an opaque
+   fill back: this bleeds through too, not just the icon rail), the tab bar,
+   panel gutters, and the terminal's own container (Term.tsx pairs this with
+   xterm's theme.background going transparent — CSS alone can't reach a
+   canvas). Monaco is deliberately NOT in this list — this is meant to dress
+   the shell and side frame, not the code editor where the actual work is. */
+html[data-canopy-bg="1"],
+html[data-canopy-bg="1"] body,
+html[data-canopy-bg="1"] #root,
+html[data-canopy-bg="1"] .titlebar,
+html[data-canopy-bg="1"] .rail,
+html[data-canopy-bg="1"] .sidebar,
+html[data-canopy-bg="1"] .side-panel,
+html[data-canopy-bg="1"] .pane-bar,
+html[data-canopy-bg="1"] .resize-handle,
+html[data-canopy-bg="1"] .term-container {
+  background: transparent;
 }
 
 * {
@@ -393,7 +491,7 @@ body,
   top: 0;
   right: 0;
   background: var(--accent);
-  color: #12131c;
+  color: var(--on-accent);
   border-radius: 7px;
   font-size: 9px;
   padding: 0 4px;
@@ -402,6 +500,71 @@ body,
 
 .rail-spacer {
   flex: 1;
+}
+
+/* ---------- appearance panel ---------- */
+
+.personalize-section {
+  margin: 14px 0 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.personalize-section-first {
+  border-top: none;
+  padding-top: 0;
+  margin-top: 4px;
+}
+
+.personalize-bg-row {
+  display: flex;
+  gap: 8px;
+  margin: 4px 0;
+}
+
+.personalize-accent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.personalize-accent-row input[type="color"] {
+  width: 36px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: none;
+}
+
+.personalize-accent-row small {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.personalize-cursor-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.personalize-blink {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.personalize-note {
+  margin: 12px 0 0;
+  font-size: 11px;
+  color: var(--text-dim);
 }
 
 /* ---------- status bar ---------- */
@@ -644,7 +807,7 @@ div + .bd-head {
 
 .icon-btn-danger:hover {
   background: rgba(240, 90, 90, 0.16);
-  color: #ff7b72;
+  color: var(--danger);
 }
 
 .command-run-name {
@@ -925,7 +1088,7 @@ div + .bd-head {
 
 .btn-accent {
   background: var(--accent);
-  color: #12131c;
+  color: var(--on-accent);
   border-color: var(--accent);
   font-weight: 600;
 }
@@ -983,7 +1146,7 @@ div + .bd-head {
 
 .badge {
   background: var(--accent);
-  color: #12131c;
+  color: var(--on-accent);
   border-radius: 8px;
   font-size: 10px;
   padding: 0 5px;
@@ -1414,7 +1577,7 @@ div + .bd-head {
   width: 100%;
   height: 100%;
   padding: 2px 0 0 6px;
-  background: #16161e;
+  background: var(--bg-alt);
 }
 
 /* ---------- viewers ---------- */
@@ -2060,7 +2223,7 @@ div + .bd-head {
 .rail-badge-urgent,
 .badge-urgent {
   background: var(--warn);
-  color: #12131c;
+  color: var(--on-accent);
 }
 
 /* ---------- JSON viewer ---------- */
