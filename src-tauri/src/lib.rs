@@ -111,13 +111,23 @@ fn js_log(level: String, message: String) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        // Must be first: a second `canopy <dir>` invocation forwards its argv
-        // here and exits, instead of starting an app that would fight this one
-        // over the hook bridge and PTY ownership.
-        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
-            cli::open_forwarded(app, argv, cwd);
-        }))
+    let builder = tauri::Builder::default();
+    // Must be first: a second `canopy <dir>` invocation forwards its argv
+    // here and exits, instead of starting an app that would fight this one
+    // over the hook bridge and PTY ownership.
+    //
+    // Release builds only. Dev and release share the app identifier, so with
+    // the guard active a `tauri dev` run hands its argv to the *installed*
+    // Canopy.app and silently exits — you cannot develop while the app you
+    // ship is running. In dev the instances coexist: they share
+    // ~/.canopy (bridge, digests, projects.json) read-mostly, and the worst
+    // real overlap — pty ids restarting from 1 in each instance — only
+    // fuzzes per-tab event attribution, which cwd matching then covers.
+    #[cfg(not(debug_assertions))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+        cli::open_forwarded(app, argv, cwd);
+    }));
+    builder
         .plugin(tauri_plugin_dialog::init())
         // Self-update (see plugins.updater in tauri.conf.json) and the restart
         // that has to follow an install.
