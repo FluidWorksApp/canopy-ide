@@ -48,6 +48,8 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const ptyIdRef = useRef<number | null>(null);
+  /** Repaint + size-sync immediately (no debounce); set by the mount effect. */
+  const syncNowRef = useRef<(() => void) | null>(null);
   // Mirrored so the mount-once drop listener can see the current value.
   const activeRef = useRef(active);
   activeRef.current = active;
@@ -185,6 +187,30 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     };
     const applyGeometry = (g: { cols: number; rows: number }) => {
       if (term.cols !== g.cols || term.rows !== g.rows) term.resize(g.cols, g.rows);
+    };
+
+    // Becoming visible again needs an explicit repaint. While the tab is
+    // display:none the renderer drops its painted cells, and nothing on the
+    // way back triggers a redraw by itself: the ResizeObserver path only
+    // repaints when the grid size actually *changed*, which on a plain tab
+    // switch it didn't. Without this, the buffer stays blank until the
+    // program in the terminal happens to emit output (an agent's spinner, a
+    // prompt repaint) — the "blank for a second or two" on every switch.
+    // Size sync rides along so a resize that happened while hidden is also
+    // corrected now rather than on the debounced observer.
+    syncNowRef.current = () => {
+      const next = propose();
+      if (next) {
+        if (ptyIdRef.current == null) {
+          applyGeometry(next);
+        } else if (next.cols !== term.cols || next.rows !== term.rows) {
+          void ipc
+            .ptyResize(ptyIdRef.current, next.cols, next.rows)
+            .then(applyGeometry)
+            .catch(() => {});
+        }
+      }
+      term.refresh(0, term.rows - 1);
     };
 
     const initial = propose();
@@ -340,6 +366,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       unlistenDrop?.();
       unlistenExit?.();
       if (ptyIdRef.current != null) void ipc.ptyKill(ptyIdRef.current);
+      syncNowRef.current = null;
       term.dispose();
       termRef.current = null;
     };
@@ -347,7 +374,12 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
   }, []);
 
   useEffect(() => {
-    if (active) termRef.current?.focus();
+    if (!active) return;
+    termRef.current?.focus();
+    // One frame so display:block has landed and the container measures; then
+    // repaint the buffer that went blank while the tab was hidden.
+    const raf = requestAnimationFrame(() => syncNowRef.current?.());
+    return () => cancelAnimationFrame(raf);
   }, [active]);
 
   return <div className="term-container" ref={containerRef} />;
