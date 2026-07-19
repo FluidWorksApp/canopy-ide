@@ -2,7 +2,11 @@ import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import "./index.css";
 import { monacoReady } from "./monaco-setup";
+import { applyAppearance } from "./themes";
 import App from "./App.tsx";
+
+// Theme before first paint — App's effect would flash dark at light users.
+applyAppearance();
 
 // Surface WebView errors in the dev terminal (Rust log).
 const jsLog = (level: string, message: string) =>

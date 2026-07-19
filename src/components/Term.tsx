@@ -15,6 +15,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
+import { xtermTheme } from "../themes";
 
 /** Quote a dropped path for the shell, the way iTerm2/Terminal.app do. Paths
  *  that are pure safe chars pass through bare; anything else is single-quoted,
@@ -77,12 +78,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         "'SF Mono', Menlo, Monaco, 'JetBrains Mono', 'Fira Code', monospace",
       cursorBlink: true,
       macOptionIsMeta: true,
-      theme: {
-        background: "#16161e",
-        foreground: "#c9d1d9",
-        cursor: "#c9d1d9",
-        selectionBackground: "#33467c",
-      },
+      theme: xtermTheme(),
     });
     termRef.current = term;
 
@@ -334,6 +330,19 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         else unlistenDrop = un;
       });
 
+    // Live appearance changes: theme flips repaint every terminal in place,
+    // font-size changes also need the grid re-measured (cell metrics change),
+    // which syncNow's propose→pty→apply path already does.
+    const onAppearance = () => {
+      term.options.theme = xtermTheme();
+      const size = getSettings().fontSize;
+      if (term.options.fontSize !== size) {
+        term.options.fontSize = size;
+      }
+      syncNowRef.current?.();
+    };
+    window.addEventListener("canopy:appearance", onAppearance);
+
     // Debounced resize: propose, let the pty apply it and SIGWINCH the child,
     // then match the grid to what it confirmed. A hidden tab proposes nothing
     // and is left alone until it is shown, which fires this again.
@@ -361,6 +370,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
 
     return () => {
       disposed = true;
+      window.removeEventListener("canopy:appearance", onAppearance);
       clearTimeout(resizeTimer);
       observer.disconnect();
       dataSub.dispose();

@@ -6,6 +6,10 @@ export interface Settings {
   runawayCpuPercent: number;
   runawayMemBytes: number;
   ptyHighWater: number;
+  /** "system" follows the OS day/night setting live. */
+  theme: "system" | "dark" | "light";
+  /** Key into themes.ts ACCENTS. */
+  accent: string;
 }
 
 // NB: stored settings override these (see getSettings), so flipping a default
@@ -18,6 +22,8 @@ const DEFAULTS: Settings = {
   runawayCpuPercent: 300,
   runawayMemBytes: 4 * 1024 * 1024 * 1024,
   ptyHighWater: 2 * 1024 * 1024,
+  theme: "dark",
+  accent: "blue",
 };
 
 const KEY = "canopy.settings";

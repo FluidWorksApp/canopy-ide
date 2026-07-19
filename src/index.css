@@ -14,6 +14,22 @@
   color-scheme: dark;
 }
 
+/* Day theme (Tokyo Night Day-ish). Everything reads these variables, so the
+   whole chrome flips here; xterm and Monaco get matching palettes from
+   themes.ts because neither reads CSS variables. */
+:root[data-theme="light"] {
+  --bg: #e6e7ed;
+  --bg-alt: #dcdee6;
+  --bg-raised: #f2f3f7;
+  --border: #c3c7d4;
+  --text: #343b58;
+  --text-dim: #6c7086;
+  --danger: #c53b53;
+  --ok: #587539;
+  --warn: #8f5e15;
+  color-scheme: light;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -1867,6 +1883,110 @@ div + .bd-head {
 
 .pd-add-dir {
   align-self: stretch;
+}
+
+/* ---------- settings + help dialogs ---------- */
+
+.settings-dialog,
+.help-dialog {
+  width: 480px;
+  max-width: 92vw;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.set-section {
+  margin: 10px 0 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.set-head {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 3px;
+  margin-top: 8px;
+}
+
+.set-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.set-label {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.set-label small {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.set-row input[type="number"] {
+  width: 90px;
+}
+
+.set-choices {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.accent-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+}
+
+.accent-swatch-active {
+  border-color: var(--text);
+}
+
+.help-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.help-body p {
+  margin: 4px 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.help-body a {
+  color: var(--accent);
+}
+
+.help-keys {
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.help-keys td {
+  padding: 3px 14px 3px 0;
+  vertical-align: top;
+}
+
+.help-keys code {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 6px;
+  white-space: nowrap;
 }
 
 .hook-setup-row {

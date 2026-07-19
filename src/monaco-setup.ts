@@ -29,6 +29,28 @@ export const monacoReady: Promise<void> = (async () => {
       "editor.background": "#1a1b26",
     },
   });
+  monaco.editor.defineTheme("canopy-light", {
+    base: "vs",
+    inherit: true,
+    rules: [],
+    colors: {
+      "editor.background": "#f2f3f7",
+    },
+  });
+  // Honour a light preference chosen in a previous run: editors mount with
+  // whatever theme is active when services come up.
+  try {
+    const stored = JSON.parse(localStorage.getItem("canopy.settings") ?? "{}") as {
+      theme?: string;
+    };
+    const light =
+      stored.theme === "light" ||
+      (stored.theme === "system" &&
+        !window.matchMedia("(prefers-color-scheme: dark)").matches);
+    if (light) monaco.editor.setTheme("canopy-light");
+  } catch {
+    // malformed settings: dark default stands
+  }
 })();
 
 export function languageForPath(path: string): string | undefined {
