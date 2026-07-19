@@ -228,7 +228,9 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
                     {groups.map((g) => {
                       const cpu = g.sessions.reduce((n, s) => n + s.total_cpu, 0);
                       const mem = g.sessions.reduce((n, s) => n + s.total_mem_bytes, 0);
-                      const open = openGroups[g.name] ?? false;
+                      // Projects open by default: the per-shell breakdown IS
+                      // the point of the popup, not a hidden second level.
+                      const open = openGroups[g.name] ?? true;
                       return (
                         <div key={g.name}>
                           <div
@@ -286,8 +288,11 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
                         </div>
                       );
                     })}
-                    <div className="bd-row bd-core" title="Rust core, language servers, hook bridge — everything not inside a terminal">
-                      <span>Core & services</span>
+                    {/* Named "Canopy itself", not "Core" — a project named
+                        anything like Core/Coraa made that read as a sibling
+                        project row instead of the IDE's own overhead. */}
+                    <div className="bd-row bd-core" title="Canopy's own engine, language servers and the agent hook bridge — everything not running inside a terminal">
+                      <span>Canopy itself (engine & language servers)</span>
                       <span className="bd-nums">
                         {Math.max(0, app.cpu - termCpu).toFixed(0)}% ·{" "}
                         {fmtMem(Math.max(0, app.mem_bytes - termMem))}
