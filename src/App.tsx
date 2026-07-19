@@ -263,20 +263,6 @@ export default function App() {
       } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.code === "Enter") {
         e.preventDefault();
         toggleZen("keydown");
-      } else if (
-        (e.metaKey || e.ctrlKey) &&
-        !e.shiftKey &&
-        !e.altKey &&
-        /^[1-9]$/.test(e.key)
-      ) {
-        // Cmd+1..9 jumps straight to the Nth open project, browser-style.
-        // Webview-only (no menu item): nothing else claims these chords, and
-        // nine menu entries would be noise.
-        const target = wsRef.current.openIds[Number(e.key) - 1];
-        if (target) {
-          e.preventDefault();
-          updateRef.current({ activeId: target });
-        }
       }
     };
     window.addEventListener("keydown", keys);
