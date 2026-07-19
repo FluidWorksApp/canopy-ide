@@ -224,6 +224,7 @@ Design rules:
 | `mermaid` | diagram blocks in markdown (lazy-loaded) |
 | `xlsx` (SheetJS, cdn dist) | spreadsheet parsing (lazy-loaded) |
 | `@tauri-apps/plugin-dialog` | native folder picker |
+| `@tauri-apps/plugin-opener` | system-browser link from the update toast for installs that can't self-update (`.deb`/`.rpm`) |
 
 ## License
 

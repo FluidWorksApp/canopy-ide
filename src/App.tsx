@@ -19,7 +19,7 @@ import { ProjectView } from "./components/ProjectView";
 import { ProjectDialog } from "./components/ProjectDialog";
 import { Welcome } from "./components/Welcome";
 import { stopWorkspaceServers } from "./lsp/client";
-import { checkForUpdate, installUpdate, type UpdateInfo } from "./updater";
+import { checkForUpdateAnyChannel, installUpdate, type UpdateAvailability } from "./updater";
 
 /** Tell the hook helper which projects share context between their sessions.
  *  Every project is listed with its opt-in state, so turning sharing off
@@ -45,8 +45,10 @@ export default function App() {
   const [hookPath, setHookPath] = useState<string | null>(null);
   const [zen, setZen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [updateAvail, setUpdateAvail] = useState<UpdateInfo | null>(null);
+  const [updateAvail, setUpdateAvail] = useState<UpdateAvailability>(null);
   const [updateProgress, setUpdateProgress] = useState<number | null>(null);
+  // "Later" mutes that version for this run; the next launch may ask again.
+  const dismissedUpdate = useRef<string | null>(null);
 
   const wsRef = useRef(ws);
   wsRef.current = ws;
@@ -176,7 +178,8 @@ export default function App() {
           } else if (e.payload === "toggle-zen") {
             toggleZen("menu");
           } else if (e.payload === "check-updates") {
-            void checkForUpdate()
+            // Explicit ask — always answer, even for a version "Later" muted.
+            void checkForUpdateAnyChannel()
               .then(async (u) => {
                 if (u) {
                   setUpdateAvail(u);
@@ -226,6 +229,29 @@ export default function App() {
     return () => {
       window.removeEventListener("keydown", keys);
       subs.forEach((s) => void s.then((fn) => fn()));
+    };
+  }, []);
+
+  // Background update checks: shortly after launch (delayed so it never
+  // competes with boot), then every 12h for the long-lived windows people
+  // leave open for days. Quiet by design — failures and "already current"
+  // say nothing; only a real update surfaces the toast.
+  useEffect(() => {
+    const tick = () => {
+      void checkForUpdateAnyChannel()
+        .then((u) => {
+          if (!u || dismissedUpdate.current === u.info.version) return;
+          // Never clobber a toast the user is already looking at (or an
+          // install in progress) with a fresh check's result.
+          setUpdateAvail((cur) => cur ?? u);
+        })
+        .catch(() => {});
+    };
+    const first = window.setTimeout(tick, 10_000);
+    const every = window.setInterval(tick, 12 * 60 * 60 * 1000);
+    return () => {
+      window.clearTimeout(first);
+      window.clearInterval(every);
     };
   }, []);
 
@@ -411,10 +437,35 @@ export default function App() {
       {updateAvail && (
         <div className="update-toast">
           <div className="update-head">
-            <strong>Canopy {updateAvail.version}</strong> is available
+            <strong>Canopy {updateAvail.info.version}</strong> is available
           </div>
-          {updateAvail.notes && <div className="update-notes">{updateAvail.notes}</div>}
-          {updateProgress === null ? (
+          {updateAvail.info.notes && <div className="update-notes">{updateAvail.info.notes}</div>}
+          {updateAvail.kind === "manual" ? (
+            <div className="update-actions">
+              {/* This install type can't self-update (.deb/.rpm — the package
+                  manager owns it, but there's no apt/dnf repo to serve it) —
+                  hand off to the downloads page rather than pretend. */}
+              <button
+                className="btn btn-accent"
+                onClick={() => {
+                  void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
+                    openUrl("https://canopyide.dev/downloads"),
+                  );
+                }}
+              >
+                Open downloads page
+              </button>
+              <button
+                className="btn"
+                onClick={() => {
+                  dismissedUpdate.current = updateAvail.info.version;
+                  setUpdateAvail(null);
+                }}
+              >
+                Later
+              </button>
+            </div>
+          ) : updateProgress === null ? (
             <div className="update-actions">
               {/* Never install without asking: the terminals hold live agent
                   sessions whose scrollback exists nowhere else, and installing
@@ -432,7 +483,13 @@ export default function App() {
               >
                 Install and restart
               </button>
-              <button className="btn" onClick={() => setUpdateAvail(null)}>
+              <button
+                className="btn"
+                onClick={() => {
+                  dismissedUpdate.current = updateAvail.info.version;
+                  setUpdateAvail(null);
+                }}
+              >
                 Later
               </button>
             </div>

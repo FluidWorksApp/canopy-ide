@@ -21,6 +21,13 @@ export interface UpdateInfo {
   date?: string;
 }
 
+/** `auto` installs in place; `manual` can only point at the downloads page
+ *  (.deb/.rpm — see the Linux note above). */
+export type UpdateAvailability =
+  | { kind: "auto"; info: UpdateInfo }
+  | { kind: "manual"; info: UpdateInfo }
+  | null;
+
 let pending: Update | null = null;
 
 /** Returns the available update, or null when current / unsupported install. */
@@ -52,4 +59,52 @@ export async function installUpdate(onProgress?: (fraction: number) => void): Pr
   });
   // Only reached if install succeeded; a failed verify throws above.
   await relaunch();
+}
+
+function newerThan(a: string, b: string): boolean {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d > 0;
+  }
+  return false;
+}
+
+/**
+ * Update check that also covers installs the plugin can't serve.
+ *
+ * The plugin reports "no update" both when we're current AND on .deb/.rpm
+ * installs it refuses to touch — indistinguishable from here. So on Linux a
+ * quiet plugin answer gets a second opinion from the GitHub API (api.github.com
+ * sends CORS headers; the release-asset URLs don't, so this is the only feed a
+ * webview fetch can read). A version we can see but not install becomes a
+ * `manual` availability: notify, and point at the downloads page.
+ */
+export async function checkForUpdateAnyChannel(): Promise<UpdateAvailability> {
+  let pluginFailed = false;
+  try {
+    const u = await checkForUpdate();
+    if (u) return { kind: "auto", info: u };
+  } catch {
+    pluginFailed = true; // unsupported install type — fall through to the feed
+  }
+  if (!pluginFailed && !/Linux/.test(navigator.userAgent)) return null;
+  try {
+    const res = await fetch(
+      "https://api.github.com/repos/FluidWorksApp/canopy-ide/releases/latest",
+      { headers: { Accept: "application/vnd.github+json" } },
+    );
+    if (!res.ok) return null;
+    const rel = (await res.json()) as { tag_name?: string; published_at?: string };
+    const latest = rel.tag_name?.replace(/^v/, "");
+    const { getVersion } = await import("@tauri-apps/api/app");
+    const current = await getVersion();
+    if (latest && newerThan(latest, current)) {
+      return { kind: "manual", info: { version: latest, date: rel.published_at } };
+    }
+  } catch {
+    // offline or rate-limited — a background check just stays quiet
+  }
+  return null;
 }
