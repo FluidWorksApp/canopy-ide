@@ -325,6 +325,34 @@ pub async fn store_save(data: String) -> Result<(), String> {
 }
 
 
+// Workspace/project export + import. These deliberately sit outside the
+// workspace scope check: the path comes from a native save/open dialog the user
+// just drove, which is the consent. They're kept narrow (JSON text only, no
+// directory traversal helpers) rather than exposing general unscoped file IO.
+
+#[tauri::command]
+pub async fn workspace_export(path: String, data: String) -> Result<(), String> {
+    let path = PathBuf::from(&path);
+    if path.extension().and_then(|e| e.to_str()) != Some("json") {
+        return Err("workspace files must be .json".into());
+    }
+    std::fs::write(&path, data).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn workspace_import(path: String) -> Result<String, String> {
+    let path = PathBuf::from(&path);
+    if path.extension().and_then(|e| e.to_str()) != Some("json") {
+        return Err("workspace files must be .json".into());
+    }
+    // Bounded: a workspace file is a small config, not a payload.
+    let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    if meta.len() > 4_000_000 {
+        return Err("not a workspace file (too large)".into());
+    }
+    std::fs::read_to_string(&path).map_err(|e| e.to_string())
+}
+
 // ---------- search (quick open + find in files) ----------
 
 /// Directories never worth walking. Keeping this in Rust means the walk stops
