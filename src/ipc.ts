@@ -119,6 +119,18 @@ export const gitStatus = (path: string) =>
 export const gitHeadContent = (path: string) =>
   invoke<string | null>("git_head_content", { path });
 
+// ---------- background image (chrome wallpaper) ----------
+
+/** Copies `path` into ~/.canopy/backgrounds/, replacing any previous one.
+ *  Returns its MIME type. */
+export const backgroundSet = (path: string) => invoke<string>("background_set", { path });
+export const backgroundClear = () => invoke<void>("background_clear");
+export const backgroundExists = () => invoke<boolean>("background_exists");
+export async function backgroundBytes(): Promise<Uint8Array> {
+  const data = await invoke<ArrayBuffer | number[]>("background_bytes");
+  return data instanceof ArrayBuffer ? new Uint8Array(data) : Uint8Array.from(data);
+}
+
 export interface ClaudeSessionStats {
   model: string | null;
   input_tokens: number;

@@ -425,6 +425,11 @@ export default function App() {
 
   return (
     <div className={`app ${zen ? "zen" : ""}`}>
+      {/* Chrome wallpaper — fixed, z-index below everything, inert (renders
+          nothing) unless a background is actually set. See background.ts /
+          the html[data-canopy-bg] rules in index.css for what shows through
+          it and what deliberately never does. */}
+      <div className="app-bg" />
       {/* Focus mode: chrome slides away but stays reachable — hovering the top
           edge brings the project tabs and the tab strip back. */}
       {zen && <div className="zen-hotzone" />}
