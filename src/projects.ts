@@ -240,6 +240,17 @@ export const AGENT_CLIS: AgentCli[] = [
   },
 ];
 
+/** Matches process names that are agent CLIs. Derived from the registry so a
+ *  newly added CLI can never be missed by detection again — the Antigravity
+ *  launch shipped with `agy` absent from a hand-maintained copy of this regex,
+ *  so its sessions showed as plain shells. The extras cover agents users run
+ *  by hand that we don't ship a launcher entry for. */
+const EXTRA_AGENT_BINS = ["gemini", "goose", "copilot", "cursor-agent", "qwen", "droid"];
+export const AGENT_PATTERN = new RegExp(
+  `\\b(${[...AGENT_CLIS.map((c) => c.bin), ...EXTRA_AGENT_BINS].join("|")})\\b`,
+  "i",
+);
+
 export async function checkInstalledClis(): Promise<Record<string, boolean>> {
   try {
     return await invoke<Record<string, boolean>>("which_check", {

@@ -7,7 +7,7 @@ import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import * as ipc from "../ipc";
 import { modelFor, monaco } from "../monaco-setup";
 import type { AgentCli, Project } from "../projects";
-import { AGENT_CLIS, checkInstalledClis } from "../projects";
+import { AGENT_CLIS, AGENT_PATTERN, checkInstalledClis } from "../projects";
 import {
   AgentIcon,
   CheckIcon,
@@ -91,9 +91,6 @@ const tabId = () =>
   typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
     : `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-
-const AGENT_PATTERN =
-  /\b(claude|codex|aider|goose|gemini|opencode|amp|copilot|cursor-agent|qwen|droid)\b/i;
 
 const RAIL_TABS: { key: SideTab; icon: string; title: string }[] = [
   { key: "files", icon: "🗂", title: "Components & files" },

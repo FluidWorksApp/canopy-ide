@@ -3,11 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
-import { restoreCommand } from "../projects";
+import { AGENT_PATTERN, restoreCommand } from "../projects";
 import type { PendingItem } from "../notifications";
-
-const AGENT_PATTERN =
-  /\b(claude|codex|aider|goose|gemini|opencode|amp|copilot|cursor-agent|qwen|droid)\b/i;
 
 interface AgentsPanelProps {
   stats: ipc.SessionStats[];
