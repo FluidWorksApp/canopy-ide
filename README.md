@@ -75,8 +75,13 @@ the project; open files as sub-tabs next to the terminals running your agents.
 
 ## Install
 
-Download from [**canopyide.dev**](https://canopyide.dev/) or grab your platform
-directly — these links always point at the newest release:
+Download from [**canopyide.dev**](https://canopyide.dev/) — or on macOS:
+
+```sh
+brew install --cask fluidworksapp/tap/canopy
+```
+
+Or grab your platform directly — these links always point at the newest release:
 
 | Platform | Download | Updates |
 |---|---|---|
