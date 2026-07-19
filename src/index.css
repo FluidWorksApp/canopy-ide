@@ -78,56 +78,6 @@
   color-scheme: dark;
 }
 
-/* ---------- chrome wallpaper ----------
-   .app-bg is always mounted but inert (background-image: none) until
-   background.ts sets --chrome-bg-image, which happens only once an image is
-   actually on disk. The html[data-canopy-bg="1"] overrides below are the only
-   thing that makes any *other* element transparent, and only while a
-   wallpaper is active — with nothing set, every rule here is a no-op and the
-   app looks exactly as it did before this feature existed. */
-.app-bg {
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  pointer-events: none;
-  background-image: var(--chrome-bg-image, none);
-  background-size: cover;
-  background-position: center;
-  filter: blur(var(--chrome-bg-blur, 0px));
-}
-
-.app-bg::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: var(--bg);
-  opacity: var(--chrome-bg-dim, 1);
-}
-
-/* html and body themselves (a z-index:-1 element still sits above the page's
-   canvas paint, which is what html/body's own background actually becomes —
-   leaving them opaque would hide the image completely regardless of anything
-   else here), #root (what the welcome screen's background comes from — it
-   sets none of its own), the titlebar, icon rail, the sidebar AND its
-   content pane (git panel / file tree — deliberately not given an opaque
-   fill back: this bleeds through too, not just the icon rail), the tab bar,
-   panel gutters, and the terminal's own container (Term.tsx pairs this with
-   xterm's theme.background going transparent — CSS alone can't reach a
-   canvas). Monaco is deliberately NOT in this list — this is meant to dress
-   the shell and side frame, not the code editor where the actual work is. */
-html[data-canopy-bg="1"],
-html[data-canopy-bg="1"] body,
-html[data-canopy-bg="1"] #root,
-html[data-canopy-bg="1"] .titlebar,
-html[data-canopy-bg="1"] .rail,
-html[data-canopy-bg="1"] .sidebar,
-html[data-canopy-bg="1"] .side-panel,
-html[data-canopy-bg="1"] .pane-bar,
-html[data-canopy-bg="1"] .resize-handle,
-html[data-canopy-bg="1"] .term-container {
-  background: transparent;
-}
-
 * {
   box-sizing: border-box;
 }
@@ -659,6 +609,16 @@ body,
   white-space: nowrap;
 }
 
+/* Each project is a bordered card, so groups can't visually run together. */
+.bd-group {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-alt);
+  margin: 6px 6px 0;
+  padding-bottom: 4px;
+  overflow: hidden;
+}
+
 /* Section headers: one per project, plus Core services. */
 .bd-head {
   display: flex;
@@ -673,10 +633,16 @@ body,
   color: var(--text-dim);
 }
 
-.bd-head + .bd-head,
-div + .bd-head {
-  border-top: 1px solid var(--border);
-  margin-top: 3px;
+.bd-group .bd-head {
+  background: var(--bg-raised);
+  padding: 6px 10px;
+  margin-bottom: 2px;
+}
+
+/* Core services header sits outside any card. */
+.status-breakdown > div:last-child > .bd-head,
+.bd-head {
+  margin-top: 4px;
 }
 
 .bd-session {
@@ -2051,11 +2017,14 @@ div + .bd-head {
 /* ---------- settings + help dialogs ---------- */
 
 .settings-dialog {
-  width: 640px;
+  width: 660px;
   max-width: 94vw;
-  max-height: 80vh;
+  height: 500px;
+  max-height: 82vh;
   display: flex;
   flex-direction: column;
+  padding: 0;
+  overflow: hidden;
 }
 
 .help-dialog {
@@ -2065,11 +2034,9 @@ div + .bd-head {
   overflow-y: auto;
 }
 
-/* VS Code-style: section nav column + scrolling content pane. */
+/* VS Code-style: nav column + scrolling content pane. */
 .settings-layout {
   display: flex;
-  gap: 14px;
-  min-height: 320px;
   flex: 1;
   overflow: hidden;
 }
@@ -2078,9 +2045,19 @@ div + .bd-head {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  flex: 0 0 130px;
+  flex: 0 0 150px;
   border-right: 1px solid var(--border);
-  padding: 8px 8px 8px 0;
+  background: var(--bg-alt);
+  padding: 14px 10px;
+}
+
+.settings-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 0 10px 10px;
 }
 
 .settings-nav-item {
@@ -2088,50 +2065,143 @@ div + .bd-head {
   background: none;
   border: none;
   border-radius: 5px;
-  padding: 6px 10px;
-  font-size: 12px;
+  padding: 7px 10px;
+  font-size: 13px;
   color: var(--text-dim);
   cursor: pointer;
 }
 
 .settings-nav-item:hover {
-  background: var(--bg-alt);
+  background: var(--bg-raised);
   color: var(--text);
 }
 
 .settings-nav-active {
-  background: var(--bg-alt);
-  color: var(--accent);
+  background: var(--bg-raised);
+  color: var(--text);
   font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .settings-content {
   flex: 1;
   overflow-y: auto;
-  padding: 4px 4px 12px 0;
+  padding: 16px 20px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 18px;
+}
+
+.settings-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-alt);
+}
+
+/* One setting: name over description over control — never side-by-side, so
+   wide controls can't squeeze the label or spill out of the modal. */
+.set-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.set-item-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.set-item-desc {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+.set-item-control {
+  margin-top: 5px;
+}
+
+.set-inline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .set-inline-check {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
   font-size: 12px;
 }
 
 .set-wide {
-  width: 230px;
+  width: 320px;
+  max-width: 100%;
 }
 
-.set-section {
-  margin: 10px 0 4px;
+.set-slider {
+  width: 260px;
+}
+
+.set-hexcode {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* Skins as preview cards: the palette shown, not named. */
+.skin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.skin-card {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
+  padding: 8px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--text);
 }
 
+.skin-card:hover {
+  border-color: var(--text-dim);
+}
+
+.skin-card-active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.skin-preview {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 40px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  padding-left: 8px;
+}
+
+.skin-chip {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+}
+
+.skin-name {
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+}
+
+/* Help reuses the old section head style. */
 .set-head {
   font-size: 10px;
   font-weight: 600;
@@ -2141,47 +2211,6 @@ div + .bd-head {
   border-bottom: 1px solid var(--border);
   padding-bottom: 3px;
   margin-top: 8px;
-}
-
-.set-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.set-label {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.set-label small {
-  color: var(--text-dim);
-  font-size: 10px;
-}
-
-.set-row input[type="number"] {
-  width: 90px;
-}
-
-.set-choices {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-
-.accent-swatch {
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  border: 2px solid transparent;
-  cursor: pointer;
-  padding: 0;
-}
-
-.accent-swatch-active {
-  border-color: var(--text);
 }
 
 .help-body {

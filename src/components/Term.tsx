@@ -32,7 +32,7 @@ const shellQuote = (p: string) =>
  *  the same legibility floor that protects chrome text protects this too. */
 function themeFor(settings: Settings) {
   const theme = terminalTheme(settings.theme, settings.customAccent);
-  return settings.backgroundMime ? { ...theme, background: "transparent" } : theme;
+  return theme;
 }
 
 export interface TermHandle {

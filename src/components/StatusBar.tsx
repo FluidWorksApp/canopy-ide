@@ -29,6 +29,11 @@ const fmtMem = (bytes: number) =>
     ? `${(bytes / 1024 ** 3).toFixed(1)} GB`
     : `${Math.round(bytes / 1024 ** 2)} MB`;
 
+/** Last stats seen per transcript, module-wide — switching tabs (or
+ *  projects) shows the right model/tokens instantly from cache while the
+ *  fresh poll runs, instead of carrying the previous tab's numbers. */
+const TRANSCRIPT_STATS = new Map<string, ipc.ClaudeSessionStats>();
+
 const fmtTokens = (n: number) =>
   n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}k` : `${n}`;
 
@@ -54,9 +59,12 @@ interface StatusBarProps {
   projects: { name: string; roots: string[] }[];
   /** Present when a Claude session is live in this project; switches its model. */
   onSetModel?: (model: string) => void;
+  /** The pty of the active terminal tab — the model/token tray follows THIS
+   *  tab's session, not whichever session in the project spoke last. */
+  activePtyId?: number | null;
 }
 
-export function StatusBar({ roots, agents, events, visible, projects, onSetModel }: StatusBarProps) {
+export function StatusBar({ roots, agents, events, visible, projects, onSetModel, activePtyId }: StatusBarProps) {
   const [branch, setBranch] = useState<string | null>(null);
   const [dirty, setDirty] = useState(0);
   const [app, setApp] = useState<ipc.AppStats | null>(null);
@@ -101,23 +109,33 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
     return () => void sub.then((fn) => fn());
   }, [visible]);
 
-  // Latest Claude transcript for this project (hook events carry cwd + path).
+  // The transcript whose model/tokens the tray shows. Per-TAB first: prefer
+  // the latest event stamped with the active terminal's pty, so switching
+  // tabs switches the tray immediately instead of showing whichever session
+  // in the project spoke last (which only corrected itself when the newly
+  // focused agent next emitted an event). Project-latest is the fallback for
+  // non-terminal tabs and unstamped events.
   const transcript = (() => {
+    let projectLatest: string | null = null;
     for (let i = events.length - 1; i >= 0; i--) {
       try {
         const parsed = JSON.parse(events[i].raw);
         if (
-          typeof parsed.transcript_path === "string" &&
-          typeof parsed.cwd === "string" &&
-          roots.some((r) => parsed.cwd === r || parsed.cwd.startsWith(r + "/"))
+          typeof parsed.transcript_path !== "string" ||
+          typeof parsed.cwd !== "string" ||
+          !roots.some((r) => parsed.cwd === r || parsed.cwd.startsWith(r + "/"))
         ) {
+          continue;
+        }
+        if (activePtyId != null && parsed.canopy_pty === activePtyId) {
           return parsed.transcript_path as string;
         }
+        projectLatest ??= parsed.transcript_path as string;
       } catch {
         // non-JSON hook line
       }
     }
-    return null;
+    return projectLatest;
   })();
 
   // Both pollers gate on `visible`: each spawns a git subprocess / transcript
@@ -142,10 +160,14 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
   }, [roots[0], visible]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
+    // Cached value first (or nothing if this session was never seen) — the
+    // tray must never show another tab's model while the poll is in flight.
+    setStats(transcript ? (TRANSCRIPT_STATS.get(transcript) ?? null) : null);
     if (!transcript || !visible) return;
     let cancelled = false;
     const refresh = () => {
       void ipc.claudeSessionStats(transcript).then((s) => {
+        TRANSCRIPT_STATS.set(transcript, s);
         if (!cancelled) setStats(s);
       }).catch(() => {});
     };
@@ -226,7 +248,7 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
                       const cpu = g.sessions.reduce((n, s) => n + s.total_cpu, 0);
                       const mem = g.sessions.reduce((n, s) => n + s.total_mem_bytes, 0);
                       return (
-                        <div key={g.name}>
+                        <div key={g.name} className="bd-group">
                           <div className="bd-head">
                             <span>{g.name}</span>
                             <span className="bd-nums">
@@ -382,7 +404,7 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
       )}
       <button
         className="btn-mini"
-        title="Skin, background, font & cursor (Settings → Appearance)"
+        title="Skin, font & cursor (Settings → Appearance)"
         onClick={() =>
           // Appearance lives inside the Settings dialog, which App owns; a
           // window event keeps this button working without prop-drilling an

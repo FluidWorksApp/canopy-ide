@@ -46,7 +46,11 @@ export const monacoReady: Promise<void> = (async () => {
       const stored = JSON.parse(localStorage.getItem("canopy.settings") ?? "{}") as {
         theme?: string;
       };
-      return stored.theme === "daylight" ? "canopy-light" : "canopy-dark";
+      const light =
+        stored.theme === "daylight" ||
+        (stored.theme === "auto" &&
+          !window.matchMedia("(prefers-color-scheme: dark)").matches);
+      return light ? "canopy-light" : "canopy-dark";
     } catch {
       return "canopy-dark";
     }

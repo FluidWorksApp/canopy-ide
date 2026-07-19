@@ -2,16 +2,13 @@ import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import "./index.css";
 import { monacoReady } from "./monaco-setup";
-import { applyTheme, getSettings } from "./settings";
-import { loadBackground } from "./background";
+import { applyTheme, getSettings, watchSystemTheme } from "./settings";
 import App from "./App.tsx";
 
 // Before first paint, so there's no flash of the wrong palette.
 applyTheme(getSettings().theme, getSettings().customAccent);
-// Not blocking mount on this — it's a decorative layer, not a service the
-// rest of the app depends on, and hopping to the Rust core + decoding a blob
-// shouldn't hold up the terminal being usable.
-void loadBackground();
+// Keep Auto tracking the OS day/night flip for the whole app lifetime.
+watchSystemTheme();
 
 // Surface WebView errors in the dev terminal (Rust log).
 const jsLog = (level: string, message: string) =>

@@ -1,7 +1,31 @@
 // Small persistent settings, stored in localStorage. Keep this flat and cheap.
-export type Theme = "default" | "gotham" | "daylight" | "custom";
+export type Theme = "auto" | "default" | "gotham" | "daylight" | "custom";
+
+/** What "auto" means right now: Default when macOS is in dark mode, Daylight
+ *  in light mode. Every consumer of the skin (CSS data-theme, terminal
+ *  palettes, Monaco) works off the resolved value — "auto" itself never
+ *  reaches them. */
+export function resolveTheme(theme: Theme): Exclude<Theme, "auto"> {
+  if (theme !== "auto") return theme;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches
+    ? "default"
+    : "daylight";
+}
+
+/** Re-apply the skin when the OS flips day/night while the setting is Auto.
+ *  Returns an unsubscribe. */
+export function watchSystemTheme(): () => void {
+  const mq = window.matchMedia("(prefers-color-scheme: dark)");
+  const onChange = () => {
+    const s = getSettings();
+    if (s.theme === "auto") applyTheme("auto", s.customAccent);
+  };
+  mq.addEventListener("change", onChange);
+  return () => mq.removeEventListener("change", onChange);
+}
 
 export const THEMES: { id: Theme; label: string }[] = [
+  { id: "auto", label: "Auto" },
   { id: "default", label: "Default" },
   { id: "gotham", label: "Gotham" },
   { id: "daylight", label: "Daylight" },
@@ -33,14 +57,6 @@ export interface Settings {
    *  --accent (with a luminance-derived --on-accent so accent-filled buttons
    *  stay legible without the user having to pick two colors). */
   customAccent: string;
-  /** MIME type of the current wallpaper (also the "is one set" flag) — the
-   *  image bytes themselves live in ~/.canopy/backgrounds/, not here. */
-  backgroundMime: string | null;
-  /** 0-100 — how strongly the wallpaper shows, everywhere it applies (chrome,
-   *  welcome screen, terminal, sidebar content): 100 is the image at its
-   *  clearest, 0 is essentially not there. One dial, not a per-area setting —
-   *  see background.ts backgroundDim(). */
-  backgroundOpacity: number;
 
   // ---- Personalize: font + cursor, Editor (Monaco) and Terminal (xterm)
   // independently — different rendering engines, so neither shares the
@@ -70,8 +86,6 @@ const DEFAULTS: Settings = {
   ptyHighWater: 2 * 1024 * 1024,
   theme: "default",
   customAccent: "#7aa2f7",
-  backgroundMime: null,
-  backgroundOpacity: 55,
   terminalFontFamily: TERMINAL_FONT_DEFAULT,
   terminalCursorStyle: "block",
   terminalCursorBlink: true,
@@ -112,7 +126,7 @@ function luminance(hex: string): number {
  *  everything else picks up a new theme (or a new/cleared/re-dimmed
  *  wallpaper) for free via CSS custom properties, but xterm renders to a
  *  canvas and needs its JS-side theme object pushed explicitly. Dispatched by
- *  applyTheme() and by every background.ts mutator. See terminalThemes.ts. */
+ *  applyTheme(). See terminalThemes.ts. */
 export const THEME_CHANGE_EVENT = "canopy:theme";
 
 /** Stamps the theme onto <html data-theme="…">, which is all index.css needs
@@ -121,7 +135,7 @@ export const THEME_CHANGE_EVENT = "canopy:theme";
  *  changes. */
 
 export function applyTheme(theme: Theme, customAccent?: string): void {
-  document.documentElement.dataset.theme = theme;
+  document.documentElement.dataset.theme = resolveTheme(theme);
   const root = document.documentElement.style;
   if (theme === "custom") {
     const accent = customAccent || DEFAULTS.customAccent;

@@ -112,6 +112,11 @@ const DAYLIGHT_TERM_THEME: TermTheme = {
  *  color the user actually chose, same as it does for --accent everywhere
  *  else — rather than asking for 16 colors on top of one. */
 export function terminalTheme(theme: Theme, customAccent?: string): TermTheme {
+  if (theme === "auto") {
+    theme = window.matchMedia("(prefers-color-scheme: dark)").matches
+      ? "default"
+      : "daylight";
+  }
   switch (theme) {
     case "gotham":
       return GOTHAM_TERM_THEME;

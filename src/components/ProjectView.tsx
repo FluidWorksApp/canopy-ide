@@ -1166,6 +1166,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         visible={visible}
         projects={allProjects}
         onSetModel={hasClaude ? setAgentModel : undefined}
+        activePtyId={activeTab?.type === "terminal" ? activeTab.ptyId : null}
       />
     </div>
   );

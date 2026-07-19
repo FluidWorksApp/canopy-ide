@@ -1,9 +1,9 @@
-// The one settings surface, VS Code-style: section nav on the left, controls
-// on the right. Appearance (skins, accent, wallpaper, fonts, cursors —
-// everything that was the standalone Appearance panel) is a section here, not
-// a second competing dialog.
+// The one settings surface, VS Code-style: section nav on the left; each
+// setting stacks name → description → control (side-by-side rows squeezed
+// long labels into slivers and pushed wide control groups out of the modal).
+// Skins render as preview cards — a palette is a thing you look at, not a
+// word you read.
 import { useState } from "react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   applyTheme,
   getSettings,
@@ -13,7 +13,6 @@ import {
   type Settings,
   type Theme,
 } from "../settings";
-import { setBackground, clearBackground, setBackgroundOpacity } from "../background";
 import { useEscape } from "../useEscape";
 
 export type SettingsTab = "appearance" | "editor" | "terminal" | "guard";
@@ -36,10 +35,44 @@ const CURSOR_OPTIONS: { id: CursorStyle; label: string }[] = [
   { id: "bar", label: "Bar" },
 ];
 
+/** Mirror of each skin's defining colors in index.css — the preview must
+ *  show the palette without applying it. Custom previews the user's own
+ *  accent on the Default base. */
+const SKIN_PREVIEWS: Record<Theme, { bg: string; raised: string; text: string; accent?: string }> = {
+  // Auto previews as a split card: Default when the OS is dark, Daylight when light.
+  auto: {
+    bg: "linear-gradient(105deg, #1a1b26 50%, #f5f6f8 50%)",
+    raised: "#1f2335",
+    text: "#f5f6f8",
+    accent: "#7aa2f7",
+  },
+  default: { bg: "#1a1b26", raised: "#1f2335", text: "#c9d1d9", accent: "#7aa2f7" },
+  gotham: { bg: "#0d0f12", raised: "#171b20", text: "#e8e6df", accent: "#d4af37" },
+  daylight: { bg: "#f5f6f8", raised: "#ffffff", text: "#1c1f26", accent: "#3b6fd6" },
+  custom: { bg: "#1a1b26", raised: "#1f2335", text: "#c9d1d9" },
+};
+
+function Item({
+  name,
+  desc,
+  children,
+}: {
+  name: string;
+  desc?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="set-item">
+      <div className="set-item-name">{name}</div>
+      {desc && <div className="set-item-desc">{desc}</div>}
+      <div className="set-item-control">{children}</div>
+    </div>
+  );
+}
+
 export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsDialogProps) {
   const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [s, setS] = useState<Settings>(() => getSettings());
-  const [bgBusy, setBgBusy] = useState(false);
   useEscape(onClose, true);
 
   const patch = (p: Partial<Settings>) => setS(updateSettings(p));
@@ -49,27 +82,11 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
     applyTheme(next, s.customAccent);
   };
 
-  const uploadBackground = async () => {
-    const selection = await openDialog({
-      multiple: false,
-      filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp"] }],
-    });
-    const path = Array.isArray(selection) ? selection[0] : selection;
-    if (!path) return;
-    setBgBusy(true);
-    try {
-      await setBackground(path);
-      setS(getSettings());
-    } finally {
-      setBgBusy(false);
-    }
-  };
-
   const cursorControls = (
     styleKey: "editorCursorStyle" | "terminalCursorStyle",
     blinkKey: "editorCursorBlink" | "terminalCursorBlink",
   ) => (
-    <div className="set-choices">
+    <div className="set-inline">
       <select
         value={s[styleKey]}
         onChange={(e) => patch({ [styleKey]: e.target.value as CursorStyle })}
@@ -86,7 +103,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
           checked={s[blinkKey]}
           onChange={(e) => patch({ [blinkKey]: e.target.checked })}
         />
-        <span>blink</span>
+        <span>Blink</span>
       </label>
     </div>
   );
@@ -94,11 +111,9 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
   return (
     <div className="confirm-backdrop" onMouseDown={onClose}>
       <div className="confirm settings-dialog" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="side-panel-head">
-          <span>Settings</span>
-        </div>
         <div className="settings-layout">
           <nav className="settings-nav">
+            <div className="settings-title">Settings</div>
             {TABS.map((t) => (
               <button
                 key={t.id}
@@ -112,100 +127,57 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
           <div className="settings-content">
             {tab === "appearance" && (
               <>
-                <div className="set-head">Theme</div>
-                <div className="set-row">
-                  <span className="set-label">
-                    Skin
-                    <small>applies immediately, terminals included</small>
-                  </span>
-                  <div className="set-choices">
-                    {THEMES.map((t) => (
-                      <button
-                        key={t.id}
-                        className={`btn ${s.theme === t.id ? "btn-accent" : ""}`}
-                        onClick={() => pickTheme(t.id)}
-                      >
-                        {t.label}
-                      </button>
-                    ))}
+                <Item name="Skin" desc="Colors for the whole app — applies immediately, terminals and editor included.">
+                  <div className="skin-grid">
+                    {THEMES.map((t) => {
+                      const p = SKIN_PREVIEWS[t.id];
+                      const accent = t.id === "custom" ? s.customAccent : p.accent;
+                      return (
+                        <button
+                          key={t.id}
+                          className={`skin-card ${s.theme === t.id ? "skin-card-active" : ""}`}
+                          onClick={() => pickTheme(t.id)}
+                        >
+                          <span className="skin-preview" style={{ background: p.bg }}>
+                            <span className="skin-chip" style={{ background: accent }} />
+                            <span className="skin-chip" style={{ background: p.raised }} />
+                            <span className="skin-chip" style={{ background: p.text }} />
+                          </span>
+                          <span className="skin-name">{t.label}</span>
+                        </button>
+                      );
+                    })}
                   </div>
-                </div>
-                <div className="set-row">
-                  <span className="set-label">
-                    Accent color
-                    <small>picking one switches to the Custom skin</small>
-                  </span>
-                  <input
-                    type="color"
-                    value={s.customAccent}
-                    onChange={(e) => {
-                      patch({ customAccent: e.target.value, theme: "custom" });
-                      applyTheme("custom", e.target.value);
-                    }}
-                  />
-                </div>
-
-                <div className="set-head">Background</div>
-                <div className="set-row">
-                  <span className="set-label">
-                    Chrome wallpaper
-                    <small>behind chrome, sidebar and terminal — never the editor</small>
-                  </span>
-                  <div className="set-choices">
-                    <button
-                      className="btn"
-                      disabled={bgBusy}
-                      onClick={() => void uploadBackground()}
-                    >
-                      {s.backgroundMime ? "Change…" : "Upload…"}
-                    </button>
-                    {s.backgroundMime && (
-                      <button
-                        className="btn"
-                        onClick={async () => {
-                          await clearBackground();
-                          setS(getSettings());
-                        }}
-                      >
-                        Clear
-                      </button>
-                    )}
-                  </div>
-                </div>
-                {s.backgroundMime && (
-                  <div className="set-row">
-                    <span className="set-label">Wallpaper opacity</span>
+                </Item>
+                <Item
+                  name="Accent color"
+                  desc="Your own highlight color. Picking one switches to the Custom skin."
+                >
+                  <div className="set-inline">
                     <input
-                      type="range"
-                      min={0}
-                      max={100}
-                      value={s.backgroundOpacity}
+                      type="color"
+                      value={s.customAccent}
                       onChange={(e) => {
-                        setBackgroundOpacity(Number(e.target.value));
-                        setS(getSettings());
+                        patch({ customAccent: e.target.value, theme: "custom" });
+                        applyTheme("custom", e.target.value);
                       }}
                     />
+                    <code className="set-hexcode">{s.customAccent}</code>
                   </div>
-                )}
+                </Item>
               </>
             )}
 
             {tab === "editor" && (
               <>
-                <div className="set-head">Font</div>
-                <div className="set-row">
-                  <span className="set-label">
-                    Font family
-                    <small>applies to newly opened files</small>
-                  </span>
+                <Item name="Font family" desc="Applies to newly opened files.">
                   <input
                     className="set-wide"
                     value={s.editorFontFamily}
                     onChange={(e) => patch({ editorFontFamily: e.target.value })}
                   />
-                </div>
-                <div className="set-row">
-                  <span className="set-label">Font size</span>
+                </Item>
+                <Item name="Font size">
                   <input
                     type="number"
                     min={8}
@@ -213,31 +185,21 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     value={s.editorFontSize}
                     onChange={(e) => patch({ editorFontSize: Number(e.target.value) || 13 })}
                   />
-                </div>
-                <div className="set-head">Cursor</div>
-                <div className="set-row">
-                  <span className="set-label">Style</span>
-                  {cursorControls("editorCursorStyle", "editorCursorBlink")}
-                </div>
+                </Item>
+                <Item name="Cursor">{cursorControls("editorCursorStyle", "editorCursorBlink")}</Item>
               </>
             )}
 
             {tab === "terminal" && (
               <>
-                <div className="set-head">Font</div>
-                <div className="set-row">
-                  <span className="set-label">
-                    Font family
-                    <small>applies to newly opened terminals</small>
-                  </span>
+                <Item name="Font family" desc="Applies to newly opened terminals.">
                   <input
                     className="set-wide"
                     value={s.terminalFontFamily}
                     onChange={(e) => patch({ terminalFontFamily: e.target.value })}
                   />
-                </div>
-                <div className="set-row">
-                  <span className="set-label">Font size</span>
+                </Item>
+                <Item name="Font size">
                   <input
                     type="number"
                     min={8}
@@ -245,18 +207,14 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     value={s.fontSize}
                     onChange={(e) => patch({ fontSize: Number(e.target.value) || 13 })}
                   />
-                </div>
-                <div className="set-head">Cursor</div>
-                <div className="set-row">
-                  <span className="set-label">Style</span>
+                </Item>
+                <Item name="Cursor">
                   {cursorControls("terminalCursorStyle", "terminalCursorBlink")}
-                </div>
-                <div className="set-head">Buffer</div>
-                <div className="set-row">
-                  <span className="set-label">
-                    Scrollback lines
-                    <small>applies to newly opened terminals</small>
-                  </span>
+                </Item>
+                <Item
+                  name="Scrollback"
+                  desc="Lines of history each terminal keeps. Applies to newly opened terminals."
+                >
                   <input
                     type="number"
                     min={1000}
@@ -268,18 +226,16 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                       if (Number.isFinite(v) && v >= 1000) patch({ scrollback: v });
                     }}
                   />
-                </div>
+                </Item>
               </>
             )}
 
             {tab === "guard" && (
               <>
-                <div className="set-head">Runaway-process warnings</div>
-                <div className="set-row">
-                  <span className="set-label">
-                    CPU threshold
-                    <small>% across a terminal's process tree</small>
-                  </span>
+                <Item
+                  name="CPU warning threshold"
+                  desc="Warn when a terminal's process tree exceeds this much CPU (%)."
+                >
                   <input
                     type="number"
                     min={50}
@@ -291,12 +247,11 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                       if (Number.isFinite(v) && v > 0) patch({ runawayCpuPercent: v });
                     }}
                   />
-                </div>
-                <div className="set-row">
-                  <span className="set-label">
-                    Memory threshold
-                    <small>GB across a terminal's process tree</small>
-                  </span>
+                </Item>
+                <Item
+                  name="Memory warning threshold"
+                  desc="Warn when a terminal's process tree exceeds this much memory (GB)."
+                >
                   <input
                     type="number"
                     min={1}
@@ -304,16 +259,15 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     value={Math.round(s.runawayMemBytes / 1024 ** 3)}
                     onChange={(e) => {
                       const v = Number(e.target.value);
-                      if (Number.isFinite(v) && v > 0)
-                        patch({ runawayMemBytes: v * 1024 ** 3 });
+                      if (Number.isFinite(v) && v > 0) patch({ runawayMemBytes: v * 1024 ** 3 });
                     }}
                   />
-                </div>
+                </Item>
               </>
             )}
           </div>
         </div>
-        <div className="confirm-actions">
+        <div className="settings-footer">
           <button className="btn btn-accent" onClick={onClose}>
             Done
           </button>
