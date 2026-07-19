@@ -108,6 +108,9 @@ interface ProjectViewProps {
   zen: boolean;
   events: AgentEventEntry[];
   hookPath: string | null;
+  /** Every open project (name + roots) — the resource breakdown groups the
+   *  machine-wide session stats by project, which one project can't know. */
+  allProjects: { name: string; roots: string[] }[];
   /** Pending-card keys the user dismissed (held app-wide so badges agree). */
   dismissedPending: Set<string>;
   onDismissPending: (key: string) => void;
@@ -116,7 +119,7 @@ interface ProjectViewProps {
   onShareContext: (on: boolean) => void;
 }
 
-export function ProjectView({ project, visible, zen, events, hookPath, dismissedPending, onDismissPending, onEdit, onNotice, onShareContext }: ProjectViewProps) {
+export function ProjectView({ project, visible, zen, events, hookPath, allProjects, dismissedPending, onDismissPending, onEdit, onNotice, onShareContext }: ProjectViewProps) {
   const [sideTab, setSideTab] = useState<SideTab>("files");
   const [collapsed, setCollapsed] = useState(false);
   const [tabs, setTabs] = useState<SubTab[]>([]);
@@ -1105,6 +1108,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, dismissed
         agents={runningAgents}
         events={projectEvents}
         visible={visible}
+        projects={allProjects}
         onSetModel={hasClaude ? setAgentModel : undefined}
       />
     </div>

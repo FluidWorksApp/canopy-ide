@@ -462,6 +462,70 @@ body,
   color: var(--text-dim);
 }
 
+/* Resource breakdown popup: project -> sessions -> processes. */
+.status-breakdown {
+  min-width: 330px;
+  max-height: 55vh;
+  overflow-y: auto;
+}
+
+.bd-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.bd-total {
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  margin-bottom: 2px;
+}
+
+.bd-project,
+.bd-session {
+  cursor: pointer;
+}
+
+.bd-project:hover,
+.bd-session:hover {
+  background: var(--bg-alt);
+}
+
+.bd-session {
+  padding-left: 22px;
+  color: var(--text-dim);
+}
+
+.bd-proc {
+  padding-left: 40px;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.bd-nums {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+
+.bd-ports {
+  color: var(--ok);
+  font-size: 10px;
+}
+
+.bd-core {
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  margin-top: 2px;
+  color: var(--text-dim);
+}
+
 /* ---------- component sections + run commands ---------- */
 
 .component-header {

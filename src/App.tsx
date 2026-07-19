@@ -482,6 +482,10 @@ export default function App() {
             project={p}
             visible={p.id === ws.activeId}
             zen={zen}
+            allProjects={openProjects.map((x) => ({
+              name: x.name,
+              roots: x.components.map((c) => c.path),
+            }))}
             events={agentEvents}
             hookPath={hookPath}
             dismissedPending={dismissedPending}

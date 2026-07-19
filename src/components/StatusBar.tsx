@@ -50,17 +50,33 @@ interface StatusBarProps {
   /** This project is the one on screen. Hidden projects freeze their polling
    *  (git status, transcript stats) instead of burning it in the background. */
   visible: boolean;
+  /** All open projects — the resource popup groups every session by project. */
+  projects: { name: string; roots: string[] }[];
   /** Present when a Claude session is live in this project; switches its model. */
   onSetModel?: (model: string) => void;
 }
 
-export function StatusBar({ roots, agents, events, visible, onSetModel }: StatusBarProps) {
+export function StatusBar({ roots, agents, events, visible, projects, onSetModel }: StatusBarProps) {
   const [branch, setBranch] = useState<string | null>(null);
   const [dirty, setDirty] = useState(0);
   const [app, setApp] = useState<ipc.AppStats | null>(null);
   const [stats, setStats] = useState<ipc.ClaudeSessionStats | null>(null);
   const [modelMenu, setModelMenu] = useState(false);
   const [confirmModel, setConfirmModel] = useState<{ id: string; label: string } | null>(null);
+  // Resource breakdown popup. Machine-wide session stats are subscribed only
+  // while it is open — the rest of the time this component costs nothing.
+  const [breakdown, setBreakdown] = useState(false);
+  const [allSessions, setAllSessions] = useState<ipc.SessionStats[]>([]);
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
+  const [openSessions, setOpenSessions] = useState<Record<number, boolean>>({});
+  useEffect(() => {
+    if (!breakdown) return;
+    const sub = ipc.onPtyStats(setAllSessions);
+    return () => {
+      setAllSessions([]);
+      void sub.then((fn) => fn());
+    };
+  }, [breakdown]);
 
   // Whole-app footprint, pushed from the Rust monitor. Only the visible
   // project listens — every hidden StatusBar re-rendering on each tick is
@@ -144,16 +160,133 @@ export function StatusBar({ roots, agents, events, visible, onSetModel }: Status
       )}
       <span className="status-spacer" />
       {app && (
-        <span
-          className="status-item status-res"
-          title={
-            `canopy: ${app.procs} process${app.procs === 1 ? "" : "es"} — ` +
-            `Rust core, language servers, terminals and everything they spawned.\n\n` +
-            `Does not include the WebView: macOS runs it in system-owned WebKit ` +
-            `processes parented to launchd, which can't be attributed back to us.`
-          }
-        >
-          {app.cpu.toFixed(0)}% cpu · {fmtMem(app.mem_bytes)}
+        <span className="status-item status-res status-model-anchor">
+          <button
+            className="status-model-btn"
+            title={
+              `canopy: ${app.procs} process${app.procs === 1 ? "" : "es"} — ` +
+              `Rust core, language servers, terminals and everything they spawned. ` +
+              `Click for the per-project breakdown.\n\n` +
+              `Does not include the WebView: macOS runs it in system-owned WebKit ` +
+              `processes parented to launchd, which can't be attributed back to us.`
+            }
+            onClick={() => setBreakdown((v) => !v)}
+          >
+            {app.cpu.toFixed(0)}% cpu · {fmtMem(app.mem_bytes)}
+          </button>
+          {breakdown && (
+            <div
+              className="status-menu status-breakdown"
+              onMouseLeave={() => setBreakdown(false)}
+            >
+              {(() => {
+                // Each session lands in the first project whose roots contain
+                // its cwd; two projects sharing a root can't double-count it.
+                const assigned = new Set<number>();
+                const groups = projects
+                  .map((p) => {
+                    const mine = allSessions.filter(
+                      (s) =>
+                        !assigned.has(s.id) &&
+                        p.roots.some((r) => s.cwd === r || s.cwd.startsWith(r + "/")),
+                    );
+                    mine.forEach((s) => assigned.add(s.id));
+                    return { name: p.name, sessions: mine };
+                  })
+                  .filter((g) => g.sessions.length > 0);
+                const other = allSessions.filter((s) => !assigned.has(s.id));
+                if (other.length > 0) groups.push({ name: "Other terminals", sessions: other });
+                const termCpu = allSessions.reduce((n, s) => n + s.total_cpu, 0);
+                const termMem = allSessions.reduce((n, s) => n + s.total_mem_bytes, 0);
+                return (
+                  <>
+                    <div className="bd-row bd-total">
+                      <span>Everything Canopy runs</span>
+                      <span className="bd-nums">
+                        {app.cpu.toFixed(0)}% · {fmtMem(app.mem_bytes)}
+                      </span>
+                    </div>
+                    {groups.map((g) => {
+                      const cpu = g.sessions.reduce((n, s) => n + s.total_cpu, 0);
+                      const mem = g.sessions.reduce((n, s) => n + s.total_mem_bytes, 0);
+                      const open = openGroups[g.name] ?? false;
+                      return (
+                        <div key={g.name}>
+                          <div
+                            className="bd-row bd-project"
+                            onClick={() =>
+                              setOpenGroups((prev) => ({ ...prev, [g.name]: !open }))
+                            }
+                          >
+                            <span>
+                              <span className="tree-chevron">{open ? "▾" : "▸"}</span>
+                              {g.name}
+                            </span>
+                            <span className="bd-nums">
+                              {cpu.toFixed(0)}% · {fmtMem(mem)}
+                            </span>
+                          </div>
+                          {open &&
+                            g.sessions.map((s) => {
+                              const sOpen = openSessions[s.id] ?? false;
+                              return (
+                                <div key={s.id}>
+                                  <div
+                                    className="bd-row bd-session"
+                                    title={s.cwd}
+                                    onClick={() =>
+                                      setOpenSessions((prev) => ({ ...prev, [s.id]: !sOpen }))
+                                    }
+                                  >
+                                    <span>
+                                      <span className="tree-chevron">{sOpen ? "▾" : "▸"}</span>
+                                      {s.title || "shell"}
+                                      {s.ports.length > 0 && (
+                                        <span className="bd-ports"> :{s.ports.join(" :")}</span>
+                                      )}
+                                    </span>
+                                    <span className="bd-nums">
+                                      {s.total_cpu.toFixed(0)}% · {fmtMem(s.total_mem_bytes)}
+                                    </span>
+                                  </div>
+                                  {sOpen &&
+                                    [...s.procs]
+                                      .sort((a, b) => b.mem_bytes - a.mem_bytes)
+                                      .slice(0, 8)
+                                      .map((p) => (
+                                        <div key={p.pid} className="bd-row bd-proc" title={p.cmd}>
+                                          <span>{p.name}</span>
+                                          <span className="bd-nums">
+                                            {p.cpu.toFixed(0)}% · {fmtMem(p.mem_bytes)}
+                                          </span>
+                                        </div>
+                                      ))}
+                                </div>
+                              );
+                            })}
+                        </div>
+                      );
+                    })}
+                    <div className="bd-row bd-core" title="Rust core, language servers, hook bridge — everything not inside a terminal">
+                      <span>Core & services</span>
+                      <span className="bd-nums">
+                        {Math.max(0, app.cpu - termCpu).toFixed(0)}% ·{" "}
+                        {fmtMem(Math.max(0, app.mem_bytes - termMem))}
+                      </span>
+                    </div>
+                    {allSessions.length === 0 && (
+                      <div className="bd-row bd-proc">
+                        {/* The monitor only reports terminals that exist, and
+                            every 2s — so this is either "none open" or the
+                            first tick hasn't landed yet. */}
+                        No terminal sessions reporting (yet).
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
+            </div>
+          )}
         </span>
       )}
       {stats?.model && (
