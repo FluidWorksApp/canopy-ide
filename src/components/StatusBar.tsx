@@ -3,7 +3,6 @@
 // arrives via hook events); cost is an estimate from a static pricing map.
 import { useEffect, useState } from "react";
 import * as ipc from "../ipc";
-import { AppearancePanel } from "./AppearancePanel";
 import type { AgentEventEntry } from "../types";
 
 // $/MTok (input, output, cache-read ≈ 0.1× input). Estimates only.
@@ -62,7 +61,6 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
   const [dirty, setDirty] = useState(0);
   const [app, setApp] = useState<ipc.AppStats | null>(null);
   const [stats, setStats] = useState<ipc.ClaudeSessionStats | null>(null);
-  const [appearanceOpen, setAppearanceOpen] = useState(false);
   const [modelMenu, setModelMenu] = useState(false);
   const [confirmModel, setConfirmModel] = useState<{ id: string; label: string } | null>(null);
   // Resource breakdown popup. Machine-wide session stats are subscribed only
@@ -384,12 +382,18 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
       )}
       <button
         className="btn-mini"
-        title="Skin, background, font & cursor"
-        onClick={() => setAppearanceOpen(true)}
+        title="Skin, background, font & cursor (Settings → Appearance)"
+        onClick={() =>
+          // Appearance lives inside the Settings dialog, which App owns; a
+          // window event keeps this button working without prop-drilling an
+          // opener through ProjectView.
+          window.dispatchEvent(
+            new CustomEvent("canopy:open-settings", { detail: { tab: "appearance" } }),
+          )
+        }
       >
         🎨 Appearance
       </button>
-      {appearanceOpen && <AppearancePanel onClose={() => setAppearanceOpen(false)} />}
     </div>
   );
 }

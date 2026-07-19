@@ -37,20 +37,24 @@ export const monacoReady: Promise<void> = (async () => {
       "editor.background": "#f2f3f7",
     },
   });
-  // Honour a light preference chosen in a previous run: editors mount with
-  // whatever theme is active when services come up.
-  try {
-    const stored = JSON.parse(localStorage.getItem("canopy.settings") ?? "{}") as {
-      theme?: string;
-    };
-    const light =
-      stored.theme === "light" ||
-      (stored.theme === "system" &&
-        !window.matchMedia("(prefers-color-scheme: dark)").matches);
-    if (light) monaco.editor.setTheme("canopy-light");
-  } catch {
-    // malformed settings: dark default stands
-  }
+  // Monaco doesn't read CSS variables, so it follows the skin by hand: the
+  // Daylight skin maps to canopy-light, everything else to canopy-dark —
+  // once at service startup (editors mount with whatever is then active) and
+  // again on every live skin switch (settings.ts dispatches canopy:theme).
+  const monacoThemeForSkin = () => {
+    try {
+      const stored = JSON.parse(localStorage.getItem("canopy.settings") ?? "{}") as {
+        theme?: string;
+      };
+      return stored.theme === "daylight" ? "canopy-light" : "canopy-dark";
+    } catch {
+      return "canopy-dark";
+    }
+  };
+  monaco.editor.setTheme(monacoThemeForSkin());
+  window.addEventListener("canopy:theme", () =>
+    monaco.editor.setTheme(monacoThemeForSkin()),
+  );
 })();
 
 export function languageForPath(path: string): string | undefined {

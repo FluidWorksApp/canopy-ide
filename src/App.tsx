@@ -21,7 +21,6 @@ import { ProjectManager } from "./components/ProjectManager";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { HelpDialog } from "./components/HelpDialog";
 import { Welcome } from "./components/Welcome";
-import { applyAppearance, watchSystemTheme } from "./themes";
 import { stopWorkspaceServers } from "./lsp/client";
 import { checkForUpdateAnyChannel, installUpdate, type UpdateAvailability } from "./updater";
 
@@ -50,7 +49,7 @@ export default function App() {
   // because the project-tab badges count from the same derived list.
   const [dismissedPending, setDismissedPending] = useState<Set<string>>(new Set());
   const [manager, setManager] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState<null | { tab?: "appearance" }>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   // One delete confirm for every entry point (manager, Welcome) — deleting a
   // project was a bare single click before, one misclick from losing a setup.
@@ -168,13 +167,6 @@ export default function App() {
   const saveProjectRef = useRef<(p: Project) => Promise<void>>(async () => {});
   const updateRef = useRef<(patch: Partial<WorkspaceState>) => void>(() => {});
 
-  // Theme/accent from settings, applied before first paint of the app body,
-  // and kept following the OS while the preference is "system".
-  useEffect(() => {
-    applyAppearance();
-    return watchSystemTheme();
-  }, []);
-
   // Load persisted workspace; re-register watchers/scopes for open projects.
   useEffect(() => {
     void loadWorkspace().then(async (state) => {
@@ -235,7 +227,7 @@ export default function App() {
           } else if (e.payload === "manage-projects") {
             setManager(true);
           } else if (e.payload === "settings") {
-            setSettingsOpen(true);
+            setSettingsOpen({});
           } else if (e.payload === "help") {
             setHelpOpen(true);
           } else if (e.payload === "save-project") {
@@ -288,9 +280,15 @@ export default function App() {
       }
     };
     window.addEventListener("keydown", keys);
+    // The status bar's 🎨 button (and anything else outside App) opens
+    // Settings at a specific tab through this event.
+    const openSettings = (e: Event) =>
+      setSettingsOpen({ tab: (e as CustomEvent).detail?.tab });
+    window.addEventListener("canopy:open-settings", openSettings);
     void ipc.hookBridgePath().then(setHookPath);
     return () => {
       window.removeEventListener("keydown", keys);
+      window.removeEventListener("canopy:open-settings", openSettings);
       subs.forEach((s) => void s.then((fn) => fn()));
     };
   }, []);
@@ -664,7 +662,12 @@ export default function App() {
         />
       )}
 
-      {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && (
+        <SettingsDialog
+          initialTab={settingsOpen.tab}
+          onClose={() => setSettingsOpen(null)}
+        />
+      )}
       {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
     </div>
   );
