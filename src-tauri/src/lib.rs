@@ -112,6 +112,9 @@ pub fn run() {
         // that has to follow an install.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // Opens https links in the system browser — the update toast's
+        // "Open downloads page" for installs that can't self-update.
+        .plugin(tauri_plugin_opener::init())
         .manage(pty::PtyManager::default())
         .manage(fsx::WorkspaceManager::default())
         .manage(lsp::LspManager::default())
