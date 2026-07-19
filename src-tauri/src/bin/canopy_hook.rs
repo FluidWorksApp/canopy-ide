@@ -63,12 +63,27 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // Which CLI's hook invoked us. Claude needs no flag (its contract is the
+    // default); other agents' setup registers `canopy-hook --agent <id>` so we
+    // can normalize their event names and speak their stdout contract.
+    let mut args = std::env::args().skip(1);
+    let mut agent_override: Option<String> = None;
+    while let Some(a) = args.next() {
+        if a == "--agent" {
+            agent_override = args.next();
+        }
+    }
+
     let mut raw = String::new();
     std::io::stdin().read_to_string(&mut raw)?;
-    let event: serde_json::Value = match serde_json::from_str(&raw) {
+    let mut event: serde_json::Value = match serde_json::from_str(&raw) {
         Ok(v) => v,
         Err(_) => return Ok(()),
     };
+
+    if let Some(agent) = agent_override.as_deref() {
+        normalize_event(&mut event, agent);
+    }
 
     let session_id = event["session_id"].as_str().unwrap_or("").to_string();
     let cwd = event["cwd"].as_str().unwrap_or("").to_string();
@@ -79,19 +94,72 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = update_digest(&session_id, &cwd, &event, &hook_event);
     }
 
-    // Only these two events can inject; everything else is observation only.
-    if hook_event == "UserPromptSubmit" || hook_event == "SessionStart" {
-        if let Some(context) = peer_context(&session_id, &cwd) {
-            let out = serde_json::json!({
-                "hookSpecificOutput": {
-                    "hookEventName": hook_event,
-                    "additionalContext": context,
+    match agent_override.as_deref() {
+        // Antigravity requires PreToolUse hooks to answer with an allow/deny
+        // verdict on stdout; we only observe, so always allow. Its other
+        // events ignore stdout. No peer-context printing: the
+        // hookSpecificOutput contract below is Claude's, and feeding it to
+        // agy would at best be ignored and at worst confuse its parser.
+        Some("agy") => {
+            if event["agy_event"].as_str() == Some("PreToolUse") {
+                println!("{}", serde_json::json!({ "allow_tool": true }));
+            }
+        }
+        Some(_) => {}
+        // Claude: only these two events can inject; everything else is
+        // observation only.
+        None => {
+            if hook_event == "UserPromptSubmit" || hook_event == "SessionStart" {
+                if let Some(context) = peer_context(&session_id, &cwd) {
+                    let out = serde_json::json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": hook_event,
+                            "additionalContext": context,
+                        }
+                    });
+                    println!("{out}");
                 }
-            });
-            println!("{out}");
+            }
         }
     }
     Ok(())
+}
+
+/// Rewrite a foreign CLI's event into the shape the rest of the pipeline
+/// (bus consumers, digests) already understands, and tag it with its agent so
+/// nothing downstream mislabels it as claude.
+fn normalize_event(event: &mut serde_json::Value, agent: &str) {
+    let Some(map) = event.as_object_mut() else { return };
+    map.insert("agent".into(), serde_json::json!(agent));
+    if agent == "agy" {
+        // Antigravity's lifecycle names differ from Claude's; keep the
+        // original under agy_event (the PreToolUse allow-verdict check needs
+        // it) and translate: PreInvocation is its prompt-submit, PostInvocation
+        // its turn-end.
+        let name = map
+            .get("hook_event_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        map.insert("agy_event".into(), serde_json::json!(name));
+        let mapped = match name.as_str() {
+            "PreInvocation" => "UserPromptSubmit",
+            "PostInvocation" => "Stop",
+            other => other,
+        };
+        map.insert("hook_event_name".into(), serde_json::json!(mapped));
+        // Digests read the prompt from `prompt` (Claude's field). Antigravity's
+        // field name is unverified — take the likeliest candidates.
+        if map.get("prompt").and_then(|v| v.as_str()).is_none() {
+            for key in ["user_input", "input", "display"] {
+                if let Some(v) = map.get(key).and_then(|v| v.as_str()) {
+                    let v = v.to_string();
+                    map.insert("prompt".into(), serde_json::json!(v));
+                    break;
+                }
+            }
+        }
+    }
 }
 
 /// Append the event to the bus the IDE tails, stamped with the terminal it came

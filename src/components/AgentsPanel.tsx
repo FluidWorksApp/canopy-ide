@@ -506,9 +506,19 @@ export function AgentsPanel({
       {showHookHelp && hookPath && (
         <div className="hook-help">
           <p>Stream tool-use events from agent CLIs into this panel:</p>
-          <button className="btn btn-accent" onClick={() => void autoSetup("claude")}>
-            Set up Claude Code hooks
-          </button>
+          {/* One button per CLI with an auto-setup arm — not just Claude.
+              (setup_agent_hooks in agents.rs is the registry for these.) */}
+          <div className="hook-setup-row">
+            <button className="btn btn-accent" onClick={() => void autoSetup("claude")}>
+              Claude Code
+            </button>
+            <button className="btn btn-accent" onClick={() => void autoSetup("codex")}>
+              Codex
+            </button>
+            <button className="btn btn-accent" onClick={() => void autoSetup("agy")}>
+              Antigravity
+            </button>
+          </div>
           {setupResult && <p className="hook-result">{setupResult}</p>}
           <p>
             Other CLIs: point any hook at appending single-line JSON to:

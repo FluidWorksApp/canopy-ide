@@ -238,6 +238,9 @@ export default function App() {
     void import("@tauri-apps/api/core").then(({ invoke }) => {
       void invoke("setup_agent_hooks", { agent: "claude" }).catch(() => {});
       void invoke("setup_agent_hooks", { agent: "codex" }).catch(() => {});
+      // No-op with a clear error until agy has run once (its config dir must
+      // exist); succeeds on the next launch after that.
+      void invoke("setup_agent_hooks", { agent: "agy" }).catch(() => {});
     });
     // Focus mode is reachable two ways: the native menu accelerator, and a
     // webview key handler. Belt and braces — the accelerator is what the menu

@@ -355,8 +355,100 @@ pub async fn setup_agent_hooks(agent: String) -> Result<String, String> {
     match agent.as_str() {
         "claude" => setup_claude_hooks(&home, &bridge),
         "codex" => setup_codex_hooks(&home, &bridge),
+        "agy" => setup_agy_hooks(&home),
         _ => Err(format!("auto-setup not supported for {agent} yet")),
     }
+}
+
+/// Antigravity CLI hooks: register the helper for all five of its events in
+/// ~/.gemini/antigravity-cli/hooks.json, under our own named group so
+/// reinstalls replace it and user-authored groups are never touched. Also
+/// best-effort enables its OSC 9 `notifications` setting — Canopy's terminals
+/// already parse OSC 9, so that alone surfaces "waiting for you" and
+/// "finished" the moment it's on.
+fn setup_agy_hooks(home: &str) -> Result<String, String> {
+    let helper = helper_path()?;
+    if !helper.exists() {
+        return Err(format!(
+            "hook helper missing at {} — hooks not installed",
+            helper.display()
+        ));
+    }
+    let dir = std::path::PathBuf::from(home).join(".gemini").join("antigravity-cli");
+    // No directory means the CLI has never run — nothing to configure yet, and
+    // creating it ourselves could fight its first-run setup.
+    if !dir.exists() {
+        return Err("Antigravity CLI not initialized yet — run `agy` once first".into());
+    }
+    let path = dir.join("hooks.json");
+    let mut hooks: serde_json::Value = if path.exists() {
+        let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        serde_json::from_str(&raw)
+            .map_err(|e| format!("{} is not valid JSON: {e}", path.display()))?
+    } else {
+        serde_json::json!({})
+    };
+    // `--agent agy` makes the helper normalize agy's event names and answer
+    // PreToolUse with an allow verdict (its required stdout contract).
+    let command = format!("{} --agent agy", helper.to_string_lossy());
+    let entry = |_ev: &str| {
+        serde_json::json!([{
+            "matcher": "*",
+            "hooks": [{ "type": "command", "command": command, "timeout": 10 }]
+        }])
+    };
+    let group = serde_json::json!({
+        "PreToolUse": entry("PreToolUse"),
+        "PostToolUse": entry("PostToolUse"),
+        "PreInvocation": entry("PreInvocation"),
+        "PostInvocation": entry("PostInvocation"),
+        "Notification": entry("Notification"),
+    });
+    let obj = hooks.as_object_mut().ok_or("hooks.json is not an object")?;
+    let already = obj.get("canopy") == Some(&group);
+    if !already {
+        obj.insert("canopy".into(), group);
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&hooks).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    // OSC 9 notifications: off by default in agy; flipping it costs nothing
+    // and Canopy already listens. Best-effort — a failure here shouldn't fail
+    // the hook install that already succeeded.
+    let settings_path = dir.join("settings.json");
+    let notif = (|| -> Result<bool, String> {
+        let mut settings: serde_json::Value = if settings_path.exists() {
+            serde_json::from_str(
+                &std::fs::read_to_string(&settings_path).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?
+        } else {
+            serde_json::json!({})
+        };
+        let obj = settings.as_object_mut().ok_or("not an object")?;
+        if obj.get("notifications") == Some(&serde_json::json!(true)) {
+            return Ok(false);
+        }
+        obj.insert("notifications".into(), serde_json::json!(true));
+        std::fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(true)
+    })()
+    .unwrap_or(false);
+
+    if already && !notif {
+        return Ok("Antigravity hooks already set up".into());
+    }
+    Ok(format!(
+        "Antigravity hooks installed{} — restart agy sessions to pick them up",
+        if notif { " (+ terminal notifications enabled)" } else { "" }
+    ))
 }
 
 /// Where the hook helper lives once installed. Hooks reference this stable path
@@ -494,6 +586,13 @@ fn resume_location(digest: &serde_json::Value) -> (String, bool) {
         // check we can't perform.
         return (cwd, true);
     };
+    // The transcript-on-disk verification below is Claude-layout-specific
+    // (~/.claude/projects buckets). A non-claude agent with a session id would
+    // always fail it and get wrongly labeled "can't resume" — its resume
+    // command syntax is registry-verified, so trust it.
+    if digest["agent"].as_str().is_some_and(|a| a != "claude") {
+        return (cwd, true);
+    }
 
     // Nothing on disk anywhere: the agent started but was never talked to, or
     // died before writing. Every `--resume` against it fails, so callers must

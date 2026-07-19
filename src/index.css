@@ -1737,6 +1737,12 @@ div + .bd-head {
   margin-left: auto;
 }
 
+.hook-setup-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 .pending-option-clickable {
   cursor: pointer;
   border-radius: 5px;
