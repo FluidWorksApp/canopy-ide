@@ -1,44 +1,66 @@
-// Issue Trackers sidebar section: one collapsible group per provider from
-// the trackers.ts registry (GitHub by default, Linear once connected, more
-// later). Read-only rows cross-referenced against local worktrees; clicking
-// ▶ on a ticket creates/reuses a worktree on its branch and launches an
-// agent with the ticket as opening context. It stops there on purpose — no
-// auto-commit, no auto-PR.
+// Issues sidebar section: ONE unified list across every connected tracker,
+// grouped by unified status (in progress / todo / backlog / done), with
+// source pills up top acting as filters. Connecting a tracker happens in
+// Settings → Integrations, not here. A ticket can be handed to an agent —
+// an already-open agent terminal, or a fresh one started in a worktree on
+// the ticket's branch. It stops there on purpose — no auto-commit, no
+// auto-PR.
 import { useCallback, useEffect, useState } from "react";
 import * as ipc from "../ipc";
 import {
+  STATUS_LABELS,
+  STATUS_ORDER,
   TRACKERS,
-  setTrackerKey,
   ticketBranch,
   ticketCommand,
+  ticketContext,
   ticketWorktree,
-  trackerKey,
-  type TrackerProvider,
+  unifiedStatus,
 } from "../trackers";
+import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { PlayIcon } from "./icons";
+
+export interface AgentTarget {
+  tabId: string;
+  title: string;
+  ptyId: number;
+}
 
 interface TicketsPanelProps {
   components: { label: string; path: string }[];
-  /** Launch a terminal running `command` in `cwd`, titled `title`. */
+  /** Agent terminals currently open in this project — send targets. */
+  agentTargets: AgentTarget[];
+  /** Launch a fresh terminal running `command` in `cwd`, titled `title`. */
   onStartTicket: (cwd: string, command: string, title: string) => void;
+  /** Type `text` into an already-running agent terminal and focus it. */
+  onSendToAgent: (target: AgentTarget, text: string) => void;
+  /** Jump to Settings → Integrations (where sources get connected). */
+  onOpenIntegrations: () => void;
   onNotice: (msg: string) => void;
 }
 
-interface ProviderState {
-  ok: boolean;
-  reason?: string;
-  tickets: ipc.TicketInfo[];
-  error?: string;
+interface SourcedTicket extends ipc.TicketInfo {
+  source: string;
 }
 
-export function TicketsPanel({ components, onStartTicket, onNotice }: TicketsPanelProps) {
+export function TicketsPanel({
+  components,
+  agentTargets,
+  onStartTicket,
+  onSendToAgent,
+  onOpenIntegrations,
+  onNotice,
+}: TicketsPanelProps) {
   const [repos, setRepos] = useState<ipc.RepoInfo[]>([]);
   const [repo, setRepo] = useState<string | null>(null);
   const [worktrees, setWorktrees] = useState<ipc.WorktreeInfo[]>([]);
-  const [byProvider, setByProvider] = useState<Record<string, ProviderState>>({});
-  const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
+  const [tickets, setTickets] = useState<SourcedTicket[]>([]);
+  const [connected, setConnected] = useState<string[]>([]);
+  const [errors, setErrors] = useState<string[]>([]);
+  const [offSources, setOffSources] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [starting, setStarting] = useState<string | null>(null);
+  const menu = useContextMenu();
 
   const key = components.map((c) => c.path).join("\n");
 
@@ -57,20 +79,26 @@ export function TicketsPanel({ components, onStartTicket, onNotice }: TicketsPan
     if (!repo) return;
     setBusy(true);
     try {
-      // Worktrees once, for the in-progress cross-reference on every row.
       void ipc.gitWorktrees(repo).then(setWorktrees).catch(() => setWorktrees([]));
-      const results = await Promise.all(
-        TRACKERS.map(async (p): Promise<[string, ProviderState]> => {
+      const all: SourcedTicket[] = [];
+      const on: string[] = [];
+      const errs: string[] = [];
+      await Promise.all(
+        TRACKERS.map(async (p) => {
           const avail = await p.available(repos.map((r) => r.path));
-          if (!avail.ok) return [p.id, { ok: false, reason: avail.reason, tickets: [] }];
+          if (!avail.ok) return;
+          on.push(p.id);
           try {
-            return [p.id, { ok: true, tickets: await p.fetch(repo) }];
+            const list = await p.fetch(repo);
+            all.push(...list.map((t) => ({ ...t, source: p.id })));
           } catch (err) {
-            return [p.id, { ok: true, tickets: [], error: String(err) }];
+            errs.push(`${p.name}: ${String(err)}`);
           }
         }),
       );
-      setByProvider(Object.fromEntries(results));
+      setConnected(on);
+      setTickets(all);
+      setErrors(errs);
     } finally {
       setBusy(false);
     }
@@ -80,7 +108,13 @@ export function TicketsPanel({ components, onStartTicket, onNotice }: TicketsPan
     void load();
   }, [load]);
 
-  const start = async (ticket: ipc.TicketInfo) => {
+  useEffect(() => {
+    const onChange = () => void load();
+    window.addEventListener("canopy:trackers-changed", onChange);
+    return () => window.removeEventListener("canopy:trackers-changed", onChange);
+  }, [load]);
+
+  const startNew = async (ticket: SourcedTicket) => {
     if (!repo || starting) return;
     setStarting(ticket.id);
     try {
@@ -104,108 +138,78 @@ export function TicketsPanel({ components, onStartTicket, onNotice }: TicketsPan
     }
   };
 
-  const connectUI = (p: TrackerProvider) => (
-    <div className="tracker-connect">
-      <p>{p.config!.help}</p>
-      <div className="tracker-connect-row">
-        <input
-          type="password"
-          placeholder={p.config!.placeholder}
-          value={keyDrafts[p.id] ?? ""}
-          onChange={(e) => setKeyDrafts((d) => ({ ...d, [p.id]: e.target.value }))}
-        />
-        <button
-          className="btn btn-accent"
-          disabled={!(keyDrafts[p.id] ?? "").trim()}
-          onClick={() => {
-            setTrackerKey(p.id, (keyDrafts[p.id] ?? "").trim());
-            setKeyDrafts((d) => ({ ...d, [p.id]: "" }));
-            void load();
-          }}
-        >
-          Connect
-        </button>
-      </div>
-    </div>
-  );
-
-  const rows = (p: TrackerProvider, st: ProviderState) => {
-    if (st.error) return <div className="tree-empty">{st.error}</div>;
-    if (st.tickets.length === 0 && !busy)
-      return <div className="tree-empty">No active tickets.</div>;
-    // Group by human state name, in first-seen order (the fetches are already
-    // sorted by recency/board order from the tracker).
-    const groups = new Map<string, ipc.TicketInfo[]>();
-    for (const t of st.tickets) {
-      const g = groups.get(t.state) ?? [];
-      g.push(t);
-      groups.set(t.state, g);
+  /** ▶ menu: hand the ticket to a running agent, or spin up a new one. */
+  const openSendMenu = (e: React.MouseEvent, ticket: SourcedTicket) => {
+    const wt = ticketWorktree(ticket, worktrees);
+    const items: MenuItem[] = [
+      {
+        label: wt
+          ? `New agent in worktree (${wt.branch})`
+          : `New agent in worktree ${ticketBranch(ticket)}`,
+        onClick: () => void startNew(ticket),
+      },
+    ];
+    if (agentTargets.length > 0) {
+      items.push({ label: "", separator: true });
+      for (const target of agentTargets) {
+        items.push({
+          label: `Send to ${target.title}`,
+          onClick: () => onSendToAgent(target, ticketContext(ticket)),
+        });
+      }
     }
-    return [...groups.entries()].map(([state, tickets]) => (
-      <div key={state}>
-        <div className="ticket-state-head">
-          {state}
-          <span className="badge">{tickets.length}</span>
-        </div>
-        {tickets.map((t) => {
-          const wt = ticketWorktree(t, worktrees);
-          return (
-            <div
-              key={`${p.id}-${t.id}`}
-              className="ticket-row"
-              title={`${t.id} — ${t.title}\n${t.url}${wt ? `\nworktree: ${wt.path}` : ""}`}
-              onClick={() => {
-                void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
-                  openUrl(t.url),
-                );
-              }}
-            >
-              <div className="ticket-main">
-                <span className="ticket-id">{t.id}</span>
-                <span className="ticket-title">{t.title}</span>
-              </div>
-              <div className="ticket-meta">
-                {wt && (
-                  <span className="ticket-wt" title={`Worktree exists: ${wt.branch}`}>
-                    ⑂ {wt.dirty > 0 ? `±${wt.dirty}` : "clean"}
-                  </span>
-                )}
-                {t.assignee && (
-                  <span className={`ticket-assignee ${t.mine ? "ticket-mine" : ""}`}>
-                    {t.mine ? "you" : t.assignee}
-                  </span>
-                )}
-                <button
-                  className="icon-btn ticket-start"
-                  title={
-                    wt
-                      ? `Open agent in existing worktree (${wt.branch})`
-                      : `Create worktree ${ticketBranch(t)} and start an agent on this ticket`
-                  }
-                  disabled={starting != null}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void start(t);
-                  }}
-                >
-                  <PlayIcon size={12} />
-                </button>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    ));
+    menu.open(e, items);
   };
+
+  const visible = tickets.filter((t) => !offSources.has(t.source));
+  const groups = STATUS_ORDER.map((status) => ({
+    status,
+    tickets: visible.filter((t) => unifiedStatus(t) === status),
+  })).filter((g) => g.tickets.length > 0);
+
+  const sourceName = (id: string) => TRACKERS.find((p) => p.id === id)?.name ?? id;
 
   return (
     <div className="side-panel">
+      {menu.menu && (
+        <ContextMenu x={menu.menu.x} y={menu.menu.y} items={menu.menu.items} onClose={menu.close} />
+      )}
       <div className="side-panel-head">
-        <span>Issue trackers</span>
+        <span>Issues</span>
         <button className="btn-icon" title="Refresh" onClick={() => void load()}>
           ↻
         </button>
       </div>
+
+      {/* Source pills: which trackers feed this list. Click to filter one out.
+          Connecting new sources lives in Settings → Integrations. */}
+      <div className="ticket-pills">
+        {connected.map((id) => (
+          <button
+            key={id}
+            className={`ticket-pill ${offSources.has(id) ? "" : "ticket-pill-on"}`}
+            title={`${sourceName(id)} — click to ${offSources.has(id) ? "show" : "hide"}`}
+            onClick={() =>
+              setOffSources((prev) => {
+                const next = new Set(prev);
+                if (next.has(id)) next.delete(id);
+                else next.add(id);
+                return next;
+              })
+            }
+          >
+            {sourceName(id)}
+          </button>
+        ))}
+        <button
+          className="ticket-pill ticket-pill-add"
+          title="Connect a tracker (Settings → Integrations)"
+          onClick={onOpenIntegrations}
+        >
+          ＋
+        </button>
+      </div>
+
       {repos.length > 1 && (
         <select
           className="ticket-repo-select"
@@ -220,37 +224,85 @@ export function TicketsPanel({ components, onStartTicket, onNotice }: TicketsPan
           ))}
         </select>
       )}
-      {TRACKERS.map((p) => {
-        const st = byProvider[p.id];
-        return (
-          <div key={p.id} className="tracker-section">
-            <div className="side-panel-head">
-              <span>{p.name}</span>
-              {st?.ok && trackerKey(p.id) && (
-                <button
-                  className="btn-icon"
-                  title={`Disconnect ${p.name} (removes the locally stored key)`}
+
+      {errors.map((e) => (
+        <div key={e} className="tree-empty">
+          {e}
+        </div>
+      ))}
+
+      {connected.length === 0 && !busy ? (
+        <div className="tree-empty">
+          No trackers connected.{" "}
+          <a
+            href="#"
+            onClick={(e) => {
+              e.preventDefault();
+              onOpenIntegrations();
+            }}
+          >
+            Connect one in Settings → Integrations.
+          </a>
+        </div>
+      ) : groups.length === 0 && !busy ? (
+        <div className="tree-empty">No active issues.</div>
+      ) : (
+        groups.map((g) => (
+          <div key={g.status}>
+            <div className="ticket-state-head">
+              {STATUS_LABELS[g.status]}
+              <span className="badge">{g.tickets.length}</span>
+            </div>
+            {g.tickets.map((t) => {
+              const wt = ticketWorktree(t, worktrees);
+              return (
+                <div
+                  key={`${t.source}-${t.id}`}
+                  className="ticket-row"
+                  title={`${t.id} — ${t.title}\n${sourceName(t.source)} · ${t.state}\n${t.url}${
+                    wt ? `\nworktree: ${wt.path}` : ""
+                  }`}
                   onClick={() => {
-                    setTrackerKey(p.id, "");
-                    void load();
+                    void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
+                      openUrl(t.url),
+                    );
                   }}
                 >
-                  ✕
-                </button>
-              )}
-            </div>
-            {!st ? (
-              <div className="tree-empty">…</div>
-            ) : st.ok ? (
-              rows(p, st)
-            ) : st.reason === "connect" && p.config ? (
-              connectUI(p)
-            ) : (
-              <div className="tree-empty">{st.reason}</div>
-            )}
+                  <div className="ticket-main">
+                    <span className={`ticket-src ticket-src-${t.source}`} title={sourceName(t.source)} />
+                    <span className="ticket-id">{t.id}</span>
+                    <span className="ticket-title">{t.title}</span>
+                  </div>
+                  <div className="ticket-meta">
+                    <span className="ticket-state-name">{t.state}</span>
+                    {wt && (
+                      <span className="ticket-wt" title={`Worktree exists: ${wt.branch}`}>
+                        ⑂ {wt.dirty > 0 ? `±${wt.dirty}` : "clean"}
+                      </span>
+                    )}
+                    {t.assignee && (
+                      <span className={`ticket-assignee ${t.mine ? "ticket-mine" : ""}`}>
+                        {t.mine ? "you" : t.assignee}
+                      </span>
+                    )}
+                    <button
+                      className="icon-btn ticket-start"
+                      title="Send to an agent — an open one, or a new one in a worktree"
+                      disabled={starting != null}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openSendMenu(e, t);
+                      }}
+                    >
+                      <PlayIcon size={12} />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
-        );
-      })}
+        ))
+      )}
     </div>
   );
 }

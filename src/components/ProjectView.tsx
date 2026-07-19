@@ -1424,7 +1424,30 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       {sideTab === "trackers" && (
         <TicketsPanel
           components={project.components.map((c) => ({ label: c.label, path: c.path }))}
+          agentTargets={tabs
+            .filter(
+              (t): t is TermSubTab =>
+                t.type === "terminal" && !t.run && isAgentTab(t) && t.ptyId != null,
+            )
+            .map((t) => ({
+              tabId: t.id,
+              title: t.customTitle ?? t.title,
+              ptyId: t.ptyId as number,
+            }))}
           onStartTicket={(cwd, command, title) => addTerminal(cwd, command, title, "✳")}
+          onSendToAgent={(target, text) => {
+            // Same two-write pattern as the model switcher: text first, Enter
+            // a beat later so a TUI's autocomplete can't swallow the submit.
+            void ipc.ptyWrite(target.ptyId, text);
+            setTimeout(() => void ipc.ptyWrite(target.ptyId, "\r"), 250);
+            setActiveTabId(target.tabId);
+            setTimeout(() => termHandles.current.get(target.tabId)?.focus(), 50);
+          }}
+          onOpenIntegrations={() =>
+            window.dispatchEvent(
+              new CustomEvent("canopy:open-settings", { detail: { tab: "integrations" } }),
+            )
+          }
           onNotice={onNotice}
         />
       )}

@@ -402,20 +402,6 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
           ~${cost.toFixed(2)}
         </span>
       )}
-      <button
-        className="btn-mini"
-        title="Skin, font & cursor (Settings → Appearance)"
-        onClick={() =>
-          // Appearance lives inside the Settings dialog, which App owns; a
-          // window event keeps this button working without prop-drilling an
-          // opener through ProjectView.
-          window.dispatchEvent(
-            new CustomEvent("canopy:open-settings", { detail: { tab: "appearance" } }),
-          )
-        }
-      >
-        🎨 Appearance
-      </button>
     </div>
   );
 }

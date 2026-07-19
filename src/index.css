@@ -3623,3 +3623,54 @@ textarea,
 .ticket-start {
   margin-left: auto;
 }
+
+/* Source pills + per-row source dot for the unified Issues list. */
+.ticket-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 12px;
+}
+
+.ticket-pill {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+
+.ticket-pill-on {
+  border-color: var(--accent);
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.ticket-pill-add {
+  padding: 2px 8px;
+}
+
+.ticket-src {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+.ticket-src-github {
+  background: #8b949e;
+}
+
+.ticket-src-linear {
+  background: #5e6ad2;
+}
+
+.ticket-state-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 90px;
+}

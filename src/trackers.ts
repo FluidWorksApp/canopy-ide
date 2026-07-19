@@ -33,8 +33,12 @@ export interface TrackerProvider {
 export const trackerKey = (id: string): string =>
   getSettings().trackerKeys[id] ?? "";
 
-export const setTrackerKey = (id: string, key: string) =>
+export const setTrackerKey = (id: string, key: string) => {
   updateSettings({ trackerKeys: { ...getSettings().trackerKeys, [id]: key } });
+  // The Issues panel refreshes itself on this — connecting a tracker in
+  // Settings shows its issues without a manual reload.
+  window.dispatchEvent(new CustomEvent("canopy:trackers-changed"));
+};
 
 const github: TrackerProvider = {
   id: "github",
@@ -106,11 +110,47 @@ export function ticketBranch(ticket: ipc.TicketInfo): string {
   return slug ? `${num}-${slug}` : `issue-${num}`;
 }
 
-/** The opening context typed into the agent when work starts on a ticket.
- *  Single-quoted for the shell. */
-export function ticketCommand(ticket: ipc.TicketInfo): string {
-  const ctx =
+/** The opening context an agent gets when a ticket is handed to it. */
+export function ticketContext(ticket: ipc.TicketInfo): string {
+  return (
     `Pick up ticket ${ticket.id}: "${ticket.title}" (${ticket.url}). ` +
-    `Read the ticket, look around the code, propose a plan, then start working.`;
-  return `claude '${ctx.replaceAll("'", `'\\''`)}'`;
+    `Read the ticket, look around the code, propose a plan, then start working.`
+  );
+}
+
+/** Shell command that starts a fresh agent seeded with the ticket. */
+export function ticketCommand(ticket: ipc.TicketInfo): string {
+  return `claude '${ticketContext(ticket).replaceAll("'", `'\\''`)}'`;
+}
+
+// ---------- unified status ----------
+// Every tracker's states fold into four buckets so the panel can present ONE
+// status-grouped list regardless of source. Provider state_type values:
+// GitHub: open/closed; Linear: triage/backlog/unstarted/started (completed/
+// canceled are filtered out at fetch). New providers map here too.
+
+export type UnifiedStatus = "in_progress" | "todo" | "backlog" | "done";
+
+export const STATUS_ORDER: UnifiedStatus[] = ["in_progress", "todo", "backlog", "done"];
+
+export const STATUS_LABELS: Record<UnifiedStatus, string> = {
+  in_progress: "In progress",
+  todo: "Todo",
+  backlog: "Backlog",
+  done: "Done",
+};
+
+export function unifiedStatus(t: ipc.TicketInfo): UnifiedStatus {
+  switch (t.state_type) {
+    case "started":
+      return "in_progress";
+    case "backlog":
+      return "backlog";
+    case "closed":
+    case "completed":
+    case "canceled":
+      return "done";
+    default:
+      return "todo"; // open, unstarted, triage — actionable but not started
+  }
 }

@@ -49,7 +49,7 @@ export default function App() {
   // because the project-tab badges count from the same derived list.
   const [dismissedPending, setDismissedPending] = useState<Set<string>>(new Set());
   const [manager, setManager] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState<null | { tab?: "appearance" }>(null);
+  const [settingsOpen, setSettingsOpen] = useState<null | { tab?: import("./components/SettingsDialog").SettingsTab }>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   // One delete confirm for every entry point (manager, Welcome) — deleting a
   // project was a bare single click before, one misclick from losing a setup.

@@ -3,7 +3,7 @@
 // long labels into slivers and pushed wide control groups out of the modal).
 // Skins render as preview cards — a palette is a thing you look at, not a
 // word you read.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   applyTheme,
   getSettings,
@@ -14,8 +14,10 @@ import {
   type Theme,
 } from "../settings";
 import { useEscape } from "../useEscape";
+import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
+import { ghAvailable } from "../ipc";
 
-export type SettingsTab = "appearance" | "editor" | "terminal" | "guard";
+export type SettingsTab = "appearance" | "editor" | "terminal" | "guard" | "integrations";
 
 interface SettingsDialogProps {
   onClose: () => void;
@@ -27,6 +29,7 @@ const TABS: { id: SettingsTab; label: string }[] = [
   { id: "editor", label: "Editor" },
   { id: "terminal", label: "Terminal" },
   { id: "guard", label: "Process guard" },
+  { id: "integrations", label: "Integrations" },
 ];
 
 const CURSOR_OPTIONS: { id: CursorStyle; label: string }[] = [
@@ -72,6 +75,12 @@ function Item({
 
 export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsDialogProps) {
   const [tab, setTab] = useState<SettingsTab>(initialTab);
+  const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
+  const [keysVersion, setKeysVersion] = useState(0);
+  const [ghOk, setGhOk] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (tab === "integrations" && ghOk === null) void ghAvailable().then(setGhOk);
+  }, [tab, ghOk]);
   const [s, setS] = useState<Settings>(() => getSettings());
   useEscape(onClose, true);
 
@@ -263,6 +272,74 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     }}
                   />
                 </Item>
+              </>
+            )}
+
+            {tab === "integrations" && (
+              <>
+                {TRACKERS.map((p) => (
+                  <div key={p.id} className="set-item">
+                    <div className="set-item-name">{p.name}</div>
+                    {p.config ? (
+                      trackerKey(p.id) ? (
+                        <>
+                          <div className="set-item-desc">
+                            Connected. The key is stored locally on this machine only.
+                          </div>
+                          <div className="set-item-control">
+                            <button
+                              className="btn"
+                              onClick={() => {
+                                setTrackerKey(p.id, "");
+                                setKeysVersion((v) => v + 1);
+                              }}
+                            >
+                              Disconnect
+                            </button>
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div className="set-item-desc">{p.config.help}</div>
+                          <div className="set-item-control set-inline">
+                            <input
+                              type="password"
+                              className="set-wide"
+                              placeholder={p.config.placeholder}
+                              value={keyDrafts[p.id] ?? ""}
+                              onChange={(e) =>
+                                setKeyDrafts((d) => ({ ...d, [p.id]: e.target.value }))
+                              }
+                            />
+                            <button
+                              className="btn btn-accent"
+                              disabled={!(keyDrafts[p.id] ?? "").trim()}
+                              onClick={() => {
+                                setTrackerKey(p.id, (keyDrafts[p.id] ?? "").trim());
+                                setKeyDrafts((d) => ({ ...d, [p.id]: "" }));
+                                setKeysVersion((v) => v + 1);
+                              }}
+                            >
+                              Connect
+                            </button>
+                          </div>
+                        </>
+                      )
+                    ) : (
+                      <div className="set-item-desc">
+                        {ghOk == null
+                          ? "Checking for the GitHub CLI…"
+                          : ghOk
+                            ? "Connected through your GitHub CLI (gh) — nothing to configure."
+                            : "Needs the GitHub CLI: brew install gh, then gh auth login in a terminal."}
+                      </div>
+                    )}
+                  </div>
+                ))}
+                <div className="set-item-desc" data-v={keysVersion}>
+                  Issues from connected trackers appear unified in the ◎ Issues
+                  panel in the sidebar.
+                </div>
               </>
             )}
           </div>
