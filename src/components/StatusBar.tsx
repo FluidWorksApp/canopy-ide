@@ -82,7 +82,6 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
   const menuStyle = menuPos
     ? ({ position: "fixed", right: menuPos.right, bottom: menuPos.bottom } as const)
     : undefined;
-  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const [openSessions, setOpenSessions] = useState<Record<number, boolean>>({});
   useEffect(() => {
     if (!breakdown) return;
@@ -219,84 +218,70 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
                 const termMem = allSessions.reduce((n, s) => n + s.total_mem_bytes, 0);
                 return (
                   <>
-                    <div className="bd-row bd-total">
-                      <span>Everything Canopy runs</span>
-                      <span className="bd-nums">
-                        {app.cpu.toFixed(0)}% · {fmtMem(app.mem_bytes)}
-                      </span>
-                    </div>
+                    {/* No grand-total row: the chip this popped from already
+                        shows it. Each project is a section header with its
+                        terminal tabs listed beneath; a tab expands to its
+                        processes on click. */}
                     {groups.map((g) => {
                       const cpu = g.sessions.reduce((n, s) => n + s.total_cpu, 0);
                       const mem = g.sessions.reduce((n, s) => n + s.total_mem_bytes, 0);
-                      // Projects open by default: the per-shell breakdown IS
-                      // the point of the popup, not a hidden second level.
-                      const open = openGroups[g.name] ?? true;
                       return (
                         <div key={g.name}>
-                          <div
-                            className="bd-row bd-project"
-                            onClick={() =>
-                              setOpenGroups((prev) => ({ ...prev, [g.name]: !open }))
-                            }
-                          >
-                            <span>
-                              <span className="tree-chevron">{open ? "▾" : "▸"}</span>
-                              {g.name}
-                            </span>
+                          <div className="bd-head">
+                            <span>{g.name}</span>
                             <span className="bd-nums">
                               {cpu.toFixed(0)}% · {fmtMem(mem)}
                             </span>
                           </div>
-                          {open &&
-                            g.sessions.map((s) => {
-                              const sOpen = openSessions[s.id] ?? false;
-                              return (
-                                <div key={s.id}>
-                                  <div
-                                    className="bd-row bd-session"
-                                    title={s.cwd}
-                                    onClick={() =>
-                                      setOpenSessions((prev) => ({ ...prev, [s.id]: !sOpen }))
-                                    }
-                                  >
-                                    <span>
-                                      <span className="tree-chevron">{sOpen ? "▾" : "▸"}</span>
-                                      {s.title || "shell"}
-                                      {s.ports.length > 0 && (
-                                        <span className="bd-ports"> :{s.ports.join(" :")}</span>
-                                      )}
-                                    </span>
-                                    <span className="bd-nums">
-                                      {s.total_cpu.toFixed(0)}% · {fmtMem(s.total_mem_bytes)}
-                                    </span>
-                                  </div>
-                                  {sOpen &&
-                                    [...s.procs]
-                                      .sort((a, b) => b.mem_bytes - a.mem_bytes)
-                                      .slice(0, 8)
-                                      .map((p) => (
-                                        <div key={p.pid} className="bd-row bd-proc" title={p.cmd}>
-                                          <span>{p.name}</span>
-                                          <span className="bd-nums">
-                                            {p.cpu.toFixed(0)}% · {fmtMem(p.mem_bytes)}
-                                          </span>
-                                        </div>
-                                      ))}
+                          {g.sessions.map((s) => {
+                            const sOpen = openSessions[s.id] ?? false;
+                            return (
+                              <div key={s.id}>
+                                <div
+                                  className="bd-row bd-session"
+                                  title={s.cwd}
+                                  onClick={() =>
+                                    setOpenSessions((prev) => ({ ...prev, [s.id]: !sOpen }))
+                                  }
+                                >
+                                  <span>
+                                    <span className="tree-chevron">{sOpen ? "▾" : "▸"}</span>
+                                    {s.title || "shell"}
+                                    {s.ports.length > 0 && (
+                                      <span className="bd-ports"> :{s.ports.join(" :")}</span>
+                                    )}
+                                  </span>
+                                  <span className="bd-nums">
+                                    {s.total_cpu.toFixed(0)}% · {fmtMem(s.total_mem_bytes)}
+                                  </span>
                                 </div>
-                              );
-                            })}
+                                {sOpen &&
+                                  [...s.procs]
+                                    .sort((a, b) => b.mem_bytes - a.mem_bytes)
+                                    .slice(0, 8)
+                                    .map((p) => (
+                                      <div key={p.pid} className="bd-row bd-proc" title={p.cmd}>
+                                        <span>{p.name}</span>
+                                        <span className="bd-nums">
+                                          {p.cpu.toFixed(0)}% · {fmtMem(p.mem_bytes)}
+                                        </span>
+                                      </div>
+                                    ))}
+                              </div>
+                            );
+                          })}
                         </div>
                       );
                     })}
-                    {/* Named "Canopy itself", not "Core" — a project named
-                        anything like Core/Coraa made that read as a sibling
-                        project row instead of the IDE's own overhead. */}
-                    <div className="bd-row bd-core" title="Canopy's own engine, language servers and the agent hook bridge — everything not running inside a terminal">
-                      <span>Canopy itself (engine & language servers)</span>
+                    <div className="bd-head" title="Canopy's own engine, language servers and the agent hook bridge — everything not running inside a terminal">
+                      <span>Core services</span>
                       <span className="bd-nums">
                         {Math.max(0, app.cpu - termCpu).toFixed(0)}% ·{" "}
                         {fmtMem(Math.max(0, app.mem_bytes - termMem))}
                       </span>
+                    </div>
+                    <div className="bd-row bd-proc">
+                      Canopy engine · language servers · hook bridge
                     </div>
                     {allSessions.length === 0 && (
                       <div className="bd-row bd-proc">

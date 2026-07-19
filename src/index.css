@@ -480,26 +480,33 @@ body,
   white-space: nowrap;
 }
 
-.bd-total {
+/* Section headers: one per project, plus Core services. */
+.bd-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px 3px;
+  font-size: 10px;
   font-weight: 600;
-  border-bottom: 1px solid var(--border);
-  border-radius: 0;
-  margin-bottom: 2px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
 }
 
-.bd-project,
+.bd-head + .bd-head,
+div + .bd-head {
+  border-top: 1px solid var(--border);
+  margin-top: 3px;
+}
+
 .bd-session {
   cursor: pointer;
+  padding-left: 16px;
 }
 
-.bd-project:hover,
 .bd-session:hover {
   background: var(--bg-alt);
-}
-
-.bd-session {
-  padding-left: 22px;
-  color: var(--text-dim);
 }
 
 .bd-proc {
