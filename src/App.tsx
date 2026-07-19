@@ -17,6 +17,7 @@ import type { AgentEventEntry } from "./types";
 import { derivePending, pendingForRoots } from "./notifications";
 import { ProjectView } from "./components/ProjectView";
 import { ProjectDialog } from "./components/ProjectDialog";
+import { ProjectManager } from "./components/ProjectManager";
 import { Welcome } from "./components/Welcome";
 import { stopWorkspaceServers } from "./lsp/client";
 import { checkForUpdateAnyChannel, installUpdate, type UpdateAvailability } from "./updater";
@@ -45,6 +46,10 @@ export default function App() {
   // card is "seen", not "never tell me again". Held here (not in the panel)
   // because the project-tab badges count from the same derived list.
   const [dismissedPending, setDismissedPending] = useState<Set<string>>(new Set());
+  const [manager, setManager] = useState(false);
+  // One delete confirm for every entry point (manager, Welcome) — deleting a
+  // project was a bare single click before, one misclick from losing a setup.
+  const [confirmDelete, setConfirmDelete] = useState<Project | null>(null);
   const [hookPath, setHookPath] = useState<string | null>(null);
   const [zen, setZen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -215,6 +220,8 @@ export default function App() {
             setDialog({ mode: "new" });
           } else if (e.payload === "open-project") {
             void openProjectFromDisk();
+          } else if (e.payload === "manage-projects") {
+            setManager(true);
           } else if (e.payload === "save-project") {
             void saveProjectAs();
           } else if (e.payload === "open-workspace") {
@@ -448,24 +455,13 @@ export default function App() {
           </button>
         </div>
         <div className="titlebar-spacer" />
-        {ws.projects.length > openProjects.length && (
-          <select
-            className="project-select"
-            value=""
-            onChange={(e) => {
-              if (e.target.value) void openProject(e.target.value);
-            }}
-          >
-            <option value="">Open project…</option>
-            {ws.projects
-              .filter((p) => !ws.openIds.includes(p.id))
-              .map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-          </select>
-        )}
+        <button
+          className="btn project-manage-btn"
+          title="Manage projects — open, create, edit, delete"
+          onClick={() => setManager(true)}
+        >
+          Projects ▾
+        </button>
       </div>
 
       <div className="app-body">
@@ -474,7 +470,10 @@ export default function App() {
             projects={ws.projects}
             onOpen={(id) => void openProject(id)}
             onNew={() => setDialog({ mode: "new" })}
-            onDelete={deleteProject}
+            onDelete={(id) => {
+              const p = wsRef.current.projects.find((x) => x.id === id);
+              if (p) setConfirmDelete(p);
+            }}
           />
         )}
         {openProjects.map((p) => (
@@ -487,7 +486,11 @@ export default function App() {
             hookPath={hookPath}
             dismissedPending={dismissedPending}
             onDismissPending={(key) =>
-              setDismissedPending((prev) => new Set(prev).add(key))
+              // Bail unchanged when already dismissed: the auto-clear effect
+              // fires per render, and a fresh Set each time would loop it.
+              setDismissedPending((prev) =>
+                prev.has(key) ? prev : new Set(prev).add(key),
+              )
             }
             onEdit={() => setDialog({ mode: "edit", project: p })}
             onNotice={setNotice}
@@ -574,6 +577,53 @@ export default function App() {
       {notice && (
         <div className="notice" onClick={() => setNotice(null)} title="dismiss">
           {notice}
+        </div>
+      )}
+
+      {manager && (
+        <ProjectManager
+          projects={ws.projects}
+          openIds={ws.openIds}
+          onOpen={(id) => void openProject(id)}
+          onNew={() => {
+            setManager(false);
+            setDialog({ mode: "new" });
+          }}
+          onEdit={(p) => {
+            setManager(false);
+            setDialog({ mode: "edit", project: p });
+          }}
+          onRequestDelete={setConfirmDelete}
+          onClose={() => setManager(false)}
+        />
+      )}
+
+      {confirmDelete && (
+        <div className="confirm-backdrop" onMouseDown={() => setConfirmDelete(null)}>
+          <div className="confirm" onMouseDown={(e) => e.stopPropagation()}>
+            <p>
+              Delete project <strong>{confirmDelete.name}</strong>?
+            </p>
+            <p className="confirm-sub">
+              Removes it from Canopy only — the folders on disk are untouched.
+              If it is open, its terminals (and anything running in them) will
+              be closed.
+            </p>
+            <div className="confirm-actions">
+              <button className="btn" onClick={() => setConfirmDelete(null)}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-danger-solid"
+                onClick={() => {
+                  deleteProject(confirmDelete.id);
+                  setConfirmDelete(null);
+                }}
+              >
+                Delete
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

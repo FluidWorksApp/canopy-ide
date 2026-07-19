@@ -14,6 +14,8 @@ interface AgentsPanelProps {
   hookPath: string | null;
   pending?: PendingItem[];
   onDismissPending?: (key: string) => void;
+  /** Answer a single-select question by clicking its option in the panel. */
+  onAnswer?: (item: PendingItem, optionIndex: number) => void;
   onJumpToTerminal?: (item: PendingItem) => void;
   /** Cross-session context sharing for this project. */
   roots: string[];
@@ -53,6 +55,7 @@ export function AgentsPanel({
   hookPath,
   pending = [],
   onDismissPending,
+  onAnswer,
   onJumpToTerminal,
   roots,
   shareContext,
@@ -278,16 +281,43 @@ export function AgentsPanel({
                       {q.header && <span className="pending-chip">{q.header}</span>}
                       <div className="pending-q-text">{q.question}</div>
                       <div className="pending-options">
-                        {q.options.map((o) => (
-                          <div key={o.label} className="pending-option">
-                            <span className="pending-option-label">
-                              {q.multiSelect ? "☐" : "○"} {o.label}
-                            </span>
-                            {o.description && (
-                              <span className="pending-option-desc">{o.description}</span>
-                            )}
-                          </div>
-                        ))}
+                        {q.options.map((o, oi) => {
+                          // Single-select, single-question asks answer from
+                          // the panel. Multi-select needs the toggle UI, and
+                          // multi-question forms step through questions in the
+                          // terminal — a digit there could answer the wrong
+                          // one. Those jump instead.
+                          const clickable =
+                            onAnswer &&
+                            !q.multiSelect &&
+                            (item.questions?.length ?? 0) === 1;
+                          return (
+                            <div
+                              key={o.label}
+                              className={`pending-option ${clickable ? "pending-option-clickable" : ""}`}
+                              title={
+                                clickable
+                                  ? "Answer with this option"
+                                  : "Multi-select — answer in the terminal"
+                              }
+                              onClick={
+                                clickable
+                                  ? (e) => {
+                                      e.stopPropagation();
+                                      onAnswer(item, oi);
+                                    }
+                                  : undefined
+                              }
+                            >
+                              <span className="pending-option-label">
+                                {q.multiSelect ? "☐" : "○"} {o.label}
+                              </span>
+                              {o.description && (
+                                <span className="pending-option-desc">{o.description}</span>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   ))}

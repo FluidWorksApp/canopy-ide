@@ -610,6 +610,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, dismissed
           .map((s) => s.id),
       );
       const target =
+        // The event's own pty stamp is an identity, not a guess — prefer it.
+        termTabs.find((t) => t.ptyId != null && t.ptyId === item.pty) ??
         termTabs.find(
           (t) =>
             t.ptyId != null &&
@@ -626,6 +628,45 @@ export function ProjectView({ project, visible, zen, events, hookPath, dismissed
     },
     [stats],
   );
+
+  // Answer a questionnaire straight from the panel: type the option's number
+  // into the agent's terminal (Claude Code's ask UI selects by digit), then
+  // Enter a beat later. The card dismisses immediately — the hook stream
+  // resolves it for real once the tool call completes.
+  const answerQuestion = useCallback(
+    (item: PendingItem, optionIndex: number) => {
+      const termTabs = tabsRef.current.filter(
+        (t): t is TermSubTab => t.type === "terminal",
+      );
+      const target =
+        termTabs.find((t) => t.ptyId != null && t.ptyId === item.pty) ??
+        termTabs.find((t) => item.cwd === t.cwd || item.cwd.startsWith(t.cwd + "/"));
+      if (target?.ptyId == null) {
+        onNotice("Can't find the terminal this question came from — answer there.");
+        return;
+      }
+      const ptyId = target.ptyId;
+      void ipc.ptyWrite(ptyId, String(optionIndex + 1));
+      setTimeout(() => void ipc.ptyWrite(ptyId, "\r"), 150);
+      onDismissPending(item.key);
+      setActiveTabId(target.id);
+      setTimeout(() => termHandles.current.get(target.id)?.focus(), 50);
+    },
+    [onNotice, onDismissPending],
+  );
+
+  // Looking at the terminal IS reading its cards. When the active tab is the
+  // terminal a pending item came from, the item's job is done — same rule as
+  // the tab unread-dot. This is also what keeps answered-in-terminal asks
+  // from lingering as stale cards.
+  useEffect(() => {
+    if (!visible || !activeTabId) return;
+    const tab = tabsRef.current.find((t) => t.id === activeTabId);
+    if (tab?.type !== "terminal" || tab.ptyId == null) return;
+    for (const item of pending) {
+      if (item.pty != null && item.pty === tab.ptyId) onDismissPending(item.key);
+    }
+  }, [activeTabId, visible, pending, onDismissPending]);
 
   // Switch the model of the Claude session running in this project by typing
   // `/model <name>` into its terminal — the same thing the user would type, so
@@ -1305,6 +1346,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, dismissed
           hookPath={hookPath}
           pending={pending}
           onDismissPending={onDismissPending}
+          onAnswer={answerQuestion}
           onJumpToTerminal={jumpToTerminal}
           roots={roots}
           shareContext={Boolean(project.shareContext)}

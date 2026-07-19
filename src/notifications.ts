@@ -24,6 +24,9 @@ export interface PendingItem {
   agent: string;
   sessionId: string;
   cwd: string;
+  /** The terminal that raised it (canopy_pty stamp) — lets the UI clear items
+   *  for a terminal the user is already looking at. Null when unstamped. */
+  pty: number | null;
   ts: number;
   message?: string;
   questions?: PendingQuestion[];
@@ -47,6 +50,7 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
     const sessionId = String(parsed.session_id ?? parsed["conversation-id"] ?? "");
     if (!sessionId) continue;
     const cwd = String(parsed.cwd ?? "");
+    const pty = typeof parsed.canopy_pty === "number" ? parsed.canopy_pty : null;
     const event = String(parsed.hook_event_name ?? parsed.type ?? "");
     const tool = String(parsed.tool_name ?? "");
 
@@ -65,17 +69,25 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
               : [],
           }))
         : [];
+      // An agent does one thing at a time, so one urgent card per session:
+      // a new ask supersedes whatever was pending (the permission prompt for
+      // this very tool call, an earlier answered-but-unresolved ask). Without
+      // this, the same interaction showed as both "needs your permission" and
+      // the question card, and stale asks accumulated.
       const list = pendingBySession.get(sessionId) ?? [];
-      list.push({
-        key: `${sessionId}-${entry.ts}-q`,
-        kind: "question",
-        agent: "claude",
-        sessionId,
-        cwd,
-        ts: entry.ts,
-        questions,
-      });
-      pendingBySession.set(sessionId, list);
+      pendingBySession.set(sessionId, [
+        ...list.filter((i) => i.kind === "idle"),
+        {
+          key: `${sessionId}-${entry.ts}-q`,
+          kind: "question",
+          agent: "claude",
+          sessionId,
+          cwd,
+          pty,
+          ts: entry.ts,
+          questions,
+        },
+      ]);
     } else if (event === "Notification") {
       const message = String(parsed.message ?? "Agent needs attention");
       const list = pendingBySession.get(sessionId) ?? [];
@@ -90,21 +102,28 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
             agent: "claude",
             sessionId,
             cwd,
+            pty,
             ts: entry.ts,
             message,
           },
         ]);
+      } else if (list.some((i) => i.kind === "question")) {
+        // The question card already says "answer in terminal" — a permission
+        // prompt for the same interaction adds a duplicate, not information.
       } else {
-        list.push({
-          key: `${sessionId}-${entry.ts}-n`,
-          kind: "notification",
-          agent: "claude",
-          sessionId,
-          cwd,
-          ts: entry.ts,
-          message,
-        });
-        pendingBySession.set(sessionId, list);
+        pendingBySession.set(sessionId, [
+          ...list.filter((i) => i.kind !== "notification"),
+          {
+            key: `${sessionId}-${entry.ts}-n`,
+            kind: "notification",
+            agent: "claude",
+            sessionId,
+            cwd,
+            pty,
+            ts: entry.ts,
+            message,
+          },
+        ]);
       }
     } else if (event === "Stop" || /turn.complete/i.test(event)) {
       // The turn ended: everything pending is resolved, and the completion is
@@ -120,6 +139,7 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
           agent: event === "Stop" ? "claude" : "codex",
           sessionId,
           cwd,
+          pty,
           ts: entry.ts,
           message: last ? last.slice(0, 140) : "Finished — waiting for you",
         },

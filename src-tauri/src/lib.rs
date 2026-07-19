@@ -68,6 +68,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         &[
             &MenuItem::with_id(app, "new-project", "New Project…", true, Some("CmdOrCtrl+N"))?,
             &MenuItem::with_id(app, "open-project", "Open Project…", true, Some("CmdOrCtrl+O"))?,
+            &MenuItem::with_id(app, "manage-projects", "Manage Projects…", true, Some("CmdOrCtrl+Shift+M"))?,
             &MenuItem::with_id(app, "save-project", "Save Project As…", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "open-workspace", "Open Workspace…", true, Some("CmdOrCtrl+Shift+O"))?,
