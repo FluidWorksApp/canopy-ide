@@ -39,6 +39,12 @@ jobs:
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             args: ""
+          # Windows: NSIS installer (+ MSI, targets = "all"). Unsigned for now —
+          # SmartScreen warns until an Authenticode certificate is added; the
+          # updater config already handles Windows (installMode: passive).
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            args: "--target x86_64-pc-windows-msvc"
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -193,6 +199,8 @@ jobs:
               cp "$root"/appimage/*.AppImage "$stage/Canopy-linux-x86_64.AppImage"
               cp "$root"/deb/*.deb          "$stage/Canopy-linux-x86_64.deb"
               cp "$root"/rpm/*.rpm          "$stage/Canopy-linux-x86_64.rpm" ;;
+            x86_64-pc-windows-msvc)
+              cp "$root"/nsis/*-setup.exe   "$stage/Canopy-windows-x86_64-setup.exe" ;;
           esac
           ls -l "$stage"
           # The release is still a draft at this point; gh resolves drafts by
