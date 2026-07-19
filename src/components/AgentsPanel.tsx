@@ -145,8 +145,18 @@ export function AgentsPanel({
         .filter(
           (d) =>
             d.session_id &&
+            // `<agent>-pty<N>` ids are synthesized by the helper for CLIs that
+            // can't report a session identity (aider's bare notification
+            // command). They're terminal-scoped signals, not conversations —
+            // nothing to resume.
+            !/-pty\d*$/.test(d.session_id) &&
             (dead(d) || !liveSessionIds.includes(d.session_id)) &&
-            (d.prompts?.length ?? 0) > 0,
+            // The prompt requirement is CLAUDE-specific: claude writes no
+            // transcript until the first prompt, so a promptless claude
+            // session can only fail to resume. Other agents capture prompts
+            // best-effort (their hook payloads' field names vary) — an empty
+            // list there must not hide a real conversation.
+            ((d.prompts?.length ?? 0) > 0 || (d.agent ?? "claude") !== "claude"),
         )
         .sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0));
     },
@@ -445,8 +455,11 @@ export function AgentsPanel({
                   <span className="agent-session">{ago(d.updated)}</span>
                 </div>
                 {/* The last prompt is how you recognise which session this was —
-                    a bare uuid tells you nothing. */}
-                {last && <div className="restore-prompt">{last}</div>}
+                    a bare uuid tells you nothing. Non-claude agents may not
+                    have one captured; say so instead of rendering nothing. */}
+                <div className="restore-prompt">
+                  {last ?? <em>(no prompt captured for this session)</em>}
+                </div>
                 <div className="restore-actions">
                   {cmd ? (
                     <button
