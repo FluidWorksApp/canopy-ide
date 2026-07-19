@@ -46,17 +46,46 @@ a Gatekeeper assessment.
 
 ## Release via CI
 
-Push a tag:
+The version lives in three files that must agree — `package.json`,
+`src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json` — and the tag must match
+them (the release name and `.dmg` filenames come from the config version, not
+the tag). `scripts/bump-version.sh` keeps all four in sync:
 
 ```sh
-git tag v0.1.0 && git push --tags
+./scripts/bump-version.sh 0.2.0   # bumps all three files, commits, tags v0.2.0
+git push && git push --tags       # <- this triggers the release build
 ```
 
 `.github/workflows/release.yml` builds macOS (both arches) and Linux and
-creates a **draft** release. Review it, then publish.
+creates a **draft** release. The draft is the QA gate: download the `.dmg`,
+open it, check the asset list (installers + `latest.json` + `.sig`s + the
+stable aliases below) — then publish. Publishing is the moment installed
+copies start auto-updating to it.
 
-You can also run it from the Actions tab (`workflow_dispatch`) to get build
-artifacts without cutting a release.
+You can also run the workflow from the Actions tab (`workflow_dispatch`) to
+get a full signed build without cutting a release — it prints
+"No releaseId or tagName provided, skipping all uploads", which is the
+dry-run working as intended.
+
+### Stable download URLs
+
+The workflow uploads a version-less alias of every installer, because
+`releases/latest/download/<name>` only resolves names that are identical in
+every release. canopyide.dev and the README hardcode these; renaming one
+breaks every published link:
+
+| Alias | Points at |
+|---|---|
+| `Canopy-macos-arm64.dmg` | macOS Apple Silicon `.dmg` |
+| `Canopy-macos-intel.dmg` | macOS Intel `.dmg` |
+| `Canopy-linux-x86_64.AppImage` | Linux AppImage |
+| `Canopy-linux-x86_64.deb` / `.rpm` | Linux packages |
+| `Canopy-windows-x86_64-setup.exe` | reserved for the Windows installer |
+
+Full URL form:
+`https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/<alias>`
+— always the newest **published** release; drafts don't count, so links keep
+serving the previous release until you hit Publish.
 
 ### Required secrets
 
@@ -71,12 +100,18 @@ artifacts without cutting a release.
 | `APPLE_PASSWORD` | an **app-specific** password from appleid.apple.com, not the account password |
 | `APPLE_TEAM_ID` | `5Y96U6L594` |
 
-Export the certificate for CI (Keychain Access → right-click the Developer ID
-Application cert → Export → .p12), then:
+Export and validate all of these with one command — it finds the identity,
+exports the `.p12`, dry-runs the exact import CI performs, and (with `--set`)
+pushes the secrets via `gh`:
 
 ```sh
-base64 -i Certificates.p12 | pbcopy   # paste into the APPLE_CERTIFICATE secret
+./scripts/export-signing-secrets.sh --set
 ```
+
+The `.p12` may contain other identities besides the Developer ID one — that's
+fine. CI imports the keychain itself and signs by the `APPLE_SIGNING_IDENTITY`
+name; it does **not** hand the certificate to Tauri, whose importer rejects
+multi-identity `.p12`s.
 
 ## Gotchas that cost real time
 
