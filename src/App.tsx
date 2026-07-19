@@ -182,6 +182,15 @@ export default function App() {
           if (e.payload === "close-project") {
             const active = wsRef.current.activeId;
             if (active) void closeProjectRef.current(active);
+          } else if (e.payload === "next-project" || e.payload === "prev-project") {
+            const dir = e.payload === "next-project" ? 1 : -1;
+            const { openIds, activeId } = wsRef.current;
+            if (openIds.length > 1) {
+              const i = Math.max(0, openIds.indexOf(activeId ?? ""));
+              updateRef.current({
+                activeId: openIds[(i + dir + openIds.length) % openIds.length],
+              });
+            }
           } else if (e.payload === "toggle-zen") {
             toggleZen("menu");
           } else if (e.payload === "check-updates") {
@@ -235,6 +244,20 @@ export default function App() {
       } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.code === "Enter") {
         e.preventDefault();
         toggleZen("keydown");
+      } else if (
+        (e.metaKey || e.ctrlKey) &&
+        !e.shiftKey &&
+        !e.altKey &&
+        /^[1-9]$/.test(e.key)
+      ) {
+        // Cmd+1..9 jumps straight to the Nth open project, browser-style.
+        // Webview-only (no menu item): nothing else claims these chords, and
+        // nine menu entries would be noise.
+        const target = wsRef.current.openIds[Number(e.key) - 1];
+        if (target) {
+          e.preventDefault();
+          updateRef.current({ activeId: target });
+        }
       }
     };
     window.addEventListener("keydown", keys);

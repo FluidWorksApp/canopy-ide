@@ -993,6 +993,37 @@ body,
   opacity: 0.5;
 }
 
+/* Agents first-class in the strip: groups render agents | shells | docs, a
+   divider between non-empty groups, agent tabs tinted with a live dot, and
+   file/PR tabs visibly quieter — workload on the left, reference on the right. */
+.tab-group {
+  display: flex;
+}
+
+.tab-group + .tab-group:not(:empty) {
+  border-left: 2px solid var(--border);
+  margin-left: 3px;
+}
+
+.tab-agent {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
+.tab-agent .tab-term-icon {
+  color: var(--accent);
+}
+
+.tab-agent-live {
+  color: var(--ok);
+  margin-right: 3px;
+}
+
+.tab-doc {
+  font-size: 11px;
+  opacity: 0.85;
+}
+
 /* A program in this terminal asked for attention (OSC 9/99/777) and nobody has
    looked yet. Deliberately not animated: several agents can be waiting at once,
    and a row of blinking tabs is a slot machine, not a signal. The dot carries

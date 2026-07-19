@@ -132,20 +132,23 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // with typed characters. Writing to the PTY directly from here opens a
     // second, racing channel: the bytes then land wherever they land, which is
     // how an earlier attempt at this ended up typing "^E^E" into the prompt.
-    // Cursor motion ONLY. Nothing here may delete: every entry is a movement
-    // widget, so a bug in this handler can misplace the cursor but can never
-    // destroy a line. An earlier version mapped kill widgets too (ESC d
-    // kill-word, C-k kill-line, C-u kill-whole-line) and one of them was
-    // mis-keyed — on a Mac the key labelled "delete" reports key="Backspace",
-    // while key="Delete" is fn+delete — so a destructive sequence sat armed on
-    // a key nobody meant to press. The deletes were never the valuable part:
-    // xterm already sends ESC+DEL for Option+Backspace, which zsh binds to
-    // backward-kill-word. Leave killing to the keys that already work.
-    const CURSOR_MOTION: Record<string, string> = {
+    // Movement widgets plus exactly ONE kill: Cmd+Delete. An earlier version
+    // mapped several kill widgets (ESC d, C-k, C-u) and one was mis-keyed —
+    // on a Mac the key labelled "delete" reports key="Backspace", while
+    // key="Delete" is fn+delete — so a destructive sequence sat armed on a
+    // key nobody meant to press, and all of them were removed. Cmd+Delete
+    // comes back keyed to the name the key actually reports, verified above.
+    // fn+delete ("Delete") stays unmapped on purpose. The sequence is C-u,
+    // what iTerm2's natural preset sends for Cmd+Delete; zsh's emacs mode
+    // reads it as kill-whole-line (bash: to line start) — the accepted
+    // terminal meaning of the chord. Option+Backspace needs no entry: xterm
+    // itself sends ESC+DEL, which zsh binds to backward-kill-word.
+    const NATURAL_EDITING: Record<string, string> = {
       "alt+ArrowLeft": "\x1bb", // backward-word
       "alt+ArrowRight": "\x1bf", // forward-word
       "meta+ArrowLeft": "\x01", // beginning-of-line (C-a)
       "meta+ArrowRight": "\x05", // end-of-line       (C-e)
+      "meta+Backspace": "\x15", // kill line         (C-u)
     };
     term.attachCustomKeyEventHandler((ev) => {
       if (ev.type !== "keydown" || ev.ctrlKey) return true;
@@ -156,11 +159,11 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       // handler, so returning false here would skip it and strand the
       // composition, making the next keypress behave as if Option were held.
       if (ev.isComposing || ev.keyCode === 229) return true;
-      // Only arrows, and only with exactly one of Cmd/Option. `ev.key` for an
-      // arrow is always a multi-char name, so a composed character can never
-      // collide with these entries.
+      // Only named keys (arrows, Backspace), and only with exactly one of
+      // Cmd/Option. `ev.key` for those is always a multi-char name, so a
+      // composed character can never collide with these entries.
       if (ev.altKey === ev.metaKey) return true;
-      const seq = CURSOR_MOTION[`${ev.metaKey ? "meta" : "alt"}+${ev.key}`];
+      const seq = NATURAL_EDITING[`${ev.metaKey ? "meta" : "alt"}+${ev.key}`];
       if (!seq) return true;
       ev.preventDefault();
       term.input(seq);

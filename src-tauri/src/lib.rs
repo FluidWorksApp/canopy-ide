@@ -51,6 +51,8 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &MenuItem::with_id(app, "prev-tab", "Previous Tab", true, Some("Ctrl+Shift+Tab"))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "close-project", "Close Project", true, Some("CmdOrCtrl+Shift+W"))?,
+            &MenuItem::with_id(app, "next-project", "Next Project", true, Some("CmdOrCtrl+Alt+Right"))?,
+            &MenuItem::with_id(app, "prev-project", "Previous Project", true, Some("CmdOrCtrl+Alt+Left"))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "toggle-sidebar", "Toggle Sidebar", true, Some("CmdOrCtrl+B"))?,
             &MenuItem::with_id(app, "toggle-zen", "Focus Mode", true, Some("CmdOrCtrl+Shift+Enter"))?,

@@ -727,6 +727,27 @@ export function ProjectView({ project, visible, zen, events, hookPath, dismissed
     setRenamingTabId(null);
   };
 
+  // Agents are the crux of this IDE; the strip's order and styling say so.
+  // Partitioned: agent terminals first (tinted, live dot), plain shells next,
+  // opened files / PRs last as a visibly quieter group. Detection is by the
+  // launch command OR by what's actually running in the pty tree, so a
+  // `claude` typed by hand into a shell promotes that tab too.
+  const agentPtyIds = new Set(
+    projectStats
+      .filter((s) => s.procs.some((p) => AGENT_PATTERN.test(p.name)))
+      .map((s) => s.id),
+  );
+  const isAgentTab = (t: SubTab): t is TermSubTab =>
+    t.type === "terminal" &&
+    (AGENT_PATTERN.test(t.command ?? "") ||
+      (t.ptyId != null && agentPtyIds.has(t.ptyId)));
+  const stripTabs = tabs.filter((t) => t.type !== "terminal" || !t.run);
+  const tabGroups: SubTab[][] = [
+    stripTabs.filter(isAgentTab),
+    stripTabs.filter((t) => t.type === "terminal" && !isAgentTab(t)),
+    stripTabs.filter((t) => t.type !== "terminal"),
+  ];
+
   const mainArea = (
     <div className="project-main">
       {tabMenu.menu && (
@@ -739,14 +760,15 @@ export function ProjectView({ project, visible, zen, events, hookPath, dismissed
       )}
       <div className="pane-bar">
         <div className="tabs">
-          {tabs
-            .filter((t) => t.type !== "terminal" || !t.run)
-            .map((tab) => (
+          {tabGroups.map((group, gi) =>
+            group.length === 0 ? null : (
+              <div className="tab-group" key={gi}>
+                {group.map((tab) => (
               <div
                 key={tab.id}
                 className={`tab ${tab.id === activeTabId ? "tab-active" : ""} ${
                   tab.type === "terminal" && tab.unread ? "tab-unread" : ""
-                }`}
+                } ${tab.type !== "terminal" ? "tab-doc" : isAgentTab(tab) ? "tab-agent" : ""}`}
                 onClick={(e) => {
                   // e.detail is the click count and fires even though app chrome
                   // is user-select:none — unlike dblclick, which WebKit drops on
@@ -773,7 +795,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, dismissed
                 }
               >
                 {tab.type === "terminal" ? (
-                  <span className="tab-term-icon">{tab.icon ?? "❯_"}</span>
+                  <span className="tab-term-icon">
+                    {isAgentTab(tab) && <LiveDot size={6} className="tab-agent-live" />}
+                    {tab.icon ?? "❯_"}
+                  </span>
                 ) : tab.type === "pr" ? (
                   <span className="tab-pr-icon">⑃</span>
                 ) : (
@@ -819,7 +844,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, dismissed
                   ✕
                 </span>
               </div>
-            ))}
+                ))}
+              </div>
+            ),
+          )}
         </div>
         {/* Long-running commands live in their own right-hand rail — they are
             services, not shells, so they never mix with the terminal tabs. */}
