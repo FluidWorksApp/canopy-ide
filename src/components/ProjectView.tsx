@@ -335,6 +335,22 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     };
     const next = cycle(1);
     const prev = cycle(-1);
+    // Cmd+1..8: the tab at that position in the same tabsRef order Cmd+W and
+    // Ctrl+Tab already use (see cycle() above) — not the grouped visual
+    // order the tab strip renders in (agent tabs first, then shells, then
+    // docs), which next/prev-tab don't follow either; matching that existing
+    // convention rather than introducing a second, inconsistent one.
+    // Cmd+9: the LAST tab regardless of how many are open, not literal
+    // position 9 — standard Chrome/Safari convention.
+    const jumpTo = (index: number) => () => {
+      const list = tabsRef.current;
+      if (list[index]) setActiveTabId(list[index].id);
+    };
+    const jumpToLast = () => {
+      const list = tabsRef.current;
+      if (list.length) setActiveTabId(list[list.length - 1].id);
+    };
+    const jumpHandlers = Array.from({ length: 8 }, (_, i) => jumpTo(i)).concat(jumpToLast);
     window.addEventListener("menu:close-tab", closeTabHandler);
     window.addEventListener("menu:new-terminal", newTerminalHandler);
     window.addEventListener("menu:toggle-sidebar", toggleSidebarHandler);
@@ -342,6 +358,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     window.addEventListener("menu:prev-tab", prev);
     window.addEventListener("menu:quick-open", quickOpen);
     window.addEventListener("menu:find-in-files", findInFiles);
+    jumpHandlers.forEach((h, i) => window.addEventListener(`menu:jump-tab-${i + 1}`, h));
     return () => {
       window.removeEventListener("menu:close-tab", closeTabHandler);
       window.removeEventListener("menu:new-terminal", newTerminalHandler);
@@ -350,6 +367,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       window.removeEventListener("menu:prev-tab", prev);
       window.removeEventListener("menu:quick-open", quickOpen);
       window.removeEventListener("menu:find-in-files", findInFiles);
+      jumpHandlers.forEach((h, i) => window.removeEventListener(`menu:jump-tab-${i + 1}`, h));
     };
   }, [visible, project.components, addTerminal]);
 
