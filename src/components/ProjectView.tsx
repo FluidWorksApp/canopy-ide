@@ -37,9 +37,10 @@ import { AgentsPanel } from "./AgentsPanel";
 import { StatusBar } from "./StatusBar";
 import { Palette, type PaletteMode } from "./Palette";
 import { GitPanel } from "./GitPanel";
+import { TicketsPanel } from "./TicketsPanel";
 import { PrView } from "./PrView";
 
-type SideTab = "files" | "changes" | "git" | "agents";
+type SideTab = "files" | "changes" | "git" | "trackers" | "agents";
 
 interface TermSubTab {
   id: string;
@@ -96,6 +97,7 @@ const RAIL_TABS: { key: SideTab; icon: string; title: string }[] = [
   { key: "files", icon: "🗂", title: "Components & files" },
   { key: "changes", icon: "±", title: "Session changes" },
   { key: "git", icon: "⎇", title: "Git — branches, commit, sync, PRs" },
+  { key: "trackers", icon: "◎", title: "Issue trackers — GitHub, Linear, …" },
   { key: "agents", icon: "✳", title: "Agents" },
 ];
 
@@ -1416,6 +1418,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           loading={changesLoading}
           onOpen={(p) => void openFile(p, { diff: true })}
           onRefresh={() => void refreshChanges()}
+        />
+      )}
+      {sideTab === "trackers" && (
+        <TicketsPanel
+          components={project.components.map((c) => ({ label: c.label, path: c.path }))}
+          onStartTicket={(cwd, command, title) => addTerminal(cwd, command, title, "✳")}
+          onNotice={onNotice}
         />
       )}
       {sideTab === "agents" && (

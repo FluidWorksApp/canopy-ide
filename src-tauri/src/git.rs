@@ -885,3 +885,154 @@ pub async fn git_worktree_prune(
     let out = run(git(&top).args(["worktree", "prune", "-v"]))?;
     Ok(if out.trim().is_empty() { "Nothing to prune".into() } else { out.trim().to_string() })
 }
+
+// ---------- tickets (issue #15) ----------
+//
+// One row shape for every tracker. GitHub Issues arrive through the user's
+// own `gh` CLI — zero configuration, inherits their auth, exactly like the
+// PR list. Linear is opt-in via a personal API key the frontend stores
+// locally; the request goes straight from this machine to api.linear.app
+// via curl (matching the shell-out-no-deps pattern), with the key delivered
+// through curl's stdin config so it never appears in a process list.
+
+#[derive(Serialize, Clone)]
+pub struct TicketInfo {
+    /// "#42" for GitHub, "ENG-123" for Linear.
+    pub id: String,
+    pub title: String,
+    /// Human-readable state name ("open", "In Progress").
+    pub state: String,
+    /// Coarse machine type — GitHub: open/closed; Linear: its state.type
+    /// (triage/backlog/unstarted/started).
+    pub state_type: String,
+    pub assignee: Option<String>,
+    pub mine: bool,
+    pub url: String,
+    /// The tracker's own suggested branch name when it has one (Linear's
+    /// branchName). GitHub has none; the frontend matches its
+    /// "<number>-slug" branch convention instead.
+    pub branch: Option<String>,
+}
+
+#[tauri::command]
+pub async fn gh_issue_list(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+) -> Result<Vec<TicketInfo>, String> {
+    let top = repo_path(&state, &repo)?;
+    let mut cmd = gh_in(&top);
+    cmd.args([
+        "issue", "list", "--state", "all", "--limit", "80", "--json",
+        "number,title,state,url,assignees,updatedAt",
+    ]);
+    let out = run_net(&mut cmd)?;
+    let v: serde_json::Value =
+        serde_json::from_str(&out).map_err(|e| format!("gh returned unexpected output: {e}"))?;
+    let me = run_net(&mut {
+        let mut c = gh_in(&top);
+        c.args(["api", "user", "--jq", ".login"]);
+        c
+    })
+    .unwrap_or_default()
+    .trim()
+    .to_string();
+
+    Ok(v.as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|i| {
+                    let assignees: Vec<String> = i["assignees"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x["login"].as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let state = i["state"].as_str().unwrap_or("").to_lowercase();
+                    TicketInfo {
+                        id: format!("#{}", i["number"].as_u64().unwrap_or(0)),
+                        title: i["title"].as_str().unwrap_or("").to_string(),
+                        state_type: state.clone(),
+                        state,
+                        mine: !me.is_empty() && assignees.iter().any(|a| a == &me),
+                        assignee: assignees.into_iter().next(),
+                        url: i["url"].as_str().unwrap_or("").to_string(),
+                        branch: None,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+#[tauri::command]
+pub async fn linear_issues(api_key: String) -> Result<Vec<TicketInfo>, String> {
+    use std::io::Write;
+    if api_key.trim().is_empty() {
+        return Err("no Linear API key".into());
+    }
+    // Active work only — completed/canceled would bury the list.
+    let query = r#"{ viewer { id } issues(first: 100, orderBy: updatedAt, filter: { state: { type: { in: ["triage", "backlog", "unstarted", "started"] } } }) { nodes { identifier title url branchName state { name type } assignee { id displayName } } } }"#;
+    let body = serde_json::json!({ "query": query }).to_string();
+    let mut child = std::process::Command::new("curl")
+        .args([
+            "-sS",
+            "--max-time",
+            "15",
+            "-K",
+            "-", // read config (the auth header) from stdin — keeps the key out of argv
+            "-H",
+            "Content-Type: application/json",
+            "--data-binary",
+            &body,
+            "https://api.linear.app/graphql",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("curl not available: {e}"))?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or("curl stdin unavailable")?
+        .write_all(format!("header = \"Authorization: {}\"\n", api_key.trim()).as_bytes())
+        .map_err(|e| e.to_string())?;
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!(
+            "Linear request failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout))
+        .map_err(|_| "Linear returned unexpected output".to_string())?;
+    if let Some(err) = v["errors"].as_array().and_then(|a| a.first()) {
+        return Err(format!(
+            "Linear: {}",
+            err["message"].as_str().unwrap_or("request rejected")
+        ));
+    }
+    let viewer = v["data"]["viewer"]["id"].as_str().unwrap_or("").to_string();
+    Ok(v["data"]["issues"]["nodes"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|i| {
+                    let assignee_id = i["assignee"]["id"].as_str().unwrap_or("");
+                    TicketInfo {
+                        id: i["identifier"].as_str().unwrap_or("").to_string(),
+                        title: i["title"].as_str().unwrap_or("").to_string(),
+                        state: i["state"]["name"].as_str().unwrap_or("").to_string(),
+                        state_type: i["state"]["type"].as_str().unwrap_or("").to_string(),
+                        assignee: i["assignee"]["displayName"].as_str().map(String::from),
+                        mine: !viewer.is_empty() && assignee_id == viewer,
+                        url: i["url"].as_str().unwrap_or("").to_string(),
+                        branch: i["branchName"].as_str().map(String::from),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}

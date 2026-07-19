@@ -3149,3 +3149,94 @@ textarea,
   font-size: 10px;
   font-style: italic;
 }
+
+/* ---------- issue trackers panel ---------- */
+
+.tracker-section {
+  border-top: 1px solid var(--border);
+}
+
+.tracker-connect {
+  padding: 4px 12px 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.tracker-connect-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.tracker-connect-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.ticket-repo-select {
+  margin: 4px 12px;
+}
+
+.ticket-state-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px 2px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.ticket-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.ticket-row:hover {
+  background: var(--bg-raised);
+}
+
+.ticket-main {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.ticket-id {
+  font-size: 11px;
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+
+.ticket-title {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ticket-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.ticket-wt {
+  color: var(--ok);
+}
+
+.ticket-assignee.ticket-mine {
+  color: var(--accent);
+}
+
+.ticket-start {
+  margin-left: auto;
+}

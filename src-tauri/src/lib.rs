@@ -223,6 +223,8 @@ pub fn run() {
             git::gh_pr_body,
             git::gh_pr_review,
             git::gh_pr_checkout,
+            git::gh_issue_list,
+            git::linear_issues,
             fsx::git_status,
             fsx::git_head_content,
             fsx::store_load,

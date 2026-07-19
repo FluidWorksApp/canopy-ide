@@ -358,3 +358,22 @@ export const sessionDigests = () => invoke<SessionDigest[]>("session_digests");
 /** Drop a session the user no longer wants offered for restore. */
 export const sessionForget = (sessionId: string) =>
   invoke<void>("session_forget", { sessionId });
+
+// ---------- issue trackers ----------
+
+/** One ticket, whatever the tracker. See src/trackers.ts for the provider
+ *  registry that produces these. */
+export interface TicketInfo {
+  id: string;
+  title: string;
+  state: string;
+  state_type: string;
+  assignee: string | null;
+  mine: boolean;
+  url: string;
+  branch: string | null;
+}
+
+export const ghIssueList = (repo: string) => invoke<TicketInfo[]>("gh_issue_list", { repo });
+export const linearIssues = (apiKey: string) =>
+  invoke<TicketInfo[]>("linear_issues", { apiKey });

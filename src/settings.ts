@@ -6,6 +6,10 @@ export interface Settings {
   runawayCpuPercent: number;
   runawayMemBytes: number;
   ptyHighWater: number;
+  /** Per-tracker secrets for the Issue Trackers panel, keyed by provider id
+   *  (see src/trackers.ts). Local-only: sent nowhere but the tracker's own
+   *  API, straight from this machine. */
+  trackerKeys: Record<string, string>;
 }
 
 // NB: stored settings override these (see getSettings), so flipping a default
@@ -18,6 +22,7 @@ const DEFAULTS: Settings = {
   runawayCpuPercent: 300,
   runawayMemBytes: 4 * 1024 * 1024 * 1024,
   ptyHighWater: 2 * 1024 * 1024,
+  trackerKeys: {},
 };
 
 const KEY = "canopy.settings";
