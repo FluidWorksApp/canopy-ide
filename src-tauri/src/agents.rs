@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
-use sysinfo::{Pid, ProcessesToUpdate, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::pty::PtyManager;
@@ -121,6 +121,7 @@ pub fn start_monitor(app: AppHandle) {
             let mut last_ports: HashMap<u32, Vec<u16>> = HashMap::new();
             loop {
                 thread::sleep(POLL_INTERVAL);
+                tick = tick.wrapping_add(1);
                 let manager = app.state::<PtyManager>();
                 let sessions: Vec<(u32, Option<u32>, String, String)> = {
                     let map = manager.sessions();
@@ -137,7 +138,26 @@ pub fn start_monitor(app: AppHandle) {
                         })
                         .collect()
                 };
-                sys.refresh_processes(ProcessesToUpdate::All, true);
+                // With no terminals there is nothing hot to watch — only the
+                // app-footprint number in the status bar, which nobody needs at
+                // 2s resolution. Skip two of every three ticks entirely.
+                if sessions.is_empty() && tick % 3 != 0 {
+                    continue;
+                }
+                // Refresh only what the monitor actually reads. The default
+                // full refresh re-fetches every process's cmdline, exe path,
+                // environment and cwd — each a sysctl/proc read, for every
+                // process on the machine, every tick. cmd is the one non-cheap
+                // field we use (agent detection / restore), and it never
+                // changes after exec — fetch it once per process and keep it.
+                sys.refresh_processes_specifics(
+                    ProcessesToUpdate::All,
+                    true,
+                    ProcessRefreshKind::nothing()
+                        .with_cpu()
+                        .with_memory()
+                        .with_cmd(UpdateKind::OnlyIfNotSet),
+                );
 
                 // parent pid -> child pids
                 let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -257,7 +277,6 @@ pub fn start_monitor(app: AppHandle) {
                         }
                     }
                 }
-                tick = tick.wrapping_add(1);
                 let _ = app.emit("pty:stats", &stats);
             }
         })
@@ -654,11 +673,22 @@ pub struct ClaudeSessionStats {
     pub turns: u64,
 }
 
+/// Byte offset already parsed per transcript, with the stats accumulated up to
+/// it. Transcripts are append-only JSONL, so each poll only has to parse what
+/// grew since the last one — without this, the 8s status-tray poll re-read and
+/// re-JSON-parsed the whole file (tens of MB in a long session) every tick,
+/// per open project.
+static STATS_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<std::path::PathBuf, (u64, ClaudeSessionStats)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
 /// Aggregate token usage + model from a Claude Code session transcript
 /// (~/.claude/projects/**/*.jsonl — the path arrives via hook events).
-/// Powers the status tray (model / tokens / cost).
+/// Powers the status tray (model / tokens / cost). Incremental: parses only
+/// bytes appended since the previous call for the same path.
 #[tauri::command]
 pub async fn claude_session_stats(transcript_path: String) -> Result<ClaudeSessionStats, String> {
+    use std::io::{Read, Seek, SeekFrom};
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
     let path = std::path::Path::new(&transcript_path)
         .canonicalize()
@@ -668,25 +698,53 @@ pub async fn claude_session_stats(transcript_path: String) -> Result<ClaudeSessi
     {
         return Err("not a claude transcript".into());
     }
-    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let mut stats = ClaudeSessionStats::default();
-    for line in raw.lines() {
-        let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
+    let (mut offset, mut stats) = STATS_CACHE
+        .lock()
+        .unwrap()
+        .get(&path)
+        .cloned()
+        .unwrap_or((0, ClaudeSessionStats::default()));
+    let len = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+    if len < offset {
+        // Truncated/rewritten (e.g. compaction) — start over.
+        offset = 0;
+        stats = ClaudeSessionStats::default();
+    }
+    if len > offset {
+        let mut f = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+        f.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+        let mut raw = String::new();
+        f.read_to_string(&mut raw).map_err(|e| e.to_string())?;
+        // Only consume complete lines: the writer may be mid-append, and a
+        // half line parsed now would be double-counted or lost next poll.
+        let consumed = match raw.rfind('\n') {
+            Some(i) => i + 1,
+            None => 0,
         };
-        if entry["type"] != "assistant" {
-            continue;
+        for line in raw[..consumed].lines() {
+            let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if entry["type"] != "assistant" {
+                continue;
+            }
+            let message = &entry["message"];
+            if let Some(model) = message["model"].as_str() {
+                stats.model = Some(model.to_string());
+            }
+            let usage = &message["usage"];
+            stats.input_tokens += usage["input_tokens"].as_u64().unwrap_or(0);
+            stats.output_tokens += usage["output_tokens"].as_u64().unwrap_or(0);
+            stats.cache_read_tokens += usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
+            stats.cache_creation_tokens +=
+                usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+            stats.turns += 1;
         }
-        let message = &entry["message"];
-        if let Some(model) = message["model"].as_str() {
-            stats.model = Some(model.to_string());
-        }
-        let usage = &message["usage"];
-        stats.input_tokens += usage["input_tokens"].as_u64().unwrap_or(0);
-        stats.output_tokens += usage["output_tokens"].as_u64().unwrap_or(0);
-        stats.cache_read_tokens += usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
-        stats.cache_creation_tokens += usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
-        stats.turns += 1;
+        offset += consumed as u64;
+        STATS_CACHE
+            .lock()
+            .unwrap()
+            .insert(path.clone(), (offset, stats.clone()));
     }
     Ok(stats)
 }

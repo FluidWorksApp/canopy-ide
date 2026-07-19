@@ -106,15 +106,17 @@ interface ProjectViewProps {
   project: Project;
   visible: boolean;
   zen: boolean;
-  stats: ipc.SessionStats[];
   events: AgentEventEntry[];
   hookPath: string | null;
+  /** Pending-card keys the user dismissed (held app-wide so badges agree). */
+  dismissedPending: Set<string>;
+  onDismissPending: (key: string) => void;
   onEdit: () => void;
   onNotice: (msg: string) => void;
   onShareContext: (on: boolean) => void;
 }
 
-export function ProjectView({ project, visible, zen, stats, events, hookPath, onEdit, onNotice, onShareContext }: ProjectViewProps) {
+export function ProjectView({ project, visible, zen, events, hookPath, dismissedPending, onDismissPending, onEdit, onNotice, onShareContext }: ProjectViewProps) {
   const [sideTab, setSideTab] = useState<SideTab>("files");
   const [collapsed, setCollapsed] = useState(false);
   const [tabs, setTabs] = useState<SubTab[]>([]);
@@ -146,6 +148,29 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   const closeTabRef = useRef<(id: string) => void>(() => {});
+
+  // Process stats for THIS project's terminals only. Subscribed here rather
+  // than in App: the monitor emits every 2s, and holding the array at App
+  // level re-rendered every mounted ProjectView (tab strips, file trees, git
+  // panels — for every open project) on every tick. Filtering at the door
+  // also lets a project with no terminals skip the setState entirely, so it
+  // never re-renders from stats at all.
+  const [stats, setStats] = useState<ipc.SessionStats[]>([]);
+  const statsRef = useRef(stats);
+  statsRef.current = stats;
+  useEffect(() => {
+    const sub = ipc.onPtyStats((all) => {
+      const ids = new Set(
+        tabsRef.current
+          .filter((t): t is TermSubTab => t.type === "terminal")
+          .map((t) => t.ptyId)
+          .filter((id): id is number => id != null),
+      );
+      const mine = all.filter((s) => ids.has(s.id));
+      setStats((prev) => (prev.length === 0 && mine.length === 0 ? prev : mine));
+    });
+    return () => void sub.then((fn) => fn());
+  }, []);
 
   // A worktree mirrors its repo's tree, so a component inside the repo maps to
   // the same relative path inside the worktree.
@@ -537,7 +562,7 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
       .map((t) => t.ptyId)
       .filter((id): id is number => id != null),
   );
-  const projectStats = stats.filter((s) => ptyIds.has(s.id));
+  const projectStats = stats; // already filtered to this project's ptys at the door
   // Hooks are global, so the raw stream carries every agent on the machine.
   // Everything below this line sees only what our own terminals raised.
   const projectEvents = eventsForProject(events, ptyIds, roots);
@@ -566,7 +591,11 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
   const changedPaths = new Set(changeGroups.flatMap((g) => g.files.map((f) => f.abs)));
   const changeCount = changeGroups.reduce((n, g) => n + g.files.length, 0);
   const sectionOpen = (path: string) => openSections[path] ?? true;
-  const pending = pendingForRoots(derivePending(projectEvents), roots);
+  const pending = pendingForRoots(derivePending(projectEvents), roots).filter(
+    (i) => !dismissedPending.has(i.key),
+  );
+  // Blocked-on-you items drive the urgent styling; completions are quiet.
+  const urgentPending = pending.filter((i) => i.kind !== "idle");
 
   // Jump to the terminal running the agent that raised the item: prefer a
   // terminal whose PTY tree contains an agent process, then match by cwd.
@@ -596,6 +625,40 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
       }
     },
     [stats],
+  );
+
+  // Switch the model of the Claude session running in this project by typing
+  // `/model <name>` into its terminal — the same thing the user would type, so
+  // the CLI's own confirmations and context-size warnings appear right there.
+  // The terminal is focused afterwards so those warnings are actually seen.
+  const setAgentModel = useCallback(
+    (model: string) => {
+      const termTabs = tabsRef.current.filter(
+        (t): t is TermSubTab => t.type === "terminal",
+      );
+      const claudePtys = new Set(
+        statsRef.current
+          .filter((s) => s.procs.some((p) => /claude/i.test(p.name)))
+          .map((s) => s.id),
+      );
+      const target = termTabs.find((t) => t.ptyId != null && claudePtys.has(t.ptyId));
+      if (target?.ptyId == null) {
+        onNotice("No running Claude session in this project.");
+        return;
+      }
+      const ptyId = target.ptyId;
+      void ipc.ptyWrite(ptyId, `/model ${model}`);
+      // Enter goes separately, a beat later: the slash-command menu opens while
+      // the text streams in, and an Enter in the same write can select the
+      // menu's highlighted entry instead of submitting the typed command.
+      setTimeout(() => void ipc.ptyWrite(ptyId, "\r"), 250);
+      setActiveTabId(target.id);
+      setTimeout(() => termHandles.current.get(target.id)?.focus(), 50);
+    },
+    [onNotice],
+  );
+  const hasClaude = projectStats.some((s) =>
+    s.procs.some((p) => /claude/i.test(p.name)),
   );
 
   // Launch an agent CLI in the project's first component — or, if it isn't on
@@ -968,7 +1031,13 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
           </div>
         )}
       </div>
-      <StatusBar roots={roots} agents={runningAgents} events={projectEvents} />
+      <StatusBar
+        roots={roots}
+        agents={runningAgents}
+        events={projectEvents}
+        visible={visible}
+        onSetModel={hasClaude ? setAgentModel : undefined}
+      />
     </div>
   );
 
@@ -1207,6 +1276,7 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
           stats={projectStats}
           hookPath={hookPath}
           pending={pending}
+          onDismissPending={onDismissPending}
           onJumpToTerminal={jumpToTerminal}
           roots={roots}
           shareContext={Boolean(project.shareContext)}
@@ -1245,7 +1315,11 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
                 <span className="rail-badge">{Math.min(changeCount, 99)}</span>
               )}
               {t.key === "agents" && pending.length > 0 && (
-                <span className="rail-badge rail-badge-urgent">{pending.length}</span>
+                <span
+                  className={`rail-badge ${urgentPending.length > 0 ? "rail-badge-urgent" : ""}`}
+                >
+                  {pending.length}
+                </span>
               )}
             </button>
           ))}

@@ -40,8 +40,11 @@ export default function App() {
   const [ws, setWs] = useState<WorkspaceState>(emptyWorkspace);
   const [loaded, setLoaded] = useState(false);
   const [dialog, setDialog] = useState<{ mode: "new" } | { mode: "edit"; project: Project } | null>(null);
-  const [stats, setStats] = useState<ipc.SessionStats[]>([]);
   const [agentEvents, setAgentEvents] = useState<AgentEventEntry[]>([]);
+  // Pending cards the user waved away. Session-scoped on purpose: a dismissed
+  // card is "seen", not "never tell me again". Held here (not in the panel)
+  // because the project-tab badges count from the same derived list.
+  const [dismissedPending, setDismissedPending] = useState<Set<string>>(new Set());
   const [hookPath, setHookPath] = useState<string | null>(null);
   const [zen, setZen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -169,7 +172,6 @@ export default function App() {
       setLoaded(true);
     });
     const subs = [
-      ipc.onPtyStats(setStats),
       ipc.onAgentEvent((raw) =>
         setAgentEvents((prev) => [...prev.slice(-199), { raw, ts: Date.now() }]),
       ),
@@ -379,9 +381,13 @@ export default function App() {
   const openProjects = ws.openIds
     .map((id) => ws.projects.find((p) => p.id === id))
     .filter((p): p is Project => Boolean(p));
-  const allPending = derivePending(agentEvents);
+  const allPending = derivePending(agentEvents).filter((i) => !dismissedPending.has(i.key));
+  // Tab badges count only what's blocked on the user — an agent that finished
+  // and is idling is not urgent.
   const pendingCount = (p: Project) =>
-    pendingForRoots(allPending, p.components.map((c) => c.path)).length;
+    pendingForRoots(allPending, p.components.map((c) => c.path)).filter(
+      (i) => i.kind !== "idle",
+    ).length;
 
   return (
     <div className={`app ${zen ? "zen" : ""}`}>
@@ -454,9 +460,12 @@ export default function App() {
             project={p}
             visible={p.id === ws.activeId}
             zen={zen}
-            stats={stats}
             events={agentEvents}
             hookPath={hookPath}
+            dismissedPending={dismissedPending}
+            onDismissPending={(key) =>
+              setDismissedPending((prev) => new Set(prev).add(key))
+            }
             onEdit={() => setDialog({ mode: "edit", project: p })}
             onNotice={setNotice}
             onShareContext={(on) =>

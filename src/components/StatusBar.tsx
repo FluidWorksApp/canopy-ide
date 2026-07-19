@@ -32,23 +32,44 @@ const fmtMem = (bytes: number) =>
 const fmtTokens = (n: number) =>
   n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}k` : `${n}`;
 
+/** What `/model` in Claude Code accepts — aliases resolve to the CLI's own
+ *  latest models, so this list doesn't go stale with each release. */
+const MODELS: { id: string; label: string; hint: string }[] = [
+  { id: "default", label: "Default", hint: "recommended" },
+  { id: "opus", label: "Opus", hint: "most capable" },
+  { id: "sonnet", label: "Sonnet", hint: "balanced" },
+  { id: "sonnet[1m]", label: "Sonnet · 1M context", hint: "long sessions" },
+  { id: "haiku", label: "Haiku", hint: "fast, cheapest" },
+  { id: "opusplan", label: "Opus Plan", hint: "Opus plans, Sonnet codes" },
+];
+
 interface StatusBarProps {
   roots: string[];
   agents: { name: string; cpu: number }[];
   events: AgentEventEntry[];
+  /** This project is the one on screen. Hidden projects freeze their polling
+   *  (git status, transcript stats) instead of burning it in the background. */
+  visible: boolean;
+  /** Present when a Claude session is live in this project; switches its model. */
+  onSetModel?: (model: string) => void;
 }
 
-export function StatusBar({ roots, agents, events }: StatusBarProps) {
+export function StatusBar({ roots, agents, events, visible, onSetModel }: StatusBarProps) {
   const [branch, setBranch] = useState<string | null>(null);
   const [dirty, setDirty] = useState(0);
   const [app, setApp] = useState<ipc.AppStats | null>(null);
   const [stats, setStats] = useState<ipc.ClaudeSessionStats | null>(null);
+  const [modelMenu, setModelMenu] = useState(false);
+  const [confirmModel, setConfirmModel] = useState<{ id: string; label: string } | null>(null);
 
-  // Whole-app footprint, pushed from the Rust monitor every 2s.
+  // Whole-app footprint, pushed from the Rust monitor. Only the visible
+  // project listens — every hidden StatusBar re-rendering on each tick is
+  // work nobody can see.
   useEffect(() => {
+    if (!visible) return;
     const sub = ipc.onAppStats(setApp);
     return () => void sub.then((fn) => fn());
-  }, []);
+  }, [visible]);
 
   // Latest Claude transcript for this project (hook events carry cwd + path).
   const transcript = (() => {
@@ -69,8 +90,11 @@ export function StatusBar({ roots, agents, events }: StatusBarProps) {
     return null;
   })();
 
+  // Both pollers gate on `visible`: each spawns a git subprocess / transcript
+  // read per tick per project, and a backgrounded project doesn't need either.
+  // Switching back re-runs the effect, which refreshes immediately.
   useEffect(() => {
-    if (!roots[0]) return;
+    if (!roots[0] || !visible) return;
     let cancelled = false;
     const refresh = () => {
       void ipc.gitStatus(roots[0]).then((s) => {
@@ -85,10 +109,10 @@ export function StatusBar({ roots, agents, events }: StatusBarProps) {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [roots[0]]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [roots[0], visible]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (!transcript) return;
+    if (!transcript || !visible) return;
     let cancelled = false;
     const refresh = () => {
       void ipc.claudeSessionStats(transcript).then((s) => {
@@ -101,7 +125,7 @@ export function StatusBar({ roots, agents, events }: StatusBarProps) {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [transcript]);
+  }, [transcript, visible]);
 
   const cost = stats ? estimateCost(stats) : null;
 
@@ -133,9 +157,69 @@ export function StatusBar({ roots, agents, events }: StatusBarProps) {
         </span>
       )}
       {stats?.model && (
-        <span className="status-item" title="model (from Claude session transcript)">
-          {stats.model.replace(/^claude-/, "")}
+        <span className="status-item status-model-anchor">
+          {onSetModel ? (
+            <button
+              className="status-model-btn"
+              title="Change this session's model (/model)"
+              onClick={() => setModelMenu((v) => !v)}
+            >
+              {stats.model.replace(/^claude-/, "")} ▾
+            </button>
+          ) : (
+            <span title="model (from Claude session transcript)">
+              {stats.model.replace(/^claude-/, "")}
+            </span>
+          )}
+          {modelMenu && (
+            <div className="status-menu" onMouseLeave={() => setModelMenu(false)}>
+              {MODELS.map((m) => (
+                <div
+                  key={m.id}
+                  className="cli-item"
+                  onClick={() => {
+                    setModelMenu(false);
+                    setConfirmModel(m);
+                  }}
+                >
+                  <span>{m.label}</span>
+                  <span className="status-menu-hint">{m.hint}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </span>
+      )}
+      {confirmModel && (
+        <div className="confirm-backdrop" onMouseDown={() => setConfirmModel(null)}>
+          <div className="confirm" onMouseDown={(e) => e.stopPropagation()}>
+            <p>
+              Switch this session to <strong>{confirmModel.label}</strong>?
+            </p>
+            <p className="confirm-sub">
+              This types <code>/model {confirmModel.id}</code> into the Claude
+              terminal and submits it. Claude applies it to the running session —
+              if the new model has a smaller context window, Claude will warn or
+              compact in the terminal, so check its response there. If you have
+              unsent text typed in that session's input box, it will be submitted
+              along with the command.
+            </p>
+            <div className="confirm-actions">
+              <button className="btn" onClick={() => setConfirmModel(null)}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-accent"
+                onClick={() => {
+                  onSetModel?.(confirmModel.id);
+                  setConfirmModel(null);
+                }}
+              >
+                Switch model
+              </button>
+            </div>
+          </div>
+        </div>
       )}
       {stats && (stats.input_tokens > 0 || stats.output_tokens > 0) && (
         <span

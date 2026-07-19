@@ -10,9 +10,9 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { SerializeAddon } from "@xterm/addon-serialize";
 import "@xterm/xterm/css/xterm.css";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
 
@@ -88,8 +88,11 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     term.loadAddon(fit);
     term.loadAddon(new Unicode11Addon());
     term.unicode.activeVersion = "11";
-    term.loadAddon(new WebLinksAddon());
-    term.loadAddon(new SerializeAddon());
+    // Links must go through the OS, not window.open(): WKWebView has no popup
+    // support, so the addon's default handler gets null back from window.open()
+    // and the click dies silently. The opener plugin's default scope already
+    // allows http/https, which is all the addon's URL matcher produces.
+    term.loadAddon(new WebLinksAddon((_event, uri) => void openUrl(uri)));
     term.open(el);
 
     // No WebGL renderer. @xterm/addon-webgl 0.19.0 corrupts rendering on

@@ -18,7 +18,9 @@ export interface PendingQuestion {
 
 export interface PendingItem {
   key: string;
-  kind: "question" | "notification";
+  /** question/notification = the agent is blocked on the user (urgent).
+   *  idle = the agent finished and is merely waiting — informational. */
+  kind: "question" | "notification" | "idle";
   agent: string;
   sessionId: string;
   cwd: string;
@@ -26,6 +28,11 @@ export interface PendingItem {
   message?: string;
   questions?: PendingQuestion[];
 }
+
+/** Claude's post-completion idle notice arrives through the same Notification
+ *  hook as real permission requests — the message text is the only thing that
+ *  tells "I'm blocked on you" apart from "I'm done and waiting". */
+const IDLE_RE = /waiting for (your )?input/i;
 
 export function derivePending(events: AgentEventEntry[]): PendingItem[] {
   const pendingBySession = new Map<string, PendingItem[]>();
@@ -70,20 +77,57 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
       });
       pendingBySession.set(sessionId, list);
     } else if (event === "Notification") {
+      const message = String(parsed.message ?? "Agent needs attention");
       const list = pendingBySession.get(sessionId) ?? [];
-      list.push({
-        key: `${sessionId}-${entry.ts}-n`,
-        kind: "notification",
-        agent: "claude",
-        sessionId,
-        cwd,
-        ts: entry.ts,
-        message: String(parsed.message ?? "Agent needs attention"),
-      });
-      pendingBySession.set(sessionId, list);
+      if (IDLE_RE.test(message)) {
+        // Completion notice, not a request. One per session is enough —
+        // replace an earlier one instead of stacking.
+        pendingBySession.set(sessionId, [
+          ...list.filter((i) => i.kind !== "idle"),
+          {
+            key: `${sessionId}-${entry.ts}-i`,
+            kind: "idle",
+            agent: "claude",
+            sessionId,
+            cwd,
+            ts: entry.ts,
+            message,
+          },
+        ]);
+      } else {
+        list.push({
+          key: `${sessionId}-${entry.ts}-n`,
+          kind: "notification",
+          agent: "claude",
+          sessionId,
+          cwd,
+          ts: entry.ts,
+          message,
+        });
+        pendingBySession.set(sessionId, list);
+      }
+    } else if (event === "Stop" || /turn.complete/i.test(event)) {
+      // The turn ended: everything pending is resolved, and the completion is
+      // itself worth a calm card until the user re-engages (the next
+      // UserPromptSubmit clears it). Codex's agent-turn-complete carries the
+      // agent's last words; Claude's Stop carries nothing.
+      const last = String(parsed["last-assistant-message"] ?? "").trim();
+      pendingBySession.set(sessionId, [
+        ...(pendingBySession.get(sessionId) ?? []).filter((i) => i.ts > entry.ts),
+        {
+          key: `${sessionId}-${entry.ts}-i`,
+          kind: "idle",
+          agent: event === "Stop" ? "claude" : "codex",
+          sessionId,
+          cwd,
+          ts: entry.ts,
+          message: last ? last.slice(0, 140) : "Finished — waiting for you",
+        },
+      ]);
     } else {
-      // Any other event from this session (PostToolUse, Stop, ...) means the
-      // agent progressed — everything pending before it is resolved.
+      // Any other event from this session (PostToolUse, SessionEnd, a new
+      // prompt, ...) means the agent progressed — everything pending before
+      // it is resolved.
       const list = pendingBySession.get(sessionId);
       if (list) {
         pendingBySession.set(
