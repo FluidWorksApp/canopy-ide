@@ -14,6 +14,11 @@
 </p>
 
 <p align="center">
+  <a href="https://canopyide.dev/"><b>canopyide.dev</b></a> ·
+  <a href="https://github.com/FluidWorksApp/canopy-ide/releases/latest">Download</a>
+</p>
+
+<p align="center">
   <img src="docs/screenshots/session.png" alt="An agent running in a Canopy terminal, with a live panel showing every session in the project" width="900">
 </p>
 
@@ -70,15 +75,21 @@ the project; open files as sub-tabs next to the terminals running your agents.
 
 ## Install
 
-Grab the newest build from the [**releases page**](https://github.com/FluidWorksApp/canopy-ide/releases/latest):
+Download from [**canopyide.dev**](https://canopyide.dev/) or grab your platform
+directly — these links always point at the newest release:
 
-| Platform | File | Updates |
+| Platform | Download | Updates |
 |---|---|---|
-| macOS (Apple Silicon / Intel) | `.dmg` | in-app auto-update |
-| Linux | `.AppImage` | in-app auto-update |
-| Linux | `.deb` / `.rpm` | via your package manager |
+| macOS — Apple Silicon | [`Canopy-macos-arm64.dmg`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-macos-arm64.dmg) | in-app auto-update |
+| macOS — Intel | [`Canopy-macos-intel.dmg`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-macos-intel.dmg) | in-app auto-update |
+| Linux — AppImage | [`Canopy-linux-x86_64.AppImage`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-linux-x86_64.AppImage) | in-app auto-update |
+| Linux — Debian/Ubuntu | [`Canopy-linux-x86_64.deb`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-linux-x86_64.deb) | via your package manager |
+| Linux — Fedora/RHEL | [`Canopy-linux-x86_64.rpm`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-linux-x86_64.rpm) | via your package manager |
+| Windows | coming soon | — |
 
-The macOS build is signed and notarized. Prefer to build it yourself? See below.
+All versions and release notes are on the
+[releases page](https://github.com/FluidWorksApp/canopy-ide/releases). The
+macOS build is signed and notarized. Prefer to build it yourself? See below.
 
 ## Build from source
 
