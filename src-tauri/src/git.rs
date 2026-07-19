@@ -960,6 +960,24 @@ pub struct CommitPatch {
     pub truncated: bool,
 }
 
+/// Reject a branch name that could be read as an option or extra revision
+/// argument. Names come from git itself here, but they reach a command line,
+/// and `--upload-pack=…`-style injection is the reason to be strict.
+fn checked_ref(name: &str) -> Result<String, String> {
+    let n = name.trim();
+    if n.is_empty()
+        || n.starts_with('-')
+        || n.contains("..")
+        || n.contains(char::is_whitespace)
+        || n.contains('~')
+        || n.contains('^')
+        || n.contains(':')
+    {
+        return Err("invalid branch name".into());
+    }
+    Ok(n.to_string())
+}
+
 /// Reject anything that isn't a hex object name before it reaches git — these
 /// strings come from the UI, and `git show` accepts far broader revision
 /// syntax (`HEAD@{...}`, ranges, paths after `--`).
@@ -1244,6 +1262,124 @@ pub async fn git_work_audit(
     }
 
     Ok(WorkAudit { base, counts_degraded, items })
+}
+
+
+/// Commits a branch has that the base does not — the "what is in here" list
+/// behind a Loose ends row. Metadata only: no patches, so this is one process
+/// and paints instantly (see the branch patch command for the heavy half).
+#[tauri::command]
+pub async fn git_branch_commits(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    branch: String,
+) -> Result<Vec<CommitInfo>, String> {
+    let top = repo_path(&state, &repo)?;
+    let branch = checked_ref(&branch)?;
+    let base = default_base(&top);
+    // base..branch — commits on the branch and not on base. Bounded: a branch
+    // with thousands of commits is a fork, not a loose end.
+    let out = run(git(&top).args([
+        "log",
+        "-200",
+        "--date=short",
+        "--pretty=format:%H\x1f%h\x1f%an\x1f%ad\x1f%s\x1f%D",
+        &format!("{base}..{branch}"),
+    ]))
+    .unwrap_or_default();
+    Ok(out
+        .lines()
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split('\x1f').collect();
+            if f.len() < 5 {
+                return None;
+            }
+            Some(CommitInfo {
+                hash: f[0].to_string(),
+                short: f[1].to_string(),
+                author: f[2].to_string(),
+                date: f[3].to_string(),
+                subject: f[4].to_string(),
+                refs: f.get(5).unwrap_or(&"").to_string(),
+            })
+        })
+        .collect())
+}
+
+/// A branch's patch. `uncommitted` gives the working-tree changes in its
+/// worktree (never cached — they change as you look at them); otherwise the
+/// cumulative diff of base...branch (cached: for a given pair of tips it can
+/// not change).
+#[tauri::command]
+pub async fn git_branch_patch(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    branch: String,
+    worktree: Option<String>,
+    uncommitted: bool,
+) -> Result<CommitPatch, String> {
+    const MAX_PATCH_BYTES: usize = 2 * 1024 * 1024;
+    let top = repo_path(&state, &repo)?;
+    let branch = checked_ref(&branch)?;
+
+    let mut patch = if uncommitted {
+        let dir = match worktree {
+            // The worktree is a registered workspace root; scope-check it like
+            // any other path from the UI.
+            Some(w) => check_scope(&state, Path::new(&w))?,
+            None => top.clone(),
+        };
+        // Tracked changes, plus untracked files rendered as additions —
+        // `git diff` alone would silently omit brand-new files, which is
+        // exactly the work most at risk of being thrown away.
+        let mut p = run(git(&dir).args(["diff", "HEAD"])).unwrap_or_default();
+        let untracked =
+            run(git(&dir).args(["ls-files", "--others", "--exclude-standard"])).unwrap_or_default();
+        for file in untracked.lines().filter(|l| !l.trim().is_empty()).take(100) {
+            if let Ok(extra) = run(git(&dir).args([
+                "diff",
+                "--no-index",
+                "--",
+                "/dev/null",
+                file,
+            ])) {
+                p.push_str(&extra);
+            } else if let Ok(extra) = run(git(&dir).args([
+                "diff",
+                "--no-index",
+                "--binary",
+                "--",
+                "/dev/null",
+                file,
+            ])) {
+                p.push_str(&extra);
+            }
+        }
+        p
+    } else {
+        let base = default_base(&top);
+        run(git(&top).args(["diff", &format!("{base}...{branch}")])).unwrap_or_default()
+    };
+
+    let mut files = 0_u32;
+    let mut adds = 0_u32;
+    let mut dels = 0_u32;
+    for line in patch.lines() {
+        if line.starts_with("diff --git ") {
+            files += 1;
+        } else if line.starts_with("+++") || line.starts_with("---") {
+        } else if line.starts_with('+') {
+            adds += 1;
+        } else if line.starts_with('-') {
+            dels += 1;
+        }
+    }
+    let truncated = patch.len() > MAX_PATCH_BYTES;
+    if truncated {
+        let cut = patch[..MAX_PATCH_BYTES].rfind('\n').unwrap_or(MAX_PATCH_BYTES);
+        patch.truncate(cut);
+    }
+    Ok(CommitPatch { patch, files_changed: files, insertions: adds, deletions: dels, truncated })
 }
 
 // ---------- tickets (issue #15) ----------

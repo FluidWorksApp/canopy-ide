@@ -13,6 +13,8 @@ import * as ipc from "../ipc";
 
 interface LooseEndsProps {
   repo: string | null;
+  /** Open this branch's work as a tab — the point of the panel. */
+  onOpenBranch: (repo: string, branch: ipc.BranchWork) => void;
   onOpenTerminal: (cwd: string, label: string) => void;
   onUseWorktree: (repo: string, path: string, branch: string) => void;
   onNotice: (msg: string) => void;
@@ -60,6 +62,7 @@ const ago = (days: number) =>
 
 export function LooseEnds({
   repo,
+  onOpenBranch,
   onOpenTerminal,
   onUseWorktree,
   onNotice,
@@ -152,7 +155,12 @@ export function LooseEnds({
             <span className="badge">{g.items.length}</span>
           </div>
           {g.items.map((b) => (
-            <div key={b.branch} className="loose-row" title={b.worktree ?? "no worktree"}>
+            <div
+              key={b.branch}
+              className="loose-row loose-row-click"
+              title={`${b.worktree ?? "no worktree"}\n\nClick to see what's in this branch`}
+              onClick={() => repo && onOpenBranch(repo, b)}
+            >
               <div className="loose-main">
                 <span className="loose-branch">
                   {b.branch}
@@ -193,7 +201,7 @@ export function LooseEnds({
                   </span>
                 )}
                 <span className="loose-age">{ago(b.age_days)}</span>
-                <span className="loose-actions">
+                <span className="loose-actions" onClick={(e) => e.stopPropagation()}>
                   {b.worktree && !b.prunable && (
                     <>
                       <button

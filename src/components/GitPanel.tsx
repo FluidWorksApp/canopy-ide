@@ -14,6 +14,8 @@ interface GitPanelProps {
   onOpenDiff: (repo: string, file: ipc.FileChange) => void;
   /** Open a pull request in the main area. */
   onOpenPr: (repo: string, pr: ipc.PrInfo) => void;
+  /** Open a branch's work in the main area. */
+  onOpenBranch: (repo: string, branch: ipc.BranchWork) => void;
   /** Open a commit in the main area. */
   onOpenCommit: (
     repo: string,
@@ -35,6 +37,7 @@ export function GitPanel({
   onOpenDiff,
   onOpenPr,
   onOpenCommit,
+  onOpenBranch,
   onOpenTerminal,
   activeWorktree,
   onUseWorktree,
@@ -637,6 +640,7 @@ export function GitPanel({
       {section === "loose" && (
         <LooseEnds
           repo={repo}
+          onOpenBranch={onOpenBranch}
           onOpenTerminal={onOpenTerminal}
           onUseWorktree={onUseWorktree}
           onNotice={onNotice}

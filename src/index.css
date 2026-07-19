@@ -4029,3 +4029,29 @@ textarea,
 .loose-toggle {
   margin: 10px 12px;
 }
+
+.loose-row-click {
+  cursor: pointer;
+}
+
+.branch-panes {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.branch-body {
+  padding-top: 8px;
+}
+
+.branch-commits {
+  margin-bottom: 14px;
+}
+
+.tab-branch-icon {
+  color: var(--ok);
+  font-size: 10px;
+}

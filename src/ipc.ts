@@ -348,6 +348,16 @@ export interface WorkAudit {
   items: BranchWork[];
 }
 
+export const gitBranchCommits = (repo: string, branch: string) =>
+  invoke<CommitInfo[]>("git_branch_commits", { repo, branch });
+
+export const gitBranchPatch = (
+  repo: string,
+  branch: string,
+  worktree: string | null,
+  uncommitted: boolean,
+) => invoke<CommitPatch>("git_branch_patch", { repo, branch, worktree, uncommitted });
+
 export const gitWorkAudit = (repo: string) => invoke<WorkAudit>("git_work_audit", { repo });
 
 export const gitWorktrees = (repo: string) => invoke<WorktreeInfo[]>("git_worktrees", { repo });
