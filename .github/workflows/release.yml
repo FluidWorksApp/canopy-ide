@@ -73,6 +73,50 @@ jobs:
 
       - run: npm ci
 
+      # Import the signing certificate ourselves instead of letting Tauri do it.
+      # Tauri's importer rejects any .p12 holding more than one identity
+      # ("certificate from APPLE_CERTIFICATE ... does not match provided
+      # identity"), and a Keychain Access / `security export` .p12 often carries
+      # every identity in the login keychain. Importing here and signing purely
+      # by APPLE_SIGNING_IDENTITY name sidesteps that: codesign picks the right
+      # identity out of the keychain no matter what else the .p12 contains.
+      - name: Import Apple signing certificate
+        if: startsWith(matrix.platform, 'macos')
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "APPLE_CERTIFICATE not set — building unsigned."
+            exit 0
+          fi
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          KEYCHAIN_PW="$(openssl rand -hex 24)"
+
+          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -f pkcs12 -T /usr/bin/codesign
+          # Lets codesign use the key without an interactive password prompt.
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PW" "$KEYCHAIN_PATH" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          rm -f "$CERT_PATH"
+
+          # Fail here with a clear message rather than deep inside `tauri build`
+          # if the identity the secrets name isn't actually in the .p12.
+          if ! security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+              | grep -qF "$APPLE_SIGNING_IDENTITY"; then
+            echo "::error::APPLE_SIGNING_IDENTITY not found in the imported .p12."
+            security find-identity -v -p codesigning "$KEYCHAIN_PATH" || true
+            exit 1
+          fi
+          echo "Identity present in keychain."
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -80,11 +124,13 @@ jobs:
           # produces no .sig, and installed copies will refuse the update.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # Apple signing + notarisation. When these are unset the mac build is
-          # unsigned: it runs here, but Gatekeeper blocks it on other people's
-          # machines. Set them before shipping to anyone else.
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # Apple signing + notarisation. The certificate itself is imported by
+          # the "Import Apple signing certificate" step above — passing
+          # APPLE_CERTIFICATE here would re-trigger Tauri's own import, which
+          # chokes on a .p12 with more than one identity. Only the identity
+          # name is passed; codesign resolves it from the imported keychain.
+          # When these are unset the mac build is unsigned: it runs here, but
+          # Gatekeeper blocks it on other people's machines.
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
