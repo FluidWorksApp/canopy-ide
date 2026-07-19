@@ -166,3 +166,36 @@ jobs:
             exit 1
           fi
           echo "$sigs updater signature(s) present"
+
+      # Tauri versions its filenames (Canopy_0.1.0_aarch64.dmg), but
+      # `releases/latest/download/<name>` only resolves names that are identical
+      # in every release. So each release also carries a version-less alias of
+      # every installer — the permanent URLs canopyide.dev and the README link:
+      #   https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-macos-arm64.dmg
+      # Keep these names in lockstep with the website's downloads page and the
+      # README table. When the Windows build lands, its alias should be
+      # Canopy-windows-x86_64-setup.exe.
+      - name: Upload stable-name download aliases
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          root="src-tauri/target/${{ matrix.target }}/release/bundle"
+          [ -d "$root" ] || root="src-tauri/target/release/bundle"
+          stage="$(mktemp -d)"
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin)
+              cp "$root"/dmg/Canopy_*.dmg "$stage/Canopy-macos-arm64.dmg" ;;
+            x86_64-apple-darwin)
+              cp "$root"/dmg/Canopy_*.dmg "$stage/Canopy-macos-intel.dmg" ;;
+            x86_64-unknown-linux-gnu)
+              cp "$root"/appimage/*.AppImage "$stage/Canopy-linux-x86_64.AppImage"
+              cp "$root"/deb/*.deb          "$stage/Canopy-linux-x86_64.deb"
+              cp "$root"/rpm/*.rpm          "$stage/Canopy-linux-x86_64.rpm" ;;
+          esac
+          ls -l "$stage"
+          # The release is still a draft at this point; gh resolves drafts by
+          # tag name. --clobber makes a re-run of the workflow idempotent.
+          gh release upload "${{ github.ref_name }}" "$stage"/* --clobber
+          rm -rf "$stage"
