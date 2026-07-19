@@ -274,7 +274,6 @@ export function TicketsPanel({
                     <span className="ticket-title">{t.title}</span>
                   </div>
                   <div className="ticket-meta">
-                    <span className="ticket-state-name">{t.state}</span>
                     {wt && (
                       <span className="ticket-wt" title={`Worktree exists: ${wt.branch}`}>
                         ⑂ {wt.dirty > 0 ? `±${wt.dirty}` : "clean"}

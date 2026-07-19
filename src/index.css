@@ -3557,7 +3557,18 @@ textarea,
 }
 
 .ticket-repo-select {
-  margin: 4px 12px;
+  margin: 0 12px 4px;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 2px 0;
+  width: fit-content;
+  cursor: pointer;
+}
+
+.ticket-repo-select:hover {
+  color: var(--text);
 }
 
 .ticket-state-head {
@@ -3574,9 +3585,9 @@ textarea,
 
 .ticket-row {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 6px 12px;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
   cursor: pointer;
 }
 
@@ -3587,8 +3598,9 @@ textarea,
 .ticket-main {
   display: flex;
   gap: 6px;
-  align-items: baseline;
+  align-items: center;
   min-width: 0;
+  flex: 1;
 }
 
 .ticket-id {
@@ -3610,6 +3622,17 @@ textarea,
   gap: 8px;
   font-size: 10px;
   color: var(--text-dim);
+  flex: 0 0 auto;
+}
+
+/* The action reveals on hover — rows read as a clean list until pointed at. */
+.ticket-row .ticket-start {
+  opacity: 0;
+}
+
+.ticket-row:hover .ticket-start,
+.ticket-row .ticket-start:disabled {
+  opacity: 1;
 }
 
 .ticket-wt {
@@ -3628,8 +3651,8 @@ textarea,
 .ticket-pills {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  padding: 6px 12px;
+  gap: 5px;
+  padding: 2px 12px 6px;
 }
 
 .ticket-pill {
