@@ -158,6 +158,16 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const [stats, setStats] = useState<ipc.SessionStats[]>([]);
   const statsRef = useRef(stats);
   statsRef.current = stats;
+  // Hook-free waiting detection, for agents with no event integration (the
+  // Antigravity permission prompt sat invisible because only claude/codex
+  // emit hook events). An agent that burned real CPU and has now been
+  // near-idle for 3 straight ticks (~6s) is either blocked on a prompt or
+  // done — both mean "look at me", so the tab gets its attention ring.
+  // Heuristic by design: it rings the tab, it never fabricates an urgent
+  // pending card. Re-arms whenever the agent works again.
+  const idleWatch = useRef(new Map<number, { busy: boolean; idle: number; flagged: boolean }>());
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
   useEffect(() => {
     const sub = ipc.onPtyStats((all) => {
       const ids = new Set(
@@ -167,9 +177,35 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           .filter((id): id is number => id != null),
       );
       const mine = all.filter((s) => ids.has(s.id));
+      for (const s of mine) {
+        if (!s.procs.some((p) => AGENT_PATTERN.test(p.name))) {
+          idleWatch.current.delete(s.id);
+          continue;
+        }
+        const w = idleWatch.current.get(s.id) ?? { busy: false, idle: 0, flagged: false };
+        if (s.total_cpu > 10) {
+          idleWatch.current.set(s.id, { busy: true, idle: 0, flagged: false });
+        } else if (w.busy && !w.flagged && ++w.idle >= 3) {
+          w.flagged = true;
+          idleWatch.current.set(s.id, w);
+          const tab = tabsRef.current.find(
+            (t): t is TermSubTab => t.type === "terminal" && t.ptyId === s.id,
+          );
+          // A ring on the tab you're watching is noise (same rule as OSC).
+          if (tab && !(tab.id === activeTabIdRef.current && visibleRef.current)) {
+            patchTab(tab.id, {
+              notice: "Agent went quiet — it may be waiting on a prompt",
+              unread: true,
+            });
+          }
+        } else {
+          idleWatch.current.set(s.id, w);
+        }
+      }
       setStats((prev) => (prev.length === 0 && mine.length === 0 ? prev : mine));
     });
     return () => void sub.then((fn) => fn());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // A worktree mirrors its repo's tree, so a component inside the repo maps to
