@@ -81,23 +81,43 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
             onChange={(e) => setName(e.target.value)}
           />
         </label>
-        <div className="field">
-          <span>
-            Components <small>(labeled directories: frontend, backend, …)</small>
-          </span>
+        {/* Two visual levels, because the flat version read as a wall of
+            identical boxes: directory CARDS (folder glyph + name + dimmed
+            path) contain an indented, labeled "Run commands" zone whose ▶
+            marks match the play buttons those commands become in the
+            sidebar. */}
+        <div className="pd-section">
+          <div className="pd-section-head">
+            <span>Directories</span>
+            <small>
+              The folders this project is made of — one repo, or several
+              (frontend, backend, …). Each gets its own file tree and
+              terminals.
+            </small>
+          </div>
           {components.map((c, i) => (
-            <div key={c.path} className="component-block">
-              <div className="component-row">
-                <input
-                  className="component-label"
-                  value={c.label}
-                  onChange={(e) => patch(i, e.target.value)}
-                />
-                <span className="component-path" title={c.path}>
-                  {c.path}
-                </span>
+            <div key={c.path} className="pd-dir-card">
+              <div className="pd-dir-head">
+                <svg width="16" height="14" viewBox="0 0 16 14" className="pd-dir-glyph">
+                  <path
+                    d="M1.5 2.5h4l1.5 1.5h7.5a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1z"
+                    fill="#dcb67a"
+                  />
+                </svg>
+                <div className="pd-dir-title">
+                  <input
+                    className="pd-dir-label"
+                    value={c.label}
+                    title="Display name for this directory"
+                    onChange={(e) => patch(i, e.target.value)}
+                  />
+                  <span className="pd-dir-path" title={c.path}>
+                    {c.path}
+                  </span>
+                </div>
                 <button
                   className="btn-icon"
+                  title="Remove from project — the folder on disk is untouched"
                   onClick={() =>
                     setComponents((prev) => prev.filter((_, j) => j !== i))
                   }
@@ -105,31 +125,41 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
                   ✕
                 </button>
               </div>
-              {(c.commands ?? []).map((cmd, k) => (
-                <div key={k} className="command-row">
-                  <input
-                    className="command-name"
-                    placeholder="name (e.g. dev)"
-                    value={cmd.name}
-                    onChange={(e) => patchCommand(i, k, "name", e.target.value)}
-                  />
-                  <input
-                    className="command-cmd"
-                    placeholder="command (e.g. npm run dev)"
-                    value={cmd.command}
-                    onChange={(e) => patchCommand(i, k, "command", e.target.value)}
-                  />
-                  <button className="btn-icon" onClick={() => removeCommand(i, k)}>
-                    ✕
-                  </button>
+              <div className="pd-cmds">
+                <div className="pd-cmds-head">
+                  <span>Run commands</span>
+                  <small>
+                    Servers and tasks for this folder — they show up as ▶ play
+                    buttons in the sidebar.
+                  </small>
                 </div>
-              ))}
-              <button className="btn btn-mini" onClick={() => addCommand(i)}>
-                ＋ run command
-              </button>
+                {(c.commands ?? []).map((cmd, k) => (
+                  <div key={k} className="pd-cmd-row">
+                    <span className="pd-cmd-play">▶</span>
+                    <input
+                      className="pd-cmd-name"
+                      placeholder="name — e.g. web"
+                      value={cmd.name}
+                      onChange={(e) => patchCommand(i, k, "name", e.target.value)}
+                    />
+                    <input
+                      className="pd-cmd-cmd"
+                      placeholder="command — e.g. pnpm run dev"
+                      value={cmd.command}
+                      onChange={(e) => patchCommand(i, k, "command", e.target.value)}
+                    />
+                    <button className="btn-icon" onClick={() => removeCommand(i, k)}>
+                      ✕
+                    </button>
+                  </div>
+                ))}
+                <button className="btn btn-mini" onClick={() => addCommand(i)}>
+                  ＋ Add command
+                </button>
+              </div>
             </div>
           ))}
-          <button className="btn" onClick={() => void addComponent()}>
+          <button className="btn pd-add-dir" onClick={() => void addComponent()}>
             ＋ Add directory…
           </button>
         </div>

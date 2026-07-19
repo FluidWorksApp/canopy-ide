@@ -1737,6 +1737,138 @@ div + .bd-head {
   margin-left: auto;
 }
 
+/* ---------- project dialog: directory cards + nested run commands ---------- */
+
+.pd-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 14px 0 6px;
+}
+
+.pd-section-head,
+.pd-cmds-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pd-section-head > span {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.pd-section-head > small,
+.pd-cmds-head > small {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-weight: 400;
+}
+
+.pd-dir-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  overflow: hidden;
+}
+
+.pd-dir-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+.pd-dir-glyph {
+  flex: 0 0 auto;
+}
+
+.pd-dir-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.pd-dir-label {
+  font-weight: 600;
+  font-size: 13px;
+  background: none;
+  border: none;
+  border-bottom: 1px dashed transparent;
+  color: var(--text);
+  padding: 0;
+}
+
+.pd-dir-label:hover,
+.pd-dir-label:focus {
+  border-bottom-color: var(--border);
+  outline: none;
+}
+
+.pd-dir-path {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* ellipsize the LEFT side — the tail of a path is the part that matters */
+  text-align: left;
+}
+
+/* Commands sit in a visually recessed zone under their directory. */
+.pd-cmds {
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  padding: 8px 12px 10px 30px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pd-cmds-head > span {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.pd-cmd-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pd-cmd-play {
+  color: var(--ok);
+  font-size: 9px;
+  flex: 0 0 auto;
+}
+
+.pd-cmd-name {
+  width: 110px;
+  flex: 0 0 auto;
+}
+
+.pd-cmd-cmd {
+  flex: 1;
+  font-family: 'SF Mono', Menlo, monospace;
+  font-size: 11px;
+}
+
+.pd-cmds .btn-mini {
+  align-self: flex-start;
+}
+
+.pd-add-dir {
+  align-self: stretch;
+}
+
 .hook-setup-row {
   display: flex;
   gap: 6px;
