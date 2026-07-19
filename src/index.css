@@ -2016,20 +2016,24 @@ body,
 
 /* ---------- settings + help dialogs ---------- */
 
-.settings-dialog {
-  width: 660px;
-  max-width: 94vw;
-  height: 500px;
-  max-height: 82vh;
+/* .confirm.settings-dialog, not .settings-dialog: the base .confirm rule
+   (max-width: 420px) is declared later in this file and was winning the
+   cascade — the dialog rendered capped at 420px and the skin grid collapsed
+   to a single column. */
+.confirm.settings-dialog {
+  width: min(760px, 94vw);
+  max-width: min(760px, 94vw);
+  height: min(560px, 84vh);
+  max-height: min(560px, 84vh);
   display: flex;
   flex-direction: column;
   padding: 0;
   overflow: hidden;
 }
 
-.help-dialog {
-  width: 480px;
-  max-width: 92vw;
+.confirm.help-dialog {
+  width: min(520px, 92vw);
+  max-width: min(520px, 92vw);
   max-height: 80vh;
   overflow-y: auto;
 }
@@ -2153,7 +2157,7 @@ body,
 /* Skins as preview cards: the palette shown, not named. */
 .skin-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
   gap: 10px;
 }
 
