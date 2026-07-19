@@ -7,7 +7,7 @@ import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import * as ipc from "../ipc";
 import { modelFor, monaco } from "../monaco-setup";
 import type { AgentCli, Project } from "../projects";
-import { AGENT_CLIS, checkInstalledClis } from "../projects";
+import { AGENT_CLIS, AGENT_PATTERN, checkInstalledClis } from "../projects";
 import {
   AgentIcon,
   CheckIcon,
@@ -92,9 +92,6 @@ const tabId = () =>
     ? crypto.randomUUID()
     : `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
-const AGENT_PATTERN =
-  /\b(claude|codex|aider|goose|gemini|opencode|amp|copilot|cursor-agent|qwen|droid)\b/i;
-
 const RAIL_TABS: { key: SideTab; icon: string; title: string }[] = [
   { key: "files", icon: "🗂", title: "Components & files" },
   { key: "changes", icon: "±", title: "Session changes" },
@@ -106,15 +103,20 @@ interface ProjectViewProps {
   project: Project;
   visible: boolean;
   zen: boolean;
-  stats: ipc.SessionStats[];
   events: AgentEventEntry[];
   hookPath: string | null;
+  /** Every open project (name + roots) — the resource breakdown groups the
+   *  machine-wide session stats by project, which one project can't know. */
+  allProjects: { name: string; roots: string[] }[];
+  /** Pending-card keys the user dismissed (held app-wide so badges agree). */
+  dismissedPending: Set<string>;
+  onDismissPending: (key: string) => void;
   onEdit: () => void;
   onNotice: (msg: string) => void;
   onShareContext: (on: boolean) => void;
 }
 
-export function ProjectView({ project, visible, zen, stats, events, hookPath, onEdit, onNotice, onShareContext }: ProjectViewProps) {
+export function ProjectView({ project, visible, zen, events, hookPath, allProjects, dismissedPending, onDismissPending, onEdit, onNotice, onShareContext }: ProjectViewProps) {
   const [sideTab, setSideTab] = useState<SideTab>("files");
   const [collapsed, setCollapsed] = useState(false);
   const [tabs, setTabs] = useState<SubTab[]>([]);
@@ -146,6 +148,65 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   const closeTabRef = useRef<(id: string) => void>(() => {});
+
+  // Process stats for THIS project's terminals only. Subscribed here rather
+  // than in App: the monitor emits every 2s, and holding the array at App
+  // level re-rendered every mounted ProjectView (tab strips, file trees, git
+  // panels — for every open project) on every tick. Filtering at the door
+  // also lets a project with no terminals skip the setState entirely, so it
+  // never re-renders from stats at all.
+  const [stats, setStats] = useState<ipc.SessionStats[]>([]);
+  const statsRef = useRef(stats);
+  statsRef.current = stats;
+  // Hook-free waiting detection, for agents with no event integration (the
+  // Antigravity permission prompt sat invisible because only claude/codex
+  // emit hook events). An agent that burned real CPU and has now been
+  // near-idle for 3 straight ticks (~6s) is either blocked on a prompt or
+  // done — both mean "look at me", so the tab gets its attention ring.
+  // Heuristic by design: it rings the tab, it never fabricates an urgent
+  // pending card. Re-arms whenever the agent works again.
+  const idleWatch = useRef(new Map<number, { busy: boolean; idle: number; flagged: boolean }>());
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+  useEffect(() => {
+    const sub = ipc.onPtyStats((all) => {
+      const ids = new Set(
+        tabsRef.current
+          .filter((t): t is TermSubTab => t.type === "terminal")
+          .map((t) => t.ptyId)
+          .filter((id): id is number => id != null),
+      );
+      const mine = all.filter((s) => ids.has(s.id));
+      for (const s of mine) {
+        if (!s.procs.some((p) => AGENT_PATTERN.test(p.name))) {
+          idleWatch.current.delete(s.id);
+          continue;
+        }
+        const w = idleWatch.current.get(s.id) ?? { busy: false, idle: 0, flagged: false };
+        if (s.total_cpu > 10) {
+          idleWatch.current.set(s.id, { busy: true, idle: 0, flagged: false });
+        } else if (w.busy && !w.flagged && ++w.idle >= 3) {
+          w.flagged = true;
+          idleWatch.current.set(s.id, w);
+          const tab = tabsRef.current.find(
+            (t): t is TermSubTab => t.type === "terminal" && t.ptyId === s.id,
+          );
+          // A ring on the tab you're watching is noise (same rule as OSC).
+          if (tab && !(tab.id === activeTabIdRef.current && visibleRef.current)) {
+            patchTab(tab.id, {
+              notice: "Agent went quiet — it may be waiting on a prompt",
+              unread: true,
+            });
+          }
+        } else {
+          idleWatch.current.set(s.id, w);
+        }
+      }
+      setStats((prev) => (prev.length === 0 && mine.length === 0 ? prev : mine));
+    });
+    return () => void sub.then((fn) => fn());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // A worktree mirrors its repo's tree, so a component inside the repo maps to
   // the same relative path inside the worktree.
@@ -227,9 +288,16 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
   // launcher, so you pick the shell or agent you actually want rather than
   // being handed a shell you didn't ask for.
 
+  // Re-probed whenever it could have changed: an install run finishing, or
+  // the launcher opening. A one-shot probe at mount meant a finished install
+  // still showed — and re-ran — the installer on every click.
+  const refreshInstalled = useCallback(
+    () => void checkInstalledClis().then(setInstalled),
+    [],
+  );
   useEffect(() => {
-    void checkInstalledClis().then(setInstalled);
-  }, []);
+    refreshInstalled();
+  }, [refreshInstalled]);
 
   // Looking at a tab is what marks it read. As an effect rather than something
   // hung off the tab's onClick, so every route in — clicking, Ctrl+Tab cycling,
@@ -537,7 +605,7 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
       .map((t) => t.ptyId)
       .filter((id): id is number => id != null),
   );
-  const projectStats = stats.filter((s) => ptyIds.has(s.id));
+  const projectStats = stats; // already filtered to this project's ptys at the door
   // Hooks are global, so the raw stream carries every agent on the machine.
   // Everything below this line sees only what our own terminals raised.
   const projectEvents = eventsForProject(events, ptyIds, roots);
@@ -566,7 +634,11 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
   const changedPaths = new Set(changeGroups.flatMap((g) => g.files.map((f) => f.abs)));
   const changeCount = changeGroups.reduce((n, g) => n + g.files.length, 0);
   const sectionOpen = (path: string) => openSections[path] ?? true;
-  const pending = pendingForRoots(derivePending(projectEvents), roots);
+  const pending = pendingForRoots(derivePending(projectEvents), roots).filter(
+    (i) => !dismissedPending.has(i.key),
+  );
+  // Blocked-on-you items drive the urgent styling; completions are quiet.
+  const urgentPending = pending.filter((i) => i.kind !== "idle");
 
   // Jump to the terminal running the agent that raised the item: prefer a
   // terminal whose PTY tree contains an agent process, then match by cwd.
@@ -581,6 +653,8 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
           .map((s) => s.id),
       );
       const target =
+        // The event's own pty stamp is an identity, not a guess — prefer it.
+        termTabs.find((t) => t.ptyId != null && t.ptyId === item.pty) ??
         termTabs.find(
           (t) =>
             t.ptyId != null &&
@@ -598,6 +672,79 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
     [stats],
   );
 
+  // Answer a questionnaire straight from the panel: type the option's number
+  // into the agent's terminal (Claude Code's ask UI selects by digit), then
+  // Enter a beat later. The card dismisses immediately — the hook stream
+  // resolves it for real once the tool call completes.
+  const answerQuestion = useCallback(
+    (item: PendingItem, optionIndex: number) => {
+      const termTabs = tabsRef.current.filter(
+        (t): t is TermSubTab => t.type === "terminal",
+      );
+      const target =
+        termTabs.find((t) => t.ptyId != null && t.ptyId === item.pty) ??
+        termTabs.find((t) => item.cwd === t.cwd || item.cwd.startsWith(t.cwd + "/"));
+      if (target?.ptyId == null) {
+        onNotice("Can't find the terminal this question came from — answer there.");
+        return;
+      }
+      const ptyId = target.ptyId;
+      void ipc.ptyWrite(ptyId, String(optionIndex + 1));
+      setTimeout(() => void ipc.ptyWrite(ptyId, "\r"), 150);
+      onDismissPending(item.key);
+      setActiveTabId(target.id);
+      setTimeout(() => termHandles.current.get(target.id)?.focus(), 50);
+    },
+    [onNotice, onDismissPending],
+  );
+
+  // Looking at the terminal IS reading its cards. When the active tab is the
+  // terminal a pending item came from, the item's job is done — same rule as
+  // the tab unread-dot. This is also what keeps answered-in-terminal asks
+  // from lingering as stale cards.
+  useEffect(() => {
+    if (!visible || !activeTabId) return;
+    const tab = tabsRef.current.find((t) => t.id === activeTabId);
+    if (tab?.type !== "terminal" || tab.ptyId == null) return;
+    for (const item of pending) {
+      if (item.pty != null && item.pty === tab.ptyId) onDismissPending(item.key);
+    }
+  }, [activeTabId, visible, pending, onDismissPending]);
+
+  // Switch the model of the Claude session running in this project by typing
+  // `/model <name>` into its terminal — the same thing the user would type, so
+  // the CLI's own confirmations and context-size warnings appear right there.
+  // The terminal is focused afterwards so those warnings are actually seen.
+  const setAgentModel = useCallback(
+    (model: string) => {
+      const termTabs = tabsRef.current.filter(
+        (t): t is TermSubTab => t.type === "terminal",
+      );
+      const claudePtys = new Set(
+        statsRef.current
+          .filter((s) => s.procs.some((p) => /claude/i.test(p.name)))
+          .map((s) => s.id),
+      );
+      const target = termTabs.find((t) => t.ptyId != null && claudePtys.has(t.ptyId));
+      if (target?.ptyId == null) {
+        onNotice("No running Claude session in this project.");
+        return;
+      }
+      const ptyId = target.ptyId;
+      void ipc.ptyWrite(ptyId, `/model ${model}`);
+      // Enter goes separately, a beat later: the slash-command menu opens while
+      // the text streams in, and an Enter in the same write can select the
+      // menu's highlighted entry instead of submitting the typed command.
+      setTimeout(() => void ipc.ptyWrite(ptyId, "\r"), 250);
+      setActiveTabId(target.id);
+      setTimeout(() => termHandles.current.get(target.id)?.focus(), 50);
+    },
+    [onNotice],
+  );
+  const hasClaude = projectStats.some((s) =>
+    s.procs.some((p) => /claude/i.test(p.name)),
+  );
+
   // Launch an agent CLI in the project's first component — or, if it isn't on
   // PATH, run its install command in a terminal and re-probe afterwards.
   /** Launch an agent CLI. `at` defaults to the first component; right-clicking a
@@ -609,8 +756,9 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
     if (installed[cli.bin]) {
       addTerminal(cwd, cli.bin, cli.name, cli.icon);
     } else {
-      addTerminal(cwd, cli.install, `install ${cli.name}`, "⬇");
-      setTimeout(() => void checkInstalledClis().then(setInstalled), 60_000);
+      // A run tab, so the installer exits when done — and that exit is the
+      // signal to re-probe (see onExited below). No timers, no staleness.
+      addTerminal(cwd, cli.install, `install ${cli.name}`, "⬇", true);
     }
   };
 
@@ -664,6 +812,27 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
     setRenamingTabId(null);
   };
 
+  // Agents are the crux of this IDE; the strip's order and styling say so.
+  // Partitioned: agent terminals first (tinted, live dot), plain shells next,
+  // opened files / PRs last as a visibly quieter group. Detection is by the
+  // launch command OR by what's actually running in the pty tree, so a
+  // `claude` typed by hand into a shell promotes that tab too.
+  const agentPtyIds = new Set(
+    projectStats
+      .filter((s) => s.procs.some((p) => AGENT_PATTERN.test(p.name)))
+      .map((s) => s.id),
+  );
+  const isAgentTab = (t: SubTab): t is TermSubTab =>
+    t.type === "terminal" &&
+    (AGENT_PATTERN.test(t.command ?? "") ||
+      (t.ptyId != null && agentPtyIds.has(t.ptyId)));
+  const stripTabs = tabs.filter((t) => t.type !== "terminal" || !t.run);
+  const tabGroups: SubTab[][] = [
+    stripTabs.filter(isAgentTab),
+    stripTabs.filter((t) => t.type === "terminal" && !isAgentTab(t)),
+    stripTabs.filter((t) => t.type !== "terminal"),
+  ];
+
   const mainArea = (
     <div className="project-main">
       {tabMenu.menu && (
@@ -676,14 +845,15 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
       )}
       <div className="pane-bar">
         <div className="tabs">
-          {tabs
-            .filter((t) => t.type !== "terminal" || !t.run)
-            .map((tab) => (
+          {tabGroups.map((group, gi) =>
+            group.length === 0 ? null : (
+              <div className="tab-group" key={gi}>
+                {group.map((tab) => (
               <div
                 key={tab.id}
                 className={`tab ${tab.id === activeTabId ? "tab-active" : ""} ${
                   tab.type === "terminal" && tab.unread ? "tab-unread" : ""
-                }`}
+                } ${tab.type !== "terminal" ? "tab-doc" : isAgentTab(tab) ? "tab-agent" : ""}`}
                 onClick={(e) => {
                   // e.detail is the click count and fires even though app chrome
                   // is user-select:none — unlike dblclick, which WebKit drops on
@@ -710,7 +880,10 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
                 }
               >
                 {tab.type === "terminal" ? (
-                  <span className="tab-term-icon">{tab.icon ?? "❯_"}</span>
+                  <span className="tab-term-icon">
+                    {isAgentTab(tab) && <LiveDot size={6} className="tab-agent-live" />}
+                    {tab.icon ?? "❯_"}
+                  </span>
                 ) : tab.type === "pr" ? (
                   <span className="tab-pr-icon">⑃</span>
                 ) : (
@@ -756,7 +929,10 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
                   ✕
                 </span>
               </div>
-            ))}
+                ))}
+              </div>
+            ),
+          )}
         </div>
         {/* Long-running commands live in their own right-hand rail — they are
             services, not shells, so they never mix with the terminal tabs. */}
@@ -837,7 +1013,16 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
             </>
           )}
           <div className="cli-menu-anchor">
-            <button className="btn" title="New terminal / agent" onClick={() => setCliMenuOpen((v) => !v)}>
+            <button
+              className="btn"
+              title="New terminal / agent"
+              onClick={() => {
+                // Opening the launcher re-probes, so a CLI installed outside
+                // Canopy (or in another project) shows as installed here.
+                if (!cliMenuOpen) refreshInstalled();
+                setCliMenuOpen((v) => !v);
+              }}
+            >
               ＋ ▾
             </button>
             {cliMenuOpen && (
@@ -902,8 +1087,14 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
                 onExited={(code) => {
                   // Shell tabs close on exit; run tabs stay so the output and
                   // exit status remain readable.
-                  if (tab.run) patchTab(tab.id, { exited: true, exitCode: code, ptyId: null });
-                  else closeTab(tab.id);
+                  if (tab.run) {
+                    patchTab(tab.id, { exited: true, exitCode: code, ptyId: null });
+                    // An installer finishing is the moment "install" labels
+                    // go stale — re-probe right now, not on a timer.
+                    if (AGENT_CLIS.some((c) => c.install === tab.command)) {
+                      refreshInstalled();
+                    }
+                  } else closeTab(tab.id);
                 }}
                 onTitle={(title) => patchTab(tab.id, { title: title || tab.command || "shell" })}
                 onNotify={(notice) =>
@@ -968,7 +1159,14 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
           </div>
         )}
       </div>
-      <StatusBar roots={roots} agents={runningAgents} events={projectEvents} />
+      <StatusBar
+        roots={roots}
+        agents={runningAgents}
+        events={projectEvents}
+        visible={visible}
+        projects={allProjects}
+        onSetModel={hasClaude ? setAgentModel : undefined}
+      />
     </div>
   );
 
@@ -1207,6 +1405,8 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
           stats={projectStats}
           hookPath={hookPath}
           pending={pending}
+          onDismissPending={onDismissPending}
+          onAnswer={answerQuestion}
           onJumpToTerminal={jumpToTerminal}
           roots={roots}
           shareContext={Boolean(project.shareContext)}
@@ -1245,7 +1445,11 @@ export function ProjectView({ project, visible, zen, stats, events, hookPath, on
                 <span className="rail-badge">{Math.min(changeCount, 99)}</span>
               )}
               {t.key === "agents" && pending.length > 0 && (
-                <span className="rail-badge rail-badge-urgent">{pending.length}</span>
+                <span
+                  className={`rail-badge ${urgentPending.length > 0 ? "rail-badge-urgent" : ""}`}
+                >
+                  {pending.length}
+                </span>
               )}
             </button>
           ))}

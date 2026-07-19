@@ -159,8 +159,7 @@ export interface AgentCli {
    * Only fill this in for syntax verified against the CLI's own help or arg
    * parser. A wrong flag doesn't error — it silently starts a *fresh* session
    * while the UI claims the context was restored, which is worse than offering
-   * nothing. Two CLIs genuinely cannot do this and stay undefined on purpose:
-   *   - gemini: `--resume` takes a list *index* or "latest", not a session id.
+   * nothing. Some CLIs genuinely cannot do this and stay undefined on purpose:
    *   - aider: only `--restore-chat-history`, and it is per-directory.
    *
    * Callers must never invoke this with an empty id: `amp threads continue`
@@ -201,15 +200,13 @@ export const AGENT_CLIS: AgentCli[] = [
     resume: (id) => `amp threads continue ${id}`,
   },
   { id: "aider", name: "Aider", bin: "aider", icon: "a", install: "python3 -m pip install -U aider-chat" },
-  // Still shipping weekly (v0.51.0, Jul 2026), but since 2026-06-18 the "Login
-  // with Google" path is dead for individuals — it fails with "This client is
-  // no longer supported ... migrate to the Antigravity suite". The CLI itself
-  // is fine on an API key: export GEMINI_API_KEY from aistudio.google.com. Use
-  // a new key; unrestricted standard keys are rejected as of 2026-06-19.
-  // Resume takes a list index rather than an id, so it can't restore a session.
-  { id: "gemini", name: "Gemini CLI", bin: "gemini", icon: "✦", install: "npm install -g @google/gemini-cli" },
-  // Google's named successor to Gemini CLI. Ships as a single Go binary — the
-  // npm package some guides cite doesn't exist.
+  // Gemini CLI is gone from this list on purpose: Google killed its "Login
+  // with Google" path for individuals (2026-06-18, "migrate to the Antigravity
+  // suite") and Antigravity below is its named successor. Offering both meant
+  // new users installed the deprecated one. Terminals running `gemini` are
+  // still detected as agents (AGENT_PATTERN keeps the name).
+  // Antigravity ships as a single Go binary — the npm package some guides cite
+  // doesn't exist.
   {
     id: "agy",
     name: "Antigravity CLI",
@@ -242,6 +239,17 @@ export const AGENT_CLIS: AgentCli[] = [
     resume: (id) => `omp --resume ${id}`,
   },
 ];
+
+/** Matches process names that are agent CLIs. Derived from the registry so a
+ *  newly added CLI can never be missed by detection again — the Antigravity
+ *  launch shipped with `agy` absent from a hand-maintained copy of this regex,
+ *  so its sessions showed as plain shells. The extras cover agents users run
+ *  by hand that we don't ship a launcher entry for. */
+const EXTRA_AGENT_BINS = ["gemini", "goose", "copilot", "cursor-agent", "qwen", "droid"];
+export const AGENT_PATTERN = new RegExp(
+  `\\b(${[...AGENT_CLIS.map((c) => c.bin), ...EXTRA_AGENT_BINS].join("|")})\\b`,
+  "i",
+);
 
 export async function checkInstalledClis(): Promise<Record<string, boolean>> {
   try {

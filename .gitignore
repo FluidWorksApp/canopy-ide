@@ -34,3 +34,4 @@ dist-ssr
 /.ds-sync/
 /ds-bundle/
 /.design-sync/
+pnpm-lock.yaml

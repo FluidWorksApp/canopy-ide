@@ -17,6 +17,7 @@ import type { AgentEventEntry } from "./types";
 import { derivePending, pendingForRoots } from "./notifications";
 import { ProjectView } from "./components/ProjectView";
 import { ProjectDialog } from "./components/ProjectDialog";
+import { ProjectManager } from "./components/ProjectManager";
 import { Welcome } from "./components/Welcome";
 import { stopWorkspaceServers } from "./lsp/client";
 import { checkForUpdateAnyChannel, installUpdate, type UpdateAvailability } from "./updater";
@@ -40,8 +41,15 @@ export default function App() {
   const [ws, setWs] = useState<WorkspaceState>(emptyWorkspace);
   const [loaded, setLoaded] = useState(false);
   const [dialog, setDialog] = useState<{ mode: "new" } | { mode: "edit"; project: Project } | null>(null);
-  const [stats, setStats] = useState<ipc.SessionStats[]>([]);
   const [agentEvents, setAgentEvents] = useState<AgentEventEntry[]>([]);
+  // Pending cards the user waved away. Session-scoped on purpose: a dismissed
+  // card is "seen", not "never tell me again". Held here (not in the panel)
+  // because the project-tab badges count from the same derived list.
+  const [dismissedPending, setDismissedPending] = useState<Set<string>>(new Set());
+  const [manager, setManager] = useState(false);
+  // One delete confirm for every entry point (manager, Welcome) — deleting a
+  // project was a bare single click before, one misclick from losing a setup.
+  const [confirmDelete, setConfirmDelete] = useState<Project | null>(null);
   const [hookPath, setHookPath] = useState<string | null>(null);
   const [zen, setZen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -169,7 +177,6 @@ export default function App() {
       setLoaded(true);
     });
     const subs = [
-      ipc.onPtyStats(setStats),
       ipc.onAgentEvent((raw) =>
         setAgentEvents((prev) => [...prev.slice(-199), { raw, ts: Date.now() }]),
       ),
@@ -180,6 +187,15 @@ export default function App() {
           if (e.payload === "close-project") {
             const active = wsRef.current.activeId;
             if (active) void closeProjectRef.current(active);
+          } else if (e.payload === "next-project" || e.payload === "prev-project") {
+            const dir = e.payload === "next-project" ? 1 : -1;
+            const { openIds, activeId } = wsRef.current;
+            if (openIds.length > 1) {
+              const i = Math.max(0, openIds.indexOf(activeId ?? ""));
+              updateRef.current({
+                activeId: openIds[(i + dir + openIds.length) % openIds.length],
+              });
+            }
           } else if (e.payload === "toggle-zen") {
             toggleZen("menu");
           } else if (e.payload === "check-updates") {
@@ -204,6 +220,8 @@ export default function App() {
             setDialog({ mode: "new" });
           } else if (e.payload === "open-project") {
             void openProjectFromDisk();
+          } else if (e.payload === "manage-projects") {
+            setManager(true);
           } else if (e.payload === "save-project") {
             void saveProjectAs();
           } else if (e.payload === "open-workspace") {
@@ -218,8 +236,12 @@ export default function App() {
     ];
     // Auto-inject agent hooks (idempotent) so tool events stream in without setup.
     void import("@tauri-apps/api/core").then(({ invoke }) => {
-      void invoke("setup_agent_hooks", { agent: "claude" }).catch(() => {});
-      void invoke("setup_agent_hooks", { agent: "codex" }).catch(() => {});
+      // Every CLI with a setup arm (see setup_agent_hooks). Each is
+      // idempotent; ones whose CLI hasn't run yet fail quietly and succeed on
+      // a later launch.
+      for (const agent of ["claude", "codex", "agy", "aider", "opencode", "omp", "amp"]) {
+        void invoke("setup_agent_hooks", { agent }).catch(() => {});
+      }
     });
     // Focus mode is reachable two ways: the native menu accelerator, and a
     // webview key handler. Belt and braces — the accelerator is what the menu
@@ -233,6 +255,20 @@ export default function App() {
       } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.code === "Enter") {
         e.preventDefault();
         toggleZen("keydown");
+      } else if (
+        (e.metaKey || e.ctrlKey) &&
+        !e.shiftKey &&
+        !e.altKey &&
+        /^[1-9]$/.test(e.key)
+      ) {
+        // Cmd+1..9 jumps straight to the Nth open project, browser-style.
+        // Webview-only (no menu item): nothing else claims these chords, and
+        // nine menu entries would be noise.
+        const target = wsRef.current.openIds[Number(e.key) - 1];
+        if (target) {
+          e.preventDefault();
+          updateRef.current({ activeId: target });
+        }
       }
     };
     window.addEventListener("keydown", keys);
@@ -379,9 +415,13 @@ export default function App() {
   const openProjects = ws.openIds
     .map((id) => ws.projects.find((p) => p.id === id))
     .filter((p): p is Project => Boolean(p));
-  const allPending = derivePending(agentEvents);
+  const allPending = derivePending(agentEvents).filter((i) => !dismissedPending.has(i.key));
+  // Tab badges count only what's blocked on the user — an agent that finished
+  // and is idling is not urgent.
   const pendingCount = (p: Project) =>
-    pendingForRoots(allPending, p.components.map((c) => c.path)).length;
+    pendingForRoots(allPending, p.components.map((c) => c.path)).filter(
+      (i) => i.kind !== "idle",
+    ).length;
 
   return (
     <div className={`app ${zen ? "zen" : ""}`}>
@@ -419,24 +459,13 @@ export default function App() {
           </button>
         </div>
         <div className="titlebar-spacer" />
-        {ws.projects.length > openProjects.length && (
-          <select
-            className="project-select"
-            value=""
-            onChange={(e) => {
-              if (e.target.value) void openProject(e.target.value);
-            }}
-          >
-            <option value="">Open project…</option>
-            {ws.projects
-              .filter((p) => !ws.openIds.includes(p.id))
-              .map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-          </select>
-        )}
+        <button
+          className="btn project-manage-btn"
+          title="Manage projects — open, create, edit, delete"
+          onClick={() => setManager(true)}
+        >
+          Projects ▾
+        </button>
       </div>
 
       <div className="app-body">
@@ -445,7 +474,10 @@ export default function App() {
             projects={ws.projects}
             onOpen={(id) => void openProject(id)}
             onNew={() => setDialog({ mode: "new" })}
-            onDelete={deleteProject}
+            onDelete={(id) => {
+              const p = wsRef.current.projects.find((x) => x.id === id);
+              if (p) setConfirmDelete(p);
+            }}
           />
         )}
         {openProjects.map((p) => (
@@ -454,9 +486,20 @@ export default function App() {
             project={p}
             visible={p.id === ws.activeId}
             zen={zen}
-            stats={stats}
+            allProjects={openProjects.map((x) => ({
+              name: x.name,
+              roots: x.components.map((c) => c.path),
+            }))}
             events={agentEvents}
             hookPath={hookPath}
+            dismissedPending={dismissedPending}
+            onDismissPending={(key) =>
+              // Bail unchanged when already dismissed: the auto-clear effect
+              // fires per render, and a fresh Set each time would loop it.
+              setDismissedPending((prev) =>
+                prev.has(key) ? prev : new Set(prev).add(key),
+              )
+            }
             onEdit={() => setDialog({ mode: "edit", project: p })}
             onNotice={setNotice}
             onShareContext={(on) =>
@@ -542,6 +585,53 @@ export default function App() {
       {notice && (
         <div className="notice" onClick={() => setNotice(null)} title="dismiss">
           {notice}
+        </div>
+      )}
+
+      {manager && (
+        <ProjectManager
+          projects={ws.projects}
+          openIds={ws.openIds}
+          onOpen={(id) => void openProject(id)}
+          onNew={() => {
+            setManager(false);
+            setDialog({ mode: "new" });
+          }}
+          onEdit={(p) => {
+            setManager(false);
+            setDialog({ mode: "edit", project: p });
+          }}
+          onRequestDelete={setConfirmDelete}
+          onClose={() => setManager(false)}
+        />
+      )}
+
+      {confirmDelete && (
+        <div className="confirm-backdrop" onMouseDown={() => setConfirmDelete(null)}>
+          <div className="confirm" onMouseDown={(e) => e.stopPropagation()}>
+            <p>
+              Delete project <strong>{confirmDelete.name}</strong>?
+            </p>
+            <p className="confirm-sub">
+              Removes it from Canopy only — the folders on disk are untouched.
+              If it is open, its terminals (and anything running in them) will
+              be closed.
+            </p>
+            <div className="confirm-actions">
+              <button className="btn" onClick={() => setConfirmDelete(null)}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-danger-solid"
+                onClick={() => {
+                  deleteProject(confirmDelete.id);
+                  setConfirmDelete(null);
+                }}
+              >
+                Delete
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

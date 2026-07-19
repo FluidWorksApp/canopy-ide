@@ -63,12 +63,57 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // Which CLI's hook invoked us. Claude needs no flag (its contract is the
+    // default); other agents' setup registers `canopy-hook --agent <id>` so we
+    // can normalize their event names and speak their stdout contract.
+    let mut args = std::env::args().skip(1);
+    let mut agent_override: Option<String> = None;
+    let mut synth_event: Option<String> = None;
+    let mut synth_message: Option<String> = None;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--agent" => agent_override = args.next(),
+            "--event" => synth_event = args.next(),
+            "--message" => synth_message = args.next(),
+            _ => {}
+        }
+    }
+
+    // Two input modes. Default: the CLI delivers event JSON on stdin (claude,
+    // codex, agy). Synthesized (--event): the CLI can only run a bare command
+    // with no payload (aider's notifications-command), so we build the event
+    // ourselves from the flags and the environment.
     let mut raw = String::new();
-    std::io::stdin().read_to_string(&mut raw)?;
-    let event: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => return Ok(()),
+    let mut event: serde_json::Value = if let Some(name) = synth_event {
+        let agent = agent_override.clone().unwrap_or_else(|| "agent".into());
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        // No real session identity exists in this mode; one stable id per
+        // terminal keeps derivePending's per-session grouping working without
+        // inventing restorable-looking sessions (no prompts ever recorded, so
+        // the restore UI filters these out).
+        let pty = std::env::var("CANOPY_PTY").unwrap_or_default();
+        serde_json::json!({
+            "hook_event_name": name,
+            "session_id": format!("{agent}-pty{pty}"),
+            "cwd": cwd,
+            "message": synth_message.unwrap_or_default(),
+        })
+    } else {
+        std::io::stdin().read_to_string(&mut raw)?;
+        match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => return Ok(()),
+        }
     };
+    if raw.is_empty() {
+        raw = serde_json::to_string(&event).unwrap_or_default();
+    }
+
+    if let Some(agent) = agent_override.as_deref() {
+        normalize_event(&mut event, agent);
+    }
 
     let session_id = event["session_id"].as_str().unwrap_or("").to_string();
     let cwd = event["cwd"].as_str().unwrap_or("").to_string();
@@ -79,19 +124,74 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = update_digest(&session_id, &cwd, &event, &hook_event);
     }
 
-    // Only these two events can inject; everything else is observation only.
-    if hook_event == "UserPromptSubmit" || hook_event == "SessionStart" {
-        if let Some(context) = peer_context(&session_id, &cwd) {
-            let out = serde_json::json!({
-                "hookSpecificOutput": {
-                    "hookEventName": hook_event,
-                    "additionalContext": context,
-                }
-            });
-            println!("{out}");
+    match agent_override.as_deref() {
+        // Antigravity requires PreToolUse hooks to answer with an allow/deny
+        // verdict on stdout; we only observe, so always allow. Its other
+        // events ignore stdout. No peer-context printing: the
+        // hookSpecificOutput contract below is Claude's, and feeding it to
+        // agy would at best be ignored and at worst confuse its parser.
+        Some("agy") => {
+            if event["agy_event"].as_str() == Some("PreToolUse") {
+                println!("{}", serde_json::json!({ "allow_tool": true }));
+            }
         }
+        // Claude and Codex share the injection contract — Codex's hooks
+        // system is modeled on Claude's, and its docs use the same
+        // hookSpecificOutput.additionalContext shape for SessionStart /
+        // UserPromptSubmit context. Anything else: observation only.
+        None | Some("codex") => {
+            if hook_event == "UserPromptSubmit" || hook_event == "SessionStart" {
+                if let Some(context) = peer_context(&session_id, &cwd) {
+                    let out = serde_json::json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": hook_event,
+                            "additionalContext": context,
+                        }
+                    });
+                    println!("{out}");
+                }
+            }
+        }
+        Some(_) => {}
     }
     Ok(())
+}
+
+/// Rewrite a foreign CLI's event into the shape the rest of the pipeline
+/// (bus consumers, digests) already understands, and tag it with its agent so
+/// nothing downstream mislabels it as claude.
+fn normalize_event(event: &mut serde_json::Value, agent: &str) {
+    let Some(map) = event.as_object_mut() else { return };
+    map.insert("agent".into(), serde_json::json!(agent));
+    if agent == "agy" {
+        // Antigravity's lifecycle names differ from Claude's; keep the
+        // original under agy_event (the PreToolUse allow-verdict check needs
+        // it) and translate: PreInvocation is its prompt-submit, PostInvocation
+        // its turn-end.
+        let name = map
+            .get("hook_event_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        map.insert("agy_event".into(), serde_json::json!(name));
+        let mapped = match name.as_str() {
+            "PreInvocation" => "UserPromptSubmit",
+            "PostInvocation" => "Stop",
+            other => other,
+        };
+        map.insert("hook_event_name".into(), serde_json::json!(mapped));
+        // Digests read the prompt from `prompt` (Claude's field). Antigravity's
+        // field name is unverified — take the likeliest candidates.
+        if map.get("prompt").and_then(|v| v.as_str()).is_none() {
+            for key in ["user_input", "input", "display"] {
+                if let Some(v) = map.get(key).and_then(|v| v.as_str()) {
+                    let v = v.to_string();
+                    map.insert("prompt".into(), serde_json::json!(v));
+                    break;
+                }
+            }
+        }
+    }
 }
 
 /// Append the event to the bus the IDE tails, stamped with the terminal it came

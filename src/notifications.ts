@@ -18,14 +18,24 @@ export interface PendingQuestion {
 
 export interface PendingItem {
   key: string;
-  kind: "question" | "notification";
+  /** question/notification = the agent is blocked on the user (urgent).
+   *  idle = the agent finished and is merely waiting — informational. */
+  kind: "question" | "notification" | "idle";
   agent: string;
   sessionId: string;
   cwd: string;
+  /** The terminal that raised it (canopy_pty stamp) — lets the UI clear items
+   *  for a terminal the user is already looking at. Null when unstamped. */
+  pty: number | null;
   ts: number;
   message?: string;
   questions?: PendingQuestion[];
 }
+
+/** Claude's post-completion idle notice arrives through the same Notification
+ *  hook as real permission requests — the message text is the only thing that
+ *  tells "I'm blocked on you" apart from "I'm done and waiting". */
+const IDLE_RE = /waiting for (your )?input/i;
 
 export function derivePending(events: AgentEventEntry[]): PendingItem[] {
   const pendingBySession = new Map<string, PendingItem[]>();
@@ -40,8 +50,13 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
     const sessionId = String(parsed.session_id ?? parsed["conversation-id"] ?? "");
     if (!sessionId) continue;
     const cwd = String(parsed.cwd ?? "");
+    const pty = typeof parsed.canopy_pty === "number" ? parsed.canopy_pty : null;
     const event = String(parsed.hook_event_name ?? parsed.type ?? "");
     const tool = String(parsed.tool_name ?? "");
+    // The helper stamps `agent` for every non-claude CLI it fronts; bare
+    // claude events carry none, hence the default.
+    const agent =
+      typeof parsed.agent === "string" && parsed.agent ? parsed.agent : "claude";
 
     if (event === "PreToolUse" && tool === "AskUserQuestion") {
       const input = parsed.tool_input as { questions?: unknown[] } | undefined;
@@ -58,32 +73,90 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
               : [],
           }))
         : [];
+      // An agent does one thing at a time, so one urgent card per session:
+      // a new ask supersedes whatever was pending (the permission prompt for
+      // this very tool call, an earlier answered-but-unresolved ask). Without
+      // this, the same interaction showed as both "needs your permission" and
+      // the question card, and stale asks accumulated.
       const list = pendingBySession.get(sessionId) ?? [];
-      list.push({
-        key: `${sessionId}-${entry.ts}-q`,
-        kind: "question",
-        agent: "claude",
-        sessionId,
-        cwd,
-        ts: entry.ts,
-        questions,
-      });
-      pendingBySession.set(sessionId, list);
-    } else if (event === "Notification") {
+      pendingBySession.set(sessionId, [
+        ...list.filter((i) => i.kind === "idle"),
+        {
+          key: `${sessionId}-${entry.ts}-q`,
+          kind: "question",
+          agent,
+          sessionId,
+          cwd,
+          pty,
+          ts: entry.ts,
+          questions,
+        },
+      ]);
+    } else if (event === "Notification" || event === "PermissionRequest") {
+      const message = String(
+        parsed.message ??
+          (event === "PermissionRequest"
+            ? `${agent} needs permission${tool ? `: ${tool}` : ""}`
+            : "Agent needs attention"),
+      );
       const list = pendingBySession.get(sessionId) ?? [];
-      list.push({
-        key: `${sessionId}-${entry.ts}-n`,
-        kind: "notification",
-        agent: "claude",
-        sessionId,
-        cwd,
-        ts: entry.ts,
-        message: String(parsed.message ?? "Agent needs attention"),
-      });
-      pendingBySession.set(sessionId, list);
+      if (IDLE_RE.test(message)) {
+        // Completion notice, not a request. One per session is enough —
+        // replace an earlier one instead of stacking.
+        pendingBySession.set(sessionId, [
+          ...list.filter((i) => i.kind !== "idle"),
+          {
+            key: `${sessionId}-${entry.ts}-i`,
+            kind: "idle",
+            agent,
+            sessionId,
+            cwd,
+            pty,
+            ts: entry.ts,
+            message,
+          },
+        ]);
+      } else if (list.some((i) => i.kind === "question")) {
+        // The question card already says "answer in terminal" — a permission
+        // prompt for the same interaction adds a duplicate, not information.
+      } else {
+        pendingBySession.set(sessionId, [
+          ...list.filter((i) => i.kind !== "notification"),
+          {
+            key: `${sessionId}-${entry.ts}-n`,
+            kind: "notification",
+            agent,
+            sessionId,
+            cwd,
+            pty,
+            ts: entry.ts,
+            message,
+          },
+        ]);
+      }
+    } else if (event === "Stop" || /turn.complete/i.test(event)) {
+      // The turn ended: everything pending is resolved, and the completion is
+      // itself worth a calm card until the user re-engages (the next
+      // UserPromptSubmit clears it). Codex's agent-turn-complete carries the
+      // agent's last words; Claude's Stop carries nothing.
+      const last = String(parsed["last-assistant-message"] ?? "").trim();
+      pendingBySession.set(sessionId, [
+        ...(pendingBySession.get(sessionId) ?? []).filter((i) => i.ts > entry.ts),
+        {
+          key: `${sessionId}-${entry.ts}-i`,
+          kind: "idle",
+          agent: parsed.agent ? agent : event === "Stop" ? "claude" : "codex",
+          sessionId,
+          cwd,
+          pty,
+          ts: entry.ts,
+          message: last ? last.slice(0, 140) : "Finished — waiting for you",
+        },
+      ]);
     } else {
-      // Any other event from this session (PostToolUse, Stop, ...) means the
-      // agent progressed — everything pending before it is resolved.
+      // Any other event from this session (PostToolUse, SessionEnd, a new
+      // prompt, ...) means the agent progressed — everything pending before
+      // it is resolved.
       const list = pendingBySession.get(sessionId);
       if (list) {
         pendingBySession.set(

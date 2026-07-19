@@ -177,13 +177,85 @@ body,
   font-weight: 600;
 }
 
-.project-select {
+.project-manage-btn {
   background: var(--bg-raised);
   color: var(--text-dim);
   border: 1px solid var(--border);
   border-radius: 4px;
-  padding: 3px 6px;
+  padding: 3px 8px;
   font-size: 12px;
+  cursor: pointer;
+}
+
+.project-manage-btn:hover {
+  color: var(--text);
+}
+
+/* ---------- project manager (CRUD modal) ---------- */
+
+.project-manager {
+  width: 460px;
+  max-width: 90vw;
+  padding: 10px 0 6px;
+}
+
+.project-manager .side-panel-head {
+  padding: 0 14px 8px;
+}
+
+.pm-list {
+  max-height: 55vh;
+  overflow-y: auto;
+}
+
+.pm-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 14px;
+  cursor: pointer;
+  border-top: 1px solid var(--border);
+}
+
+.pm-row:hover {
+  background: var(--bg-raised);
+}
+
+.pm-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.pm-row-name {
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pm-open-badge {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--ok);
+  border: 1px solid var(--ok);
+  border-radius: 8px;
+  padding: 0 6px;
+}
+
+.pm-row-dirs {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pm-row-actions {
+  display: inline-flex;
+  gap: 4px;
+  flex: 0 0 auto;
 }
 
 /* ---------- project view ---------- */
@@ -352,6 +424,113 @@ body,
 
 .status-spacer {
   flex: 1;
+}
+
+/* Model switcher: the model chip opens a menu that drops UP from the tray. */
+.status-model-anchor {
+  position: relative;
+}
+
+.status-model-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.status-model-btn:hover {
+  color: var(--text);
+}
+
+.status-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 40;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  min-width: 210px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  padding: 4px;
+}
+
+.status-menu-hint {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+/* Resource breakdown popup: project -> sessions -> processes. */
+.status-breakdown {
+  min-width: 330px;
+  max-height: 55vh;
+  overflow-y: auto;
+}
+
+.bd-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* Section headers: one per project, plus Core services. */
+.bd-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px 3px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.bd-head + .bd-head,
+div + .bd-head {
+  border-top: 1px solid var(--border);
+  margin-top: 3px;
+}
+
+.bd-session {
+  cursor: pointer;
+  padding-left: 16px;
+}
+
+.bd-session:hover {
+  background: var(--bg-alt);
+}
+
+.bd-proc {
+  padding-left: 40px;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.bd-nums {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+
+.bd-ports {
+  color: var(--ok);
+  font-size: 10px;
+}
+
+.bd-core {
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  margin-top: 2px;
+  color: var(--text-dim);
 }
 
 /* ---------- component sections + run commands ---------- */
@@ -957,6 +1136,37 @@ body,
   opacity: 0.5;
 }
 
+/* Agents first-class in the strip: groups render agents | shells | docs, a
+   divider between non-empty groups, agent tabs tinted with a live dot, and
+   file/PR tabs visibly quieter — workload on the left, reference on the right. */
+.tab-group {
+  display: flex;
+}
+
+.tab-group + .tab-group:not(:empty) {
+  border-left: 2px solid var(--border);
+  margin-left: 3px;
+}
+
+.tab-agent {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
+.tab-agent .tab-term-icon {
+  color: var(--accent);
+}
+
+.tab-agent-live {
+  color: var(--ok);
+  margin-right: 3px;
+}
+
+.tab-doc {
+  font-size: 11px;
+  opacity: 0.85;
+}
+
 /* A program in this terminal asked for attention (OSC 9/99/777) and nobody has
    looked yet. Deliberately not animated: several agents can be waiting at once,
    and a row of blinking tabs is a slot machine, not a signal. The dot carries
@@ -1512,6 +1722,167 @@ body,
 
 .pending-card:hover {
   border-color: var(--accent);
+}
+
+/* A finished agent is news, not an alarm — plain border, dimmer text. */
+.pending-card-idle {
+  border-color: var(--border);
+}
+
+.pending-card-idle .pending-q-text {
+  color: var(--text-dim);
+}
+
+.pending-dismiss {
+  margin-left: auto;
+}
+
+/* ---------- project dialog: directory cards + nested run commands ---------- */
+
+.pd-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 14px 0 6px;
+}
+
+.pd-section-head,
+.pd-cmds-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pd-section-head > span {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.pd-section-head > small,
+.pd-cmds-head > small {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-weight: 400;
+}
+
+.pd-dir-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  overflow: hidden;
+}
+
+.pd-dir-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+.pd-dir-glyph {
+  flex: 0 0 auto;
+}
+
+.pd-dir-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.pd-dir-label {
+  font-weight: 600;
+  font-size: 13px;
+  background: none;
+  border: none;
+  border-bottom: 1px dashed transparent;
+  color: var(--text);
+  padding: 0;
+}
+
+.pd-dir-label:hover,
+.pd-dir-label:focus {
+  border-bottom-color: var(--border);
+  outline: none;
+}
+
+.pd-dir-path {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* ellipsize the LEFT side — the tail of a path is the part that matters */
+  text-align: left;
+}
+
+/* Commands sit in a visually recessed zone under their directory. */
+.pd-cmds {
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  padding: 8px 12px 10px 30px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pd-cmds-head > span {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.pd-cmd-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pd-cmd-play {
+  color: var(--ok);
+  font-size: 9px;
+  flex: 0 0 auto;
+}
+
+.pd-cmd-name {
+  width: 110px;
+  flex: 0 0 auto;
+}
+
+.pd-cmd-cmd {
+  flex: 1;
+  font-family: 'SF Mono', Menlo, monospace;
+  font-size: 11px;
+}
+
+.pd-cmds .btn-mini {
+  align-self: flex-start;
+}
+
+.pd-add-dir {
+  align-self: stretch;
+}
+
+.hook-setup-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.pending-option-clickable {
+  cursor: pointer;
+  border-radius: 5px;
+}
+
+.pending-option-clickable:hover {
+  background: var(--bg-alt);
+  outline: 1px solid var(--accent);
 }
 
 .pending-chip {

@@ -3,16 +3,16 @@
 import { useEffect, useMemo, useState } from "react";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
-import { restoreCommand } from "../projects";
+import { AGENT_PATTERN, restoreCommand } from "../projects";
 import type { PendingItem } from "../notifications";
-
-const AGENT_PATTERN =
-  /\b(claude|codex|aider|goose|gemini|opencode|amp|copilot|cursor-agent|qwen|droid)\b/i;
 
 interface AgentsPanelProps {
   stats: ipc.SessionStats[];
   hookPath: string | null;
   pending?: PendingItem[];
+  onDismissPending?: (key: string) => void;
+  /** Answer a single-select question by clicking its option in the panel. */
+  onAnswer?: (item: PendingItem, optionIndex: number) => void;
   onJumpToTerminal?: (item: PendingItem) => void;
   /** Cross-session context sharing for this project. */
   roots: string[];
@@ -34,6 +34,14 @@ const ago = (secs?: number) => {
   return `${Math.floor(d / 86400)}d ago`;
 };
 
+/** Last thing the *human* typed. Hooks also record injected payloads
+    (`<task-notification>…`, shared-context blocks) as prompts; an XML-ish
+    blob identifies nothing, so skip anything that opens with a tag. */
+const lastHumanPrompt = (prompts?: string[]) =>
+  [...(prompts ?? [])]
+    .reverse()
+    .find((p) => p.trim().length > 0 && !p.trimStart().startsWith("<"));
+
 const fmtMem = (bytes: number) =>
   bytes > 1024 * 1024 * 1024
     ? `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`
@@ -43,6 +51,8 @@ export function AgentsPanel({
   stats,
   hookPath,
   pending = [],
+  onDismissPending,
+  onAnswer,
   onJumpToTerminal,
   roots,
   shareContext,
@@ -105,7 +115,9 @@ export function AgentsPanel({
   // from the same `stats`, so a terminal running claude appeared twice with
   // near-identical numbers — the only difference being that the session total
   // also counts the shell wrapping the agent. The session is the real unit:
-  // it's what you kill, and what has a directory.
+  // it's what you kill, and what has a directory. The display *partitions*
+  // these rows — agent-hosting terminals under one head, plain shells under
+  // another — so each session still appears exactly once.
   // Sessions that exist on disk but have no live terminal — what you lost when
   // the IDE or the machine died. Newest first: that's the one you were most
   // likely mid-thought in.
@@ -133,8 +145,18 @@ export function AgentsPanel({
         .filter(
           (d) =>
             d.session_id &&
+            // `<agent>-pty<N>` ids are synthesized by the helper for CLIs that
+            // can't report a session identity (aider's bare notification
+            // command). They're terminal-scoped signals, not conversations —
+            // nothing to resume.
+            !/-pty\d*$/.test(d.session_id) &&
             (dead(d) || !liveSessionIds.includes(d.session_id)) &&
-            (d.prompts?.length ?? 0) > 0,
+            // The prompt requirement is CLAUDE-specific: claude writes no
+            // transcript until the first prompt, so a promptless claude
+            // session can only fail to resume. Other agents capture prompts
+            // best-effort (their hook payloads' field names vary) — an empty
+            // list there must not hide a real conversation.
+            ((d.prompts?.length ?? 0) > 0 || (d.agent ?? "claude") !== "claude"),
         )
         .sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0));
     },
@@ -167,15 +189,92 @@ export function AgentsPanel({
     });
   }, [stats, digests]);
 
+  // An agent session and a plain shell answer different questions — "what is
+  // it working on?" vs "what's running in it?" — so they get separate heads.
+  const agentSessions = sessions.filter((x) => x.agent);
+  const termSessions = sessions.filter((x) => !x.agent);
+
+  const sessionRow = ({ session: s, agent, dir, digest }: (typeof sessions)[number]) => {
+    const runaway =
+      s.total_cpu > settings.runawayCpuPercent ||
+      s.total_mem_bytes > settings.runawayMemBytes;
+    // What the human last asked for. The highest-signal line about a session:
+    // "fix the login redirect" identifies it in a way that cpu, memory and a
+    // directory never will.
+    const task = lastHumanPrompt(digest?.prompts);
+    return (
+      <div key={s.id} className={`agent-row ${runaway ? "agent-runaway" : ""}`}>
+        <div className="agent-main">
+          <span className="agent-name">{agent?.name ?? s.title}</span>
+          {dir && (
+            <span className="agent-dir" title={s.cwd}>
+              {dir}
+            </span>
+          )}
+          {/* Which branch this agent is editing — the difference between
+              two identical-looking rows working on different things. */}
+          {digest?.branch && (
+            <span className="agent-branch" title={`On branch ${digest.branch}`}>
+              {digest.branch}
+            </span>
+          )}
+          <span className="agent-session">term #{s.id}</span>
+          {/* A dev server in here, without opening the tab to find out. */}
+          {s.ports?.map((p) => (
+            <span key={p} className="agent-port" title={`Listening on port ${p}`}>
+              :{p}
+            </span>
+          ))}
+          {runaway && <span className="runaway-badge">runaway?</span>}
+        </div>
+        {task && (
+          <div className="agent-task" title={task}>
+            {task}
+          </div>
+        )}
+        <div className="agent-stats">
+          <span>{s.total_cpu.toFixed(0)}% cpu</span>
+          <span>{fmtMem(s.total_mem_bytes)}</span>
+          <span>{s.procs.length} procs</span>
+          <button
+            className="btn-icon btn-danger"
+            title={`Kill terminal #${s.id}${agent ? ` and the ${agent.name} running in it` : ""}`}
+            onClick={() => void ipc.ptyKill(s.id)}
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  // Blocked-on-you vs merely-finished: the same stream, very different urgency.
+  const urgent = pending.filter((i) => i.kind !== "idle");
+  const idle = pending.filter((i) => i.kind === "idle");
+
+  const dismissBtn = (key: string) =>
+    onDismissPending && (
+      <button
+        className="icon-btn pending-dismiss"
+        title="Dismiss"
+        onClick={(e) => {
+          e.stopPropagation();
+          onDismissPending(key);
+        }}
+      >
+        ✕
+      </button>
+    );
+
   return (
     <div className="side-panel">
-      {pending.length > 0 && (
+      {urgent.length > 0 && (
         <>
           <div className="side-panel-head">
             <span>Needs your input</span>
-            <span className="badge">{pending.length}</span>
+            <span className="badge">{urgent.length}</span>
           </div>
-          {pending.map((item) => (
+          {urgent.map((item) => (
             <div
               key={item.key}
               className="pending-card"
@@ -189,16 +288,43 @@ export function AgentsPanel({
                       {q.header && <span className="pending-chip">{q.header}</span>}
                       <div className="pending-q-text">{q.question}</div>
                       <div className="pending-options">
-                        {q.options.map((o) => (
-                          <div key={o.label} className="pending-option">
-                            <span className="pending-option-label">
-                              {q.multiSelect ? "☐" : "○"} {o.label}
-                            </span>
-                            {o.description && (
-                              <span className="pending-option-desc">{o.description}</span>
-                            )}
-                          </div>
-                        ))}
+                        {q.options.map((o, oi) => {
+                          // Single-select, single-question asks answer from
+                          // the panel. Multi-select needs the toggle UI, and
+                          // multi-question forms step through questions in the
+                          // terminal — a digit there could answer the wrong
+                          // one. Those jump instead.
+                          const clickable =
+                            onAnswer &&
+                            !q.multiSelect &&
+                            (item.questions?.length ?? 0) === 1;
+                          return (
+                            <div
+                              key={o.label}
+                              className={`pending-option ${clickable ? "pending-option-clickable" : ""}`}
+                              title={
+                                clickable
+                                  ? "Answer with this option"
+                                  : "Multi-select — answer in the terminal"
+                              }
+                              onClick={
+                                clickable
+                                  ? (e) => {
+                                      e.stopPropagation();
+                                      onAnswer(item, oi);
+                                    }
+                                  : undefined
+                              }
+                            >
+                              <span className="pending-option-label">
+                                {q.multiSelect ? "☐" : "○"} {o.label}
+                              </span>
+                              {o.description && (
+                                <span className="pending-option-desc">{o.description}</span>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   ))}
@@ -209,6 +335,30 @@ export function AgentsPanel({
               <div className="pending-footer">
                 <span className="event-time">{new Date(item.ts).toLocaleTimeString()}</span>
                 <span className="pending-jump">answer in terminal ➜</span>
+                {dismissBtn(item.key)}
+              </div>
+            </div>
+          ))}
+        </>
+      )}
+      {idle.length > 0 && (
+        <>
+          <div className="side-panel-head">
+            <span>Finished</span>
+            <span className="badge">{idle.length}</span>
+          </div>
+          {idle.map((item) => (
+            <div
+              key={item.key}
+              className="pending-card pending-card-idle"
+              onClick={() => onJumpToTerminal?.(item)}
+              title="Open the terminal running this agent"
+            >
+              <div className="pending-q-text">✓ {item.message}</div>
+              <div className="pending-footer">
+                <span className="event-time">{new Date(item.ts).toLocaleTimeString()}</span>
+                <span className="pending-jump">open terminal ➜</span>
+                {dismissBtn(item.key)}
               </div>
             </div>
           ))}
@@ -291,7 +441,7 @@ export function AgentsPanel({
             const runIn = d.resume_cwd || d.cwd || "";
             const cmd = d.resumable === false ? null : restoreCommand(agentId, d.session_id);
             const dir = runIn.split("/").filter(Boolean).pop() ?? "";
-            const last = (d.prompts ?? []).at(-1);
+            const last = lastHumanPrompt(d.prompts);
             return (
               <div key={d.session_id} className="restore-row">
                 <div className="restore-main">
@@ -305,8 +455,11 @@ export function AgentsPanel({
                   <span className="agent-session">{ago(d.updated)}</span>
                 </div>
                 {/* The last prompt is how you recognise which session this was —
-                    a bare uuid tells you nothing. */}
-                <div className="restore-prompt">{last}</div>
+                    a bare uuid tells you nothing. Non-claude agents may not
+                    have one captured; say so instead of rendering nothing. */}
+                <div className="restore-prompt">
+                  {last ?? <em>(no prompt captured for this session)</em>}
+                </div>
                 <div className="restore-actions">
                   {cmd ? (
                     <button
@@ -350,7 +503,10 @@ export function AgentsPanel({
       )}
 
       <div className="side-panel-head">
-        <span>Sessions</span>
+        <span>
+          Agent sessions{" "}
+          {agentSessions.length > 0 && <span className="badge">{agentSessions.length}</span>}
+        </span>
         <button
           className="btn-icon"
           title="How to hook up agent CLIs"
@@ -363,9 +519,28 @@ export function AgentsPanel({
       {showHookHelp && hookPath && (
         <div className="hook-help">
           <p>Stream tool-use events from agent CLIs into this panel:</p>
-          <button className="btn btn-accent" onClick={() => void autoSetup("claude")}>
-            Set up Claude Code hooks
-          </button>
+          {/* One button per CLI with an auto-setup arm — every CLI whose
+              integration surface supports it (see docs/agent-parity.md).
+              setup_agent_hooks in agents.rs is the registry for these. */}
+          <div className="hook-setup-row">
+            {[
+              { id: "claude", label: "Claude Code" },
+              { id: "codex", label: "Codex" },
+              { id: "agy", label: "Antigravity" },
+              { id: "aider", label: "Aider" },
+              { id: "opencode", label: "OpenCode" },
+              { id: "omp", label: "oh-my-pi" },
+              { id: "amp", label: "Amp" },
+            ].map((a) => (
+              <button
+                key={a.id}
+                className="btn btn-accent"
+                onClick={() => void autoSetup(a.id)}
+              >
+                {a.label}
+              </button>
+            ))}
+          </div>
           {setupResult && <p className="hook-result">{setupResult}</p>}
           <p>
             Other CLIs: point any hook at appending single-line JSON to:
@@ -374,64 +549,23 @@ export function AgentsPanel({
         </div>
       )}
 
-      {sessions.length === 0 ? (
+      {agentSessions.length === 0 ? (
         <div className="tree-empty">
-          Nothing running. Launch <code>claude</code>, <code>codex</code>, etc. from the ＋
+          No agents running. Launch <code>claude</code>, <code>codex</code>, etc. from the ＋
           menu or by right-clicking a component.
         </div>
       ) : (
-        sessions.map(({ session: s, agent, dir, digest }) => {
-          const runaway =
-            s.total_cpu > settings.runawayCpuPercent ||
-            s.total_mem_bytes > settings.runawayMemBytes;
-          return (
-            <div key={s.id} className={`agent-row ${runaway ? "agent-runaway" : ""}`}>
-              <div className="agent-main">
-                <span className="agent-name">{agent?.name ?? s.title}</span>
-                {dir && (
-                  <span className="agent-dir" title={s.cwd}>
-                    {dir}
-                  </span>
-                )}
-                {/* Which branch this agent is editing — the difference between
-                    two identical-looking rows working on different things. */}
-                {digest?.branch && (
-                  <span className="agent-branch" title={`On branch ${digest.branch}`}>
-                    {digest.branch}
-                  </span>
-                )}
-                <span className="agent-session">term #{s.id}</span>
-                {/* A dev server in here, without opening the tab to find out. */}
-                {s.ports?.map((p) => (
-                  <span key={p} className="agent-port" title={`Listening on port ${p}`}>
-                    :{p}
-                  </span>
-                ))}
-                {runaway && <span className="runaway-badge">runaway?</span>}
-              </div>
-              {/* What the human last asked for. The highest-signal line about a
-                  session: "fix the login redirect" identifies it in a way that
-                  cpu, memory and a directory never will. */}
-              {digest?.prompts?.length ? (
-                <div className="agent-task" title={digest.prompts[digest.prompts.length - 1]}>
-                  {digest.prompts[digest.prompts.length - 1]}
-                </div>
-              ) : null}
-              <div className="agent-stats">
-                <span>{s.total_cpu.toFixed(0)}% cpu</span>
-                <span>{fmtMem(s.total_mem_bytes)}</span>
-                <span>{s.procs.length} procs</span>
-                <button
-                  className="btn-icon btn-danger"
-                  title={`Kill terminal #${s.id}${agent ? ` and the ${agent.name} running in it` : ""}`}
-                  onClick={() => void ipc.ptyKill(s.id)}
-                >
-                  ✕
-                </button>
-              </div>
-            </div>
-          );
-        })
+        agentSessions.map(sessionRow)
+      )}
+
+      {termSessions.length > 0 && (
+        <>
+          <div className="side-panel-head">
+            <span>Terminals</span>
+            <span className="badge">{termSessions.length}</span>
+          </div>
+          {termSessions.map(sessionRow)}
+        </>
       )}
     </div>
   );

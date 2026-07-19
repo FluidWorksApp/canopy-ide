@@ -51,6 +51,8 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &MenuItem::with_id(app, "prev-tab", "Previous Tab", true, Some("Ctrl+Shift+Tab"))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "close-project", "Close Project", true, Some("CmdOrCtrl+Shift+W"))?,
+            &MenuItem::with_id(app, "next-project", "Next Project", true, Some("CmdOrCtrl+Alt+Right"))?,
+            &MenuItem::with_id(app, "prev-project", "Previous Project", true, Some("CmdOrCtrl+Alt+Left"))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "toggle-sidebar", "Toggle Sidebar", true, Some("CmdOrCtrl+B"))?,
             &MenuItem::with_id(app, "toggle-zen", "Focus Mode", true, Some("CmdOrCtrl+Shift+Enter"))?,
@@ -66,6 +68,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         &[
             &MenuItem::with_id(app, "new-project", "New Project…", true, Some("CmdOrCtrl+N"))?,
             &MenuItem::with_id(app, "open-project", "Open Project…", true, Some("CmdOrCtrl+O"))?,
+            &MenuItem::with_id(app, "manage-projects", "Manage Projects…", true, Some("CmdOrCtrl+Shift+M"))?,
             &MenuItem::with_id(app, "save-project", "Save Project As…", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "open-workspace", "Open Workspace…", true, Some("CmdOrCtrl+Shift+O"))?,

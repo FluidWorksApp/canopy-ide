@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
-use sysinfo::{Pid, ProcessesToUpdate, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::pty::PtyManager;
@@ -121,6 +121,7 @@ pub fn start_monitor(app: AppHandle) {
             let mut last_ports: HashMap<u32, Vec<u16>> = HashMap::new();
             loop {
                 thread::sleep(POLL_INTERVAL);
+                tick = tick.wrapping_add(1);
                 let manager = app.state::<PtyManager>();
                 let sessions: Vec<(u32, Option<u32>, String, String)> = {
                     let map = manager.sessions();
@@ -137,7 +138,26 @@ pub fn start_monitor(app: AppHandle) {
                         })
                         .collect()
                 };
-                sys.refresh_processes(ProcessesToUpdate::All, true);
+                // With no terminals there is nothing hot to watch — only the
+                // app-footprint number in the status bar, which nobody needs at
+                // 2s resolution. Skip two of every three ticks entirely.
+                if sessions.is_empty() && tick % 3 != 0 {
+                    continue;
+                }
+                // Refresh only what the monitor actually reads. The default
+                // full refresh re-fetches every process's cmdline, exe path,
+                // environment and cwd — each a sysctl/proc read, for every
+                // process on the machine, every tick. cmd is the one non-cheap
+                // field we use (agent detection / restore), and it never
+                // changes after exec — fetch it once per process and keep it.
+                sys.refresh_processes_specifics(
+                    ProcessesToUpdate::All,
+                    true,
+                    ProcessRefreshKind::nothing()
+                        .with_cpu()
+                        .with_memory()
+                        .with_cmd(UpdateKind::OnlyIfNotSet),
+                );
 
                 // parent pid -> child pids
                 let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -257,7 +277,6 @@ pub fn start_monitor(app: AppHandle) {
                         }
                     }
                 }
-                tick = tick.wrapping_add(1);
                 let _ = app.emit("pty:stats", &stats);
             }
         })
@@ -336,9 +355,381 @@ pub async fn setup_agent_hooks(agent: String) -> Result<String, String> {
     match agent.as_str() {
         "claude" => setup_claude_hooks(&home, &bridge),
         "codex" => setup_codex_hooks(&home, &bridge),
+        "agy" => setup_agy_hooks(&home),
+        "aider" => setup_aider_hooks(&home),
+        "opencode" => setup_opencode_plugin(&home),
+        "omp" => setup_omp_hook(&home),
+        "amp" => setup_amp_plugin(&home),
         _ => Err(format!("auto-setup not supported for {agent} yet")),
     }
 }
+
+/// Aider has no hook system, but `notifications-command` runs an arbitrary
+/// command whenever it is waiting for input — after a turn AND at y/n
+/// confirms (verified in its io.py). The helper's --event mode synthesizes
+/// the JSON aider can't provide; session identity is per-terminal, which is
+/// enough for cards and deliberately never enough to look restorable.
+fn setup_aider_hooks(home: &str) -> Result<String, String> {
+    let helper = helper_path()?;
+    if !helper.exists() {
+        return Err(format!("hook helper missing at {}", helper.display()));
+    }
+    let path = std::path::PathBuf::from(home).join(".aider.conf.yml");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    if existing.contains("canopy-hook") {
+        return Ok("Aider notifications already set up".into());
+    }
+    if existing.contains("notifications") {
+        return Err(
+            "~/.aider.conf.yml already configures notifications — point \
+             notifications-command at canopy-hook manually"
+                .into(),
+        );
+    }
+    let block = format!(
+        "\n# canopy: surface \"waiting for input\" in the IDE\nnotifications: true\nnotifications-command: {} --agent aider --event Notification --message \"Aider is waiting for your input\"\n",
+        helper.to_string_lossy()
+    );
+    std::fs::write(&path, format!("{existing}{block}")).map_err(|e| e.to_string())?;
+    Ok("Aider notifications hooked (~/.aider.conf.yml) — restart aider sessions".into())
+}
+
+/// Write a generated integration file, idempotently.
+fn install_generated_file(
+    path: std::path::PathBuf,
+    source: &str,
+    ok_msg: &str,
+    already_msg: &str,
+) -> Result<String, String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    if std::fs::read_to_string(&path).map(|s| s == source).unwrap_or(false) {
+        return Ok(already_msg.into());
+    }
+    std::fs::write(&path, source).map_err(|e| e.to_string())?;
+    Ok(ok_msg.into())
+}
+
+/// OpenCode: JS plugins in ~/.config/opencode/plugin/ receive the full event
+/// bus (permission.asked, session.idle, tool.execute, ...). The generated
+/// plugin forwards normalized events to the helper over stdin, so gating,
+/// pty stamping and digests all come along.
+fn setup_opencode_plugin(home: &str) -> Result<String, String> {
+    let helper = helper_path()?;
+    if !helper.exists() {
+        return Err(format!("hook helper missing at {}", helper.display()));
+    }
+    const TEMPLATE: &str = r#"// Canopy IDE bridge — generated by Canopy, edits will be overwritten.
+// Forwards OpenCode bus events to Canopy's hook helper. Fails silent by
+// design: this must never break the session it observes.
+import { spawn } from "node:child_process"
+
+const HELPER = "__HELPER__"
+
+const send = (obj) => {
+  try {
+    if (process.env.CANOPY !== "1") return
+    const child = spawn(HELPER, ["--agent", "opencode"], { stdio: ["pipe", "ignore", "ignore"] })
+    child.on("error", () => {})
+    child.stdin.write(JSON.stringify(obj))
+    child.stdin.end()
+  } catch {}
+}
+
+export const CanopyBridge = async ({ directory }) => {
+  const sid = (e) =>
+    e?.properties?.sessionID ?? e?.properties?.info?.sessionID ?? e?.properties?.info?.id ?? ""
+  const base = (e) => ({ session_id: sid(e), cwd: directory, agent: "opencode" })
+  return {
+    event: async ({ event }) => {
+      try {
+        switch (event?.type) {
+          case "session.created":
+            send({ ...base(event), hook_event_name: "SessionStart" })
+            break
+          case "session.idle":
+            send({ ...base(event), hook_event_name: "Stop" })
+            break
+          case "permission.asked":
+            send({
+              ...base(event),
+              hook_event_name: "Notification",
+              message: `OpenCode needs permission: ${event?.properties?.title ?? event?.properties?.type ?? "tool"}`,
+            })
+            break
+          case "file.edited":
+            send({
+              ...base(event),
+              hook_event_name: "PostToolUse",
+              tool_name: "Edit",
+              tool_input: { file_path: event?.properties?.file ?? "" },
+            })
+            break
+        }
+      } catch {}
+    },
+    "tool.execute.after": async (input) => {
+      try {
+        send({
+          session_id: input?.sessionID ?? "",
+          cwd: directory,
+          agent: "opencode",
+          hook_event_name: "PostToolUse",
+          tool_name: input?.tool ?? "",
+        })
+      } catch {}
+    },
+  }
+}
+"#;
+    let source = TEMPLATE.replace("__HELPER__", &helper.to_string_lossy());
+    install_generated_file(
+        std::path::PathBuf::from(home)
+            .join(".config")
+            .join("opencode")
+            .join("plugin")
+            .join("canopy.ts"),
+        &source,
+        "OpenCode plugin installed — restart opencode sessions to load it",
+        "OpenCode plugin already set up",
+    )
+}
+
+/// oh-my-pi: TS hook modules auto-discovered from ~/.omp/agent/hooks/. Its
+/// hook API is in flux (hooks vs extensions), so registration is defensive —
+/// whatever events exist fire, the rest are ignored.
+fn setup_omp_hook(home: &str) -> Result<String, String> {
+    let helper = helper_path()?;
+    if !helper.exists() {
+        return Err(format!("hook helper missing at {}", helper.display()));
+    }
+    const TEMPLATE: &str = r#"// Canopy IDE bridge — generated by Canopy, edits will be overwritten.
+// Forwards oh-my-pi events to Canopy's hook helper. Defensive on purpose:
+// omp's hook API is documented as in flux, so every registration and field
+// access tolerates absence, and nothing here may throw into the host.
+import { spawn } from "node:child_process"
+
+const HELPER = "__HELPER__"
+
+const send = (obj) => {
+  try {
+    if (process.env.CANOPY !== "1") return
+    const child = spawn(HELPER, ["--agent", "omp"], { stdio: ["pipe", "ignore", "ignore"] })
+    child.on("error", () => {})
+    child.stdin.write(JSON.stringify(obj))
+    child.stdin.end()
+  } catch {}
+}
+
+export default function canopyBridge(pi) {
+  const base = () => ({
+    cwd: process.cwd(),
+    agent: "omp",
+    session_id:
+      pi?.session?.id ?? pi?.sessionId ?? `omp-pty${process.env.CANOPY_PTY ?? ""}`,
+  })
+  const on = (ev, fn) => {
+    try {
+      pi?.on?.(ev, fn)
+    } catch {}
+  }
+  on("session_start", () => send({ ...base(), hook_event_name: "SessionStart" }))
+  on("turn_start", (ctx) =>
+    send({
+      ...base(),
+      hook_event_name: "UserPromptSubmit",
+      prompt: ctx?.prompt ?? ctx?.input ?? "",
+    }),
+  )
+  on("turn_end", () => send({ ...base(), hook_event_name: "Stop" }))
+  on("tool_result", (ctx) =>
+    send({
+      ...base(),
+      hook_event_name: "PostToolUse",
+      tool_name: ctx?.tool?.name ?? ctx?.name ?? "",
+    }),
+  )
+  on("tool_approval_requested", (ctx) =>
+    send({
+      ...base(),
+      hook_event_name: "Notification",
+      message: `oh-my-pi needs approval: ${ctx?.tool?.name ?? "a tool"}`,
+    }),
+  )
+}
+"#;
+    let source = TEMPLATE.replace("__HELPER__", &helper.to_string_lossy());
+    install_generated_file(
+        std::path::PathBuf::from(home)
+            .join(".omp")
+            .join("agent")
+            .join("hooks")
+            .join("canopy.ts"),
+        &source,
+        "oh-my-pi hook installed — restart omp sessions to load it",
+        "oh-my-pi hook already set up",
+    )
+}
+
+/// Amp: TS plugins in ~/.config/amp/plugins/ with session/agent/tool events.
+/// Threads live server-side, so AMP_THREAD_ID (when present) is the session
+/// identity; otherwise per-terminal, same as aider.
+fn setup_amp_plugin(home: &str) -> Result<String, String> {
+    let helper = helper_path()?;
+    if !helper.exists() {
+        return Err(format!("hook helper missing at {}", helper.display()));
+    }
+    const TEMPLATE: &str = r#"// Canopy IDE bridge — generated by Canopy, edits will be overwritten.
+// Forwards Amp plugin events to Canopy's hook helper. Fails silent by design.
+import { spawn } from "node:child_process"
+
+const HELPER = "__HELPER__"
+
+const send = (obj) => {
+  try {
+    if (process.env.CANOPY !== "1") return
+    const child = spawn(HELPER, ["--agent", "amp"], { stdio: ["pipe", "ignore", "ignore"] })
+    child.on("error", () => {})
+    child.stdin.write(JSON.stringify(obj))
+    child.stdin.end()
+  } catch {}
+}
+
+export default function canopyBridge(amp) {
+  const base = (ctx) => ({
+    cwd: process.cwd(),
+    agent: "amp",
+    session_id:
+      ctx?.threadId ?? process.env.AMP_THREAD_ID ?? `amp-pty${process.env.CANOPY_PTY ?? ""}`,
+  })
+  const on = (ev, fn) => {
+    try {
+      amp?.on?.(ev, fn)
+    } catch {}
+  }
+  on("session.start", (ctx) => send({ ...base(ctx), hook_event_name: "SessionStart" }))
+  on("agent.start", (ctx) =>
+    send({ ...base(ctx), hook_event_name: "UserPromptSubmit", prompt: ctx?.prompt ?? "" }),
+  )
+  on("agent.end", (ctx) => send({ ...base(ctx), hook_event_name: "Stop" }))
+  on("tool.result", (ctx) =>
+    send({ ...base(ctx), hook_event_name: "PostToolUse", tool_name: ctx?.tool ?? "" }),
+  )
+}
+"#;
+    let source = TEMPLATE.replace("__HELPER__", &helper.to_string_lossy());
+    install_generated_file(
+        std::path::PathBuf::from(home)
+            .join(".config")
+            .join("amp")
+            .join("plugins")
+            .join("canopy.ts"),
+        &source,
+        "Amp plugin installed — restart amp sessions to load it",
+        "Amp plugin already set up",
+    )
+}
+
+/// Antigravity CLI hooks: register the helper for all five of its events in
+/// ~/.gemini/antigravity-cli/hooks.json, under our own named group so
+/// reinstalls replace it and user-authored groups are never touched. Also
+/// best-effort enables its OSC 9 `notifications` setting — Canopy's terminals
+/// already parse OSC 9, so that alone surfaces "waiting for you" and
+/// "finished" the moment it's on.
+fn setup_agy_hooks(home: &str) -> Result<String, String> {
+    let helper = helper_path()?;
+    if !helper.exists() {
+        return Err(format!(
+            "hook helper missing at {} — hooks not installed",
+            helper.display()
+        ));
+    }
+    let dir = std::path::PathBuf::from(home).join(".gemini").join("antigravity-cli");
+    // No directory means the CLI has never run — nothing to configure yet, and
+    // creating it ourselves could fight its first-run setup.
+    if !dir.exists() {
+        return Err("Antigravity CLI not initialized yet — run `agy` once first".into());
+    }
+    let path = dir.join("hooks.json");
+    let mut hooks: serde_json::Value = if path.exists() {
+        let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        serde_json::from_str(&raw)
+            .map_err(|e| format!("{} is not valid JSON: {e}", path.display()))?
+    } else {
+        serde_json::json!({})
+    };
+    // `--agent agy` makes the helper normalize agy's event names and answer
+    // PreToolUse with an allow verdict (its required stdout contract).
+    let command = format!("{} --agent agy", helper.to_string_lossy());
+    let entry = |_ev: &str| {
+        serde_json::json!([{
+            "matcher": "*",
+            "hooks": [{ "type": "command", "command": command, "timeout": 10 }]
+        }])
+    };
+    let group = serde_json::json!({
+        "PreToolUse": entry("PreToolUse"),
+        "PostToolUse": entry("PostToolUse"),
+        "PreInvocation": entry("PreInvocation"),
+        "PostInvocation": entry("PostInvocation"),
+        "Notification": entry("Notification"),
+    });
+    let obj = hooks.as_object_mut().ok_or("hooks.json is not an object")?;
+    let already = obj.get("canopy") == Some(&group);
+    if !already {
+        obj.insert("canopy".into(), group);
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&hooks).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    // OSC 9 notifications: off by default in agy; flipping it costs nothing
+    // and Canopy already listens. Best-effort — a failure here shouldn't fail
+    // the hook install that already succeeded.
+    let settings_path = dir.join("settings.json");
+    let notif = (|| -> Result<bool, String> {
+        let mut settings: serde_json::Value = if settings_path.exists() {
+            serde_json::from_str(
+                &std::fs::read_to_string(&settings_path).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?
+        } else {
+            serde_json::json!({})
+        };
+        let obj = settings.as_object_mut().ok_or("not an object")?;
+        if obj.get("notifications") == Some(&serde_json::json!(true)) {
+            return Ok(false);
+        }
+        obj.insert("notifications".into(), serde_json::json!(true));
+        std::fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(true)
+    })()
+    .unwrap_or(false);
+
+    if already && !notif {
+        return Ok("Antigravity hooks already set up".into());
+    }
+    Ok(format!(
+        "Antigravity hooks installed{} — restart agy sessions to pick them up",
+        if notif { " (+ terminal notifications enabled)" } else { "" }
+    ))
+}
+
+/// Substrings identifying a hook entry as one of ours, across every version we
+/// have shipped: the original inline shell command wrote to agent-events.jsonl,
+/// later ones invoke the helper binary out of our state dir. Matching all of
+/// them means an upgrade replaces its predecessor instead of stacking a dead
+/// hook beside it. Hooks the user wrote match none of these and are left
+/// alone. Add to this list on any future rename. Shared by the claude and
+/// codex installers.
+const MARKERS: &[&str] = &["agent-events.jsonl", "canopy-hook", ".canopy/"];
 
 /// Where the hook helper lives once installed. Hooks reference this stable path
 /// rather than the app bundle, so they keep working across upgrades and don't
@@ -475,6 +866,13 @@ fn resume_location(digest: &serde_json::Value) -> (String, bool) {
         // check we can't perform.
         return (cwd, true);
     };
+    // The transcript-on-disk verification below is Claude-layout-specific
+    // (~/.claude/projects buckets). A non-claude agent with a session id would
+    // always fail it and get wrongly labeled "can't resume" — its resume
+    // command syntax is registry-verified, so trust it.
+    if digest["agent"].as_str().is_some_and(|a| a != "claude") {
+        return (cwd, true);
+    }
 
     // Nothing on disk anywhere: the agent started but was never talked to, or
     // died before writing. Every `--resume` against it fails, so callers must
@@ -558,14 +956,6 @@ fn setup_claude_hooks(home: &str, bridge: &str) -> Result<String, String> {
             helper.display()
         ));
     }
-    // Substrings identifying a hook entry as one of ours, across every version
-    // we have shipped: the original inline shell command wrote to
-    // agent-events.jsonl, later ones invoke the helper binary out of our state
-    // dir. Matching all of them means an upgrade replaces its predecessor
-    // instead of stacking a dead hook beside it. Hooks the user wrote match
-    // none of these and are left alone. Add to this list on any future rename.
-    const MARKERS: &[&str] = &["agent-events.jsonl", "canopy-hook", ".canopy/"];
-
     let command = helper.to_string_lossy().to_string();
     let make_entry = |matcher: Option<&str>| {
         let mut entry = serde_json::json!({
@@ -626,22 +1016,100 @@ fn setup_claude_hooks(home: &str, bridge: &str) -> Result<String, String> {
 }
 
 fn setup_codex_hooks(home: &str, bridge: &str) -> Result<String, String> {
+    // Two generations, both installed. The full hooks system (stable since
+    // ~v0.124) is modeled on Claude Code's — same event names, same stdin
+    // payload (session_id, transcript_path, cwd, hook_event_name) — so it
+    // routes through the same helper and unlocks the whole pipeline: stamped
+    // events, digests, restore, permission cards, context. The legacy
+    // `notify` stays for older versions; it only fires agent-turn-complete
+    // and writes the bridge raw, which degrades gracefully to idle cards.
+    let notify = setup_codex_notify(home, bridge);
+
+    let helper = helper_path()?;
+    if !helper.exists() {
+        return Err(format!(
+            "hook helper missing at {} — hooks not installed",
+            helper.display()
+        ));
+    }
+    let dir = std::path::PathBuf::from(home).join(".codex");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("hooks.json");
+    let mut settings: serde_json::Value = if path.exists() {
+        let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        serde_json::from_str(&raw)
+            .map_err(|e| format!("{} is not valid JSON: {e}", path.display()))?
+    } else {
+        serde_json::json!({})
+    };
+    let command = format!("{} --agent codex", helper.to_string_lossy());
+    let want = serde_json::json!({
+        "hooks": [ { "type": "command", "command": command } ]
+    });
+    let hooks = settings
+        .as_object_mut()
+        .ok_or("hooks.json is not an object")?
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
+    let hooks = hooks.as_object_mut().ok_or("hooks is not an object")?;
+    let mut changed = 0;
+    // No PreToolUse: we observe, and a hook there sits in the approval path.
+    // PermissionRequest is registered observe-only (no stdout = no decision)
+    // purely so the blocked-on-approval moment reaches the pending cards.
+    for event in [
+        "SessionStart",
+        "UserPromptSubmit",
+        "Stop",
+        "PostToolUse",
+        "PermissionRequest",
+    ] {
+        let list = hooks.entry(event).or_insert_with(|| serde_json::json!([]));
+        let Some(arr) = list.as_array_mut() else { continue };
+        if arr.iter().any(|e| e == &want) {
+            continue;
+        }
+        arr.retain(|e| {
+            let s = e.to_string();
+            !MARKERS.iter().any(|m| s.contains(m))
+        });
+        arr.push(want.clone());
+        changed += 1;
+    }
+    if changed > 0 {
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    match (changed, notify) {
+        (0, Ok(_)) => Ok("Codex hooks already set up".into()),
+        _ => Ok(
+            "Codex hooks installed (~/.codex/hooks.json) — restart codex sessions, and run \
+             /hooks in codex once to trust them"
+                .into(),
+        ),
+    }
+}
+
+/// Legacy notify fallback for codex versions without the hooks system.
+fn setup_codex_notify(home: &str, bridge: &str) -> Result<String, String> {
     let dir = std::path::PathBuf::from(home).join(".codex");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join("config.toml");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     if existing.contains("agent-events.jsonl") {
-        return Ok("Codex hooks already set up".into());
+        return Ok("already".into());
     }
     if existing.lines().any(|l| l.trim_start().starts_with("notify")) {
-        return Err("Codex config already has a custom `notify` — add the bridge append manually".into());
+        return Err("custom notify present".into());
     }
     // Codex passes the notification JSON as an argument, not stdin.
     let line = format!(
         "notify = [\"/bin/sh\", \"-c\", \"printf '%s\\\\n' \\\"$0\\\" >> {bridge}\"]\n"
     );
     std::fs::write(&path, format!("{existing}\n{line}")).map_err(|e| e.to_string())?;
-    Ok("Codex notify hook installed (~/.codex/config.toml)".into())
+    Ok("installed".into())
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -654,11 +1122,22 @@ pub struct ClaudeSessionStats {
     pub turns: u64,
 }
 
+/// Byte offset already parsed per transcript, with the stats accumulated up to
+/// it. Transcripts are append-only JSONL, so each poll only has to parse what
+/// grew since the last one — without this, the 8s status-tray poll re-read and
+/// re-JSON-parsed the whole file (tens of MB in a long session) every tick,
+/// per open project.
+static STATS_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<std::path::PathBuf, (u64, ClaudeSessionStats)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
 /// Aggregate token usage + model from a Claude Code session transcript
 /// (~/.claude/projects/**/*.jsonl — the path arrives via hook events).
-/// Powers the status tray (model / tokens / cost).
+/// Powers the status tray (model / tokens / cost). Incremental: parses only
+/// bytes appended since the previous call for the same path.
 #[tauri::command]
 pub async fn claude_session_stats(transcript_path: String) -> Result<ClaudeSessionStats, String> {
+    use std::io::{Read, Seek, SeekFrom};
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
     let path = std::path::Path::new(&transcript_path)
         .canonicalize()
@@ -668,25 +1147,53 @@ pub async fn claude_session_stats(transcript_path: String) -> Result<ClaudeSessi
     {
         return Err("not a claude transcript".into());
     }
-    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let mut stats = ClaudeSessionStats::default();
-    for line in raw.lines() {
-        let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
+    let (mut offset, mut stats) = STATS_CACHE
+        .lock()
+        .unwrap()
+        .get(&path)
+        .cloned()
+        .unwrap_or((0, ClaudeSessionStats::default()));
+    let len = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+    if len < offset {
+        // Truncated/rewritten (e.g. compaction) — start over.
+        offset = 0;
+        stats = ClaudeSessionStats::default();
+    }
+    if len > offset {
+        let mut f = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+        f.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+        let mut raw = String::new();
+        f.read_to_string(&mut raw).map_err(|e| e.to_string())?;
+        // Only consume complete lines: the writer may be mid-append, and a
+        // half line parsed now would be double-counted or lost next poll.
+        let consumed = match raw.rfind('\n') {
+            Some(i) => i + 1,
+            None => 0,
         };
-        if entry["type"] != "assistant" {
-            continue;
+        for line in raw[..consumed].lines() {
+            let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if entry["type"] != "assistant" {
+                continue;
+            }
+            let message = &entry["message"];
+            if let Some(model) = message["model"].as_str() {
+                stats.model = Some(model.to_string());
+            }
+            let usage = &message["usage"];
+            stats.input_tokens += usage["input_tokens"].as_u64().unwrap_or(0);
+            stats.output_tokens += usage["output_tokens"].as_u64().unwrap_or(0);
+            stats.cache_read_tokens += usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
+            stats.cache_creation_tokens +=
+                usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+            stats.turns += 1;
         }
-        let message = &entry["message"];
-        if let Some(model) = message["model"].as_str() {
-            stats.model = Some(model.to_string());
-        }
-        let usage = &message["usage"];
-        stats.input_tokens += usage["input_tokens"].as_u64().unwrap_or(0);
-        stats.output_tokens += usage["output_tokens"].as_u64().unwrap_or(0);
-        stats.cache_read_tokens += usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
-        stats.cache_creation_tokens += usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
-        stats.turns += 1;
+        offset += consumed as u64;
+        STATS_CACHE
+            .lock()
+            .unwrap()
+            .insert(path.clone(), (offset, stats.clone()));
     }
     Ok(stats)
 }

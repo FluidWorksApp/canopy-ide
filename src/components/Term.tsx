@@ -10,9 +10,9 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { SerializeAddon } from "@xterm/addon-serialize";
 import "@xterm/xterm/css/xterm.css";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
 
@@ -48,6 +48,8 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const ptyIdRef = useRef<number | null>(null);
+  /** Repaint + size-sync immediately (no debounce); set by the mount effect. */
+  const syncNowRef = useRef<(() => void) | null>(null);
   // Mirrored so the mount-once drop listener can see the current value.
   const activeRef = useRef(active);
   activeRef.current = active;
@@ -88,8 +90,11 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     term.loadAddon(fit);
     term.loadAddon(new Unicode11Addon());
     term.unicode.activeVersion = "11";
-    term.loadAddon(new WebLinksAddon());
-    term.loadAddon(new SerializeAddon());
+    // Links must go through the OS, not window.open(): WKWebView has no popup
+    // support, so the addon's default handler gets null back from window.open()
+    // and the click dies silently. The opener plugin's default scope already
+    // allows http/https, which is all the addon's URL matcher produces.
+    term.loadAddon(new WebLinksAddon((_event, uri) => void openUrl(uri)));
     term.open(el);
 
     // No WebGL renderer. @xterm/addon-webgl 0.19.0 corrupts rendering on
@@ -127,20 +132,23 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // with typed characters. Writing to the PTY directly from here opens a
     // second, racing channel: the bytes then land wherever they land, which is
     // how an earlier attempt at this ended up typing "^E^E" into the prompt.
-    // Cursor motion ONLY. Nothing here may delete: every entry is a movement
-    // widget, so a bug in this handler can misplace the cursor but can never
-    // destroy a line. An earlier version mapped kill widgets too (ESC d
-    // kill-word, C-k kill-line, C-u kill-whole-line) and one of them was
-    // mis-keyed — on a Mac the key labelled "delete" reports key="Backspace",
-    // while key="Delete" is fn+delete — so a destructive sequence sat armed on
-    // a key nobody meant to press. The deletes were never the valuable part:
-    // xterm already sends ESC+DEL for Option+Backspace, which zsh binds to
-    // backward-kill-word. Leave killing to the keys that already work.
-    const CURSOR_MOTION: Record<string, string> = {
+    // Movement widgets plus exactly ONE kill: Cmd+Delete. An earlier version
+    // mapped several kill widgets (ESC d, C-k, C-u) and one was mis-keyed —
+    // on a Mac the key labelled "delete" reports key="Backspace", while
+    // key="Delete" is fn+delete — so a destructive sequence sat armed on a
+    // key nobody meant to press, and all of them were removed. Cmd+Delete
+    // comes back keyed to the name the key actually reports, verified above.
+    // fn+delete ("Delete") stays unmapped on purpose. The sequence is C-u,
+    // what iTerm2's natural preset sends for Cmd+Delete; zsh's emacs mode
+    // reads it as kill-whole-line (bash: to line start) — the accepted
+    // terminal meaning of the chord. Option+Backspace needs no entry: xterm
+    // itself sends ESC+DEL, which zsh binds to backward-kill-word.
+    const NATURAL_EDITING: Record<string, string> = {
       "alt+ArrowLeft": "\x1bb", // backward-word
       "alt+ArrowRight": "\x1bf", // forward-word
       "meta+ArrowLeft": "\x01", // beginning-of-line (C-a)
       "meta+ArrowRight": "\x05", // end-of-line       (C-e)
+      "meta+Backspace": "\x15", // kill line         (C-u)
     };
     term.attachCustomKeyEventHandler((ev) => {
       if (ev.type !== "keydown" || ev.ctrlKey) return true;
@@ -151,11 +159,11 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       // handler, so returning false here would skip it and strand the
       // composition, making the next keypress behave as if Option were held.
       if (ev.isComposing || ev.keyCode === 229) return true;
-      // Only arrows, and only with exactly one of Cmd/Option. `ev.key` for an
-      // arrow is always a multi-char name, so a composed character can never
-      // collide with these entries.
+      // Only named keys (arrows, Backspace), and only with exactly one of
+      // Cmd/Option. `ev.key` for those is always a multi-char name, so a
+      // composed character can never collide with these entries.
       if (ev.altKey === ev.metaKey) return true;
-      const seq = CURSOR_MOTION[`${ev.metaKey ? "meta" : "alt"}+${ev.key}`];
+      const seq = NATURAL_EDITING[`${ev.metaKey ? "meta" : "alt"}+${ev.key}`];
       if (!seq) return true;
       ev.preventDefault();
       term.input(seq);
@@ -182,6 +190,30 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     };
     const applyGeometry = (g: { cols: number; rows: number }) => {
       if (term.cols !== g.cols || term.rows !== g.rows) term.resize(g.cols, g.rows);
+    };
+
+    // Becoming visible again needs an explicit repaint. While the tab is
+    // display:none the renderer drops its painted cells, and nothing on the
+    // way back triggers a redraw by itself: the ResizeObserver path only
+    // repaints when the grid size actually *changed*, which on a plain tab
+    // switch it didn't. Without this, the buffer stays blank until the
+    // program in the terminal happens to emit output (an agent's spinner, a
+    // prompt repaint) — the "blank for a second or two" on every switch.
+    // Size sync rides along so a resize that happened while hidden is also
+    // corrected now rather than on the debounced observer.
+    syncNowRef.current = () => {
+      const next = propose();
+      if (next) {
+        if (ptyIdRef.current == null) {
+          applyGeometry(next);
+        } else if (next.cols !== term.cols || next.rows !== term.rows) {
+          void ipc
+            .ptyResize(ptyIdRef.current, next.cols, next.rows)
+            .then(applyGeometry)
+            .catch(() => {});
+        }
+      }
+      term.refresh(0, term.rows - 1);
     };
 
     const initial = propose();
@@ -337,6 +369,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       unlistenDrop?.();
       unlistenExit?.();
       if (ptyIdRef.current != null) void ipc.ptyKill(ptyIdRef.current);
+      syncNowRef.current = null;
       term.dispose();
       termRef.current = null;
     };
@@ -344,7 +377,12 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
   }, []);
 
   useEffect(() => {
-    if (active) termRef.current?.focus();
+    if (!active) return;
+    termRef.current?.focus();
+    // One frame so display:block has landed and the container measures; then
+    // repaint the buffer that went blank while the tab was hidden.
+    const raf = requestAnimationFrame(() => syncNowRef.current?.());
+    return () => cancelAnimationFrame(raf);
   }, [active]);
 
   return <div className="term-container" ref={containerRef} />;
