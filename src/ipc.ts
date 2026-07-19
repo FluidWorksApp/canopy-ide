@@ -373,6 +373,8 @@ export interface TicketInfo {
   mine: boolean;
   url: string;
   branch: string | null;
+  body: string;
+  priority: string;
 }
 
 export const ghIssueList = (repo: string) => invoke<TicketInfo[]>("gh_issue_list", { repo });

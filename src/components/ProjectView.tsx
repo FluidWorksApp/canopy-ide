@@ -37,7 +37,9 @@ import { AgentsPanel } from "./AgentsPanel";
 import { StatusBar } from "./StatusBar";
 import { Palette, type PaletteMode } from "./Palette";
 import { GitPanel } from "./GitPanel";
-import { TicketsPanel } from "./TicketsPanel";
+import { TicketsPanel, type AgentTarget } from "./TicketsPanel";
+import { TicketView } from "./TicketView";
+import { ticketBranch, ticketContext, ticketWorktree } from "../trackers";
 import { PrView } from "./PrView";
 
 type SideTab = "files" | "changes" | "git" | "trackers" | "agents";
@@ -76,6 +78,13 @@ interface FileSubTab {
   file: OpenFile;
 }
 
+interface TicketSubTab {
+  id: string;
+  type: "ticket";
+  ticket: ipc.TicketInfo;
+  source: string;
+}
+
 interface PrSubTab {
   id: string;
   type: "pr";
@@ -83,7 +92,7 @@ interface PrSubTab {
   pr: ipc.PrInfo;
 }
 
-type SubTab = TermSubTab | FileSubTab | PrSubTab;
+type SubTab = TermSubTab | FileSubTab | PrSubTab | TicketSubTab;
 
 const decoder = new TextDecoder();
 // Collision-proof ids: a module counter resets on hot-reload and produced
@@ -255,6 +264,85 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     const id = tabId();
     setTabs((prev) => [...prev, { id, type: "pr", repo, pr }]);
     setActiveTabId(id);
+  }, []);
+
+  const patchTabRaw = useCallback((id: string, patch: Partial<SubTab>) => {
+    setTabs((prev) => prev.map((t) => (t.id === id ? ({ ...t, ...patch } as SubTab) : t)));
+  }, []);
+
+  // Worktrees for the ticket tab's cross-reference. Loaded when a ticket tab
+  // opens rather than polled — the Issues panel keeps its own copy for rows.
+  const [ticketWorktrees, setTicketWorktrees] = useState<ipc.WorktreeInfo[]>([]);
+  const ticketRepo = useCallback(async () => {
+    const repos = await ipc.gitRepos(
+      componentsRef.current.map((c) => [c.label, c.path] as [string, string]),
+    );
+    return repos[0]?.path ?? null;
+  }, []);
+
+  /** Create or reuse the ticket's worktree and start an agent in it. The one
+   *  implementation both the Issues panel and the ticket tab call. */
+  const startTicketWork = useCallback(
+    async (ticket: ipc.TicketInfo) => {
+      const repo = await ticketRepo();
+      if (!repo) {
+        onNotice("No git repository in this project.");
+        return;
+      }
+      try {
+        const worktrees = await ipc.gitWorktrees(repo).catch(() => [] as ipc.WorktreeInfo[]);
+        const existing = ticketWorktree(ticket, worktrees);
+        const command = `claude '${ticketContext(ticket).replaceAll("'", `'\\''`)}'`;
+        if (existing) {
+          addTerminal(existing.path, command, ticket.id, "✳");
+          setTicketWorktrees(worktrees);
+          return;
+        }
+        const branch = ticketBranch(ticket);
+        const path = `${repo}-wt-${branch.replace(/\//g, "-")}`;
+        const branches = await ipc.gitBranches(repo).catch(() => [] as ipc.BranchInfo[]);
+        await ipc.gitWorktreeAdd(repo, path, branch, !branches.some((b) => b.name === branch));
+        await ipc.workspaceAdd(path).catch(() => {});
+        setTicketWorktrees(await ipc.gitWorktrees(repo).catch(() => worktrees));
+        addTerminal(path, command, ticket.id, "✳");
+      } catch (err) {
+        onNotice(`Couldn't start work on ${ticket.id}: ${String(err)}`);
+      }
+    },
+    [ticketRepo, addTerminal, onNotice],
+  );
+
+  /** Open an issue as its own tab, reusing one already open for it. */
+  const openTicket = useCallback(
+    (ticket: ipc.TicketInfo, source: string) => {
+      const existing = tabsRef.current.find(
+        (t): t is TicketSubTab =>
+          t.type === "ticket" && t.source === source && t.ticket.id === ticket.id,
+      );
+      if (existing) {
+        // Refresh the payload: the panel's copy is newer than the tab's.
+        patchTabRaw(existing.id, { ticket } as Partial<SubTab>);
+        setActiveTabId(existing.id);
+        return;
+      }
+      const id = tabId();
+      setTabs((prev) => [...prev, { id, type: "ticket", ticket, source }]);
+      setActiveTabId(id);
+      void ticketRepo().then((repo) => {
+        if (repo) void ipc.gitWorktrees(repo).then(setTicketWorktrees).catch(() => {});
+      });
+    },
+    [patchTabRaw, ticketRepo],
+  );
+
+  /** Hand ticket context to an agent terminal that is already running. */
+  const sendTicketToAgent = useCallback((target: AgentTarget, text: string) => {
+    // Same two-write pattern as the model switcher: text, then Enter a beat
+    // later so a TUI's autocomplete can't swallow the submit.
+    void ipc.ptyWrite(target.ptyId, text);
+    setTimeout(() => void ipc.ptyWrite(target.ptyId, "\r"), 250);
+    setActiveTabId(target.tabId);
+    setTimeout(() => termHandles.current.get(target.tabId)?.focus(), 50);
   }, []);
 
   /** Re-run a run tab's command in place, reusing the tab (and its position in
@@ -853,6 +941,15 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     stripTabs.filter((t) => t.type !== "terminal"),
   ];
 
+  // Agent terminals that can receive a ticket, shared by the Issues panel and
+  // the ticket tab.
+  const agentTargets: AgentTarget[] = tabs
+    .filter(
+      (t): t is TermSubTab =>
+        t.type === "terminal" && !t.run && isAgentTab(t) && t.ptyId != null,
+    )
+    .map((t) => ({ tabId: t.id, title: t.customTitle ?? t.title, ptyId: t.ptyId as number }));
+
   const mainArea = (
     <div className="project-main">
       {tabMenu.menu && (
@@ -896,7 +993,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                     ? `${tab.notice ? `${tab.notice}\n` : ""}${tab.command ?? ""} — ${tab.cwd}`
                     : tab.type === "pr"
                       ? `${tab.pr.title} — ${tab.pr.url}`
-                      : tab.file.path
+                      : tab.type === "ticket"
+                        ? `${tab.ticket.id} — ${tab.ticket.title}\n${tab.ticket.url}`
+                        : tab.file.path
                 }
               >
                 {tab.type === "terminal" ? (
@@ -906,6 +1005,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                   </span>
                 ) : tab.type === "pr" ? (
                   <span className="tab-pr-icon">⑃</span>
+                ) : tab.type === "ticket" ? (
+                  <span className="tab-ticket-icon">◎</span>
                 ) : (
                   tab.file.external != null && <span className="tab-external">●</span>
                 )}
@@ -936,7 +1037,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                       ? (tab.customTitle ?? tab.title)
                       : tab.type === "pr"
                         ? `#${tab.pr.number} ${tab.pr.title}`
-                        : `${tab.file.name}${tab.file.dirty ? " •" : ""}`}
+                        : tab.type === "ticket"
+                          ? `${tab.ticket.id} ${tab.ticket.title}`
+                          : `${tab.file.name}${tab.file.dirty ? " •" : ""}`}
                   </span>
                 )}
                 <span
@@ -1128,6 +1231,19 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               />
             </div>
           ))}
+        {activeTab?.type === "ticket" && (
+          <TicketView
+            key={activeTab.id}
+            ticket={activeTab.ticket}
+            source={activeTab.source}
+            worktree={ticketWorktree(activeTab.ticket, ticketWorktrees)}
+            agentTargets={agentTargets}
+            onStartNew={() => void startTicketWork(activeTab.ticket)}
+            onSendToAgent={(target) =>
+              sendTicketToAgent(target, ticketContext(activeTab.ticket))
+            }
+          />
+        )}
         {activeTab?.type === "pr" && (
           <PrView
             key={activeTab.id}
@@ -1424,31 +1540,15 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       {sideTab === "trackers" && (
         <TicketsPanel
           components={project.components.map((c) => ({ label: c.label, path: c.path }))}
-          agentTargets={tabs
-            .filter(
-              (t): t is TermSubTab =>
-                t.type === "terminal" && !t.run && isAgentTab(t) && t.ptyId != null,
-            )
-            .map((t) => ({
-              tabId: t.id,
-              title: t.customTitle ?? t.title,
-              ptyId: t.ptyId as number,
-            }))}
-          onStartTicket={(cwd, command, title) => addTerminal(cwd, command, title, "✳")}
-          onSendToAgent={(target, text) => {
-            // Same two-write pattern as the model switcher: text first, Enter
-            // a beat later so a TUI's autocomplete can't swallow the submit.
-            void ipc.ptyWrite(target.ptyId, text);
-            setTimeout(() => void ipc.ptyWrite(target.ptyId, "\r"), 250);
-            setActiveTabId(target.tabId);
-            setTimeout(() => termHandles.current.get(target.tabId)?.focus(), 50);
-          }}
-          onOpenIntegrations={() =>
+          agentTargets={agentTargets}
+          onStartWork={startTicketWork}
+          onSendToAgent={sendTicketToAgent}
+          onOpenTicket={openTicket}
+          onOpenIntegrations={() => {
             window.dispatchEvent(
               new CustomEvent("canopy:open-settings", { detail: { tab: "integrations" } }),
-            )
-          }
-          onNotice={onNotice}
+            );
+          }}
         />
       )}
       {sideTab === "agents" && (

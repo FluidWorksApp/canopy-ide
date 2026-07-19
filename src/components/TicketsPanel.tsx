@@ -12,7 +12,6 @@ import {
   STATUS_ORDER,
   TRACKERS,
   ticketBranch,
-  ticketCommand,
   ticketContext,
   ticketWorktree,
   unifiedStatus,
@@ -30,13 +29,15 @@ interface TicketsPanelProps {
   components: { label: string; path: string }[];
   /** Agent terminals currently open in this project — send targets. */
   agentTargets: AgentTarget[];
-  /** Launch a fresh terminal running `command` in `cwd`, titled `title`. */
-  onStartTicket: (cwd: string, command: string, title: string) => void;
+  /** Create/reuse the ticket's worktree and start an agent there. Owned by
+   *  ProjectView so the ticket tab and this panel do the identical thing. */
+  onStartWork: (ticket: ipc.TicketInfo) => Promise<void>;
   /** Type `text` into an already-running agent terminal and focus it. */
   onSendToAgent: (target: AgentTarget, text: string) => void;
+  /** Open the ticket as a tab in the main area. */
+  onOpenTicket: (ticket: ipc.TicketInfo, source: string) => void;
   /** Jump to Settings → Integrations (where sources get connected). */
   onOpenIntegrations: () => void;
-  onNotice: (msg: string) => void;
 }
 
 interface SourcedTicket extends ipc.TicketInfo {
@@ -46,10 +47,10 @@ interface SourcedTicket extends ipc.TicketInfo {
 export function TicketsPanel({
   components,
   agentTargets,
-  onStartTicket,
+  onStartWork,
   onSendToAgent,
+  onOpenTicket,
   onOpenIntegrations,
-  onNotice,
 }: TicketsPanelProps) {
   const [repos, setRepos] = useState<ipc.RepoInfo[]>([]);
   const [repo, setRepo] = useState<string | null>(null);
@@ -115,24 +116,11 @@ export function TicketsPanel({
   }, [load]);
 
   const startNew = async (ticket: SourcedTicket) => {
-    if (!repo || starting) return;
+    if (starting) return;
     setStarting(ticket.id);
     try {
-      const existing = ticketWorktree(ticket, worktrees);
-      if (existing) {
-        onStartTicket(existing.path, ticketCommand(ticket), ticket.id);
-        return;
-      }
-      const branch = ticketBranch(ticket);
-      const path = `${repo}-wt-${branch.replace(/\//g, "-")}`;
-      const branches = await ipc.gitBranches(repo).catch(() => [] as ipc.BranchInfo[]);
-      const exists = branches.some((b) => b.name === branch);
-      await ipc.gitWorktreeAdd(repo, path, branch, !exists);
-      await ipc.workspaceAdd(path).catch(() => {});
-      await ipc.gitWorktrees(repo).then(setWorktrees).catch(() => {});
-      onStartTicket(path, ticketCommand(ticket), ticket.id);
-    } catch (err) {
-      onNotice(`Couldn't start work on ${ticket.id}: ${String(err)}`);
+      await onStartWork(ticket);
+      if (repo) void ipc.gitWorktrees(repo).then(setWorktrees).catch(() => {});
     } finally {
       setStarting(null);
     }
@@ -210,19 +198,21 @@ export function TicketsPanel({
         </button>
       </div>
 
+      {/* Repo picker as chips, matching the Git panel — the app should have
+          one way to choose which repo a panel is acting on, not two. */}
       {repos.length > 1 && (
-        <select
-          className="ticket-repo-select"
-          value={repo ?? ""}
-          title="Repository new worktrees are created in (and whose GitHub issues show)"
-          onChange={(e) => setRepo(e.target.value || null)}
-        >
+        <div className="git-repos">
           {repos.map((r) => (
-            <option key={r.path} value={r.path}>
+            <button
+              key={r.path}
+              className={`git-repo-chip ${r.path === repo ? "git-repo-chip-on" : ""}`}
+              title={`${r.path}\ncomponents: ${r.components.join(", ")}`}
+              onClick={() => setRepo(r.path)}
+            >
               {r.name}
-            </option>
+            </button>
           ))}
-        </select>
+        </div>
       )}
 
       {errors.map((e) => (
@@ -262,11 +252,7 @@ export function TicketsPanel({
                   title={`${t.id} — ${t.title}\n${sourceName(t.source)} · ${t.state}\n${t.url}${
                     wt ? `\nworktree: ${wt.path}` : ""
                   }`}
-                  onClick={() => {
-                    void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
-                      openUrl(t.url),
-                    );
-                  }}
+                  onClick={() => onOpenTicket(t, t.source)}
                 >
                   <div className="ticket-main">
                     <span className={`ticket-src ticket-src-${t.source}`} title={sourceName(t.source)} />

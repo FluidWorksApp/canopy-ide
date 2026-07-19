@@ -581,8 +581,46 @@ pub struct PrInfo {
 /// gh infers the repository from the working directory, which avoids parsing
 /// remote URLs ourselves and works with forks/multiple remotes as the user has
 /// them configured.
+/// Absolute path to a tool, resolved through the user's LOGIN shell.
+///
+/// A GUI app on macOS inherits launchd's minimal PATH (/usr/bin:/bin:...),
+/// not the shell's — so Homebrew lives outside it. `git` happens to sit in
+/// /usr/bin (Xcode CLT) and worked; `gh` sits in /opt/homebrew/bin and did
+/// not, which is why the PR tab claimed "needs the GitHub CLI" on machines
+/// where `gh` is plainly installed and every other git feature worked.
+/// Resolved once per tool per run: spawning a login shell is expensive, and
+/// a tool's location doesn't move while the app is open.
+fn tool_path(tool: &'static str) -> String {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<&'static str, String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = cache.lock().unwrap().get(tool) {
+        return hit.clone();
+    }
+    // `command -v` is a shell builtin, so this works even where `which` isn't
+    // installed. -l loads the profile that sets PATH in the first place.
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let resolved = std::process::Command::new(shell)
+        .args(["-lc", &format!("command -v {tool}")])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|p| !p.is_empty())
+        // Fall back to the bare name: if it IS on the inherited PATH this
+        // still works, and if it isn't the caller reports it as missing.
+        .unwrap_or_else(|| tool.to_string());
+    cache.lock().unwrap().insert(tool, resolved.clone());
+    resolved
+}
+
+pub(crate) fn gh_bin() -> String {
+    tool_path("gh")
+}
+
 fn gh_in(repo: &Path) -> Command {
-    let mut cmd = Command::new("gh");
+    let mut cmd = Command::new(gh_bin());
     cmd.env("GH_PROMPT_DISABLED", "1");
     cmd.current_dir(repo);
     cmd
@@ -590,7 +628,7 @@ fn gh_in(repo: &Path) -> Command {
 
 #[tauri::command]
 pub async fn gh_available() -> bool {
-    Command::new("gh")
+    Command::new(gh_bin())
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -912,6 +950,12 @@ pub struct TicketInfo {
     /// branchName). GitHub has none; the frontend matches its
     /// "<number>-slug" branch convention instead.
     pub branch: Option<String>,
+    /// Markdown description. Fetched with the list rather than on demand —
+    /// both trackers return it in the same call, so a detail view costs no
+    /// extra round trip.
+    pub body: String,
+    /// Human priority label when the tracker has one ("High"); empty otherwise.
+    pub priority: String,
 }
 
 #[tauri::command]
@@ -923,7 +967,7 @@ pub async fn gh_issue_list(
     let mut cmd = gh_in(&top);
     cmd.args([
         "issue", "list", "--state", "all", "--limit", "80", "--json",
-        "number,title,state,url,assignees,updatedAt",
+        "number,title,state,url,assignees,updatedAt,body,labels",
     ]);
     let out = run_net(&mut cmd)?;
     let v: serde_json::Value =
@@ -959,6 +1003,22 @@ pub async fn gh_issue_list(
                         assignee: assignees.into_iter().next(),
                         url: i["url"].as_str().unwrap_or("").to_string(),
                         branch: None,
+                        body: i["body"].as_str().unwrap_or("").to_string(),
+                        // GitHub has no priority field; surface a priority/P0
+                        // style label if the repo uses one.
+                        priority: i["labels"]
+                            .as_array()
+                            .and_then(|ls| {
+                                ls.iter().find_map(|l| {
+                                    let n = l["name"].as_str().unwrap_or("");
+                                    let low = n.to_lowercase();
+                                    (low.starts_with("p0")
+                                        || low.starts_with("p1")
+                                        || low.starts_with("priority"))
+                                    .then(|| n.to_string())
+                                })
+                            })
+                            .unwrap_or_default(),
                     }
                 })
                 .collect()
@@ -973,9 +1033,9 @@ pub async fn linear_issues(api_key: String) -> Result<Vec<TicketInfo>, String> {
         return Err("no Linear API key".into());
     }
     // Active work only — completed/canceled would bury the list.
-    let query = r#"{ viewer { id } issues(first: 100, orderBy: updatedAt, filter: { state: { type: { in: ["triage", "backlog", "unstarted", "started"] } } }) { nodes { identifier title url branchName state { name type } assignee { id displayName } } } }"#;
+    let query = r#"{ viewer { id } issues(first: 100, orderBy: updatedAt, filter: { state: { type: { in: ["triage", "backlog", "unstarted", "started"] } } }) { nodes { identifier title url branchName description priorityLabel state { name type } assignee { id displayName } } } }"#;
     let body = serde_json::json!({ "query": query }).to_string();
-    let mut child = std::process::Command::new("curl")
+    let mut child = std::process::Command::new(tool_path("curl"))
         .args([
             "-sS",
             "--max-time",
@@ -1030,6 +1090,13 @@ pub async fn linear_issues(api_key: String) -> Result<Vec<TicketInfo>, String> {
                         mine: !viewer.is_empty() && assignee_id == viewer,
                         url: i["url"].as_str().unwrap_or("").to_string(),
                         branch: i["branchName"].as_str().map(String::from),
+                        body: i["description"].as_str().unwrap_or("").to_string(),
+                        priority: match i["priorityLabel"].as_str().unwrap_or("") {
+                            // Linear reports "No priority" for unset — treat
+                            // that as no label rather than rendering it.
+                            "No priority" => String::new(),
+                            other => other.to_string(),
+                        },
                     }
                 })
                 .collect()
