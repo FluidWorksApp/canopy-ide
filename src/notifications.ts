@@ -53,6 +53,10 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
     const pty = typeof parsed.canopy_pty === "number" ? parsed.canopy_pty : null;
     const event = String(parsed.hook_event_name ?? parsed.type ?? "");
     const tool = String(parsed.tool_name ?? "");
+    // The helper stamps `agent` for every non-claude CLI it fronts; bare
+    // claude events carry none, hence the default.
+    const agent =
+      typeof parsed.agent === "string" && parsed.agent ? parsed.agent : "claude";
 
     if (event === "PreToolUse" && tool === "AskUserQuestion") {
       const input = parsed.tool_input as { questions?: unknown[] } | undefined;
@@ -80,7 +84,7 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
         {
           key: `${sessionId}-${entry.ts}-q`,
           kind: "question",
-          agent: "claude",
+          agent,
           sessionId,
           cwd,
           pty,
@@ -88,8 +92,13 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
           questions,
         },
       ]);
-    } else if (event === "Notification") {
-      const message = String(parsed.message ?? "Agent needs attention");
+    } else if (event === "Notification" || event === "PermissionRequest") {
+      const message = String(
+        parsed.message ??
+          (event === "PermissionRequest"
+            ? `${agent} needs permission${tool ? `: ${tool}` : ""}`
+            : "Agent needs attention"),
+      );
       const list = pendingBySession.get(sessionId) ?? [];
       if (IDLE_RE.test(message)) {
         // Completion notice, not a request. One per session is enough —
@@ -99,7 +108,7 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
           {
             key: `${sessionId}-${entry.ts}-i`,
             kind: "idle",
-            agent: "claude",
+            agent,
             sessionId,
             cwd,
             pty,
@@ -116,7 +125,7 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
           {
             key: `${sessionId}-${entry.ts}-n`,
             kind: "notification",
-            agent: "claude",
+            agent,
             sessionId,
             cwd,
             pty,
@@ -136,7 +145,7 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
         {
           key: `${sessionId}-${entry.ts}-i`,
           kind: "idle",
-          agent: event === "Stop" ? "claude" : "codex",
+          agent: parsed.agent ? agent : event === "Stop" ? "claude" : "codex",
           sessionId,
           cwd,
           pty,

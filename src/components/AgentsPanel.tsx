@@ -506,18 +506,27 @@ export function AgentsPanel({
       {showHookHelp && hookPath && (
         <div className="hook-help">
           <p>Stream tool-use events from agent CLIs into this panel:</p>
-          {/* One button per CLI with an auto-setup arm — not just Claude.
-              (setup_agent_hooks in agents.rs is the registry for these.) */}
+          {/* One button per CLI with an auto-setup arm — every CLI whose
+              integration surface supports it (see docs/agent-parity.md).
+              setup_agent_hooks in agents.rs is the registry for these. */}
           <div className="hook-setup-row">
-            <button className="btn btn-accent" onClick={() => void autoSetup("claude")}>
-              Claude Code
-            </button>
-            <button className="btn btn-accent" onClick={() => void autoSetup("codex")}>
-              Codex
-            </button>
-            <button className="btn btn-accent" onClick={() => void autoSetup("agy")}>
-              Antigravity
-            </button>
+            {[
+              { id: "claude", label: "Claude Code" },
+              { id: "codex", label: "Codex" },
+              { id: "agy", label: "Antigravity" },
+              { id: "aider", label: "Aider" },
+              { id: "opencode", label: "OpenCode" },
+              { id: "omp", label: "oh-my-pi" },
+              { id: "amp", label: "Amp" },
+            ].map((a) => (
+              <button
+                key={a.id}
+                className="btn btn-accent"
+                onClick={() => void autoSetup(a.id)}
+              >
+                {a.label}
+              </button>
+            ))}
           </div>
           {setupResult && <p className="hook-result">{setupResult}</p>}
           <p>

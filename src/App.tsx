@@ -236,11 +236,12 @@ export default function App() {
     ];
     // Auto-inject agent hooks (idempotent) so tool events stream in without setup.
     void import("@tauri-apps/api/core").then(({ invoke }) => {
-      void invoke("setup_agent_hooks", { agent: "claude" }).catch(() => {});
-      void invoke("setup_agent_hooks", { agent: "codex" }).catch(() => {});
-      // No-op with a clear error until agy has run once (its config dir must
-      // exist); succeeds on the next launch after that.
-      void invoke("setup_agent_hooks", { agent: "agy" }).catch(() => {});
+      // Every CLI with a setup arm (see setup_agent_hooks). Each is
+      // idempotent; ones whose CLI hasn't run yet fail quietly and succeed on
+      // a later launch.
+      for (const agent of ["claude", "codex", "agy", "aider", "opencode", "omp", "amp"]) {
+        void invoke("setup_agent_hooks", { agent }).catch(() => {});
+      }
     });
     // Focus mode is reachable two ways: the native menu accelerator, and a
     // webview key handler. Belt and braces — the accelerator is what the menu

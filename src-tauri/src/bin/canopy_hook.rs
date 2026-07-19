@@ -68,18 +68,48 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     // can normalize their event names and speak their stdout contract.
     let mut args = std::env::args().skip(1);
     let mut agent_override: Option<String> = None;
+    let mut synth_event: Option<String> = None;
+    let mut synth_message: Option<String> = None;
     while let Some(a) = args.next() {
-        if a == "--agent" {
-            agent_override = args.next();
+        match a.as_str() {
+            "--agent" => agent_override = args.next(),
+            "--event" => synth_event = args.next(),
+            "--message" => synth_message = args.next(),
+            _ => {}
         }
     }
 
+    // Two input modes. Default: the CLI delivers event JSON on stdin (claude,
+    // codex, agy). Synthesized (--event): the CLI can only run a bare command
+    // with no payload (aider's notifications-command), so we build the event
+    // ourselves from the flags and the environment.
     let mut raw = String::new();
-    std::io::stdin().read_to_string(&mut raw)?;
-    let mut event: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => return Ok(()),
+    let mut event: serde_json::Value = if let Some(name) = synth_event {
+        let agent = agent_override.clone().unwrap_or_else(|| "agent".into());
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        // No real session identity exists in this mode; one stable id per
+        // terminal keeps derivePending's per-session grouping working without
+        // inventing restorable-looking sessions (no prompts ever recorded, so
+        // the restore UI filters these out).
+        let pty = std::env::var("CANOPY_PTY").unwrap_or_default();
+        serde_json::json!({
+            "hook_event_name": name,
+            "session_id": format!("{agent}-pty{pty}"),
+            "cwd": cwd,
+            "message": synth_message.unwrap_or_default(),
+        })
+    } else {
+        std::io::stdin().read_to_string(&mut raw)?;
+        match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => return Ok(()),
+        }
     };
+    if raw.is_empty() {
+        raw = serde_json::to_string(&event).unwrap_or_default();
+    }
 
     if let Some(agent) = agent_override.as_deref() {
         normalize_event(&mut event, agent);
@@ -105,10 +135,11 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{}", serde_json::json!({ "allow_tool": true }));
             }
         }
-        Some(_) => {}
-        // Claude: only these two events can inject; everything else is
-        // observation only.
-        None => {
+        // Claude and Codex share the injection contract — Codex's hooks
+        // system is modeled on Claude's, and its docs use the same
+        // hookSpecificOutput.additionalContext shape for SessionStart /
+        // UserPromptSubmit context. Anything else: observation only.
+        None | Some("codex") => {
             if hook_event == "UserPromptSubmit" || hook_event == "SessionStart" {
                 if let Some(context) = peer_context(&session_id, &cwd) {
                     let out = serde_json::json!({
@@ -121,6 +152,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        Some(_) => {}
     }
     Ok(())
 }
