@@ -255,9 +255,16 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // launcher, so you pick the shell or agent you actually want rather than
   // being handed a shell you didn't ask for.
 
+  // Re-probed whenever it could have changed: an install run finishing, or
+  // the launcher opening. A one-shot probe at mount meant a finished install
+  // still showed — and re-ran — the installer on every click.
+  const refreshInstalled = useCallback(
+    () => void checkInstalledClis().then(setInstalled),
+    [],
+  );
   useEffect(() => {
-    void checkInstalledClis().then(setInstalled);
-  }, []);
+    refreshInstalled();
+  }, [refreshInstalled]);
 
   // Looking at a tab is what marks it read. As an effect rather than something
   // hung off the tab's onClick, so every route in — clicking, Ctrl+Tab cycling,
@@ -716,8 +723,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     if (installed[cli.bin]) {
       addTerminal(cwd, cli.bin, cli.name, cli.icon);
     } else {
-      addTerminal(cwd, cli.install, `install ${cli.name}`, "⬇");
-      setTimeout(() => void checkInstalledClis().then(setInstalled), 60_000);
+      // A run tab, so the installer exits when done — and that exit is the
+      // signal to re-probe (see onExited below). No timers, no staleness.
+      addTerminal(cwd, cli.install, `install ${cli.name}`, "⬇", true);
     }
   };
 
@@ -972,7 +980,16 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             </>
           )}
           <div className="cli-menu-anchor">
-            <button className="btn" title="New terminal / agent" onClick={() => setCliMenuOpen((v) => !v)}>
+            <button
+              className="btn"
+              title="New terminal / agent"
+              onClick={() => {
+                // Opening the launcher re-probes, so a CLI installed outside
+                // Canopy (or in another project) shows as installed here.
+                if (!cliMenuOpen) refreshInstalled();
+                setCliMenuOpen((v) => !v);
+              }}
+            >
               ＋ ▾
             </button>
             {cliMenuOpen && (
@@ -1037,8 +1054,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 onExited={(code) => {
                   // Shell tabs close on exit; run tabs stay so the output and
                   // exit status remain readable.
-                  if (tab.run) patchTab(tab.id, { exited: true, exitCode: code, ptyId: null });
-                  else closeTab(tab.id);
+                  if (tab.run) {
+                    patchTab(tab.id, { exited: true, exitCode: code, ptyId: null });
+                    // An installer finishing is the moment "install" labels
+                    // go stale — re-probe right now, not on a timer.
+                    if (AGENT_CLIS.some((c) => c.install === tab.command)) {
+                      refreshInstalled();
+                    }
+                  } else closeTab(tab.id);
                 }}
                 onTitle={(title) => patchTab(tab.id, { title: title || tab.command || "shell" })}
                 onNotify={(notice) =>
