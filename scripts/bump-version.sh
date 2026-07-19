@@ -35,8 +35,10 @@ if git rev-parse -q --verify "refs/tags/v$V" >/dev/null; then
   exit 1
 fi
 
-# package.json + package-lock.json
-npm version "$V" --no-git-tag-version >/dev/null
+# package.json + package-lock.json. --allow-same-version: for a first release
+# the files are usually already stamped with the target version, and the only
+# missing piece is the tag — without the flag npm hard-errors on "no change".
+npm version "$V" --no-git-tag-version --allow-same-version >/dev/null
 
 # Cargo.toml: only the [package] version — the first `version = "…"` line.
 perl -pi -e 'BEGIN{$done=0} $done ||= s/^version = "[^"]+"/version = "'"$V"'"/' \
@@ -67,7 +69,11 @@ for f in \
 done
 
 git add -A
-git commit -m "Release v$V"
+if git diff --cached --quiet; then
+  echo "files already at $V — nothing to commit; tagging the current HEAD"
+else
+  git commit -m "Release v$V"
+fi
 git tag "v$V"
 
 echo
