@@ -67,6 +67,21 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
   // while it is open — the rest of the time this component costs nothing.
   const [breakdown, setBreakdown] = useState(false);
   const [allSessions, setAllSessions] = useState<ipc.SessionStats[]>([]);
+  // Popups anchored to a chip must escape .status-bar's overflow:hidden (it
+  // clips its one-line row — and clipped everything that pops above it, so
+  // only a shadow sliver ever showed). Fixed positioning, measured from the
+  // clicked chip, ignores ancestor clipping entirely.
+  const [menuPos, setMenuPos] = useState<{ right: number; bottom: number } | null>(null);
+  const anchorMenu = (e: React.MouseEvent) => {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setMenuPos({
+      right: Math.max(8, window.innerWidth - r.right),
+      bottom: window.innerHeight - r.top + 6,
+    });
+  };
+  const menuStyle = menuPos
+    ? ({ position: "fixed", right: menuPos.right, bottom: menuPos.bottom } as const)
+    : undefined;
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const [openSessions, setOpenSessions] = useState<Record<number, boolean>>({});
   useEffect(() => {
@@ -170,13 +185,17 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
               `Does not include the WebView: macOS runs it in system-owned WebKit ` +
               `processes parented to launchd, which can't be attributed back to us.`
             }
-            onClick={() => setBreakdown((v) => !v)}
+            onClick={(e) => {
+              anchorMenu(e);
+              setBreakdown((v) => !v);
+            }}
           >
             {app.cpu.toFixed(0)}% cpu · {fmtMem(app.mem_bytes)}
           </button>
           {breakdown && (
             <div
               className="status-menu status-breakdown"
+              style={menuStyle}
               onMouseLeave={() => setBreakdown(false)}
             >
               {(() => {
@@ -295,7 +314,10 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
             <button
               className="status-model-btn"
               title="Change this session's model (/model)"
-              onClick={() => setModelMenu((v) => !v)}
+              onClick={(e) => {
+                anchorMenu(e);
+                setModelMenu((v) => !v);
+              }}
             >
               {stats.model.replace(/^claude-/, "")} ▾
             </button>
@@ -305,7 +327,7 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
             </span>
           )}
           {modelMenu && (
-            <div className="status-menu" onMouseLeave={() => setModelMenu(false)}>
+            <div className="status-menu" style={menuStyle} onMouseLeave={() => setModelMenu(false)}>
               {MODELS.map((m) => (
                 <div
                   key={m.id}
