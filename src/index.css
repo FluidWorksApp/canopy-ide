@@ -153,7 +153,19 @@ body,
   align-items: center;
   gap: 2px;
   overflow-x: auto;
-  scrollbar-width: none;
+  /* Already scrollable (data was always reachable) — scrollbar-width:none
+     just hid any hint of it. See the .run-rail comment for why both
+     properties are set rather than just scrollbar-width. */
+  scrollbar-width: thin;
+}
+
+.project-tabs::-webkit-scrollbar {
+  height: 4px;
+}
+
+.project-tabs::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
 }
 
 .project-tab {
@@ -401,7 +413,21 @@ body,
   border-top: 1px solid var(--border);
   flex: 0 0 auto;
   white-space: nowrap;
-  overflow: hidden;
+  /* overflow:hidden with no scroll was silent clipping — the same shape as
+     the git-tabs bug above, just for status items instead of tabs. Enough
+     of them (or a narrow window) shrinks text below its own box and it just
+     vanishes under this. Scrollable + a visible thin scrollbar instead. */
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.status-bar::-webkit-scrollbar {
+  height: 4px;
+}
+
+.status-bar::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
 }
 
 .status-item {
@@ -1111,7 +1137,18 @@ div + .bd-head {
   display: flex;
   overflow-x: auto;
   flex: 1;
-  scrollbar-width: none;
+  /* Same as .run-rail/.project-tabs: already scrollable, scrollbar-width:none
+     just hid that fact. */
+  scrollbar-width: thin;
+}
+
+.tabs::-webkit-scrollbar {
+  height: 4px;
+}
+
+.tabs::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
 }
 
 .tab {
@@ -1218,11 +1255,25 @@ div + .bd-head {
   padding: 0 6px;
   margin-left: auto;
   border-left: 1px solid var(--border);
-  scrollbar-width: none;
+  /* Chips already don't clip — flex:0 0 auto keeps each one full width and
+     this scrolls instead. What was missing is any hint that there's more to
+     scroll to: scrollbar-width:none hid it completely. A thin scrollbar is
+     the visible affordance; still out of the way when everything fits. */
+  scrollbar-width: thin;
 }
 
+/* scrollbar-width is a recent-WebKit-only feature — Tauri's WKWebView version
+   tracks the OS's installed WebKit, which on an older macOS may not honor it
+   at all. A thin/none pair for both properties is the only way to be sure
+   the affordance actually shows on every target in the README's support
+   matrix (macOS 10.15+), not just wherever this happened to be tested. */
 .run-rail::-webkit-scrollbar {
-  display: none;
+  height: 4px;
+}
+
+.run-rail::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
 }
 
 .run-rail-label {
@@ -2301,6 +2352,7 @@ div + .bd-head {
 
 .git-tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 2px;
   padding: 4px 8px 0;
   border-bottom: 1px solid var(--border);
@@ -2314,6 +2366,12 @@ div + .bd-head {
   font-size: 11px;
   padding: 3px 6px;
   cursor: pointer;
+  /* Keep each tab's own label intact — wrap moves whole tabs to a second
+     row (git-tabs, above) rather than letting flex squeeze/break the text
+     of an individual one. Tabs were clipping off the edge with zero way to
+     reach them, not just visually tight. */
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .git-tab-on {
