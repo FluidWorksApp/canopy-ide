@@ -16,16 +16,25 @@ interface CommitViewProps {
 
 export function CommitView({ repo, hash, onNotice }: CommitViewProps) {
   const [detail, setDetail] = useState<ipc.CommitDetail | null>(null);
+  const [patch, setPatch] = useState<ipc.CommitPatch | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [split, setSplit] = useState(true);
 
+  // Two phases on purpose: metadata is a `git show -s` (milliseconds) so the
+  // header paints at once, while the patch — the part that actually costs
+  // something on a large commit — fills in behind it.
   useEffect(() => {
     let live = true;
     setDetail(null);
+    setPatch(null);
     setError(null);
     void ipc
       .gitCommitDetail(repo, hash)
       .then((d) => live && setDetail(d))
+      .catch((e) => live && setError(String(e)));
+    void ipc
+      .gitCommitPatch(repo, hash)
+      .then((p) => live && setPatch(p))
       .catch((e) => live && setError(String(e)));
     return () => {
       live = false;
@@ -35,7 +44,7 @@ export function CommitView({ repo, hash, onNotice }: CommitViewProps) {
   if (error) return <div className="tree-empty">{error}</div>;
   if (!detail) return <div className="tree-empty">Loading commit…</div>;
 
-  const files = detail.patch ? splitPatch(detail.patch) : [];
+  const files = patch?.patch ? splitPatch(patch.patch) : [];
   const isMerge = detail.parents.length > 1;
 
   return (
@@ -50,8 +59,12 @@ export function CommitView({ repo, hash, onNotice }: CommitViewProps) {
           <span className="commit-date">{detail.date}</span>
           {isMerge && <span className="commit-chip">merge</span>}
           {detail.refs && <span className="commit-chip">{detail.refs}</span>}
-          <span className="commit-stat commit-add">+{detail.insertions}</span>
-          <span className="commit-stat commit-del">−{detail.deletions}</span>
+          {patch && (
+            <>
+              <span className="commit-stat commit-add">+{patch.insertions}</span>
+              <span className="commit-stat commit-del">−{patch.deletions}</span>
+            </>
+          )}
           <span className="git-spacer" />
           <button
             className="btn-mini"
@@ -75,7 +88,9 @@ export function CommitView({ repo, hash, onNotice }: CommitViewProps) {
       </div>
 
       <div className="commit-files">
-        {files.length === 0 ? (
+        {!patch ? (
+          <div className="tree-empty">Loading diff…</div>
+        ) : files.length === 0 ? (
           <div className="tree-empty">
             {isMerge
               ? "Merge commit — no patch of its own. Open its parents to see the changes."
@@ -100,6 +115,12 @@ export function CommitView({ repo, hash, onNotice }: CommitViewProps) {
               />
             </div>
           ))
+        )}
+        {patch?.truncated && (
+          <div className="tree-empty">
+            Patch truncated — this commit is larger than 2 MB. Use{" "}
+            <code>git show {detail.short}</code> for the whole thing.
+          </div>
         )}
       </div>
     </div>

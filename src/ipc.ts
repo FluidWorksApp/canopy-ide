@@ -274,14 +274,21 @@ export interface CommitDetail {
   body: string;
   refs: string;
   parents: string[];
+}
+
+export interface CommitPatch {
+  patch: string;
   files_changed: number;
   insertions: number;
   deletions: number;
-  patch: string;
+  truncated: boolean;
 }
 
 export const gitCommitDetail = (repo: string, hash: string) =>
   invoke<CommitDetail>("git_commit_detail", { repo, hash });
+
+export const gitCommitPatch = (repo: string, hash: string) =>
+  invoke<CommitPatch>("git_commit_patch", { repo, hash });
 
 export const gitLog = (repo: string, limit?: number) =>
   invoke<CommitInfo[]>("git_log", { repo, limit });

@@ -222,6 +222,7 @@ pub fn run() {
             git::git_diff,
             git::git_log,
             git::git_commit_detail,
+            git::git_commit_patch,
             git::git_worktrees,
             git::git_worktree_add,
             git::git_worktree_remove,

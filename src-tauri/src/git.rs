@@ -924,7 +924,10 @@ pub async fn git_worktree_prune(
     Ok(if out.trim().is_empty() { "Nothing to prune".into() } else { out.trim().to_string() })
 }
 
-/// A commit as its own view: full metadata plus the patch it introduced.
+/// A commit's metadata — everything the header needs, and nothing that costs
+/// a diff computation. Split from the patch on purpose: `git show -s` is
+/// milliseconds even on a big repo, so the view can paint immediately while
+/// the patch (which is the expensive part) loads behind it.
 #[derive(Serialize, Clone)]
 pub struct CommitDetail {
     pub hash: String,
@@ -939,12 +942,27 @@ pub struct CommitDetail {
     pub refs: String,
     /// Parent hashes — more than one means a merge.
     pub parents: Vec<String>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct CommitPatch {
+    pub patch: String,
     pub files_changed: u32,
     pub insertions: u32,
     pub deletions: u32,
-    /// Unified patch. Empty for a merge commit, where `git show` prints no
-    /// diff by default (combined diffs are a different, noisier format).
-    pub patch: String,
+    /// The patch was too large to ship whole; `patch` holds the head of it.
+    pub truncated: bool,
+}
+
+/// Reject anything that isn't a hex object name before it reaches git — these
+/// strings come from the UI, and `git show` accepts far broader revision
+/// syntax (`HEAD@{...}`, ranges, paths after `--`).
+fn checked_hash(hash: &str) -> Result<String, String> {
+    let h = hash.trim();
+    if h.is_empty() || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("invalid commit hash".into());
+    }
+    Ok(h.to_string())
 }
 
 #[tauri::command]
@@ -954,13 +972,7 @@ pub async fn git_commit_detail(
     hash: String,
 ) -> Result<CommitDetail, String> {
     let top = repo_path(&state, &repo)?;
-    // Reject anything that isn't a hex object name before it reaches git —
-    // this string comes from the UI, and `git show` happily takes revisions
-    // with far broader syntax (`HEAD@{...}`, ranges, paths after `--`).
-    let hash = hash.trim().to_string();
-    if hash.is_empty() || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err("invalid commit hash".into());
-    }
+    let hash = checked_hash(&hash)?;
     let meta = run(git(&top).args([
         "show",
         "-s",
@@ -972,20 +984,6 @@ pub async fn git_commit_detail(
     if f.len() < 9 {
         return Err("commit not found".into());
     }
-    let stat = run(git(&top).args(["show", "--stat", "--oneline", "--format=", &hash]))
-        .unwrap_or_default();
-    let summary = stat.lines().last().unwrap_or("");
-    let num = |kw: &str| -> u32 {
-        summary
-            .split(',')
-            .find(|p| p.contains(kw))
-            .and_then(|p| p.trim().split_whitespace().next())
-            .and_then(|n| n.parse().ok())
-            .unwrap_or(0)
-    };
-    // Merges print no patch under plain `git show`; leave it empty rather
-    // than reaching for a combined diff the renderer can't display anyway.
-    let patch = run(git(&top).args(["show", "--patch", "--format=", &hash])).unwrap_or_default();
     Ok(CommitDetail {
         hash: f[0].to_string(),
         short: f[1].to_string(),
@@ -996,11 +994,75 @@ pub async fn git_commit_detail(
         body: f[6].trim().to_string(),
         refs: f[7].to_string(),
         parents: f[8].split_whitespace().map(String::from).collect(),
-        files_changed: num("file"),
-        insertions: num("insertion"),
-        deletions: num("deletion"),
-        patch,
     })
+}
+
+/// A commit's patch, with its stats derived from the patch itself rather than
+/// a second `--stat` pass — that pass recomputed the identical diff, which on
+/// a large commit is the single most expensive thing this view did.
+///
+/// Commits are immutable, so results are cached for the run: reopening a tab
+/// (or revisiting one) costs nothing.
+#[tauri::command]
+pub async fn git_commit_patch(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    hash: String,
+) -> Result<CommitPatch, String> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    /// Big enough for any patch a human reviews; past this the cost is all in
+    /// shipping and rendering megabytes of generated diff (lockfiles, vendored
+    /// trees) that nobody reads line by line.
+    const MAX_PATCH_BYTES: usize = 2 * 1024 * 1024;
+    static CACHE: OnceLock<Mutex<HashMap<String, CommitPatch>>> = OnceLock::new();
+
+    let top = repo_path(&state, &repo)?;
+    let hash = checked_hash(&hash)?;
+    let cache_key = format!("{}\x1f{hash}", top.display());
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = cache.lock().unwrap().get(&cache_key) {
+        return Ok(hit.clone());
+    }
+
+    // Merges print no patch under plain `git show`; that is reported as an
+    // empty patch rather than reaching for a combined diff the renderer
+    // cannot display anyway.
+    let mut patch = run(git(&top).args(["show", "--patch", "--format=", &hash]))?;
+
+    let mut files = 0_u32;
+    let mut adds = 0_u32;
+    let mut dels = 0_u32;
+    for line in patch.lines() {
+        if line.starts_with("diff --git ") {
+            files += 1;
+        } else if line.starts_with("+++") || line.starts_with("---") {
+            // File headers, not content.
+        } else if line.starts_with('+') {
+            adds += 1;
+        } else if line.starts_with('-') {
+            dels += 1;
+        }
+    }
+
+    let truncated = patch.len() > MAX_PATCH_BYTES;
+    if truncated {
+        // Cut on a line boundary so the last hunk the renderer sees is valid.
+        let cut = patch[..MAX_PATCH_BYTES]
+            .rfind('\n')
+            .unwrap_or(MAX_PATCH_BYTES);
+        patch.truncate(cut);
+    }
+
+    let result = CommitPatch {
+        patch,
+        files_changed: files,
+        insertions: adds,
+        deletions: dels,
+        truncated,
+    };
+    cache.lock().unwrap().insert(cache_key, result.clone());
+    Ok(result)
 }
 
 // ---------- tickets (issue #15) ----------
