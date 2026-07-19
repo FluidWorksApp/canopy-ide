@@ -722,6 +722,15 @@ fn setup_agy_hooks(home: &str) -> Result<String, String> {
     ))
 }
 
+/// Substrings identifying a hook entry as one of ours, across every version we
+/// have shipped: the original inline shell command wrote to agent-events.jsonl,
+/// later ones invoke the helper binary out of our state dir. Matching all of
+/// them means an upgrade replaces its predecessor instead of stacking a dead
+/// hook beside it. Hooks the user wrote match none of these and are left
+/// alone. Add to this list on any future rename. Shared by the claude and
+/// codex installers.
+const MARKERS: &[&str] = &["agent-events.jsonl", "canopy-hook", ".canopy/"];
+
 /// Where the hook helper lives once installed. Hooks reference this stable path
 /// rather than the app bundle, so they keep working across upgrades and don't
 /// break if the app is moved.
@@ -947,14 +956,6 @@ fn setup_claude_hooks(home: &str, bridge: &str) -> Result<String, String> {
             helper.display()
         ));
     }
-    // Substrings identifying a hook entry as one of ours, across every version
-    // we have shipped: the original inline shell command wrote to
-    // agent-events.jsonl, later ones invoke the helper binary out of our state
-    // dir. Matching all of them means an upgrade replaces its predecessor
-    // instead of stacking a dead hook beside it. Hooks the user wrote match
-    // none of these and are left alone. Add to this list on any future rename.
-    const MARKERS: &[&str] = &["agent-events.jsonl", "canopy-hook", ".canopy/"];
-
     let command = helper.to_string_lossy().to_string();
     let make_entry = |matcher: Option<&str>| {
         let mut entry = serde_json::json!({
