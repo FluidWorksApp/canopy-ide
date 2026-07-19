@@ -743,24 +743,24 @@ pub async fn kill_process(pid: u32) -> Result<(), String> {
 mod tests {
     use super::claude_bucket;
 
-    /// Encodings taken from real bucket directories under ~/.claude/projects.
-    /// Every one of these is a path our own users hit; the `.claude/worktrees`
-    /// case is the isolation model, and `/` -> `-` alone gets all three wrong.
+    /// Mirrors the encoding claude applies to bucket directories under
+    /// ~/.claude/projects. The `.claude/worktrees` case is the isolation model,
+    /// and `/` -> `-` alone gets all three cases wrong.
     #[test]
     fn bucket_encodes_every_non_alphanumeric() {
         assert_eq!(
-            claude_bucket("/Users/s/Documents/GitHub/coraa-app/coraa-agent/.claude/worktrees/brs"),
-            "-Users-s-Documents-GitHub-coraa-app-coraa-agent--claude-worktrees-brs",
+            claude_bucket("/Users/dev/Projects/my-app/backend/.claude/worktrees/feat"),
+            "-Users-dev-Projects-my-app-backend--claude-worktrees-feat",
             "a dot must encode to '-', giving '--claude' where '/.' was"
         );
         assert_eq!(
-            claude_bucket("/private/var/folders/d1/2vxk8gl_1mxz/T/coraa-wp"),
-            "-private-var-folders-d1-2vxk8gl-1mxz-T-coraa-wp",
+            claude_bucket("/private/var/folders/d1/2vxk8gl_1mxz/T/scratch"),
+            "-private-var-folders-d1-2vxk8gl-1mxz-T-scratch",
             "an underscore must encode to '-'"
         );
         assert_eq!(
-            claude_bucket("/Users/s/Documents/GitHub/product-demo"),
-            "-Users-s-Documents-GitHub-product-demo",
+            claude_bucket("/Users/dev/Projects/my-demo"),
+            "-Users-dev-Projects-my-demo",
             "an existing hyphen survives unchanged"
         );
     }
