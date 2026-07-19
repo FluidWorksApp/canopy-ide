@@ -55,12 +55,8 @@ export default function App() {
   // One press can reach us from both the menu accelerator and the webview key
   // handler; without this they'd cancel each other and focus mode would look
   // stuck. First one wins, the echo inside the window is ignored.
-  // File menu. The workspace already auto-persists to
-  // ~/.canopy/projects.json — these are explicit open/export on top.
-  const openProjectFromDisk = useCallback(async () => {
-    const { open } = await import("@tauri-apps/plugin-dialog");
-    const dir = await open({ directory: true, title: "Open project folder" });
-    if (typeof dir !== "string") return;
+  // Shared by the File menu and the `canopy <dir>` CLI path.
+  const openDirAsProject = useCallback(async (dir: string) => {
     // Reuse a project already pointing at this folder instead of duplicating it.
     const existing = wsRef.current.projects.find((p) =>
       p.components.some((c) => c.path === dir),
@@ -69,13 +65,22 @@ export default function App() {
       await openProjectRef.current(existing.id);
       return;
     }
-    const name = dir.slice(dir.lastIndexOf("/") + 1) || dir;
+    const name = dir.split(/[\\/]/).pop() || dir;
     await saveProjectRef.current({
       id: newProjectId(),
       name,
       components: [{ label: name, path: dir, commands: [] }],
     });
   }, []);
+
+  // File menu. The workspace already auto-persists to
+  // ~/.canopy/projects.json — these are explicit open/export on top.
+  const openProjectFromDisk = useCallback(async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const dir = await open({ directory: true, title: "Open project folder" });
+    if (typeof dir !== "string") return;
+    await openDirAsProject(dir);
+  }, [openDirAsProject]);
 
   const saveProjectAs = useCallback(async () => {
     const state = wsRef.current;
@@ -189,6 +194,12 @@ export default function App() {
                 setNotice(`Canopy is up to date (${await getVersion()}).`);
               })
               .catch((err) => setNotice(`Update check failed: ${err}`));
+          } else if (e.payload === "install-cli") {
+            void import("@tauri-apps/api/core").then(({ invoke }) =>
+              invoke<string>("cli_install_shim")
+                .then(setNotice)
+                .catch((err) => setNotice(String(err))),
+            );
           } else if (e.payload === "new-project") {
             setDialog({ mode: "new" });
           } else if (e.payload === "open-project") {
@@ -231,6 +242,27 @@ export default function App() {
       subs.forEach((s) => void s.then((fn) => fn()));
     };
   }, []);
+
+  // `canopy <dir>` delivery. Cold start: the arg waited in Rust state while
+  // the webview booted — collect it once the workspace is loaded (opening a
+  // project before load would be clobbered by setWs). Warm: a second CLI
+  // invocation's argv arrives as a cli-open event via the single-instance
+  // plugin.
+  useEffect(() => {
+    if (!loaded) return;
+    void import("@tauri-apps/api/core").then(({ invoke }) =>
+      invoke<string | null>("cli_take_pending_open")
+        .then((dir) => (dir ? openDirAsProject(dir) : undefined))
+        .catch(() => {}),
+    );
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/event").then(({ listen }) =>
+      listen<string>("cli-open", (e) => void openDirAsProject(e.payload)).then((fn) => {
+        unlisten = fn;
+      }),
+    );
+    return () => unlisten?.();
+  }, [loaded, openDirAsProject]);
 
   // Background update checks: shortly after launch (delayed so it never
   // competes with boot), then every 12h for the long-lived windows people
