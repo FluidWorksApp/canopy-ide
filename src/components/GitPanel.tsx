@@ -13,6 +13,11 @@ interface GitPanelProps {
   onOpenDiff: (repo: string, file: ipc.FileChange) => void;
   /** Open a pull request in the main area. */
   onOpenPr: (repo: string, pr: ipc.PrInfo) => void;
+  /** Open a commit in the main area. */
+  onOpenCommit: (
+    repo: string,
+    commit: { hash: string; short: string; subject: string },
+  ) => void;
   /** Open a terminal in a directory (used to work inside a worktree). */
   onOpenTerminal: (cwd: string, label: string) => void;
   /** Worktree currently backing the project's files, if any. */
@@ -28,6 +33,7 @@ export function GitPanel({
   components,
   onOpenDiff,
   onOpenPr,
+  onOpenCommit,
   onOpenTerminal,
   activeWorktree,
   onUseWorktree,
@@ -628,7 +634,15 @@ export function GitPanel({
       {section === "history" && (
         <div className="git-scroll">
           {log.map((c) => (
-            <div key={c.hash} className="git-commit-row" title={`${c.hash}\n${c.author} · ${c.date}`}>
+            <div
+              key={c.hash}
+              className="git-commit-row git-commit-row-click"
+              title={`${c.hash}\n${c.author} · ${c.date}\n\nClick to open this commit`}
+              onClick={() =>
+                repo &&
+                onOpenCommit(repo, { hash: c.hash, short: c.short, subject: c.subject })
+              }
+            >
               <span className="git-commit-hash">{c.short}</span>
               <span className="git-commit-subject">{c.subject}</span>
               <span className="git-commit-meta">{c.date}</span>

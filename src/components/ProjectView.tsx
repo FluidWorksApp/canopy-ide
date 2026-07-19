@@ -39,6 +39,7 @@ import { Palette, type PaletteMode } from "./Palette";
 import { GitPanel } from "./GitPanel";
 import { TicketsPanel, type AgentTarget } from "./TicketsPanel";
 import { TicketView } from "./TicketView";
+import { CommitView } from "./CommitView";
 import { ticketBranch, ticketContext, ticketWorktree } from "../trackers";
 import { PrView } from "./PrView";
 
@@ -85,6 +86,15 @@ interface TicketSubTab {
   source: string;
 }
 
+interface CommitSubTab {
+  id: string;
+  type: "commit";
+  repo: string;
+  hash: string;
+  short: string;
+  subject: string;
+}
+
 interface PrSubTab {
   id: string;
   type: "pr";
@@ -92,7 +102,7 @@ interface PrSubTab {
   pr: ipc.PrInfo;
 }
 
-type SubTab = TermSubTab | FileSubTab | PrSubTab | TicketSubTab;
+type SubTab = TermSubTab | FileSubTab | PrSubTab | TicketSubTab | CommitSubTab;
 
 const decoder = new TextDecoder();
 // Collision-proof ids: a module counter resets on hot-reload and produced
@@ -310,6 +320,23 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       }
     },
     [ticketRepo, addTerminal, onNotice],
+  );
+
+  /** Open a commit as its own tab, reusing one already open for it. */
+  const openCommit = useCallback(
+    (repo: string, commit: { hash: string; short: string; subject: string }) => {
+      const existing = tabsRef.current.find(
+        (t): t is CommitSubTab => t.type === "commit" && t.hash === commit.hash,
+      );
+      if (existing) {
+        setActiveTabId(existing.id);
+        return;
+      }
+      const id = tabId();
+      setTabs((prev) => [...prev, { id, type: "commit", repo, ...commit }]);
+      setActiveTabId(id);
+    },
+    [],
   );
 
   /** Open an issue as its own tab, reusing one already open for it. */
@@ -995,7 +1022,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                       ? `${tab.pr.title} — ${tab.pr.url}`
                       : tab.type === "ticket"
                         ? `${tab.ticket.id} — ${tab.ticket.title}\n${tab.ticket.url}`
-                        : tab.file.path
+                        : tab.type === "commit"
+                          ? `${tab.short} — ${tab.subject}`
+                          : tab.file.path
                 }
               >
                 {tab.type === "terminal" ? (
@@ -1007,6 +1036,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                   <span className="tab-pr-icon">⑃</span>
                 ) : tab.type === "ticket" ? (
                   <span className="tab-ticket-icon">◎</span>
+                ) : tab.type === "commit" ? (
+                  <span className="tab-commit-icon">◇</span>
                 ) : (
                   tab.file.external != null && <span className="tab-external">●</span>
                 )}
@@ -1039,7 +1070,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                         ? `#${tab.pr.number} ${tab.pr.title}`
                         : tab.type === "ticket"
                           ? `${tab.ticket.id} ${tab.ticket.title}`
-                          : `${tab.file.name}${tab.file.dirty ? " •" : ""}`}
+                          : tab.type === "commit"
+                            ? `${tab.short} ${tab.subject}`
+                            : `${tab.file.name}${tab.file.dirty ? " •" : ""}`}
                   </span>
                 )}
                 <span
@@ -1231,6 +1264,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               />
             </div>
           ))}
+        {activeTab?.type === "commit" && (
+          <CommitView
+            key={activeTab.id}
+            repo={activeTab.repo}
+            hash={activeTab.hash}
+            onNotice={onNotice}
+          />
+        )}
         {activeTab?.type === "ticket" && (
           <TicketView
             key={activeTab.id}
@@ -1525,6 +1566,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           }}
           onOpenDiff={(_repo, f) => void openFile(f.abs, { diff: true })}
           onOpenPr={(repo, pr) => openPr(repo, pr)}
+          onOpenCommit={openCommit}
           onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
           onNotice={onNotice}
         />

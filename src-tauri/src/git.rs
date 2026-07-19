@@ -924,6 +924,85 @@ pub async fn git_worktree_prune(
     Ok(if out.trim().is_empty() { "Nothing to prune".into() } else { out.trim().to_string() })
 }
 
+/// A commit as its own view: full metadata plus the patch it introduced.
+#[derive(Serialize, Clone)]
+pub struct CommitDetail {
+    pub hash: String,
+    pub short: String,
+    pub author: String,
+    pub email: String,
+    /// ISO-ish author date, as git formats it.
+    pub date: String,
+    pub subject: String,
+    /// Commit message minus the subject line.
+    pub body: String,
+    pub refs: String,
+    /// Parent hashes — more than one means a merge.
+    pub parents: Vec<String>,
+    pub files_changed: u32,
+    pub insertions: u32,
+    pub deletions: u32,
+    /// Unified patch. Empty for a merge commit, where `git show` prints no
+    /// diff by default (combined diffs are a different, noisier format).
+    pub patch: String,
+}
+
+#[tauri::command]
+pub async fn git_commit_detail(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    hash: String,
+) -> Result<CommitDetail, String> {
+    let top = repo_path(&state, &repo)?;
+    // Reject anything that isn't a hex object name before it reaches git —
+    // this string comes from the UI, and `git show` happily takes revisions
+    // with far broader syntax (`HEAD@{...}`, ranges, paths after `--`).
+    let hash = hash.trim().to_string();
+    if hash.is_empty() || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("invalid commit hash".into());
+    }
+    let meta = run(git(&top).args([
+        "show",
+        "-s",
+        "--date=iso",
+        "--pretty=format:%H\x1f%h\x1f%an\x1f%ae\x1f%ad\x1f%s\x1f%b\x1f%D\x1f%P",
+        &hash,
+    ]))?;
+    let f: Vec<&str> = meta.split('\x1f').collect();
+    if f.len() < 9 {
+        return Err("commit not found".into());
+    }
+    let stat = run(git(&top).args(["show", "--stat", "--oneline", "--format=", &hash]))
+        .unwrap_or_default();
+    let summary = stat.lines().last().unwrap_or("");
+    let num = |kw: &str| -> u32 {
+        summary
+            .split(',')
+            .find(|p| p.contains(kw))
+            .and_then(|p| p.trim().split_whitespace().next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0)
+    };
+    // Merges print no patch under plain `git show`; leave it empty rather
+    // than reaching for a combined diff the renderer can't display anyway.
+    let patch = run(git(&top).args(["show", "--patch", "--format=", &hash])).unwrap_or_default();
+    Ok(CommitDetail {
+        hash: f[0].to_string(),
+        short: f[1].to_string(),
+        author: f[2].to_string(),
+        email: f[3].to_string(),
+        date: f[4].to_string(),
+        subject: f[5].to_string(),
+        body: f[6].trim().to_string(),
+        refs: f[7].to_string(),
+        parents: f[8].split_whitespace().map(String::from).collect(),
+        files_changed: num("file"),
+        insertions: num("insertion"),
+        deletions: num("deletion"),
+        patch,
+    })
+}
+
 // ---------- tickets (issue #15) ----------
 //
 // One row shape for every tracker. GitHub Issues arrive through the user's

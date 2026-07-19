@@ -264,6 +264,25 @@ export const gitPush = (repo: string, setUpstream = false) =>
   invoke<string>("git_push", { repo, setUpstream });
 export const gitDiff = (repo: string, path: string, staged: boolean) =>
   invoke<string>("git_diff", { repo, path, staged });
+export interface CommitDetail {
+  hash: string;
+  short: string;
+  author: string;
+  email: string;
+  date: string;
+  subject: string;
+  body: string;
+  refs: string;
+  parents: string[];
+  files_changed: number;
+  insertions: number;
+  deletions: number;
+  patch: string;
+}
+
+export const gitCommitDetail = (repo: string, hash: string) =>
+  invoke<CommitDetail>("git_commit_detail", { repo, hash });
+
 export const gitLog = (repo: string, limit?: number) =>
   invoke<CommitInfo[]>("git_log", { repo, limit });
 

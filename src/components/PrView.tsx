@@ -196,7 +196,7 @@ export function PrView({ repo, pr, onNotice }: PrViewProps) {
 }
 
 /** Split a multi-file unified patch into one patch per file. */
-function splitPatch(patch: string): { path: string; patch: string }[] {
+export function splitPatch(patch: string): { path: string; patch: string }[] {
   const out: { path: string; patch: string }[] = [];
   const lines = patch.split("\n");
   let current: { path: string; lines: string[] } | null = null;
