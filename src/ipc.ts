@@ -324,6 +324,32 @@ export interface WorktreeInfo {
   dirty: number;
 }
 
+export interface BranchWork {
+  branch: string;
+  worktree: string | null;
+  is_main: boolean;
+  prunable: boolean;
+  current: boolean;
+  dirty: number;
+  ahead: number;
+  behind: number;
+  upstream: string | null;
+  upstream_gone: boolean;
+  merged: boolean;
+  last_commit: string;
+  age_days: number;
+  subject: string;
+  author: string;
+}
+
+export interface WorkAudit {
+  base: string;
+  counts_degraded: boolean;
+  items: BranchWork[];
+}
+
+export const gitWorkAudit = (repo: string) => invoke<WorkAudit>("git_work_audit", { repo });
+
 export const gitWorktrees = (repo: string) => invoke<WorktreeInfo[]>("git_worktrees", { repo });
 export const gitWorktreeAdd = (repo: string, path: string, branch: string, create: boolean) =>
   invoke<string>("git_worktree_add", { repo, path, branch, create });

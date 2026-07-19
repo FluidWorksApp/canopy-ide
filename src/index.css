@@ -3890,3 +3890,142 @@ textarea,
   color: var(--accent);
   font-size: 10px;
 }
+
+/* ---------- loose ends (branch/worktree audit) ---------- */
+
+.loose-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.loose-summary strong {
+  color: var(--text);
+}
+
+.loose-sep {
+  opacity: 0.5;
+}
+
+.loose-base {
+  padding: 0 12px 8px;
+  font-size: 10px;
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+
+.loose-group {
+  border-top: 1px solid var(--border);
+}
+
+.loose-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+/* Risk reads in the header color: red = losing it loses work. */
+.loose-head-uncommitted {
+  color: var(--danger);
+}
+
+.loose-head-unpushed {
+  color: var(--warn);
+}
+
+.loose-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 12px;
+}
+
+.loose-row:hover {
+  background: var(--bg-raised);
+}
+
+.loose-main {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.loose-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  flex: 0 0 auto;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.loose-subject {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.loose-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.loose-dirty {
+  color: var(--danger);
+}
+
+.loose-ahead {
+  color: var(--warn);
+}
+
+.loose-chip {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 6px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.loose-chip-warn {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.loose-age {
+  margin-left: auto;
+}
+
+/* Actions stay out of the way until the row is pointed at. */
+.loose-actions {
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+}
+
+.loose-row:hover .loose-actions {
+  opacity: 1;
+}
+
+.loose-toggle {
+  margin: 10px 12px;
+}

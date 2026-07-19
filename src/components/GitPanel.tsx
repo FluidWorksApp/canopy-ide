@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 import * as ipc from "../ipc";
 import { useEscape } from "../useEscape";
 import { CheckIcon, FailIcon, RestartIcon } from "./icons";
+import { LooseEnds } from "./LooseEnds";
 
 interface GitPanelProps {
   components: { label: string; path: string }[];
@@ -27,7 +28,7 @@ interface GitPanelProps {
   onNotice: (msg: string) => void;
 }
 
-type Section = "changes" | "branches" | "worktrees" | "history" | "prs";
+type Section = "changes" | "branches" | "worktrees" | "loose" | "history" | "prs";
 
 export function GitPanel({
   components,
@@ -325,7 +326,7 @@ export function GitPanel({
       </div>
 
       <div className="git-tabs">
-        {(["changes", "branches", "worktrees", "history", "prs"] as Section[]).map((s) => (
+        {(["changes", "branches", "worktrees", "loose", "history", "prs"] as Section[]).map((s) => (
           <button
             key={s}
             className={`git-tab ${section === s ? "git-tab-on" : ""}`}
@@ -335,8 +336,10 @@ export function GitPanel({
               ? `Changes (${allChanged.length})`
               : s === "prs"
                 ? "PRs"
-                : s === "worktrees" && worktrees.length > 1
-                  ? `Worktrees (${worktrees.length})`
+                : s === "loose"
+                  ? "Loose ends"
+                  : s === "worktrees" && worktrees.length > 1
+                    ? `Worktrees (${worktrees.length})`
                   : s[0].toUpperCase() + s.slice(1)}
           </button>
         ))}
@@ -629,6 +632,16 @@ export function GitPanel({
             </div>
           )}
         </div>
+      )}
+
+      {section === "loose" && (
+        <LooseEnds
+          repo={repo}
+          onOpenTerminal={onOpenTerminal}
+          onUseWorktree={onUseWorktree}
+          onNotice={onNotice}
+          onConfirm={(text, run) => setConfirm({ text, run })}
+        />
       )}
 
       {section === "history" && (

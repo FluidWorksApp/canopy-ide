@@ -788,7 +788,13 @@ pub async fn git_worktrees(
     repo: String,
 ) -> Result<Vec<WorktreeInfo>, String> {
     let top = repo_path(&state, &repo)?;
-    let out = run(git(&top).args(["worktree", "list", "--porcelain"]))?;
+    list_worktrees(&top)
+}
+
+/// Parse `git worktree list --porcelain` and count uncommitted files in each
+/// live worktree. Shared by the Worktrees tab and the work audit.
+fn list_worktrees(top: &Path) -> Result<Vec<WorktreeInfo>, String> {
+    let out = run(git(top).args(["worktree", "list", "--porcelain"]))?;
 
     let mut list: Vec<WorktreeInfo> = Vec::new();
     let mut cur: Option<WorktreeInfo> = None;
@@ -1063,6 +1069,181 @@ pub async fn git_commit_patch(
     };
     cache.lock().unwrap().insert(cache_key, result.clone());
     Ok(result)
+}
+
+
+// ---------- work audit: what did the agents leave behind ----------
+//
+// The question this answers is NOT "which branches exist" — it is "which of
+// these can I delete, and which hold work that exists nowhere else". Agents
+// create worktrees and branches faster than anyone can track, then move on;
+// what is left behind is indistinguishable at a glance from active work.
+//
+// Safety is about EXISTENCE, not merge status: uncommitted files live only in
+// that directory, and unpushed commits live only in this clone. Those are the
+// two states where deleting loses work for good. Merge status is about
+// clutter — a merged branch is safe to remove, it is just noise until you do.
+
+#[derive(Serialize, Clone)]
+pub struct BranchWork {
+    pub branch: String,
+    /// Worktree holding it, if any. None = a branch nobody checked out.
+    pub worktree: Option<String>,
+    pub is_main: bool,
+    /// Worktree directory is gone; the record is stale.
+    pub prunable: bool,
+    pub current: bool,
+    /// Uncommitted files in its worktree. Only this directory has them.
+    pub dirty: u32,
+    /// Commits not on its upstream (or, with no upstream, not on base).
+    pub ahead: u32,
+    pub behind: u32,
+    pub upstream: Option<String>,
+    /// Upstream was deleted — on GitHub, what happens when a PR merges with
+    /// "delete branch on merge" on. Strong signal the work landed.
+    pub upstream_gone: bool,
+    /// Tip is an ancestor of base: merged the plain way.
+    pub merged: bool,
+    pub last_commit: String,
+    pub age_days: u32,
+    pub subject: String,
+    pub author: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct WorkAudit {
+    /// Branch merge status was measured against.
+    pub base: String,
+    /// True when git could not report counts against base (needs git 2.41+
+    /// for %(ahead-behind:)) — the UI then hides "unpushed" for branches
+    /// with no upstream rather than showing a wrong zero.
+    pub counts_degraded: bool,
+    pub items: Vec<BranchWork>,
+}
+
+/// The branch merges are measured against: origin's default branch when it is
+/// knowable, else a local main/master, else the current branch (which makes
+/// every other branch read as unmerged — correct, if unhelpful).
+fn default_base(top: &Path) -> String {
+    if let Ok(sym) = run(git(top).args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])) {
+        let s = sym.trim();
+        if !s.is_empty() {
+            return s.to_string();
+        }
+    }
+    for cand in ["origin/main", "origin/master", "main", "master"] {
+        if run(git(top).args(["rev-parse", "--verify", "--quiet", cand])).is_ok() {
+            return cand.to_string();
+        }
+    }
+    run(git(top).args(["rev-parse", "--abbrev-ref", "HEAD"]))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "HEAD".into())
+}
+
+#[tauri::command]
+pub async fn git_work_audit(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+) -> Result<WorkAudit, String> {
+    let top = repo_path(&state, &repo)?;
+    let base = default_base(&top);
+
+    // Worktrees first: this is the only part that costs a process per entry
+    // (a status per worktree), and it is what gives us dirty counts.
+    let worktrees = list_worktrees(&top)?;
+    let current = run(git(&top).args(["rev-parse", "--abbrev-ref", "HEAD"]))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    // Every local branch in ONE call: upstream, tracking, date, subject,
+    // author. Never per-branch — a repo with 24 agent worktrees would spawn a
+    // process storm for a panel that should feel instant.
+    const FIELDS: &str = "%(refname:short)%1f%(upstream:short)%1f%(upstream:track)%1f%(committerdate:unix)%1f%(contents:subject)%1f%(authorname)";
+    let refs = run(git(&top).args(["for-each-ref", "--format", FIELDS, "refs/heads"]))?;
+
+    // Ahead/behind vs base needs git 2.41+. Asked for separately so an older
+    // git degrades to "no counts" instead of failing the whole listing.
+    let mut vs_base: std::collections::HashMap<String, (u32, u32)> = Default::default();
+    let ab_fmt = format!("%(refname:short)%1f%(ahead-behind:{base})");
+    let counts_degraded = match run(git(&top).args(["for-each-ref", "--format", &ab_fmt, "refs/heads"]))
+    {
+        Ok(out) => {
+            for line in out.lines() {
+                let mut f = line.split('\x1f');
+                let (Some(name), Some(counts)) = (f.next(), f.next()) else { continue };
+                let mut n = counts.split_whitespace();
+                if let (Some(a), Some(b)) = (n.next(), n.next()) {
+                    if let (Ok(a), Ok(b)) = (a.parse(), b.parse()) {
+                        vs_base.insert(name.to_string(), (a, b));
+                    }
+                }
+            }
+            vs_base.is_empty()
+        }
+        Err(_) => true,
+    };
+
+    let merged: std::collections::HashSet<String> =
+        run(git(&top).args(["branch", "--merged", &base, "--format", "%(refname:short)"]))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let mut items = Vec::new();
+    for line in refs.lines() {
+        let f: Vec<&str> = line.split('\x1f').collect();
+        if f.len() < 6 {
+            continue;
+        }
+        let branch = f[0].to_string();
+        let upstream = (!f[1].is_empty()).then(|| f[1].to_string());
+        let track = f[2];
+        let upstream_gone = track.contains("gone");
+        // "[ahead 2, behind 1]" — absent entirely when in sync.
+        let parse_track = |kw: &str| -> u32 {
+            track
+                .split(|c| c == '[' || c == ']' || c == ',')
+                .find_map(|p| p.trim().strip_prefix(kw))
+                .and_then(|n| n.trim().parse().ok())
+                .unwrap_or(0)
+        };
+        // With an upstream, "unpushed" means ahead of it. Without one, the
+        // work exists only here, so measure against base instead.
+        let (ahead, behind) = if upstream.is_some() && !upstream_gone {
+            (parse_track("ahead "), parse_track("behind "))
+        } else {
+            vs_base.get(&branch).copied().unwrap_or((0, 0))
+        };
+        let ts: u64 = f[3].parse().unwrap_or(now);
+        let wt = worktrees.iter().find(|w| w.branch.as_deref() == Some(branch.as_str()));
+        items.push(BranchWork {
+            worktree: wt.map(|w| w.path.clone()),
+            is_main: wt.map(|w| w.is_main).unwrap_or(false),
+            prunable: wt.map(|w| w.prunable.is_some()).unwrap_or(false),
+            current: branch == current,
+            dirty: wt.map(|w| w.dirty).unwrap_or(0),
+            ahead,
+            behind,
+            upstream,
+            upstream_gone,
+            merged: merged.contains(&branch),
+            last_commit: f[3].to_string(),
+            age_days: ((now.saturating_sub(ts)) / 86_400) as u32,
+            subject: f[4].to_string(),
+            author: f[5].to_string(),
+            branch,
+        });
+    }
+
+    Ok(WorkAudit { base, counts_degraded, items })
 }
 
 // ---------- tickets (issue #15) ----------

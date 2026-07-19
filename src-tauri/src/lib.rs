@@ -224,6 +224,7 @@ pub fn run() {
             git::git_commit_detail,
             git::git_commit_patch,
             git::git_worktrees,
+            git::git_work_audit,
             git::git_worktree_add,
             git::git_worktree_remove,
             git::git_worktree_prune,
