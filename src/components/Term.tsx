@@ -14,7 +14,8 @@ import "@xterm/xterm/css/xterm.css";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import * as ipc from "../ipc";
-import { getSettings } from "../settings";
+import { getSettings, THEME_CHANGE_EVENT, type Settings } from "../settings";
+import { terminalTheme } from "../terminalThemes";
 
 /** Quote a dropped path for the shell, the way iTerm2/Terminal.app do. Paths
  *  that are pure safe chars pass through bare; anything else is single-quoted,
@@ -22,6 +23,17 @@ import { getSettings } from "../settings";
 const SAFE_PATH = /^[A-Za-z0-9_\-./~+@%:=,]+$/;
 const shellQuote = (p: string) =>
   SAFE_PATH.test(p) ? p : `'${p.replaceAll("'", `'\\''`)}'`;
+
+/** The skin's terminal palette, with the background swapped for fully
+ *  transparent whenever a wallpaper is set — .term-container (index.css)
+ *  drops its own opaque fill under the same condition, so what actually
+ *  shows through is .app-bg's image, already blurred and dimmed by the one
+ *  shared Opacity control (background.ts). No separate per-terminal alpha:
+ *  the same legibility floor that protects chrome text protects this too. */
+function themeFor(settings: Settings) {
+  const theme = terminalTheme(settings.theme, settings.customAccent);
+  return theme;
+}
 
 export interface TermHandle {
   clearScrollback: () => void;
@@ -73,18 +85,25 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       allowProposedApi: true,
       scrollback: settings.scrollback,
       fontSize: settings.fontSize,
-      fontFamily:
-        "'SF Mono', Menlo, Monaco, 'JetBrains Mono', 'Fira Code', monospace",
-      cursorBlink: true,
+      fontFamily: settings.terminalFontFamily,
+      cursorStyle: settings.terminalCursorStyle,
+      cursorBlink: settings.terminalCursorBlink,
       macOptionIsMeta: true,
-      theme: {
-        background: "#16161e",
-        foreground: "#c9d1d9",
-        cursor: "#c9d1d9",
-        selectionBackground: "#33467c",
-      },
+      theme: themeFor(settings),
     });
     termRef.current = term;
+
+    // Everything else recolors for free via CSS custom properties when the
+    // skin — or the wallpaper, or its opacity — changes; xterm renders to a
+    // canvas and needs its theme object pushed explicitly. Reassigning
+    // .options.theme repaints immediately — no remount, no fresh PTY, the
+    // running shell/agent is untouched. .term-container going transparent
+    // (index.css, gated the same way) is what actually lets .app-bg show
+    // through once xterm itself stops painting an opaque background.
+    const onThemeChange = () => {
+      term.options.theme = themeFor(getSettings());
+    };
+    window.addEventListener(THEME_CHANGE_EVENT, onThemeChange);
 
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -363,6 +382,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       disposed = true;
       clearTimeout(resizeTimer);
       observer.disconnect();
+      window.removeEventListener(THEME_CHANGE_EVENT, onThemeChange);
       dataSub.dispose();
       titleSub.dispose();
       oscSubs.forEach((s) => s.dispose());

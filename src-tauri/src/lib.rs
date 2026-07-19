@@ -20,6 +20,8 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &MenuItem::with_id(app, "check-updates", "Check for Updates…", true, None::<&str>)?,
             &MenuItem::with_id(app, "install-cli", "Install 'canopy' Command…", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?,
+            &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::hide(app, None)?,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::quit(app, None)?,
@@ -106,7 +108,13 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &PredefinedMenuItem::fullscreen(app, None)?,
         ],
     )?;
-    Menu::with_items(app, &[&app_menu, &file, &edit, &go, &tabs, &window])
+    let help = Submenu::with_items(
+        app,
+        "Help",
+        true,
+        &[&MenuItem::with_id(app, "help", "Canopy Help", true, Some("CmdOrCtrl+Shift+H"))?],
+    )?;
+    Menu::with_items(app, &[&app_menu, &file, &edit, &go, &tabs, &window, &help])
 }
 
 /// Frontend error bridge: WebView console/errors surface in the dev terminal.

@@ -1,6 +1,52 @@
 // Small persistent settings, stored in localStorage. Keep this flat and cheap.
+export type Theme = "auto" | "default" | "gotham" | "daylight" | "custom";
+
+/** What "auto" means right now: Default when macOS is in dark mode, Daylight
+ *  in light mode. Every consumer of the skin (CSS data-theme, terminal
+ *  palettes, Monaco) works off the resolved value — "auto" itself never
+ *  reaches them. */
+export function resolveTheme(theme: Theme): Exclude<Theme, "auto"> {
+  if (theme !== "auto") return theme;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches
+    ? "default"
+    : "daylight";
+}
+
+/** Re-apply the skin when the OS flips day/night while the setting is Auto.
+ *  Returns an unsubscribe. */
+export function watchSystemTheme(): () => void {
+  const mq = window.matchMedia("(prefers-color-scheme: dark)");
+  const onChange = () => {
+    const s = getSettings();
+    if (s.theme === "auto") applyTheme("auto", s.customAccent);
+  };
+  mq.addEventListener("change", onChange);
+  return () => mq.removeEventListener("change", onChange);
+}
+
+export const THEMES: { id: Theme; label: string }[] = [
+  { id: "auto", label: "Auto" },
+  { id: "default", label: "Default" },
+  { id: "gotham", label: "Gotham" },
+  { id: "daylight", label: "Daylight" },
+  { id: "custom", label: "Custom" },
+];
+
+/** Shared across Monaco and xterm even though neither uses these names
+ *  natively — Monaco calls "bar" "line", xterm doesn't have Monaco's
+ *  line-thin/block-outline variants. Personalize.tsx maps to whichever each
+ *  engine actually wants. */
+export type CursorStyle = "block" | "underline" | "bar";
+
+export const TERMINAL_FONT_DEFAULT =
+  "'SF Mono', Menlo, Monaco, 'JetBrains Mono', 'Fira Code', monospace";
+export const EDITOR_FONT_DEFAULT =
+  "'SF Mono', Menlo, Monaco, 'JetBrains Mono', 'Fira Code', monospace";
+
 export interface Settings {
   scrollback: number;
+  /** Terminal font size — kept under its original name for backward compat
+   *  with everyone who already has it in localStorage. */
   fontSize: number;
   // Runaway-process guard thresholds (per PTY session process tree)
   runawayCpuPercent: number;
@@ -10,6 +56,26 @@ export interface Settings {
    *  (see src/trackers.ts). Local-only: sent nowhere but the tracker's own
    *  API, straight from this machine. */
   trackerKeys: Record<string, string>;
+  theme: Theme;
+  /** Only meaningful when theme === "custom" — a hex color, applied as
+   *  --accent (with a luminance-derived --on-accent so accent-filled buttons
+   *  stay legible without the user having to pick two colors). */
+  customAccent: string;
+
+  // ---- Personalize: font + cursor, Editor (Monaco) and Terminal (xterm)
+  // independently — different rendering engines, so neither shares the
+  // other's font metrics or cursor vocabulary. Applied to newly opened
+  // terminals/editor tabs, same as `fontSize`/`scrollback` already were —
+  // there's no live-remount of what's already open, consistent with how
+  // those two settings have always behaved (no Settings screen has ever
+  // pushed a change into an already-open Term/Monaco instance).
+  terminalFontFamily: string;
+  terminalCursorStyle: CursorStyle;
+  terminalCursorBlink: boolean;
+  editorFontFamily: string;
+  editorFontSize: number;
+  editorCursorStyle: CursorStyle;
+  editorCursorBlink: boolean;
 }
 
 // NB: stored settings override these (see getSettings), so flipping a default
@@ -23,6 +89,15 @@ const DEFAULTS: Settings = {
   runawayMemBytes: 4 * 1024 * 1024 * 1024,
   ptyHighWater: 2 * 1024 * 1024,
   trackerKeys: {},
+  theme: "default",
+  customAccent: "#7aa2f7",
+  terminalFontFamily: TERMINAL_FONT_DEFAULT,
+  terminalCursorStyle: "block",
+  terminalCursorBlink: true,
+  editorFontFamily: EDITOR_FONT_DEFAULT,
+  editorFontSize: 13,
+  editorCursorStyle: "bar",
+  editorCursorBlink: true,
 };
 
 const KEY = "canopy.settings";
@@ -39,4 +114,43 @@ export function updateSettings(patch: Partial<Settings>): Settings {
   const next = { ...getSettings(), ...patch };
   localStorage.setItem(KEY, JSON.stringify(next));
   return next;
+}
+
+/** Relative luminance (WCAG) from a #rrggbb hex string — used to decide
+ *  whether text sitting on a filled accent color should be black or white,
+ *  so a "Custom" accent stays legible without the user picking two colors. */
+function luminance(hex: string): number {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex.trim());
+  if (!m) return 0.5;
+  const [r, g, b] = m.slice(1, 4).map((h) => parseInt(h, 16) / 255);
+  const lin = (c: number) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+}
+
+/** Event name Term.tsx listens for to recolor already-open terminals live —
+ *  everything else picks up a new theme (or a new/cleared/re-dimmed
+ *  wallpaper) for free via CSS custom properties, but xterm renders to a
+ *  canvas and needs its JS-side theme object pushed explicitly. Dispatched by
+ *  applyTheme(). See terminalThemes.ts. */
+export const THEME_CHANGE_EVENT = "canopy:theme";
+
+/** Stamps the theme onto <html data-theme="…">, which is all index.css needs
+ *  to flip every color: one attribute, not a re-render or a re-mount. Call on
+ *  boot and again whenever the theme (or, for "custom", the accent color)
+ *  changes. */
+
+export function applyTheme(theme: Theme, customAccent?: string): void {
+  document.documentElement.dataset.theme = resolveTheme(theme);
+  const root = document.documentElement.style;
+  if (theme === "custom") {
+    const accent = customAccent || DEFAULTS.customAccent;
+    root.setProperty("--accent", accent);
+    root.setProperty("--on-accent", luminance(accent) > 0.5 ? "#12131c" : "#ffffff");
+  } else {
+    // A previous Custom session may have left an inline override behind —
+    // drop back to whatever the newly selected preset's stylesheet block says.
+    root.removeProperty("--accent");
+    root.removeProperty("--on-accent");
+  }
+  window.dispatchEvent(new CustomEvent(THEME_CHANGE_EVENT));
 }

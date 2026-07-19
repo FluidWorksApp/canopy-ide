@@ -119,6 +119,7 @@ export const gitStatus = (path: string) =>
 export const gitHeadContent = (path: string) =>
   invoke<string | null>("git_head_content", { path });
 
+
 export interface ClaudeSessionStats {
   model: string | null;
   input_tokens: number;
