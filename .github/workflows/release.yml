@@ -39,12 +39,14 @@ jobs:
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             args: ""
-          # Windows: NSIS installer (+ MSI, targets = "all"). Unsigned for now —
-          # SmartScreen warns until an Authenticode certificate is added; the
-          # updater config already handles Windows (installMode: passive).
+          # Windows: NSIS only. `targets: "all"` would also attempt an MSI via
+          # WiX, whose light.exe fails on the runner — and NSIS is the format
+          # the updater is configured for (installMode: passive) anyway.
+          # Unsigned for now — SmartScreen warns until an Authenticode
+          # certificate is added.
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
-            args: "--target x86_64-pc-windows-msvc"
+            args: "--target x86_64-pc-windows-msvc --bundles nsis"
 
     runs-on: ${{ matrix.platform }}
     steps:
