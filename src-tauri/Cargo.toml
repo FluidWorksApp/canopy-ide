@@ -40,6 +40,7 @@ trash = "5.2.3"
 tauri-plugin-updater = "2.10.1"
 tauri-plugin-process = "2.3.1"
 tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
 
 # Unix signals for killing whole PTY process groups (no zombies)
 [target.'cfg(unix)'.dependencies]

@@ -1,4 +1,5 @@
 mod agents;
+mod cli;
 mod fsx;
 mod git;
 mod lsp;
@@ -17,6 +18,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         &[
             &PredefinedMenuItem::about(app, None, None)?,
             &MenuItem::with_id(app, "check-updates", "Check for Updates…", true, None::<&str>)?,
+            &MenuItem::with_id(app, "install-cli", "Install 'canopy' Command…", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::hide(app, None)?,
             &PredefinedMenuItem::separator(app)?,
@@ -107,6 +109,12 @@ fn js_log(level: String, message: String) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must be first: a second `canopy <dir>` invocation forwards its argv
+        // here and exits, instead of starting an app that would fight this one
+        // over the hook bridge and PTY ownership.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            cli::open_forwarded(app, argv, cwd);
+        }))
         .plugin(tauri_plugin_dialog::init())
         // Self-update (see plugins.updater in tauri.conf.json) and the restart
         // that has to follow an install.
@@ -118,6 +126,7 @@ pub fn run() {
         .manage(pty::PtyManager::default())
         .manage(fsx::WorkspaceManager::default())
         .manage(lsp::LspManager::default())
+        .manage(cli::pending_from_env())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -142,6 +151,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             js_log,
+            cli::cli_take_pending_open,
+            cli::cli_install_shim,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_ack,
