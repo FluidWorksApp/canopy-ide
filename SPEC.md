@@ -26,7 +26,14 @@ processes of the app. Target idle footprint: 60–150 MB.
 2. **Raw byte passthrough** on the PTY stream, both directions. No filtering/normalizing.
 3. **Bounded memory everywhere** — scrollback caps, backpressure on PTY reads, clean teardown
    (no zombie processes, leaked threads, or unbounded buffers).
-4. **Fully offline** — no network/server dependency.
+4. **Fully offline** — no network/server dependency. The one carve-out is the
+   opt-in team relay: a peer-to-peer TCP socket one Canopy hosts and teammates
+   join (chat, review requests, direct file transfer). Nothing external is ever
+   required — the "server" is a teammate's Canopy, off by default, and every
+   other feature works with the cable unplugged. The relay is end-to-end
+   encrypted: the join code drives a SPAKE2 key exchange and every frame/file
+   is sealed with ChaCha20-Poly1305, so it is safe to run over the public
+   internet, not only a trusted LAN.
 5. **Minimal dependencies** — every added library is justified in the README.
 
 ## Feature areas

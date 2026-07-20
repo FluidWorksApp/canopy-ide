@@ -4,6 +4,7 @@ mod fsx;
 mod git;
 mod lsp;
 mod pty;
+mod relay;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager};
@@ -147,9 +148,13 @@ pub fn run() {
         // Opens https links in the system browser — the update toast's
         // "Open downloads page" for installs that can't self-update.
         .plugin(tauri_plugin_opener::init())
+        // Native (macOS/…) notifications for team-relay activity landing
+        // while Canopy isn't the focused app.
+        .plugin(tauri_plugin_notification::init())
         .manage(pty::PtyManager::default())
         .manage(fsx::WorkspaceManager::default())
         .manage(lsp::LspManager::default())
+        .manage(relay::RelayManager::default())
         .manage(cli::pending_from_env())
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -248,6 +253,16 @@ pub fn run() {
             agents::set_context_scopes,
             agents::session_digests,
             agents::session_forget,
+            relay::relay_host_start,
+            relay::relay_host_stop,
+            relay::relay_regenerate_code,
+            relay::relay_connect,
+            relay::relay_disconnect,
+            relay::relay_status,
+            relay::relay_send_chat,
+            relay::relay_send_command,
+            relay::relay_offer_file,
+            relay::relay_accept_file,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -256,6 +271,8 @@ pub fn run() {
                 // Guarantee no child processes outlive the app.
                 app.state::<pty::PtyManager>().kill_all();
                 app.state::<lsp::LspManager>().kill_all();
+                // ... and no relay socket either.
+                app.state::<relay::RelayManager>().shutdown();
             }
         });
 }

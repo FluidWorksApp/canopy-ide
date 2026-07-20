@@ -13,7 +13,7 @@ import {
   type Project,
   type WorkspaceState,
 } from "./projects";
-import type { AgentEventEntry, NoticeKind } from "./types";
+import type { AgentEventEntry, NoticeKind, RelayHandle } from "./types";
 import { derivePending, pendingForRoots } from "./notifications";
 import { ProjectView } from "./components/ProjectView";
 import { ProjectDialog } from "./components/ProjectDialog";
@@ -27,6 +27,27 @@ import { checkForUpdateAnyChannel, installUpdate, type UpdateAvailability } from
 /** Tell the hook helper which projects share context between their sessions.
  *  Every project is listed with its opt-in state, so turning sharing off
  *  actively revokes it rather than just omitting the entry. */
+// Relay chat is persisted per-relay, keyed by the host's stable identity key
+// (its Ed25519 pubkey) — not the ephemeral session id — so history survives
+// restarts and re-associates with the same relay on reconnect. Capped, and
+// scoped by relay so joining a different team never mixes transcripts.
+const RELAY_CHAT_PREFIX = "canopy.relayChat:";
+function loadRelayChat(label: string): ipc.RelayChatMsg[] {
+  try {
+    const raw = localStorage.getItem(RELAY_CHAT_PREFIX + label);
+    return raw ? (JSON.parse(raw) as ipc.RelayChatMsg[]) : [];
+  } catch {
+    return [];
+  }
+}
+function saveRelayChat(label: string, msgs: ipc.RelayChatMsg[]) {
+  try {
+    localStorage.setItem(RELAY_CHAT_PREFIX + label, JSON.stringify(msgs.slice(-500)));
+  } catch {
+    // Storage full/blocked — history is a convenience, never fail over it.
+  }
+}
+
 function publishScopes(state: WorkspaceState) {
   void ipc
     .setContextScopes(
@@ -61,6 +82,22 @@ export default function App() {
     (text: string, kind: NoticeKind = "info") => setNotice({ text, kind }),
     [],
   );
+  // Native (macOS) notification for team activity landing while Canopy isn't
+  // the focused app — the in-app toast can't be seen from another Space.
+  // First call asks the OS for permission; a denial just means silence.
+  const nativeNotify = useCallback(async (title: string, body: string) => {
+    if (document.hasFocus()) return;
+    try {
+      const { isPermissionGranted, requestPermission, sendNotification } = await import(
+        "@tauri-apps/plugin-notification"
+      );
+      let granted = await isPermissionGranted();
+      if (!granted) granted = (await requestPermission()) === "granted";
+      if (granted) sendNotification({ title, body });
+    } catch {
+      // Notifications are a garnish — never fail anything over them.
+    }
+  }, []);
   // Successes and status lines are transient; a failure stays until it has
   // been read and dismissed.
   useEffect(() => {
@@ -68,6 +105,39 @@ export default function App() {
     const t = window.setTimeout(() => setNotice(null), 4500);
     return () => window.clearTimeout(t);
   }, [notice]);
+  // Team relay: one socket per app, so the state lives here and every
+  // ProjectView renders the same picture. Chat keeps a rolling transcript
+  // (received + our own sends); the inbox holds commands awaiting action.
+  const [relayStatus, setRelayStatus] = useState<ipc.RelayStatus>({
+    role: "off", code: null, port: null, ips: [], addr: null, self_id: null, name: null,
+    visibility: null, public_ip: null, members: [],
+  });
+  const [relayChat, setRelayChat] = useState<ipc.RelayChatMsg[]>([]);
+  const [relayInbox, setRelayInbox] = useState<ipc.RelayCommandMsg[]>([]);
+  const [relayTransfers, setRelayTransfers] = useState<import("./types").RelayTransfer[]>([]);
+  // The relay we're persisting chat under = the host's stable identity key.
+  // Null when off, so the persist effect never writes an empty transcript.
+  const relayChatLabel = useRef<string | null>(null);
+  // Hydrate the transcript when we (re)join a relay; drop the label when off.
+  useEffect(() => {
+    const label = relayStatus.members.find((m) => m.is_host)?.key ?? null;
+    if (label && label !== relayChatLabel.current) {
+      relayChatLabel.current = label;
+      setRelayChat(loadRelayChat(label));
+    } else if (!label) {
+      relayChatLabel.current = null;
+    }
+  }, [relayStatus]);
+  // Persist as it grows. The length guard means clearing the in-memory view on
+  // disconnect can't wipe the stored history.
+  useEffect(() => {
+    if (relayChatLabel.current && relayChat.length > 0) {
+      saveRelayChat(relayChatLabel.current, relayChat);
+    }
+  }, [relayChat]);
+  // Which conversation is on screen (null = team chat, undefined = none) —
+  // a toast for a message the user is already reading is noise.
+  const activeChatRef = useRef<string | null | undefined>(undefined);
   const [updateAvail, setUpdateAvail] = useState<UpdateAvailability>(null);
   const [updateProgress, setUpdateProgress] = useState<number | null>(null);
   // "Later" mutes that version for this run; the next launch may ask again.
@@ -116,7 +186,7 @@ export default function App() {
       filters: [{ name: "canopy project", extensions: ["json"] }],
     });
     if (!path) return;
-    await exportProject(path, project).catch((e) => notify(String(e)));
+    await exportProject(path, project).catch((e) => notify(String(e), "error"));
   }, []);
 
   const saveWorkspaceAs = useCallback(async () => {
@@ -127,7 +197,7 @@ export default function App() {
       filters: [{ name: "canopy workspace", extensions: ["json"] }],
     });
     if (!path) return;
-    await exportWorkspace(path, wsRef.current).catch((e) => notify(String(e)));
+    await exportWorkspace(path, wsRef.current).catch((e) => notify(String(e), "error"));
   }, []);
 
   const openWorkspaceFile = useCallback(async () => {
@@ -141,7 +211,7 @@ export default function App() {
     try {
       file = await importFile(path);
     } catch (err) {
-      notify(String(err instanceof Error ? err.message : err));
+      notify(String(err instanceof Error ? err.message : err), "error");
       return;
     }
     // Merge rather than replace: importing a workspace must never silently
@@ -195,6 +265,85 @@ export default function App() {
       ipc.onAgentEvent((raw) =>
         setAgentEvents((prev) => [...prev.slice(-199), { raw, ts: Date.now() }]),
       ),
+      ipc.onRelayState(setRelayStatus),
+      ipc.onRelayChat((m) => {
+        setRelayChat((prev) => [...prev.slice(-499), m]);
+        // A DM lives in the sender's conversation; a broadcast in the team
+        // chat (null). Toast only when that conversation isn't on screen.
+        const convo = m.to === null ? null : m.from;
+        const text = m.text.length > 120 ? `${m.text.slice(0, 120)}…` : m.text;
+        if (activeChatRef.current !== convo) {
+          notify(`${m.from_name}: ${text}`);
+        }
+        void nativeNotify(
+          m.to === null ? `${m.from_name} (team chat)` : m.from_name,
+          text,
+        );
+      }),
+      ipc.onRelayCommand((m) => {
+        setRelayInbox((prev) => (prev.some((x) => x.id === m.id) ? prev : [...prev, m]));
+        const pr = (m.payload as { pr?: { number?: number; title?: string } } | null)?.pr;
+        const file = (m.payload as { name?: string } | null)?.name;
+        const text =
+          m.kind === "open-pr" && pr
+            ? `${m.from_name} asked you to review PR #${pr.number}: ${pr.title}`
+            : m.kind === "file-offer" && file
+              ? `${m.from_name} wants to send you ${file}`
+              : `${m.from_name} sent a ${m.kind} command`;
+        notify(`${text} — see the Team panel`);
+        void nativeNotify("Canopy — Team", text);
+      }),
+      ipc.onRelayTransferProgress((p) => {
+        // Upsert the live row; a progress tick can arrive before any terminal
+        // event, so it creates the row if missing.
+        setRelayTransfers((prev) => {
+          const next = prev.filter((x) => x.id !== p.id);
+          next.push({
+            id: p.id,
+            direction: p.direction,
+            name: p.name,
+            done: p.done,
+            total: p.total,
+            status: "active",
+          });
+          return next;
+        });
+      }),
+      ipc.onRelayTransfer((t) => {
+        const msg =
+          t.direction === "in"
+            ? t.ok
+              ? `Received ${t.name} — saved to ${t.detail}`
+              : `Receiving ${t.name} failed: ${t.detail}`
+            : t.ok
+              ? `Sent ${t.name} to ${t.detail}`
+              : `Sending ${t.name} failed: ${t.detail}`;
+        notify(msg, t.ok ? "success" : "error");
+        void nativeNotify("Canopy — File transfer", msg);
+        // Mark the row terminal, then retire it after a beat so the bar's
+        // final state is visible before it disappears.
+        setRelayTransfers((prev) => {
+          const row = prev.find((x) => x.id === t.id);
+          const done = t.ok ? t.total : (row?.done ?? 0);
+          const others = prev.filter((x) => x.id !== t.id);
+          return [
+            ...others,
+            {
+              id: t.id,
+              direction: t.direction,
+              name: t.name,
+              done,
+              total: t.total,
+              status: t.ok ? "ok" : "failed",
+              detail: t.detail,
+            },
+          ];
+        });
+        window.setTimeout(
+          () => setRelayTransfers((prev) => prev.filter((x) => x.id !== t.id)),
+          t.ok ? 4000 : 8000,
+        );
+      }),
       // Native menu accelerators (Cmd+W etc.) → scoped in-app actions. The
       // visible ProjectView handles tab-level ones; close-project is ours.
       import("@tauri-apps/api/event").then(({ listen }) =>
@@ -222,14 +371,14 @@ export default function App() {
                   return;
                 }
                 const { getVersion } = await import("@tauri-apps/api/app");
-                notify(`Canopy is up to date (${await getVersion()}).`);
+                notify(`Canopy is up to date (${await getVersion()}).`, "success");
               })
-              .catch((err) => notify(`Update check failed: ${err}`));
+              .catch((err) => notify(`Update check failed: ${err}`, "error"));
           } else if (e.payload === "install-cli") {
             void import("@tauri-apps/api/core").then(({ invoke }) =>
               invoke<string>("cli_install_shim")
                 .then((m) => notify(m, "success"))
-                .catch((err) => notify(String(err))),
+                .catch((err) => notify(String(err), "error")),
             );
           } else if (e.payload === "new-project") {
             setDialog({ mode: "new" });
@@ -283,6 +432,9 @@ export default function App() {
       setSettingsOpen({ tab: (e as CustomEvent).detail?.tab });
     window.addEventListener("canopy:open-settings", openSettings);
     void ipc.hookBridgePath().then(setHookPath);
+    // A relay may already be live (hot reload in dev, a future auto-start) —
+    // ask rather than assume "off".
+    void ipc.relayStatus().then(setRelayStatus).catch(() => {});
     return () => {
       window.removeEventListener("keydown", keys);
       window.removeEventListener("canopy:open-settings", openSettings);
@@ -421,6 +573,46 @@ export default function App() {
     [update, closeProject],
   );
 
+  // The relay handle every ProjectView shares. Sends append the stamped
+  // message locally — the relay never echoes a frame back to its author, so
+  // this is the only way our own words reach our own transcript.
+  const relaySendChat = useCallback(async (to: string | null, text: string) => {
+    const msg = await ipc.relaySendChat(to, text);
+    setRelayChat((prev) => [...prev.slice(-499), msg]);
+  }, []);
+  const relaySendCommand = useCallback(async (to: string | null, kind: string, payload: unknown) => {
+    await ipc.relaySendCommand(to, kind, payload);
+  }, []);
+  const relay: RelayHandle = {
+    status: relayStatus,
+    chat: relayChat,
+    inbox: relayInbox,
+    transfers: relayTransfers,
+    hostStart: async (name, visibility, port) => {
+      setRelayStatus(await ipc.relayHostStart(name, visibility, port));
+    },
+    hostStop: async () => {
+      setRelayStatus(await ipc.relayHostStop());
+      setRelayChat([]);
+    },
+    regenerateCode: async () => {
+      setRelayStatus(await ipc.relayRegenerateCode());
+    },
+    connect: async (addr, code, name) => {
+      setRelayStatus(await ipc.relayConnect(addr, code, name));
+    },
+    disconnect: async () => {
+      setRelayStatus(await ipc.relayDisconnect());
+      setRelayChat([]);
+    },
+    sendChat: relaySendChat,
+    sendCommand: relaySendCommand,
+    dismissInbox: (id) => setRelayInbox((prev) => prev.filter((m) => m.id !== id)),
+    reportActiveChat: (peer) => {
+      activeChatRef.current = peer;
+    },
+  };
+
   if (!loaded) return null;
 
   const openProjects = ws.openIds
@@ -503,6 +695,7 @@ export default function App() {
             }))}
             events={agentEvents}
             hookPath={hookPath}
+            relay={relay}
             dismissedPending={dismissedPending}
             onDismissPending={(key) =>
               // Bail unchanged when already dismissed: the auto-clear effect
@@ -563,7 +756,7 @@ export default function App() {
                   void installUpdate(setUpdateProgress).catch((err) => {
                     setUpdateProgress(null);
                     setUpdateAvail(null);
-                    notify(`Update failed: ${err}`);
+                    notify(`Update failed: ${err}`, "error");
                   });
                 }}
               >

@@ -208,15 +208,24 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     //
     // So: propose -> pty applies and reports back -> resize the grid to that.
     // One authority, and a hidden tab simply proposes nothing.
+    // Below this, a measurement is an artifact of being taken mid-layout, not
+    // a terminal anyone asked for. Pushing one to the pty makes the child
+    // re-wrap its output at that width, and everything it prints before the
+    // size is corrected stays shredded in the scrollback forever — the damage
+    // outlives the bad measurement, which is why this reads as random
+    // corruption rather than a momentarily narrow terminal.
+    const MIN_COLS = 20;
+    const MIN_ROWS = 4;
     const propose = (): { cols: number; rows: number } | null => {
       const d = fit.proposeDimensions();
       if (!d || !Number.isFinite(d.cols) || !Number.isFinite(d.rows)) return null;
-      if (d.cols < 1 || d.rows < 1) return null;
+      if (d.cols < MIN_COLS || d.rows < MIN_ROWS) return null;
       return { cols: d.cols, rows: d.rows };
     };
     const applyGeometry = (g: { cols: number; rows: number }) => {
       if (term.cols !== g.cols || term.rows !== g.rows) term.resize(g.cols, g.rows);
     };
+    let disposed = false;
 
     // Becoming visible again needs an explicit repaint. While the tab is
     // display:none the renderer drops its painted cells, and nothing on the
@@ -227,24 +236,47 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // prompt repaint) — the "blank for a second or two" on every switch.
     // Size sync rides along so a resize that happened while hidden is also
     // corrected now rather than on the debounced observer.
-    syncNowRef.current = () => {
-      const next = propose();
-      if (next) {
-        if (ptyIdRef.current == null) {
-          applyGeometry(next);
-        } else if (next.cols !== term.cols || next.rows !== term.rows) {
-          void ipc
-            .ptyResize(ptyIdRef.current, next.cols, next.rows)
-            .then(applyGeometry)
-            .catch(() => {});
-        }
+    const pushGeometry = (next: { cols: number; rows: number }) => {
+      if (ptyIdRef.current == null) {
+        applyGeometry(next);
+      } else if (next.cols !== term.cols || next.rows !== term.rows) {
+        void ipc
+          .ptyResize(ptyIdRef.current, next.cols, next.rows)
+          .then(applyGeometry)
+          .catch(() => {});
       }
+    };
+
+    // Repaint now, but never resize off a single measurement.
+    //
+    // Every caller of this runs at a moment when the layout may still be
+    // settling — the biggest being a tab switch, where the container flips
+    // from display:none and the panel group has not necessarily applied its
+    // final widths yet. One frame is not enough to guarantee it has, so the
+    // old code could measure a container that was briefly a fraction of its
+    // real width, SIGWINCH the running child with it, and shred the output of
+    // whatever was mid-command. It self-corrected 50ms later via the observer,
+    // which is exactly why it looked intermittent and unreproducible.
+    //
+    // So: take two measurements a frame apart and only push if they agree. A
+    // settling layout disagrees and we defer to the ResizeObserver, which is
+    // debounced and measures once things are stable anyway. The repaint — the
+    // part a tab switch actually needs, to refill a buffer blanked while
+    // hidden — still happens immediately.
+    syncNowRef.current = () => {
       term.refresh(0, term.rows - 1);
+      const first = propose();
+      if (!first) return;
+      requestAnimationFrame(() => {
+        if (disposed) return;
+        const second = propose();
+        if (!second) return;
+        if (second.cols !== first.cols || second.rows !== first.rows) return;
+        pushGeometry(second);
+      });
     };
 
     const initial = propose();
-
-    let disposed = false;
     // Cell size is a function of the font, and a font resolves
     // asynchronously — the first proposeDimensions() above can be measured
     // against a fallback face. If the real font is even slightly wider or
@@ -394,20 +426,11 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     const observer = new ResizeObserver(() => {
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
+        // Already stable by construction: 50ms of quiet since the last size
+        // change. The pty may also be gone by now (exited between the observer
+        // firing and this call); pushGeometry swallows that.
         const next = propose();
-        if (!next) return;
-        if (ptyIdRef.current == null) {
-          // Still spawning; the size we asked for is already in flight.
-          applyGeometry(next);
-          return;
-        }
-        void ipc
-          .ptyResize(ptyIdRef.current, next.cols, next.rows)
-          .then(applyGeometry)
-          .catch(() => {
-            // The pty is gone (exited between the observer firing and this
-            // call). Nothing to keep in sync with.
-          });
+        if (next) pushGeometry(next);
       }, 50);
     });
     observer.observe(el);

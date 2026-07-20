@@ -83,6 +83,10 @@ export interface Settings {
    *  Was hardcoded to claude, which quietly made every other agent a
    *  second-class citizen in a product built to run all of them. */
   defaultAgent: string;
+  /** Display name on the team relay, remembered from the last host/join. */
+  relayName: string;
+  /** Last relay address joined, prefilled on the next join. */
+  relayAddr: string;
 }
 
 // NB: stored settings override these (see getSettings), so flipping a default
@@ -96,6 +100,8 @@ const DEFAULTS: Settings = {
   runawayMemBytes: 4 * 1024 * 1024 * 1024,
   ptyHighWater: 2 * 1024 * 1024,
   defaultAgent: "claude",
+  relayName: "",
+  relayAddr: "",
   trackerKeys: {},
   theme: "default",
   customAccent: "",
@@ -113,16 +119,7 @@ const KEY = "canopy.settings";
 export function getSettings(): Settings {
   try {
     const stored = JSON.parse(localStorage.getItem(KEY) ?? "{}") as Partial<Settings>;
-    const merged = { ...DEFAULTS, ...stored };
-    // Accent used to be meaningful only under the "custom" skin, and every
-    // install carried the default blue in that field whether or not it was
-    // ever chosen. Applying that to every skin now would repaint Gotham's
-    // gold blue for people who never asked. So: an accent counts as chosen
-    // only if the old model would actually have shown it.
-    if (stored.customAccent && stored.theme !== "custom") {
-      merged.customAccent = "";
-    }
-    return merged;
+    return { ...DEFAULTS, ...stored };
   } catch {
     return { ...DEFAULTS };
   }

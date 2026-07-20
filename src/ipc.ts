@@ -424,6 +424,125 @@ export const sessionDigests = () => invoke<SessionDigest[]>("session_digests");
 export const sessionForget = (sessionId: string) =>
   invoke<void>("session_forget", { sessionId });
 
+// ---------- team relay ----------
+
+export interface RelayMember {
+  id: string;
+  name: string;
+  joined_ms: number;
+  is_host: boolean;
+  /** Ed25519 identity public key (hex) proven on the direct link. */
+  key: string | null;
+  /** Trust-on-first-use verdict from our perspective:
+   *  "self" us | "new" first sight | "known" pinned & matches |
+   *  "changed" pinned but key differs (warn!) | "relayed" host-asserted. */
+  trust: "self" | "new" | "known" | "changed" | "relayed" | "";
+}
+
+/** Who we are on the relay right now. role "off" = not hosting, not joined. */
+export interface RelayStatus {
+  role: "off" | "host" | "client";
+  code: string | null;
+  port: number | null;
+  /** Host only: LAN addresses teammates can reach us on. */
+  ips: string[];
+  /** Client only: the host address we joined. */
+  addr: string | null;
+  self_id: string | null;
+  name: string | null;
+  /** Host only: "local" (LAN) or "public" (internet-reachable). */
+  visibility: "local" | "public" | null;
+  /** Host only, public mode: the internet-facing address teammates dial. */
+  public_ip: string | null;
+  members: RelayMember[];
+}
+
+export interface RelayChatMsg {
+  id: string;
+  from: string;
+  from_name: string;
+  /** null = everyone; an id = a direct message. */
+  to: string | null;
+  text: string;
+  ts: number;
+}
+
+export interface RelayCommandMsg {
+  id: string;
+  from: string;
+  from_name: string;
+  to: string | null;
+  /** e.g. "open-pr" — the payload's shape belongs to the kind. */
+  kind: string;
+  payload: unknown;
+  ts: number;
+}
+
+export const relayStatus = () => invoke<RelayStatus>("relay_status");
+export const relayHostStart = (name: string, visibility: "local" | "public", port?: number) =>
+  invoke<RelayStatus>("relay_host_start", { name, visibility, port });
+export const relayHostStop = () => invoke<RelayStatus>("relay_host_stop");
+export const relayRegenerateCode = () => invoke<RelayStatus>("relay_regenerate_code");
+export const relayConnect = (addr: string, code: string, name: string) =>
+  invoke<RelayStatus>("relay_connect", { addr, code, name });
+export const relayDisconnect = () => invoke<RelayStatus>("relay_disconnect");
+/** Resolves with the stamped message — the sender's UI appends it; the relay
+ *  never echoes a frame back to its author. */
+export const relaySendChat = (to: string | null, text: string) =>
+  invoke<RelayChatMsg>("relay_send_chat", { to, text });
+export const relaySendCommand = (to: string | null, kind: string, payload: unknown) =>
+  invoke<RelayCommandMsg>("relay_send_command", { to, kind, payload });
+
+export const onRelayState = (cb: (s: RelayStatus) => void): Promise<UnlistenFn> =>
+  listen<RelayStatus>("relay:state", (e) => cb(e.payload));
+export const onRelayChat = (cb: (m: RelayChatMsg) => void): Promise<UnlistenFn> =>
+  listen<RelayChatMsg>("relay:chat", (e) => cb(e.payload));
+export const onRelayCommand = (cb: (m: RelayCommandMsg) => void): Promise<UnlistenFn> =>
+  listen<RelayCommandMsg>("relay:command", (e) => cb(e.payload));
+
+/** A "file-offer" command's payload: where to fetch, the one-time token that
+ *  gates the fetch, and the hash the received bytes must match. */
+export interface RelayFileOffer {
+  name: string;
+  size: number;
+  sha256: string;
+  addrs: string[];
+  token: string;
+}
+
+export interface RelayTransferEvent {
+  /** Correlates with the progress stream. Non-secret (never the token). */
+  id: string;
+  direction: "in" | "out";
+  name: string;
+  total: number;
+  ok: boolean;
+  /** in+ok: saved path; out+ok: receiver's name; !ok: what failed. */
+  detail: string;
+}
+
+export interface RelayTransferProgress {
+  id: string;
+  direction: "in" | "out";
+  name: string;
+  done: number;
+  total: number;
+}
+
+/** Offer a file to a member: the bytes go peer-to-peer, only the offer rides
+ *  the relay. Resolves once the offer is sent; the outcome arrives later as a
+ *  relay:transfer event. */
+export const relayOfferFile = (to: string, path: string) =>
+  invoke<void>("relay_offer_file", { to, path });
+export const relayAcceptFile = (offer: RelayFileOffer, dest: string) =>
+  invoke<void>("relay_accept_file", { ...offer, dest });
+export const onRelayTransfer = (cb: (e: RelayTransferEvent) => void): Promise<UnlistenFn> =>
+  listen<RelayTransferEvent>("relay:transfer", (e) => cb(e.payload));
+export const onRelayTransferProgress = (
+  cb: (e: RelayTransferProgress) => void,
+): Promise<UnlistenFn> =>
+  listen<RelayTransferProgress>("relay:transfer-progress", (e) => cb(e.payload));
+
 // ---------- issue trackers ----------
 
 /** One ticket, whatever the tracker. See src/trackers.ts for the provider

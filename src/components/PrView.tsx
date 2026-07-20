@@ -7,7 +7,8 @@ import { useEscape } from "../useEscape";
 import { DiffView, DiffModeEnum } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import * as ipc from "../ipc";
-import type { Notify } from "../types";
+import type { Notify, RelayHandle } from "../types";
+import { TeamIcon } from "./icons";
 // NB: PR diffs arrive as real patches from `gh pr diff`, so they go straight
 // into the renderer. Working-tree diffs (components/DiffView.tsx) have to build
 // their patch first — see the note there about Monaco's diff not computing.
@@ -16,6 +17,8 @@ interface PrViewProps {
   repo: string;
   pr: ipc.PrInfo;
   onNotice: Notify;
+  /** Team relay, when connected: "ask a teammate to review" lives here. */
+  relay?: RelayHandle;
 }
 
 type Review = "approve" | "request-changes" | "comment";
@@ -26,7 +29,7 @@ const REVIEW_LABEL: Record<Review, string> = {
   comment: "Comment",
 };
 
-export function PrView({ repo, pr, onNotice }: PrViewProps) {
+export function PrView({ repo, pr, onNotice, relay }: PrViewProps) {
   const [patch, setPatch] = useState<string | null>(null);
   const [body, setBody] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -36,6 +39,30 @@ export function PrView({ repo, pr, onNotice }: PrViewProps) {
   const [confirm, setConfirm] = useState<Review | null>(null);
   useEscape(() => setConfirm(null), confirm != null);
   const [done, setDone] = useState<string | null>(null);
+  const [askOpen, setAskOpen] = useState(false);
+
+  // Teammates a review request can go to (everyone but us).
+  const teammates =
+    relay && relay.status.role !== "off"
+      ? relay.status.members.filter((m) => m.id !== relay.status.self_id)
+      : [];
+
+  /** Send the PR to a teammate over the relay; their Canopy opens it natively
+   *  by matching this repo's origin URL against their local checkouts. */
+  const requestReview = async (memberId: string, memberName: string) => {
+    setAskOpen(false);
+    try {
+      const remote = await ipc.gitRemoteUrl(repo);
+      if (!remote) {
+        onNotice("This repo has no shareable origin URL.", "error");
+        return;
+      }
+      await relay!.sendCommand(memberId, "open-pr", { repo: remote, pr });
+      onNotice(`Asked ${memberName} to review #${pr.number}.`, "success");
+    } catch (err) {
+      onNotice(String(err), "error");
+    }
+  };
 
   useEffect(() => {
     let live = true;
@@ -102,6 +129,30 @@ export function PrView({ repo, pr, onNotice }: PrViewProps) {
           >
             Checkout
           </button>
+          {teammates.length > 0 && (
+            <div className="cli-menu-anchor">
+              <button
+                className="btn-mini"
+                title="Ask a teammate on the relay to review — opens the PR in their Canopy"
+                onClick={() => setAskOpen((v) => !v)}
+              >
+                <TeamIcon size={11} /> Request review ▾
+              </button>
+              {askOpen && (
+                <div className="cli-menu" onMouseLeave={() => setAskOpen(false)}>
+                  {teammates.map((m) => (
+                    <div
+                      key={m.id}
+                      className="cli-item"
+                      onClick={() => void requestReview(m.id, m.name)}
+                    >
+                      <span>{m.name}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
