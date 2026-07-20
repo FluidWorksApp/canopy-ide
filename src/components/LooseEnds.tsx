@@ -48,14 +48,18 @@ const BUCKETS: { id: Bucket; label: string; hint: string }[] = [
   },
 ];
 
-function bucketOf(b: ipc.BranchWork): Bucket {
+function bucketOf(b: ipc.BranchWork, countsDegraded: boolean): Bucket {
   if (b.dirty > 0) return "uncommitted";
-  // No upstream at all means it was never pushed anywhere: ahead is measured
-  // against the base branch in that case, so a fresh branch with commits
-  // lands here rather than looking clean.
-  if (b.ahead > 0 && !b.merged) return "unpushed";
-  if (!b.merged && !b.upstream_gone) return "open";
-  return "cleanable";
+  if (b.merged) return "cleanable";
+  // No upstream means it was never pushed anywhere, so `ahead` is counted
+  // against the base branch instead — and that count needs git 2.41+. Where
+  // it is unavailable every upstream-less branch reports 0, which would file
+  // commits that exist ONLY in this clone under "Safe from loss". That is the
+  // one lie this panel must never tell, so assume unpushed and let the banner
+  // explain the missing count.
+  if (!b.upstream) return b.ahead > 0 || countsDegraded ? "unpushed" : "open";
+  if (b.ahead > 0) return "unpushed";
+  return b.upstream_gone ? "cleanable" : "open";
 }
 
 const ago = (days: number) =>
@@ -93,7 +97,7 @@ export function LooseEnds({
   if (!audit) return <div className="tree-empty">{busy ? "Auditing…" : "—"}</div>;
 
   const groups = BUCKETS.map((b) => {
-    const items = audit.items.filter((x) => bucketOf(x) === b.id);
+    const items = audit.items.filter((x) => bucketOf(x, audit.counts_degraded) === b.id);
     // Danger groups newest-first (that's what you were just doing); the
     // cleanup group oldest-first, because the most forgotten is the most
     // deletable and that's the whole point of the view.
@@ -104,10 +108,12 @@ export function LooseEnds({
   }).filter((g) => g.items.length > 0);
 
   const risky = audit.items.filter((b) => {
-    const k = bucketOf(b);
+    const k = bucketOf(b, audit.counts_degraded);
     return k === "uncommitted" || k === "unpushed";
   }).length;
-  const cleanable = audit.items.filter((b) => bucketOf(b) === "cleanable").length;
+  const cleanable = audit.items.filter(
+    (b) => bucketOf(b, audit.counts_degraded) === "cleanable",
+  ).length;
   const visible = showAll ? groups : groups.filter((g) => g.id !== "cleanable");
 
   const removeWorktree = (b: ipc.BranchWork) => {

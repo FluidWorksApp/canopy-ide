@@ -960,6 +960,49 @@ pub struct CommitPatch {
     pub truncated: bool,
 }
 
+/// Count a unified patch's files and +/- lines.
+///
+/// Counting must happen INSIDE hunks: a removed line whose content begins with
+/// `--` renders as `---`, and skipping every `---`/`+++` prefix to dodge the
+/// file headers silently swallowed those. Headers only appear before the first
+/// `@@` of a file, so tracking hunk state is both simpler and correct.
+fn patch_stats(patch: &str) -> (u32, u32, u32) {
+    let (mut files, mut adds, mut dels) = (0_u32, 0_u32, 0_u32);
+    let mut in_hunk = false;
+    for line in patch.lines() {
+        if line.starts_with("diff --git ") {
+            files += 1;
+            in_hunk = false;
+        } else if line.starts_with("@@") {
+            in_hunk = true;
+        } else if in_hunk {
+            match line.as_bytes().first() {
+                Some(b'+') => adds += 1,
+                Some(b'-') => dels += 1,
+                _ => {}
+            }
+        }
+    }
+    (files, adds, dels)
+}
+
+/// Truncate to at most `max` bytes, on a line boundary, without splitting a
+/// character. Slicing a String by a raw byte index panics when that index
+/// lands inside a multi-byte character — a 2 MB patch containing CJK or an
+/// emoji would take the whole command down with it.
+fn truncate_patch(patch: &mut String, max: usize) -> bool {
+    if patch.len() <= max {
+        return false;
+    }
+    let mut cut = max;
+    while cut > 0 && !patch.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let cut = patch[..cut].rfind('\n').map(|i| i + 1).unwrap_or(cut);
+    patch.truncate(cut);
+    true
+}
+
 /// Reject a branch name that could be read as an option or extra revision
 /// argument. Names come from git itself here, but they reach a command line,
 /// and `--upload-pack=…`-style injection is the reason to be strict.
@@ -1054,29 +1097,8 @@ pub async fn git_commit_patch(
     // cannot display anyway.
     let mut patch = run(git(&top).args(["show", "--patch", "--format=", &hash]))?;
 
-    let mut files = 0_u32;
-    let mut adds = 0_u32;
-    let mut dels = 0_u32;
-    for line in patch.lines() {
-        if line.starts_with("diff --git ") {
-            files += 1;
-        } else if line.starts_with("+++") || line.starts_with("---") {
-            // File headers, not content.
-        } else if line.starts_with('+') {
-            adds += 1;
-        } else if line.starts_with('-') {
-            dels += 1;
-        }
-    }
-
-    let truncated = patch.len() > MAX_PATCH_BYTES;
-    if truncated {
-        // Cut on a line boundary so the last hunk the renderer sees is valid.
-        let cut = patch[..MAX_PATCH_BYTES]
-            .rfind('\n')
-            .unwrap_or(MAX_PATCH_BYTES);
-        patch.truncate(cut);
-    }
+    let (files, adds, dels) = patch_stats(&patch);
+    let truncated = truncate_patch(&mut patch, MAX_PATCH_BYTES);
 
     let result = CommitPatch {
         patch,
@@ -1439,9 +1461,21 @@ pub async fn git_branch_patch(
 
     let mut patch = if uncommitted {
         let dir = match worktree {
-            // The worktree is a registered workspace root; scope-check it like
-            // any other path from the UI.
-            Some(w) => check_scope(&state, Path::new(&w))?,
+            // Authorize against the repo's OWN worktree list, not the
+            // workspace roots. A worktree an agent created in a terminal was
+            // never registered as a root, so check_scope refused it — which
+            // is precisely the abandoned worktree Loose ends is for. Git
+            // itself is the authority on what belongs to this repo.
+            Some(w) => {
+                let want = PathBuf::from(&w);
+                let known = list_worktrees(&top)?
+                    .into_iter()
+                    .any(|x| PathBuf::from(&x.path) == want);
+                if !known {
+                    return Err("not a worktree of this repository".into());
+                }
+                want
+            }
             None => top.clone(),
         };
         // Tracked changes, plus untracked files rendered as additions —
@@ -1450,24 +1484,18 @@ pub async fn git_branch_patch(
         let mut p = run(git(&dir).args(["diff", "HEAD"])).unwrap_or_default();
         let untracked =
             run(git(&dir).args(["ls-files", "--others", "--exclude-standard"])).unwrap_or_default();
+        // `git diff --no-index` exits 1 whenever the files differ — which is
+        // always, since we are diffing against /dev/null. run() reports a
+        // non-zero exit as an error, so every untracked file was silently
+        // dropped and a worktree of brand-new files rendered as empty: the
+        // exact "there is nothing here, safe to delete" lie this pane exists
+        // to prevent. Read stdout directly, like git_diff already does.
         for file in untracked.lines().filter(|l| !l.trim().is_empty()).take(100) {
-            if let Ok(extra) = run(git(&dir).args([
-                "diff",
-                "--no-index",
-                "--",
-                "/dev/null",
-                file,
-            ])) {
-                p.push_str(&extra);
-            } else if let Ok(extra) = run(git(&dir).args([
-                "diff",
-                "--no-index",
-                "--binary",
-                "--",
-                "/dev/null",
-                file,
-            ])) {
-                p.push_str(&extra);
+            if let Ok(out) = git(&dir)
+                .args(["diff", "--no-index", "--binary", "--", "/dev/null", file])
+                .output()
+            {
+                p.push_str(&String::from_utf8_lossy(&out.stdout));
             }
         }
         p
@@ -1476,24 +1504,8 @@ pub async fn git_branch_patch(
         run(git(&top).args(["diff", &format!("{base}...{branch}")])).unwrap_or_default()
     };
 
-    let mut files = 0_u32;
-    let mut adds = 0_u32;
-    let mut dels = 0_u32;
-    for line in patch.lines() {
-        if line.starts_with("diff --git ") {
-            files += 1;
-        } else if line.starts_with("+++") || line.starts_with("---") {
-        } else if line.starts_with('+') {
-            adds += 1;
-        } else if line.starts_with('-') {
-            dels += 1;
-        }
-    }
-    let truncated = patch.len() > MAX_PATCH_BYTES;
-    if truncated {
-        let cut = patch[..MAX_PATCH_BYTES].rfind('\n').unwrap_or(MAX_PATCH_BYTES);
-        patch.truncate(cut);
-    }
+    let (files, adds, dels) = patch_stats(&patch);
+    let truncated = truncate_patch(&mut patch, MAX_PATCH_BYTES);
     Ok(CommitPatch { patch, files_changed: files, insertions: adds, deletions: dels, truncated })
 }
 

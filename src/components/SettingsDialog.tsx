@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   applyTheme,
+  THEME_CHANGE_EVENT,
   getSettings,
   updateSettings,
   THEMES,
@@ -110,7 +111,14 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
   const [s, setS] = useState<Settings>(() => getSettings());
   useEscape(onClose, true);
 
-  const patch = (p: Partial<Settings>) => setS(updateSettings(p));
+  // Every write announces itself. Term and MonacoEditor apply font/cursor
+  // changes live off this event, and only applyTheme was dispatching it — so
+  // picking a new terminal font did nothing until the next new terminal.
+  const patch = (p: Partial<Settings>) => {
+    const next = updateSettings(p);
+    setS(next);
+    window.dispatchEvent(new CustomEvent(THEME_CHANGE_EVENT));
+  };
 
   const pickTheme = (next: Theme) => {
     patch({ theme: next });

@@ -241,6 +241,11 @@ Design rules:
 | `xlsx` (SheetJS, cdn dist) | spreadsheet parsing (lazy-loaded) |
 | `@tauri-apps/plugin-dialog` | native folder picker |
 | `@tauri-apps/plugin-opener` | system-browser link from the update toast for installs that can't self-update (`.deb`/`.rpm`) |
+| `sha2` | key derivation (HKDF) + file-transfer integrity hash for the team relay |
+| `spake2` | turns the low-entropy join code into a strong mutually-authenticated session key (PAKE), so the relay resists eavesdropping and offline brute-force |
+| `hkdf` | splits the session key into per-direction encryption keys |
+| `chacha20poly1305` | AEAD sealing every relay frame and file chunk (the transport itself stays std::net — no async/TLS stack) |
+| `tauri-plugin-notification` (+ npm counterpart) | native notifications for team-relay chat/commands/transfers landing while the app is unfocused |
 
 ## License
 

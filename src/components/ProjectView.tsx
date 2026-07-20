@@ -29,9 +29,10 @@ import {
   PlayIcon,
   RestartIcon,
   StopIcon,
+  TeamIcon,
   TerminalIcon,
 } from "./icons";
-import type { AgentEventEntry, OpenFile, Notify } from "../types";
+import type { AgentEventEntry, OpenFile, Notify, RelayHandle } from "../types";
 import {
   derivePending,
   eventsForProject,
@@ -63,8 +64,10 @@ import {
   type RememberedTerminal,
 } from "../terminalMemory";
 import { PrView } from "./PrView";
+import { TeamPanel } from "./TeamPanel";
+import { ChatView } from "./ChatView";
 
-type SideTab = "files" | "changes" | "git" | "trackers" | "agents";
+type SideTab = "files" | "changes" | "git" | "trackers" | "agents" | "team";
 
 interface TermSubTab {
   id: string;
@@ -130,7 +133,24 @@ interface PrSubTab {
   pr: ipc.PrInfo;
 }
 
-type SubTab = TermSubTab | FileSubTab | PrSubTab | TicketSubTab | CommitSubTab | BranchSubTab;
+interface ChatSubTab {
+  id: string;
+  type: "chat";
+  /** Relay member id for a DM; null for the everyone channel. */
+  peer: string | null;
+  name: string;
+  /** A message arrived while the tab wasn't in front. */
+  unread?: boolean;
+}
+
+type SubTab =
+  | TermSubTab
+  | FileSubTab
+  | PrSubTab
+  | TicketSubTab
+  | CommitSubTab
+  | BranchSubTab
+  | ChatSubTab;
 
 const decoder = new TextDecoder();
 
@@ -252,6 +272,7 @@ const RAIL_TABS: {
   { key: "git", Icon: GitBranchIcon, title: "Git — branches, commits, worktrees, PRs" },
   { key: "trackers", Icon: IssueIcon, title: "Issues — GitHub, Linear, …" },
   { key: "agents", Icon: AgentsIcon, title: "Agents" },
+  { key: "team", Icon: TeamIcon, title: "Team — relay, chat, notifications" },
 ];
 
 interface ProjectViewProps {
@@ -269,9 +290,11 @@ interface ProjectViewProps {
   onEdit: () => void;
   onNotice: Notify;
   onShareContext: (on: boolean) => void;
+  /** App-wide team relay — same handle in every project. */
+  relay: RelayHandle;
 }
 
-export function ProjectView({ project, visible, zen, events, hookPath, allProjects, dismissedPending, onDismissPending, onEdit, onNotice, onShareContext }: ProjectViewProps) {
+export function ProjectView({ project, visible, zen, events, hookPath, allProjects, dismissedPending, onDismissPending, onEdit, onNotice, onShareContext, relay }: ProjectViewProps) {
   const [sideTab, setSideTab] = useState<SideTab>("files");
   const [collapsed, setCollapsed] = useState(false);
   const [tabs, setTabs] = useState<SubTab[]>([]);
@@ -425,6 +448,91 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const patchTabRaw = useCallback((id: string, patch: Partial<SubTab>) => {
     setTabs((prev) => prev.map((t) => (t.id === id ? ({ ...t, ...patch } as SubTab) : t)));
   }, []);
+
+  /** Open a relay conversation as its own tab — the everyone channel (peer
+   *  null) or a DM — reusing one already open for it. */
+  const openChat = useCallback((peer: string | null, name: string) => {
+    const existing = tabsRef.current.find(
+      (t): t is ChatSubTab => t.type === "chat" && t.peer === peer,
+    );
+    if (existing) {
+      setActiveTabId(existing.id);
+      return;
+    }
+    const id = tabId();
+    setTabs((prev) => [...prev, { id, type: "chat", peer, name }]);
+    setActiveTabId(id);
+  }, []);
+
+  // Tell App which conversation is in front so it can skip toasts for it —
+  // only the visible project speaks, or every mounted one would overwrite it.
+  const activeTabForChat = tabs.find((t) => t.id === activeTabId);
+  const activeChatPeer =
+    visible && activeTabForChat?.type === "chat" ? activeTabForChat.peer : undefined;
+  useEffect(() => {
+    if (!visible) return;
+    relay.reportActiveChat(activeChatPeer);
+    return () => relay.reportActiveChat(undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, activeChatPeer]);
+
+  // Ring chat tabs that received something while not in front. The transcript
+  // is app-level, so "new" is detected by length, not subscription.
+  const chatSeen = useRef(0);
+  useEffect(() => {
+    const fresh = relay.chat.slice(chatSeen.current);
+    chatSeen.current = relay.chat.length;
+    if (fresh.length === 0) return;
+    const selfId = relay.status.self_id;
+    setTabs((prev) =>
+      prev.map((t) => {
+        if (t.type !== "chat" || (t.id === activeTabId && visible)) return t;
+        const mine = fresh.some((m) =>
+          t.peer === null
+            ? m.to === null && m.from !== selfId
+            : m.from === t.peer && m.to === selfId,
+        );
+        return mine ? { ...t, unread: true } : t;
+      }),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [relay.chat]);
+
+  /** Act on a relay command: open-pr finds the local checkout whose origin
+   *  matches the sender's repo and opens the PR natively in it. */
+  const openInboxItem = useCallback(
+    async (item: ipc.RelayCommandMsg) => {
+      if (item.kind !== "open-pr") {
+        relay.dismissInbox(item.id);
+        return;
+      }
+      const payload = item.payload as { repo?: string; pr?: ipc.PrInfo };
+      if (!payload.pr) {
+        onNotice("That request is missing its PR payload.", "error");
+        return;
+      }
+      try {
+        const repos = await ipc.gitRepos(
+          componentsRef.current.map((c) => [c.label, c.path] as [string, string]),
+        );
+        for (const r of repos) {
+          const url = await ipc.gitRemoteUrl(r.path).catch(() => "");
+          if (url && payload.repo && url.toLowerCase() === payload.repo.toLowerCase()) {
+            openPr(r.path, payload.pr);
+            relay.dismissInbox(item.id);
+            return;
+          }
+        }
+        onNotice(
+          `No component in this project has origin ${payload.repo ?? "?"} — open the matching project and try from there.`,
+          "warn",
+        );
+      } catch (err) {
+        onNotice(String(err), "error");
+      }
+    },
+    [onNotice, openPr, relay],
+  );
 
   // Restorable agent sessions, loaded while the launcher (empty state) is on
   // screen — that is precisely the moment "you left three agents mid-thought"
@@ -708,7 +816,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   useEffect(() => {
     if (!visible || !activeTabId) return;
     setTabs((prev) =>
-      prev.some((t) => t.id === activeTabId && t.type === "terminal" && t.unread)
+      prev.some(
+        (t) => t.id === activeTabId && (t.type === "terminal" || t.type === "chat") && t.unread,
+      )
         ? prev.map((t) => (t.id === activeTabId ? ({ ...t, unread: false } as SubTab) : t))
         : prev,
     );
@@ -1343,7 +1453,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               <div
                 key={tab.id}
                 className={`tab ${tab.id === activeTabId ? "tab-active" : ""} ${
-                  tab.type === "terminal" && tab.unread ? "tab-unread" : ""
+                  (tab.type === "terminal" || tab.type === "chat") && tab.unread
+                    ? "tab-unread"
+                    : ""
                 } ${tab.type !== "terminal" ? "tab-doc" : isAgentTab(tab) ? "tab-agent" : ""}`}
                 onClick={(e) => {
                   // e.detail is the click count and fires even though app chrome
@@ -1373,7 +1485,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                           ? `${tab.short} — ${tab.subject}`
                           : tab.type === "branch"
                             ? `${tab.branch.branch}\n${tab.branch.worktree ?? "no worktree"}`
-                            : tab.file.path
+                            : tab.type === "chat"
+                              ? tab.peer === null
+                                ? "Team chat — everyone on the relay"
+                                : `Direct chat with ${tab.name}`
+                              : tab.file.path
                 }
               >
                 {tab.type === "terminal" ? (
@@ -1389,6 +1505,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                   <CommitIcon size={12} className="tab-commit-icon" />
                 ) : tab.type === "branch" ? (
                   <GitBranchIcon size={12} className="tab-branch-icon" />
+                ) : tab.type === "chat" ? (
+                  <TeamIcon size={12} className="tab-chat-icon" />
                 ) : (
                   tab.file.external != null && <span className="tab-external">●</span>
                 )}
@@ -1425,7 +1543,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                             ? `${tab.short} ${tab.subject}`
                             : tab.type === "branch"
                               ? tab.branch.branch
-                              : `${tab.file.name}${tab.file.dirty ? " •" : ""}`}
+                              : tab.type === "chat"
+                                ? tab.name
+                                : `${tab.file.name}${tab.file.dirty ? " •" : ""}`}
                   </span>
                 )}
                 <span
@@ -1606,7 +1726,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             worktree={ticketWorktree(activeTab.ticket, ticketWorktrees)}
             agentTargets={agentTargets}
           installed={installed}
-            onStartNew={() => void startTicketWork(activeTab.ticket)}
+            onStartNew={(agentId) => void startTicketWork(activeTab.ticket, agentId)}
             onSendToAgent={(target) =>
               sendTicketToAgent(target, ticketContext(activeTab.ticket))
             }
@@ -1617,6 +1737,16 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             key={activeTab.id}
             repo={activeTab.repo}
             pr={activeTab.pr}
+            onNotice={onNotice}
+            relay={relay}
+          />
+        )}
+        {activeTab?.type === "chat" && (
+          <ChatView
+            key={activeTab.id}
+            peer={activeTab.peer}
+            title={activeTab.name}
+            relay={relay}
             onNotice={onNotice}
           />
         )}
@@ -2067,6 +2197,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           }}
         />
       )}
+      {sideTab === "team" && (
+        <TeamPanel
+          relay={relay}
+          onOpenChat={openChat}
+          onOpenInboxItem={(item) => void openInboxItem(item)}
+          onNotice={onNotice}
+        />
+      )}
       {sideTab === "agents" && (
         <AgentsPanel
           stats={projectStats}
@@ -2117,6 +2255,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 >
                   {pending.length}
                 </span>
+              )}
+              {t.key === "team" && relay.inbox.length > 0 && (
+                <span className="rail-badge rail-badge-urgent">{relay.inbox.length}</span>
               )}
             </button>
           ))}

@@ -37,10 +37,21 @@ notify = "8"
 # Process-tree inspection for the runaway guard + agent detection
 sysinfo = "0.33"
 trash = "5.2.3"
+# Relay encryption: SPAKE2 turns the low-entropy join code into a strong,
+# mutually-authenticated session key (magic-wormhole's approach); HKDF splits
+# it per-direction; ChaCha20-Poly1305 is the AEAD on the wire; SHA-256 both
+# derives keys and integrity-checks transferred files. All pure-Rust RustCrypto
+# — the relay transport itself stays std::net, no async/TLS stack pulled in.
+sha2 = "0.10"
+spake2 = "0.4"
+hkdf = "0.12"
+chacha20poly1305 = "0.10"
 tauri-plugin-updater = "2.10.1"
 tauri-plugin-process = "2.3.1"
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
+# Native notifications for team-relay activity while the app is unfocused
+tauri-plugin-notification = "2"
 
 # Unix signals for killing whole PTY process groups (no zombies)
 [target.'cfg(unix)'.dependencies]
