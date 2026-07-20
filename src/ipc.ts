@@ -500,6 +500,20 @@ export const onRelayChat = (cb: (m: RelayChatMsg) => void): Promise<UnlistenFn> 
 export const onRelayCommand = (cb: (m: RelayCommandMsg) => void): Promise<UnlistenFn> =>
   listen<RelayCommandMsg>("relay:command", (e) => cb(e.payload));
 
+/** Live collaborative editing. `doc` is an opaque id minted by the sharer; the
+ *  backend never learns which file it refers to, and no path is ever sent —
+ *  see docs/collab-editing.md §5. Separate from sendCommand because this runs
+ *  at a frame per keystroke and must not touch the inbox or notifications. */
+export const relaySendCollab = (
+  to: string | null,
+  doc: string,
+  body: import("./collab").CollabBody,
+) => invoke<void>("relay_send_collab", { to, doc, body });
+export const onRelayCollab = (
+  cb: (m: import("./collab").CollabMsg) => void,
+): Promise<UnlistenFn> =>
+  listen<import("./collab").CollabMsg>("relay:collab", (e) => cb(e.payload));
+
 /** A "file-offer" command's payload: where to fetch, the one-time token that
  *  gates the fetch, and the hash the received bytes must match. */
 export interface RelayFileOffer {

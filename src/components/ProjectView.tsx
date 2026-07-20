@@ -8,7 +8,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
-import { modelFor, monaco } from "../monaco-setup";
+import { modelFor, monaco, languageForPath } from "../monaco-setup";
+import { GuestSession, OwnerSession } from "../collab";
+import { CollabView } from "./CollabView";
 import type { AgentCli, Project } from "../projects";
 import { AGENT_CLIS, AGENT_PATTERN, checkInstalledClis, startCommand } from "../projects";
 import {
@@ -143,7 +145,18 @@ interface ChatSubTab {
   unread?: boolean;
 }
 
+/** A file someone else owns, live. Distinct from FileSubTab because it has no
+ *  path — that is the point, see docs/collab-editing.md §5. */
+interface CollabSubTab {
+  id: string;
+  type: "collab";
+  doc: string;
+  name: string;
+  ownerName: string;
+}
+
 type SubTab =
+  | CollabSubTab
   | TermSubTab
   | FileSubTab
   | PrSubTab
@@ -310,6 +323,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const [rootCreate, setRootCreate] = useState<{ dir: string; kind: "file" | "dir"; value: string } | null>(null);
   useEscape(() => setRootCreate(null), rootCreate != null);
   const [cliMenuOpen, setCliMenuOpen] = useState(false);
+  const [shareMenuOpen, setShareMenuOpen] = useState(false);
   const [shellMenuOpen, setShellMenuOpen] = useState(false);
   const [runMenuOpen, setRunMenuOpen] = useState(false);
   const [installed, setInstalled] = useState<Record<string, boolean>>({});
@@ -463,6 +477,68 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     setTabs((prev) => [...prev, { id, type: "chat", peer, name }]);
     setActiveTabId(id);
   }, []);
+
+  // ---- live editing ----
+  // Owner-side sessions this project started, keyed by path. Outside React
+  // state on purpose: an OwnerSession holds a Monaco model subscription and
+  // per-keystroke state, and copying it on every render would break both.
+  const shared = useRef(new Map<string, OwnerSession>());
+  // closeTab is a stable callback but needs the manager, which arrives as a
+  // prop. The instance itself never changes; the ref is just how a [] callback
+  // reaches it.
+  const collabRef = useRef(relay.collab);
+  collabRef.current = relay.collab;
+  const ownerCursorAt = useRef(0);
+
+  const sharedDocFor = useCallback((path: string) => shared.current.get(path), []);
+
+  const sendOwnerCursor = useCallback((path: string, anchor: number, head: number) => {
+    const s = shared.current.get(path);
+    if (!s) return;
+    // Same 50ms floor the guest view uses: presence is droppable, and a caret
+    // dragged across a file must not become a frame per pixel.
+    const now = Date.now();
+    if (now - ownerCursorAt.current < 50) return;
+    ownerCursorAt.current = now;
+    s.sendCursor(anchor, head);
+  }, []);
+
+  /** Share the open file with a member, live. This is the ONLY place a path
+   *  becomes a shareable document, and it is reachable only from a click. */
+  const shareFileLive = useCallback(
+    (path: string, name: string, member: string, memberName: string) => {
+      let session = shared.current.get(path);
+      if (!session) {
+        const model = monaco.editor.getModel(monaco.Uri.file(path));
+        if (!model) {
+          onNotice("Open the file in the editor before sharing it live.", "error");
+          return;
+        }
+        session = relay.collab.share(path, model);
+        shared.current.set(path, session);
+      }
+      session.offerTo(member, name, languageForPath(path) ?? null);
+      onNotice(`Offered ${name} to ${memberName} — live once they accept.`, "success");
+    },
+    [onNotice, relay],
+  );
+
+  // A guest session appears only when the owner answers our `open` with a
+  // snapshot, so the tab is opened from the manager's state rather than at the
+  // moment we accept — there is nothing to show until the text arrives.
+  useEffect(() => {
+    const open = tabsRef.current.filter((t): t is CollabSubTab => t.type === "collab");
+    for (const [doc, meta] of relay.collab.liveGuests()) {
+      if (open.some((t) => t.doc === doc)) continue;
+      const id = tabId();
+      setTabs((prev) => [
+        ...prev,
+        { id, type: "collab", doc, name: meta.name, ownerName: meta.ownerName },
+      ]);
+      setActiveTabId(id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [relay.collabTick]);
 
   // Tell App which conversation is in front so it can skip toasts for it —
   // only the visible project speaks, or every mounted one would overwrite it.
@@ -893,8 +969,23 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     setTabs((prev) => {
       const closing = prev.find((t) => t.id === id);
       if (closing?.type === "file") {
+        // Closing the tab disposes the model the OwnerSession is subscribed
+        // to, so the share has to end first — otherwise it sits there holding
+        // a dead model and every remote edit throws.
+        const share = shared.current.get(closing.file.path);
+        if (share) {
+          collabRef.current.close(share.doc);
+          shared.current.delete(closing.file.path);
+        }
         monaco.editor.getModel(monaco.Uri.file(closing.file.path))?.dispose();
         baselines.current.delete(closing.file.path);
+      }
+      if (closing?.type === "collab") {
+        collabRef.current.close(closing.doc);
+        monaco.editor
+          .getModels()
+          .find((m) => m.uri.scheme === "canopy-collab" && m.uri.path.startsWith(`/${closing.doc}/`))
+          ?.dispose();
       }
       const next = prev.filter((t) => t.id !== id);
       setActiveTabId((active) =>
@@ -1489,7 +1580,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                               ? tab.peer === null
                                 ? "Team chat — everyone on the relay"
                                 : `Direct chat with ${tab.name}`
-                              : tab.file.path
+                              : tab.type === "collab"
+                                ? `${tab.name} — live, owned by ${tab.ownerName}`
+                                : tab.file.path
                 }
               >
                 {tab.type === "terminal" ? (
@@ -1507,6 +1600,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                   <GitBranchIcon size={12} className="tab-branch-icon" />
                 ) : tab.type === "chat" ? (
                   <TeamIcon size={12} className="tab-chat-icon" />
+                ) : tab.type === "collab" ? (
+                  <TeamIcon size={12} className="tab-collab-icon" />
                 ) : (
                   tab.file.external != null && <span className="tab-external">●</span>
                 )}
@@ -1545,7 +1640,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                               ? tab.branch.branch
                               : tab.type === "chat"
                                 ? tab.name
-                                : `${tab.file.name}${tab.file.dirty ? " •" : ""}`}
+                                : tab.type === "collab"
+                                  ? `${tab.name} ⇄`
+                                  : `${tab.file.name}${tab.file.dirty ? " •" : ""}`}
                   </span>
                 )}
                 <span
@@ -1580,6 +1677,48 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           setOpen={setRunMenuOpen}
         />
         <div className="pane-actions">
+          {/* Live share. Only offered for a source buffer on a live relay:
+              the other viewers are read-only projections with no operation
+              model, so there is nothing to synchronise. */}
+          {activeTab?.type === "file" &&
+            (activeTab.file.kind === "code" || activeTab.file.view === "source") &&
+            relay.status.role !== "off" &&
+            relay.status.members.some((m) => m.id !== relay.status.self_id) && (
+              <div className="cli-menu-anchor">
+                <button
+                  className={`btn ${shared.current.has(activeTab.file.path) ? "btn-accent" : ""}`}
+                  title="Edit this file live with a teammate"
+                  onClick={() => setShareMenuOpen((v) => !v)}
+                >
+                  {shared.current.has(activeTab.file.path) ? "Sharing ⇄" : "Share live"}
+                </button>
+                {shareMenuOpen && (
+                  <div className="cli-menu" onMouseLeave={() => setShareMenuOpen(false)}>
+                    {relay.status.members
+                      .filter((m) => m.id !== relay.status.self_id)
+                      .map((m) => (
+                        <div
+                          key={m.id}
+                          className="cli-item"
+                          onClick={() => {
+                            setShareMenuOpen(false);
+                            shareFileLive(
+                              activeTab.file.path,
+                              activeTab.file.name,
+                              m.id,
+                              m.name,
+                            );
+                          }}
+                        >
+                          <span>
+                            <TeamIcon size={15} className="cli-icon" /> {m.name}
+                          </span>
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </div>
+            )}
           {activeTab?.type === "file" &&
             ["markdown", "html", "notebook", "sheet", "json"].includes(activeTab.file.kind) && (
               <button className="btn" onClick={() => toggleView(activeTab.file.path)}>
@@ -1750,10 +1889,34 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             onNotice={onNotice}
           />
         )}
+        {activeTab?.type === "collab" &&
+          (() => {
+            const session = relay.collab.get(activeTab.doc);
+            return session instanceof GuestSession ? (
+              <CollabView
+                key={activeTab.id}
+                session={session}
+                ownerName={activeTab.ownerName}
+                onNotice={onNotice}
+              />
+            ) : (
+              <div className="editor-empty">
+                <h2>{activeTab.name}</h2>
+                <p>This live session has ended.</p>
+              </div>
+            );
+          })()}
         {activeTab?.type === "file" && (
           <FileView
             key={activeTab.id}
             file={activeTab.file}
+            onCursor={
+              // Only a shared file broadcasts a caret; every other tab passes
+              // undefined and the subscription in MonacoEditor short-circuits.
+              sharedDocFor(activeTab.file.path)
+                ? (anchor, head) => sendOwnerCursor(activeTab.file.path, anchor, head)
+                : undefined
+            }
             onSave={() => void saveFile(activeTab.file.path)}
             onDirty={(dirty) => {
               if (activeTab.file.dirty !== dirty) patchFile(activeTab.file.path, { dirty });

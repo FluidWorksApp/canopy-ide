@@ -5170,3 +5170,46 @@ a.btn-mini {
   border-color: var(--danger);
   font-weight: 600;
 }
+
+/* ---------- live collaborative editing ---------- */
+/* Remote carets are Monaco decorations rather than overlay widgets: a widget
+   needs pixel coordinates and re-measuring on every scroll and font change,
+   and a caret that lags the text it is pointing at is worse than none. */
+.collab-cursor-caret::before {
+  content: "";
+  position: absolute;
+  width: 2px;
+  height: 1.2em;
+  background: var(--accent);
+  z-index: 5;
+}
+.collab-selection {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: 2px;
+}
+
+.collab-view {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.collab-editor {
+  flex: 1;
+  min-height: 0;
+}
+.collab-banner {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-bottom: 1px solid var(--border);
+}
+/* The owner leaving is the one state the user must not misread as "still
+   shared" — their edits stop going anywhere and nothing will be saved. */
+.collab-banner-orphaned {
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+  color: var(--text);
+}
+.tab-collab-icon {
+  opacity: 0.8;
+}

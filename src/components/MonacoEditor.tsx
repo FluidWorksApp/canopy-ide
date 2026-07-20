@@ -9,15 +9,21 @@ interface MonacoEditorProps {
   model: monaco.editor.ITextModel;
   onSave: () => void;
   onDirty: (dirty: boolean) => void;
+  /** Caret and selection in document offsets, for live collaboration to
+   *  broadcast as presence. Offsets rather than positions because that is the
+   *  coordinate space the operations already use. */
+  onCursor?: (anchor: number, head: number) => void;
 }
 
-export function MonacoEditor({ model, onSave, onDirty }: MonacoEditorProps) {
+export function MonacoEditor({ model, onSave, onDirty, onCursor }: MonacoEditorProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const saveRef = useRef(onSave);
   const dirtyRef = useRef(onDirty);
+  const cursorRef = useRef(onCursor);
   saveRef.current = onSave;
   dirtyRef.current = onDirty;
+  cursorRef.current = onCursor;
 
   useEffect(() => {
     const el = containerRef.current;
@@ -51,8 +57,22 @@ export function MonacoEditor({ model, onSave, onDirty }: MonacoEditorProps) {
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () =>
       saveRef.current(),
     );
+    // Read through the ref, so a tab that isn't collaborating pays for one
+    // dead callback rather than the subscription being torn down and rebuilt
+    // every time the parent re-renders.
+    const cursorSub = editor.onDidChangeCursorSelection((e) => {
+      const cb = cursorRef.current;
+      if (!cb) return;
+      const m = editor.getModel();
+      if (!m) return;
+      cb(
+        m.getOffsetAt(e.selection.getStartPosition()),
+        m.getOffsetAt(e.selection.getEndPosition()),
+      );
+    });
     return () => {
       window.removeEventListener(THEME_CHANGE_EVENT, onSettingsChange);
+      cursorSub.dispose();
       editor.dispose();
       editorRef.current = null;
     };
