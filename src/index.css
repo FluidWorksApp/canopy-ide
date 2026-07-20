@@ -1455,6 +1455,55 @@ body,
   border-radius: 2px;
 }
 
+/* Collapsed rail (more than one run/shell): the label plus a single toggle
+   button that opens the full list.
+   
+   These five classes were referenced by ProjectView and never existed here, so
+   the menu had no positioning context and inherited none of this. Two things
+   were wrong at once. Without `position: relative` the menu's `position:
+   absolute; right: 0; top: 100%` resolved against some far-away ancestor, and
+   even with it, `.run-rail` is a scroll container (overflow-x: auto) — and an
+   absolutely positioned child of a scroll container is clipped by it. In this
+   collapsed form the rail is one button, so there is nothing to scroll and the
+   clipping is pure loss: turn it off so the menu can escape. */
+.rail-menu-anchor {
+  position: relative;
+  overflow: visible;
+}
+
+.rail-toggle {
+  max-width: 200px;
+}
+
+.rail-count {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  opacity: 0.75;
+}
+
+.rail-caret {
+  flex: 0 0 auto;
+  font-size: 9px;
+  opacity: 0.6;
+  line-height: 1;
+}
+
+/* Many runs shouldn't grow a menu taller than the window. */
+.rail-menu {
+  max-height: 60vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Inside the menu the chips are rows, not a scrolling strip. */
+.rail-menu-chip {
+  max-width: none;
+  width: 100%;
+}
+
 .run-rail-label {
   font-size: 9px;
   letter-spacing: 0.09em;
