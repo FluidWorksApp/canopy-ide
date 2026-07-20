@@ -359,6 +359,28 @@ pub async fn workspace_import(path: String) -> Result<String, String> {
 /// at the boundary instead of the frontend filtering a huge result set.
 const SKIP_DIRS: &[&str] = &[
     ".git",
+    // Dot-directories that are caches or vendored trees. Named explicitly
+    // rather than caught by a leading-dot rule, which also swallowed .github,
+    // .vscode and every agent config directory.
+    ".svn",
+    ".hg",
+    ".direnv",
+    ".gradle",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".terraform",
+    ".yarn",
+    ".pnpm-store",
+    ".parcel-cache",
+    ".sass-cache",
+    ".nuxt",
+    ".output",
+    ".svelte-kit",
+    ".astro",
+    ".vercel",
+    ".serverless",
+    ".tox",
     "node_modules",
     "target",
     "dist",
@@ -385,16 +407,19 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>, limit: usize, depth: usize) {
         }
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with('.') && name != ".claude" {
-            continue;
-        }
         let path = entry.path();
         if path.is_dir() {
+            // Directories are filtered by name (SKIP_DIRS), never by a leading
+            // dot: .github and .claude hold real work.
             if SKIP_DIRS.contains(&name.as_ref()) {
                 continue;
             }
             walk(&path, out, limit, depth + 1);
         } else {
+            // Dotfiles are files. Skipping every name starting with '.' meant
+            // .env, .gitignore, .prettierrc and every CI config were invisible
+            // to quick-open AND to find-in-files — searchable content the
+            // editor could open perfectly well once you got to it another way.
             out.push(path);
         }
     }
