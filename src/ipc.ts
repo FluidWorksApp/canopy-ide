@@ -358,6 +358,8 @@ export const gitBranchPatch = (
   uncommitted: boolean,
 ) => invoke<CommitPatch>("git_branch_patch", { repo, branch, worktree, uncommitted });
 
+export const gitRemoteUrl = (repo: string) => invoke<string>("git_remote_url", { repo });
+
 export const gitWorkAudit = (repo: string) => invoke<WorkAudit>("git_work_audit", { repo });
 
 export const gitWorktrees = (repo: string) => invoke<WorktreeInfo[]>("git_worktrees", { repo });
@@ -438,6 +440,17 @@ export interface TicketInfo {
   body: string;
   priority: string;
 }
+
+export interface GhAuth {
+  installed: boolean;
+  path: string;
+  authenticated: boolean;
+  account: string;
+  host: string;
+  detail: string;
+}
+
+export const ghAuth = () => invoke<GhAuth>("gh_auth");
 
 export const ghIssueList = (repo: string) => invoke<TicketInfo[]>("gh_issue_list", { repo });
 export const linearIssues = (apiKey: string) =>

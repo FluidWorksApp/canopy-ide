@@ -82,6 +82,18 @@
   box-sizing: border-box;
 }
 
+/* Every button here is flat. The UA default is `border: 2px outset`, so any
+   class that sets a background without also setting a border renders a 3D
+   bevel — which is exactly what `btn-mini btn-accent` (no `.btn`) did, in 25
+   places. Reset once at element level: every button class below re-declares
+   what it needs and wins on specificity regardless of order. */
+button {
+  font: inherit;
+  border: 1px solid transparent;
+  background: none;
+  color: inherit;
+}
+
 html,
 body,
 #root {
@@ -411,13 +423,14 @@ body,
 /* ---------- rail (collapsed sidebar) ---------- */
 
 .rail {
-  width: 42px;
-  flex: 0 0 42px;
+  width: 46px;
+  flex: 0 0 46px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  padding: 8px 0;
+  /* Real icons need separating; 4px read as one continuous column. */
+  gap: 8px;
+  padding: 10px 0;
   background: var(--bg-alt);
 }
 
@@ -428,14 +441,23 @@ body,
 
 .rail-btn {
   position: relative;
-  width: 32px;
-  height: 32px;
+  /* Centres an SVG rather than a glyph: the rail carries real icons now. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
   background: none;
   border: none;
-  border-radius: 6px;
+  border-radius: 8px;
   color: var(--text-dim);
   font-size: 15px;
   cursor: pointer;
+}
+
+.rail-btn:hover {
+  color: var(--text);
+  background: var(--bg-raised);
 }
 
 .rail-btn:hover {
@@ -450,8 +472,9 @@ body,
 
 .rail-badge {
   position: absolute;
-  top: 0;
-  right: 0;
+  /* Clear of the glyph: at 34px the badge used to sit on top of the icon. */
+  top: -3px;
+  right: -4px;
   background: var(--accent);
   color: var(--on-accent);
   border-radius: 7px;
@@ -831,10 +854,21 @@ body,
   flex: 1;
 }
 
+/* Size modifier that also stands on its own — most call sites use it without
+   `.btn`, so it carries the same flat surface. */
 .btn-mini {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 4px;
   font-size: 11px;
   padding: 2px 8px;
   margin-top: 6px;
+  cursor: pointer;
+}
+
+.btn-mini:hover {
+  border-color: var(--accent);
 }
 
 .cli-icon {
@@ -3656,6 +3690,9 @@ textarea,
 }
 
 .ticket-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: none;
@@ -3675,20 +3712,22 @@ textarea,
   padding: 2px 8px;
 }
 
+/* Brand marks inherit colour, so tint them per tracker. */
 .ticket-src {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
   flex: 0 0 auto;
   align-self: center;
 }
 
 .ticket-src-github {
-  background: #8b949e;
+  color: var(--text-dim);
 }
 
 .ticket-src-linear {
-  background: #5e6ad2;
+  color: #7b86e8;
+}
+
+.ticket-refreshing {
+  opacity: 0.5;
 }
 
 .ticket-state-name {
@@ -4054,4 +4093,254 @@ textarea,
 .tab-branch-icon {
   color: var(--ok);
   font-size: 10px;
+}
+
+/* Tab-strip and detail-header marks: SVGs need alignment, glyphs didn't. */
+.tab-pr-icon,
+.tab-ticket-icon,
+.tab-commit-icon,
+.tab-branch-icon,
+.ticket-view-mark {
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+.tab-ticket-icon {
+  color: var(--text-dim);
+}
+
+.ticket-view-mark {
+  color: var(--accent);
+}
+
+.set-note {
+  margin-top: 4px;
+  opacity: 0.8;
+}
+
+.set-item-name.set-inline {
+  gap: 6px;
+}
+
+/* ---------- resume block on the project launcher ---------- */
+
+.resume-block {
+  width: min(620px, 90%);
+  /* Below the launcher: starting something new is the primary action and
+     shouldn't move depending on whether there's history to restore. */
+  margin: 26px 0 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-alt);
+  overflow: hidden;
+  text-align: left;
+}
+
+.resume-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.resume-head > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.resume-head-actions {
+  gap: 4px;
+}
+
+.resume-subhead {
+  padding: 8px 12px 3px;
+  border-top: 1px solid var(--border);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.resume-row code {
+  font-family: 'SF Mono', Menlo, monospace;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.resume-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  font-size: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.resume-row:first-of-type {
+  border-top: none;
+}
+
+.resume-row-click {
+  cursor: pointer;
+}
+
+.resume-row-click:hover {
+  background: var(--bg-raised);
+}
+
+.resume-prompt {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resume-dir,
+.resume-branch,
+.resume-age {
+  font-size: 10px;
+  color: var(--text-dim);
+  flex: 0 0 auto;
+}
+
+.resume-branch {
+  color: var(--ok);
+}
+
+.resume-row .btn-mini {
+  margin-top: 0;
+}
+
+.resume-unsupported {
+  font-size: 10px;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+/* Anchors styled as buttons (open-on-remote actions). */
+a.btn,
+a.btn-mini {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+.commit-body a {
+  color: var(--accent);
+}
+
+/* Agent picker cards (Settings → Agents) reuse the skin-card shell. */
+.agent-card-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 40px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+
+/* Ticket footer: two labelled action groups, not one ambiguous row. */
+.ticket-action-group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.ticket-action-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.ticket-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ticket-action-row .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ticket-action-dir {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+.ticket-view-actions {
+  align-items: center;
+  gap: 12px;
+}
+
+/* Split button: one control, primary action plus a caret for everything
+   else. Two buttons visually fused rather than a button and a stray chevron. */
+.split-btn {
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.split-btn-main {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.split-btn-caret {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-left: 1px solid rgba(0, 0, 0, 0.25);
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
+/* Nested menu panel ("New agent ›") and section headings. */
+.ctx-sub-anchor {
+  position: relative;
+}
+
+.ctx-caret {
+  margin-left: auto;
+  color: var(--text-dim);
+}
+
+.ctx-item-on {
+  background: var(--bg-alt);
+}
+
+.ctx-submenu {
+  position: absolute;
+  left: calc(100% - 2px);
+  top: -4px;
+  min-width: 190px;
+}
+
+.ctx-submenu-left {
+  left: auto;
+  right: calc(100% - 2px);
+}
+
+.ctx-heading {
+  padding: 6px 10px 3px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.split-btn-agent {
+  margin-left: 7px;
+  font-weight: 400;
+  opacity: 0.75;
 }

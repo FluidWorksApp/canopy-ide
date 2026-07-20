@@ -5,11 +5,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import * as ipc from "../ipc";
+import { getSettings } from "../settings";
 import { modelFor, monaco } from "../monaco-setup";
 import type { AgentCli, Project } from "../projects";
-import { AGENT_CLIS, AGENT_PATTERN, checkInstalledClis } from "../projects";
+import { AGENT_CLIS, AGENT_PATTERN, checkInstalledClis, startCommand } from "../projects";
 import {
   AgentIcon,
+  AgentsIcon,
+  CommitIcon,
+  PullRequestIcon,
+  TrackerIcon,
+  DiffIcon,
+  FilesIcon,
+  GitBranchIcon,
+  IssueIcon,
   CheckIcon,
   FailIcon,
   LiveDot,
@@ -42,6 +51,13 @@ import { TicketView } from "./TicketView";
 import { CommitView } from "./CommitView";
 import { BranchView } from "./BranchView";
 import { ticketBranch, ticketContext, ticketWorktree } from "../trackers";
+import { restorableFrom, type Restorable } from "../restorable";
+import {
+  forgetTerminals,
+  rememberTerminals,
+  rememberedTerminals,
+  type RememberedTerminal,
+} from "../terminalMemory";
 import { PrView } from "./PrView";
 
 type SideTab = "files" | "changes" | "git" | "trackers" | "agents";
@@ -113,6 +129,16 @@ interface PrSubTab {
 type SubTab = TermSubTab | FileSubTab | PrSubTab | TicketSubTab | CommitSubTab | BranchSubTab;
 
 const decoder = new TextDecoder();
+
+/** Compact relative age for a unix-seconds timestamp. */
+const ago = (secs?: number) => {
+  if (!secs) return "";
+  const d = Math.max(0, Math.floor(Date.now() / 1000) - secs);
+  if (d < 60) return "just now";
+  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
+  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
+  return `${Math.floor(d / 86400)}d ago`;
+};
 // Collision-proof ids: a module counter resets on hot-reload and produced
 // duplicate tab ids (closing one tab hit another).
 const tabId = () =>
@@ -120,12 +146,19 @@ const tabId = () =>
     ? crypto.randomUUID()
     : `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
-const RAIL_TABS: { key: SideTab; icon: string; title: string }[] = [
-  { key: "files", icon: "🗂", title: "Components & files" },
-  { key: "changes", icon: "±", title: "Session changes" },
-  { key: "git", icon: "⎇", title: "Git — branches, commit, sync, PRs" },
-  { key: "trackers", icon: "◎", title: "Issue trackers — GitHub, Linear, …" },
-  { key: "agents", icon: "✳", title: "Agents" },
+// Real icons, not glyphs: this is a 5-item column where shape is the only
+// thing distinguishing entries, and the Agents button used to be Claude's
+// asterisk — which read as "Claude" rather than "agents".
+const RAIL_TABS: {
+  key: SideTab;
+  Icon: (p: { size?: number; className?: string }) => React.ReactElement;
+  title: string;
+}[] = [
+  { key: "files", Icon: FilesIcon, title: "Components & files" },
+  { key: "changes", Icon: DiffIcon, title: "Session changes" },
+  { key: "git", Icon: GitBranchIcon, title: "Git — branches, commits, worktrees, PRs" },
+  { key: "trackers", Icon: IssueIcon, title: "Issues — GitHub, Linear, …" },
+  { key: "agents", Icon: AgentsIcon, title: "Agents" },
 ];
 
 interface ProjectViewProps {
@@ -162,6 +195,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   useEscape(() => setRootCreate(null), rootCreate != null);
   const [cliMenuOpen, setCliMenuOpen] = useState(false);
   const [installed, setInstalled] = useState<Record<string, boolean>>({});
+  const installedRef = useRef(installed);
+  installedRef.current = installed;
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
   const [palette, setPalette] = useState<PaletteMode | null>(null);
   // When set, the whole project's file surface (tree, quick-open, search, new
@@ -255,6 +290,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // worktree is activated — disagreeing with the panel's own terminal button.
   const componentsRef = useRef(components);
   componentsRef.current = components;
+  const rootsRef = useRef(roots);
+  rootsRef.current = roots;
+  // Set from the memo below; the restore loader reads it without having to
+  // re-subscribe every time an event arrives.
+  const liveSessionIdsRef = useRef<string[]>([]);
 
   // ---------- terminals ----------
 
@@ -266,6 +306,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         { id, type: "terminal", cwd, title: title ?? "shell", ptyId: null, command, icon, run },
       ]);
       setActiveTabId(id);
+      // Returned so callers that must talk to the new terminal (seeding an
+      // agent with an opening prompt) can find its pty once it spawns.
+      return id;
     },
     [],
   );
@@ -288,6 +331,89 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     setTabs((prev) => prev.map((t) => (t.id === id ? ({ ...t, ...patch } as SubTab) : t)));
   }, []);
 
+  // Restorable agent sessions, loaded while the launcher (empty state) is on
+  // screen — that is precisely the moment "you left three agents mid-thought"
+  // is worth saying, and it costs nothing the rest of the time.
+  const [restorable, setRestorable] = useState<Restorable[]>([]);
+  useEffect(() => {
+    if (tabs.length > 0 || !visible) return;
+    let live = true;
+    const load = () =>
+      void ipc
+        .sessionDigests()
+        .then((d) => {
+          if (!live) return;
+          const mine = d.filter((x) =>
+            rootsRef.current.some((r) => x.cwd === r || (x.cwd ?? "").startsWith(r + "/")),
+          );
+          setRestorable(restorableFrom(mine, statsRef.current, liveSessionIdsRef.current));
+        })
+        .catch(() => live && setRestorable([]));
+    load();
+    const t = setInterval(load, 5000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [tabs.length, visible]);
+
+  // Remember the terminal layout so it can be offered back on the empty
+  // state. Snapshotted on change rather than on unmount: a crash or a force
+  // quit never runs cleanup, and those are precisely the cases this exists
+  // for.
+  useEffect(() => {
+    const open: RememberedTerminal[] = tabs
+      .filter((t): t is TermSubTab => t.type === "terminal" && !t.exited)
+      .map((t) => ({
+        cwd: t.cwd,
+        command: t.command,
+        title: t.customTitle ?? t.title,
+        icon: t.icon,
+        run: t.run,
+      }));
+    rememberTerminals(project.id, open);
+  }, [tabs, project.id]);
+
+  const [remembered, setRemembered] = useState<RememberedTerminal[]>([]);
+  useEffect(() => {
+    if (tabs.length > 0 || !visible) return;
+    setRemembered(rememberedTerminals(project.id));
+  }, [tabs.length, visible, project.id]);
+
+  // A terminal running `claude` or `omp` is an agent, not a shell — listing it
+  // under "Terminals" was accurate about the mechanism and wrong about the
+  // thing. Split by what the command actually starts.
+  const rememberedAgents = remembered.filter((t) =>
+    AGENT_CLIS.some((c) => (t.command ?? "").startsWith(c.bin)),
+  );
+  const rememberedShells = remembered.filter(
+    (t) => !AGENT_CLIS.some((c) => (t.command ?? "").startsWith(c.bin)),
+  );
+  // An agent terminal whose directory already has a restorable session is
+  // redundant — that row restores the same work WITH its history, so offering
+  // "start it fresh" beside it is just a worse duplicate.
+  const freshAgents = rememberedAgents.filter(
+    (t) => !restorable.some((r) => r.cwd === t.cwd),
+  );
+
+  const reopenTerminal = useCallback(
+    (t: RememberedTerminal) => addTerminal(t.cwd, t.command, t.title, t.icon, t.run),
+    [addTerminal],
+  );
+
+  const resumeSession = useCallback(
+    (r: Restorable) => {
+      if (!r.command || !r.cwd) return;
+      addTerminal(
+        r.cwd,
+        r.command,
+        r.digest.agent ?? "agent",
+        AGENT_CLIS.find((c) => c.id === r.agentId)?.icon,
+      );
+    },
+    [addTerminal],
+  );
+
   // Worktrees for the ticket tab's cross-reference. Loaded when a ticket tab
   // opens rather than polled — the Issues panel keeps its own copy for rows.
   const [ticketWorktrees, setTicketWorktrees] = useState<ipc.WorktreeInfo[]>([]);
@@ -301,19 +427,47 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   /** Create or reuse the ticket's worktree and start an agent in it. The one
    *  implementation both the Issues panel and the ticket tab call. */
   const startTicketWork = useCallback(
-    async (ticket: ipc.TicketInfo) => {
+    async (ticket: ipc.TicketInfo, agentId?: string) => {
       const repo = await ticketRepo();
       if (!repo) {
         onNotice("No git repository in this project.");
         return;
       }
+      // The chosen agent, else the preference if it is installed, else the
+      // first installed CLI. Never a hardcoded name, and never one that
+      // isn't on the machine.
+      const installedClis = AGENT_CLIS.filter((c) => installedRef.current[c.bin]);
+      const preferred = getSettings().defaultAgent;
+      const agent =
+        agentId ||
+        (installedClis.find((c) => c.id === preferred) ?? installedClis[0] ?? AGENT_CLIS[0])
+          ?.id;
+      const cli = AGENT_CLIS.find((c) => c.id === agent);
+      const start = startCommand(agent, ticketContext(ticket));
+      if (!cli || !start) {
+        onNotice(`Unknown agent "${agent}".`);
+        return;
+      }
+      // A CLI with no verified prompt syntax launches bare and gets the
+      // ticket typed in once its TUI is up — the same two-write pattern the
+      // model switcher uses, so nothing is silently dropped.
+      const seed = (id: string) => {
+        if (!start.typePrompt) return;
+        const pty = tabsRef.current.find(
+          (t): t is TermSubTab => t.id === id && t.type === "terminal",
+        )?.ptyId;
+        if (pty == null) return;
+        void ipc.ptyWrite(pty, ticketContext(ticket));
+        setTimeout(() => void ipc.ptyWrite(pty, "\r"), 250);
+      };
       try {
         const worktrees = await ipc.gitWorktrees(repo).catch(() => [] as ipc.WorktreeInfo[]);
         const existing = ticketWorktree(ticket, worktrees);
-        const command = `claude '${ticketContext(ticket).replaceAll("'", `'\\''`)}'`;
+        const title = `${ticket.id} · ${cli.name}`;
         if (existing) {
-          addTerminal(existing.path, command, ticket.id, "✳");
+          const id = addTerminal(existing.path, start.command, title, cli.icon);
           setTicketWorktrees(worktrees);
+          if (id) setTimeout(() => seed(id), 2500);
           return;
         }
         const branch = ticketBranch(ticket);
@@ -322,7 +476,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         await ipc.gitWorktreeAdd(repo, path, branch, !branches.some((b) => b.name === branch));
         await ipc.workspaceAdd(path).catch(() => {});
         setTicketWorktrees(await ipc.gitWorktrees(repo).catch(() => worktrees));
-        addTerminal(path, command, ticket.id, "✳");
+        const id = addTerminal(path, start.command, title, cli.icon);
+        if (id) setTimeout(() => seed(id), 2500);
       } catch (err) {
         onNotice(`Couldn't start work on ${ticket.id}: ${String(err)}`);
       }
@@ -480,22 +635,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     };
     const next = cycle(1);
     const prev = cycle(-1);
-    // Cmd+1..8: the tab at that position in the same tabsRef order Cmd+W and
-    // Ctrl+Tab already use (see cycle() above) — not the grouped visual
-    // order the tab strip renders in (agent tabs first, then shells, then
-    // docs), which next/prev-tab don't follow either; matching that existing
-    // convention rather than introducing a second, inconsistent one.
-    // Cmd+9: the LAST tab regardless of how many are open, not literal
-    // position 9 — standard Chrome/Safari convention.
-    const jumpTo = (index: number) => () => {
-      const list = tabsRef.current;
-      if (list[index]) setActiveTabId(list[index].id);
+    // Settings asks for interactive CLI flows (gh auth login/logout, brew
+    // install) to run somewhere the user can actually answer prompts.
+    const runCommand = (e: Event) => {
+      const d = (e as CustomEvent).detail as { command?: string; title?: string };
+      const first = componentsRef.current[0];
+      if (d?.command && first) addTerminal(first.path, d.command, d.title ?? d.command, "⚙");
     };
-    const jumpToLast = () => {
-      const list = tabsRef.current;
-      if (list.length) setActiveTabId(list[list.length - 1].id);
-    };
-    const jumpHandlers = Array.from({ length: 8 }, (_, i) => jumpTo(i)).concat(jumpToLast);
+    window.addEventListener("canopy:run-command", runCommand);
     window.addEventListener("menu:close-tab", closeTabHandler);
     window.addEventListener("menu:new-terminal", newTerminalHandler);
     window.addEventListener("menu:toggle-sidebar", toggleSidebarHandler);
@@ -503,8 +650,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     window.addEventListener("menu:prev-tab", prev);
     window.addEventListener("menu:quick-open", quickOpen);
     window.addEventListener("menu:find-in-files", findInFiles);
-    jumpHandlers.forEach((h, i) => window.addEventListener(`menu:jump-tab-${i + 1}`, h));
     return () => {
+      window.removeEventListener("canopy:run-command", runCommand);
       window.removeEventListener("menu:close-tab", closeTabHandler);
       window.removeEventListener("menu:new-terminal", newTerminalHandler);
       window.removeEventListener("menu:toggle-sidebar", toggleSidebarHandler);
@@ -512,7 +659,6 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       window.removeEventListener("menu:prev-tab", prev);
       window.removeEventListener("menu:quick-open", quickOpen);
       window.removeEventListener("menu:find-in-files", findInFiles);
-      jumpHandlers.forEach((h, i) => window.removeEventListener(`menu:jump-tab-${i + 1}`, h));
     };
   }, [visible, project.components, addTerminal]);
 
@@ -789,6 +935,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     }
     return [...ids];
   }, [projectEvents]);
+  liveSessionIdsRef.current = liveSessionIds;
   const runningAgents = projectStats.flatMap((s) =>
     s.procs
       .filter((p) => AGENT_PATTERN.test(p.name))
@@ -1003,7 +1150,23 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       (t): t is TermSubTab =>
         t.type === "terminal" && !t.run && isAgentTab(t) && t.ptyId != null,
     )
-    .map((t) => ({ tabId: t.id, title: t.customTitle ?? t.title, ptyId: t.ptyId as number }));
+    .map((t) => {
+      // Which CLI is actually in there: the process tree first (it knows even
+      // when the agent was typed by hand into a plain shell), then the launch
+      // command as a fallback.
+      const procs = projectStats.find((s) => s.id === t.ptyId)?.procs ?? [];
+      const byProc = AGENT_CLIS.find((c) =>
+        procs.some((p) => p.name === c.bin || p.cmd.split(" ")[0]?.endsWith(c.bin)),
+      );
+      const byCommand = AGENT_CLIS.find((c) => (t.command ?? "").startsWith(c.bin));
+      return {
+        tabId: t.id,
+        title: t.customTitle ?? t.title,
+        ptyId: t.ptyId as number,
+        agentId: (byProc ?? byCommand)?.id ?? "agent",
+        dir: t.cwd.split("/").filter(Boolean).pop() ?? "",
+      };
+    });
 
   const mainArea = (
     <div className="project-main">
@@ -1063,13 +1226,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                     {tab.icon ?? "❯_"}
                   </span>
                 ) : tab.type === "pr" ? (
-                  <span className="tab-pr-icon">⑃</span>
+                  <PullRequestIcon size={12} className="tab-pr-icon" />
                 ) : tab.type === "ticket" ? (
-                  <span className="tab-ticket-icon">◎</span>
+                  <TrackerIcon id={tab.source} size={12} className="tab-ticket-icon" />
                 ) : tab.type === "commit" ? (
-                  <span className="tab-commit-icon">◇</span>
+                  <CommitIcon size={12} className="tab-commit-icon" />
                 ) : tab.type === "branch" ? (
-                  <span className="tab-branch-icon">⑂</span>
+                  <GitBranchIcon size={12} className="tab-branch-icon" />
                 ) : (
                   tab.file.external != null && <span className="tab-external">●</span>
                 )}
@@ -1323,6 +1486,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             source={activeTab.source}
             worktree={ticketWorktree(activeTab.ticket, ticketWorktrees)}
             agentTargets={agentTargets}
+          installed={installed}
             onStartNew={() => void startTicketWork(activeTab.ticket)}
             onSendToAgent={(target) =>
               sendTicketToAgent(target, ticketContext(activeTab.ticket))
@@ -1377,6 +1541,151 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 </button>
               ))}
             </div>
+            {(restorable.length > 0 ||
+              freshAgents.length > 0 ||
+              rememberedShells.length > 0) && (
+              <div className="resume-block">
+                <div className="resume-head">
+                  <span>
+                    Pick up where you left off
+                    <span className="badge">
+                      {restorable.length + freshAgents.length + rememberedShells.length}
+                    </span>
+                  </span>
+                  <span className="resume-head-actions">
+                    <button
+                      className="btn"
+                      title="Reopen everything below — agent sessions with their history, terminals with their command"
+                      onClick={() => {
+                        restorable.forEach(resumeSession);
+                        freshAgents.forEach(reopenTerminal);
+                        rememberedShells.forEach(reopenTerminal);
+                      }}
+                    >
+                      Restore all
+                    </button>
+                    <button
+                      className="btn-icon"
+                      title="Forget the remembered terminals for this project"
+                      onClick={() => {
+                        forgetTerminals(project.id);
+                        setRemembered([]);
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </span>
+                </div>
+                {restorable.length > 0 &&
+                  (freshAgents.length > 0 || rememberedShells.length > 0) && (
+                    <div className="resume-subhead">Agent sessions — resume with history</div>
+                  )}
+                {restorable.map((r) => (
+                  <div
+                    key={r.digest.session_id}
+                    className={`resume-row ${r.command ? "resume-row-click" : ""}`}
+                    title={`${r.agentId} · ${r.cwd}`}
+                    onClick={() => resumeSession(r)}
+                  >
+                    <AgentIcon id={r.agentId} size={14} />
+                    <span className="resume-prompt">
+                      {r.prompt || <em>(no prompt captured)</em>}
+                    </span>
+                    <span className="resume-dir">
+                      {r.cwd.split("/").filter(Boolean).pop()}
+                    </span>
+                    {r.digest.branch && (
+                      <span className="resume-branch">⑂ {r.digest.branch}</span>
+                    )}
+                    <span className="resume-age">{ago(r.digest.updated)}</span>
+                    {r.command ? (
+                      <button
+                        className="btn-mini btn-accent"
+                        title={r.command}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          resumeSession(r);
+                        }}
+                      >
+                        Resume
+                      </button>
+                    ) : (
+                      <span className="resume-unsupported">can't resume</span>
+                    )}
+                  </div>
+                ))}
+
+                {freshAgents.length > 0 && (
+                  <>
+                    <div className="resume-subhead">
+                      Agents — started fresh, no history to resume
+                    </div>
+                    {freshAgents.map((t, i) => {
+                      const cli = AGENT_CLIS.find((c) => (t.command ?? "").startsWith(c.bin));
+                      return (
+                        <div
+                          key={`a-${t.cwd}-${i}`}
+                          className="resume-row resume-row-click"
+                          title={`${t.command ?? ""} — ${t.cwd}`}
+                          onClick={() => reopenTerminal(t)}
+                        >
+                          <AgentIcon id={cli?.id ?? "agent"} size={14} />
+                          <span className="resume-prompt">{cli?.name ?? t.title}</span>
+                          <span className="resume-dir">
+                            {t.cwd.split("/").filter(Boolean).pop()}
+                          </span>
+                          <button
+                            className="btn-mini"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              reopenTerminal(t);
+                            }}
+                          >
+                            Start
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </>
+                )}
+
+                {rememberedShells.length > 0 && (
+                  <>
+                    {(restorable.length > 0 || freshAgents.length > 0) && (
+                      <div className="resume-subhead">
+                        Terminals — reopened running their command again
+                      </div>
+                    )}
+                    {rememberedShells.map((t, i) => (
+                      <div
+                        key={`t-${t.cwd}-${t.command ?? ""}-${i}`}
+                        className="resume-row resume-row-click"
+                        title={`${t.command ?? "shell"} — ${t.cwd}`}
+                        onClick={() => reopenTerminal(t)}
+                      >
+                        <TerminalIcon size={13} />
+                        <span className="resume-prompt">
+                          {t.command ? <code>{t.command}</code> : <em>shell</em>}
+                        </span>
+                        <span className="resume-dir">
+                          {t.cwd.split("/").filter(Boolean).pop()}
+                        </span>
+                        {t.run && <span className="resume-branch">run</span>}
+                        <button
+                          className="btn-mini"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            reopenTerminal(t);
+                          }}
+                        >
+                          Reopen
+                        </button>
+                      </div>
+                    ))}
+                  </>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -1628,6 +1937,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         <TicketsPanel
           components={project.components.map((c) => ({ label: c.label, path: c.path }))}
           agentTargets={agentTargets}
+          installed={installed}
           onStartWork={startTicketWork}
           onSendToAgent={sendTicketToAgent}
           onOpenTicket={openTicket}
@@ -1678,7 +1988,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 }
               }}
             >
-              {t.icon}
+              <t.Icon size={18} />
               {t.key === "changes" && changeCount > 0 && (
                 <span className="rail-badge">{Math.min(changeCount, 99)}</span>
               )}

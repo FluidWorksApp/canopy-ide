@@ -1090,6 +1090,121 @@ pub async fn git_commit_patch(
 }
 
 
+
+/// Whether the GitHub CLI is installed and who it is signed in as. Powers the
+/// Integrations settings section: "install it", "sign in", "signed in as X,
+/// sign out" are three different states and the UI has to tell them apart.
+#[derive(Serialize, Clone)]
+pub struct GhAuth {
+    pub installed: bool,
+    /// Resolved path, so the settings screen can show what it found.
+    pub path: String,
+    pub authenticated: bool,
+    /// Login name when signed in.
+    pub account: String,
+    pub host: String,
+    /// gh's own message when something is off — shown verbatim rather than
+    /// paraphrased, since it usually says exactly what to do.
+    pub detail: String,
+}
+
+#[tauri::command]
+pub async fn gh_auth() -> Result<GhAuth, String> {
+    let bin = gh_bin();
+    let installed = Command::new(&bin)
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !installed {
+        return Ok(GhAuth {
+            installed: false,
+            path: String::new(),
+            authenticated: false,
+            account: String::new(),
+            host: String::new(),
+            detail: String::new(),
+        });
+    }
+    // `gh api user` is the honest test: `gh auth status` reports a stored
+    // token even when it has been revoked server-side.
+    let mut cmd = Command::new(&bin);
+    cmd.env("GH_PROMPT_DISABLED", "1");
+    cmd.args(["api", "user", "--jq", ".login"]);
+    let (authenticated, account, detail) = match cmd.output() {
+        Ok(o) if o.status.success() => (
+            true,
+            String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            String::new(),
+        ),
+        Ok(o) => (
+            false,
+            String::new(),
+            String::from_utf8_lossy(&o.stderr).trim().lines().next().unwrap_or("").to_string(),
+        ),
+        Err(e) => (false, String::new(), e.to_string()),
+    };
+    let host = Command::new(&bin)
+        .args(["auth", "status"])
+        .output()
+        .ok()
+        .map(|o| {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            text.lines()
+                .find(|l| l.trim_start().starts_with("Logged in to"))
+                .and_then(|l| l.split_whitespace().nth(3).map(String::from))
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    Ok(GhAuth {
+        installed: true,
+        path: bin,
+        authenticated,
+        account,
+        host,
+        detail,
+    })
+}
+
+
+/// The repo's browsable web URL, derived from origin. Empty when there is no
+/// origin or it isn't an http/ssh remote we can rewrite (a local path, say).
+///
+/// Both remote spellings normalise to the same https base:
+///   git@github.com:owner/repo.git  ->  https://github.com/owner/repo
+///   https://github.com/owner/repo.git
+#[tauri::command]
+pub async fn git_remote_url(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+) -> Result<String, String> {
+    let top = repo_path(&state, &repo)?;
+    let raw = run(git(&top).args(["remote", "get-url", "origin"])).unwrap_or_default();
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(String::new());
+    }
+    let url = if let Some(rest) = raw.strip_prefix("git@") {
+        // host:owner/repo -> host/owner/repo
+        match rest.split_once(':') {
+            Some((host, path)) => format!("https://{host}/{path}"),
+            None => return Ok(String::new()),
+        }
+    } else if raw.starts_with("https://") || raw.starts_with("http://") {
+        raw.to_string()
+    } else if let Some(rest) = raw.strip_prefix("ssh://git@") {
+        format!("https://{rest}")
+    } else {
+        // file:// or a bare path — nothing to browse.
+        return Ok(String::new());
+    };
+    Ok(url.trim_end_matches('/').trim_end_matches(".git").to_string())
+}
+
 // ---------- work audit: what did the agents leave behind ----------
 //
 // The question this answers is NOT "which branches exist" — it is "which of

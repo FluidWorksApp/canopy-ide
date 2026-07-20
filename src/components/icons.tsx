@@ -205,6 +205,146 @@ export const BRAND_ICONS: Record<string, (p: IconProps) => ReactElement> = {
   omp: OmpIcon,
 };
 
+
+// ---------- sidebar rail ----------
+// One distinct silhouette each: these sit in a 5-icon column where the only
+// way to tell them apart at 18px is shape. Deliberately NOT reusing any agent
+// brand mark — the Agents rail button used Claude's asterisk, which read as
+// "Claude" rather than "agents".
+
+/** Files: a plain folder. Detail inside it (document lines, a fold) turns to
+ *  mush at rail size — the silhouette is the whole signal. */
+export function FilesIcon({ size = 18, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M3 8a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.5.7l1.2 1.3H19a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+    </svg>
+  );
+}
+
+/** Changes: an added line over a removed line — the shape of a diff hunk.
+ *  The previous attempt combined a plus, a minus and a chevron and read as a
+ *  shell prompt at 17px; two marks and two rules is all that survives. */
+export function DiffIcon({ size = 18, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M4 8h4M6 6v4" />
+      <path d="M11.5 8H20" />
+      <path d="M4 16h4" />
+      <path d="M11.5 16H20" />
+    </svg>
+  );
+}
+
+/** Git: the branch fork everyone recognises. */
+export function GitBranchIcon({ size = 18, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <circle cx="7" cy="5.5" r="2.3" />
+      <circle cx="7" cy="18.5" r="2.3" />
+      <circle cx="17" cy="9" r="2.3" />
+      <path d="M7 7.8v8.4" />
+      <path d="M17 11.3c0 3.6-3.3 4.7-7 5" />
+    </svg>
+  );
+}
+
+/** Issues: the circle-dot every tracker uses for an open issue. */
+export function IssueIcon({ size = 18, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <circle cx="12" cy="12" r="8.5" />
+      <circle cx="12" cy="12" r="2.6" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+/** Agents: a bot head. Distinct from every CLI brand mark on purpose. */
+export function AgentsIcon({ size = 18, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <rect x="4" y="8.5" width="16" height="11" rx="3.5" />
+      <path d="M12 8.5V5" />
+      <circle cx="12" cy="3.6" r="1.4" fill="currentColor" stroke="none" />
+      <circle cx="9" cy="14" r="1.45" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="14" r="1.45" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+
+/** A commit: a node on a line, the way every git UI draws one. */
+export function CommitIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <circle cx="12" cy="12" r="3.5" />
+      <path d="M12 3v5.5M12 15.5V21" />
+    </svg>
+  );
+}
+
+/** A pull request: a branch merging back. */
+export function PullRequestIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <circle cx="7" cy="6" r="2.2" />
+      <circle cx="7" cy="18" r="2.2" />
+      <circle cx="17" cy="18" r="2.2" />
+      <path d="M7 8.2v7.6" />
+      <path d="M17 15.8V11a2.5 2.5 0 0 0-2.5-2.5H11" />
+      <path d="m12.8 6.4-1.9 2.1 1.9 2.1" strokeWidth={1.6} />
+    </svg>
+  );
+}
+
+// ---------- issue tracker brand marks ----------
+
+/** GitHub's Octocat mark. */
+export function GitHubIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="currentColor"
+      className={className}
+      aria-hidden
+    >
+      <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z" />
+    </svg>
+  );
+}
+
+/** Linear's mark. */
+export function LinearIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 100 100"
+      fill="currentColor"
+      className={className}
+      aria-hidden
+    >
+      <path d="M1.2 61.5a49 49 0 0 0 37.3 37.3L1.2 61.5Z" />
+      <path d="M.1 47.9 52.1 99.9a49.5 49.5 0 0 0 10.4-2L2.1 37.5a49.5 49.5 0 0 0-2 10.4Z" />
+      <path d="M6 27.2 72.8 94a50 50 0 0 0 7.6-5.9L11.9 19.6A50 50 0 0 0 6 27.2Z" />
+      <path d="M18.6 12.6a49.9 49.9 0 1 1 68.8 68.8L18.6 12.6Z" />
+    </svg>
+  );
+}
+
+/** A tracker's mark by registry id — same shape as AgentIcon. */
+export const TRACKER_ICONS: Record<string, (p: IconProps) => ReactElement> = {
+  github: GitHubIcon,
+  linear: LinearIcon,
+};
+
+export function TrackerIcon({ id, size = 14, className }: IconProps & { id: string }) {
+  const Brand = TRACKER_ICONS[id];
+  return Brand ? <Brand size={size} className={className} /> : <IssueIcon size={size} className={className} />;
+}
+
 // Render an agent CLI's brand mark by registry id, falling back to a terminal
 // glyph for CLIs we don't have a mark for.
 export function AgentIcon({ id, size = 14, className }: IconProps & { id: string }) {

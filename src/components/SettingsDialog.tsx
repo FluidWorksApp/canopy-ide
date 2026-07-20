@@ -3,7 +3,7 @@
 // long labels into slivers and pushed wide control groups out of the modal).
 // Skins render as preview cards — a palette is a thing you look at, not a
 // word you read.
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   applyTheme,
   getSettings,
@@ -15,9 +15,12 @@ import {
 } from "../settings";
 import { useEscape } from "../useEscape";
 import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
-import { ghAvailable } from "../ipc";
+import * as ipc from "../ipc";
+import { availableMonoFonts, fontLabel, fontStack } from "../fonts";
+import { AgentIcon, TrackerIcon } from "./icons";
+import { AGENT_CLIS } from "../projects";
 
-export type SettingsTab = "appearance" | "editor" | "terminal" | "guard" | "integrations";
+export type SettingsTab = "appearance" | "agents" | "editor" | "terminal" | "guard" | "integrations";
 
 interface SettingsDialogProps {
   onClose: () => void;
@@ -26,6 +29,7 @@ interface SettingsDialogProps {
 
 const TABS: { id: SettingsTab; label: string }[] = [
   { id: "appearance", label: "Appearance" },
+  { id: "agents", label: "Agents" },
   { id: "editor", label: "Editor" },
   { id: "terminal", label: "Terminal" },
   { id: "guard", label: "Process guard" },
@@ -77,10 +81,32 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
   const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
   const [keysVersion, setKeysVersion] = useState(0);
-  const [ghOk, setGhOk] = useState<boolean | null>(null);
+  const [gh, setGh] = useState<ipc.GhAuth | null>(null);
+  const [ghBusy, setGhBusy] = useState(false);
+  const fonts = availableMonoFonts();
+
+  const refreshGh = useCallback(() => {
+    setGhBusy(true);
+    void ipc
+      .ghAuth()
+      .then(setGh)
+      .catch(() => setGh(null))
+      .finally(() => setGhBusy(false));
+  }, []);
   useEffect(() => {
-    if (tab === "integrations" && ghOk === null) void ghAvailable().then(setGhOk);
-  }, [tab, ghOk]);
+    if (tab === "integrations") refreshGh();
+  }, [tab, refreshGh]);
+
+  /** gh's sign-in and sign-out are interactive (device code, browser
+   *  hand-off, confirmations) so they belong in a real terminal the user can
+   *  watch and answer — not a silent subprocess. ProjectView owns terminals;
+   *  this asks it to open one. */
+  const runInTerminal = (command: string, title: string) => {
+    window.dispatchEvent(
+      new CustomEvent("canopy:run-command", { detail: { command, title } }),
+    );
+    onClose();
+  };
   const [s, setS] = useState<Settings>(() => getSettings());
   useEscape(onClose, true);
 
@@ -140,7 +166,9 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   <div className="skin-grid">
                     {THEMES.map((t) => {
                       const p = SKIN_PREVIEWS[t.id];
-                      const accent = t.id === "custom" ? s.customAccent : p.accent;
+                      // Preview the accent the skin would actually render
+                      // with — the user's override wins on every skin now.
+                      const accent = s.customAccent || p.accent;
                       return (
                         <button
                           key={t.id}
@@ -160,31 +188,91 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 </Item>
                 <Item
                   name="Accent color"
-                  desc="Your own highlight color. Picking one switches to the Custom skin."
+                  desc="Applies on top of whichever skin is selected — including Auto and Daylight. Leave it unset to use the skin's own accent."
                 >
                   <div className="set-inline">
                     <input
                       type="color"
-                      value={s.customAccent}
+                      value={s.customAccent || "#7aa2f7"}
                       onChange={(e) => {
-                        patch({ customAccent: e.target.value, theme: "custom" });
-                        applyTheme("custom", e.target.value);
+                        patch({ customAccent: e.target.value });
+                        applyTheme(s.theme, e.target.value);
                       }}
                     />
-                    <code className="set-hexcode">{s.customAccent}</code>
+                    <code className="set-hexcode">
+                      {s.customAccent || "skin default"}
+                    </code>
+                    {s.customAccent && (
+                      <button
+                        className="btn"
+                        onClick={() => {
+                          patch({ customAccent: "" });
+                          applyTheme(s.theme, "");
+                        }}
+                      >
+                        Use skin colour
+                      </button>
+                    )}
                   </div>
+                </Item>
+              </>
+            )}
+
+            {tab === "agents" && (
+              <>
+                <Item
+                  name="Default agent"
+                  desc="Which CLI starts work when you hand it a ticket. You can always pick a different one at the moment you start — this is just what the primary button does."
+                >
+                  <div className="skin-grid">
+                    {AGENT_CLIS.map((cli) => (
+                      <button
+                        key={cli.id}
+                        className={`skin-card ${s.defaultAgent === cli.id ? "skin-card-active" : ""}`}
+                        onClick={() => patch({ defaultAgent: cli.id })}
+                      >
+                        <span className="agent-card-mark">
+                          <AgentIcon id={cli.id} size={22} />
+                        </span>
+                        <span className="skin-name">{cli.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                </Item>
+                <Item
+                  name="Opening context"
+                  desc="Every agent is handed the ticket's id, title and URL, and asked to read it, look around the code, and propose a plan before working. Agents whose CLI takes an opening prompt get it as an argument; the rest have it typed in once their interface is up."
+                >
+                  <span className="set-item-desc">
+                    Canopy never commits, pushes or opens a PR on your behalf.
+                  </span>
                 </Item>
               </>
             )}
 
             {tab === "editor" && (
               <>
-                <Item name="Font family" desc="Applies to newly opened files.">
-                  <input
+                <Item name="Font family" desc="Monospace fonts found on this machine. Applies to newly opened files.">
+                  <select
                     className="set-wide"
-                    value={s.editorFontFamily}
-                    onChange={(e) => patch({ editorFontFamily: e.target.value })}
-                  />
+                    value={fontLabel(s.editorFontFamily)}
+                    onChange={(e) => patch({ editorFontFamily: fontStack(e.target.value) })}
+                  >
+                    <option value="">System default</option>
+                    {fonts.map((f) => (
+                      <option key={f} value={f}>
+                        {f}
+                      </option>
+                    ))}
+                    {/* A font stored from another machine (or an older text
+                        box) that isn't installed here — keep it selectable
+                        rather than silently switching them off it. */}
+                    {fontLabel(s.editorFontFamily) && !fonts.includes(fontLabel(s.editorFontFamily)) && (
+                      <option value={fontLabel(s.editorFontFamily)}>
+                        {fontLabel(s.editorFontFamily)} (not installed)
+                      </option>
+                    )}
+                  </select>
                 </Item>
                 <Item name="Font size">
                   <input
@@ -201,12 +289,27 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
 
             {tab === "terminal" && (
               <>
-                <Item name="Font family" desc="Applies to newly opened terminals.">
-                  <input
+                <Item name="Font family" desc="Monospace fonts found on this machine. Applies to newly opened terminals.">
+                  <select
                     className="set-wide"
-                    value={s.terminalFontFamily}
-                    onChange={(e) => patch({ terminalFontFamily: e.target.value })}
-                  />
+                    value={fontLabel(s.terminalFontFamily)}
+                    onChange={(e) => patch({ terminalFontFamily: fontStack(e.target.value) })}
+                  >
+                    <option value="">System default</option>
+                    {fonts.map((f) => (
+                      <option key={f} value={f}>
+                        {f}
+                      </option>
+                    ))}
+                    {/* A font stored from another machine (or an older text
+                        box) that isn't installed here — keep it selectable
+                        rather than silently switching them off it. */}
+                    {fontLabel(s.terminalFontFamily) && !fonts.includes(fontLabel(s.terminalFontFamily)) && (
+                      <option value={fontLabel(s.terminalFontFamily)}>
+                        {fontLabel(s.terminalFontFamily)} (not installed)
+                      </option>
+                    )}
+                  </select>
                 </Item>
                 <Item name="Font size">
                   <input
@@ -279,7 +382,10 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
               <>
                 {TRACKERS.map((p) => (
                   <div key={p.id} className="set-item">
-                    <div className="set-item-name">{p.name}</div>
+                    <div className="set-item-name set-inline">
+                      <TrackerIcon id={p.id} size={14} />
+                      {p.name}
+                    </div>
                     {p.config ? (
                       trackerKey(p.id) ? (
                         <>
@@ -326,13 +432,75 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                         </>
                       )
                     ) : (
-                      <div className="set-item-desc">
-                        {ghOk == null
-                          ? "Checking for the GitHub CLI…"
-                          : ghOk
-                            ? "Connected through your GitHub CLI (gh) — nothing to configure."
-                            : "Needs the GitHub CLI: brew install gh, then gh auth login in a terminal."}
-                      </div>
+                      // GitHub has no key of ours — it rides on the user's own
+                      // gh CLI, so this section manages that instead: install
+                      // it, sign in, or show who is signed in with a way out.
+                      <>
+                        <div className="set-item-desc">
+                          {!gh
+                            ? ghBusy
+                              ? "Checking the GitHub CLI…"
+                              : "Couldn't check the GitHub CLI."
+                            : !gh.installed
+                              ? "The GitHub CLI (gh) isn't installed. Canopy uses it for issues and pull requests — no token of its own."
+                              : gh.authenticated
+                                ? `Signed in as ${gh.account}${gh.host ? ` on ${gh.host}` : ""} · ${gh.path}`
+                                : `Installed at ${gh.path}, but not signed in.${gh.detail ? ` ${gh.detail}` : ""}`}
+                        </div>
+                        <div className="set-item-control set-inline">
+                          {gh && !gh.installed && (
+                            <button
+                              className="btn btn-accent"
+                              onClick={() =>
+                                runInTerminal("brew install gh", "install gh")
+                              }
+                            >
+                              Install with Homebrew
+                            </button>
+                          )}
+                          {gh?.installed && !gh.authenticated && (
+                            <button
+                              className="btn btn-accent"
+                              onClick={() =>
+                                runInTerminal("gh auth login", "gh auth login")
+                              }
+                            >
+                              Sign in to GitHub
+                            </button>
+                          )}
+                          {gh?.authenticated && (
+                            <>
+                              <button
+                                className="btn"
+                                onClick={() =>
+                                  runInTerminal(
+                                    "gh auth login",
+                                    "gh auth login",
+                                  )
+                                }
+                              >
+                                Switch account
+                              </button>
+                              <button
+                                className="btn"
+                                onClick={() =>
+                                  runInTerminal("gh auth logout", "gh auth logout")
+                                }
+                              >
+                                Sign out
+                              </button>
+                            </>
+                          )}
+                          <button className="btn" disabled={ghBusy} onClick={refreshGh}>
+                            {ghBusy ? "Checking…" : "Recheck"}
+                          </button>
+                        </div>
+                        <div className="set-item-desc set-note">
+                          Sign-in runs in a terminal because GitHub's flow is
+                          interactive — Canopy never sees the token; gh stores
+                          it in your keychain.
+                        </div>
+                      </>
                     )}
                   </div>
                 ))}

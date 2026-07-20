@@ -118,10 +118,8 @@ export function ticketContext(ticket: ipc.TicketInfo): string {
   );
 }
 
-/** Shell command that starts a fresh agent seeded with the ticket. */
-export function ticketCommand(ticket: ipc.TicketInfo): string {
-  return `claude '${ticketContext(ticket).replaceAll("'", `'\\''`)}'`;
-}
+// Starting an agent on a ticket lives in projects.ts (startCommand) so every
+// registered CLI can do it — this module used to hardcode `claude`.
 
 // ---------- unified status ----------
 // Every tracker's states fold into four buckets so the panel can present ONE

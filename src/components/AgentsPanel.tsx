@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
 import { AGENT_PATTERN, restoreCommand } from "../projects";
+import { restorableFrom } from "../restorable";
 import type { PendingItem } from "../notifications";
 
 interface AgentsPanelProps {
@@ -128,38 +129,10 @@ export function AgentsPanel({
   // ID", because the transcript is only created once there is something to
   // record. Listing those would offer a button that can only fail, on sessions
   // with nothing worth restoring anyway.
+  // Shared with the project's empty state — one definition of "restorable",
+  // so the two surfaces can never disagree about what is offered.
   const restorable = useMemo(
-    () => {
-      // Having spoken is not the same as being alive. liveSessionIds only knows
-      // which sessions emitted a hook event during this app run, so one that has
-      // since exited stays "live" on that signal forever and never offers its
-      // Restore button. A session whose terminal is gone is dead, whatever it
-      // said earlier: `surface` is the pty id the hook recorded from our spawn
-      // env, so this is an identity check, and a pty absent from stats is
-      // genuinely gone because the monitor emits from the live session map.
-      // Sessions with no surface started outside a Canopy terminal and can only
-      // be judged by the event signal.
-      const alivePtys = new Set(stats.map((s) => String(s.id)));
-      const dead = (d: ipc.SessionDigest) => !!d.surface && !alivePtys.has(d.surface);
-      return digests
-        .filter(
-          (d) =>
-            d.session_id &&
-            // `<agent>-pty<N>` ids are synthesized by the helper for CLIs that
-            // can't report a session identity (aider's bare notification
-            // command). They're terminal-scoped signals, not conversations —
-            // nothing to resume.
-            !/-pty\d*$/.test(d.session_id) &&
-            (dead(d) || !liveSessionIds.includes(d.session_id)) &&
-            // The prompt requirement is CLAUDE-specific: claude writes no
-            // transcript until the first prompt, so a promptless claude
-            // session can only fail to resume. Other agents capture prompts
-            // best-effort (their hook payloads' field names vary) — an empty
-            // list there must not hide a real conversation.
-            ((d.prompts?.length ?? 0) > 0 || (d.agent ?? "claude") !== "claude"),
-        )
-        .sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0));
-    },
+    () => restorableFrom(digests, stats, liveSessionIds).map((r) => r.digest),
     [digests, stats, liveSessionIds.join(",")],
   );
 

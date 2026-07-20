@@ -7,6 +7,7 @@ import { DiffView, DiffModeEnum } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import * as ipc from "../ipc";
 import { splitPatch } from "./PrView";
+import { GitBranchIcon } from "./icons";
 
 interface BranchViewProps {
   repo: string;
@@ -34,6 +35,18 @@ export function BranchView({
   const [pane, setPane] = useState<Pane>(branch.dirty > 0 ? "uncommitted" : "diff");
   const [patch, setPatch] = useState<ipc.CommitPatch | null>(null);
   const [split, setSplit] = useState(true);
+  const [remote, setRemote] = useState("");
+
+  useEffect(() => {
+    let live = true;
+    void ipc
+      .gitRemoteUrl(repo)
+      .then((u) => live && setRemote(u))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [repo]);
 
   // Metadata first (one `git log`, instant); the patch is fetched per pane so
   // the heavy call only runs for the view actually being looked at.
@@ -69,7 +82,7 @@ export function BranchView({
     <div className="ticket-view">
       <div className="ticket-view-head">
         <div className="ticket-view-title">
-          <span className="ticket-view-id">⑂</span>
+          <GitBranchIcon size={15} className="ticket-view-mark" />
           <span>{branch.branch}</span>
         </div>
         <div className="ticket-view-meta">
@@ -88,6 +101,22 @@ export function BranchView({
               : "no worktree"}
           </span>
           <span className="status-spacer" />
+          {remote && (
+            <>
+              <a className="btn" href={`${remote}/tree/${branch.branch}`}>
+                Open on remote
+              </a>
+              {!branch.merged && (
+                <a
+                  className="btn"
+                  href={`${remote}/compare/${branch.branch}?expand=1`}
+                  title="Open a pull request for this branch"
+                >
+                  Open PR
+                </a>
+              )}
+            </>
+          )}
           {branch.worktree && !branch.prunable && (
             <button
               className="btn"

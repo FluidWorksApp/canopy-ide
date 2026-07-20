@@ -168,7 +168,21 @@ export interface AgentCli {
    * watching. See restoreCommand().
    */
   resume?: (sessionId: string) => string;
+
+  /**
+   * Command that starts the CLI with an opening prompt already in hand.
+   *
+   * Same rule as `resume`: only fill this in where the syntax is verified,
+   * because a wrong flag doesn't error — it starts a session that silently
+   * ignores the prompt, or worse, runs headless and exits. When this is
+   * absent Canopy launches the CLI bare and types the prompt into it once
+   * the TUI is up, which works everywhere but is a beat slower.
+   */
+  prompt?: (text: string) => string;
 }
+
+/** Single-quote a string for a POSIX shell. */
+export const shellQuote = (text: string) => `'${text.replaceAll("'", `'\\''`)}'`;
 
 export const AGENT_CLIS: AgentCli[] = [
   {
@@ -179,6 +193,9 @@ export const AGENT_CLIS: AgentCli[] = [
     install: "npm install -g @anthropic-ai/claude-code",
     // Verified: `-r, --resume [value]  Resume a conversation by session ID`.
     resume: (id) => `claude --resume ${id}`,
+    // Verified: claude takes the opening prompt as a positional argument and
+    // stays interactive.
+    prompt: (text) => `claude ${shellQuote(text)}`,
   },
   {
     id: "codex",
@@ -189,6 +206,9 @@ export const AGENT_CLIS: AgentCli[] = [
     // Verified: `codex resume <SESSION_ID>` — subcommand, id is positional and
     // takes a UUID or a session name.
     resume: (id) => `codex resume ${id}`,
+    // Verified: codex takes a positional prompt and stays interactive.
+    // (`codex exec` is the headless one — deliberately not that.)
+    prompt: (text) => `codex ${shellQuote(text)}`,
   },
   {
     id: "amp",
@@ -271,6 +291,26 @@ export async function checkInstalledClis(): Promise<Record<string, boolean>> {
  * opens an interactive picker that hangs forever in a PTY nobody is watching.
  * Both would look like "restore worked" while doing something else entirely.
  */
+/**
+ * How to start `agentId` working on `text`.
+ *
+ * Returns the command to run, plus whether the prompt still needs typing in
+ * afterwards. Every agent can be started this way — the ones without verified
+ * prompt syntax simply launch bare and get the text typed into them, rather
+ * than being excluded from the feature (which is what hardcoding one CLI
+ * amounted to).
+ */
+export function startCommand(
+  agentId: string,
+  text: string,
+): { command: string; typePrompt: boolean } | null {
+  const cli = AGENT_CLIS.find((c) => c.id === agentId);
+  if (!cli) return null;
+  return cli.prompt
+    ? { command: cli.prompt(text), typePrompt: false }
+    : { command: cli.bin, typePrompt: true };
+}
+
 export function restoreCommand(agentId: string, sessionId: string): string | null {
   const id = sessionId.trim();
   if (!id) return null;

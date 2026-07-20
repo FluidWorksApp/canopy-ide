@@ -7,6 +7,7 @@
 // auto-PR.
 import { useCallback, useEffect, useState } from "react";
 import * as ipc from "../ipc";
+import { agentMenuItems } from "../agentMenu";
 import {
   STATUS_LABELS,
   STATUS_ORDER,
@@ -16,13 +17,17 @@ import {
   ticketWorktree,
   unifiedStatus,
 } from "../trackers";
-import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
-import { PlayIcon } from "./icons";
+import { ContextMenu, useContextMenu } from "./ContextMenu";
+import { PlayIcon, TrackerIcon } from "./icons";
 
 export interface AgentTarget {
   tabId: string;
   title: string;
   ptyId: number;
+  /** Registry id of the CLI running in it, for its brand mark. */
+  agentId: string;
+  /** Directory it is working in — what tells two claudes apart. */
+  dir: string;
 }
 
 interface TicketsPanelProps {
@@ -31,7 +36,9 @@ interface TicketsPanelProps {
   agentTargets: AgentTarget[];
   /** Create/reuse the ticket's worktree and start an agent there. Owned by
    *  ProjectView so the ticket tab and this panel do the identical thing. */
-  onStartWork: (ticket: ipc.TicketInfo) => Promise<void>;
+  onStartWork: (ticket: ipc.TicketInfo, agentId?: string) => Promise<void>;
+  /** Which agent CLIs are on PATH — the list offered for a new agent. */
+  installed: Record<string, boolean>;
   /** Type `text` into an already-running agent terminal and focus it. */
   onSendToAgent: (target: AgentTarget, text: string) => void;
   /** Open the ticket as a tab in the main area. */
@@ -44,10 +51,21 @@ interface SourcedTicket extends ipc.TicketInfo {
   source: string;
 }
 
+/** Last good fetch per repo, kept for the run. Refetching a tracker takes a
+ *  network round trip (and a `gh` subprocess), and throwing the previous
+ *  result away first meant every refresh — including simply re-entering the
+ *  panel — flashed an empty list and lost scroll position. Render the cache
+ *  immediately, then replace it when the real answer lands. */
+const LAST_GOOD = new Map<
+  string,
+  { tickets: SourcedTicket[]; connected: string[]; worktrees: ipc.WorktreeInfo[] }
+>();
+
 export function TicketsPanel({
   components,
   agentTargets,
   onStartWork,
+  installed,
   onSendToAgent,
   onOpenTicket,
   onOpenIntegrations,
@@ -57,6 +75,9 @@ export function TicketsPanel({
   const [worktrees, setWorktrees] = useState<ipc.WorktreeInfo[]>([]);
   const [tickets, setTickets] = useState<SourcedTicket[]>([]);
   const [connected, setConnected] = useState<string[]>([]);
+  /** True only when there is nothing cached to show — a genuinely empty
+   *  first load, not a background refresh. */
+  const [cold, setCold] = useState(true);
   const [errors, setErrors] = useState<string[]>([]);
   const [offSources, setOffSources] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
@@ -76,11 +97,32 @@ export function TicketsPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 
+  // Paint whatever we last saw for this repo before any request goes out.
+  useEffect(() => {
+    if (!repo) return;
+    const cached = LAST_GOOD.get(repo);
+    if (cached) {
+      setTickets(cached.tickets);
+      setConnected(cached.connected);
+      setWorktrees(cached.worktrees);
+      setCold(false);
+    } else {
+      setCold(true);
+    }
+  }, [repo]);
+
   const load = useCallback(async () => {
     if (!repo) return;
     setBusy(true);
     try {
-      void ipc.gitWorktrees(repo).then(setWorktrees).catch(() => setWorktrees([]));
+      void ipc
+        .gitWorktrees(repo)
+        .then((w) => {
+          setWorktrees(w);
+          const prev = LAST_GOOD.get(repo);
+          if (prev) LAST_GOOD.set(repo, { ...prev, worktrees: w });
+        })
+        .catch(() => {});
       const all: SourcedTicket[] = [];
       const on: string[] = [];
       const errs: string[] = [];
@@ -98,8 +140,20 @@ export function TicketsPanel({
         }),
       );
       setConnected(on);
-      setTickets(all);
       setErrors(errs);
+      // A failed tracker returns nothing; keeping the stale list beats
+      // blanking the panel because the network blipped. Only replace when
+      // this fetch actually produced something, or when everything that is
+      // connected genuinely reported zero.
+      if (all.length > 0 || errs.length === 0) {
+        setTickets(all);
+        LAST_GOOD.set(repo, {
+          tickets: all,
+          connected: on,
+          worktrees: LAST_GOOD.get(repo)?.worktrees ?? [],
+        });
+      }
+      setCold(false);
     } finally {
       setBusy(false);
     }
@@ -115,38 +169,30 @@ export function TicketsPanel({
     return () => window.removeEventListener("canopy:trackers-changed", onChange);
   }, [load]);
 
-  const startNew = async (ticket: SourcedTicket) => {
+  const startNew = async (ticket: SourcedTicket, agentId?: string) => {
     if (starting) return;
     setStarting(ticket.id);
     try {
-      await onStartWork(ticket);
+      await onStartWork(ticket, agentId);
       if (repo) void ipc.gitWorktrees(repo).then(setWorktrees).catch(() => {});
     } finally {
       setStarting(null);
     }
   };
 
-  /** ▶ menu: hand the ticket to a running agent, or spin up a new one. */
+  /** ▶ opens the shared agent menu: running agents, then New agent ›. */
   const openSendMenu = (e: React.MouseEvent, ticket: SourcedTicket) => {
     const wt = ticketWorktree(ticket, worktrees);
-    const items: MenuItem[] = [
-      {
-        label: wt
-          ? `New agent in worktree (${wt.branch})`
-          : `New agent in worktree ${ticketBranch(ticket)}`,
-        onClick: () => void startNew(ticket),
-      },
-    ];
-    if (agentTargets.length > 0) {
-      items.push({ label: "", separator: true });
-      for (const target of agentTargets) {
-        items.push({
-          label: `Send to ${target.title}`,
-          onClick: () => onSendToAgent(target, ticketContext(ticket)),
-        });
-      }
-    }
-    menu.open(e, items);
+    menu.open(
+      e,
+      agentMenuItems({
+        targets: agentTargets,
+        installed,
+        newLabel: wt ? `New agent in ${wt.branch}` : `New agent in ${ticketBranch(ticket)}`,
+        onSend: (t) => onSendToAgent(t, ticketContext(ticket)),
+        onStart: (agentId) => void startNew(ticket, agentId),
+      }),
+    );
   };
 
   const visible = tickets.filter((t) => !offSources.has(t.source));
@@ -164,7 +210,11 @@ export function TicketsPanel({
       )}
       <div className="side-panel-head">
         <span>Issues</span>
-        <button className="btn-icon" title="Refresh" onClick={() => void load()}>
+        <button
+          className={`btn-icon ${busy ? "ticket-refreshing" : ""}`}
+          title={busy ? "Refreshing…" : "Refresh"}
+          onClick={() => void load()}
+        >
           ↻
         </button>
       </div>
@@ -186,6 +236,7 @@ export function TicketsPanel({
               })
             }
           >
+            <TrackerIcon id={id} size={11} />
             {sourceName(id)}
           </button>
         ))}
@@ -221,7 +272,7 @@ export function TicketsPanel({
         </div>
       ))}
 
-      {connected.length === 0 && !busy ? (
+      {connected.length === 0 && !busy && !cold ? (
         <div className="tree-empty">
           No trackers connected.{" "}
           <a
@@ -234,8 +285,8 @@ export function TicketsPanel({
             Connect one in Settings → Integrations.
           </a>
         </div>
-      ) : groups.length === 0 && !busy ? (
-        <div className="tree-empty">No active issues.</div>
+      ) : groups.length === 0 ? (
+        <div className="tree-empty">{cold && busy ? "Loading issues…" : "No active issues."}</div>
       ) : (
         groups.map((g) => (
           <div key={g.status}>
@@ -255,7 +306,11 @@ export function TicketsPanel({
                   onClick={() => onOpenTicket(t, t.source)}
                 >
                   <div className="ticket-main">
-                    <span className={`ticket-src ticket-src-${t.source}`} title={sourceName(t.source)} />
+                    <TrackerIcon
+                      id={t.source}
+                      size={12}
+                      className={`ticket-src ticket-src-${t.source}`}
+                    />
                     <span className="ticket-id">{t.id}</span>
                     <span className="ticket-title">{t.title}</span>
                   </div>

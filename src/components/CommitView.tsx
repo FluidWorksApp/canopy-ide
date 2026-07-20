@@ -14,8 +14,25 @@ interface CommitViewProps {
   onNotice: (msg: string) => void;
 }
 
+/** Turn bare URLs in a commit message into real links. Commit messages carry
+ *  PR and issue URLs constantly and they were plain text — the one place in
+ *  the app where a visible URL wasn't clickable. */
+function linkify(text: string) {
+  const parts = text.split(/(https?:\/\/[^\s)\]]+)/g);
+  return parts.map((p, i) =>
+    /^https?:\/\//.test(p) ? (
+      <a key={i} href={p}>
+        {p}
+      </a>
+    ) : (
+      p
+    ),
+  );
+}
+
 export function CommitView({ repo, hash, onNotice }: CommitViewProps) {
   const [detail, setDetail] = useState<ipc.CommitDetail | null>(null);
+  const [remote, setRemote] = useState("");
   const [patch, setPatch] = useState<ipc.CommitPatch | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [split, setSplit] = useState(true);
@@ -36,6 +53,10 @@ export function CommitView({ repo, hash, onNotice }: CommitViewProps) {
       .gitCommitPatch(repo, hash)
       .then((p) => live && setPatch(p))
       .catch((e) => live && setError(String(e)));
+    void ipc
+      .gitRemoteUrl(repo)
+      .then((u) => live && setRemote(u))
+      .catch(() => {});
     return () => {
       live = false;
     };
@@ -66,6 +87,15 @@ export function CommitView({ repo, hash, onNotice }: CommitViewProps) {
             </>
           )}
           <span className="git-spacer" />
+          {remote && (
+            <a
+              className="btn-mini"
+              href={`${remote}/commit/${detail.hash}`}
+              title="Open this commit on the remote"
+            >
+              Open on remote
+            </a>
+          )}
           <button
             className="btn-mini"
             title="Copy the full hash"
@@ -84,7 +114,7 @@ export function CommitView({ repo, hash, onNotice }: CommitViewProps) {
             </button>
           )}
         </div>
-        {detail.body && <pre className="commit-body">{detail.body}</pre>}
+        {detail.body && <pre className="commit-body">{linkify(detail.body)}</pre>}
       </div>
 
       <div className="commit-files">
