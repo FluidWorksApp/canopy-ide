@@ -210,7 +210,14 @@ export function AgentsPanel({
     // directory never will.
     const task = lastHumanPrompt(digest?.prompts);
     return (
-      <div key={s.id} className={`agent-row ${runaway ? "agent-runaway" : ""}`}>
+      <div
+        key={s.id}
+        className={`agent-row ${runaway ? "agent-runaway" : ""}`}
+        // Rows truncate to one line each now; the full detail lives here.
+        title={[agent?.name ?? s.title, s.cwd, digest?.branch, task]
+          .filter(Boolean)
+          .join("\n")}
+      >
         <div className="agent-main">
           {/* The CLI's own mark, not its name in bold — the panel is a column
               of near-identical rows and a glyph reads faster than a word. */}
@@ -241,11 +248,7 @@ export function AgentsPanel({
           ))}
           {runaway && <span className="runaway-badge">runaway?</span>}
         </div>
-        {task && (
-          <div className="agent-task" title={task}>
-            {task}
-          </div>
-        )}
+        {task && <div className="agent-task">{task}</div>}
         <div className="agent-stats">
           <span>{s.total_cpu.toFixed(0)}% cpu</span>
           <span>{fmtMem(s.total_mem_bytes)}</span>

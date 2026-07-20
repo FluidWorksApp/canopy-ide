@@ -4363,14 +4363,14 @@ a.btn-mini {
 
 .ap-section {
   border-top: 1px solid var(--border);
-  padding: 4px 0 8px;
+  padding: 0 0 4px;
 }
 
 .ap-head {
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 8px 12px 6px;
+  padding: 7px 12px 4px;
 }
 
 .ap-title {
@@ -4407,9 +4407,10 @@ a.btn-mini {
 .ap-body .agent-row,
 .ap-body .restore-row {
   position: relative;
-  padding: 6px 10px 6px 8px;
+  padding: 5px 10px 5px 8px;
   border: none;
   border-top: 1px solid var(--border);
+  line-height: 1.35;
 }
 
 .ap-body > div:first-child.agent-row,
@@ -4452,12 +4453,26 @@ a.btn-mini {
   align-items: center;
   gap: 2px;
   margin: 0;
-  opacity: 0;
+  visibility: hidden;
 }
 
 .ap-body .agent-stats {
-  margin-top: 4px;
-  opacity: 0;
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: 10px;
+  /* visibility, not opacity: an opacity:0 box still reserves its line, which
+     is why every row carried an empty fourth line. */
+  visibility: hidden;
+}
+
+.ap-body .agent-row:hover .agent-stats,
+.ap-body .agent-row:focus-within .agent-stats {
+  visibility: visible;
 }
 
 .row-act {
@@ -4498,21 +4513,52 @@ a.btn-mini {
 /* Four stacked restore rows meant eight always-on buttons; reveal on the
    row you're actually pointing at. Keyboard focus reveals them too. */
 .ap-body .restore-row:hover .restore-actions,
-.ap-body .restore-row:focus-within .restore-actions,
-.ap-body .agent-row:hover .agent-stats,
-.ap-body .agent-row:focus-within .agent-stats {
-  opacity: 1;
+.ap-body .restore-row:focus-within .restore-actions {
+  visibility: visible;
 }
 
-.ap-body .restore-prompt {
+.ap-body .restore-prompt,
+.ap-body .agent-task {
   font-size: 11px;
   color: var(--text-dim);
-  line-height: 1.4;
-  margin-top: 2px;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  line-height: 1.35;
+  margin: 1px 0 0;
+  /* One line: these identify a session, they are not the content. The full
+     text is in the row's title. */
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Meta chips: the row is a summary, so nothing in it needs 12px. */
+.ap-body .agent-dir,
+.ap-body .agent-branch,
+.ap-body .share-branch,
+.ap-body .agent-session,
+.ap-body .agent-port {
+  font-size: 10px;
+}
+
+.ap-body .agent-main,
+.ap-body .restore-main {
+  /* Keep the summary on one line and let it truncate, rather than wrapping
+     into a second and third row of chips. */
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+
+.ap-body .agent-main > *,
+.ap-body .restore-main > * {
+  flex: 0 0 auto;
+}
+
+.ap-body .agent-dir,
+.ap-body .agent-branch,
+.ap-body .share-branch {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40%;
 }
 
 .ap-body .restore-actions .btn-mini,
