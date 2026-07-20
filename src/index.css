@@ -5141,32 +5141,81 @@ a.btn-mini {
 
 /* ---------- team relay: identity trust badges ---------- */
 
-.team-trust {
-  font-size: 10px;
-  padding: 0 5px;
-  border-radius: 4px;
+/* Trust as one glyph. A green tick reads instantly and takes no width from
+   the name; the hover title still carries the fingerprint for anyone who
+   wants it. Only "changed" escalates to a filled warning. */
+.team-mark {
+  font-size: 12px;
   flex: 0 0 auto;
-  white-space: nowrap;
-  border: 1px solid transparent;
+  line-height: 1;
+  cursor: help;
 }
 
-.team-trust-known {
+.team-mark-ok {
   color: var(--ok);
-  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
 }
 
-.team-trust-new {
-  color: var(--text-dim);
-  border-color: var(--border);
-}
-
-.team-trust-relayed {
+/* First contact and host-asserted are legitimate but not yet independently
+   verified — a dimmer tick, not the confident green. */
+.team-mark-new,
+.team-mark-relayed {
   color: var(--text-dim);
 }
 
-.team-trust-changed {
+.team-mark-changed {
   color: var(--on-accent);
   background: var(--danger);
-  border-color: var(--danger);
+  border-radius: 4px;
+  padding: 0 4px;
   font-weight: 600;
+}
+
+/* Pushes the unread count to the row's right edge (the File/Chat buttons that
+   used to hold this side are gone — the whole row is the click target now). */
+.team-member-spacer {
+  margin-left: auto;
+}
+
+/* Unread count: the one thing a member row needs to shout. */
+.team-unread {
+  flex: 0 0 auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 11px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.team-unread-total {
+  margin-left: 6px;
+}
+
+/* Attach lives in the composer, a quiet icon beside what you're typing —
+   not a button competing with the person's name in the member list. */
+.chat-attach {
+  flex: 0 0 auto;
+  font-size: 15px;
+  line-height: 1;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: none;
+  border: 1px solid transparent;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.chat-attach:hover:not(:disabled) {
+  opacity: 1;
+  background: var(--bg-raised);
+}
+
+.chat-attach:disabled {
+  opacity: 0.3;
+  cursor: default;
 }

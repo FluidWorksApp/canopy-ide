@@ -21,26 +21,27 @@ interface TeamPanelProps {
 /** "123 4567" — grouped the way people read codes to each other. */
 const prettyCode = (code: string) => `${code.slice(0, 3)} ${code.slice(3)}`;
 
-/** A member's trust-on-first-use standing. "changed" is the one that matters —
- *  a name we've talked to before now presenting a different identity key, which
- *  is what a reused join code being used to impersonate a teammate looks like. */
-function TrustBadge({ trust, keyHex }: { trust: string; keyHex: string | null }) {
+/** Trust as a single glyph, not a word. A green tick is "this is who they were
+ *  last time"; the one case that still needs words is "changed", because a name
+ *  reappearing under a different identity key is exactly how a reused join code
+ *  gets used to impersonate a teammate — that one must not be quiet. */
+function TrustMark({ trust, keyHex }: { trust: string; keyHex: string | null }) {
   const fp = keyHex ? keyHex.slice(0, 8) : "";
   if (trust === "changed") {
     return (
-      <span className="team-trust team-trust-changed" title={`Identity key CHANGED for this name — verify out-of-band before trusting. Key ${fp}…`}>
-        ⚠ key changed
+      <span className="team-mark team-mark-changed" title={`Identity key CHANGED for this name — verify out-of-band before trusting. Key ${fp}…`}>
+        ⚠
       </span>
     );
   }
   if (trust === "known") {
-    return <span className="team-trust team-trust-known" title={`Verified — same identity key as before (${fp}…)`}>✓ verified</span>;
+    return <span className="team-mark team-mark-ok" title={`Verified — same identity key as before (${fp}…)`}>✓</span>;
   }
   if (trust === "new") {
-    return <span className="team-trust team-trust-new" title={`First time seeing this identity (${fp}…) — pinned now, verified on next join`}>• new</span>;
+    return <span className="team-mark team-mark-new" title={`First time seeing this identity (${fp}…) — pinned now, verified on next join`}>✓</span>;
   }
   if (trust === "relayed") {
-    return <span className="team-trust team-trust-relayed" title="Identity asserted by the host, not directly verified by you">via host</span>;
+    return <span className="team-mark team-mark-relayed" title="Identity asserted by the host, not directly verified by you">✓</span>;
   }
   return null;
 }
@@ -112,40 +113,31 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
   };
 
   const others = s.members.filter((m) => m.id !== s.self_id);
+  const totalUnread = Object.values(relay.unread).reduce((a, b) => a + b, 0);
 
-  const memberRow = (m: RelayMember) => (
-    <div
-      key={m.id}
-      className="team-member"
-      title={`Chat with ${m.name}`}
-      onClick={() => onOpenChat(m.id, m.name)}
-    >
-      <LiveDot size={7} className="team-live" />
-      <span className="team-member-name">{m.name}</span>
-      {m.is_host && <span className="team-tag">host</span>}
-      <TrustBadge trust={m.trust} keyHex={m.key} />
-      {m.joined_ms > 0 && <span className="team-member-age">{ago(m.joined_ms)}</span>}
-      <button
-        className="btn-mini"
-        title={`Send ${m.name} a file — direct, peer-to-peer`}
-        onClick={(e) => {
-          e.stopPropagation();
-          void offerFileTo(m.id, m.name, onNotice);
-        }}
+  // A member row IS the chat entry: the person, whether they're verified (a
+  // tick, nothing more), and how many messages are waiting. No File/Chat
+  // buttons — the whole row opens the conversation, and files are sent from
+  // inside it. File-sending lives with the message you're writing, not as a
+  // sibling of the person's name.
+  const memberRow = (m: RelayMember) => {
+    const n = relay.unread[m.id] ?? 0;
+    return (
+      <div
+        key={m.id}
+        className="team-member"
+        title={`Chat with ${m.name}`}
+        onClick={() => onOpenChat(m.id, m.name)}
       >
-        File
-      </button>
-      <button
-        className="btn-mini"
-        onClick={(e) => {
-          e.stopPropagation();
-          onOpenChat(m.id, m.name);
-        }}
-      >
-        Chat
-      </button>
-    </div>
-  );
+        <LiveDot size={7} className="team-live" />
+        <span className="team-member-name">{m.name}</span>
+        {m.is_host && <span className="team-tag">host</span>}
+        <TrustMark trust={m.trust} keyHex={m.key} />
+        <span className="team-member-spacer" />
+        {n > 0 && <span className="team-unread" title={`${n} unread`}>{n}</span>}
+      </div>
+    );
+  };
 
   const publicAddr = s.public_ip && s.port ? `${s.public_ip}:${s.port}` : null;
   const localAddr = s.ips[0] && s.port ? `${s.ips[0]}:${s.port}` : null;
@@ -316,6 +308,11 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
         <>
           <div className="team-section-head">
             Members <span className="badge">{s.members.length}</span>
+            {totalUnread > 0 && (
+              <span className="team-unread team-unread-total" title={`${totalUnread} unread`}>
+                {totalUnread}
+              </span>
+            )}
           </div>
           <div
             className="team-member team-everyone"
@@ -324,15 +321,12 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
           >
             <TeamIcon size={13} />
             <span className="team-member-name">Everyone</span>
-            <button
-              className="btn-mini"
-              onClick={(e) => {
-                e.stopPropagation();
-                onOpenChat(null, "Team chat");
-              }}
-            >
-              Chat
-            </button>
+            <span className="team-member-spacer" />
+            {(relay.unread[""] ?? 0) > 0 && (
+              <span className="team-unread" title={`${relay.unread[""]} unread`}>
+                {relay.unread[""]}
+              </span>
+            )}
           </div>
           {others.map(memberRow)}
           {others.length === 0 && (

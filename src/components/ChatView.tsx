@@ -148,12 +148,13 @@ export function ChatView({ peer, title, relay, onNotice }: ChatViewProps) {
       <div className="chat-compose">
         {peer !== null && (
           <button
-            className="btn"
-            title={`Send ${title} a file — direct, peer-to-peer`}
+            className="chat-attach"
+            title={`Attach a file for ${title} — sent direct, peer-to-peer`}
+            aria-label="Attach a file"
             disabled={offline || peerGone}
             onClick={() => void offerFileTo(peer, title, onNotice)}
           >
-            ⌁ File
+            📎
           </button>
         )}
         <input

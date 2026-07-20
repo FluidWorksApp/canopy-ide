@@ -52,6 +52,9 @@ export interface RelayHandle {
   status: RelayStatus;
   /** Rolling transcript: everything received plus our own sent messages. */
   chat: RelayChatMsg[];
+  /** Unread count per conversation: "" is the team channel, a member id is a
+   *  DM. Absent/zero means nothing waiting. */
+  unread: Record<string, number>;
   /** Commands awaiting action ("review this PR"), newest last. */
   inbox: RelayCommandMsg[];
   /** File transfers in flight or recently finished. */

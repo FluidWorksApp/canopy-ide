@@ -1,6 +1,6 @@
 // Shell: project tabs on top; each open project is a fully mounted (hidden
 // when inactive) ProjectView so its terminals keep running across switches.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "./ipc";
 import {
   emptyWorkspace,
@@ -138,6 +138,15 @@ export default function App() {
   // Which conversation is on screen (null = team chat, undefined = none) —
   // a toast for a message the user is already reading is noise.
   const activeChatRef = useRef<string | null | undefined>(undefined);
+  // Per-conversation "last read" timestamps, so the Team panel can show how
+  // many messages each member (and the everyone channel) has waiting. Keyed by
+  // convoKey: "" for the team channel, the member id for a DM. A message counts
+  // as unread when it postdates the last time that conversation was on screen.
+  const [chatSeen, setChatSeen] = useState<Record<string, number>>({});
+  const markSeen = useCallback((peer: string | null) => {
+    const key = peer ?? "";
+    setChatSeen((s) => ({ ...s, [key]: Date.now() }));
+  }, []);
   const [updateAvail, setUpdateAvail] = useState<UpdateAvailability>(null);
   const [updateProgress, setUpdateProgress] = useState<number | null>(null);
   // "Later" mutes that version for this run; the next launch may ask again.
@@ -272,7 +281,11 @@ export default function App() {
         // chat (null). Toast only when that conversation isn't on screen.
         const convo = m.to === null ? null : m.from;
         const text = m.text.length > 120 ? `${m.text.slice(0, 120)}…` : m.text;
-        if (activeChatRef.current !== convo) {
+        // If the user is looking at this conversation, it's already read;
+        // otherwise it stays unread (the panel badge) and we toast.
+        if (activeChatRef.current === convo) {
+          markSeen(convo);
+        } else {
           notify(`${m.from_name}: ${text}`);
         }
         void nativeNotify(
@@ -583,6 +596,20 @@ export default function App() {
   const relaySendCommand = useCallback(async (to: string | null, kind: string, payload: unknown) => {
     await ipc.relaySendCommand(to, kind, payload);
   }, []);
+  // Unread-per-conversation, derived: a message someone else sent, newer than
+  // the last time that conversation was read. "" is the team channel; a member
+  // id is a DM. Own messages never count.
+  const unread = useMemo(() => {
+    const self = relayStatus.self_id;
+    const counts: Record<string, number> = {};
+    for (const m of relayChat) {
+      if (m.from === self) continue;
+      const key = m.to === null ? "" : m.to === self ? m.from : null;
+      if (key === null) continue;
+      if (m.ts > (chatSeen[key] ?? 0)) counts[key] = (counts[key] ?? 0) + 1;
+    }
+    return counts;
+  }, [relayChat, chatSeen, relayStatus.self_id]);
   const relay: RelayHandle = {
     status: relayStatus,
     chat: relayChat,
@@ -610,7 +637,10 @@ export default function App() {
     dismissInbox: (id) => setRelayInbox((prev) => prev.filter((m) => m.id !== id)),
     reportActiveChat: (peer) => {
       activeChatRef.current = peer;
+      // Opening (or having open) a conversation reads it.
+      if (peer !== undefined) markSeen(peer);
     },
+    unread,
   };
 
   if (!loaded) return null;
