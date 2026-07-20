@@ -35,3 +35,4 @@ dist-ssr
 /ds-bundle/
 /.design-sync/
 pnpm-lock.yaml
+.claude/

@@ -104,7 +104,7 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
     const dest = await save({ title: `Save ${offer.name}`, defaultPath: offer.name });
     if (!dest) return;
     try {
-      await ipc.relayAcceptFile(offer, dest);
+      await ipc.relayAcceptFile(offer, dest, item.from);
       relay.dismissInbox(item.id);
       onNotice(`Receiving ${offer.name}…`);
     } catch (err) {

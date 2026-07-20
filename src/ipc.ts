@@ -459,6 +459,9 @@ export interface RelayStatus {
 
 export interface RelayChatMsg {
   id: string;
+  /** Set on entries synthesised from a completed file transfer, so the
+   *  conversation records what was sent/received as well as what was said. */
+  file?: { name: string; path: string | null; direction: "in" | "out" };
   from: string;
   from_name: string;
   /** null = everyone; an id = a direct message. */
@@ -533,6 +536,9 @@ export interface RelayTransferEvent {
   ok: boolean;
   /** in+ok: saved path; out+ok: receiver's name; !ok: what failed. */
   detail: string;
+  /** The member on the other end, so a finished transfer can be filed into
+   *  that conversation instead of only flashing past as a toast. */
+  peer: string | null;
 }
 
 export interface RelayTransferProgress {
@@ -548,8 +554,8 @@ export interface RelayTransferProgress {
  *  relay:transfer event. */
 export const relayOfferFile = (to: string, path: string) =>
   invoke<void>("relay_offer_file", { to, path });
-export const relayAcceptFile = (offer: RelayFileOffer, dest: string) =>
-  invoke<void>("relay_accept_file", { ...offer, dest });
+export const relayAcceptFile = (offer: RelayFileOffer, dest: string, from?: string | null) =>
+  invoke<void>("relay_accept_file", { ...offer, dest, from: from ?? null });
 export const onRelayTransfer = (cb: (e: RelayTransferEvent) => void): Promise<UnlistenFn> =>
   listen<RelayTransferEvent>("relay:transfer", (e) => cb(e.payload));
 export const onRelayTransferProgress = (

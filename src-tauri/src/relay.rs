@@ -1710,6 +1710,9 @@ pub struct TransferEvent {
     pub ok: bool,
     /// in+ok: the saved path; out+ok: the receiver's name; !ok: what failed.
     pub detail: String,
+    /// The member on the other end, so a completed transfer can be filed into
+    /// that conversation's history instead of only flashing past as a toast.
+    pub peer: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -1721,7 +1724,8 @@ struct TransferProgress {
     total: u64,
 }
 
-fn emit_transfer(app: &AppHandle, id: &str, direction: &str, name: &str, total: u64, ok: bool, detail: String) {
+#[allow(clippy::too_many_arguments)]
+fn emit_transfer(app: &AppHandle, id: &str, direction: &str, name: &str, total: u64, ok: bool, detail: String, peer: Option<&str>) {
     let _ = app.emit(
         "relay:transfer",
         TransferEvent {
@@ -1731,6 +1735,7 @@ fn emit_transfer(app: &AppHandle, id: &str, direction: &str, name: &str, total: 
             total,
             ok,
             detail,
+            peer: peer.map(str::to_string),
         },
     );
 }
@@ -1813,6 +1818,7 @@ pub async fn relay_offer_file(
     to: String,
     path: String,
 ) -> Result<(), String> {
+    let to_id = to.clone();
     let meta = std::fs::metadata(&path).map_err(|e| format!("Can't read that file: {e}"))?;
     if !meta.is_file() {
         return Err("Only single files can be sent (zip a folder first).".into());
@@ -1893,7 +1899,7 @@ pub async fn relay_offer_file(
     thread::Builder::new()
         .name("relay-send-file".into())
         .spawn(move || {
-            serve_file(&app, &transfer_id, listener, &path, &name, size, &token, &alive, &to_name);
+            serve_file(&app, &transfer_id, listener, &path, &name, size, &token, &alive, &to_name, &to_id);
             alive.store(false, Ordering::SeqCst);
             inner_arc.lock().unwrap().transfers.remove(&token);
         })
@@ -1914,6 +1920,7 @@ fn serve_file(
     token: &str,
     alive: &Arc<AtomicBool>,
     to_name: &str,
+    to_id: &str,
 ) {
     let deadline = Instant::now() + OFFER_TTL;
     loop {
@@ -1948,7 +1955,7 @@ fn serve_file(
             continue;
         }
         let Ok(mut file) = std::fs::File::open(path) else {
-            emit_transfer(app, id, "out", name, size, false, "The file vanished before it was picked up.".into());
+            emit_transfer(app, id, "out", name, size, false, "The file vanished before it was picked up.".into(), Some(to_id));
             return;
         };
         emit_progress(app, id, "out", name, 0, size);
@@ -1979,7 +1986,7 @@ fn serve_file(
         let _ = stream.shutdown(Shutdown::Both);
         if sent_ok {
             emit_progress(app, id, "out", name, size, size);
-            emit_transfer(app, id, "out", name, size, true, to_name.to_string());
+            emit_transfer(app, id, "out", name, size, true, to_name.to_string(), Some(to_id));
             return;
         }
         // Receiver dropped mid-pull — keep the offer alive for a retry.
@@ -1999,8 +2006,12 @@ pub async fn relay_accept_file(
     addrs: Vec<String>,
     token: String,
     dest: String,
+    // Who offered it — carried through so the finished transfer lands in their
+    // conversation rather than only in a toast that scrolls away.
+    from: Option<String>,
 ) -> Result<(), String> {
     let id = new_id();
+    let from_id = from;
     thread::Builder::new()
         .name("relay-receive-file".into())
         .spawn(move || {
@@ -2024,19 +2035,20 @@ pub async fn relay_accept_file(
                 emit_transfer(
                     &app, &id, "in", &name, size, false,
                     "Couldn't reach the sender directly — a firewall or NAT between you is blocking the peer-to-peer connection.".into(),
+                    from_id.as_deref(),
                 );
                 return;
             };
             let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
             let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
             let Some((mut sender, mut receiver)) = secure::file_channel_tcp(&stream, &token, false) else {
-                emit_transfer(&app, &id, "in", &name, size, false, "Couldn't set up the secure channel.".into());
+                emit_transfer(&app, &id, "in", &name, size, false, "Couldn't set up the secure channel.".into(), from_id.as_deref());
                 return;
             };
             // Authenticate to the sender: only we (holding the token) can send
             // a frame that decrypts under the token-derived key.
             if !sender.send(b"canopy-file") {
-                emit_transfer(&app, &id, "in", &name, size, false, "Handshake with the sender failed.".into());
+                emit_transfer(&app, &id, "in", &name, size, false, "Handshake with the sender failed.".into(), from_id.as_deref());
                 return;
             }
             // Receive into a sibling temp file and rename onto `dest` only
@@ -2048,7 +2060,7 @@ pub async fn relay_accept_file(
             // `dest` either stays untouched or becomes the complete file.
             let part = format!("{dest}.canopy-part");
             let Ok(mut out) = std::fs::File::create(&part) else {
-                emit_transfer(&app, &id, "in", &name, size, false, format!("Can't write to {dest}."));
+                emit_transfer(&app, &id, "in", &name, size, false, format!("Can't write to {dest}."), from_id.as_deref());
                 return;
             };
             emit_progress(&app, &id, "in", &name, 0, size);
@@ -2061,7 +2073,7 @@ pub async fn relay_accept_file(
                 if out.write_all(&chunk).is_err() {
                     drop(out);
                     let _ = std::fs::remove_file(&part);
-                    emit_transfer(&app, &id, "in", &name, size, false, format!("Writing {dest} failed — disk full?"));
+                    emit_transfer(&app, &id, "in", &name, size, false, format!("Writing {dest} failed — disk full?"), from_id.as_deref());
                     return;
                 }
                 got += chunk.len() as u64;
@@ -2073,22 +2085,22 @@ pub async fn relay_accept_file(
             drop(out);
             if got < size {
                 let _ = std::fs::remove_file(&part);
-                emit_transfer(&app, &id, "in", &name, size, false, "The connection dropped before the whole file arrived.".into());
+                emit_transfer(&app, &id, "in", &name, size, false, "The connection dropped before the whole file arrived.".into(), from_id.as_deref());
                 return;
             }
             let digest = format!("{:x}", hasher.finalize());
             if digest != sha256.to_lowercase() {
                 let _ = std::fs::remove_file(&part);
-                emit_transfer(&app, &id, "in", &name, size, false, "Integrity check failed — the received bytes don't match the offer. Nothing was kept.".into());
+                emit_transfer(&app, &id, "in", &name, size, false, "Integrity check failed — the received bytes don't match the offer. Nothing was kept.".into(), from_id.as_deref());
                 return;
             }
             if let Err(e) = std::fs::rename(&part, &dest) {
                 let _ = std::fs::remove_file(&part);
-                emit_transfer(&app, &id, "in", &name, size, false, format!("Couldn't save to {dest}: {e}"));
+                emit_transfer(&app, &id, "in", &name, size, false, format!("Couldn't save to {dest}: {e}"), from_id.as_deref());
                 return;
             }
             emit_progress(&app, &id, "in", &name, size, size);
-            emit_transfer(&app, &id, "in", &name, size, true, dest.clone());
+            emit_transfer(&app, &id, "in", &name, size, true, dest.clone(), from_id.as_deref());
         })
         .map_err(|e| format!("couldn't spawn transfer thread: {e}"))?;
     Ok(())

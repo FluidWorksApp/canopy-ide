@@ -140,7 +140,21 @@ export function ChatView({ peer, title, relay, onNotice }: ChatViewProps) {
               <span className="chat-msg-from">{m.from === selfId ? "you" : m.from_name}</span>
               <span className="chat-msg-time">{timeOf(m.ts)}</span>
             </div>
-            <div className="chat-msg-text">{m.text}</div>
+            {m.file ? (
+              <div
+                className="chat-file"
+                title={m.file.path ?? m.file.name}
+                onClick={() => m.file?.path && void ipc.fsReveal(m.file.path)}
+              >
+                <span className="chat-file-icon">📎</span>
+                <span className="chat-file-name">{m.file.name}</span>
+                <span className="chat-file-dir">
+                  {m.file.direction === "out" ? "sent" : "received"}
+                </span>
+              </div>
+            ) : (
+              <div className="chat-msg-text">{m.text}</div>
+            )}
           </div>
         ))}
         <div ref={endRef} />

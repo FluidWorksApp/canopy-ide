@@ -375,6 +375,30 @@ export default function App() {
               : `Sending ${t.name} failed: ${t.detail}`;
         notify(msg, t.ok ? "success" : "error");
         void nativeNotify("Canopy — File transfer", msg);
+        // A completed transfer is part of the conversation, not just a toast
+        // that scrolls away: record it in the transcript with the peer it was
+        // with (a DM, since files are always one-to-one), so history shows what
+        // was sent and received alongside what was said. Only successes — a
+        // failed transfer left nothing to reference.
+        if (t.ok && t.peer) {
+          const selfId = relayStatus.self_id ?? "";
+          const fileMsg: ipc.RelayChatMsg = {
+            id: `file-${t.id}`,
+            from: t.direction === "out" ? selfId : t.peer,
+            from_name: t.direction === "out" ? "you" : "",
+            to: t.direction === "out" ? t.peer : selfId,
+            text: "",
+            ts: Date.now(),
+            file: {
+              name: t.name,
+              path: t.direction === "in" ? t.detail : null,
+              direction: t.direction,
+            },
+          };
+          setRelayChat((prev) =>
+            prev.some((m) => m.id === fileMsg.id) ? prev : [...prev.slice(-499), fileMsg],
+          );
+        }
         // Mark the row terminal, then retire it after a beat so the bar's
         // final state is visible before it disappears.
         setRelayTransfers((prev) => {

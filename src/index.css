@@ -5262,3 +5262,37 @@ a.btn-mini {
 .tab-collab-icon {
   opacity: 0.8;
 }
+
+/* A file that moved through a conversation, shown inline in its transcript —
+   clicking reveals a received file in Finder. */
+.chat-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  font-size: 12px;
+}
+.chat-file:hover {
+  border-color: var(--accent);
+}
+.chat-file-icon {
+  flex: 0 0 auto;
+}
+.chat-file-name {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+.chat-file-dir {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
