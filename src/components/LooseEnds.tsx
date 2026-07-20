@@ -10,6 +10,7 @@
 // clutter sorts last (oldest first — the most-forgotten is the most deletable).
 import { useCallback, useEffect, useState } from "react";
 import * as ipc from "../ipc";
+import type { Notify } from "../types";
 
 interface LooseEndsProps {
   repo: string | null;
@@ -17,7 +18,7 @@ interface LooseEndsProps {
   onOpenBranch: (repo: string, branch: ipc.BranchWork) => void;
   onOpenTerminal: (cwd: string, label: string) => void;
   onUseWorktree: (repo: string, path: string, branch: string) => void;
-  onNotice: (msg: string) => void;
+  onNotice: Notify;
   /** Ask for a confirmation before something destructive. */
   onConfirm: (text: string, run: () => void) => void;
 }
@@ -78,7 +79,7 @@ export function LooseEnds({
     try {
       setAudit(await ipc.gitWorkAudit(repo));
     } catch (err) {
-      onNotice(String(err));
+      onNotice(String(err), "error");
     } finally {
       setBusy(false);
     }
@@ -119,10 +120,10 @@ export function LooseEnds({
       void ipc
         .gitWorktreeRemove(repo, b.worktree as string, b.dirty > 0)
         .then((m) => {
-          onNotice(m);
+          onNotice(m, "success");
           void load();
         })
-        .catch((e) => onNotice(String(e)));
+        .catch((e) => onNotice(String(e), "error"));
     });
   };
 

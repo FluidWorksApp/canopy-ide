@@ -29,7 +29,7 @@ import {
   StopIcon,
   TerminalIcon,
 } from "./icons";
-import type { AgentEventEntry, OpenFile } from "../types";
+import type { AgentEventEntry, OpenFile, Notify } from "../types";
 import {
   derivePending,
   eventsForProject,
@@ -176,7 +176,7 @@ interface ProjectViewProps {
   dismissedPending: Set<string>;
   onDismissPending: (key: string) => void;
   onEdit: () => void;
-  onNotice: (msg: string) => void;
+  onNotice: Notify;
   onShareContext: (on: boolean) => void;
 }
 
@@ -1131,7 +1131,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         await ipc.fsCreateDir(target);
       }
     } catch (e) {
-      onNotice(String(e));
+      onNotice(String(e), "error");
     }
   };
 

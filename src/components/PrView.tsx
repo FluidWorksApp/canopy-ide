@@ -7,6 +7,7 @@ import { useEscape } from "../useEscape";
 import { DiffView, DiffModeEnum } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import * as ipc from "../ipc";
+import type { Notify } from "../types";
 // NB: PR diffs arrive as real patches from `gh pr diff`, so they go straight
 // into the renderer. Working-tree diffs (components/DiffView.tsx) have to build
 // their patch first — see the note there about Monaco's diff not computing.
@@ -14,7 +15,7 @@ import * as ipc from "../ipc";
 interface PrViewProps {
   repo: string;
   pr: ipc.PrInfo;
-  onNotice: (msg: string) => void;
+  onNotice: Notify;
 }
 
 type Review = "approve" | "request-changes" | "comment";
@@ -61,7 +62,7 @@ export function PrView({ repo, pr, onNotice }: PrViewProps) {
       onNotice(msg);
       setComment("");
     } catch (err) {
-      onNotice(String(err));
+      onNotice(String(err), "error");
     } finally {
       setBusy(false);
     }
@@ -96,7 +97,7 @@ export function PrView({ repo, pr, onNotice }: PrViewProps) {
               void ipc
                 .ghPrCheckout(repo, pr.number)
                 .then(onNotice)
-                .catch((e) => onNotice(String(e)))
+                .catch((e) => onNotice(String(e), "error"))
             }
           >
             Checkout

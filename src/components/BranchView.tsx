@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 import { DiffView, DiffModeEnum } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import * as ipc from "../ipc";
+import type { Notify } from "../types";
 import { splitPatch } from "./PrView";
 import { GitBranchIcon } from "./icons";
 
@@ -17,7 +18,7 @@ interface BranchViewProps {
     commit: { hash: string; short: string; subject: string },
   ) => void;
   onOpenTerminal: (cwd: string, label: string) => void;
-  onNotice: (msg: string) => void;
+  onNotice: Notify;
 }
 
 type Pane = "uncommitted" | "diff";
@@ -56,7 +57,7 @@ export function BranchView({
     void ipc
       .gitBranchCommits(repo, branch.branch)
       .then((c) => live && setCommits(c))
-      .catch((e) => live && onNotice(String(e)));
+      .catch((e) => live && onNotice(String(e), "error"));
     return () => {
       live = false;
     };
@@ -68,7 +69,7 @@ export function BranchView({
     void ipc
       .gitBranchPatch(repo, branch.branch, branch.worktree, pane === "uncommitted")
       .then((p) => live && setPatch(p))
-      .catch((e) => live && onNotice(String(e)));
+      .catch((e) => live && onNotice(String(e), "error"));
     return () => {
       live = false;
     };

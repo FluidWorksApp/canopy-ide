@@ -5,13 +5,14 @@ import { useEffect, useState } from "react";
 import { DiffView, DiffModeEnum } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import * as ipc from "../ipc";
+import type { Notify } from "../types";
 import { splitPatch } from "./PrView";
 
 interface CommitViewProps {
   repo: string;
   /** Full hash — the panel row carries it; short hashes are display only. */
   hash: string;
-  onNotice: (msg: string) => void;
+  onNotice: Notify;
 }
 
 /** Turn bare URLs in a commit message into real links. Commit messages carry

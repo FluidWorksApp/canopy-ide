@@ -2656,10 +2656,15 @@ body,
   padding: 8px 14px;
   border-radius: 6px;
   background: var(--bg-raised);
-  border: 1px solid var(--danger);
+  /* Neutral by default. Every message used to wear the danger border, so a
+     plain status line ("Switched to origin") read as a failure. */
+  border: 1px solid var(--border);
   color: var(--text);
   font-size: 12px;
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 
@@ -4444,22 +4449,38 @@ a.btn-mini {
 }
 
 /* Corner actions: the row's right edge was empty space, and two full-width
-   buttons per row made a list of four sessions read as a form. */
+   buttons per row made a list of four sessions read as a form.
+   They float over the row, so they carry the row's own background plus a
+   fade on the leading edge — otherwise the labels land on top of the text
+   underneath and both become unreadable. */
+.ap-body .agent-row:hover,
+.ap-body .restore-row:hover {
+  background: var(--bg-raised);
+}
+
 .ap-body .restore-actions {
   position: absolute;
-  top: 4px;
-  right: 6px;
+  top: 3px;
+  right: 4px;
   display: flex;
   align-items: center;
   gap: 2px;
   margin: 0;
   visibility: hidden;
+  padding: 2px 2px 2px 34px;
+  border-radius: 6px;
+  background: linear-gradient(
+    to right,
+    transparent 0,
+    var(--bg-raised) 30px,
+    var(--bg-raised) 100%
+  );
 }
 
 .ap-body .agent-stats {
   position: absolute;
-  top: 4px;
-  right: 6px;
+  top: 3px;
+  right: 4px;
   display: flex;
   align-items: center;
   gap: 7px;
@@ -4468,6 +4489,14 @@ a.btn-mini {
   /* visibility, not opacity: an opacity:0 box still reserves its line, which
      is why every row carried an empty fourth line. */
   visibility: hidden;
+  padding: 2px 4px 2px 34px;
+  border-radius: 6px;
+  background: linear-gradient(
+    to right,
+    transparent 0,
+    var(--bg-raised) 30px,
+    var(--bg-raised) 100%
+  );
 }
 
 .ap-body .agent-row:hover .agent-stats,
@@ -4575,4 +4604,38 @@ a.btn-mini {
 
 .ap-section-urgent {
   border-left: 2px solid var(--warn);
+}
+
+/* Message kinds. The stripe carries the severity; the text stays readable
+   rather than being tinted into low contrast. */
+.notice::before {
+  content: "";
+  width: 3px;
+  align-self: stretch;
+  border-radius: 2px;
+  background: var(--text-dim);
+}
+
+.notice-success {
+  border-color: color-mix(in srgb, var(--ok) 55%, var(--border));
+}
+
+.notice-success::before {
+  background: var(--ok);
+}
+
+.notice-warn {
+  border-color: color-mix(in srgb, var(--warn) 55%, var(--border));
+}
+
+.notice-warn::before {
+  background: var(--warn);
+}
+
+.notice-error {
+  border-color: var(--danger);
+}
+
+.notice-error::before {
+  background: var(--danger);
 }

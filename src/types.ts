@@ -25,3 +25,9 @@ export interface AgentEventEntry {
   raw: string;
   ts: number;
 }
+
+/** Message severity for the toast. Everything used to render with a red
+ *  border, so "Switched to origin" looked like a failure. */
+export type NoticeKind = "info" | "success" | "warn" | "error";
+
+export type Notify = (message: string, kind?: NoticeKind) => void;
