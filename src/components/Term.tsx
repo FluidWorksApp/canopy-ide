@@ -259,6 +259,19 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         if (!disposed) syncNowRef.current?.();
       })
       .catch(() => {});
+
+    // The same drift has other routes in: moving the window to a display with
+    // a different pixel ratio changes the measured cell size, and waking from
+    // sleep can leave a stale measurement behind. xterm does not re-measure on
+    // its own, and nothing resizes the container, so the ResizeObserver never
+    // fires — the grid quietly stops matching the pty and every mid-line
+    // redraw lands in the wrong column until the terminal is recreated.
+    // Re-checking when the window regains focus is cheap: syncNow only talks
+    // to the pty when the numbers actually differ.
+    const onFocus = () => {
+      if (activeRef.current) syncNowRef.current?.();
+    };
+    window.addEventListener("focus", onFocus);
     let unlistenExit: (() => void) | undefined;
 
     void ipc
@@ -404,6 +417,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       clearTimeout(resizeTimer);
       observer.disconnect();
       window.removeEventListener(THEME_CHANGE_EVENT, onThemeChange);
+      window.removeEventListener("focus", onFocus);
       dataSub.dispose();
       titleSub.dispose();
       oscSubs.forEach((s) => s.dispose());
