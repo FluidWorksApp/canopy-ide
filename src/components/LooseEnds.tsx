@@ -57,8 +57,16 @@ function bucketOf(b: ipc.BranchWork, countsDegraded: boolean): Bucket {
   // commits that exist ONLY in this clone under "Safe from loss". That is the
   // one lie this panel must never tell, so assume unpushed and let the banner
   // explain the missing count.
-  if (!b.upstream) return b.ahead > 0 || countsDegraded ? "unpushed" : "open";
+  // git.rs counts `ahead` against the BASE BRANCH (not an upstream) whenever
+  // `upstream.is_none() || upstream_gone` — and that count needs git 2.41+.
+  // Where it is unavailable it reports 0 for exactly those branches, so
+  // trusting it files commits that exist only in this clone under "safe to
+  // clean up", next to a delete button. Mirror git.rs's condition exactly:
+  // guarding only the no-upstream half left branches whose remote was deleted
+  // still being called safe.
+  if ((!b.upstream || b.upstream_gone) && countsDegraded) return "unpushed";
   if (b.ahead > 0) return "unpushed";
+  if (!b.upstream) return "open";
   return b.upstream_gone ? "cleanable" : "open";
 }
 

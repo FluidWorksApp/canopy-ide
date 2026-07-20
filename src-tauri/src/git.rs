@@ -1467,12 +1467,24 @@ pub async fn git_branch_patch(
             // is precisely the abandoned worktree Loose ends is for. Git
             // itself is the authority on what belongs to this repo.
             Some(w) => {
-                let want = PathBuf::from(&w);
-                let known = list_worktrees(&top)?
-                    .into_iter()
-                    .any(|x| PathBuf::from(&x.path) == want);
+                // Compare canonically: a trailing slash, a `..`, or a
+                // symlinked prefix (/tmp vs /private/tmp on macOS) all name
+                // the same worktree in strings git never produced, and an
+                // exact-string match would refuse a worktree that plainly
+                // exists.
+                let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p));
+                let want = canon(&w);
+                let known = list_worktrees(&top)?.into_iter().any(|x| canon(&x.path) == want);
                 if !known {
                     return Err("not a worktree of this repository".into());
+                }
+                // git keeps listing a worktree after its directory is deleted
+                // (that is what "prunable" means, and those are exactly the
+                // ones Loose ends surfaces). Every git call below would fail
+                // on the missing cwd and unwrap_or_default() would render that
+                // as an empty diff. Say what is actually true instead.
+                if !want.is_dir() {
+                    return Err("this worktree's directory no longer exists".into());
                 }
                 want
             }
@@ -1482,17 +1494,36 @@ pub async fn git_branch_patch(
         // `git diff` alone would silently omit brand-new files, which is
         // exactly the work most at risk of being thrown away.
         let mut p = run(git(&dir).args(["diff", "HEAD"])).unwrap_or_default();
-        let untracked =
-            run(git(&dir).args(["ls-files", "--others", "--exclude-standard"])).unwrap_or_default();
+        // -z: NUL-delimited and UNQUOTED. Without it, core.quotePath wraps any
+        // path with non-ASCII or special characters in quotes and escapes it
+        // ("caf\303\251.md"), and that literal — quotes included — was handed
+        // to `git diff` as a filename, which failed. Since the error is
+        // swallowed below, those files vanished from the patch: the same
+        // "nothing here, safe to delete" lie in a new costume.
+        let untracked = run(git(&dir).args([
+            "ls-files", "--others", "--exclude-standard", "-z",
+        ]))
+        .unwrap_or_default();
         // `git diff --no-index` exits 1 whenever the files differ — which is
         // always, since we are diffing against /dev/null. run() reports a
         // non-zero exit as an error, so every untracked file was silently
         // dropped and a worktree of brand-new files rendered as empty: the
         // exact "there is nothing here, safe to delete" lie this pane exists
         // to prevent. Read stdout directly, like git_diff already does.
-        for file in untracked.lines().filter(|l| !l.trim().is_empty()).take(100) {
+        for file in untracked.split('\0').filter(|l| !l.is_empty()).take(100) {
+            // Stop as soon as we are past what we would keep anyway. Without
+            // this the whole loop runs first and truncates after, so a
+            // worktree of large new files built the entire patch in memory
+            // before throwing most of it away.
+            if p.len() >= MAX_PATCH_BYTES {
+                break;
+            }
+            // No --binary: a new PNG or database file would otherwise be
+            // inlined as base85 and dwarf the text this pane exists to show.
+            // Plain --no-index prints "Binary files ... differ", which is the
+            // useful fact — the file is there and it is new.
             if let Ok(out) = git(&dir)
-                .args(["diff", "--no-index", "--binary", "--", "/dev/null", file])
+                .args(["diff", "--no-index", "--", "/dev/null", file])
                 .output()
             {
                 p.push_str(&String::from_utf8_lossy(&out.stdout));

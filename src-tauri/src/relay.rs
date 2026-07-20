@@ -61,6 +61,15 @@ pub struct Member {
     pub name: String,
     pub joined_ms: u64,
     pub is_host: bool,
+    /// Ed25519 identity public key (hex) this member proved possession of on
+    /// its direct link. None for members only relayed to us by the host, whose
+    /// keys we can't independently verify.
+    #[serde(default)]
+    pub key: Option<String>,
+    /// Trust-on-first-use verdict for `key`, computed by the observer against
+    /// its own pin store: "self" | "new" | "known" | "changed" | "relayed".
+    #[serde(default)]
+    pub trust: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -91,6 +100,9 @@ pub struct CommandMsg {
 enum Frame {
     /// `code` is legacy — the PAKE handshake already proved it, so the host
     /// ignores it. Kept so a join is a self-describing frame.
+    /// First frame after the handshake, both directions: proves possession of
+    /// a long-term identity key, bound to this session so it can't be replayed.
+    Identity { pubkey: String, sig: String },
     Join { code: String, name: String },
     Welcome { self_id: String, members: Vec<Member> },
     Presence { members: Vec<Member> },
@@ -139,12 +151,25 @@ mod secure {
         n
     }
 
-    /// One 32-byte key from `key` for the labelled purpose/direction.
-    pub fn derive(key: &[u8], info: &[u8]) -> [u8; 32] {
-        let hk = Hkdf::<Sha256>::new(None, key);
+    /// One 32-byte key from `key` for the labelled purpose/direction, with an
+    /// optional salt. A per-session salt is what makes counter-from-0 nonces
+    /// safe when the input `key` is otherwise static (the file token) — without
+    /// it, two sessions under the same token would share a keystream.
+    pub fn derive(key: &[u8], salt: Option<&[u8]>, info: &[u8]) -> [u8; 32] {
+        let hk = Hkdf::<Sha256>::new(salt, key);
         let mut okm = [0u8; 32];
         hk.expand(info, &mut okm).expect("hkdf expand into 32 bytes never fails");
         okm
+    }
+
+    /// 16 fresh bytes from the OS CSPRNG, used as a per-transfer HKDF salt.
+    fn random_salt() -> [u8; 16] {
+        let mut salt = [0u8; 16];
+        // getrandom only fails on platforms without an RNG source, which none
+        // of Canopy's targets are; treat an error as fatal for this transfer
+        // rather than risk a predictable/duplicate salt.
+        getrandom::getrandom(&mut salt).expect("OS randomness unavailable");
+        salt
     }
 
     fn write_prefixed(mut w: &TcpStream, data: &[u8]) -> std::io::Result<()> {
@@ -223,7 +248,11 @@ mod secure {
     /// dies mid-handshake — a WRONG code still returns channels here (SPAKE2
     /// always completes), but with a mismatched key, so the first real frame
     /// fails to decrypt. That is where a bad code is rejected.
-    pub fn handshake(stream: &TcpStream, code: &str, initiator: bool) -> Option<(Sender, Receiver)> {
+    pub fn handshake(
+        stream: &TcpStream,
+        code: &str,
+        initiator: bool,
+    ) -> Option<(Sender, Receiver, [u8; 32])> {
         let (state, mine) = Spake2::<Ed25519Group>::start_symmetric(
             &Password::new(code.as_bytes()),
             &Identity::new(b"canopy-relay"),
@@ -237,22 +266,45 @@ mod secure {
             t
         };
         let key = state.finish(&theirs).ok()?;
-        let i2r = derive(&key, b"canopy-relay initiator->responder");
-        let r2i = derive(&key, b"canopy-relay responder->initiator");
-        if initiator {
-            channel(stream, i2r, r2i)
-        } else {
-            channel(stream, r2i, i2r)
-        }
+        // The SPAKE2 key is already fresh per connection (OS-random ephemeral
+        // scalars), so no extra salt is needed here.
+        let i2r = derive(&key, None, b"canopy-relay initiator->responder");
+        let r2i = derive(&key, None, b"canopy-relay responder->initiator");
+        // A per-connection binding for the identity signatures, unforgeable
+        // without the code (it comes from the SPAKE2 key) and unique per
+        // session (so an identity frame can't be replayed).
+        let binding = derive(&key, None, b"canopy-relay identity-binding");
+        let (send_key, recv_key) = if initiator { (i2r, r2i) } else { (r2i, i2r) };
+        let (sender, receiver) = channel(stream, send_key, recv_key)?;
+        Some((sender, receiver, binding))
     }
 
-    /// Transfer channel keyed by the offer's 128-bit token (high-entropy, so
-    /// no PAKE — the token is derived straight into keys). Bulk flows
+    /// Transfer channel keyed by the offer's 128-bit token. The token is static
+    /// for the offer's lifetime and `serve_file` re-serves the same file on
+    /// retries, so keying straight off the token would restart the nonce
+    /// counter at 0 under an identical key every attempt — a two-time pad. A
+    /// fresh random salt per connection, exchanged in the clear before any
+    /// ciphertext (the salt is not secret; the token is), makes each session's
+    /// keys unique so counter-from-0 nonces are safe. Bulk flows
     /// sender->receiver; the receiver's first frame authenticates it (only a
     /// holder of the token can produce a decryptable one).
     pub fn file_channel(stream: &TcpStream, token: &str, is_sender: bool) -> Option<(Sender, Receiver)> {
-        let s2r = derive(token.as_bytes(), b"canopy-file sender->receiver");
-        let r2s = derive(token.as_bytes(), b"canopy-file receiver->sender");
+        // The sender picks the salt and sends it first; the receiver reads it.
+        let salt = if is_sender {
+            let salt = random_salt();
+            write_prefixed(stream, &salt).ok()?;
+            salt
+        } else {
+            let got = read_prefixed(&mut { stream }).ok()?;
+            if got.len() != 16 {
+                return None;
+            }
+            let mut salt = [0u8; 16];
+            salt.copy_from_slice(&got);
+            salt
+        };
+        let s2r = derive(token.as_bytes(), Some(&salt), b"canopy-file sender->receiver");
+        let r2s = derive(token.as_bytes(), Some(&salt), b"canopy-file receiver->sender");
         if is_sender {
             channel(stream, s2r, r2s)
         } else {
@@ -263,6 +315,178 @@ mod secure {
     /// Break a channel's underlying socket so a blocked `recv` returns.
     pub fn shutdown(stream: &TcpStream) {
         let _ = stream.shutdown(Shutdown::Both);
+    }
+}
+
+/// Trust-on-first-use identity. SPAKE2 already proves both ends hold the join
+/// code, but the code is reused and shared, so it can't tell one holder from
+/// another across sessions. Each Canopy has a long-term Ed25519 key it signs
+/// the session with; the counterpart pins (name -> key) on first sight and is
+/// warned if that name later shows up with a different key — catching a reused
+/// code being used to impersonate a teammate.
+mod identity {
+    use super::secure;
+    use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+
+    fn canopy_dir() -> Option<PathBuf> {
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+        Some(PathBuf::from(home).join(".canopy"))
+    }
+
+    pub struct Local {
+        signing: SigningKey,
+        pub pubkey_hex: String,
+    }
+
+    /// This machine's identity key, generated once and persisted. The private
+    /// seed lives in ~/.canopy/relay-identity — same trust level as the rest
+    /// of that directory (projects, hook digests).
+    pub fn local() -> &'static Local {
+        static LOCAL: OnceLock<Local> = OnceLock::new();
+        LOCAL.get_or_init(|| {
+            let path = canopy_dir().map(|d| d.join("relay-identity"));
+            // Load an existing 32-byte hex seed, else make one.
+            let seed = path
+                .as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|s| hex::decode(s.trim()).ok())
+                .filter(|b| b.len() == 32)
+                .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                .unwrap_or_else(|| {
+                    let mut seed = [0u8; 32];
+                    getrandom::getrandom(&mut seed).expect("OS randomness unavailable");
+                    if let Some(p) = &path {
+                        if let Some(dir) = p.parent() {
+                            let _ = std::fs::create_dir_all(dir);
+                        }
+                        let _ = std::fs::write(p, hex::encode(seed));
+                    }
+                    seed
+                });
+            let signing = SigningKey::from_bytes(&seed);
+            let pubkey_hex = hex::encode(signing.verifying_key().to_bytes());
+            Local { signing, pubkey_hex }
+        })
+    }
+
+    /// The message both sides sign: the session binding (derived from the
+    /// SPAKE2 key, so unique per connection and unforgeable without the code)
+    /// domain-separated by role, so an identity frame can't be reflected.
+    fn signed_msg(binding: &[u8; 32], role: &str) -> Vec<u8> {
+        let mut m = b"canopy-identity:".to_vec();
+        m.extend_from_slice(role.as_bytes());
+        m.push(b':');
+        m.extend_from_slice(binding);
+        m
+    }
+
+    /// Exchange and verify identity frames over the freshly-established channel.
+    /// Returns the peer's verified public key (hex), or None if the peer failed
+    /// to prove possession. `initiator` (the client) sends first.
+    pub fn exchange(
+        sender: &mut secure::Sender,
+        receiver: &mut secure::Receiver,
+        binding: &[u8; 32],
+        initiator: bool,
+    ) -> Option<String> {
+        let me = local();
+        let (my_role, peer_role) = if initiator { ("initiator", "responder") } else { ("responder", "initiator") };
+        let sig = me.signing.sign(&signed_msg(binding, my_role));
+        let mine = serde_json::to_vec(&super::Frame::Identity {
+            pubkey: me.pubkey_hex.clone(),
+            sig: hex::encode(sig.to_bytes()),
+        })
+        .ok()?;
+
+        // Order mirrors the Join/Welcome sequencing: initiator speaks first.
+        let peer = if initiator {
+            if !sender.send(&mine) {
+                return None;
+            }
+            receiver.recv()?
+        } else {
+            let peer = receiver.recv()?;
+            if !sender.send(&mine) {
+                return None;
+            }
+            peer
+        };
+        let (pubkey, sig) = match serde_json::from_slice::<super::Frame>(&peer).ok()? {
+            super::Frame::Identity { pubkey, sig } => (pubkey, sig),
+            _ => return None,
+        };
+        // Verify the peer actually holds the private key for the pubkey it
+        // presented, over THIS session's binding.
+        let pk_bytes: [u8; 32] = hex::decode(&pubkey).ok()?.try_into().ok()?;
+        let sig_bytes: [u8; 64] = hex::decode(&sig).ok()?.try_into().ok()?;
+        let vk = VerifyingKey::from_bytes(&pk_bytes).ok()?;
+        vk.verify(&signed_msg(binding, peer_role), &Signature::from_bytes(&sig_bytes))
+            .ok()?;
+        Some(pubkey)
+    }
+
+    fn pin_path() -> Option<PathBuf> {
+        canopy_dir().map(|d| d.join("relay-known-peers.json"))
+    }
+
+    fn pin_guard() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    /// TOFU verdict for a (name, key) pair against the on-disk pin store, and
+    /// pin it if new. First-seen key for a name wins and is NOT overwritten on
+    /// a mismatch, so the "changed" warning persists until the user resolves it.
+    pub fn trust(name: &str, key_hex: &str) -> String {
+        let _g = pin_guard().lock().unwrap();
+        let Some(path) = pin_path() else { return "new".into() };
+        let mut map: std::collections::HashMap<String, String> = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let verdict = match map.get(name) {
+            Some(seen) if seen == key_hex => "known",
+            Some(_) => "changed",
+            None => {
+                map.insert(name.to_string(), key_hex.to_string());
+                if let Some(dir) = path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                if let Ok(json) = serde_json::to_string_pretty(&map) {
+                    // Write via a temp file so a crash mid-write can't corrupt
+                    // the pin store into "everyone is suddenly unknown".
+                    let tmp = path.with_extension("json.tmp");
+                    if std::fs::File::create(&tmp)
+                        .and_then(|mut f| f.write_all(json.as_bytes()).and_then(|_| f.flush()))
+                        .is_ok()
+                    {
+                        let _ = std::fs::rename(&tmp, &path);
+                    }
+                }
+                "new"
+            }
+        };
+        verdict.to_string()
+    }
+
+    /// Re-affirm a trust verdict without mutating the store — used to render a
+    /// peer's current standing on demand. Kept minimal; `trust` does the write.
+    #[allow(dead_code)]
+    pub fn read_verdict(name: &str, key_hex: &str) -> String {
+        let _g = pin_guard().lock().unwrap();
+        let Some(path) = pin_path() else { return "new".into() };
+        let map: std::collections::HashMap<String, String> = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        match map.get(name) {
+            Some(seen) if seen == key_hex => "known".into(),
+            Some(_) => "changed".into(),
+            None => "new".into(),
+        }
     }
 }
 
@@ -300,6 +524,11 @@ struct Client {
     self_id: String,
     name: String,
     members: Vec<Member>,
+    /// The host's identity key we verified on our direct link, and our own
+    /// TOFU verdict for it — the client only directly authenticates the host,
+    /// so other members' keys are shown as relayed.
+    host_key: String,
+    host_trust: String,
     /// Encrypted writer to the host (which relays onward).
     sender: Arc<Mutex<secure::Sender>>,
     shutdown: TcpStream,
@@ -375,6 +604,8 @@ fn host_members(host: &Host) -> Vec<Member> {
         name: host.name.clone(),
         joined_ms: 0,
         is_host: true,
+        key: Some(identity::local().pubkey_hex.clone()),
+        trust: "self".into(),
     }];
     let mut rest: Vec<Member> = host.peers.values().map(|p| p.member.clone()).collect();
     rest.sort_by_key(|m| m.joined_ms);
@@ -398,6 +629,26 @@ fn status_of(inner: &Inner) -> RelayStatus {
         };
     }
     if let Some(client) = &inner.client {
+        // Re-cast trust from OUR perspective: we directly verified only the
+        // host, so the host row carries our own TOFU verdict, our own row is
+        // "self", and everyone else is "relayed" (asserted by the host, not
+        // verified by us).
+        let members = client
+            .members
+            .iter()
+            .map(|m| {
+                let mut m = m.clone();
+                if m.is_host {
+                    m.key = Some(client.host_key.clone());
+                    m.trust = client.host_trust.clone();
+                } else if m.id == client.self_id {
+                    m.trust = "self".into();
+                } else {
+                    m.trust = "relayed".into();
+                }
+                m
+            })
+            .collect();
         return RelayStatus {
             role: "client".into(),
             code: None,
@@ -408,7 +659,7 @@ fn status_of(inner: &Inner) -> RelayStatus {
             name: Some(client.name.clone()),
             visibility: None,
             public_ip: None,
-            members: client.members.clone(),
+            members,
         };
     }
     RelayStatus {
@@ -599,26 +850,31 @@ fn host_conn(app: AppHandle, inner: Arc<Mutex<Inner>>, stream: TcpStream, alive:
         }
         host.code.clone()
     };
-    let Some((sender, mut receiver)) = secure::handshake(&stream, &code, false) else {
+    let Some((mut sender, mut receiver, binding)) = secure::handshake(&stream, &code, false) else {
         secure::shutdown(&stream);
         return;
     };
-    let sender = Arc::new(Mutex::new(sender));
 
-    // The first encrypted frame must be the Join. A wrong code produced a
-    // different session key on the far side, so this decrypt fails — that is
-    // how a bad code is now rejected. Tarpit that case: two seconds per wrong
-    // guess makes brute-forcing 10M codes a non-starter (a public relay gets
-    // probed) while a mistyped code barely notices.
+    // Identity exchange (peer proves possession of its long-term key, bound to
+    // this session) then the Join frame. A wrong code produced a different
+    // session key, so both fail to decrypt — that is how a bad code is now
+    // rejected. Tarpit that case: two seconds per wrong guess makes
+    // brute-forcing 10M codes a non-starter (a public relay gets probed) while
+    // a mistyped code barely notices.
+    let Some(peer_key) = identity::exchange(&mut sender, &mut receiver, &binding, false) else {
+        thread::sleep(Duration::from_secs(2));
+        secure::shutdown(&stream);
+        return;
+    };
     let name = match receiver.recv().and_then(|b| serde_json::from_slice::<Frame>(&b).ok()) {
         Some(Frame::Join { name, .. }) => name,
         _ => {
-            thread::sleep(Duration::from_secs(2));
             secure::shutdown(&stream);
             return;
         }
     };
     let Ok(shutdown) = stream.try_clone() else { return };
+    let sender = Arc::new(Mutex::new(sender));
 
     // Register under the lock. Order matters on the new peer's wire: Welcome
     // must be its FIRST frame, so it goes out before the presence update —
@@ -631,10 +887,19 @@ fn host_conn(app: AppHandle, inner: Arc<Mutex<Inner>>, stream: TcpStream, alive:
         }
         let id = new_id();
         let name = if name.trim().is_empty() { format!("guest-{}", &id[..4]) } else { name.trim().to_string() };
+        // TOFU verdict for this (name, key) against our pin store.
+        let trust = identity::trust(&name, &peer_key);
         host.peers.insert(
             id.clone(),
             Peer {
-                member: Member { id: id.clone(), name: name.clone(), joined_ms: now_ms(), is_host: false },
+                member: Member {
+                    id: id.clone(),
+                    name: name.clone(),
+                    joined_ms: now_ms(),
+                    is_host: false,
+                    key: Some(peer_key.clone()),
+                    trust,
+                },
                 sender: sender.clone(),
                 shutdown,
             },
@@ -799,21 +1064,34 @@ pub async fn relay_connect(
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let name = if name.trim().is_empty() { "guest".to_string() } else { name.trim().to_string() };
     // SPAKE2 as the initiator, keyed by the code we were given.
-    let Some((sender, mut receiver)) = secure::handshake(&stream, code.trim(), true) else {
+    let Some((mut sender, mut receiver, binding)) = secure::handshake(&stream, code.trim(), true) else {
         return Err("Couldn't establish a secure channel — check the address and that the relay is running.".into());
     };
+    // Prove our identity and verify the host's, bound to this session. A wrong
+    // code yields a mismatched key, so this fails — reported as a refused code.
+    let Some(host_key) = identity::exchange(&mut sender, &mut receiver, &binding, true) else {
+        return Err("The relay refused the connection — wrong code, or it isn't reachable.".into());
+    };
+    // TOFU: is this the same host key we pinned for this host name before? We
+    // don't know the host's name yet (it arrives in Welcome), so pin below.
     let sender = Arc::new(Mutex::new(sender));
     if !peer_send(&sender, &Frame::Join { code: String::new(), name: name.clone() }) {
         return Err("Couldn't talk to the relay.".into());
     }
-    // Welcome is our first encrypted frame back. If the code was wrong, our
-    // key doesn't match the host's and this fails to decrypt — reported as a
-    // refused code rather than a mysterious hang.
+    // Welcome is our first encrypted frame back.
     let (self_id, members) = match receiver.recv().and_then(|b| serde_json::from_slice::<Frame>(&b).ok()) {
         Some(Frame::Welcome { self_id, members }) => (self_id, members),
         _ => return Err("The relay refused the connection — wrong code, or it isn't reachable.".into()),
     };
     let _ = stream.set_read_timeout(None);
+    // Pin the host under its advertised name; a changed key for a name we've
+    // joined before is the warning TOFU exists to raise.
+    let host_name = members
+        .iter()
+        .find(|m| m.is_host)
+        .map(|m| m.name.clone())
+        .unwrap_or_else(|| full.clone());
+    let host_trust = identity::trust(&host_name, &host_key);
 
     let alive = Arc::new(AtomicBool::new(true));
     let client = Client {
@@ -821,6 +1099,8 @@ pub async fn relay_connect(
         self_id,
         name,
         members,
+        host_key,
+        host_trust,
         sender: sender.clone(),
         shutdown: stream.try_clone().map_err(|e| e.to_string())?,
         alive: alive.clone(),
@@ -991,20 +1271,57 @@ fn deliver(inner: &Inner, to: Option<String>, frame: Frame) -> Result<(), String
 
 #[derive(Serialize, Clone)]
 pub struct TransferEvent {
+    /// Correlates the progress stream with this terminal event. Non-secret
+    /// (never the token) so it is safe to hand the UI.
+    pub id: String,
     /// "in" (receiving) | "out" (sending)
     pub direction: String,
     pub name: String,
+    pub total: u64,
     pub ok: bool,
     /// in+ok: the saved path; out+ok: the receiver's name; !ok: what failed.
     pub detail: String,
 }
 
-fn emit_transfer(app: &AppHandle, direction: &str, name: &str, ok: bool, detail: String) {
+#[derive(Serialize, Clone)]
+struct TransferProgress {
+    id: String,
+    direction: String,
+    name: String,
+    done: u64,
+    total: u64,
+}
+
+fn emit_transfer(app: &AppHandle, id: &str, direction: &str, name: &str, total: u64, ok: bool, detail: String) {
     let _ = app.emit(
         "relay:transfer",
-        TransferEvent { direction: direction.into(), name: name.into(), ok, detail },
+        TransferEvent {
+            id: id.into(),
+            direction: direction.into(),
+            name: name.into(),
+            total,
+            ok,
+            detail,
+        },
     );
 }
+
+fn emit_progress(app: &AppHandle, id: &str, direction: &str, name: &str, done: u64, total: u64) {
+    let _ = app.emit(
+        "relay:transfer-progress",
+        TransferProgress {
+            id: id.into(),
+            direction: direction.into(),
+            name: name.into(),
+            done,
+            total,
+        },
+    );
+}
+
+/// Emit a progress tick at most ~6×/second so a fast local transfer doesn't
+/// flood the event bus. Returns the new "last emitted" byte mark.
+const PROGRESS_STEP: u64 = 512 * 1024;
 
 fn sha256_file(path: &std::path::Path) -> Result<String, String> {
     use sha2::{Digest, Sha256};
@@ -1019,6 +1336,26 @@ fn sha256_file(path: &std::path::Path) -> Result<String, String> {
         }
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// A file offer's `addrs` are chosen by the remote sender, and on accept we
+/// dial each one — so a malicious member could point them at internal
+/// infrastructure (cloud metadata at 169.254.169.254, a link-local device) and
+/// use the receiver as an outbound-connect primitive. Loopback and private
+/// LAN stay allowed (legitimate same-machine / same-office transfers); the
+/// dangerous special-use ranges are refused.
+fn safe_dial_addr(sa: &std::net::SocketAddr) -> bool {
+    match sa.ip() {
+        std::net::IpAddr::V4(v4) => {
+            !(v4.is_link_local() || v4.is_multicast() || v4.is_broadcast() || v4.is_unspecified())
+        }
+        std::net::IpAddr::V6(v6) => {
+            // Reject unspecified, multicast, and link-local (fe80::/10).
+            !(v6.is_unspecified()
+                || v6.is_multicast()
+                || (v6.segments()[0] & 0xffc0) == 0xfe80)
+        }
+    }
 }
 
 fn is_private_addr(host: &str) -> bool {
@@ -1100,6 +1437,9 @@ pub async fn relay_offer_file(
     }
 
     let alive = Arc::new(AtomicBool::new(true));
+    // A non-secret id for the UI to track this send by — distinct from the
+    // token, which never leaves the encrypted channel.
+    let transfer_id = new_id();
     {
         let mut inner = state.inner.lock().unwrap();
         inner.transfers.insert(token.clone(), alive.clone());
@@ -1123,7 +1463,7 @@ pub async fn relay_offer_file(
     thread::Builder::new()
         .name("relay-send-file".into())
         .spawn(move || {
-            serve_file(&app, listener, &path, &name, &token, &alive, &to_name);
+            serve_file(&app, &transfer_id, listener, &path, &name, size, &token, &alive, &to_name);
             alive.store(false, Ordering::SeqCst);
             inner_arc.lock().unwrap().transfers.remove(&token);
         })
@@ -1133,11 +1473,14 @@ pub async fn relay_offer_file(
 
 /// One-shot file server: whoever presents the token gets the bytes, once.
 /// Survives a dropped attempt so the receiver can retry until the TTL.
+#[allow(clippy::too_many_arguments)]
 fn serve_file(
     app: &AppHandle,
+    id: &str,
     listener: TcpListener,
     path: &str,
     name: &str,
+    size: u64,
     token: &str,
     alive: &Arc<AtomicBool>,
     to_name: &str,
@@ -1175,11 +1518,14 @@ fn serve_file(
             continue;
         }
         let Ok(mut file) = std::fs::File::open(path) else {
-            emit_transfer(app, "out", name, false, "The file vanished before it was picked up.".into());
+            emit_transfer(app, id, "out", name, size, false, "The file vanished before it was picked up.".into());
             return;
         };
+        emit_progress(app, id, "out", name, 0, size);
         let mut buf = [0u8; 65536];
         let mut sent_ok = true;
+        let mut done: u64 = 0;
+        let mut marked: u64 = 0;
         loop {
             match file.read(&mut buf) {
                 Ok(0) => break,
@@ -1187,6 +1533,11 @@ fn serve_file(
                     if !sender.send(&buf[..n]) {
                         sent_ok = false;
                         break;
+                    }
+                    done += n as u64;
+                    if done - marked >= PROGRESS_STEP {
+                        marked = done;
+                        emit_progress(app, id, "out", name, done, size);
                     }
                 }
                 Err(_) => {
@@ -1197,7 +1548,8 @@ fn serve_file(
         }
         let _ = stream.shutdown(Shutdown::Both);
         if sent_ok {
-            emit_transfer(app, "out", name, true, to_name.to_string());
+            emit_progress(app, id, "out", name, size, size);
+            emit_transfer(app, id, "out", name, size, true, to_name.to_string());
             return;
         }
         // Receiver dropped mid-pull — keep the offer alive for a retry.
@@ -1218,13 +1570,20 @@ pub async fn relay_accept_file(
     token: String,
     dest: String,
 ) -> Result<(), String> {
+    let id = new_id();
     thread::Builder::new()
         .name("relay-receive-file".into())
         .spawn(move || {
             use sha2::{Digest, Sha256};
             let mut stream = None;
             for a in &addrs {
+                // Only dial well-formed addresses that aren't pointed at
+                // internal/special-use ranges — the sender chose these, so a
+                // hostile one could aim them at metadata/link-local hosts.
                 if let Ok(sa) = a.parse::<std::net::SocketAddr>() {
+                    if !safe_dial_addr(&sa) {
+                        continue;
+                    }
                     if let Ok(s) = TcpStream::connect_timeout(&sa, Duration::from_secs(4)) {
                         stream = Some(s);
                         break;
@@ -1233,7 +1592,7 @@ pub async fn relay_accept_file(
             }
             let Some(stream) = stream else {
                 emit_transfer(
-                    &app, "in", &name, false,
+                    &app, &id, "in", &name, size, false,
                     "Couldn't reach the sender directly — a firewall or NAT between you is blocking the peer-to-peer connection.".into(),
                 );
                 return;
@@ -1241,45 +1600,52 @@ pub async fn relay_accept_file(
             let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
             let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
             let Some((mut sender, mut receiver)) = secure::file_channel(&stream, &token, false) else {
-                emit_transfer(&app, "in", &name, false, "Couldn't set up the secure channel.".into());
+                emit_transfer(&app, &id, "in", &name, size, false, "Couldn't set up the secure channel.".into());
                 return;
             };
             // Authenticate to the sender: only we (holding the token) can send
             // a frame that decrypts under the token-derived key.
             if !sender.send(b"canopy-file") {
-                emit_transfer(&app, "in", &name, false, "Handshake with the sender failed.".into());
+                emit_transfer(&app, &id, "in", &name, size, false, "Handshake with the sender failed.".into());
                 return;
             }
             let Ok(mut out) = std::fs::File::create(&dest) else {
-                emit_transfer(&app, "in", &name, false, format!("Can't write to {dest}."));
+                emit_transfer(&app, &id, "in", &name, size, false, format!("Can't write to {dest}."));
                 return;
             };
+            emit_progress(&app, &id, "in", &name, 0, size);
             let mut hasher = Sha256::new();
             let mut got = 0u64;
+            let mut marked = 0u64;
             while got < size {
                 let Some(chunk) = receiver.recv() else { break };
                 hasher.update(&chunk);
                 if out.write_all(&chunk).is_err() {
                     drop(out);
                     let _ = std::fs::remove_file(&dest);
-                    emit_transfer(&app, "in", &name, false, format!("Writing {dest} failed — disk full?"));
+                    emit_transfer(&app, &id, "in", &name, size, false, format!("Writing {dest} failed — disk full?"));
                     return;
                 }
                 got += chunk.len() as u64;
+                if got - marked >= PROGRESS_STEP {
+                    marked = got;
+                    emit_progress(&app, &id, "in", &name, got, size);
+                }
             }
             drop(out);
             if got < size {
                 let _ = std::fs::remove_file(&dest);
-                emit_transfer(&app, "in", &name, false, "The connection dropped before the whole file arrived.".into());
+                emit_transfer(&app, &id, "in", &name, size, false, "The connection dropped before the whole file arrived.".into());
                 return;
             }
-            let got = format!("{:x}", hasher.finalize());
-            if got != sha256.to_lowercase() {
+            let digest = format!("{:x}", hasher.finalize());
+            if digest != sha256.to_lowercase() {
                 let _ = std::fs::remove_file(&dest);
-                emit_transfer(&app, "in", &name, false, "Integrity check failed — the received bytes don't match the offer. Nothing was kept.".into());
+                emit_transfer(&app, &id, "in", &name, size, false, "Integrity check failed — the received bytes don't match the offer. Nothing was kept.".into());
                 return;
             }
-            emit_transfer(&app, "in", &name, true, dest.clone());
+            emit_progress(&app, &id, "in", &name, size, size);
+            emit_transfer(&app, &id, "in", &name, size, true, dest.clone());
         })
         .map_err(|e| format!("couldn't spawn transfer thread: {e}"))?;
     Ok(())

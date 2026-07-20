@@ -21,6 +21,30 @@ interface TeamPanelProps {
 /** "123 4567" — grouped the way people read codes to each other. */
 const prettyCode = (code: string) => `${code.slice(0, 3)} ${code.slice(3)}`;
 
+/** A member's trust-on-first-use standing. "changed" is the one that matters —
+ *  a name we've talked to before now presenting a different identity key, which
+ *  is what a reused join code being used to impersonate a teammate looks like. */
+function TrustBadge({ trust, keyHex }: { trust: string; keyHex: string | null }) {
+  const fp = keyHex ? keyHex.slice(0, 8) : "";
+  if (trust === "changed") {
+    return (
+      <span className="team-trust team-trust-changed" title={`Identity key CHANGED for this name — verify out-of-band before trusting. Key ${fp}…`}>
+        ⚠ key changed
+      </span>
+    );
+  }
+  if (trust === "known") {
+    return <span className="team-trust team-trust-known" title={`Verified — same identity key as before (${fp}…)`}>✓ verified</span>;
+  }
+  if (trust === "new") {
+    return <span className="team-trust team-trust-new" title={`First time seeing this identity (${fp}…) — pinned now, verified on next join`}>• new</span>;
+  }
+  if (trust === "relayed") {
+    return <span className="team-trust team-trust-relayed" title="Identity asserted by the host, not directly verified by you">via host</span>;
+  }
+  return null;
+}
+
 const ago = (ms: number) => {
   if (!ms) return "";
   const d = Math.max(0, Math.floor((Date.now() - ms) / 1000));
@@ -99,6 +123,7 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
       <LiveDot size={7} className="team-live" />
       <span className="team-member-name">{m.name}</span>
       {m.is_host && <span className="team-tag">host</span>}
+      <TrustBadge trust={m.trust} keyHex={m.key} />
       {m.joined_ms > 0 && <span className="team-member-age">{ago(m.joined_ms)}</span>}
       <button
         className="btn-mini"
@@ -320,6 +345,37 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
                 : "."}
             </div>
           )}
+        </>
+      )}
+
+      {relay.transfers.length > 0 && (
+        <>
+          <div className="team-section-head">Transfers</div>
+          {relay.transfers.map((t) => {
+            const pct = t.total > 0 ? Math.min(100, Math.round((t.done / t.total) * 100)) : 0;
+            return (
+              <div key={t.id} className={`team-transfer team-transfer-${t.status}`}>
+                <div className="team-transfer-head">
+                  <span className="team-transfer-dir">{t.direction === "in" ? "↓" : "↑"}</span>
+                  <span className="team-transfer-name" title={t.name}>{t.name}</span>
+                  <span className="team-transfer-pct">
+                    {t.status === "ok" ? "done" : t.status === "failed" ? "failed" : `${pct}%`}
+                  </span>
+                </div>
+                <div className="team-transfer-bar">
+                  <div
+                    className="team-transfer-fill"
+                    style={{ width: `${t.status === "ok" ? 100 : pct}%` }}
+                  />
+                </div>
+                <div className="team-transfer-sub">
+                  {t.status === "failed"
+                    ? t.detail
+                    : `${prettySize(t.done)} / ${prettySize(t.total)}`}
+                </div>
+              </div>
+            );
+          })}
         </>
       )}
 

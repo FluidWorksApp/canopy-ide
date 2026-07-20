@@ -383,13 +383,10 @@ const SKIP_DIRS: &[&str] = &[
     ".tox",
     // More generated trees that the old blanket dot-skip excluded for free.
     ".dart_tool",
-    ".m2",
     ".gradle-cache",
     ".stack-work",
     ".history",
-    ".cargo",
     ".rustup",
-    ".bundle",
     ".nx",
     ".angular",
     ".docusaurus",

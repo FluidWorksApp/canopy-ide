@@ -431,6 +431,12 @@ export interface RelayMember {
   name: string;
   joined_ms: number;
   is_host: boolean;
+  /** Ed25519 identity public key (hex) proven on the direct link. */
+  key: string | null;
+  /** Trust-on-first-use verdict from our perspective:
+   *  "self" us | "new" first sight | "known" pinned & matches |
+   *  "changed" pinned but key differs (warn!) | "relayed" host-asserted. */
+  trust: "self" | "new" | "known" | "changed" | "relayed" | "";
 }
 
 /** Who we are on the relay right now. role "off" = not hosting, not joined. */
@@ -505,11 +511,22 @@ export interface RelayFileOffer {
 }
 
 export interface RelayTransferEvent {
+  /** Correlates with the progress stream. Non-secret (never the token). */
+  id: string;
   direction: "in" | "out";
   name: string;
+  total: number;
   ok: boolean;
   /** in+ok: saved path; out+ok: receiver's name; !ok: what failed. */
   detail: string;
+}
+
+export interface RelayTransferProgress {
+  id: string;
+  direction: "in" | "out";
+  name: string;
+  done: number;
+  total: number;
 }
 
 /** Offer a file to a member: the bytes go peer-to-peer, only the offer rides
@@ -521,6 +538,10 @@ export const relayAcceptFile = (offer: RelayFileOffer, dest: string) =>
   invoke<void>("relay_accept_file", { ...offer, dest });
 export const onRelayTransfer = (cb: (e: RelayTransferEvent) => void): Promise<UnlistenFn> =>
   listen<RelayTransferEvent>("relay:transfer", (e) => cb(e.payload));
+export const onRelayTransferProgress = (
+  cb: (e: RelayTransferProgress) => void,
+): Promise<UnlistenFn> =>
+  listen<RelayTransferProgress>("relay:transfer-progress", (e) => cb(e.payload));
 
 // ---------- issue trackers ----------
 

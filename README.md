@@ -245,6 +245,9 @@ Design rules:
 | `spake2` | turns the low-entropy join code into a strong mutually-authenticated session key (PAKE), so the relay resists eavesdropping and offline brute-force |
 | `hkdf` | splits the session key into per-direction encryption keys |
 | `chacha20poly1305` | AEAD sealing every relay frame and file chunk (the transport itself stays std::net — no async/TLS stack) |
+| `getrandom` | OS CSPRNG for per-file-transfer key-derivation salts + identity-key seeds |
+| `ed25519-dalek` | long-term identity keys for trust-on-first-use (a reused join code can't silently impersonate a teammate) |
+| `hex` | encoding identity keys/signatures on the wire and in the pin store |
 | `tauri-plugin-notification` (+ npm counterpart) | native notifications for team-relay chat/commands/transfers landing while the app is unfocused |
 
 ## License

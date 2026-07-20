@@ -5045,3 +5045,128 @@ a.btn-mini {
 .tab-chat-icon {
   color: var(--accent);
 }
+
+/* ---------- team relay: file transfer progress ---------- */
+
+.team-transfer {
+  margin: 4px 12px;
+  padding: 7px 10px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.team-transfer-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.team-transfer-dir {
+  color: var(--accent);
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+
+.team-transfer-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.team-transfer-pct {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+
+.team-transfer-bar {
+  height: 5px;
+  border-radius: 3px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.team-transfer-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.2s ease;
+}
+
+.team-transfer-ok .team-transfer-fill {
+  background: var(--ok);
+}
+
+.team-transfer-failed .team-transfer-fill {
+  background: var(--danger);
+}
+
+.team-transfer-ok .team-transfer-pct {
+  color: var(--ok);
+}
+
+.team-transfer-failed .team-transfer-pct {
+  color: var(--danger);
+}
+
+.team-transfer-sub {
+  color: var(--text-dim);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.chat-view {
+  position: relative;
+}
+
+.chat-drop-overlay {
+  position: absolute;
+  inset: 6px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--accent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg));
+  color: var(--text);
+  font-weight: 600;
+  pointer-events: none;
+}
+
+/* ---------- team relay: identity trust badges ---------- */
+
+.team-trust {
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 4px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+
+.team-trust-known {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+}
+
+.team-trust-new {
+  color: var(--text-dim);
+  border-color: var(--border);
+}
+
+.team-trust-relayed {
+  color: var(--text-dim);
+}
+
+.team-trust-changed {
+  color: var(--on-accent);
+  background: var(--danger);
+  border-color: var(--danger);
+  font-weight: 600;
+}

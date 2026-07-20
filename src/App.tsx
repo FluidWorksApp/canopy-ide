@@ -27,6 +27,27 @@ import { checkForUpdateAnyChannel, installUpdate, type UpdateAvailability } from
 /** Tell the hook helper which projects share context between their sessions.
  *  Every project is listed with its opt-in state, so turning sharing off
  *  actively revokes it rather than just omitting the entry. */
+// Relay chat is persisted per-relay, keyed by the host's stable identity key
+// (its Ed25519 pubkey) — not the ephemeral session id — so history survives
+// restarts and re-associates with the same relay on reconnect. Capped, and
+// scoped by relay so joining a different team never mixes transcripts.
+const RELAY_CHAT_PREFIX = "canopy.relayChat:";
+function loadRelayChat(label: string): ipc.RelayChatMsg[] {
+  try {
+    const raw = localStorage.getItem(RELAY_CHAT_PREFIX + label);
+    return raw ? (JSON.parse(raw) as ipc.RelayChatMsg[]) : [];
+  } catch {
+    return [];
+  }
+}
+function saveRelayChat(label: string, msgs: ipc.RelayChatMsg[]) {
+  try {
+    localStorage.setItem(RELAY_CHAT_PREFIX + label, JSON.stringify(msgs.slice(-500)));
+  } catch {
+    // Storage full/blocked — history is a convenience, never fail over it.
+  }
+}
+
 function publishScopes(state: WorkspaceState) {
   void ipc
     .setContextScopes(
@@ -93,6 +114,27 @@ export default function App() {
   });
   const [relayChat, setRelayChat] = useState<ipc.RelayChatMsg[]>([]);
   const [relayInbox, setRelayInbox] = useState<ipc.RelayCommandMsg[]>([]);
+  const [relayTransfers, setRelayTransfers] = useState<import("./types").RelayTransfer[]>([]);
+  // The relay we're persisting chat under = the host's stable identity key.
+  // Null when off, so the persist effect never writes an empty transcript.
+  const relayChatLabel = useRef<string | null>(null);
+  // Hydrate the transcript when we (re)join a relay; drop the label when off.
+  useEffect(() => {
+    const label = relayStatus.members.find((m) => m.is_host)?.key ?? null;
+    if (label && label !== relayChatLabel.current) {
+      relayChatLabel.current = label;
+      setRelayChat(loadRelayChat(label));
+    } else if (!label) {
+      relayChatLabel.current = null;
+    }
+  }, [relayStatus]);
+  // Persist as it grows. The length guard means clearing the in-memory view on
+  // disconnect can't wipe the stored history.
+  useEffect(() => {
+    if (relayChatLabel.current && relayChat.length > 0) {
+      saveRelayChat(relayChatLabel.current, relayChat);
+    }
+  }, [relayChat]);
   // Which conversation is on screen (null = team chat, undefined = none) —
   // a toast for a message the user is already reading is noise.
   const activeChatRef = useRef<string | null | undefined>(undefined);
@@ -251,6 +293,22 @@ export default function App() {
         notify(`${text} — see the Team panel`);
         void nativeNotify("Canopy — Team", text);
       }),
+      ipc.onRelayTransferProgress((p) => {
+        // Upsert the live row; a progress tick can arrive before any terminal
+        // event, so it creates the row if missing.
+        setRelayTransfers((prev) => {
+          const next = prev.filter((x) => x.id !== p.id);
+          next.push({
+            id: p.id,
+            direction: p.direction,
+            name: p.name,
+            done: p.done,
+            total: p.total,
+            status: "active",
+          });
+          return next;
+        });
+      }),
       ipc.onRelayTransfer((t) => {
         const msg =
           t.direction === "in"
@@ -262,6 +320,29 @@ export default function App() {
               : `Sending ${t.name} failed: ${t.detail}`;
         notify(msg, t.ok ? "success" : "error");
         void nativeNotify("Canopy — File transfer", msg);
+        // Mark the row terminal, then retire it after a beat so the bar's
+        // final state is visible before it disappears.
+        setRelayTransfers((prev) => {
+          const row = prev.find((x) => x.id === t.id);
+          const done = t.ok ? t.total : (row?.done ?? 0);
+          const others = prev.filter((x) => x.id !== t.id);
+          return [
+            ...others,
+            {
+              id: t.id,
+              direction: t.direction,
+              name: t.name,
+              done,
+              total: t.total,
+              status: t.ok ? "ok" : "failed",
+              detail: t.detail,
+            },
+          ];
+        });
+        window.setTimeout(
+          () => setRelayTransfers((prev) => prev.filter((x) => x.id !== t.id)),
+          t.ok ? 4000 : 8000,
+        );
       }),
       // Native menu accelerators (Cmd+W etc.) → scoped in-app actions. The
       // visible ProjectView handles tab-level ones; close-project is ours.
@@ -506,6 +587,7 @@ export default function App() {
     status: relayStatus,
     chat: relayChat,
     inbox: relayInbox,
+    transfers: relayTransfers,
     hostStart: async (name, visibility, port) => {
       setRelayStatus(await ipc.relayHostStart(name, visibility, port));
     },

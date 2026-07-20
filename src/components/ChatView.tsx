@@ -3,6 +3,7 @@
 // app-wide); this view filters it down to the one conversation and sends
 // through the same handle, so every open project shows the same chat.
 import { useEffect, useMemo, useRef, useState } from "react";
+import * as ipc from "../ipc";
 import type { Notify, RelayHandle } from "../types";
 import { TeamIcon } from "./icons";
 import { offerFileTo } from "./TeamPanel";
@@ -21,8 +22,67 @@ const timeOf = (ts: number) =>
 export function ChatView({ peer, title, relay, onNotice }: ChatViewProps) {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [dropActive, setDropActive] = useState(false);
   const endRef = useRef<HTMLDivElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const selfId = relay.status.self_id;
+  const offline = relay.status.role === "off";
+  const peerGone =
+    peer !== null && !relay.status.members.some((m) => m.id === peer);
+  const canDrop = peer !== null && !offline && !peerGone;
+
+  // Drag-and-drop a file onto a DM to send it. Tauri's drag-drop is a
+  // window-level event, so we gate on whether the drop landed inside THIS
+  // chat's rectangle — a hidden tab has an empty rect and so never reacts,
+  // which is exactly the filter we want across several open chats.
+  const canDropRef = useRef(canDrop);
+  canDropRef.current = canDrop;
+  const peerRef = useRef(peer);
+  peerRef.current = peer;
+  useEffect(() => {
+    if (peer === null) return;
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    const inside = (x: number, y: number) => {
+      const r = rootRef.current?.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const cx = x / dpr;
+      const cy = y / dpr;
+      return !!r && r.width > 0 && cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom;
+    };
+    void import("@tauri-apps/api/webview")
+      .then(({ getCurrentWebview }) =>
+        getCurrentWebview().onDragDropEvent((event) => {
+          const p = event.payload;
+          if (p.type === "over") {
+            setDropActive(canDropRef.current && inside(p.position.x, p.position.y));
+          } else if (p.type === "leave") {
+            setDropActive(false);
+          } else if (p.type === "drop") {
+            setDropActive(false);
+            if (!canDropRef.current || !peerRef.current) return;
+            if (!inside(p.position.x, p.position.y)) return;
+            const path = p.paths[0];
+            if (!path) return;
+            void ipc
+              .relayOfferFile(peerRef.current, path)
+              .then(() =>
+                onNotice(`Offered ${path.split("/").pop()} to ${title} — sends when they accept.`, "success"),
+              )
+              .catch((err) => onNotice(String(err), "error"));
+          }
+        }),
+      )
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [peer, title, onNotice]);
 
   const messages = useMemo(
     () =>
@@ -40,10 +100,6 @@ export function ChatView({ peer, title, relay, onNotice }: ChatViewProps) {
     endRef.current?.scrollIntoView({ block: "end" });
   }, [messages.length]);
 
-  const offline = relay.status.role === "off";
-  const peerGone =
-    peer !== null && !relay.status.members.some((m) => m.id === peer);
-
   const send = async () => {
     const text = draft.trim();
     if (!text || busy) return;
@@ -59,7 +115,10 @@ export function ChatView({ peer, title, relay, onNotice }: ChatViewProps) {
   };
 
   return (
-    <div className="chat-view">
+    <div className="chat-view" ref={rootRef}>
+      {dropActive && (
+        <div className="chat-drop-overlay">Drop to send {title} this file</div>
+      )}
       <div className="chat-head">
         <TeamIcon size={14} />
         <span className="chat-title">{title}</span>
