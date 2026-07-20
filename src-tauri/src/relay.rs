@@ -528,6 +528,11 @@ struct Host {
     visibility: String,
     /// Discovered when visibility is "public"; None when the lookup failed.
     public_ip: Option<String>,
+    /// None for a local relay. Some(Ok) when the router accepted a UPnP
+    /// mapping for our port; Some(Err(reason)) when it did not, so the panel
+    /// can tell the host to forward it by hand rather than let them hand out
+    /// an address that silently goes nowhere.
+    port_map: Option<Result<(), String>>,
     peers: HashMap<String, Peer>,
     /// Flips false on stop; the listener and every reader checks it before
     /// touching state, so threads of a stopped relay can't haunt the next one.
@@ -594,6 +599,14 @@ pub struct RelayStatus {
     /// Host only, public visibility: the internet-facing address teammates
     /// dial. None while unknown (lookup failed / local mode).
     pub public_ip: Option<String>,
+    /// Host only, public visibility: did the router accept a UPnP mapping for
+    /// our port? None when not applicable (local relay). Some(false) means the
+    /// advertised address is very likely unreachable until the port is
+    /// forwarded by hand — the panel says so rather than letting the host hand
+    /// out an address that goes nowhere.
+    pub port_mapped: Option<bool>,
+    /// Why the mapping failed, when it did.
+    pub port_map_note: Option<String>,
     pub members: Vec<Member>,
 }
 
@@ -640,6 +653,8 @@ fn status_of(inner: &Inner) -> RelayStatus {
             name: Some(host.name.clone()),
             visibility: Some(host.visibility.clone()),
             public_ip: host.public_ip.clone(),
+            port_mapped: host.port_map.as_ref().map(|r| r.is_ok()),
+            port_map_note: host.port_map.as_ref().and_then(|r| r.as_ref().err().cloned()),
             members: host_members(host),
         };
     }
@@ -674,6 +689,8 @@ fn status_of(inner: &Inner) -> RelayStatus {
             name: Some(client.name.clone()),
             visibility: None,
             public_ip: None,
+            port_mapped: None,
+            port_map_note: None,
             members,
         };
     }
@@ -687,7 +704,51 @@ fn status_of(inner: &Inner) -> RelayStatus {
         name: None,
         visibility: None,
         public_ip: None,
+        port_mapped: None,
+        port_map_note: None,
         members: Vec::new(),
+    }
+}
+
+/// Ask the router to forward our port to this machine (UPnP IGD).
+///
+/// Public hosting used to look like it worked while being unreachable: we
+/// looked up the public IP, printed `1.2.3.4:6679`, and left the host to
+/// discover from a teammate's timeout that nothing was forwarded. Most home
+/// routers will open the port on request, so ask — and when they refuse, say
+/// so plainly instead of advertising an address that goes nowhere.
+///
+/// Returns Ok on a mapping the router accepted, Err with a short reason
+/// otherwise. Never fatal: a public relay with no mapping still works for
+/// anyone who forwards the port by hand.
+fn map_port(port: u16) -> Result<(), String> {
+    use igd::{search_gateway, PortMappingProtocol, SearchOptions};
+    let local = local_ips()
+        .into_iter()
+        .find_map(|ip| ip.parse::<std::net::Ipv4Addr>().ok())
+        .ok_or("no IPv4 address on this machine")?;
+    let gw = search_gateway(SearchOptions {
+        timeout: Some(Duration::from_secs(3)),
+        ..Default::default()
+    })
+    .map_err(|e| format!("no UPnP router found ({e})"))?;
+    // A finite lease so a crashed Canopy doesn't leave the port open forever;
+    // renewed implicitly each time hosting starts. Routers that reject a
+    // 12-hour lease usually accept a permanent one, so try that second.
+    let addr = std::net::SocketAddrV4::new(local, port);
+    gw.add_port(PortMappingProtocol::TCP, port, addr, 43_200, "Canopy relay")
+        .or_else(|_| gw.add_port(PortMappingProtocol::TCP, port, addr, 0, "Canopy relay"))
+        .map_err(|e| format!("router refused the mapping ({e})"))
+}
+
+/// Best-effort release of the mapping from `map_port`.
+fn unmap_port(port: u16) {
+    use igd::{search_gateway, PortMappingProtocol, SearchOptions};
+    if let Ok(gw) = search_gateway(SearchOptions {
+        timeout: Some(Duration::from_secs(2)),
+        ..Default::default()
+    }) {
+        let _ = gw.remove_port(PortMappingProtocol::TCP, port);
     }
 }
 
@@ -737,6 +798,12 @@ fn retire_transfers(inner: &mut Inner) {
 fn stop_host(inner: &mut Inner) {
     retire_transfers(inner);
     if let Some(host) = inner.host.take() {
+        // Give the port back if we opened it. Best-effort and off-thread: the
+        // router round-trip must not stall stopping the relay.
+        if matches!(host.port_map, Some(Ok(()))) {
+            let port = host.port;
+            std::thread::spawn(move || unmap_port(port));
+        }
         host.alive.store(false, Ordering::SeqCst);
         for peer in host.peers.values() {
             let _ = peer.shutdown.shutdown(Shutdown::Both);
@@ -796,6 +863,8 @@ pub async fn relay_host_start(
     // address is the thing the host exists to hand out, so "started but I
     // can't tell you where" would be a worse trade.
     let public_ip = if visibility == "public" { fetch_public_ip() } else { None };
+    // Only meaningful for a public relay; a LAN host needs nothing forwarded.
+    let port_map = if visibility == "public" { Some(map_port(actual)) } else { None };
     let host = Host {
         code: new_code(),
         port: actual,
@@ -803,6 +872,7 @@ pub async fn relay_host_start(
         name,
         visibility,
         public_ip,
+        port_map,
         peers: HashMap::new(),
         alive: alive.clone(),
     };
@@ -951,70 +1021,48 @@ fn host_conn(app: AppHandle, inner: Arc<Mutex<Inner>>, stream: TcpStream, alive:
     loop {
         let Some(bytes) = receiver.recv() else { break };
         let Ok(frame) = serde_json::from_slice::<Frame>(&bytes) else { continue };
-        let guard = inner.lock().unwrap();
-        let Some(host) = guard.host.as_ref() else { break };
-        if !alive.load(Ordering::SeqCst) || !host.peers.contains_key(&my_id) {
-            break;
-        }
-        match frame {
-            Frame::Chat(mut msg) => {
-                // The connection is the identity — whatever the frame claimed.
-                msg.from = my_id.clone();
-                msg.from_name = my_name.clone();
-                msg.ts = now_ms();
-                if msg.id.is_empty() {
-                    msg.id = new_id();
-                }
-                route(&app, host, &my_id, msg.to.clone(), Frame::Chat(msg.clone()), "relay:chat");
+        // Decide everything that needs the lock, then drop it before writing a
+        // single byte to a socket.
+        let plan: Option<(Vec<Arc<Mutex<secure::Sender>>>, bool, Frame, &str)> = {
+            let guard = inner.lock().unwrap();
+            let Some(host) = guard.host.as_ref() else { break };
+            if !alive.load(Ordering::SeqCst) || !host.peers.contains_key(&my_id) {
+                break;
             }
-            Frame::Command(mut msg) => {
-                msg.from = my_id.clone();
-                msg.from_name = my_name.clone();
-                msg.ts = now_ms();
-                if msg.id.is_empty() {
-                    msg.id = new_id();
+            match frame {
+                Frame::Chat(mut msg) => {
+                    // The connection is the identity — whatever the frame claimed.
+                    msg.from = my_id.clone();
+                    msg.from_name = my_name.clone();
+                    msg.ts = now_ms();
+                    if msg.id.is_empty() {
+                        msg.id = new_id();
+                    }
+                    let (targets, local) = route_targets(host, &my_id, &msg.to);
+                    Some((targets, local, Frame::Chat(msg), "relay:chat"))
                 }
-                route(&app, host, &my_id, msg.to.clone(), Frame::Command(msg.clone()), "relay:command");
-            }
-            Frame::Ping => {
-                if let Some(peer) = host.peers.get(&my_id) {
-                    let _ = peer_send(&peer.sender, &Frame::Pong);
+                Frame::Command(mut msg) => {
+                    msg.from = my_id.clone();
+                    msg.from_name = my_name.clone();
+                    msg.ts = now_ms();
+                    if msg.id.is_empty() {
+                        msg.id = new_id();
+                    }
+                    let (targets, local) = route_targets(host, &my_id, &msg.to);
+                    Some((targets, local, Frame::Command(msg), "relay:command"))
                 }
+                Frame::Ping => host
+                    .peers
+                    .get(&my_id)
+                    .map(|p| (vec![p.sender.clone()], false, Frame::Pong, "")),
+                _ => None,
             }
-            _ => {}
+        };
+        if let Some((targets, emit_local, frame, event)) = plan {
+            deliver_frame(&app, &targets, &frame, event, emit_local);
         }
     }
     remove_peer(&app, &inner, &my_id);
-}
-
-/// Host-side fan-out for a member's frame: everyone (except the sender), one
-/// peer, or the host itself — the last lands only in our own UI.
-fn route(app: &AppHandle, host: &Host, sender: &str, to: Option<String>, frame: Frame, event: &str) {
-    let emit_local = |frame: &Frame| match frame {
-        Frame::Chat(m) => {
-            let _ = app.emit(event, m.clone());
-        }
-        Frame::Command(m) => {
-            let _ = app.emit(event, m.clone());
-        }
-        _ => {}
-    };
-    match to {
-        None => {
-            for (id, peer) in &host.peers {
-                if id != sender {
-                    let _ = peer_send(&peer.sender, &frame);
-                }
-            }
-            emit_local(&frame);
-        }
-        Some(target) if target == host.self_id => emit_local(&frame),
-        Some(target) => {
-            if let Some(peer) = host.peers.get(&target) {
-                let _ = peer_send(&peer.sender, &frame);
-            }
-        }
-    }
 }
 
 fn remove_peer(app: &AppHandle, inner: &Arc<Mutex<Inner>>, id: &str) {
@@ -1024,6 +1072,62 @@ fn remove_peer(app: &AppHandle, inner: &Arc<Mutex<Inner>>, id: &str) {
         let _ = peer.shutdown.shutdown(Shutdown::Both);
         broadcast_presence(host);
         emit_state(app, &guard);
+    }
+}
+
+/// Host-side fan-out, phase 1: work out who a frame goes to.
+///
+/// Split from the sending half deliberately. This is pure and runs under the
+/// global lock; `deliver` does the blocking socket writes and must NOT. Fusing
+/// them meant one unresponsive peer held the whole relay's mutex for up to the
+/// 5s write timeout — per peer — and every unrelated operation (status polls,
+/// other members' messages, joins, stopping the relay) queued behind it.
+///
+/// Returns the senders to write to, and whether the frame also belongs in our
+/// own UI.
+fn route_targets(
+    host: &Host,
+    sender: &str,
+    to: &Option<String>,
+) -> (Vec<Arc<Mutex<secure::Sender>>>, bool) {
+    match to {
+        None => (
+            host.peers
+                .iter()
+                .filter(|(id, _)| id.as_str() != sender)
+                .map(|(_, p)| p.sender.clone())
+                .collect(),
+            true,
+        ),
+        Some(target) if *target == host.self_id => (Vec::new(), true),
+        Some(target) => (
+            host.peers.get(target).map(|p| p.sender.clone()).into_iter().collect(),
+            false,
+        ),
+    }
+}
+
+/// Host-side fan-out, phase 2: the blocking part. Call with NO lock held.
+fn deliver_frame(
+    app: &AppHandle,
+    targets: &[Arc<Mutex<secure::Sender>>],
+    frame: &Frame,
+    event: &str,
+    emit_local: bool,
+) {
+    for sender in targets {
+        let _ = peer_send(sender, frame);
+    }
+    if emit_local {
+        match frame {
+            Frame::Chat(m) => {
+                let _ = app.emit(event, m.clone());
+            }
+            Frame::Command(m) => {
+                let _ = app.emit(event, m.clone());
+            }
+            _ => {}
+        }
     }
 }
 

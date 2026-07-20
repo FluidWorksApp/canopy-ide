@@ -4817,6 +4817,26 @@ a.btn-mini {
   line-height: 1.45;
 }
 
+/* Reachability of a public relay: the difference between "teammates can
+   connect" and "this address goes nowhere", so it gets colour rather than
+   sitting in the same dim grey as everything else. */
+.team-note-ok {
+  color: var(--text);
+  border-left: 2px solid var(--ok, #3fb950);
+  padding-left: 8px;
+}
+
+.team-note-warn {
+  color: var(--text);
+  border-left: 2px solid var(--warn, #d29922);
+  padding-left: 8px;
+}
+
+.team-note-warn strong {
+  color: var(--warn, #d29922);
+  font-weight: 600;
+}
+
 /* members + inbox */
 
 .team-section-head {

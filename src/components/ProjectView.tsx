@@ -476,12 +476,24 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, activeChatPeer]);
 
-  // Ring chat tabs that received something while not in front. The transcript
-  // is app-level, so "new" is detected by length, not subscription.
-  const chatSeen = useRef(0);
+  // Ring chat tabs that received something while not in front.
+  //
+  // Identity, not position. This tracked a running index into the transcript,
+  // but App caps that transcript at 500 and empties it on disconnect — so once
+  // 500 messages had gone by, the length stopped growing, `slice(500)` was
+  // forever empty, and chat tabs never rang again for the rest of the session.
+  // Disconnecting broke it the other way: the index pointed past the end of a
+  // now-empty array, and nothing rang until 500 fresh messages had arrived.
+  // Comparing ids against what we've already seen survives both, because it
+  // never assumes the transcript only grows.
+  const chatSeen = useRef<Set<string> | null>(null);
   useEffect(() => {
-    const fresh = relay.chat.slice(chatSeen.current);
-    chatSeen.current = relay.chat.length;
+    const seen = chatSeen.current;
+    // First run seeds without ringing: history loaded before this view existed
+    // is not "new", it is just history.
+    chatSeen.current = new Set(relay.chat.map((m) => m.id));
+    if (seen === null) return;
+    const fresh = relay.chat.filter((m) => !seen.has(m.id));
     if (fresh.length === 0) return;
     const selfId = relay.status.self_id;
     setTabs((prev) =>
