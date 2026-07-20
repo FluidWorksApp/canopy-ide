@@ -931,6 +931,19 @@ pub async fn relay_host_start(
 /// One joined connection, host side: secure handshake, authenticate, register,
 /// then relay each frame until the peer hangs up.
 fn host_conn(app: AppHandle, inner: Arc<Mutex<Inner>>, stream: TcpStream, alive: Arc<AtomicBool>) {
+    // The listener is non-blocking so the accept loop can poll `alive`, and on
+    // BSD-derived platforms — macOS included — accept() hands back a socket
+    // that INHERITED that flag. Linux does not, which is why this only ever
+    // broke on a Mac.
+    //
+    // It has to be cleared before the timeouts below, because a timeout is
+    // silently ignored on a non-blocking socket: the first handshake read
+    // returns WouldBlock immediately, recv() maps that to None via `.ok()?`,
+    // and the host reads "the peer hung up" and drops a connection that had
+    // only just arrived. Every join on macOS failed this way, local and
+    // public alike, and the swallowed error left nothing to diagnose it by.
+    // The file-transfer accept path already does this; this one was missed.
+    let _ = stream.set_nonblocking(false);
     // A join must arrive promptly; port-scanners and half-open connections
     // get dropped instead of parked forever.
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
