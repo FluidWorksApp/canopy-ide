@@ -4,7 +4,7 @@
 // the two things you do with a ticket you're reading are understand it and
 // hand it to an agent.
 import { useMemo, useState } from "react";
-import { marked } from "marked";
+import { renderMarkdown } from "../markdown";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type * as ipc from "../ipc";
 import { TRACKERS } from "../trackers";
@@ -54,7 +54,7 @@ export function TicketView({
   const html = useMemo(
     () =>
       ticket.body.trim()
-        ? marked.parse(ticket.body, { async: false })
+        ? renderMarkdown(ticket.body)
         : "<p class='ticket-view-empty'>No description.</p>",
     [ticket.body],
   );

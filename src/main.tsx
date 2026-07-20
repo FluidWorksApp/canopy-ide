@@ -39,8 +39,13 @@ window.addEventListener(
 window.addEventListener("click", (e) => {
   const anchor = (e.target as HTMLElement | null)?.closest?.("a");
   const href = anchor?.getAttribute("href");
-  if (!href || !/^https?:\/\//i.test(href)) return;
+  if (!href) return;
+  // Cancel FIRST, for every scheme. Returning early on a non-http href left
+  // the webview to navigate it itself — and `javascript:` or `file:` in an
+  // issue body or a converted document is then a free script execution or a
+  // local read. Only http(s) goes on to the OS browser.
   e.preventDefault();
+  if (!/^https?:\/\//i.test(href)) return;
   void import("@tauri-apps/plugin-opener").then(({ openUrl }) => openUrl(href));
 });
 

@@ -1,7 +1,9 @@
 // One open project: icon rail + collapsible side panel (components / changes /
-// agents) + the main area where the TERMINAL is the hero. Terminals and files
-// are sub-tabs; terminals stay mounted so TUIs keep running. Bottom status tray
-// shows git branch, agents, model, tokens, cost.
+// agents) + the main area where the AGENT is the hero. Agents and reference
+// docs are sub-tabs; plain shells and long-running commands sit in compact
+// right-hand rails (single chip, or a dropdown once there's more than one).
+// Terminals stay mounted so TUIs keep running. Bottom status tray shows git
+// branch, agents, model, tokens, cost.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import * as ipc from "../ipc";
@@ -148,6 +150,95 @@ const tabId = () =>
     ? crypto.randomUUID()
     : `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
+/** One entry in a right-hand rail (a shell or a running command). */
+interface RailChip {
+  id: string;
+  active: boolean;
+  /** Extra state class for the chip (e.g. run-chip-live / -done / -failed). */
+  className?: string;
+  dot: React.ReactNode;
+  title: string;
+  tooltip: string;
+  /** Trailing control, e.g. a run's "re-run" button. */
+  action?: React.ReactNode;
+  onSelect: () => void;
+  onClose: () => void;
+}
+
+// A compact right-hand rail for terminals that aren't the hero — shells and
+// running commands. One entry shows as a single chip; two or more collapse
+// into a dropdown so the strip stays quiet and the agent keeps center stage.
+function Rail({
+  label,
+  chips,
+  summary,
+  open,
+  setOpen,
+}: {
+  label: string;
+  chips: RailChip[];
+  summary: React.ReactNode;
+  open: boolean;
+  setOpen: (v: boolean) => void;
+}) {
+  if (chips.length === 0) return null;
+  const chip = (c: RailChip, inMenu: boolean) => (
+    <div
+      key={c.id}
+      className={`run-chip ${c.className ?? ""} ${c.active ? "run-chip-active" : ""} ${
+        inMenu ? "rail-menu-chip" : ""
+      }`}
+      onClick={() => {
+        c.onSelect();
+        if (inMenu) setOpen(false);
+      }}
+      title={c.tooltip}
+    >
+      {c.dot}
+      <span className="run-chip-title">{c.title}</span>
+      {c.action}
+      <span
+        className="tab-close"
+        onClick={(e) => {
+          e.stopPropagation();
+          c.onClose();
+        }}
+      >
+        ✕
+      </span>
+    </div>
+  );
+  if (chips.length === 1) {
+    return (
+      <div className="run-rail">
+        <span className="run-rail-label">{label}</span>
+        {chip(chips[0], false)}
+      </div>
+    );
+  }
+  const active = chips.find((c) => c.active);
+  return (
+    <div className="run-rail rail-menu-anchor">
+      <span className="run-rail-label">{label}</span>
+      <button
+        className={`run-chip rail-toggle ${active ? "run-chip-active" : ""}`}
+        onClick={() => setOpen(!open)}
+        title={`${chips.length} ${label.toLowerCase()}`}
+      >
+        {summary}
+        <span className="run-chip-title">{active ? active.title : label}</span>
+        <span className="rail-count">{chips.length}</span>
+        <span className="rail-caret">▾</span>
+      </button>
+      {open && (
+        <div className="cli-menu rail-menu" onMouseLeave={() => setOpen(false)}>
+          {chips.map((c) => chip(c, true))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Real icons, not glyphs: this is a 5-item column where shape is the only
 // thing distinguishing entries, and the Agents button used to be Claude's
 // asterisk — which read as "Claude" rather than "agents".
@@ -196,6 +287,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const [rootCreate, setRootCreate] = useState<{ dir: string; kind: "file" | "dir"; value: string } | null>(null);
   useEscape(() => setRootCreate(null), rootCreate != null);
   const [cliMenuOpen, setCliMenuOpen] = useState(false);
+  const [shellMenuOpen, setShellMenuOpen] = useState(false);
+  const [runMenuOpen, setRunMenuOpen] = useState(false);
   const [installed, setInstalled] = useState<Record<string, boolean>>({});
   const installedRef = useRef(installed);
   installedRef.current = installed;
@@ -1131,11 +1224,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     setRenamingTabId(null);
   };
 
-  // Agents are the crux of this IDE; the strip's order and styling say so.
-  // Partitioned: agent terminals first (tinted, live dot), plain shells next,
-  // opened files / PRs last as a visibly quieter group. Detection is by the
-  // launch command OR by what's actually running in the pty tree, so a
-  // `claude` typed by hand into a shell promotes that tab too.
+  // Agents are the crux of this IDE, so they own the main strip. Detection is
+  // by launch command OR by what's actually running in the pty tree, so a
+  // `claude` typed by hand into a shell promotes that tab too. Plain shells and
+  // long-running commands are demoted to their own right-hand rails (below);
+  // reference docs (files, PRs, tickets) form a quieter group after the agents.
   const agentPtyIds = new Set(
     projectStats
       .filter((s) => s.procs.some((p) => AGENT_PATTERN.test(p.name)))
@@ -1146,11 +1239,65 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     (AGENT_PATTERN.test(t.command ?? "") ||
       (t.ptyId != null && agentPtyIds.has(t.ptyId)));
   const stripTabs = tabs.filter((t) => t.type !== "terminal" || !t.run);
+  const shellTabs = stripTabs.filter(
+    (t): t is TermSubTab => t.type === "terminal" && !isAgentTab(t),
+  );
   const tabGroups: SubTab[][] = [
     stripTabs.filter(isAgentTab),
-    stripTabs.filter((t) => t.type === "terminal" && !isAgentTab(t)),
     stripTabs.filter((t) => t.type !== "terminal"),
   ];
+  // Shells and runs each get a compact rail; Rail collapses to a dropdown at 2+.
+  const shellChips: RailChip[] = shellTabs.map((tab) => ({
+    id: tab.id,
+    active: tab.id === activeTabId,
+    dot: <TerminalIcon size={11} className="run-chip-shell-dot" />,
+    title: tab.customTitle ?? tab.title,
+    tooltip: `${tab.command ?? "shell"} — ${tab.cwd}`,
+    onSelect: () => setActiveTabId(tab.id),
+    onClose: () => closeTab(tab.id),
+  }));
+  const runChips: RailChip[] = runTabs.map((tab) => {
+    const ok = tab.exitCode === 0;
+    const state = !tab.exited ? "live" : ok ? "done" : "failed";
+    return {
+      id: tab.id,
+      active: tab.id === activeTabId,
+      className: `run-chip-${state}`,
+      dot: !tab.exited ? (
+        <LiveDot size={7} className="run-chip-dot" />
+      ) : ok ? (
+        <CheckIcon size={11} className="run-chip-ok" />
+      ) : (
+        <FailIcon size={11} className="run-chip-fail" />
+      ),
+      title: tab.title,
+      tooltip: tab.exited
+        ? `${ok ? "finished" : `exited ${tab.exitCode ?? "?"}`} — ${tab.command ?? ""}`
+        : `running — ${tab.command ?? ""}`,
+      action: tab.exited ? (
+        <button
+          className="icon-btn run-chip-btn"
+          title="Run again"
+          onClick={(e) => {
+            e.stopPropagation();
+            restartRun(tab.id);
+          }}
+        >
+          <RestartIcon size={11} />
+        </button>
+      ) : undefined,
+      onSelect: () => setActiveTabId(tab.id),
+      onClose: () => closeTab(tab.id),
+    };
+  });
+  // One summary glyph for the runs dropdown: any live wins, then any failure.
+  const runSummary = runTabs.some((t) => !t.exited) ? (
+    <LiveDot size={7} className="run-chip-dot" />
+  ) : runTabs.some((t) => t.exitCode !== 0) ? (
+    <FailIcon size={11} className="run-chip-fail" />
+  ) : (
+    <CheckIcon size={11} className="run-chip-ok" />
+  );
 
   // Agent terminals that can receive a ticket, shared by the Issues panel and
   // the ticket tab.
@@ -1296,59 +1443,22 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             ),
           )}
         </div>
-        {/* Long-running commands live in their own right-hand rail — they are
-            services, not shells, so they never mix with the terminal tabs. */}
-        {runTabs.length > 0 && (
-          <div className="run-rail">
-            <span className="run-rail-label">RUNS</span>
-            {runTabs.map((tab) => {
-              const ok = tab.exitCode === 0;
-              const state = !tab.exited ? "live" : ok ? "done" : "failed";
-              return (
-                <div
-                  key={tab.id}
-                  className={`run-chip run-chip-${state} ${tab.id === activeTabId ? "run-chip-active" : ""}`}
-                  onClick={() => setActiveTabId(tab.id)}
-                  title={
-                    tab.exited
-                      ? `${ok ? "finished" : `exited ${tab.exitCode ?? "?"}`} — ${tab.command ?? ""}`
-                      : `running — ${tab.command ?? ""}`
-                  }
-                >
-                  {!tab.exited ? (
-                    <LiveDot size={7} className="run-chip-dot" />
-                  ) : ok ? (
-                    <CheckIcon size={11} className="run-chip-ok" />
-                  ) : (
-                    <FailIcon size={11} className="run-chip-fail" />
-                  )}
-                  <span className="run-chip-title">{tab.title}</span>
-                  {tab.exited && (
-                    <button
-                      className="icon-btn run-chip-btn"
-                      title="Run again"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        restartRun(tab.id);
-                      }}
-                    >
-                      <RestartIcon size={11} />
-                    </button>
-                  )}
-                  <span
-                    className="tab-close"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      closeTab(tab.id);
-                    }}
-                  >
-                    ✕
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        )}
+        {/* Plain shells and long-running commands aren't the hero — they live
+            in compact right-hand rails, each collapsing to a dropdown at 2+. */}
+        <Rail
+          label="SHELLS"
+          chips={shellChips}
+          summary={<TerminalIcon size={11} className="run-chip-shell-dot" />}
+          open={shellMenuOpen}
+          setOpen={setShellMenuOpen}
+        />
+        <Rail
+          label="RUNS"
+          chips={runChips}
+          summary={runSummary}
+          open={runMenuOpen}
+          setOpen={setRunMenuOpen}
+        />
         <div className="pane-actions">
           {activeTab?.type === "file" &&
             ["markdown", "html", "notebook", "sheet", "json"].includes(activeTab.file.kind) && (
