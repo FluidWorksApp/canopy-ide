@@ -36,7 +36,7 @@ fn now_ms() -> u64 {
 }
 
 /// Process-seeded randomness without a rand crate: RandomState is freshly
-/// seeded per call. Session codes and member ids — not cryptography.
+/// seeded per call. Display ids only — not cryptography.
 fn entropy() -> u64 {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
@@ -45,8 +45,23 @@ fn entropy() -> u64 {
     h.finish()
 }
 
+/// Randomness from the OS CSPRNG, for values an attacker must not be able to
+/// predict. SPAKE2 makes a short join code safe against OFFLINE attack — an
+/// eavesdropper cannot brute-force the code from a captured handshake — but it
+/// assumes the code itself is unguessable. Derived from `entropy()` it was
+/// not: SipHash of a per-thread seed and a millisecond timestamp, correlated
+/// across successive calls, and explicitly disclaimed as non-cryptographic by
+/// its own doc comment. Predict the code and the whole PAKE is bypassed
+/// legitimately — you just run the protocol with the right password.
+fn secure_u64() -> u64 {
+    let mut b = [0u8; 8];
+    getrandom::getrandom(&mut b).expect("OS randomness unavailable");
+    u64::from_le_bytes(b)
+}
+
 fn new_code() -> String {
-    format!("{:07}", entropy() % 10_000_000)
+    // The modulo bias here is ~2^-40 — immaterial against a 7-digit space.
+    format!("{:07}", secure_u64() % 10_000_000)
 }
 
 fn new_id() -> String {
@@ -709,7 +724,18 @@ fn broadcast_presence(host: &Host) {
     }
 }
 
+/// Stop serving any in-flight file offers. These outlived both stop_host and
+/// stop_client — only app exit retired them — so "Stop hosting" left listeners
+/// on open ports still handing bytes to anyone holding the token.
+fn retire_transfers(inner: &mut Inner) {
+    for alive in inner.transfers.values() {
+        alive.store(false, Ordering::SeqCst);
+    }
+    inner.transfers.clear();
+}
+
 fn stop_host(inner: &mut Inner) {
+    retire_transfers(inner);
     if let Some(host) = inner.host.take() {
         host.alive.store(false, Ordering::SeqCst);
         for peer in host.peers.values() {
@@ -719,6 +745,7 @@ fn stop_host(inner: &mut Inner) {
 }
 
 fn stop_client(inner: &mut Inner) {
+    retire_transfers(inner);
     if let Some(client) = inner.client.take() {
         client.alive.store(false, Ordering::SeqCst);
         let _ = client.shutdown.shutdown(Shutdown::Both);
@@ -1399,7 +1426,8 @@ pub async fn relay_offer_file(
         TcpListener::bind("0.0.0.0:0").map_err(|e| format!("Couldn't open a transfer port: {e}"))?;
     let tport = listener.local_addr().map_err(|e| e.to_string())?.port();
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
-    let token = format!("{:016x}{:016x}", entropy(), entropy());
+    // Feeds the AEAD keys for the transfer channel — must be CSPRNG.
+    let token = format!("{:016x}{:016x}", secure_u64(), secure_u64());
 
     // Who we're sending to (for the toast) and whether this side is
     // internet-facing (host in public mode, or a client that dialed a
@@ -1609,7 +1637,15 @@ pub async fn relay_accept_file(
                 emit_transfer(&app, &id, "in", &name, size, false, "Handshake with the sender failed.".into());
                 return;
             }
-            let Ok(mut out) = std::fs::File::create(&dest) else {
+            // Receive into a sibling temp file and rename onto `dest` only
+            // once the hash checks out. Creating `dest` directly truncated it
+            // before a single byte arrived, and every failure path below then
+            // deleted it — so accepting a file that overwrites one of your own
+            // and losing the connection destroyed YOUR file, which was never
+            // part of the transfer. Rename within a directory is atomic, so
+            // `dest` either stays untouched or becomes the complete file.
+            let part = format!("{dest}.canopy-part");
+            let Ok(mut out) = std::fs::File::create(&part) else {
                 emit_transfer(&app, &id, "in", &name, size, false, format!("Can't write to {dest}."));
                 return;
             };
@@ -1622,7 +1658,7 @@ pub async fn relay_accept_file(
                 hasher.update(&chunk);
                 if out.write_all(&chunk).is_err() {
                     drop(out);
-                    let _ = std::fs::remove_file(&dest);
+                    let _ = std::fs::remove_file(&part);
                     emit_transfer(&app, &id, "in", &name, size, false, format!("Writing {dest} failed — disk full?"));
                     return;
                 }
@@ -1634,14 +1670,19 @@ pub async fn relay_accept_file(
             }
             drop(out);
             if got < size {
-                let _ = std::fs::remove_file(&dest);
+                let _ = std::fs::remove_file(&part);
                 emit_transfer(&app, &id, "in", &name, size, false, "The connection dropped before the whole file arrived.".into());
                 return;
             }
             let digest = format!("{:x}", hasher.finalize());
             if digest != sha256.to_lowercase() {
-                let _ = std::fs::remove_file(&dest);
+                let _ = std::fs::remove_file(&part);
                 emit_transfer(&app, &id, "in", &name, size, false, "Integrity check failed — the received bytes don't match the offer. Nothing was kept.".into());
+                return;
+            }
+            if let Err(e) = std::fs::rename(&part, &dest) {
+                let _ = std::fs::remove_file(&part);
+                emit_transfer(&app, &id, "in", &name, size, false, format!("Couldn't save to {dest}: {e}"));
                 return;
             }
             emit_progress(&app, &id, "in", &name, size, size);
