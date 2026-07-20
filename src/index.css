@@ -2107,6 +2107,7 @@ body,
    to a single column. */
 .confirm.settings-dialog {
   width: min(760px, 94vw);
+  /* Wins over .confirm's narrower definite width above. */
   max-width: min(760px, 94vw);
   height: min(560px, 84vh);
   max-height: min(560px, 84vh);
@@ -3003,11 +3004,24 @@ body,
   align-items: center;
   justify-content: center;
   background: rgba(0, 0, 0, 0.5);
+  /* Dialogs are rendered inside whatever component owns them — the model
+     switcher's lives in .status-bar, which sets white-space: nowrap for its
+     one-line row. white-space inherits through position:fixed, so its
+     paragraphs could never wrap and ran straight off the box. Reset it for
+     every dialog rather than per caller. */
+  white-space: normal;
+  text-align: left;
 }
 
 .confirm {
-  max-width: 420px;
+  /* A definite width, not just a cap: with only max-width a long unbreakable
+     token (a path, a URL) could still push the box wider. */
+  width: min(420px, 92vw);
+  max-width: min(420px, 92vw);
   padding: 16px 18px;
+  /* Paths and commands appear in these dialogs and have no spaces to break
+     at. */
+  overflow-wrap: anywhere;
   border-radius: 8px;
   background: var(--bg-alt);
   border: 1px solid var(--border);
