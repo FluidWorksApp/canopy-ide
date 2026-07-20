@@ -16,6 +16,10 @@ interface AgentsPanelProps {
   /** Answer a single-select question by clicking its option in the panel. */
   onAnswer?: (item: PendingItem, optionIndex: number) => void;
   onJumpToTerminal?: (item: PendingItem) => void;
+  /** Focus the tab a running session is in. Separate from onJumpToTerminal:
+   *  that one guesses a tab from a notification's cwd, this one has the pty
+   *  id in hand and is exact. */
+  onJumpToPty?: (ptyId: number) => void;
   /** Cross-session context sharing for this project. */
   roots: string[];
   shareContext: boolean;
@@ -85,6 +89,7 @@ export function AgentsPanel({
   onDismissPending,
   onAnswer,
   onJumpToTerminal,
+  onJumpToPty,
   roots,
   shareContext,
   onShareContext,
@@ -212,7 +217,13 @@ export function AgentsPanel({
     return (
       <div
         key={s.id}
-        className={`agent-row ${runaway ? "agent-runaway" : ""}`}
+        className={`agent-row ${runaway ? "agent-runaway" : ""} ${
+          onJumpToPty ? "agent-row-jump" : ""
+        }`}
+        // The whole row goes to its terminal. Listing what is running without
+        // a way to reach it made the panel a read-only status board; the row
+        // already identifies the session, so it should also be the way there.
+        onClick={() => onJumpToPty?.(s.id)}
         // Rows truncate to one line each now; the full detail lives here.
         title={[agent?.name ?? s.title, s.cwd, digest?.branch, task]
           .filter(Boolean)
@@ -242,9 +253,19 @@ export function AgentsPanel({
           <span className="agent-session">term #{s.id}</span>
           {/* A dev server in here, without opening the tab to find out. */}
           {s.ports?.map((p) => (
-            <span key={p} className="agent-port" title={`Listening on port ${p}`}>
+            <button
+              key={p}
+              className="agent-port"
+              title={`Open http://localhost:${p} in your browser`}
+              onClick={(e) => {
+                e.stopPropagation();
+                void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
+                  openUrl(`http://localhost:${p}`),
+                );
+              }}
+            >
               :{p}
-            </span>
+            </button>
           ))}
           {runaway && <span className="runaway-badge">runaway?</span>}
         </div>
@@ -256,7 +277,10 @@ export function AgentsPanel({
           <button
             className="btn-icon btn-danger"
             title={`Kill terminal #${s.id}${agent ? ` and the ${agent.name} running in it` : ""}`}
-            onClick={() => void ipc.ptyKill(s.id)}
+            onClick={(e) => {
+              e.stopPropagation();
+              void ipc.ptyKill(s.id);
+            }}
           >
             ✕
           </button>

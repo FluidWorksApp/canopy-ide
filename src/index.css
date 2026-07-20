@@ -1455,6 +1455,135 @@ body,
   border-radius: 2px;
 }
 
+/* Collapsed rail (more than one run/shell): the label plus a single toggle
+   button that opens the full list.
+   
+   These five classes were referenced by ProjectView and never existed here, so
+   the menu had no positioning context and inherited none of this. Two things
+   were wrong at once. Without `position: relative` the menu's `position:
+   absolute; right: 0; top: 100%` resolved against some far-away ancestor, and
+   even with it, `.run-rail` is a scroll container (overflow-x: auto) — and an
+   absolutely positioned child of a scroll container is clipped by it. In this
+   collapsed form the rail is one button, so there is nothing to scroll and the
+   clipping is pure loss: turn it off so the menu can escape. */
+.rail-menu-anchor {
+  position: relative;
+  overflow: visible;
+}
+
+.rail-toggle {
+  max-width: 200px;
+}
+
+.rail-count {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  opacity: 0.75;
+}
+
+.rail-caret {
+  flex: 0 0 auto;
+  font-size: 9px;
+  opacity: 0.6;
+  line-height: 1;
+}
+
+/* Many runs shouldn't grow a menu taller than the window. */
+.rail-menu {
+  max-height: 60vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Inside the menu the chips are rows, not a scrolling strip. */
+.rail-menu-chip {
+  max-width: none;
+  width: 100%;
+}
+
+/* ---- endpoints a shell is serving ------------------------------------- */
+
+/* The chip floats over the grid instead of sitting above it: the terminal's
+   height is what the pty gets told, and resizing it is how output ends up
+   wrapped at the wrong column. */
+.term-host {
+  position: relative;
+}
+
+.term-ports {
+  position: absolute;
+  top: 6px;
+  /* Clear of the scrollbar. */
+  right: 16px;
+  z-index: 5;
+  display: flex;
+  gap: 4px;
+  /* The strip is a pass-through; only the chips take clicks, so selecting
+     terminal text underneath still works. */
+  pointer-events: none;
+}
+
+.term-port {
+  pointer-events: auto;
+  font-size: 10px;
+  font-family: var(--mono, ui-monospace, monospace);
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: var(--text-dim);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  opacity: 0.75;
+  cursor: pointer;
+  transition: opacity 0.12s ease, color 0.12s ease;
+}
+
+.term-port:hover {
+  opacity: 1;
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* The same port in the Agents panel is now a link, not a label. */
+.agent-port {
+  cursor: pointer;
+}
+
+.agent-port:hover {
+  color: var(--accent);
+}
+
+/* ---- jump to a session's tab ------------------------------------------ */
+
+.agent-row-jump {
+  cursor: pointer;
+}
+
+/* Activating a tab is invisible when three of them look alike, so the one you
+   were sent to says so for a moment. */
+.tab-flash {
+  animation: tab-flash 1.2s ease-out;
+}
+
+@keyframes tab-flash {
+  0%,
+  55% {
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+  100% {
+    box-shadow: inset 0 0 0 1px transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab-flash {
+    animation: none;
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+}
+
 .run-rail-label {
   font-size: 9px;
   letter-spacing: 0.09em;
@@ -4815,6 +4944,26 @@ a.btn-mini {
   color: var(--text-dim);
   font-size: 11px;
   line-height: 1.45;
+}
+
+/* Reachability of a public relay: the difference between "teammates can
+   connect" and "this address goes nowhere", so it gets colour rather than
+   sitting in the same dim grey as everything else. */
+.team-note-ok {
+  color: var(--text);
+  border-left: 2px solid var(--ok, #3fb950);
+  padding-left: 8px;
+}
+
+.team-note-warn {
+  color: var(--text);
+  border-left: 2px solid var(--warn, #d29922);
+  padding-left: 8px;
+}
+
+.team-note-warn strong {
+  color: var(--warn, #d29922);
+  font-weight: 600;
 }
 
 /* members + inbox */
