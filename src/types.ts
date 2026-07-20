@@ -59,6 +59,13 @@ export interface RelayHandle {
   inbox: RelayCommandMsg[];
   /** File transfers in flight or recently finished. */
   transfers: RelayTransfer[];
+  /** Live-editing sessions and the offers that haven't been answered. The
+   *  manager is the single owner of the doc -> session table; note it has no
+   *  way at all to turn a doc id from the wire into a path. */
+  collab: import("./collab").CollabManager;
+  /** Bumped whenever an offer arrives or a session opens, so the panels that
+   *  render them re-run — the manager itself is mutable and outside React. */
+  collabTick: number;
   hostStart: (name: string, visibility: "local" | "public", port?: number) => Promise<void>;
   hostStop: () => Promise<void>;
   regenerateCode: () => Promise<void>;

@@ -110,6 +110,70 @@ pub struct CommandMsg {
     pub ts: u64,
 }
 
+/// One text operation in the collaborative-editing stream. Offsets are UTF-16
+/// code units so they land in Monaco's coordinate space without a conversion
+/// layer on either side.
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(tag = "op", rename_all = "lowercase")]
+pub enum CollabOp {
+    Retain { n: u32 },
+    Insert { s: String },
+    Delete { n: u32 },
+}
+
+/// What a collab frame is saying about a document. Typed rather than a free
+/// `Value` (the way `CommandMsg::payload` is) so a malformed body is refused at
+/// the relay instead of being fanned out to every peer for the frontend to
+/// puzzle over — the collab path runs at one frame per keystroke, so it is the
+/// last place to be forgiving.
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum CollabBody {
+    /// Owner -> peer: "I am sharing a file live." `name` is a BASENAME FOR
+    /// DISPLAY ONLY and is re-sanitised on the receiving side. A path never
+    /// crosses this wire — see docs/collab-editing.md §5, invariant COLLAB-1.
+    Offer { name: String, lang: Option<String> },
+    /// Peer -> owner: "let me in." Refused unless the sender was offered it.
+    Open,
+    /// Owner -> peer: the whole document at `rev`, on open or on resync.
+    Snapshot { rev: u64, text: String },
+    /// The edit stream. Peer -> owner: `rev` is the base the ops were composed
+    /// against. Owner -> everyone: `rev` is the new authoritative revision and
+    /// `author` is whose op it is, so the author recognises its own ack.
+    Ops {
+        rev: u64,
+        ops: Vec<CollabOp>,
+        #[serde(default)]
+        author: String,
+        /// Owner's document hash at `rev`, sent every few revisions. A peer
+        /// that computes a different one has diverged and asks to resync,
+        /// which is what keeps a transform bug from becoming silent corruption.
+        #[serde(default)]
+        hash: Option<String>,
+    },
+    /// Peer -> owner: "I disagree with you about the document, send it again."
+    Resync { reason: String },
+    /// Owner unshares, or a peer leaves the document.
+    Close { reason: String },
+    /// Presence. Unsequenced and droppable; `rev` lets a stale one be
+    /// transformed into place rather than drawn in the wrong spot.
+    Cursor { anchor: u32, head: u32, rev: u64 },
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct CollabMsg {
+    pub id: String,
+    pub from: String,
+    pub from_name: String,
+    pub to: Option<String>,
+    /// The document. Opaque 128-bit CSPRNG token minted by the owner; the only
+    /// way any peer can name a document, and it resolves to a path in exactly
+    /// one process (the owner's) and only via an explicit local share.
+    pub doc: String,
+    pub body: CollabBody,
+    pub ts: u64,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 enum Frame {
@@ -123,6 +187,11 @@ enum Frame {
     Presence { members: Vec<Member> },
     Chat(ChatMsg),
     Command(CommandMsg),
+    /// Live collaborative editing. Deliberately its own variant rather than a
+    /// `Command` kind: commands land in the Team panel's inbox and raise a
+    /// notification, which is right for "review this PR" and catastrophic for
+    /// a frame per keystroke.
+    Collab(CollabMsg),
     Ping,
     Pong,
 }
@@ -976,6 +1045,31 @@ fn host_conn(app: AppHandle, inner: Arc<Mutex<Inner>>, stream: TcpStream, alive:
                 }
                 route(&app, host, &my_id, msg.to.clone(), Frame::Command(msg.clone()), "relay:command");
             }
+            Frame::Collab(mut msg) => {
+                msg.from = my_id.clone();
+                msg.from_name = my_name.clone();
+                msg.ts = now_ms();
+                if msg.id.is_empty() {
+                    msg.id = new_id();
+                }
+                // Chat and commands are occasional, so `route` writing sockets
+                // with the relay mutex held costs nothing visible. Collab is a
+                // frame per keystroke per editor: holding the ONE global lock
+                // across a blocking write here would serialise the whole app
+                // behind the slowest peer's TCP window. So pick the targets
+                // under the lock (pure, cheap) and write after dropping it —
+                // the sender handles stay valid because each is an Arc.
+                let for_us = msg.to.as_deref() == Some(host.self_id.as_str()) || msg.to.is_none();
+                let targets = collab_targets(host, &my_id, &msg.to);
+                drop(guard);
+                if for_us {
+                    let _ = app.emit("relay:collab", msg.clone());
+                }
+                let frame = Frame::Collab(msg);
+                for target in targets {
+                    let _ = peer_send(&target, &frame);
+                }
+            }
             Frame::Ping => {
                 if let Some(peer) = host.peers.get(&my_id) {
                     let _ = peer_send(&peer.sender, &Frame::Pong);
@@ -985,6 +1079,29 @@ fn host_conn(app: AppHandle, inner: Arc<Mutex<Inner>>, stream: TcpStream, alive:
         }
     }
     remove_peer(&app, &inner, &my_id);
+}
+
+/// Who a collab frame goes to, resolved as pure data so the caller can release
+/// the relay mutex before it writes a byte. Cloning the `Arc<Mutex<Sender>>`
+/// (not the Sender) is what makes that split possible.
+fn collab_targets(
+    host: &Host,
+    sender: &str,
+    to: &Option<String>,
+) -> Vec<Arc<Mutex<secure::Sender>>> {
+    match to {
+        None => host
+            .peers
+            .iter()
+            .filter(|(id, _)| id.as_str() != sender)
+            .map(|(_, peer)| peer.sender.clone())
+            .collect(),
+        Some(target) => host
+            .peers
+            .get(target)
+            .map(|peer| vec![peer.sender.clone()])
+            .unwrap_or_default(),
+    }
 }
 
 /// Host-side fan-out for a member's frame: everyone (except the sender), one
@@ -1165,6 +1282,9 @@ pub async fn relay_connect(
                     Frame::Command(msg) => {
                         let _ = reader_app.emit("relay:command", msg);
                     }
+                    Frame::Collab(msg) => {
+                        let _ = reader_app.emit("relay:collab", msg);
+                    }
                     Frame::Ping => {
                         let _ = peer_send(&reader_sender, &Frame::Pong);
                     }
@@ -1257,6 +1377,59 @@ pub async fn relay_send_command(
     };
     deliver(&inner, to, Frame::Command(msg.clone()))?;
     Ok(msg)
+}
+
+/// Put a collab frame of ours on the wire. Same split as the host-side relay
+/// path: everything that needs the relay mutex happens first and yields plain
+/// data, then the lock is dropped and only then does a socket get written. At a
+/// frame per keystroke this is the difference between a lock held for
+/// nanoseconds and one held for a network round-trip.
+///
+/// Note this carries no path and mints no document: `doc` is a token the
+/// frontend already holds, and the backend never learns what file it means.
+#[tauri::command]
+pub async fn relay_send_collab(
+    state: State<'_, RelayManager>,
+    to: Option<String>,
+    doc: String,
+    body: CollabBody,
+) -> Result<(), String> {
+    let (frame, targets, upstream) = {
+        let inner = state.inner.lock().unwrap();
+        let (from, from_name) = sender_context(&inner)?;
+        let msg = CollabMsg {
+            id: new_id(),
+            from,
+            from_name,
+            to: to.clone(),
+            doc,
+            body,
+            ts: now_ms(),
+        };
+        let frame = Frame::Collab(msg);
+        if let Some(host) = &inner.host {
+            let targets = collab_targets(host, &host.self_id, &to);
+            if targets.is_empty() && to.is_some() {
+                return Err("That member is no longer connected.".into());
+            }
+            (frame, targets, None)
+        } else if let Some(client) = &inner.client {
+            (frame, Vec::new(), Some(client.sender.clone()))
+        } else {
+            return Err("Not connected to a relay.".into());
+        }
+    };
+    if let Some(sender) = upstream {
+        return if peer_send(&sender, &frame) {
+            Ok(())
+        } else {
+            Err("Lost the relay connection.".into())
+        };
+    }
+    for target in targets {
+        let _ = peer_send(&target, &frame);
+    }
+    Ok(())
 }
 
 /// Put a frame of ours on the wire. Host: straight to the target peer(s) —
@@ -1690,4 +1863,76 @@ pub async fn relay_accept_file(
         })
         .map_err(|e| format!("couldn't spawn transfer thread: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The frontend composes these bodies by hand in TypeScript, so the two
+    /// definitions are only kept honest by something that parses the exact
+    /// shape the frontend emits. A silent tag mismatch here would present as
+    /// "collaborative editing does nothing", with no error anywhere.
+    #[test]
+    fn parses_the_bodies_the_frontend_sends() {
+        let cases = [
+            r#"{"kind":"offer","name":"relay.rs","lang":"rust"}"#,
+            r#"{"kind":"open"}"#,
+            r#"{"kind":"snapshot","rev":7,"text":"hello"}"#,
+            r#"{"kind":"ops","rev":8,"ops":[{"op":"retain","n":3},{"op":"insert","s":"x"},{"op":"delete","n":2}],"author":"abc","hash":null}"#,
+            r#"{"kind":"resync","reason":"hash"}"#,
+            r#"{"kind":"close","reason":"left"}"#,
+            r#"{"kind":"cursor","anchor":1,"head":4,"rev":8}"#,
+        ];
+        for c in cases {
+            serde_json::from_str::<CollabBody>(c).unwrap_or_else(|e| panic!("{c}: {e}"));
+        }
+    }
+
+    /// A collab frame has to survive the same encode/decode the relay does to
+    /// every other frame, and land back as `Collab` rather than being eaten by
+    /// an earlier variant's tag.
+    #[test]
+    fn collab_frame_round_trips() {
+        let frame = Frame::Collab(CollabMsg {
+            id: "i".into(),
+            from: "f".into(),
+            from_name: "n".into(),
+            to: None,
+            doc: "d".into(),
+            body: CollabBody::Ops {
+                rev: 1,
+                ops: vec![CollabOp::Retain { n: 2 }, CollabOp::Insert { s: "hi".into() }],
+                author: "f".into(),
+                hash: Some("deadbeef".into()),
+            },
+            ts: 0,
+        });
+        let bytes = serde_json::to_vec(&frame).unwrap();
+        assert!(matches!(
+            serde_json::from_slice::<Frame>(&bytes).unwrap(),
+            Frame::Collab(_)
+        ));
+    }
+
+    /// Fan-out must skip the sender — echoing an operation back to its author
+    /// would have the guest apply its own edit twice.
+    #[test]
+    fn broadcast_targets_exclude_the_sender() {
+        // Constructing a Peer needs a live socket, so this checks the routing
+        // decision the only way that stays a unit test: an empty peer table
+        // still yields the right shape for both addressing modes.
+        let host = Host {
+            code: "0000000".into(),
+            port: 0,
+            self_id: "host".into(),
+            name: "h".into(),
+            visibility: "local".into(),
+            public_ip: None,
+            peers: HashMap::new(),
+            alive: Arc::new(AtomicBool::new(true)),
+        };
+        assert!(collab_targets(&host, "someone", &None).is_empty());
+        assert!(collab_targets(&host, "someone", &Some("nobody".into())).is_empty());
+    }
 }

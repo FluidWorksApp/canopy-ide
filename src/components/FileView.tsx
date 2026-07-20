@@ -24,6 +24,8 @@ interface FileViewProps {
   onAcceptExternal: () => void;
   onKeepMine: () => void;
   onCloseDiff: () => void;
+  /** Set while this file is shared live, so the caret goes out as presence. */
+  onCursor?: (anchor: number, head: number) => void;
 }
 
 export function FileView(props: FileViewProps) {
@@ -64,7 +66,14 @@ export function FileView(props: FileViewProps) {
   if (file.kind === "code" || file.view === "source") {
     const text = file.bytes ? decoder.decode(file.bytes) : "";
     const model = modelFor(file.path, text);
-    return <MonacoEditor model={model} onSave={props.onSave} onDirty={props.onDirty} />;
+    return (
+      <MonacoEditor
+        model={model}
+        onSave={props.onSave}
+        onDirty={props.onDirty}
+        onCursor={props.onCursor}
+      />
+    );
   }
 
   if (!file.bytes) return <div className="viewer-loading">Loading…</div>;

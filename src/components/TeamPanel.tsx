@@ -373,6 +373,43 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
         </>
       )}
 
+      {/* Live-edit invitations. Deliberately not folded into `inbox`: a collab
+          offer resolves into an editor tab, not a command to act on once, and
+          accepting one is the moment access is granted. */}
+      {relay.collab.offers.size > 0 && (
+        <>
+          <div className="team-section-head">
+            Live edit <span className="badge badge-urgent">{relay.collab.offers.size}</span>
+          </div>
+          {[...relay.collab.offers].map(([doc, offer]) => (
+            <div key={doc} className="team-inbox-item">
+              <div className="team-inbox-head">
+                <TeamIcon size={13} className="team-inbox-icon" />
+                <span className="team-inbox-from">{offer.fromName}</span>
+              </div>
+              <div className="team-inbox-body">
+                Wants to edit <strong>{offer.name}</strong> with you, live. Your copy
+                stays in memory — only they can save it.
+              </div>
+              <div className="team-inbox-actions">
+                <button
+                  className="btn-mini btn-accent"
+                  onClick={() => {
+                    relay.collab.accept(doc);
+                    onNotice(`Opening ${offer.name}…`);
+                  }}
+                >
+                  Join
+                </button>
+                <button className="btn-mini" onClick={() => relay.collab.dismiss(doc)}>
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          ))}
+        </>
+      )}
+
       {relay.inbox.length > 0 && (
         <>
           <div className="team-section-head">

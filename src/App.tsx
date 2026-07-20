@@ -15,6 +15,7 @@ import {
 } from "./projects";
 import type { AgentEventEntry, NoticeKind, RelayHandle } from "./types";
 import { derivePending, pendingForRoots } from "./notifications";
+import { CollabManager, safeName } from "./collab";
 import { ProjectView } from "./components/ProjectView";
 import { ProjectDialog } from "./components/ProjectDialog";
 import { ProjectManager } from "./components/ProjectManager";
@@ -115,6 +116,13 @@ export default function App() {
   const [relayChat, setRelayChat] = useState<ipc.RelayChatMsg[]>([]);
   const [relayInbox, setRelayInbox] = useState<ipc.RelayCommandMsg[]>([]);
   const [relayTransfers, setRelayTransfers] = useState<import("./types").RelayTransfer[]>([]);
+  // Live editing. The manager is a plain mutable object deliberately kept out
+  // of React state — it holds Monaco models and per-keystroke session state,
+  // neither of which survives being copied. `collabTick` is how a change in it
+  // reaches the render tree.
+  const collab = useRef<CollabManager | null>(null);
+  if (!collab.current) collab.current = new CollabManager();
+  const [collabTick, setCollabTick] = useState(0);
   // The relay we're persisting chat under = the host's stable identity key.
   // Null when off, so the persist effect never writes an empty transcript.
   const relayChatLabel = useRef<string | null>(null);
@@ -128,6 +136,27 @@ export default function App() {
       relayChatLabel.current = null;
     }
   }, [relayStatus]);
+  // The collab manager follows the relay's lifecycle: it needs our member id to
+  // recognise its own operations coming back, and every session is over the
+  // moment the relay is. Members who vanish take their carets with them —
+  // otherwise a caret sits on a line forever after its owner closed the lid.
+  const seenMembers = useRef<string[]>([]);
+  useEffect(() => {
+    const mgr = collab.current!;
+    if (relayStatus.role === "off") {
+      seenMembers.current = [];
+      mgr.reset();
+      setCollabTick((n) => n + 1);
+      return;
+    }
+    if (relayStatus.self_id) mgr.setSelf(relayStatus.self_id);
+    const now = relayStatus.members.map((m) => m.id);
+    for (const gone of seenMembers.current.filter((id) => !now.includes(id))) {
+      mgr.dropMember(gone);
+    }
+    seenMembers.current = now;
+  }, [relayStatus]);
+
   // Persist as it grows. The length guard means clearing the in-memory view on
   // disconnect can't wipe the stored history.
   useEffect(() => {
@@ -305,6 +334,19 @@ export default function App() {
               : `${m.from_name} sent a ${m.kind} command`;
         notify(`${text} — see the Team panel`);
         void nativeNotify("Canopy — Team", text);
+      }),
+      ipc.onRelayCollab((m) => {
+        const mgr = collab.current!;
+        const known = mgr.get(m.doc) !== undefined;
+        mgr.receive(m);
+        setCollabTick((n) => n + 1);
+        // Only the invitation is worth interrupting for. Everything else on
+        // this channel is a keystroke.
+        if (!known && m.body.kind === "offer") {
+          const what = `${m.from_name} wants to edit ${safeName(m.body.name)} with you`;
+          notify(`${what} — see the Team panel`);
+          void nativeNotify("Canopy — Team", what);
+        }
       }),
       ipc.onRelayTransferProgress((p) => {
         // Upsert the live row; a progress tick can arrive before any terminal
@@ -615,6 +657,8 @@ export default function App() {
     chat: relayChat,
     inbox: relayInbox,
     transfers: relayTransfers,
+    collab: collab.current,
+    collabTick,
     hostStart: async (name, visibility, port) => {
       setRelayStatus(await ipc.relayHostStart(name, visibility, port));
     },
