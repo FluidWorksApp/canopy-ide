@@ -1,4 +1,12 @@
+/* ---------- theme ----------
+   Every color in this file (with a handful of deliberate exceptions — a docx
+   page, an embedded HTML preview, a notebook image cell — which stay a fixed
+   "paper" white the way a real document does, regardless of app theme) is one
+   of these custom properties. Switching themes is one attribute flip on
+   <html data-theme="…"> (see settings.ts applyTheme()); nothing re-renders. */
 :root {
+  /* Default: the original palette, unchanged, plus --on-accent factored out of
+     what used to be five separate hardcoded #12131c's. */
   --bg: #1a1b26;
   --bg-alt: #16161e;
   --bg-raised: #1f2335;
@@ -9,8 +17,64 @@
   --danger: #f7768e;
   --ok: #9ece6a;
   --warn: #e0af68;
+  /* Text color for content sitting on a filled --accent/--ok/--warn/--danger
+     surface (buttons, badges) — those are all light/saturated, so this stays
+     dark across every theme below except the ones that invert it. */
+  --on-accent: #12131c;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 13px;
+  color-scheme: dark;
+}
+
+/* Gotham — dark charcoal/gunmetal + gold, pure color-and-type personality
+   (no logos, no marks, nothing but a palette — same idea as a "Dracula" or
+   "Nord" published editor theme). */
+:root[data-theme="gotham"] {
+  --bg: #0d0f12;
+  --bg-alt: #101317;
+  --bg-raised: #171b20;
+  --border: #2b2f36;
+  --text: #e8e6df;
+  --text-dim: #8b8d93;
+  --accent: #d4af37;
+  --danger: #e0483e;
+  --ok: #4caf7d;
+  --warn: #e2943a;
+  --on-accent: #14110a;
+  color-scheme: dark;
+}
+
+/* Daylight — a clean light theme: the other kind of "fun alternate" from a
+   dark-charcoal reskin, and a real contrast test for every --on-accent /
+   --text-dim pairing in the app. */
+:root[data-theme="daylight"] {
+  --bg: #f5f6f8;
+  --bg-alt: #eceef1;
+  --bg-raised: #ffffff;
+  --border: #d8dbe0;
+  --text: #1c1f26;
+  --text-dim: #62687a;
+  --accent: #3b6fd6;
+  --danger: #c9414f;
+  --ok: #2f9e5c;
+  --warn: #a5690f;
+  --on-accent: #ffffff;
+  color-scheme: light;
+}
+
+/* Custom — Default's palette as the base; --accent/--on-accent are
+   overridden inline by applyTheme() (settings.ts) from the user's picked
+   color, computed there rather than here since it's a runtime value. */
+:root[data-theme="custom"] {
+  --bg: #1a1b26;
+  --bg-alt: #16161e;
+  --bg-raised: #1f2335;
+  --border: #2a2e42;
+  --text: #c9d1d9;
+  --text-dim: #787f97;
+  --danger: #f7768e;
+  --ok: #9ece6a;
+  --warn: #e0af68;
   color-scheme: dark;
 }
 
@@ -389,7 +453,7 @@ body,
   top: 0;
   right: 0;
   background: var(--accent);
-  color: #12131c;
+  color: var(--on-accent);
   border-radius: 7px;
   font-size: 9px;
   padding: 0 4px;
@@ -398,6 +462,71 @@ body,
 
 .rail-spacer {
   flex: 1;
+}
+
+/* ---------- appearance panel ---------- */
+
+.personalize-section {
+  margin: 14px 0 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.personalize-section-first {
+  border-top: none;
+  padding-top: 0;
+  margin-top: 4px;
+}
+
+.personalize-bg-row {
+  display: flex;
+  gap: 8px;
+  margin: 4px 0;
+}
+
+.personalize-accent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.personalize-accent-row input[type="color"] {
+  width: 36px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: none;
+}
+
+.personalize-accent-row small {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.personalize-cursor-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.personalize-blink {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.personalize-note {
+  margin: 12px 0 0;
+  font-size: 11px;
+  color: var(--text-dim);
 }
 
 /* ---------- status bar ---------- */
@@ -506,6 +635,16 @@ body,
   white-space: nowrap;
 }
 
+/* Each project is a bordered card, so groups can't visually run together. */
+.bd-group {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-alt);
+  margin: 6px 6px 0;
+  padding-bottom: 4px;
+  overflow: hidden;
+}
+
 /* Section headers: one per project, plus Core services. */
 .bd-head {
   display: flex;
@@ -520,10 +659,16 @@ body,
   color: var(--text-dim);
 }
 
-.bd-head + .bd-head,
-div + .bd-head {
-  border-top: 1px solid var(--border);
-  margin-top: 3px;
+.bd-group .bd-head {
+  background: var(--bg-raised);
+  padding: 6px 10px;
+  margin-bottom: 2px;
+}
+
+/* Core services header sits outside any card. */
+.status-breakdown > div:last-child > .bd-head,
+.bd-head {
+  margin-top: 4px;
 }
 
 .bd-session {
@@ -654,7 +799,7 @@ div + .bd-head {
 
 .icon-btn-danger:hover {
   background: rgba(240, 90, 90, 0.16);
-  color: #ff7b72;
+  color: var(--danger);
 }
 
 .command-run-name {
@@ -935,7 +1080,7 @@ div + .bd-head {
 
 .btn-accent {
   background: var(--accent);
-  color: #12131c;
+  color: var(--on-accent);
   border-color: var(--accent);
   font-weight: 600;
 }
@@ -993,7 +1138,7 @@ div + .bd-head {
 
 .badge {
   background: var(--accent);
-  color: #12131c;
+  color: var(--on-accent);
   border-radius: 8px;
   font-size: 10px;
   padding: 0 5px;
@@ -1449,7 +1594,7 @@ div + .bd-head {
   width: 100%;
   height: 100%;
   padding: 2px 0 0 6px;
-  background: #16161e;
+  background: var(--bg-alt);
 }
 
 /* ---------- viewers ---------- */
@@ -1920,6 +2065,244 @@ div + .bd-head {
   align-self: stretch;
 }
 
+/* ---------- settings + help dialogs ---------- */
+
+/* .confirm.settings-dialog, not .settings-dialog: the base .confirm rule
+   (max-width: 420px) is declared later in this file and was winning the
+   cascade — the dialog rendered capped at 420px and the skin grid collapsed
+   to a single column. */
+.confirm.settings-dialog {
+  width: min(760px, 94vw);
+  max-width: min(760px, 94vw);
+  height: min(560px, 84vh);
+  max-height: min(560px, 84vh);
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+
+.confirm.help-dialog {
+  width: min(520px, 92vw);
+  max-width: min(520px, 92vw);
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+/* VS Code-style: nav column + scrolling content pane. */
+.settings-layout {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 0 0 150px;
+  border-right: 1px solid var(--border);
+  background: var(--bg-alt);
+  padding: 14px 10px;
+}
+
+.settings-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 0 10px 10px;
+}
+
+.settings-nav-item {
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  padding: 7px 10px;
+  font-size: 13px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.settings-nav-item:hover {
+  background: var(--bg-raised);
+  color: var(--text);
+}
+
+.settings-nav-active {
+  background: var(--bg-raised);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.settings-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.settings-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-alt);
+}
+
+/* One setting: name over description over control — never side-by-side, so
+   wide controls can't squeeze the label or spill out of the modal. */
+.set-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.set-item-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.set-item-desc {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+.set-item-control {
+  margin-top: 5px;
+}
+
+.set-inline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.set-inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+}
+
+.set-wide {
+  width: 320px;
+  max-width: 100%;
+}
+
+.set-slider {
+  width: 260px;
+}
+
+.set-hexcode {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* Skins as preview cards: the palette shown, not named. */
+.skin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 10px;
+}
+
+.skin-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.skin-card:hover {
+  border-color: var(--text-dim);
+}
+
+.skin-card-active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.skin-preview {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 40px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  padding-left: 8px;
+}
+
+.skin-chip {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+}
+
+.skin-name {
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+}
+
+/* Help reuses the old section head style. */
+.set-head {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 3px;
+  margin-top: 8px;
+}
+
+.help-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.help-body p {
+  margin: 4px 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.help-body a {
+  color: var(--accent);
+}
+
+.help-keys {
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.help-keys td {
+  padding: 3px 14px 3px 0;
+  vertical-align: top;
+}
+
+.help-keys code {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 6px;
+  white-space: nowrap;
+}
+
 .hook-setup-row {
   display: flex;
   gap: 6px;
@@ -1991,7 +2374,7 @@ div + .bd-head {
 .rail-badge-urgent,
 .badge-urgent {
   background: var(--warn);
-  color: #12131c;
+  color: var(--on-accent);
 }
 
 /* ---------- JSON viewer ---------- */

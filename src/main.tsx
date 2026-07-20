@@ -2,7 +2,13 @@ import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import "./index.css";
 import { monacoReady } from "./monaco-setup";
+import { applyTheme, getSettings, watchSystemTheme } from "./settings";
 import App from "./App.tsx";
+
+// Before first paint, so there's no flash of the wrong palette.
+applyTheme(getSettings().theme, getSettings().customAccent);
+// Keep Auto tracking the OS day/night flip for the whole app lifetime.
+watchSystemTheme();
 
 // Surface WebView errors in the dev terminal (Rust log).
 const jsLog = (level: string, message: string) =>
