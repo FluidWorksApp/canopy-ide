@@ -187,7 +187,7 @@ mod secure {
         salt
     }
 
-    fn write_prefixed(mut w: &TcpStream, data: &[u8]) -> std::io::Result<()> {
+    fn write_prefixed(w: &mut dyn Write, data: &[u8]) -> std::io::Result<()> {
         w.write_all(&(data.len() as u32).to_be_bytes())?;
         w.write_all(data)?;
         w.flush()
@@ -205,12 +205,23 @@ mod secure {
         Ok(buf)
     }
 
+    /// A duplex byte pipe the secure layer runs over. Boxed rather than generic
+    /// so `Sender`/`Receiver` stay concrete types and don't ripple type
+    /// parameters through `Host`/`Client`/`Peer`. TCP supplies two cloned
+    /// halves of one socket; the UDP transport supplies its own reliable-stream
+    /// halves. The crypto neither knows nor cares which — the whole point of
+    /// this split (see punch.rs) is that the pipe under it changed from a TCP
+    /// listener CGNAT blocks to a hole-punched UDP path it doesn't.
+    pub type BoxWrite = Box<dyn Write + Send>;
+    pub type BoxRead = Box<dyn Read + Send>;
+
     /// The encrypting half of a channel. NOT internally synchronised — wrap it
-    /// in a Mutex; the counter nonce demands serialised sends.
+    /// in a Mutex; the counter nonce demands serialised sends, and the counter
+    /// only stays in step because the pipe below is reliable and ordered.
     pub struct Sender {
         cipher: ChaCha20Poly1305,
         counter: u64,
-        stream: TcpStream,
+        writer: BoxWrite,
     }
 
     impl Sender {
@@ -220,7 +231,7 @@ mod secure {
                 return false;
             };
             self.counter = self.counter.wrapping_add(1);
-            write_prefixed(&self.stream, &ct).is_ok()
+            write_prefixed(&mut self.writer, &ct).is_ok()
         }
     }
 
@@ -229,7 +240,7 @@ mod secure {
     pub struct Receiver {
         cipher: ChaCha20Poly1305,
         counter: u64,
-        reader: BufReader<TcpStream>,
+        reader: BufReader<BoxRead>,
     }
 
     impl Receiver {
@@ -242,19 +253,26 @@ mod secure {
         }
     }
 
-    fn channel(stream: &TcpStream, send_key: [u8; 32], recv_key: [u8; 32]) -> Option<(Sender, Receiver)> {
-        Some((
+    /// Build the two halves from an ALREADY-wrapped reader (the handshake reads
+    /// through the same BufReader it hands on, so buffered bytes aren't lost).
+    fn channel(
+        writer: BoxWrite,
+        reader: BufReader<BoxRead>,
+        send_key: [u8; 32],
+        recv_key: [u8; 32],
+    ) -> (Sender, Receiver) {
+        (
             Sender {
                 cipher: ChaCha20Poly1305::new(Key::from_slice(&send_key)),
                 counter: 0,
-                stream: stream.try_clone().ok()?,
+                writer,
             },
             Receiver {
                 cipher: ChaCha20Poly1305::new(Key::from_slice(&recv_key)),
                 counter: 0,
-                reader: BufReader::new(stream.try_clone().ok()?),
+                reader,
             },
-        ))
+        )
     }
 
     /// SPAKE2 over the raw stream, keyed by `code`. The joining client is the
@@ -264,20 +282,24 @@ mod secure {
     /// always completes), but with a mismatched key, so the first real frame
     /// fails to decrypt. That is where a bad code is rejected.
     pub fn handshake(
-        stream: &TcpStream,
+        mut writer: BoxWrite,
+        reader: BoxRead,
         code: &str,
         initiator: bool,
     ) -> Option<(Sender, Receiver, [u8; 32])> {
+        // The SAME BufReader is used for the handshake read and then handed to
+        // the Receiver — a fresh one could strand bytes the first read buffered.
+        let mut br = BufReader::new(reader);
         let (state, mine) = Spake2::<Ed25519Group>::start_symmetric(
             &Password::new(code.as_bytes()),
             &Identity::new(b"canopy-relay"),
         );
         let theirs = if initiator {
-            write_prefixed(stream, &mine).ok()?;
-            read_prefixed(&mut { stream }).ok()?
+            write_prefixed(&mut writer, &mine).ok()?;
+            read_prefixed(&mut br).ok()?
         } else {
-            let t = read_prefixed(&mut { stream }).ok()?;
-            write_prefixed(stream, &mine).ok()?;
+            let t = read_prefixed(&mut br).ok()?;
+            write_prefixed(&mut writer, &mine).ok()?;
             t
         };
         let key = state.finish(&theirs).ok()?;
@@ -290,7 +312,7 @@ mod secure {
         // session (so an identity frame can't be replayed).
         let binding = derive(&key, None, b"canopy-relay identity-binding");
         let (send_key, recv_key) = if initiator { (i2r, r2i) } else { (r2i, i2r) };
-        let (sender, receiver) = channel(stream, send_key, recv_key)?;
+        let (sender, receiver) = channel(writer, br, send_key, recv_key);
         Some((sender, receiver, binding))
     }
 
@@ -303,14 +325,20 @@ mod secure {
     /// keys unique so counter-from-0 nonces are safe. Bulk flows
     /// sender->receiver; the receiver's first frame authenticates it (only a
     /// holder of the token can produce a decryptable one).
-    pub fn file_channel(stream: &TcpStream, token: &str, is_sender: bool) -> Option<(Sender, Receiver)> {
+    pub fn file_channel(
+        mut writer: BoxWrite,
+        reader: BoxRead,
+        token: &str,
+        is_sender: bool,
+    ) -> Option<(Sender, Receiver)> {
+        let mut br = BufReader::new(reader);
         // The sender picks the salt and sends it first; the receiver reads it.
         let salt = if is_sender {
             let salt = random_salt();
-            write_prefixed(stream, &salt).ok()?;
+            write_prefixed(&mut writer, &salt).ok()?;
             salt
         } else {
-            let got = read_prefixed(&mut { stream }).ok()?;
+            let got = read_prefixed(&mut br).ok()?;
             if got.len() != 16 {
                 return None;
             }
@@ -320,16 +348,32 @@ mod secure {
         };
         let s2r = derive(token.as_bytes(), Some(&salt), b"canopy-file sender->receiver");
         let r2s = derive(token.as_bytes(), Some(&salt), b"canopy-file receiver->sender");
-        if is_sender {
-            channel(stream, s2r, r2s)
-        } else {
-            channel(stream, r2s, s2r)
-        }
+        let (send_key, recv_key) = if is_sender { (s2r, r2s) } else { (r2s, s2r) };
+        Some(channel(writer, br, send_key, recv_key))
     }
 
     /// Break a channel's underlying socket so a blocked `recv` returns.
     pub fn shutdown(stream: &TcpStream) {
         let _ = stream.shutdown(Shutdown::Both);
+    }
+
+    /// TCP convenience: clone the socket into the two boxed halves the generic
+    /// `handshake` now takes. Keeps the LAN callers a one-word change while the
+    /// UDP transport builds its own halves and calls `handshake` directly.
+    pub fn handshake_tcp(
+        stream: &TcpStream,
+        code: &str,
+        initiator: bool,
+    ) -> Option<(Sender, Receiver, [u8; 32])> {
+        let w: BoxWrite = Box::new(stream.try_clone().ok()?);
+        let r: BoxRead = Box::new(stream.try_clone().ok()?);
+        handshake(w, r, code, initiator)
+    }
+
+    pub fn file_channel_tcp(stream: &TcpStream, token: &str, is_sender: bool) -> Option<(Sender, Receiver)> {
+        let w: BoxWrite = Box::new(stream.try_clone().ok()?);
+        let r: BoxRead = Box::new(stream.try_clone().ok()?);
+        file_channel(w, r, token, is_sender)
     }
 }
 
@@ -877,7 +921,7 @@ fn host_conn(app: AppHandle, inner: Arc<Mutex<Inner>>, stream: TcpStream, alive:
         }
         host.code.clone()
     };
-    let Some((mut sender, mut receiver, binding)) = secure::handshake(&stream, &code, false) else {
+    let Some((mut sender, mut receiver, binding)) = secure::handshake_tcp(&stream, &code, false) else {
         secure::shutdown(&stream);
         return;
     };
@@ -1091,7 +1135,7 @@ pub async fn relay_connect(
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let name = if name.trim().is_empty() { "guest".to_string() } else { name.trim().to_string() };
     // SPAKE2 as the initiator, keyed by the code we were given.
-    let Some((mut sender, mut receiver, binding)) = secure::handshake(&stream, code.trim(), true) else {
+    let Some((mut sender, mut receiver, binding)) = secure::handshake_tcp(&stream, code.trim(), true) else {
         return Err("Couldn't establish a secure channel — check the address and that the relay is running.".into());
     };
     // Prove our identity and verify the host's, bound to this session. A wrong
@@ -1537,7 +1581,7 @@ fn serve_file(
         // Token-keyed AEAD. The receiver's first frame must decrypt under the
         // token-derived key — only a holder of the offer's token can produce
         // one, so a successful decrypt IS the authentication.
-        let Some((mut sender, mut receiver)) = secure::file_channel(&stream, token, true) else {
+        let Some((mut sender, mut receiver)) = secure::file_channel_tcp(&stream, token, true) else {
             let _ = stream.shutdown(Shutdown::Both);
             continue;
         };
@@ -1627,7 +1671,7 @@ pub async fn relay_accept_file(
             };
             let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
             let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
-            let Some((mut sender, mut receiver)) = secure::file_channel(&stream, &token, false) else {
+            let Some((mut sender, mut receiver)) = secure::file_channel_tcp(&stream, &token, false) else {
                 emit_transfer(&app, &id, "in", &name, size, false, "Couldn't set up the secure channel.".into());
                 return;
             };
