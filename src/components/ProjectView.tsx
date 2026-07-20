@@ -259,6 +259,38 @@ function Rail({
   );
 }
 
+/** Endpoints a shell is actually serving, offered where you are looking.
+ *
+ *  The ports are already known — `lsof` collects them for the resource
+ *  breakdown — but they were only ever shown in side panels, so starting a dev
+ *  server still meant reading its banner and retyping the URL. Rendered as an
+ *  overlay rather than a bar above the grid on purpose: the terminal's size is
+ *  what the pty is told, and anything that changes its height risks the
+ *  wrap-at-the-wrong-column class of bug. An absolute chip changes nothing. */
+function TermPorts({ ptyId, stats }: { ptyId: number | null | undefined; stats: ipc.SessionStats[] }) {
+  if (ptyId == null) return null;
+  const ports = stats.find((s) => s.id === ptyId)?.ports ?? [];
+  if (ports.length === 0) return null;
+  return (
+    <div className="term-ports">
+      {ports.map((p) => (
+        <button
+          key={p}
+          className="term-port"
+          title={`Open http://localhost:${p} in your browser`}
+          onClick={() =>
+            void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
+              openUrl(`http://localhost:${p}`),
+            )
+          }
+        >
+          localhost:{p}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 // Real icons, not glyphs: this is a 5-item column where shape is the only
 // thing distinguishing entries, and the Agents button used to be Claude's
 // asterisk — which read as "Claude" rather than "agents".
@@ -299,6 +331,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const [collapsed, setCollapsed] = useState(false);
   const [tabs, setTabs] = useState<SubTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  /** Briefly ringed after a jump — with several similar terminal tabs open,
+   *  activating one is not enough to show WHICH one you landed on. */
+  const [flashTabId, setFlashTabId] = useState<string | null>(null);
   // Change feed comes from git, grouped by component (see refreshChanges).
   const [changeGroups, setChangeGroups] = useState<ChangeGroup[]>([]);
   const [changesLoading, setChangesLoading] = useState(false);
@@ -1176,6 +1211,19 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
 
   // Jump to the terminal running the agent that raised the item: prefer a
   // terminal whose PTY tree contains an agent process, then match by cwd.
+  /** Focus the tab a given pty is running in, and flash it so the eye lands
+   *  on which of several near-identical tabs just became active. */
+  const jumpToPty = useCallback((ptyId: number) => {
+    const target = tabsRef.current.find(
+      (t): t is TermSubTab => t.type === "terminal" && t.ptyId === ptyId,
+    );
+    if (!target) return;
+    setActiveTabId(target.id);
+    setFlashTabId(target.id);
+    window.setTimeout(() => setFlashTabId((c) => (c === target.id ? null : c)), 1200);
+    setTimeout(() => termHandles.current.get(target.id)?.focus(), 50);
+  }, []);
+
   const jumpToTerminal = useCallback(
     (item: PendingItem) => {
       const termTabs = tabsRef.current.filter(
@@ -1468,7 +1516,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                   (tab.type === "terminal" || tab.type === "chat") && tab.unread
                     ? "tab-unread"
                     : ""
-                } ${tab.type !== "terminal" ? "tab-doc" : isAgentTab(tab) ? "tab-agent" : ""}`}
+                } ${tab.type !== "terminal" ? "tab-doc" : isAgentTab(tab) ? "tab-agent" : ""} ${
+                  tab.id === flashTabId ? "tab-flash" : ""
+                }`}
                 onClick={(e) => {
                   // e.detail is the click count and fires even though app chrome
                   // is user-select:none — unlike dblclick, which WebKit drops on
@@ -1669,9 +1719,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           .map((tab) => (
             <div
               key={tab.id}
-              className="fill"
+              className="fill term-host"
               style={{ display: tab.id === activeTabId && visible ? "block" : "none" }}
             >
+              <TermPorts ptyId={tab.ptyId} stats={stats} />
               <Term
                 // epoch remounts the Term (fresh PTY) when a run tab restarts
                 key={`${tab.id}:${tab.epoch ?? 0}`}
@@ -2225,6 +2276,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onDismissPending={onDismissPending}
           onAnswer={answerQuestion}
           onJumpToTerminal={jumpToTerminal}
+          onJumpToPty={jumpToPty}
           roots={roots}
           shareContext={Boolean(project.shareContext)}
           onShareContext={onShareContext}
