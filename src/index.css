@@ -4344,3 +4344,127 @@ a.btn-mini {
   font-weight: 400;
   opacity: 0.75;
 }
+
+/* ---------- agents panel: grouped, indented sections ---------- */
+
+.ap-section {
+  border-top: 1px solid var(--border);
+  padding: 4px 0 8px;
+}
+
+.ap-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 12px 6px;
+}
+
+.ap-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.ap-head-spacer {
+  flex: 1;
+}
+
+/* The body is indented under its header with a rule, so a row visibly
+   belongs to a group rather than floating in one long column. */
+.ap-body {
+  margin-left: 12px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+}
+
+.ap-section-quiet .ap-title {
+  color: var(--text-dim);
+  opacity: 0.85;
+}
+
+.ap-section-quiet .ap-body {
+  opacity: 0.92;
+}
+
+/* Rows inside a section: the group already carries the left rule and the
+   padding, so rows drop their own frames. */
+.ap-body .agent-row,
+.ap-body .restore-row {
+  padding: 6px 10px 6px 8px;
+  border: none;
+  border-top: 1px solid var(--border);
+}
+
+.ap-body > div:first-child.agent-row,
+.ap-body > div:first-child.restore-row {
+  border-top: none;
+}
+
+.ap-mark {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+}
+
+.ap-body .agent-main,
+.ap-body .restore-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ap-body .agent-name {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.ap-body .restore-help {
+  font-size: 10px;
+  color: var(--text-dim);
+  line-height: 1.45;
+  padding: 2px 10px 6px 8px;
+}
+
+.ap-body .restore-actions,
+.ap-body .agent-stats {
+  margin-top: 4px;
+  opacity: 0;
+}
+
+/* Four stacked restore rows meant eight always-on buttons; reveal on the
+   row you're actually pointing at. Keyboard focus reveals them too. */
+.ap-body .restore-row:hover .restore-actions,
+.ap-body .restore-row:focus-within .restore-actions,
+.ap-body .agent-row:hover .agent-stats,
+.ap-body .agent-row:focus-within .agent-stats {
+  opacity: 1;
+}
+
+.ap-body .restore-prompt {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.4;
+  margin-top: 2px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.ap-body .restore-actions .btn-mini,
+.ap-body .agent-stats .btn-mini {
+  margin-top: 0;
+}
+
+/* Section head for the plain (non-grouped) rows below the sections. */
+.ap-plain-head {
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  padding-top: 10px;
+}
+
+.ap-section-urgent {
+  border-left: 2px solid var(--warn);
+}

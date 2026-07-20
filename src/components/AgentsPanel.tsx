@@ -3,8 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
-import { AGENT_PATTERN, restoreCommand } from "../projects";
+import { AGENT_CLIS, AGENT_PATTERN, restoreCommand } from "../projects";
 import { restorableFrom } from "../restorable";
+import { AgentIcon, TerminalIcon } from "./icons";
 import type { PendingItem } from "../notifications";
 
 interface AgentsPanelProps {
@@ -47,6 +48,35 @@ const fmtMem = (bytes: number) =>
   bytes > 1024 * 1024 * 1024
     ? `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`
     : `${Math.round(bytes / 1024 / 1024)} MB`;
+
+/** One group. The panel used to be five identical full-width lists with
+ *  identical headings, so "running now" and "restorable from before" looked
+ *  the same — the indented body plus a rule is what separates them. */
+function Section({
+  title,
+  count,
+  tone,
+  action,
+  children,
+}: {
+  title: string;
+  count?: number;
+  tone?: "urgent" | "quiet";
+  action?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className={`ap-section ${tone ? `ap-section-${tone}` : ""}`}>
+      <div className="ap-head">
+        <span className="ap-title">{title}</span>
+        {count != null && count > 0 && <span className="badge">{count}</span>}
+        <span className="ap-head-spacer" />
+        {action}
+      </div>
+      <div className="ap-body">{children}</div>
+    </div>
+  );
+}
 
 export function AgentsPanel({
   stats,
@@ -167,6 +197,10 @@ export function AgentsPanel({
   const agentSessions = sessions.filter((x) => x.agent);
   const termSessions = sessions.filter((x) => !x.agent);
 
+  /** Registry id for a process name, so the row can wear the CLI's mark. */
+  const agentIdOf = (procName: string) =>
+    AGENT_CLIS.find((c) => procName === c.bin || procName.startsWith(c.bin))?.id ?? "agent";
+
   const sessionRow = ({ session: s, agent, dir, digest }: (typeof sessions)[number]) => {
     const runaway =
       s.total_cpu > settings.runawayCpuPercent ||
@@ -178,6 +212,13 @@ export function AgentsPanel({
     return (
       <div key={s.id} className={`agent-row ${runaway ? "agent-runaway" : ""}`}>
         <div className="agent-main">
+          {/* The CLI's own mark, not its name in bold — the panel is a column
+              of near-identical rows and a glyph reads faster than a word. */}
+          {agent ? (
+            <AgentIcon id={agentIdOf(agent.name)} size={14} className="ap-mark" />
+          ) : (
+            <TerminalIcon size={13} className="ap-mark" />
+          )}
           <span className="agent-name">{agent?.name ?? s.title}</span>
           {dir && (
             <span className="agent-dir" title={s.cwd}>
@@ -395,16 +436,74 @@ export function AgentsPanel({
         )}
       </div>
 
-      {restorable.length > 0 && (
-        <>
-          <div className="side-panel-head">
-            <span>Restore sessions</span>
-            <span className="badge">{restorable.length}</span>
+      <Section
+        title="Running agents"
+        count={agentSessions.length}
+        action={
+          <button
+            className="btn-icon"
+            title="How to hook up agent CLIs"
+            onClick={() => setShowHookHelp((v) => !v)}
+          >
+            ?
+          </button>
+        }
+      >
+
+      {showHookHelp && hookPath && (
+        <div className="hook-help">
+          <p>Stream tool-use events from agent CLIs into this panel:</p>
+          {/* One button per CLI with an auto-setup arm — every CLI whose
+              integration surface supports it (see docs/agent-parity.md).
+              setup_agent_hooks in agents.rs is the registry for these. */}
+          <div className="hook-setup-row">
+            {[
+              { id: "claude", label: "Claude Code" },
+              { id: "codex", label: "Codex" },
+              { id: "agy", label: "Antigravity" },
+              { id: "aider", label: "Aider" },
+              { id: "opencode", label: "OpenCode" },
+              { id: "omp", label: "oh-my-pi" },
+              { id: "amp", label: "Amp" },
+            ].map((a) => (
+              <button
+                key={a.id}
+                className="btn btn-accent"
+                onClick={() => void autoSetup(a.id)}
+              >
+                {a.label}
+              </button>
+            ))}
           </div>
+          {setupResult && <p className="hook-result">{setupResult}</p>}
+          <p>
+            Other CLIs: point any hook at appending single-line JSON to:
+          </p>
+          <code className="hook-path">{hookPath}</code>
+        </div>
+      )}
+
+      {agentSessions.length === 0 ? (
+        <div className="tree-empty">
+          No agents running. Launch <code>claude</code>, <code>codex</code>, etc. from the ＋
+          menu or by right-clicking a component.
+        </div>
+      ) : (
+        agentSessions.map(sessionRow)
+      )}
+      </Section>
+
+      {termSessions.length > 0 && (
+        <Section title="Terminals" count={termSessions.length}>
+          {termSessions.map(sessionRow)}
+        </Section>
+      )}
+
+      {restorable.length > 0 && (
+        <Section title="Restorable sessions" count={restorable.length} tone="quiet">
           <div className="restore-help">
-            Agent sessions from this project that aren't open right now. They survive
-            a crash or restart — reopening runs the agent's own resume so it comes
-            back with its history.
+            Not open right now — reopening runs the agent's own resume, so it
+            comes back with its history.
           </div>
           {restorable.map((d) => {
             const agentId = d.agent ?? "agent";
@@ -418,6 +517,7 @@ export function AgentsPanel({
             return (
               <div key={d.session_id} className="restore-row">
                 <div className="restore-main">
+                  <AgentIcon id={agentId} size={14} className="ap-mark" />
                   <span className="agent-name">{agentId}</span>
                   {dir && (
                     <span className="agent-dir" title={runIn}>
@@ -472,73 +572,7 @@ export function AgentsPanel({
               </div>
             );
           })}
-        </>
-      )}
-
-      <div className="side-panel-head">
-        <span>
-          Agent sessions{" "}
-          {agentSessions.length > 0 && <span className="badge">{agentSessions.length}</span>}
-        </span>
-        <button
-          className="btn-icon"
-          title="How to hook up agent CLIs"
-          onClick={() => setShowHookHelp((v) => !v)}
-        >
-          ?
-        </button>
-      </div>
-
-      {showHookHelp && hookPath && (
-        <div className="hook-help">
-          <p>Stream tool-use events from agent CLIs into this panel:</p>
-          {/* One button per CLI with an auto-setup arm — every CLI whose
-              integration surface supports it (see docs/agent-parity.md).
-              setup_agent_hooks in agents.rs is the registry for these. */}
-          <div className="hook-setup-row">
-            {[
-              { id: "claude", label: "Claude Code" },
-              { id: "codex", label: "Codex" },
-              { id: "agy", label: "Antigravity" },
-              { id: "aider", label: "Aider" },
-              { id: "opencode", label: "OpenCode" },
-              { id: "omp", label: "oh-my-pi" },
-              { id: "amp", label: "Amp" },
-            ].map((a) => (
-              <button
-                key={a.id}
-                className="btn btn-accent"
-                onClick={() => void autoSetup(a.id)}
-              >
-                {a.label}
-              </button>
-            ))}
-          </div>
-          {setupResult && <p className="hook-result">{setupResult}</p>}
-          <p>
-            Other CLIs: point any hook at appending single-line JSON to:
-          </p>
-          <code className="hook-path">{hookPath}</code>
-        </div>
-      )}
-
-      {agentSessions.length === 0 ? (
-        <div className="tree-empty">
-          No agents running. Launch <code>claude</code>, <code>codex</code>, etc. from the ＋
-          menu or by right-clicking a component.
-        </div>
-      ) : (
-        agentSessions.map(sessionRow)
-      )}
-
-      {termSessions.length > 0 && (
-        <>
-          <div className="side-panel-head">
-            <span>Terminals</span>
-            <span className="badge">{termSessions.length}</span>
-          </div>
-          {termSessions.map(sessionRow)}
-        </>
+        </Section>
       )}
     </div>
   );
