@@ -19,6 +19,8 @@ import {
   FilesIcon,
   GitBranchIcon,
   IssueIcon,
+  SettingsIcon,
+  SidebarIcon,
   CheckIcon,
   FailIcon,
   LiveDot,
@@ -2025,10 +2027,19 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           <div className="rail-spacer" />
           <button
             className="rail-btn"
+            title="Settings (Cmd+,)"
+            onClick={() =>
+              window.dispatchEvent(new CustomEvent("canopy:open-settings"))
+            }
+          >
+            <SettingsIcon size={18} />
+          </button>
+          <button
+            className="rail-btn"
             title="Toggle sidebar (Cmd+B)"
             onClick={() => setCollapsed((v) => !v)}
           >
-            {collapsed ? "⇥" : "⇤"}
+            <SidebarIcon size={18} collapsed={collapsed} />
           </button>
         </div>
       )}

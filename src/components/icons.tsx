@@ -309,6 +309,31 @@ export function PullRequestIcon({ size = 14, className }: IconProps) {
   );
 }
 
+/** Settings: a gear. */
+export function SettingsIcon({ size = 18, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <circle cx="12" cy="12" r="3.2" />
+      <path d="M19.4 14.5a1.6 1.6 0 0 0 .3 1.8l.1.1a1.9 1.9 0 1 1-2.7 2.7l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5v.3a1.9 1.9 0 1 1-3.8 0v-.2a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a1.9 1.9 0 1 1-2.7-2.7l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3.4a1.9 1.9 0 1 1 0-3.8h.2a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a1.9 1.9 0 1 1 2.7-2.7l.1.1a1.6 1.6 0 0 0 1.8.3h.1a1.6 1.6 0 0 0 1-1.5V3.4a1.9 1.9 0 1 1 3.8 0v.2a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a1.9 1.9 0 1 1 2.7 2.7l-.1.1a1.6 1.6 0 0 0-.3 1.8v.1a1.6 1.6 0 0 0 1.5 1h.3a1.9 1.9 0 1 1 0 3.8h-.2a1.6 1.6 0 0 0-1.5 1Z" />
+    </svg>
+  );
+}
+
+/** Sidebar toggle: a panel with its side rail. */
+export function SidebarIcon({ size = 18, className, collapsed }: IconProps & { collapsed?: boolean }) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="M9.5 5v14" />
+      {/* The arrow says what the click does, not what is showing. */}
+      <path
+        d={collapsed ? "m13.8 9.8 2.4 2.2-2.4 2.2" : "m16.2 9.8-2.4 2.2 2.4 2.2"}
+        strokeWidth={1.6}
+      />
+    </svg>
+  );
+}
+
 // ---------- issue tracker brand marks ----------
 
 /** GitHub's Octocat mark. */
