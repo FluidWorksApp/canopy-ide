@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -835,6 +835,22 @@ pub async fn relay_host_start(
             return Err("Connected to another relay — disconnect first.".into());
         }
     }
+    let alive = Arc::new(AtomicBool::new(true));
+    let name = if name.trim().is_empty() { "host".to_string() } else { name.trim().to_string() };
+    let visibility = match visibility.as_deref() {
+        Some("public") => "public".to_string(),
+        _ => "local".to_string(),
+    };
+
+    // "Public" means over the internet, which in practice means carrier NAT,
+    // which a TCP listener cannot traverse (an inbound SYN to an unopened port
+    // is dropped — every internet join timed out this way). So public hosting
+    // takes the UDP + STUN + hole-punch + QUIC path; local network stays TCP,
+    // untouched, since a LAN has no wall in the way.
+    if visibility == "public" {
+        return host_public(app, inner_arc, name, alive).await;
+    }
+
     let want = port.unwrap_or(DEFAULT_PORT);
     // Requested port first; if the default is taken (another Canopy on this
     // machine, say) fall back to an ephemeral one rather than failing —
@@ -848,17 +864,7 @@ pub async fn relay_host_start(
     listener
         .set_nonblocking(true)
         .map_err(|e| format!("listener setup failed: {e}"))?;
-
-    let alive = Arc::new(AtomicBool::new(true));
-    let name = if name.trim().is_empty() { "host".to_string() } else { name.trim().to_string() };
-    let visibility = match visibility.as_deref() {
-        Some("public") => "public".to_string(),
-        _ => "local".to_string(),
-    };
-    // Blocking curl (≤8s worst case) before the relay reports ready — the
-    // address is the thing the host exists to hand out, so "started but I
-    // can't tell you where" would be a worse trade.
-    let public_ip = if visibility == "public" { fetch_public_ip() } else { None };
+    let public_ip = None;
     let host = Host {
         code: new_code(),
         port: actual,
@@ -919,6 +925,94 @@ pub async fn relay_host_start(
 
     emit_state(&app, &inner_arc.lock().unwrap());
     Ok(status)
+}
+
+/// Host over the internet: bind UDP, discover the reachable public address via
+/// STUN (which also opens the NAT mapping), then run a QUIC server on that
+/// socket. quinn multiplexes every joiner over the one socket, so each arrives
+/// as a `QuicPeer` we drive with `serve_peer` exactly like a TCP accept.
+///
+/// Known limit for a first cut: an idle QUIC server sends nothing, so if no
+/// joiner arrives within the NAT's idle window (~30s) the mapping lapses and
+/// the address goes stale. In practice the host shares the address and the
+/// joiner connects promptly; a host-side keepalive to hold the hole open
+/// indefinitely is a follow-up.
+async fn host_public(
+    app: AppHandle,
+    inner_arc: Arc<Mutex<Inner>>,
+    name: String,
+    alive: Arc<AtomicBool>,
+) -> Result<RelayStatus, String> {
+    let sock = UdpSocket::bind(("0.0.0.0", DEFAULT_PORT))
+        .or_else(|_| UdpSocket::bind("0.0.0.0:0"))
+        .map_err(|e| format!("Couldn't open a UDP port: {e}"))?;
+    let local_port = sock.local_addr().map_err(|e| e.to_string())?.port();
+    // The reachable address teammates dial. STUN reveals it AND, by sending
+    // out first, opens the hole that makes inbound packets arrive.
+    let (public_ip, port) = match crate::punch::discover(&sock) {
+        Ok(a) => (Some(a.ip().to_string()), a.port()),
+        Err(_) => (None, local_port),
+    };
+    let peer_rx = crate::qstream::serve(sock, alive.clone())?;
+
+    let host = Host {
+        code: new_code(),
+        port,
+        self_id: new_id(),
+        name,
+        visibility: "public".to_string(),
+        public_ip,
+        peers: HashMap::new(),
+        alive: alive.clone(),
+    };
+    let status = {
+        let mut inner = inner_arc.lock().unwrap();
+        inner.host = Some(host);
+        status_of(&inner)
+    };
+
+    // Pull each connecting peer and hand it to serve_peer, keyed by the code
+    // current at connect time (so New Code stops admitting new joiners).
+    let app2 = app.clone();
+    let accept_inner = inner_arc.clone();
+    let accept_alive = alive.clone();
+    thread::Builder::new()
+        .name("relay-quic-accept".into())
+        .spawn(move || {
+            while accept_alive.load(Ordering::SeqCst) {
+                let Ok(qp) = peer_rx.recv() else { break };
+                let code = match accept_inner.lock().unwrap().host.as_ref() {
+                    Some(h) => h.code.clone(),
+                    None => break,
+                };
+                let app3 = app2.clone();
+                let inner3 = accept_inner.clone();
+                let alive3 = accept_alive.clone();
+                thread::spawn(move || host_conn_quic(app3, inner3, qp, code, alive3));
+            }
+        })
+        .map_err(|e| format!("couldn't spawn accept thread: {e}"))?;
+
+    emit_state(&app, &inner_arc.lock().unwrap());
+    Ok(status)
+}
+
+/// A joined QUIC peer, host side: run the handshake over its stream halves,
+/// then the shared serve_peer loop. QUIC reads block natively, so the
+/// on_joined hook is a no-op.
+fn host_conn_quic(
+    app: AppHandle,
+    inner: Arc<Mutex<Inner>>,
+    qp: crate::qstream::QuicPeer,
+    code: String,
+    alive: Arc<AtomicBool>,
+) {
+    let crate::qstream::QuicPeer { writer, reader, conn } = qp;
+    let Some((sender, receiver, binding)) = secure::handshake(writer, reader, &code, false) else {
+        conn.close(0u32.into(), b"handshake");
+        return;
+    };
+    serve_peer(app, inner, sender, receiver, binding, alive, Closer::Quic(conn), || {});
 }
 
 /// One joined connection, host side: secure handshake, authenticate, register,
@@ -1177,32 +1271,75 @@ pub async fn relay_connect(
                 ))
         })
         .map_err(|_| format!("Not a valid address: {full}"))?;
-    let stream = TcpStream::connect_timeout(&sock_addr, Duration::from_secs(5))
-        .map_err(|e| format!("Couldn't reach {full}: {e}"))?;
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let name = if name.trim().is_empty() { "guest".to_string() } else { name.trim().to_string() };
-    // SPAKE2 as the initiator, keyed by the code we were given.
-    let Some((mut sender, mut receiver, binding)) = secure::handshake_tcp(&stream, code.trim(), true) else {
-        return Err("Couldn't establish a secure channel — check the address and that the relay is running.".into());
-    };
+
+    // A LAN address is reached directly over TCP — no wall in the way. A public
+    // address means the internet, i.e. carrier NAT, so take the UDP hole-punch
+    // + QUIC path. Same SPAKE2 handshake and relay logic either way.
+    if is_private_addr(&sock_addr.ip().to_string()) {
+        let stream = TcpStream::connect_timeout(&sock_addr, Duration::from_secs(5))
+            .map_err(|e| format!("Couldn't reach {full}: {e}"))?;
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+        let Some((sender, receiver, binding)) = secure::handshake_tcp(&stream, code.trim(), true) else {
+            return Err("Couldn't establish a secure channel — check the address and that the relay is running.".into());
+        };
+        let closer = Closer::Tcp(stream.try_clone().map_err(|e| e.to_string())?);
+        let block = stream.try_clone().ok();
+        run_client(app, inner_arc, sender, receiver, binding, closer, name, full, move || {
+            if let Some(s) = block {
+                let _ = s.set_read_timeout(None);
+            }
+        })
+    } else {
+        let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("Couldn't open a UDP port: {e}"))?;
+        let (writer, reader, conn) =
+            crate::qstream::connect(sock, sock_addr, true, Duration::from_secs(12))
+                .map_err(|e| format!("Couldn't reach {full}: {e}"))?;
+        let Some((sender, receiver, binding)) = secure::handshake(writer, reader, code.trim(), true) else {
+            conn.close(0u32.into(), b"handshake");
+            return Err("Couldn't establish a secure channel — check the address and that the relay is running.".into());
+        };
+        run_client(app, inner_arc, sender, receiver, binding, Closer::Quic(conn), name, full, || {})
+    }
+}
+
+/// The transport-agnostic half of joining a relay: identity exchange, Join,
+/// Welcome, register as the client, then read frames until the host hangs up.
+/// Shared by the TCP (LAN) and QUIC (internet) join paths; `on_welcome` flips
+/// TCP to blocking reads once joined (QUIC blocks natively, so a no-op).
+#[allow(clippy::too_many_arguments)]
+fn run_client(
+    app: AppHandle,
+    inner_arc: Arc<Mutex<Inner>>,
+    mut sender: secure::Sender,
+    mut receiver: secure::Receiver,
+    binding: [u8; 32],
+    closer: Closer,
+    name: String,
+    full: String,
+    on_welcome: impl FnOnce(),
+) -> Result<RelayStatus, String> {
     // Prove our identity and verify the host's, bound to this session. A wrong
     // code yields a mismatched key, so this fails — reported as a refused code.
     let Some(host_key) = identity::exchange(&mut sender, &mut receiver, &binding, true) else {
+        closer.close();
         return Err("The relay refused the connection — wrong code, or it isn't reachable.".into());
     };
-    // TOFU: is this the same host key we pinned for this host name before? We
-    // don't know the host's name yet (it arrives in Welcome), so pin below.
     let sender = Arc::new(Mutex::new(sender));
     if !peer_send(&sender, &Frame::Join { code: String::new(), name: name.clone() }) {
+        closer.close();
         return Err("Couldn't talk to the relay.".into());
     }
     // Welcome is our first encrypted frame back.
     let (self_id, members) = match receiver.recv().and_then(|b| serde_json::from_slice::<Frame>(&b).ok()) {
         Some(Frame::Welcome { self_id, members }) => (self_id, members),
-        _ => return Err("The relay refused the connection — wrong code, or it isn't reachable.".into()),
+        _ => {
+            closer.close();
+            return Err("The relay refused the connection — wrong code, or it isn't reachable.".into());
+        }
     };
-    let _ = stream.set_read_timeout(None);
+    on_welcome();
     // Pin the host under its advertised name; a changed key for a name we've
     // joined before is the warning TOFU exists to raise.
     let host_name = members
@@ -1214,14 +1351,14 @@ pub async fn relay_connect(
 
     let alive = Arc::new(AtomicBool::new(true));
     let client = Client {
-        addr: full.clone(),
+        addr: full,
         self_id,
         name,
         members,
         host_key,
         host_trust,
         sender: sender.clone(),
-        shutdown: Closer::Tcp(stream.try_clone().map_err(|e| e.to_string())?),
+        shutdown: closer,
         alive: alive.clone(),
     };
     let status = {

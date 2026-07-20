@@ -181,10 +181,10 @@ pub fn connect(
     peer: SocketAddr,
     initiator: bool,
     timeout: Duration,
-) -> Result<(BoxWrite, BoxRead), String> {
+) -> Result<(BoxWrite, BoxRead, quinn::Connection), String> {
     sock.set_nonblocking(true)
         .map_err(|e| format!("socket nonblocking: {e}"))?;
-    let (ready_tx, ready_rx) = std_mpsc::channel::<Result<(BoxWrite, BoxRead), String>>();
+    let (ready_tx, ready_rx) = std_mpsc::channel::<Result<(BoxWrite, BoxRead, quinn::Connection), String>>();
 
     // The runtime — and thus the connection and its pumps — lives on this
     // thread until the connection closes. Detached on purpose: the returned
@@ -203,8 +203,9 @@ pub fn connect(
             rt.block_on(async move {
                 match establish(sock, peer, initiator, timeout).await {
                     Ok((conn, wr, rd)) => {
-                        let _ = ready_tx.send(Ok((wr, rd)));
-                        // Hold the connection open for the pumps' lifetime.
+                        let _ = ready_tx.send(Ok((wr, rd, conn.clone())));
+                        // Hold the connection open for the pumps' lifetime; the
+                        // caller's clone drives teardown by closing it.
                         conn.closed().await;
                     }
                     Err(e) => {
@@ -389,7 +390,7 @@ mod tests {
 
         // Host = QUIC server / SPAKE2 responder.
         let h = std::thread::spawn(move || {
-            let (w, r) = connect(host_sock, join_addr, false, Duration::from_secs(10))?;
+            let (w, r, _c) = connect(host_sock, join_addr, false, Duration::from_secs(10))?;
             let (mut s, mut rx, _bind) =
                 secure::handshake(w, r, code, false).ok_or("host handshake")?;
             let got = rx.recv().ok_or("host recv")?;
@@ -398,7 +399,7 @@ mod tests {
         });
 
         // Joiner = QUIC client / SPAKE2 initiator.
-        let (w, r) = connect(join_sock, host_addr, true, Duration::from_secs(10)).unwrap();
+        let (w, r, _c) = connect(join_sock, host_addr, true, Duration::from_secs(10)).unwrap();
         let (mut s, mut rx, _bind) = secure::handshake(w, r, code, true).unwrap();
         s.send(b"hello from joiner");
         let from_host = rx.recv().unwrap();
