@@ -56,6 +56,7 @@ import { GitPanel } from "./GitPanel";
 import { TicketsPanel, type AgentTarget } from "./TicketsPanel";
 import { TicketView } from "./TicketView";
 import { CommitView } from "./CommitView";
+import { ReviewView, type ReviewPayload } from "./ReviewView";
 import { BranchView } from "./BranchView";
 import { ticketBranch, ticketContext, ticketWorktree } from "../trackers";
 import { markRestored, restorableFrom, type Restorable } from "../restorable";
@@ -135,6 +136,12 @@ interface PrSubTab {
   pr: ipc.PrInfo;
 }
 
+interface ReviewSubTab {
+  id: string;
+  type: "review";
+  review: ReviewPayload;
+}
+
 interface ChatSubTab {
   id: string;
   type: "chat";
@@ -163,6 +170,7 @@ type SubTab =
   | TicketSubTab
   | CommitSubTab
   | BranchSubTab
+  | ReviewSubTab
   | ChatSubTab;
 
 const decoder = new TextDecoder();
@@ -459,6 +467,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     setActiveTabId(id);
   }, []);
 
+  /** Open a code-review request that arrived over the relay — the diff came
+   *  with it, so there is nothing to fetch. */
+  const openReview = useCallback((review: ReviewPayload) => {
+    const id = tabId();
+    setTabs((prev) => [...prev, { id, type: "review", review }]);
+    setActiveTabId(id);
+  }, []);
+
   const patchTabRaw = useCallback((id: string, patch: Partial<SubTab>) => {
     setTabs((prev) => prev.map((t) => (t.id === id ? ({ ...t, ...patch } as SubTab) : t)));
   }, []);
@@ -578,6 +594,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
    *  matches the sender's repo and opens the PR natively in it. */
   const openInboxItem = useCallback(
     async (item: ipc.RelayCommandMsg) => {
+      // A review request carries its own diff — open it directly, no repo
+      // lookup needed (the reviewer may not even have the code).
+      if (item.kind === "review") {
+        openReview({ ...(item.payload as ReviewPayload), from: item.from_name });
+        relay.dismissInbox(item.id);
+        return;
+      }
       if (item.kind !== "open-pr") {
         relay.dismissInbox(item.id);
         return;
@@ -607,7 +630,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         onNotice(String(err), "error");
       }
     },
-    [onNotice, openPr, relay],
+    [onNotice, openPr, openReview, relay],
   );
 
   // Restorable agent sessions, loaded while the launcher (empty state) is on
@@ -1582,7 +1605,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                                 : `Direct chat with ${tab.name}`
                               : tab.type === "collab"
                                 ? `${tab.name} — live, owned by ${tab.ownerName}`
-                                : tab.file.path
+                                : tab.type === "review"
+                                  ? `Review from ${tab.review.from}: ${tab.review.title}`
+                                  : tab.file.path
                 }
               >
                 {tab.type === "terminal" ? (
@@ -1602,6 +1627,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                   <TeamIcon size={12} className="tab-chat-icon" />
                 ) : tab.type === "collab" ? (
                   <TeamIcon size={12} className="tab-collab-icon" />
+                ) : tab.type === "review" ? (
+                  <PullRequestIcon size={12} className="tab-pr-icon" />
                 ) : (
                   tab.file.external != null && <span className="tab-external">●</span>
                 )}
@@ -1642,7 +1669,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                                 ? tab.name
                                 : tab.type === "collab"
                                   ? `${tab.name} ⇄`
-                                  : `${tab.file.name}${tab.file.dirty ? " •" : ""}`}
+                                  : tab.type === "review"
+                                    ? tab.review.title
+                                    : `${tab.file.name}${tab.file.dirty ? " •" : ""}`}
                   </span>
                 )}
                 <span
@@ -1841,6 +1870,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           ))}
         {activeTab?.type === "branch" && (
           <BranchView
+            relay={relay}
             key={activeTab.id}
             repo={activeTab.repo}
             branch={activeTab.branch}
@@ -1879,6 +1909,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             onNotice={onNotice}
             relay={relay}
           />
+        )}
+        {activeTab?.type === "review" && (
+          <ReviewView key={activeTab.id} review={activeTab.review} />
         )}
         {activeTab?.type === "chat" && (
           <ChatView

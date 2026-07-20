@@ -329,9 +329,11 @@ export default function App() {
         const text =
           m.kind === "open-pr" && pr
             ? `${m.from_name} asked you to review PR #${pr.number}: ${pr.title}`
-            : m.kind === "file-offer" && file
-              ? `${m.from_name} wants to send you ${file}`
-              : `${m.from_name} sent a ${m.kind} command`;
+            : m.kind === "review"
+              ? `${m.from_name} asked you to review ${(m.payload as { title?: string } | null)?.title ?? "a branch"}`
+              : m.kind === "file-offer" && file
+                ? `${m.from_name} wants to send you ${file}`
+                : `${m.from_name} sent a ${m.kind} command`;
         notify(`${text} — see the Team panel`);
         void nativeNotify("Canopy — Team", text);
       }),

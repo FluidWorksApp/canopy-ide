@@ -6,7 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 import { DiffView, DiffModeEnum } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import * as ipc from "../ipc";
-import type { Notify } from "../types";
+import type { Notify, RelayHandle } from "../types";
 import { splitPatch } from "./PrView";
 import { GitBranchIcon } from "./icons";
 
@@ -19,6 +19,9 @@ interface BranchViewProps {
   ) => void;
   onOpenTerminal: (cwd: string, label: string) => void;
   onNotice: Notify;
+  /** When connected to a relay, a branch can be sent to a teammate for review
+   *  — the diff travels with the request, so they needn't have the code. */
+  relay?: RelayHandle;
 }
 
 type Pane = "uncommitted" | "diff";
@@ -29,6 +32,7 @@ export function BranchView({
   onOpenCommit,
   onOpenTerminal,
   onNotice,
+  relay,
 }: BranchViewProps) {
   const [commits, setCommits] = useState<ipc.CommitInfo[] | null>(null);
   // Which patch is on screen. Defaults to uncommitted work when there is any,
@@ -37,6 +41,33 @@ export function BranchView({
   const [patch, setPatch] = useState<ipc.CommitPatch | null>(null);
   const [split, setSplit] = useState(true);
   const [remote, setRemote] = useState("");
+  const [askReview, setAskReview] = useState(false);
+
+  const teammates =
+    relay && relay.status.role !== "off"
+      ? relay.status.members.filter((m) => m.id !== relay.status.self_id)
+      : [];
+
+  /** Send this branch's cumulative diff to a teammate as a review request. The
+   *  full branch patch (vs base) goes over the encrypted channel, so they can
+   *  review a branch they don't have — and a truncated one says so. */
+  const sendForReview = async (memberId: string, memberName: string) => {
+    setAskReview(false);
+    try {
+      const p = await ipc.gitBranchPatch(repo, branch.branch, branch.worktree, false);
+      await relay!.sendCommand(memberId, "review", {
+        title: branch.branch,
+        branch: branch.branch,
+        insertions: p.insertions,
+        deletions: p.deletions,
+        truncated: p.truncated,
+        patch: p.patch,
+      });
+      onNotice(`Sent ${branch.branch} to ${memberName} for review.`, "success");
+    } catch (err) {
+      onNotice(String(err), "error");
+    }
+  };
 
   useEffect(() => {
     let live = true;
@@ -102,6 +133,30 @@ export function BranchView({
               : "no worktree"}
           </span>
           <span className="status-spacer" />
+          {teammates.length > 0 && (
+            <div className="review-send">
+              <button
+                className="btn"
+                title="Send this branch's diff to a teammate for review"
+                onClick={() => setAskReview((v) => !v)}
+              >
+                Request review ▾
+              </button>
+              {askReview && (
+                <div className="cli-menu review-menu" onMouseLeave={() => setAskReview(false)}>
+                  {teammates.map((m) => (
+                    <button
+                      key={m.id}
+                      className="cli-menu-item"
+                      onClick={() => void sendForReview(m.id, m.name)}
+                    >
+                      {m.name}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           {remote && (
             <>
               <a className="btn" href={`${remote}/tree/${branch.branch}`}>

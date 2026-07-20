@@ -5296,3 +5296,16 @@ a.btn-mini {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
+
+/* The Request-review control anchors its member dropdown. */
+.review-send {
+  position: relative;
+  display: inline-block;
+}
+.review-menu {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 40;
+  min-width: 160px;
+}

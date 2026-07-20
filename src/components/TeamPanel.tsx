@@ -422,6 +422,10 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
                 : undefined;
             const file =
               item.kind === "file-offer" ? (item.payload as ipc.RelayFileOffer) : undefined;
+            const review =
+              item.kind === "review"
+                ? (item.payload as { title?: string; insertions?: number; deletions?: number })
+                : undefined;
             return (
               <div key={item.id} className="team-inbox-item">
                 <div className="team-inbox-head">
@@ -436,9 +440,11 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
                 <div className="team-inbox-body">
                   {pr
                     ? `Review PR #${pr.number}: ${pr.title}`
-                    : file
-                      ? `Wants to send you ${file.name} (${prettySize(file.size)})`
-                      : `${item.kind} — ${JSON.stringify(item.payload)}`}
+                    : review
+                      ? `Review ${review.title} (+${review.insertions ?? 0} −${review.deletions ?? 0})`
+                      : file
+                        ? `Wants to send you ${file.name} (${prettySize(file.size)})`
+                        : `${item.kind} — ${JSON.stringify(item.payload)}`}
                 </div>
                 <div className="team-inbox-actions">
                   {file ? (
