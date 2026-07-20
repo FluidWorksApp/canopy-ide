@@ -297,9 +297,6 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // Set from the memo below; the restore loader reads it without having to
   // re-subscribe every time an event arrives.
   const liveSessionIdsRef = useRef<string[]>([]);
-  // Agent CLIs running right now, by id and directory — used to suppress
-  // "restore" for work that is already open.
-  const liveAgentsRef = useRef<{ agentId: string; cwd: string }[]>([]);
 
   // ---------- terminals ----------
 
@@ -351,14 +348,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           const mine = d.filter((x) =>
             rootsRef.current.some((r) => x.cwd === r || (x.cwd ?? "").startsWith(r + "/")),
           );
-          setRestorable(
-            restorableFrom(
-              mine,
-              statsRef.current,
-              liveSessionIdsRef.current,
-              liveAgentsRef.current,
-            ),
-          );
+          setRestorable(restorableFrom(mine, statsRef.current, liveSessionIdsRef.current));
         })
         .catch(() => live && setRestorable([]));
     load();
@@ -416,7 +406,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const resumeSession = useCallback(
     (r: Restorable) => {
       if (!r.command || !r.cwd) return;
-      // Drop it from the list now, not once its agent happens to speak.
+      // Hide it immediately rather than waiting for the next poll; the mark
+      // is a bridge until the agent shows up in the process list, after which
+      // the row's presence tracks whether that terminal is still open.
       markRestored(r.digest.session_id);
       setRestorable((prev) =>
         prev.filter((x) => x.digest.session_id !== r.digest.session_id),
@@ -953,12 +945,6 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     return [...ids];
   }, [projectEvents]);
   liveSessionIdsRef.current = liveSessionIds;
-  liveAgentsRef.current = projectStats.flatMap((s) =>
-    s.procs
-      .map((proc) => AGENT_CLIS.find((c) => proc.name === c.bin || proc.name.startsWith(c.bin)))
-      .filter((c): c is (typeof AGENT_CLIS)[number] => !!c)
-      .map((c) => ({ agentId: c.id, cwd: s.cwd })),
-  );
   const runningAgents = projectStats.flatMap((s) =>
     s.procs
       .filter((p) => AGENT_PATTERN.test(p.name))

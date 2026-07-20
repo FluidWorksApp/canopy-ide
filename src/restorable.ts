@@ -4,7 +4,7 @@
 // listed as restorable in one place and missing in the other is worse than
 // either behaviour on its own.
 import * as ipc from "./ipc";
-import { restoreCommand } from "./projects";
+import { AGENT_CLIS, restoreCommand } from "./projects";
 
 export interface Restorable {
   digest: ipc.SessionDigest;
@@ -22,20 +22,43 @@ export interface Restorable {
 const lastHumanPrompt = (prompts?: string[]) =>
   [...(prompts ?? [])].reverse().find((p) => p.trim() && !p.trimStart().startsWith("<"));
 
-/** Sessions restored during this run. A resumed session keeps its id, so it
- *  drops off the list once its agent emits a hook event — but that can take
- *  until the first tool call, and for CLIs read straight from disk (omp) no
- *  event ever arrives. Recording the click closes both gaps immediately. */
-const restoredThisRun = new Set<string>();
+/** When Restore was clicked, per session. This is a bridge, not a tombstone:
+ *  it hides the row for the moment between the click and the agent actually
+ *  appearing in the process list. Once the agent IS visible the mark is
+ *  dropped, so closing that terminal brings the row straight back — a
+ *  restorable session belongs wherever the work currently is, not wherever it
+ *  was when the app started. */
+const restoredAt = new Map<string, number>();
+
+/** Long enough to cover a CLI booting; short enough that a restore which
+ *  never produced a process doesn't hide the row for the rest of the run. */
+const RESTORE_GRACE_MS = 90_000;
 
 export function markRestored(sessionId: string) {
-  restoredThisRun.add(sessionId);
+  restoredAt.set(sessionId, Date.now());
 }
 
-/** A live agent terminal, for suppressing sessions that are already running. */
-export interface LiveAgent {
+interface LiveAgent {
   agentId: string;
   cwd: string;
+}
+
+/** Agent CLIs running right now, by registry id and working directory.
+ *  Derived from the process trees the monitor already reports, so both the
+ *  panel and the launcher see the same thing without either having to
+ *  assemble it. */
+function liveAgentsFrom(stats: ipc.SessionStats[]): LiveAgent[] {
+  return stats.flatMap((s) =>
+    s.procs
+      .map((p) => {
+        const first = p.cmd.split(/\s+/)[0] ?? "";
+        return AGENT_CLIS.find(
+          (c) => p.name === c.bin || first === c.bin || first.endsWith(`/${c.bin}`),
+        );
+      })
+      .filter((c): c is (typeof AGENT_CLIS)[number] => !!c)
+      .map((c) => ({ agentId: c.id, cwd: s.cwd })),
+  );
 }
 
 /**
@@ -50,32 +73,46 @@ export function restorableFrom(
   digests: ipc.SessionDigest[],
   stats: ipc.SessionStats[],
   liveSessionIds: string[],
-  liveAgents: LiveAgent[] = [],
 ): Restorable[] {
   const alivePtys = new Set(stats.map((s) => String(s.id)));
   const dead = (d: ipc.SessionDigest) => !!d.surface && !alivePtys.has(d.surface);
+  const liveAgents = liveAgentsFrom(stats);
   // Same CLI, same directory, running right now — that work is open, whatever
   // its session id. This is the only signal for agents whose sessions are read
-  // from disk rather than reported through hooks.
+  // from disk rather than reported through hooks (omp), and it is what makes
+  // the row come back the moment the terminal closes.
   const runningHere = (d: ipc.SessionDigest) => {
     const dir = d.resume_cwd || d.cwd || "";
     if (!dir) return false;
     return liveAgents.some((a) => a.cwd === dir && a.agentId === (d.agent ?? "claude"));
   };
   return digests
-    .filter(
-      (d) =>
-        d.session_id &&
-        !/-pty\d*$/.test(d.session_id) &&
-        !restoredThisRun.has(d.session_id) &&
-        !runningHere(d) &&
-        (dead(d) || !liveSessionIds.includes(d.session_id)) &&
-        // Claude writes no transcript until the first prompt, so a promptless
-        // claude session can only fail to resume. Other agents capture
-        // prompts best-effort, so an empty list there must not hide a real
-        // conversation.
-        ((d.prompts?.length ?? 0) > 0 || (d.agent ?? "claude") !== "claude"),
-    )
+    .filter((d) => {
+      const id = d.session_id;
+      if (!id || /-pty\d*$/.test(id)) return false;
+
+      // Open right now — it belongs in the running list, not this one.
+      if (runningHere(d) || (!dead(d) && liveSessionIds.includes(id))) {
+        // The process is visible, so the click-time mark has done its job.
+        // Dropping it here is what lets the row return when this terminal is
+        // closed, instead of staying hidden for the rest of the run.
+        restoredAt.delete(id);
+        return false;
+      }
+
+      // Just restored and the process hasn't shown up yet.
+      const clicked = restoredAt.get(id);
+      if (clicked != null) {
+        if (Date.now() - clicked < RESTORE_GRACE_MS) return false;
+        // It never materialised — stop hiding it.
+        restoredAt.delete(id);
+      }
+
+      // Claude writes no transcript until the first prompt, so a promptless
+      // claude session can only fail to resume. Other agents capture prompts
+      // best-effort, so an empty list there must not hide a real conversation.
+      return (d.prompts?.length ?? 0) > 0 || (d.agent ?? "claude") !== "claude";
+    })
     .sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0))
     .map((digest) => {
       const agentId = digest.agent ?? "agent";
