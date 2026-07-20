@@ -262,12 +262,16 @@ async fn establish(
     } else {
         conn.accept_bi().await.map_err(|e| format!("accept stream: {e}"))?
     };
+    let (writer, reader) = make_halves(send, recv);
+    Ok((conn, writer, reader))
+}
 
+/// Spawn the two pump tasks bridging a QUIC bidi stream to the sync world, and
+/// return the boxed halves. Must be called on the tokio runtime (it spawns).
+fn make_halves(mut send: quinn::SendStream, mut recv: quinn::RecvStream) -> (BoxWrite, BoxRead) {
     let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     let (in_tx, in_rx) = std_mpsc::channel::<Vec<u8>>();
-
     // Send pump: relay writes -> QUIC stream.
-    let mut send = send;
     tokio::spawn(async move {
         while let Some(chunk) = out_rx.recv().await {
             if send.write_all(&chunk).await.is_err() {
@@ -277,7 +281,6 @@ async fn establish(
         let _ = send.finish();
     });
     // Recv pump: QUIC stream -> relay reads.
-    let mut recv = recv;
     tokio::spawn(async move {
         let mut buf = vec![0u8; RECV_CHUNK];
         loop {
@@ -292,14 +295,78 @@ async fn establish(
             }
         }
     });
-
     let writer: BoxWrite = Box::new(ChanWrite(out_tx));
-    let reader: BoxRead = Box::new(ChanRead {
-        rx: in_rx,
-        left: Vec::new(),
-        pos: 0,
-    });
-    Ok((conn, writer, reader))
+    let reader: BoxRead = Box::new(ChanRead { rx: in_rx, left: Vec::new(), pos: 0 });
+    (writer, reader)
+}
+
+/// One accepted QUIC peer, host side: its stream halves plus the connection
+/// (kept for the `Closer` that tears it down).
+pub struct QuicPeer {
+    pub writer: BoxWrite,
+    pub reader: BoxRead,
+    pub conn: quinn::Connection,
+}
+
+/// Host a QUIC server on the already-punched socket, delivering each peer that
+/// connects. Unlike `connect` (one point-to-point link), a server endpoint
+/// multiplexes MANY connections over the one socket — which is exactly the star
+/// topology the relay already has, so the caller spawns a `serve_peer` per
+/// delivered `QuicPeer` just as the TCP accept loop does.
+///
+/// Runs until `alive` clears (checked between accepts) or the receiver drops.
+pub fn serve(sock: UdpSocket, alive: Arc<std::sync::atomic::AtomicBool>) -> Result<std_mpsc::Receiver<QuicPeer>, String> {
+    use std::sync::atomic::Ordering;
+    sock.set_nonblocking(true).map_err(|e| format!("socket nonblocking: {e}"))?;
+    let (peer_tx, peer_rx) = std_mpsc::channel::<QuicPeer>();
+    let (ready_tx, ready_rx) = std_mpsc::channel::<Result<(), String>>();
+    std::thread::Builder::new()
+        .name("relay-quic-host".into())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(format!("runtime: {e}")));
+                    return;
+                }
+            };
+            rt.block_on(async move {
+                let ep = match server_config().and_then(|cfg| {
+                    Endpoint::new(EndpointConfig::default(), Some(cfg), sock, Arc::new(TokioRuntime))
+                        .map_err(|e| format!("server endpoint: {e}"))
+                }) {
+                    Ok(ep) => ep,
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(e));
+                        return;
+                    }
+                };
+                let _ = ready_tx.send(Ok(()));
+                // Accept in bounded waits so `alive` is checked promptly on stop.
+                while alive.load(Ordering::SeqCst) {
+                    let incoming = match tokio::time::timeout(Duration::from_secs(1), ep.accept()).await {
+                        Ok(Some(i)) => i,
+                        Ok(None) => break,       // endpoint closed
+                        Err(_) => continue,      // timeout — re-check alive
+                    };
+                    let peer_tx = peer_tx.clone();
+                    // Each peer's handshake runs concurrently so one slow joiner
+                    // can't stall the accept loop.
+                    tokio::spawn(async move {
+                        let Ok(conn) = incoming.await else { return };
+                        let Ok((send, recv)) = conn.accept_bi().await else { return };
+                        let (writer, reader) = make_halves(send, recv);
+                        let _ = peer_tx.send(QuicPeer { writer, reader, conn });
+                    });
+                }
+                ep.close(0u32.into(), b"stop");
+            });
+        })
+        .map_err(|e| format!("spawn quic host thread: {e}"))?;
+    ready_rx
+        .recv()
+        .map_err(|_| "quic host thread died".to_string())??;
+    Ok(peer_rx)
 }
 
 #[cfg(test)]

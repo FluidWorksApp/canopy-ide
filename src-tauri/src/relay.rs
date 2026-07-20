@@ -551,14 +551,33 @@ mod identity {
 
 // ---------- state ----------
 
+/// How to forcibly break a peer's connection so a thread blocked in `recv`
+/// wakes up. TCP shuts the socket down; QUIC closes the connection. Kept
+/// lock-free (no `secure::Sender` mutex) so closing a dead peer can't block on
+/// a send still in flight.
+enum Closer {
+    Tcp(TcpStream),
+    Quic(quinn::Connection),
+}
+
+impl Closer {
+    fn close(&self) {
+        match self {
+            Closer::Tcp(s) => {
+                let _ = s.shutdown(Shutdown::Both);
+            }
+            Closer::Quic(c) => c.close(0u32.into(), b"bye"),
+        }
+    }
+}
+
 struct Peer {
     member: Member,
     /// Encrypted writer to this peer. Every fan-out (chat, presence, ping)
     /// locks it — the AEAD counter nonce forbids concurrent sends.
     sender: Arc<Mutex<secure::Sender>>,
-    /// A bare clone of the socket, only for `shutdown` on teardown — lock-free
-    /// so closing a dead peer can't block on a send in flight.
-    shutdown: TcpStream,
+    /// Teardown handle, transport-agnostic — see `Closer`.
+    shutdown: Closer,
 }
 
 struct Host {
@@ -590,7 +609,7 @@ struct Client {
     host_trust: String,
     /// Encrypted writer to the host (which relays onward).
     sender: Arc<Mutex<secure::Sender>>,
-    shutdown: TcpStream,
+    shutdown: Closer,
     alive: Arc<AtomicBool>,
 }
 
@@ -783,7 +802,7 @@ fn stop_host(inner: &mut Inner) {
     if let Some(host) = inner.host.take() {
         host.alive.store(false, Ordering::SeqCst);
         for peer in host.peers.values() {
-            let _ = peer.shutdown.shutdown(Shutdown::Both);
+            let _ = peer.shutdown.close();
         }
     }
 }
@@ -792,7 +811,7 @@ fn stop_client(inner: &mut Inner) {
     retire_transfers(inner);
     if let Some(client) = inner.client.take() {
         client.alive.store(false, Ordering::SeqCst);
-        let _ = client.shutdown.shutdown(Shutdown::Both);
+        let _ = client.shutdown.close();
     }
 }
 
@@ -889,7 +908,7 @@ pub async fn relay_host_start(
                     if let Some(host) = &inner.host {
                         for peer in host.peers.values() {
                             if !peer_send(&peer.sender, &Frame::Ping) {
-                                let _ = peer.shutdown.shutdown(Shutdown::Both);
+                                let _ = peer.shutdown.close();
                             }
                         }
                     }
@@ -921,11 +940,41 @@ fn host_conn(app: AppHandle, inner: Arc<Mutex<Inner>>, stream: TcpStream, alive:
         }
         host.code.clone()
     };
-    let Some((mut sender, mut receiver, binding)) = secure::handshake_tcp(&stream, &code, false) else {
+    let Some((sender, receiver, binding)) = secure::handshake_tcp(&stream, &code, false) else {
         secure::shutdown(&stream);
         return;
     };
+    let Ok(dup) = stream.try_clone() else {
+        secure::shutdown(&stream);
+        return;
+    };
+    // TCP reads must block once the peer has joined: the join arrives promptly
+    // under the timeout set above, but conversation may then pause for minutes.
+    // (QUIC blocks natively, so its caller passes a no-op.)
+    let block = stream.try_clone().ok();
+    serve_peer(app, inner, sender, receiver, binding, alive, Closer::Tcp(dup), move || {
+        if let Some(s) = block {
+            let _ = s.set_read_timeout(None);
+        }
+    });
+}
 
+/// The transport-agnostic half of hosting one peer: identity exchange, register
+/// under the lock (Welcome then Presence), then relay each frame until the peer
+/// leaves. Shared by the TCP accept loop (`host_conn`) and the QUIC accept loop
+/// — each hands over an already-established secure channel plus a `Closer` to
+/// break it, and an `on_joined` hook to flip the transport to blocking reads.
+#[allow(clippy::too_many_arguments)]
+fn serve_peer(
+    app: AppHandle,
+    inner: Arc<Mutex<Inner>>,
+    mut sender: secure::Sender,
+    mut receiver: secure::Receiver,
+    binding: [u8; 32],
+    alive: Arc<AtomicBool>,
+    closer: Closer,
+    on_joined: impl FnOnce(),
+) {
     // Identity exchange (peer proves possession of its long-term key, bound to
     // this session) then the Join frame. A wrong code produced a different
     // session key, so both fail to decrypt — that is how a bad code is now
@@ -934,17 +983,16 @@ fn host_conn(app: AppHandle, inner: Arc<Mutex<Inner>>, stream: TcpStream, alive:
     // a mistyped code barely notices.
     let Some(peer_key) = identity::exchange(&mut sender, &mut receiver, &binding, false) else {
         thread::sleep(Duration::from_secs(2));
-        secure::shutdown(&stream);
+        closer.close();
         return;
     };
     let name = match receiver.recv().and_then(|b| serde_json::from_slice::<Frame>(&b).ok()) {
         Some(Frame::Join { name, .. }) => name,
         _ => {
-            secure::shutdown(&stream);
+            closer.close();
             return;
         }
     };
-    let Ok(shutdown) = stream.try_clone() else { return };
     let sender = Arc::new(Mutex::new(sender));
 
     // Register under the lock. Order matters on the new peer's wire: Welcome
@@ -972,7 +1020,7 @@ fn host_conn(app: AppHandle, inner: Arc<Mutex<Inner>>, stream: TcpStream, alive:
                     trust,
                 },
                 sender: sender.clone(),
-                shutdown,
+                shutdown: closer,
             },
         );
         let members = host_members(host);
@@ -991,7 +1039,7 @@ fn host_conn(app: AppHandle, inner: Arc<Mutex<Inner>>, stream: TcpStream, alive:
     };
 
     // Joined: reads now block until the peer speaks or disconnects.
-    let _ = stream.set_read_timeout(None);
+    on_joined();
     loop {
         let Some(bytes) = receiver.recv() else { break };
         let Ok(frame) = serde_json::from_slice::<Frame>(&bytes) else { continue };
@@ -1065,7 +1113,7 @@ fn remove_peer(app: &AppHandle, inner: &Arc<Mutex<Inner>>, id: &str) {
     let mut guard = inner.lock().unwrap();
     let Some(host) = guard.host.as_mut() else { return };
     if let Some(peer) = host.peers.remove(id) {
-        let _ = peer.shutdown.shutdown(Shutdown::Both);
+        let _ = peer.shutdown.close();
         broadcast_presence(host);
         emit_state(app, &guard);
     }
@@ -1173,7 +1221,7 @@ pub async fn relay_connect(
         host_key,
         host_trust,
         sender: sender.clone(),
-        shutdown: stream.try_clone().map_err(|e| e.to_string())?,
+        shutdown: Closer::Tcp(stream.try_clone().map_err(|e| e.to_string())?),
         alive: alive.clone(),
     };
     let status = {
