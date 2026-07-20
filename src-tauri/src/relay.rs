@@ -144,7 +144,7 @@ fn peer_send(sender: &Arc<Mutex<secure::Sender>>, frame: &Frame) -> bool {
 /// key: an attacker gets one online guess per connection (which the tarpit
 /// throttles) and learns nothing from eavesdropping. HKDF splits that key
 /// per-direction; ChaCha20-Poly1305 encrypts and authenticates every frame.
-mod secure {
+pub(crate) mod secure {
     use chacha20poly1305::aead::{Aead, KeyInit};
     use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
     use hkdf::Hkdf;

@@ -5,6 +5,7 @@ mod git;
 mod lsp;
 mod pty;
 mod punch;
+mod qstream;
 mod relay;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};

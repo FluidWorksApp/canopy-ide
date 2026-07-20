@@ -1,3 +1,4 @@
+#![allow(dead_code)] // wired into the relay in the host/join UDP path (task #7)
 //! Direct peer-to-peer UDP connection with no middleman.
 //!
 //! The old relay opened a TCP listener and waited for an inbound connection.
