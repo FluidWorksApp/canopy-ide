@@ -29,6 +29,26 @@ window.addEventListener(
   { capture: true },
 );
 
+
+// Every http(s) link in the app opens in the real browser, wherever it lives:
+// issue bodies, commit messages, PR descriptions, rendered markdown, anything
+// added later. Delegated once here rather than per-view — a webview has
+// nowhere to navigate back from, so a link that "works" by replacing the app
+// is worse than one that does nothing, and solving it per view is how some
+// get forgotten (commit messages had).
+window.addEventListener("click", (e) => {
+  const anchor = (e.target as HTMLElement | null)?.closest?.("a");
+  const href = anchor?.getAttribute("href");
+  if (!href) return;
+  // Cancel FIRST, for every scheme. Returning early on a non-http href left
+  // the webview to navigate it itself — and `javascript:` or `file:` in an
+  // issue body or a converted document is then a free script execution or a
+  // local read. Only http(s) goes on to the OS browser.
+  e.preventDefault();
+  if (!/^https?:\/\//i.test(href)) return;
+  void import("@tauri-apps/plugin-opener").then(({ openUrl }) => openUrl(href));
+});
+
 window.addEventListener("error", (e) =>
   jsLog("error", `${e.message} @ ${e.filename}:${e.lineno}`),
 );

@@ -4,8 +4,10 @@
 // so hooks, credential helpers and SSH config all behave identically.
 import { useCallback, useEffect, useState } from "react";
 import * as ipc from "../ipc";
+import type { Notify } from "../types";
 import { useEscape } from "../useEscape";
 import { CheckIcon, FailIcon, RestartIcon } from "./icons";
+import { LooseEnds } from "./LooseEnds";
 
 interface GitPanelProps {
   components: { label: string; path: string }[];
@@ -13,21 +15,30 @@ interface GitPanelProps {
   onOpenDiff: (repo: string, file: ipc.FileChange) => void;
   /** Open a pull request in the main area. */
   onOpenPr: (repo: string, pr: ipc.PrInfo) => void;
+  /** Open a branch's work in the main area. */
+  onOpenBranch: (repo: string, branch: ipc.BranchWork) => void;
+  /** Open a commit in the main area. */
+  onOpenCommit: (
+    repo: string,
+    commit: { hash: string; short: string; subject: string },
+  ) => void;
   /** Open a terminal in a directory (used to work inside a worktree). */
   onOpenTerminal: (cwd: string, label: string) => void;
   /** Worktree currently backing the project's files, if any. */
   activeWorktree: string | null;
   /** Make a worktree the project's working environment. */
   onUseWorktree: (repo: string, path: string, branch: string) => void;
-  onNotice: (msg: string) => void;
+  onNotice: Notify;
 }
 
-type Section = "changes" | "branches" | "worktrees" | "history" | "prs";
+type Section = "changes" | "branches" | "worktrees" | "loose" | "history" | "prs";
 
 export function GitPanel({
   components,
   onOpenDiff,
   onOpenPr,
+  onOpenCommit,
+  onOpenBranch,
   onOpenTerminal,
   activeWorktree,
   onUseWorktree,
@@ -94,7 +105,7 @@ export function GitPanel({
     try {
       setPrs(await ipc.ghPrList(repo));
     } catch (err) {
-      onNotice(String(err));
+      onNotice(String(err), "error");
     } finally {
       setBusy(null);
     }
@@ -114,7 +125,7 @@ export function GitPanel({
     try {
       setWorktrees(await ipc.gitWorktrees(repo));
     } catch (err) {
-      onNotice(String(err));
+      onNotice(String(err), "error");
     } finally {
       setBusy(null);
     }
@@ -131,10 +142,12 @@ export function GitPanel({
     setBusy(label);
     try {
       const out = await fn();
-      if (typeof out === "string" && out.trim()) onNotice(out.trim().split("\n")[0]);
+      // git's own first line of output — a result, not a fault.
+      if (typeof out === "string" && out.trim())
+        onNotice(out.trim().split("\n")[0], "success");
       await refresh();
     } catch (err) {
-      onNotice(String(err));
+      onNotice(String(err), "error");
     } finally {
       setBusy(null);
     }
@@ -174,9 +187,11 @@ export function GitPanel({
     });
     void fn()
       .then((out) => {
-        if (typeof out === "string" && out.trim()) onNotice(out.trim().split("\n")[0]);
+        // git's own first line of output — a result, not a fault.
+      if (typeof out === "string" && out.trim())
+        onNotice(out.trim().split("\n")[0], "success");
       })
-      .catch((err) => onNotice(String(err)))
+      .catch((err) => onNotice(String(err), "error"))
       // Reconcile on success (confirm) and failure (revert) alike.
       .finally(() => void refresh());
   };
@@ -319,7 +334,7 @@ export function GitPanel({
       </div>
 
       <div className="git-tabs">
-        {(["changes", "branches", "worktrees", "history", "prs"] as Section[]).map((s) => (
+        {(["changes", "branches", "worktrees", "loose", "history", "prs"] as Section[]).map((s) => (
           <button
             key={s}
             className={`git-tab ${section === s ? "git-tab-on" : ""}`}
@@ -329,8 +344,10 @@ export function GitPanel({
               ? `Changes (${allChanged.length})`
               : s === "prs"
                 ? "PRs"
-                : s === "worktrees" && worktrees.length > 1
-                  ? `Worktrees (${worktrees.length})`
+                : s === "loose"
+                  ? "Loose ends"
+                  : s === "worktrees" && worktrees.length > 1
+                    ? `Worktrees (${worktrees.length})`
                   : s[0].toUpperCase() + s.slice(1)}
           </button>
         ))}
@@ -625,10 +642,29 @@ export function GitPanel({
         </div>
       )}
 
+      {section === "loose" && (
+        <LooseEnds
+          repo={repo}
+          onOpenBranch={onOpenBranch}
+          onOpenTerminal={onOpenTerminal}
+          onUseWorktree={onUseWorktree}
+          onNotice={onNotice}
+          onConfirm={(text, run) => setConfirm({ text, run })}
+        />
+      )}
+
       {section === "history" && (
         <div className="git-scroll">
           {log.map((c) => (
-            <div key={c.hash} className="git-commit-row" title={`${c.hash}\n${c.author} · ${c.date}`}>
+            <div
+              key={c.hash}
+              className="git-commit-row git-commit-row-click"
+              title={`${c.hash}\n${c.author} · ${c.date}\n\nClick to open this commit`}
+              onClick={() =>
+                repo &&
+                onOpenCommit(repo, { hash: c.hash, short: c.short, subject: c.subject })
+              }
+            >
               <span className="git-commit-hash">{c.short}</span>
               <span className="git-commit-subject">{c.subject}</span>
               <span className="git-commit-meta">{c.date}</span>

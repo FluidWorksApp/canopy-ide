@@ -2,6 +2,7 @@
 // fs:change events refresh affected directories (debounced).
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as ipc from "../ipc";
+import type { Notify } from "../types";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { useEscape } from "../useEscape";
 import { fileIconUrl } from "./fileIcons";
@@ -13,7 +14,7 @@ interface FileTreeProps {
   /** Only meaningful with the root header shown — that's the sole caller of it. */
   onRemoveRoot?: (root: string) => void;
   /** Surface an error/result message (rename clashes, delete failures, ...). */
-  onNotice?: (msg: string) => void;
+  onNotice?: Notify;
   /** Render root contents directly (the caller already shows a labeled header). */
   hideRootHeader?: boolean;
 }

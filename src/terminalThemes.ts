@@ -107,25 +107,30 @@ const DAYLIGHT_TERM_THEME: TermTheme = {
   brightWhite: "#1c1f26",
 };
 
-/** The current skin's terminal palette. "custom" starts from Default's and
- *  substitutes the picked accent into cursor/blue/brightBlue — the one
- *  color the user actually chose, same as it does for --accent everywhere
- *  else — rather than asking for 16 colors on top of one. */
+/** The current skin's terminal palette, with the accent (when the user set
+ *  one) substituted into cursor/blue/brightBlue on ANY skin — the accent is
+ *  orthogonal to the skin everywhere else, and a terminal whose cursor
+ *  ignored it looked like a bug. Substituting the one colour the user
+ *  actually chose beats asking for 16 on top of it. */
 export function terminalTheme(theme: Theme, customAccent?: string): TermTheme {
   if (theme === "auto") {
     theme = window.matchMedia("(prefers-color-scheme: dark)").matches
       ? "default"
       : "daylight";
   }
+  const palette = match_palette(theme);
+  const accent = (customAccent ?? "").trim();
+  return accent
+    ? { ...palette, cursor: accent, blue: accent, brightBlue: accent }
+    : palette;
+}
+
+function match_palette(theme: Theme): TermTheme {
   switch (theme) {
     case "gotham":
       return GOTHAM_TERM_THEME;
     case "daylight":
       return DAYLIGHT_TERM_THEME;
-    case "custom": {
-      const accent = customAccent || DEFAULT_TERM_THEME.blue;
-      return { ...DEFAULT_TERM_THEME, cursor: accent, blue: accent, brightBlue: accent };
-    }
     default:
       return DEFAULT_TERM_THEME;
   }

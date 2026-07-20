@@ -151,9 +151,7 @@ visible project — `Cmd+W` closes a tab, never the app.
 | `Cmd+Shift+O` / `Cmd+Shift+S` | Open / Save workspace file |
 | `Cmd+T` | New terminal |
 | `Cmd+W` | Close tab |
-| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
-| `Cmd+1` … `Cmd+8` | Jump to tab at that position |
-| `Cmd+9` | Jump to the last tab |
+| `Ctrl+Cmd+←` / `Ctrl+Cmd+→` | Previous / next tab |
 | `Cmd+Shift+W` | Close project |
 | `Cmd+B` | Toggle sidebar |
 | `Cmd+Shift+Enter` | Focus mode (`Esc` exits) |

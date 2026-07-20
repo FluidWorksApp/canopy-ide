@@ -2,7 +2,7 @@
 // Element, or macOS's Look Up / Translate over selected text) is meaningless in
 // a desktop IDE, so the app suppresses it globally (see main.tsx) and shows
 // this instead.
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 export interface MenuItem {
   label: string;
@@ -15,6 +15,10 @@ export interface MenuItem {
   icon?: ReactNode;
   /** Trailing note, dimmed and right-aligned (e.g. "install"). */
   hint?: string;
+  /** Nested items, shown in a panel attached to this row. Used where a
+   *  choice has its own list ("New agent ▸" → every installed CLI) and
+   *  flattening it would bury the common case under the rare one. */
+  submenu?: MenuItem[];
 }
 
 interface ContextMenuProps {
@@ -27,6 +31,30 @@ interface ContextMenuProps {
 export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ x, y });
+  const [openSub, setOpenSub] = useState<number | null>(null);
+  const subRef = useRef<HTMLDivElement>(null);
+  // The attached panel is positioned relative to its row, so it inherits none
+  // of the parent's viewport clamping — near the bottom or right edge it ran
+  // straight off screen. Measure the real rect once it opens and pull it back.
+  const [subFix, setSubFix] = useState<{ top: number; flip: boolean }>({
+    top: 0,
+    flip: false,
+  });
+  useLayoutEffect(() => {
+    if (openSub == null) {
+      setSubFix({ top: 0, flip: false });
+      return;
+    }
+    const el = subRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const margin = 8;
+    // Lift it just enough to fit; never push it above the top edge.
+    const overflowY = r.bottom - (window.innerHeight - margin);
+    const top = overflowY > 0 ? -Math.min(overflowY, Math.max(0, r.top - margin)) : 0;
+    const flip = r.right > window.innerWidth - margin;
+    setSubFix({ top, flip });
+  }, [openSub]);
 
   // Keep the menu inside the window — near the bottom/right edge it would
   // otherwise open off-screen and be unusable.
@@ -74,7 +102,64 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
     >
       {items.map((item, i) =>
         item.separator ? (
-          <div key={i} className="ctx-sep" />
+          // A separator with a label is a section heading, which is how the
+          // agent menus tell "running" from "new" without a second widget.
+          item.label ? (
+            <div key={i} className="ctx-heading">
+              {item.label}
+            </div>
+          ) : (
+            <div key={i} className="ctx-sep" />
+          )
+        ) : item.submenu ? (
+          <div
+            key={i}
+            className="ctx-sub-anchor"
+            onMouseEnter={() => setOpenSub(i)}
+            onMouseLeave={() => setOpenSub((cur) => (cur === i ? null : cur))}
+          >
+            <button
+              className={`ctx-item ${openSub === i ? "ctx-item-on" : ""}`}
+              onClick={() => setOpenSub((cur) => (cur === i ? null : i))}
+            >
+              {item.icon != null && <span className="ctx-icon">{item.icon}</span>}
+              <span className="ctx-label">{item.label}</span>
+              <span className="ctx-caret">›</span>
+            </button>
+            {openSub === i && (
+              <div
+                ref={subRef}
+                className={`ctx-menu ctx-submenu ${subFix.flip ? "ctx-submenu-left" : ""}`}
+                style={{ marginTop: subFix.top }}
+              >
+                {item.submenu.map((sub, j) =>
+                  sub.separator ? (
+                    sub.label ? (
+                      <div key={j} className="ctx-heading">
+                        {sub.label}
+                      </div>
+                    ) : (
+                      <div key={j} className="ctx-sep" />
+                    )
+                  ) : (
+                    <button
+                      key={j}
+                      className={`ctx-item ${sub.danger ? "ctx-danger" : ""}`}
+                      disabled={sub.disabled}
+                      onClick={() => {
+                        sub.onClick?.();
+                        onClose();
+                      }}
+                    >
+                      {sub.icon != null && <span className="ctx-icon">{sub.icon}</span>}
+                      <span className="ctx-label">{sub.label}</span>
+                      {sub.hint && <span className="ctx-hint">{sub.hint}</span>}
+                    </button>
+                  ),
+                )}
+              </div>
+            )}
+          </div>
         ) : (
           <button
             key={i}

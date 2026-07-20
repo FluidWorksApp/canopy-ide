@@ -2,7 +2,7 @@
 // renders fully offline (mermaid and SheetJS are lazy-loaded so they cost
 // nothing until a matching file is opened).
 import { useEffect, useMemo, useRef, useState } from "react";
-import { marked } from "marked";
+import { renderMarkdown, sanitizeHtml } from "../markdown";
 import "highlight.js/styles/github-dark.css";
 
 const decoder = new TextDecoder();
@@ -42,7 +42,7 @@ export function hasSourceView(kind: ViewerKind): boolean {
 export function MarkdownView({ bytes }: { bytes: Uint8Array }) {
   const ref = useRef<HTMLDivElement>(null);
   const html = useMemo(
-    () => marked.parse(decoder.decode(bytes), { async: false }),
+    () => renderMarkdown(decoder.decode(bytes)),
     [bytes],
   );
 
@@ -213,7 +213,7 @@ export function SheetView({ bytes }: { bytes: Uint8Array }) {
       )}
       <div
         className="viewer-scroll sheet-table"
-        dangerouslySetInnerHTML={{ __html: sheets[active]?.html ?? "" }}
+        dangerouslySetInnerHTML={{ __html: sanitizeHtml(sheets[active]?.html ?? "") }}
       />
     </div>
   );
@@ -325,7 +325,9 @@ export function DocxView({ bytes }: { bytes: Uint8Array }) {
     void import("mammoth")
       .then((mammoth) => mammoth.convertToHtml({ arrayBuffer: toArrayBuffer(bytes) }))
       .then((result) => {
-        if (!cancelled) setHtml(result.value);
+        // mammoth emits HTML from the document's own contents — sanitize it
+        // like any other converted source.
+        if (!cancelled) setHtml(sanitizeHtml(result.value));
       })
       .catch((e) => setError(String(e)));
     return () => {
@@ -376,7 +378,7 @@ export function NotebookView({ bytes }: { bytes: Uint8Array }) {
             key={i}
             className="markdown-body nb-md"
             dangerouslySetInnerHTML={{
-              __html: marked.parse(joinSource(cell.source), { async: false }),
+              __html: renderMarkdown(joinSource(cell.source)),
             }}
           />
         ) : (
@@ -406,7 +408,7 @@ function NbOutputView({ out }: { out: NbOutput }) {
     return (
       <div
         className="nb-output"
-        dangerouslySetInnerHTML={{ __html: joinSource(out.data["text/html"]) }}
+        dangerouslySetInnerHTML={{ __html: sanitizeHtml(joinSource(out.data["text/html"])) }}
       />
     );
   }

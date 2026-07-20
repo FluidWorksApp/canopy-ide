@@ -24,15 +24,12 @@ const SAFE_PATH = /^[A-Za-z0-9_\-./~+@%:=,]+$/;
 const shellQuote = (p: string) =>
   SAFE_PATH.test(p) ? p : `'${p.replaceAll("'", `'\\''`)}'`;
 
-/** The skin's terminal palette, with the background swapped for fully
- *  transparent whenever a wallpaper is set — .term-container (index.css)
- *  drops its own opaque fill under the same condition, so what actually
- *  shows through is .app-bg's image, already blurred and dimmed by the one
- *  shared Opacity control (background.ts). No separate per-terminal alpha:
- *  the same legibility floor that protects chrome text protects this too. */
+/** The active skin's terminal palette, with the user's accent substituted in
+ *  when they set one. Always fully opaque: xterm's DOM renderer paints cell
+ *  backgrounds, and a transparent background makes a cleared cell show
+ *  whatever was beneath it — which reads as "delete did nothing". */
 function themeFor(settings: Settings) {
-  const theme = terminalTheme(settings.theme, settings.customAccent);
-  return theme;
+  return terminalTheme(settings.theme, settings.customAccent);
 }
 
 export interface TermHandle {
@@ -94,14 +91,24 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     termRef.current = term;
 
     // Everything else recolors for free via CSS custom properties when the
-    // skin — or the wallpaper, or its opacity — changes; xterm renders to a
-    // canvas and needs its theme object pushed explicitly. Reassigning
-    // .options.theme repaints immediately — no remount, no fresh PTY, the
-    // running shell/agent is untouched. .term-container going transparent
-    // (index.css, gated the same way) is what actually lets .app-bg show
-    // through once xterm itself stops painting an opaque background.
+    // skin changes; xterm renders its own surface and needs the theme object
+    // pushed explicitly. Reassigning .options.theme repaints immediately — no
+    // remount, no fresh PTY, the running shell/agent is untouched.
     const onThemeChange = () => {
-      term.options.theme = themeFor(getSettings());
+      const next = getSettings();
+      term.options.theme = themeFor(next);
+      // Font and cursor used to apply only to newly opened terminals. That is
+      // worse than it sounds: an open terminal kept a grid measured for the
+      // OLD font while everything else re-rendered, which is precisely the
+      // mismatch above. Apply them here and re-measure.
+      const metricsChanged =
+        term.options.fontFamily !== next.terminalFontFamily ||
+        term.options.fontSize !== next.fontSize;
+      term.options.fontFamily = next.terminalFontFamily;
+      term.options.fontSize = next.fontSize;
+      term.options.cursorStyle = next.terminalCursorStyle;
+      term.options.cursorBlink = next.terminalCursorBlink;
+      if (metricsChanged) syncNowRef.current?.();
     };
     window.addEventListener(THEME_CHANGE_EVENT, onThemeChange);
 
@@ -238,6 +245,33 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     const initial = propose();
 
     let disposed = false;
+    // Cell size is a function of the font, and a font resolves
+    // asynchronously — the first proposeDimensions() above can be measured
+    // against a fallback face. If the real font is even slightly wider or
+    // narrower, xterm keeps the columns it computed while the glyphs render
+    // at a different width, so the shell wraps and redraws against a column
+    // the terminal no longer agrees with. That is what "backspace deletes
+    // nothing, and the line vanishes when I press right" actually is: the
+    // redraw is landing in the wrong place, not the keys failing. Re-measure
+    // once the fonts are ready and push the corrected size to the pty.
+    void document.fonts?.ready
+      .then(() => {
+        if (!disposed) syncNowRef.current?.();
+      })
+      .catch(() => {});
+
+    // The same drift has other routes in: moving the window to a display with
+    // a different pixel ratio changes the measured cell size, and waking from
+    // sleep can leave a stale measurement behind. xterm does not re-measure on
+    // its own, and nothing resizes the container, so the ResizeObserver never
+    // fires — the grid quietly stops matching the pty and every mid-line
+    // redraw lands in the wrong column until the terminal is recreated.
+    // Re-checking when the window regains focus is cheap: syncNow only talks
+    // to the pty when the numbers actually differ.
+    const onFocus = () => {
+      if (activeRef.current) syncNowRef.current?.();
+    };
+    window.addEventListener("focus", onFocus);
     let unlistenExit: (() => void) | undefined;
 
     void ipc
@@ -383,6 +417,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       clearTimeout(resizeTimer);
       observer.disconnect();
       window.removeEventListener(THEME_CHANGE_EVENT, onThemeChange);
+      window.removeEventListener("focus", onFocus);
       dataSub.dispose();
       titleSub.dispose();
       oscSubs.forEach((s) => s.dispose());

@@ -264,6 +264,32 @@ export const gitPush = (repo: string, setUpstream = false) =>
   invoke<string>("git_push", { repo, setUpstream });
 export const gitDiff = (repo: string, path: string, staged: boolean) =>
   invoke<string>("git_diff", { repo, path, staged });
+export interface CommitDetail {
+  hash: string;
+  short: string;
+  author: string;
+  email: string;
+  date: string;
+  subject: string;
+  body: string;
+  refs: string;
+  parents: string[];
+}
+
+export interface CommitPatch {
+  patch: string;
+  files_changed: number;
+  insertions: number;
+  deletions: number;
+  truncated: boolean;
+}
+
+export const gitCommitDetail = (repo: string, hash: string) =>
+  invoke<CommitDetail>("git_commit_detail", { repo, hash });
+
+export const gitCommitPatch = (repo: string, hash: string) =>
+  invoke<CommitPatch>("git_commit_patch", { repo, hash });
+
 export const gitLog = (repo: string, limit?: number) =>
   invoke<CommitInfo[]>("git_log", { repo, limit });
 
@@ -297,6 +323,44 @@ export interface WorktreeInfo {
   is_main: boolean;
   dirty: number;
 }
+
+export interface BranchWork {
+  branch: string;
+  worktree: string | null;
+  is_main: boolean;
+  prunable: boolean;
+  current: boolean;
+  dirty: number;
+  ahead: number;
+  behind: number;
+  upstream: string | null;
+  upstream_gone: boolean;
+  merged: boolean;
+  last_commit: string;
+  age_days: number;
+  subject: string;
+  author: string;
+}
+
+export interface WorkAudit {
+  base: string;
+  counts_degraded: boolean;
+  items: BranchWork[];
+}
+
+export const gitBranchCommits = (repo: string, branch: string) =>
+  invoke<CommitInfo[]>("git_branch_commits", { repo, branch });
+
+export const gitBranchPatch = (
+  repo: string,
+  branch: string,
+  worktree: string | null,
+  uncommitted: boolean,
+) => invoke<CommitPatch>("git_branch_patch", { repo, branch, worktree, uncommitted });
+
+export const gitRemoteUrl = (repo: string) => invoke<string>("git_remote_url", { repo });
+
+export const gitWorkAudit = (repo: string) => invoke<WorkAudit>("git_work_audit", { repo });
 
 export const gitWorktrees = (repo: string) => invoke<WorktreeInfo[]>("git_worktrees", { repo });
 export const gitWorktreeAdd = (repo: string, path: string, branch: string, create: boolean) =>
@@ -359,3 +423,35 @@ export const sessionDigests = () => invoke<SessionDigest[]>("session_digests");
 /** Drop a session the user no longer wants offered for restore. */
 export const sessionForget = (sessionId: string) =>
   invoke<void>("session_forget", { sessionId });
+
+// ---------- issue trackers ----------
+
+/** One ticket, whatever the tracker. See src/trackers.ts for the provider
+ *  registry that produces these. */
+export interface TicketInfo {
+  id: string;
+  title: string;
+  state: string;
+  state_type: string;
+  assignee: string | null;
+  mine: boolean;
+  url: string;
+  branch: string | null;
+  body: string;
+  priority: string;
+}
+
+export interface GhAuth {
+  installed: boolean;
+  path: string;
+  authenticated: boolean;
+  account: string;
+  host: string;
+  detail: string;
+}
+
+export const ghAuth = () => invoke<GhAuth>("gh_auth");
+
+export const ghIssueList = (repo: string) => invoke<TicketInfo[]>("gh_issue_list", { repo });
+export const linearIssues = (apiKey: string) =>
+  invoke<TicketInfo[]>("linear_issues", { apiKey });

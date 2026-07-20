@@ -52,10 +52,17 @@ export interface Settings {
   runawayCpuPercent: number;
   runawayMemBytes: number;
   ptyHighWater: number;
+  /** Per-tracker secrets for the Issue Trackers panel, keyed by provider id
+   *  (see src/trackers.ts). Local-only: sent nowhere but the tracker's own
+   *  API, straight from this machine. */
+  trackerKeys: Record<string, string>;
   theme: Theme;
-  /** Only meaningful when theme === "custom" — a hex color, applied as
-   *  --accent (with a luminance-derived --on-accent so accent-filled buttons
-   *  stay legible without the user having to pick two colors). */
+  /** Highlight color, applied on top of WHATEVER skin is active — a skin
+   *  sets the whole palette, the accent is one colour within it, and there
+   *  is no reason picking a purple should force you off Daylight. Empty
+   *  string means "use the skin's own accent". A luminance-derived
+   *  --on-accent rides along so accent-filled buttons stay legible without
+   *  the user having to pick a second colour. */
   customAccent: string;
 
   // ---- Personalize: font + cursor, Editor (Monaco) and Terminal (xterm)
@@ -72,6 +79,10 @@ export interface Settings {
   editorFontSize: number;
   editorCursorStyle: CursorStyle;
   editorCursorBlink: boolean;
+  /** Which agent CLI starts work on a ticket (registry id in projects.ts).
+   *  Was hardcoded to claude, which quietly made every other agent a
+   *  second-class citizen in a product built to run all of them. */
+  defaultAgent: string;
 }
 
 // NB: stored settings override these (see getSettings), so flipping a default
@@ -84,8 +95,10 @@ const DEFAULTS: Settings = {
   runawayCpuPercent: 300,
   runawayMemBytes: 4 * 1024 * 1024 * 1024,
   ptyHighWater: 2 * 1024 * 1024,
+  defaultAgent: "claude",
+  trackerKeys: {},
   theme: "default",
-  customAccent: "#7aa2f7",
+  customAccent: "",
   terminalFontFamily: TERMINAL_FONT_DEFAULT,
   terminalCursorStyle: "block",
   terminalCursorBlink: true,
@@ -99,7 +112,17 @@ const KEY = "canopy.settings";
 
 export function getSettings(): Settings {
   try {
-    return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(KEY) ?? "{}") };
+    const stored = JSON.parse(localStorage.getItem(KEY) ?? "{}") as Partial<Settings>;
+    const merged = { ...DEFAULTS, ...stored };
+    // Accent used to be meaningful only under the "custom" skin, and every
+    // install carried the default blue in that field whether or not it was
+    // ever chosen. Applying that to every skin now would repaint Gotham's
+    // gold blue for people who never asked. So: an accent counts as chosen
+    // only if the old model would actually have shown it.
+    if (stored.customAccent && stored.theme !== "custom") {
+      merged.customAccent = "";
+    }
+    return merged;
   } catch {
     return { ...DEFAULTS };
   }
@@ -137,13 +160,15 @@ export const THEME_CHANGE_EVENT = "canopy:theme";
 export function applyTheme(theme: Theme, customAccent?: string): void {
   document.documentElement.dataset.theme = resolveTheme(theme);
   const root = document.documentElement.style;
-  if (theme === "custom") {
-    const accent = customAccent || DEFAULTS.customAccent;
+  const accent = (customAccent ?? "").trim();
+  if (accent) {
+    // Orthogonal to the skin: Gotham with a teal accent is a legitimate
+    // thing to want, and forcing a skin change to get one was the wrong
+    // model.
     root.setProperty("--accent", accent);
     root.setProperty("--on-accent", luminance(accent) > 0.5 ? "#12131c" : "#ffffff");
   } else {
-    // A previous Custom session may have left an inline override behind —
-    // drop back to whatever the newly selected preset's stylesheet block says.
+    // No override — fall back to whatever the skin's stylesheet block says.
     root.removeProperty("--accent");
     root.removeProperty("--on-accent");
   }

@@ -13,7 +13,7 @@ import {
   type Project,
   type WorkspaceState,
 } from "./projects";
-import type { AgentEventEntry } from "./types";
+import type { AgentEventEntry, NoticeKind } from "./types";
 import { derivePending, pendingForRoots } from "./notifications";
 import { ProjectView } from "./components/ProjectView";
 import { ProjectDialog } from "./components/ProjectDialog";
@@ -49,14 +49,25 @@ export default function App() {
   // because the project-tab badges count from the same derived list.
   const [dismissedPending, setDismissedPending] = useState<Set<string>>(new Set());
   const [manager, setManager] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState<null | { tab?: "appearance" }>(null);
+  const [settingsOpen, setSettingsOpen] = useState<null | { tab?: import("./components/SettingsDialog").SettingsTab }>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   // One delete confirm for every entry point (manager, Welcome) — deleting a
   // project was a bare single click before, one misclick from losing a setup.
   const [confirmDelete, setConfirmDelete] = useState<Project | null>(null);
   const [hookPath, setHookPath] = useState<string | null>(null);
   const [zen, setZen] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ text: string; kind: NoticeKind } | null>(null);
+  const notify = useCallback(
+    (text: string, kind: NoticeKind = "info") => setNotice({ text, kind }),
+    [],
+  );
+  // Successes and status lines are transient; a failure stays until it has
+  // been read and dismissed.
+  useEffect(() => {
+    if (!notice || notice.kind === "error") return;
+    const t = window.setTimeout(() => setNotice(null), 4500);
+    return () => window.clearTimeout(t);
+  }, [notice]);
   const [updateAvail, setUpdateAvail] = useState<UpdateAvailability>(null);
   const [updateProgress, setUpdateProgress] = useState<number | null>(null);
   // "Later" mutes that version for this run; the next launch may ask again.
@@ -105,7 +116,7 @@ export default function App() {
       filters: [{ name: "canopy project", extensions: ["json"] }],
     });
     if (!path) return;
-    await exportProject(path, project).catch((e) => setNotice(String(e)));
+    await exportProject(path, project).catch((e) => notify(String(e)));
   }, []);
 
   const saveWorkspaceAs = useCallback(async () => {
@@ -116,7 +127,7 @@ export default function App() {
       filters: [{ name: "canopy workspace", extensions: ["json"] }],
     });
     if (!path) return;
-    await exportWorkspace(path, wsRef.current).catch((e) => setNotice(String(e)));
+    await exportWorkspace(path, wsRef.current).catch((e) => notify(String(e)));
   }, []);
 
   const openWorkspaceFile = useCallback(async () => {
@@ -130,7 +141,7 @@ export default function App() {
     try {
       file = await importFile(path);
     } catch (err) {
-      setNotice(String(err instanceof Error ? err.message : err));
+      notify(String(err instanceof Error ? err.message : err));
       return;
     }
     // Merge rather than replace: importing a workspace must never silently
@@ -211,14 +222,14 @@ export default function App() {
                   return;
                 }
                 const { getVersion } = await import("@tauri-apps/api/app");
-                setNotice(`Canopy is up to date (${await getVersion()}).`);
+                notify(`Canopy is up to date (${await getVersion()}).`);
               })
-              .catch((err) => setNotice(`Update check failed: ${err}`));
+              .catch((err) => notify(`Update check failed: ${err}`));
           } else if (e.payload === "install-cli") {
             void import("@tauri-apps/api/core").then(({ invoke }) =>
               invoke<string>("cli_install_shim")
-                .then(setNotice)
-                .catch((err) => setNotice(String(err))),
+                .then((m) => notify(m, "success"))
+                .catch((err) => notify(String(err))),
             );
           } else if (e.payload === "new-project") {
             setDialog({ mode: "new" });
@@ -501,7 +512,7 @@ export default function App() {
               )
             }
             onEdit={() => setDialog({ mode: "edit", project: p })}
-            onNotice={setNotice}
+            onNotice={notify}
             onShareContext={(on) =>
               void saveProject({ ...p, shareContext: on })
             }
@@ -552,7 +563,7 @@ export default function App() {
                   void installUpdate(setUpdateProgress).catch((err) => {
                     setUpdateProgress(null);
                     setUpdateAvail(null);
-                    setNotice(`Update failed: ${err}`);
+                    notify(`Update failed: ${err}`);
                   });
                 }}
               >
@@ -583,8 +594,12 @@ export default function App() {
       )}
 
       {notice && (
-        <div className="notice" onClick={() => setNotice(null)} title="dismiss">
-          {notice}
+        <div
+          className={`notice notice-${notice.kind}`}
+          onClick={() => setNotice(null)}
+          title="dismiss"
+        >
+          {notice.text}
         </div>
       )}
 

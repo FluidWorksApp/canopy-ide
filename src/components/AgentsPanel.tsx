@@ -3,7 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
-import { AGENT_PATTERN, restoreCommand } from "../projects";
+import { AGENT_CLIS, AGENT_PATTERN, restoreCommand } from "../projects";
+import { restorableFrom } from "../restorable";
+import { AgentIcon, RestartIcon, TerminalIcon, TrashIcon } from "./icons";
 import type { PendingItem } from "../notifications";
 
 interface AgentsPanelProps {
@@ -46,6 +48,35 @@ const fmtMem = (bytes: number) =>
   bytes > 1024 * 1024 * 1024
     ? `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`
     : `${Math.round(bytes / 1024 / 1024)} MB`;
+
+/** One group. The panel used to be five identical full-width lists with
+ *  identical headings, so "running now" and "restorable from before" looked
+ *  the same — the indented body plus a rule is what separates them. */
+function Section({
+  title,
+  count,
+  tone,
+  action,
+  children,
+}: {
+  title: string;
+  count?: number;
+  tone?: "urgent" | "quiet";
+  action?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className={`ap-section ${tone ? `ap-section-${tone}` : ""}`}>
+      <div className="ap-head">
+        <span className="ap-title">{title}</span>
+        {count != null && count > 0 && <span className="badge">{count}</span>}
+        <span className="ap-head-spacer" />
+        {action}
+      </div>
+      <div className="ap-body">{children}</div>
+    </div>
+  );
+}
 
 export function AgentsPanel({
   stats,
@@ -128,38 +159,10 @@ export function AgentsPanel({
   // ID", because the transcript is only created once there is something to
   // record. Listing those would offer a button that can only fail, on sessions
   // with nothing worth restoring anyway.
+  // Shared with the project's empty state — one definition of "restorable",
+  // so the two surfaces can never disagree about what is offered.
   const restorable = useMemo(
-    () => {
-      // Having spoken is not the same as being alive. liveSessionIds only knows
-      // which sessions emitted a hook event during this app run, so one that has
-      // since exited stays "live" on that signal forever and never offers its
-      // Restore button. A session whose terminal is gone is dead, whatever it
-      // said earlier: `surface` is the pty id the hook recorded from our spawn
-      // env, so this is an identity check, and a pty absent from stats is
-      // genuinely gone because the monitor emits from the live session map.
-      // Sessions with no surface started outside a Canopy terminal and can only
-      // be judged by the event signal.
-      const alivePtys = new Set(stats.map((s) => String(s.id)));
-      const dead = (d: ipc.SessionDigest) => !!d.surface && !alivePtys.has(d.surface);
-      return digests
-        .filter(
-          (d) =>
-            d.session_id &&
-            // `<agent>-pty<N>` ids are synthesized by the helper for CLIs that
-            // can't report a session identity (aider's bare notification
-            // command). They're terminal-scoped signals, not conversations —
-            // nothing to resume.
-            !/-pty\d*$/.test(d.session_id) &&
-            (dead(d) || !liveSessionIds.includes(d.session_id)) &&
-            // The prompt requirement is CLAUDE-specific: claude writes no
-            // transcript until the first prompt, so a promptless claude
-            // session can only fail to resume. Other agents capture prompts
-            // best-effort (their hook payloads' field names vary) — an empty
-            // list there must not hide a real conversation.
-            ((d.prompts?.length ?? 0) > 0 || (d.agent ?? "claude") !== "claude"),
-        )
-        .sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0));
-    },
+    () => restorableFrom(digests, stats, liveSessionIds).map((r) => r.digest),
     [digests, stats, liveSessionIds.join(",")],
   );
 
@@ -194,6 +197,10 @@ export function AgentsPanel({
   const agentSessions = sessions.filter((x) => x.agent);
   const termSessions = sessions.filter((x) => !x.agent);
 
+  /** Registry id for a process name, so the row can wear the CLI's mark. */
+  const agentIdOf = (procName: string) =>
+    AGENT_CLIS.find((c) => procName === c.bin || procName.startsWith(c.bin))?.id ?? "agent";
+
   const sessionRow = ({ session: s, agent, dir, digest }: (typeof sessions)[number]) => {
     const runaway =
       s.total_cpu > settings.runawayCpuPercent ||
@@ -203,8 +210,22 @@ export function AgentsPanel({
     // directory never will.
     const task = lastHumanPrompt(digest?.prompts);
     return (
-      <div key={s.id} className={`agent-row ${runaway ? "agent-runaway" : ""}`}>
+      <div
+        key={s.id}
+        className={`agent-row ${runaway ? "agent-runaway" : ""}`}
+        // Rows truncate to one line each now; the full detail lives here.
+        title={[agent?.name ?? s.title, s.cwd, digest?.branch, task]
+          .filter(Boolean)
+          .join("\n")}
+      >
         <div className="agent-main">
+          {/* The CLI's own mark, not its name in bold — the panel is a column
+              of near-identical rows and a glyph reads faster than a word. */}
+          {agent ? (
+            <AgentIcon id={agentIdOf(agent.name)} size={14} className="ap-mark" />
+          ) : (
+            <TerminalIcon size={13} className="ap-mark" />
+          )}
           <span className="agent-name">{agent?.name ?? s.title}</span>
           {dir && (
             <span className="agent-dir" title={s.cwd}>
@@ -227,11 +248,7 @@ export function AgentsPanel({
           ))}
           {runaway && <span className="runaway-badge">runaway?</span>}
         </div>
-        {task && (
-          <div className="agent-task" title={task}>
-            {task}
-          </div>
-        )}
+        {task && <div className="agent-task">{task}</div>}
         <div className="agent-stats">
           <span>{s.total_cpu.toFixed(0)}% cpu</span>
           <span>{fmtMem(s.total_mem_bytes)}</span>
@@ -422,99 +439,19 @@ export function AgentsPanel({
         )}
       </div>
 
-      {restorable.length > 0 && (
-        <>
-          <div className="side-panel-head">
-            <span>Restore sessions</span>
-            <span className="badge">{restorable.length}</span>
-          </div>
-          <div className="restore-help">
-            Agent sessions from this project that aren't open right now. They survive
-            a crash or restart — reopening runs the agent's own resume so it comes
-            back with its history.
-          </div>
-          {restorable.map((d) => {
-            const agentId = d.agent ?? "agent";
-            // resume_cwd, not cwd: claude looks the conversation up under its
-            // project root, so resuming from the subdirectory the agent ran in
-            // reports "No conversation found".
-            const runIn = d.resume_cwd || d.cwd || "";
-            const cmd = d.resumable === false ? null : restoreCommand(agentId, d.session_id);
-            const dir = runIn.split("/").filter(Boolean).pop() ?? "";
-            const last = lastHumanPrompt(d.prompts);
-            return (
-              <div key={d.session_id} className="restore-row">
-                <div className="restore-main">
-                  <span className="agent-name">{agentId}</span>
-                  {dir && (
-                    <span className="agent-dir" title={runIn}>
-                      {dir}
-                    </span>
-                  )}
-                  {d.branch && <span className="share-branch">⎇ {d.branch}</span>}
-                  <span className="agent-session">{ago(d.updated)}</span>
-                </div>
-                {/* The last prompt is how you recognise which session this was —
-                    a bare uuid tells you nothing. Non-claude agents may not
-                    have one captured; say so instead of rendering nothing. */}
-                <div className="restore-prompt">
-                  {last ?? <em>(no prompt captured for this session)</em>}
-                </div>
-                <div className="restore-actions">
-                  {cmd ? (
-                    <button
-                      className="btn-mini"
-                      title={cmd}
-                      onClick={() => onRestore?.(runIn, cmd, agentId, agentId)}
-                    >
-                      Restore
-                    </button>
-                  ) : d.resumable === false ? (
-                    // The agent wrote no transcript, so every --resume against
-                    // this id fails. Say so rather than hand over a button whose
-                    // only outcome is a red error in a terminal.
-                    <span className="restore-unsupported" title={d.cwd}>
-                      no saved history — can't resume
-                    </span>
-                  ) : (
-                    <span
-                      className="restore-unsupported"
-                      title={`${agentId} cannot reopen a specific past session by id`}
-                    >
-                      no resume support
-                    </span>
-                  )}
-                  <button
-                    className="btn-mini"
-                    title="Forget this session — removes it from this list"
-                    onClick={() => {
-                      void ipc.sessionForget(d.session_id).then(() =>
-                        setDigests((prev) => prev.filter((x) => x.session_id !== d.session_id)),
-                      );
-                    }}
-                  >
-                    Forget
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-        </>
-      )}
-
-      <div className="side-panel-head">
-        <span>
-          Agent sessions{" "}
-          {agentSessions.length > 0 && <span className="badge">{agentSessions.length}</span>}
-        </span>
-        <button
-          className="btn-icon"
-          title="How to hook up agent CLIs"
-          onClick={() => setShowHookHelp((v) => !v)}
-        >
-          ?
-        </button>
-      </div>
+      <Section
+        title="Running agents"
+        count={agentSessions.length}
+        action={
+          <button
+            className="btn-icon"
+            title="How to hook up agent CLIs"
+            onClick={() => setShowHookHelp((v) => !v)}
+          >
+            ?
+          </button>
+        }
+      >
 
       {showHookHelp && hookPath && (
         <div className="hook-help">
@@ -557,15 +494,95 @@ export function AgentsPanel({
       ) : (
         agentSessions.map(sessionRow)
       )}
+      </Section>
 
       {termSessions.length > 0 && (
-        <>
-          <div className="side-panel-head">
-            <span>Terminals</span>
-            <span className="badge">{termSessions.length}</span>
-          </div>
+        <Section title="Terminals" count={termSessions.length}>
           {termSessions.map(sessionRow)}
-        </>
+        </Section>
+      )}
+
+      {restorable.length > 0 && (
+        <Section title="Restorable sessions" count={restorable.length} tone="quiet">
+          <div className="restore-help">
+            Not open right now — reopening runs the agent's own resume, so it
+            comes back with its history.
+          </div>
+          {restorable.map((d) => {
+            const agentId = d.agent ?? "agent";
+            // resume_cwd, not cwd: claude looks the conversation up under its
+            // project root, so resuming from the subdirectory the agent ran in
+            // reports "No conversation found".
+            const runIn = d.resume_cwd || d.cwd || "";
+            const cmd = d.resumable === false ? null : restoreCommand(agentId, d.session_id);
+            const dir = runIn.split("/").filter(Boolean).pop() ?? "";
+            const last = lastHumanPrompt(d.prompts);
+            return (
+              <div key={d.session_id} className="restore-row">
+                <div className="restore-main">
+                  <AgentIcon id={agentId} size={14} className="ap-mark" />
+                  <span className="agent-name">{agentId}</span>
+                  {dir && (
+                    <span className="agent-dir" title={runIn}>
+                      {dir}
+                    </span>
+                  )}
+                  {d.branch && <span className="share-branch">⎇ {d.branch}</span>}
+                  <span className="agent-session">{ago(d.updated)}</span>
+                </div>
+                {/* The last prompt is how you recognise which session this was —
+                    a bare uuid tells you nothing. Non-claude agents may not
+                    have one captured; say so instead of rendering nothing. */}
+                <div className="restore-prompt">
+                  {last ?? <em>(no prompt captured for this session)</em>}
+                </div>
+                {/* Two icon actions in the row's own top-right corner: the
+                    empty column beside the text was doing nothing, and two
+                    full-width buttons per row made four sessions look like a
+                    form. Labels come back on hover. */}
+                <div className="restore-actions">
+                  {cmd ? (
+                    <button
+                      className="row-act row-act-go"
+                      title={`Restore this session — ${cmd}`}
+                      onClick={() => onRestore?.(runIn, cmd, agentId, agentId)}
+                    >
+                      <RestartIcon size={13} />
+                      <span className="row-act-label">Restore</span>
+                    </button>
+                  ) : (
+                    // The agent wrote no transcript (or its CLI can't reopen
+                    // by id), so every --resume against this fails. Say so
+                    // rather than offer a button whose only outcome is a red
+                    // error in a terminal.
+                    <span
+                      className="restore-unsupported"
+                      title={
+                        d.resumable === false
+                          ? "No saved history for this session"
+                          : `${agentId} cannot reopen a specific past session by id`
+                      }
+                    >
+                      can't resume
+                    </span>
+                  )}
+                  <button
+                    className="row-act row-act-del"
+                    title="Forget this session — removes it from this list"
+                    onClick={() => {
+                      void ipc.sessionForget(d.session_id).then(() =>
+                        setDigests((prev) => prev.filter((x) => x.session_id !== d.session_id)),
+                      );
+                    }}
+                  >
+                    <TrashIcon size={13} />
+                    <span className="row-act-label">Forget</span>
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </Section>
       )}
     </div>
   );

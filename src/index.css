@@ -82,6 +82,18 @@
   box-sizing: border-box;
 }
 
+/* Every button here is flat. The UA default is `border: 2px outset`, so any
+   class that sets a background without also setting a border renders a 3D
+   bevel — which is exactly what `btn-mini btn-accent` (no `.btn`) did, in 25
+   places. Reset once at element level: every button class below re-declares
+   what it needs and wins on specificity regardless of order. */
+button {
+  font: inherit;
+  border: 1px solid transparent;
+  background: none;
+  color: inherit;
+}
+
 html,
 body,
 #root {
@@ -411,13 +423,14 @@ body,
 /* ---------- rail (collapsed sidebar) ---------- */
 
 .rail {
-  width: 42px;
-  flex: 0 0 42px;
+  width: 46px;
+  flex: 0 0 46px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  padding: 8px 0;
+  /* Real icons need separating; 4px read as one continuous column. */
+  gap: 8px;
+  padding: 10px 0;
   background: var(--bg-alt);
 }
 
@@ -428,14 +441,23 @@ body,
 
 .rail-btn {
   position: relative;
-  width: 32px;
-  height: 32px;
+  /* Centres an SVG rather than a glyph: the rail carries real icons now. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
   background: none;
   border: none;
-  border-radius: 6px;
+  border-radius: 8px;
   color: var(--text-dim);
   font-size: 15px;
   cursor: pointer;
+}
+
+.rail-btn:hover {
+  color: var(--text);
+  background: var(--bg-raised);
 }
 
 .rail-btn:hover {
@@ -450,8 +472,9 @@ body,
 
 .rail-badge {
   position: absolute;
-  top: 0;
-  right: 0;
+  /* Clear of the glyph: at 34px the badge used to sit on top of the icon. */
+  top: -3px;
+  right: -4px;
   background: var(--accent);
   color: var(--on-accent);
   border-radius: 7px;
@@ -831,10 +854,21 @@ body,
   flex: 1;
 }
 
+/* Size modifier that also stands on its own — most call sites use it without
+   `.btn`, so it carries the same flat surface. */
 .btn-mini {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 4px;
   font-size: 11px;
   padding: 2px 8px;
   margin-top: 6px;
+  cursor: pointer;
+}
+
+.btn-mini:hover {
+  border-color: var(--accent);
 }
 
 .cli-icon {
@@ -2073,6 +2107,7 @@ body,
    to a single column. */
 .confirm.settings-dialog {
   width: min(760px, 94vw);
+  /* Wins over .confirm's narrower definite width above. */
   max-width: min(760px, 94vw);
   height: min(560px, 84vh);
   max-height: min(560px, 84vh);
@@ -2621,10 +2656,15 @@ body,
   padding: 8px 14px;
   border-radius: 6px;
   background: var(--bg-raised);
-  border: 1px solid var(--danger);
+  /* Neutral by default. Every message used to wear the danger border, so a
+     plain status line ("Switched to origin") read as a failure. */
+  border: 1px solid var(--border);
   color: var(--text);
   font-size: 12px;
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 
@@ -2969,11 +3009,24 @@ body,
   align-items: center;
   justify-content: center;
   background: rgba(0, 0, 0, 0.5);
+  /* Dialogs are rendered inside whatever component owns them — the model
+     switcher's lives in .status-bar, which sets white-space: nowrap for its
+     one-line row. white-space inherits through position:fixed, so its
+     paragraphs could never wrap and ran straight off the box. Reset it for
+     every dialog rather than per caller. */
+  white-space: normal;
+  text-align: left;
 }
 
 .confirm {
-  max-width: 420px;
+  /* A definite width, not just a cap: with only max-width a long unbreakable
+     token (a path, a URL) could still push the box wider. */
+  width: min(420px, 92vw);
+  max-width: min(420px, 92vw);
   padding: 16px 18px;
+  /* Paths and commands appear in these dialogs and have no spaces to break
+     at. */
+  overflow-wrap: anywhere;
   border-radius: 8px;
   background: var(--bg-alt);
   border: 1px solid var(--border);
@@ -3531,4 +3584,1058 @@ textarea,
   color: var(--text-dim);
   font-size: 10px;
   font-style: italic;
+}
+
+/* ---------- issue trackers panel ---------- */
+
+.tracker-section {
+  border-top: 1px solid var(--border);
+}
+
+.tracker-connect {
+  padding: 4px 12px 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.tracker-connect-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.tracker-connect-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.ticket-repo-select {
+  margin: 0 12px 4px;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 2px 0;
+  width: fit-content;
+  cursor: pointer;
+}
+
+.ticket-repo-select:hover {
+  color: var(--text);
+}
+
+.ticket-state-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px 2px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.ticket-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  cursor: pointer;
+}
+
+.ticket-row:hover {
+  background: var(--bg-raised);
+}
+
+.ticket-main {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+  flex: 1;
+}
+
+.ticket-id {
+  font-size: 11px;
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+
+.ticket-title {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ticket-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--text-dim);
+  flex: 0 0 auto;
+}
+
+/* The action reveals on hover — rows read as a clean list until pointed at. */
+.ticket-row .ticket-start {
+  opacity: 0;
+}
+
+.ticket-row:hover .ticket-start,
+.ticket-row .ticket-start:disabled {
+  opacity: 1;
+}
+
+.ticket-wt {
+  color: var(--ok);
+}
+
+.ticket-assignee.ticket-mine {
+  color: var(--accent);
+}
+
+.ticket-start {
+  margin-left: auto;
+}
+
+/* Source pills + per-row source dot for the unified Issues list. */
+.ticket-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 2px 12px 6px;
+}
+
+.ticket-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+
+.ticket-pill-on {
+  border-color: var(--accent);
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.ticket-pill-add {
+  padding: 2px 8px;
+}
+
+/* Brand marks inherit colour, so tint them per tracker. */
+.ticket-src {
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+.ticket-src-github {
+  color: var(--text-dim);
+}
+
+.ticket-src-linear {
+  color: #7b86e8;
+}
+
+.ticket-refreshing {
+  opacity: 0.5;
+}
+
+.ticket-state-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 90px;
+}
+
+/* ---------- commit opened as a tab ---------- */
+
+.git-commit-row-click {
+  cursor: pointer;
+}
+
+.git-commit-row-click:hover {
+  background: var(--bg-raised);
+}
+
+.commit-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.commit-head {
+  padding: 12px 18px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-alt);
+  flex: 0 0 auto;
+}
+
+.commit-subject {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.commit-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.commit-hash {
+  color: var(--warn);
+}
+
+.commit-chip {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 6px;
+}
+
+.commit-stat.commit-add {
+  color: var(--ok);
+}
+
+.commit-stat.commit-del {
+  color: var(--danger);
+}
+
+.commit-body {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: 'SF Mono', Menlo, monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  color: var(--text-dim);
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.commit-files {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 14px;
+}
+
+.tab-commit-icon {
+  color: var(--warn);
+  font-size: 10px;
+}
+
+/* ---------- issue opened as a tab ---------- */
+
+.ticket-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.ticket-view-head {
+  padding: 12px 18px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-alt);
+  flex: 0 0 auto;
+}
+
+.ticket-view-title {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.ticket-view-id {
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+
+.ticket-view-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.ticket-view-state {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.ticket-view-chip {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 6px;
+}
+
+.ticket-view-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 18px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.ticket-view-body h1,
+.ticket-view-body h2,
+.ticket-view-body h3 {
+  margin: 18px 0 8px;
+}
+
+.ticket-view-body pre {
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+
+.ticket-view-body code {
+  font-family: 'SF Mono', Menlo, monospace;
+  font-size: 12px;
+}
+
+.ticket-view-body :not(pre) > code {
+  background: var(--bg-alt);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.ticket-view-body img {
+  max-width: 100%;
+}
+
+.ticket-view-empty {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.ticket-view-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 18px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-alt);
+  flex: 0 0 auto;
+}
+
+.ticket-view-note {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.tab-ticket-icon {
+  color: var(--accent);
+  font-size: 10px;
+}
+
+/* ---------- loose ends (branch/worktree audit) ---------- */
+
+.loose-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.loose-summary strong {
+  color: var(--text);
+}
+
+.loose-sep {
+  opacity: 0.5;
+}
+
+.loose-base {
+  padding: 0 12px 8px;
+  font-size: 10px;
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+
+.loose-group {
+  border-top: 1px solid var(--border);
+}
+
+.loose-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+/* Risk reads in the header color: red = losing it loses work. */
+.loose-head-uncommitted {
+  color: var(--danger);
+}
+
+.loose-head-unpushed {
+  color: var(--warn);
+}
+
+.loose-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 12px;
+}
+
+.loose-row:hover {
+  background: var(--bg-raised);
+}
+
+.loose-main {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.loose-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  flex: 0 0 auto;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.loose-subject {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.loose-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.loose-dirty {
+  color: var(--danger);
+}
+
+.loose-ahead {
+  color: var(--warn);
+}
+
+.loose-chip {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 6px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.loose-chip-warn {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.loose-age {
+  margin-left: auto;
+}
+
+/* Actions stay out of the way until the row is pointed at. */
+.loose-actions {
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+}
+
+.loose-row:hover .loose-actions {
+  opacity: 1;
+}
+
+.loose-toggle {
+  margin: 10px 12px;
+}
+
+.loose-row-click {
+  cursor: pointer;
+}
+
+.branch-panes {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.branch-body {
+  padding-top: 8px;
+}
+
+.branch-commits {
+  margin-bottom: 14px;
+}
+
+.tab-branch-icon {
+  color: var(--ok);
+  font-size: 10px;
+}
+
+/* Tab-strip and detail-header marks: SVGs need alignment, glyphs didn't. */
+.tab-pr-icon,
+.tab-ticket-icon,
+.tab-commit-icon,
+.tab-branch-icon,
+.ticket-view-mark {
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+.tab-ticket-icon {
+  color: var(--text-dim);
+}
+
+.ticket-view-mark {
+  color: var(--accent);
+}
+
+.set-note {
+  margin-top: 4px;
+  opacity: 0.8;
+}
+
+.set-item-name.set-inline {
+  gap: 6px;
+}
+
+/* ---------- resume block on the project launcher ---------- */
+
+.resume-block {
+  width: min(620px, 90%);
+  /* Below the launcher: starting something new is the primary action and
+     shouldn't move depending on whether there's history to restore. */
+  margin: 26px 0 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-alt);
+  overflow: hidden;
+  text-align: left;
+}
+
+.resume-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.resume-head > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.resume-head-actions {
+  gap: 4px;
+}
+
+.resume-subhead {
+  padding: 8px 12px 3px;
+  border-top: 1px solid var(--border);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.resume-row code {
+  font-family: 'SF Mono', Menlo, monospace;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.resume-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  font-size: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.resume-row:first-of-type {
+  border-top: none;
+}
+
+.resume-row-click {
+  cursor: pointer;
+}
+
+.resume-row-click:hover {
+  background: var(--bg-raised);
+}
+
+.resume-prompt {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resume-dir,
+.resume-branch,
+.resume-age {
+  font-size: 10px;
+  color: var(--text-dim);
+  flex: 0 0 auto;
+}
+
+.resume-branch {
+  color: var(--ok);
+}
+
+.resume-row .btn-mini {
+  margin-top: 0;
+}
+
+.resume-unsupported {
+  font-size: 10px;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+/* Anchors styled as buttons (open-on-remote actions). */
+a.btn,
+a.btn-mini {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+.commit-body a {
+  color: var(--accent);
+}
+
+/* Agent picker cards (Settings → Agents) reuse the skin-card shell. */
+.agent-card-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 40px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+
+/* Ticket footer: two labelled action groups, not one ambiguous row. */
+.ticket-action-group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.ticket-action-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.ticket-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ticket-action-row .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ticket-action-dir {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+.ticket-view-actions {
+  align-items: center;
+  gap: 12px;
+}
+
+/* Split button: one control, primary action plus a caret for everything
+   else. Two buttons visually fused rather than a button and a stray chevron. */
+.split-btn {
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.split-btn-main {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.split-btn-caret {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-left: 1px solid rgba(0, 0, 0, 0.25);
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
+/* Nested menu panel ("New agent ›") and section headings. */
+.ctx-sub-anchor {
+  position: relative;
+}
+
+.ctx-caret {
+  margin-left: auto;
+  color: var(--text-dim);
+}
+
+.ctx-item-on {
+  background: var(--bg-alt);
+}
+
+.ctx-submenu {
+  position: absolute;
+  left: calc(100% - 2px);
+  top: -4px;
+  min-width: 190px;
+}
+
+.ctx-submenu-left {
+  left: auto;
+  right: calc(100% - 2px);
+}
+
+.ctx-heading {
+  padding: 6px 10px 3px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.split-btn-agent {
+  margin-left: 7px;
+  font-weight: 400;
+  opacity: 0.75;
+}
+
+/* ---------- agents panel: grouped, indented sections ---------- */
+
+.ap-section {
+  border-top: 1px solid var(--border);
+  padding: 0 0 4px;
+}
+
+.ap-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 12px 4px;
+}
+
+.ap-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.ap-head-spacer {
+  flex: 1;
+}
+
+/* The body is indented under its header with a rule, so a row visibly
+   belongs to a group rather than floating in one long column. */
+.ap-body {
+  margin-left: 12px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+}
+
+.ap-section-quiet .ap-title {
+  color: var(--text-dim);
+  opacity: 0.85;
+}
+
+.ap-section-quiet .ap-body {
+  opacity: 0.92;
+}
+
+/* Rows inside a section: the group already carries the left rule and the
+   padding, so rows drop their own frames. */
+.ap-body .agent-row,
+.ap-body .restore-row {
+  position: relative;
+  padding: 5px 10px 5px 8px;
+  border: none;
+  border-top: 1px solid var(--border);
+  line-height: 1.35;
+}
+
+.ap-body > div:first-child.agent-row,
+.ap-body > div:first-child.restore-row {
+  border-top: none;
+}
+
+.ap-mark {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+}
+
+.ap-body .agent-main,
+.ap-body .restore-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ap-body .agent-name {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.ap-body .restore-help {
+  font-size: 10px;
+  color: var(--text-dim);
+  line-height: 1.45;
+  padding: 2px 10px 6px 8px;
+}
+
+/* Corner actions: the row's right edge was empty space, and two full-width
+   buttons per row made a list of four sessions read as a form.
+   They float over the row, so they carry the row's own background plus a
+   fade on the leading edge — otherwise the labels land on top of the text
+   underneath and both become unreadable. */
+.ap-body .agent-row:hover,
+.ap-body .restore-row:hover {
+  background: var(--bg-raised);
+}
+
+.ap-body .restore-actions {
+  position: absolute;
+  top: 3px;
+  right: 4px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin: 0;
+  visibility: hidden;
+  padding: 2px 2px 2px 34px;
+  border-radius: 6px;
+  background: linear-gradient(
+    to right,
+    transparent 0,
+    var(--bg-raised) 30px,
+    var(--bg-raised) 100%
+  );
+}
+
+.ap-body .agent-stats {
+  position: absolute;
+  top: 3px;
+  right: 4px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: 10px;
+  /* visibility, not opacity: an opacity:0 box still reserves its line, which
+     is why every row carried an empty fourth line. */
+  visibility: hidden;
+  padding: 2px 4px 2px 34px;
+  border-radius: 6px;
+  background: linear-gradient(
+    to right,
+    transparent 0,
+    var(--bg-raised) 30px,
+    var(--bg-raised) 100%
+  );
+}
+
+.ap-body .agent-row:hover .agent-stats,
+.ap-body .agent-row:focus-within .agent-stats {
+  visibility: visible;
+}
+
+.row-act {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 5px;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 10px;
+}
+
+/* The label appears on hover of the button itself — the icons carry the
+   meaning, the words confirm it before a destructive click. */
+.row-act-label {
+  display: none;
+}
+
+.row-act:hover .row-act-label {
+  display: inline;
+}
+
+.row-act-go:hover {
+  color: var(--ok);
+  border-color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+
+.row-act-del:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
+/* Four stacked restore rows meant eight always-on buttons; reveal on the
+   row you're actually pointing at. Keyboard focus reveals them too. */
+.ap-body .restore-row:hover .restore-actions,
+.ap-body .restore-row:focus-within .restore-actions {
+  visibility: visible;
+}
+
+.ap-body .restore-prompt,
+.ap-body .agent-task {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.35;
+  margin: 1px 0 0;
+  /* One line: these identify a session, they are not the content. The full
+     text is in the row's title. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Meta chips: the row is a summary, so nothing in it needs 12px. */
+.ap-body .agent-dir,
+.ap-body .agent-branch,
+.ap-body .share-branch,
+.ap-body .agent-session,
+.ap-body .agent-port {
+  font-size: 10px;
+}
+
+.ap-body .agent-main,
+.ap-body .restore-main {
+  /* Keep the summary on one line and let it truncate, rather than wrapping
+     into a second and third row of chips. */
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+
+.ap-body .agent-main > *,
+.ap-body .restore-main > * {
+  flex: 0 0 auto;
+}
+
+.ap-body .agent-dir,
+.ap-body .agent-branch,
+.ap-body .share-branch {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40%;
+}
+
+.ap-body .restore-actions .btn-mini,
+.ap-body .agent-stats .btn-mini {
+  margin-top: 0;
+}
+
+/* Section head for the plain (non-grouped) rows below the sections. */
+.ap-plain-head {
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  padding-top: 10px;
+}
+
+.ap-section-urgent {
+  border-left: 2px solid var(--warn);
+}
+
+/* Message kinds. The stripe carries the severity; the text stays readable
+   rather than being tinted into low contrast. */
+.notice::before {
+  content: "";
+  width: 3px;
+  align-self: stretch;
+  border-radius: 2px;
+  background: var(--text-dim);
+}
+
+.notice-success {
+  border-color: color-mix(in srgb, var(--ok) 55%, var(--border));
+}
+
+.notice-success::before {
+  background: var(--ok);
+}
+
+.notice-warn {
+  border-color: color-mix(in srgb, var(--warn) 55%, var(--border));
+}
+
+.notice-warn::before {
+  background: var(--warn);
+}
+
+.notice-error {
+  border-color: var(--danger);
+}
+
+.notice-error::before {
+  background: var(--danger);
 }

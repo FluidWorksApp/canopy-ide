@@ -581,8 +581,46 @@ pub struct PrInfo {
 /// gh infers the repository from the working directory, which avoids parsing
 /// remote URLs ourselves and works with forks/multiple remotes as the user has
 /// them configured.
+/// Absolute path to a tool, resolved through the user's LOGIN shell.
+///
+/// A GUI app on macOS inherits launchd's minimal PATH (/usr/bin:/bin:...),
+/// not the shell's — so Homebrew lives outside it. `git` happens to sit in
+/// /usr/bin (Xcode CLT) and worked; `gh` sits in /opt/homebrew/bin and did
+/// not, which is why the PR tab claimed "needs the GitHub CLI" on machines
+/// where `gh` is plainly installed and every other git feature worked.
+/// Resolved once per tool per run: spawning a login shell is expensive, and
+/// a tool's location doesn't move while the app is open.
+fn tool_path(tool: &'static str) -> String {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<&'static str, String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = cache.lock().unwrap().get(tool) {
+        return hit.clone();
+    }
+    // `command -v` is a shell builtin, so this works even where `which` isn't
+    // installed. -l loads the profile that sets PATH in the first place.
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let resolved = std::process::Command::new(shell)
+        .args(["-lc", &format!("command -v {tool}")])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|p| !p.is_empty())
+        // Fall back to the bare name: if it IS on the inherited PATH this
+        // still works, and if it isn't the caller reports it as missing.
+        .unwrap_or_else(|| tool.to_string());
+    cache.lock().unwrap().insert(tool, resolved.clone());
+    resolved
+}
+
+pub(crate) fn gh_bin() -> String {
+    tool_path("gh")
+}
+
 fn gh_in(repo: &Path) -> Command {
-    let mut cmd = Command::new("gh");
+    let mut cmd = Command::new(gh_bin());
     cmd.env("GH_PROMPT_DISABLED", "1");
     cmd.current_dir(repo);
     cmd
@@ -590,7 +628,7 @@ fn gh_in(repo: &Path) -> Command {
 
 #[tauri::command]
 pub async fn gh_available() -> bool {
-    Command::new("gh")
+    Command::new(gh_bin())
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -750,7 +788,13 @@ pub async fn git_worktrees(
     repo: String,
 ) -> Result<Vec<WorktreeInfo>, String> {
     let top = repo_path(&state, &repo)?;
-    let out = run(git(&top).args(["worktree", "list", "--porcelain"]))?;
+    list_worktrees(&top)
+}
+
+/// Parse `git worktree list --porcelain` and count uncommitted files in each
+/// live worktree. Shared by the Worktrees tab and the work audit.
+fn list_worktrees(top: &Path) -> Result<Vec<WorktreeInfo>, String> {
+    let out = run(git(top).args(["worktree", "list", "--porcelain"]))?;
 
     let mut list: Vec<WorktreeInfo> = Vec::new();
     let mut cur: Option<WorktreeInfo> = None;
@@ -884,4 +928,751 @@ pub async fn git_worktree_prune(
     let top = repo_path(&state, &repo)?;
     let out = run(git(&top).args(["worktree", "prune", "-v"]))?;
     Ok(if out.trim().is_empty() { "Nothing to prune".into() } else { out.trim().to_string() })
+}
+
+/// A commit's metadata — everything the header needs, and nothing that costs
+/// a diff computation. Split from the patch on purpose: `git show -s` is
+/// milliseconds even on a big repo, so the view can paint immediately while
+/// the patch (which is the expensive part) loads behind it.
+#[derive(Serialize, Clone)]
+pub struct CommitDetail {
+    pub hash: String,
+    pub short: String,
+    pub author: String,
+    pub email: String,
+    /// ISO-ish author date, as git formats it.
+    pub date: String,
+    pub subject: String,
+    /// Commit message minus the subject line.
+    pub body: String,
+    pub refs: String,
+    /// Parent hashes — more than one means a merge.
+    pub parents: Vec<String>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct CommitPatch {
+    pub patch: String,
+    pub files_changed: u32,
+    pub insertions: u32,
+    pub deletions: u32,
+    /// The patch was too large to ship whole; `patch` holds the head of it.
+    pub truncated: bool,
+}
+
+/// Reject a branch name that could be read as an option or extra revision
+/// argument. Names come from git itself here, but they reach a command line,
+/// and `--upload-pack=…`-style injection is the reason to be strict.
+fn checked_ref(name: &str) -> Result<String, String> {
+    let n = name.trim();
+    if n.is_empty()
+        || n.starts_with('-')
+        || n.contains("..")
+        || n.contains(char::is_whitespace)
+        || n.contains('~')
+        || n.contains('^')
+        || n.contains(':')
+    {
+        return Err("invalid branch name".into());
+    }
+    Ok(n.to_string())
+}
+
+/// Reject anything that isn't a hex object name before it reaches git — these
+/// strings come from the UI, and `git show` accepts far broader revision
+/// syntax (`HEAD@{...}`, ranges, paths after `--`).
+fn checked_hash(hash: &str) -> Result<String, String> {
+    let h = hash.trim();
+    if h.is_empty() || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("invalid commit hash".into());
+    }
+    Ok(h.to_string())
+}
+
+#[tauri::command]
+pub async fn git_commit_detail(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    hash: String,
+) -> Result<CommitDetail, String> {
+    let top = repo_path(&state, &repo)?;
+    let hash = checked_hash(&hash)?;
+    let meta = run(git(&top).args([
+        "show",
+        "-s",
+        "--date=iso",
+        "--pretty=format:%H\x1f%h\x1f%an\x1f%ae\x1f%ad\x1f%s\x1f%b\x1f%D\x1f%P",
+        &hash,
+    ]))?;
+    let f: Vec<&str> = meta.split('\x1f').collect();
+    if f.len() < 9 {
+        return Err("commit not found".into());
+    }
+    Ok(CommitDetail {
+        hash: f[0].to_string(),
+        short: f[1].to_string(),
+        author: f[2].to_string(),
+        email: f[3].to_string(),
+        date: f[4].to_string(),
+        subject: f[5].to_string(),
+        body: f[6].trim().to_string(),
+        refs: f[7].to_string(),
+        parents: f[8].split_whitespace().map(String::from).collect(),
+    })
+}
+
+/// A commit's patch, with its stats derived from the patch itself rather than
+/// a second `--stat` pass — that pass recomputed the identical diff, which on
+/// a large commit is the single most expensive thing this view did.
+///
+/// Commits are immutable, so results are cached for the run: reopening a tab
+/// (or revisiting one) costs nothing.
+#[tauri::command]
+pub async fn git_commit_patch(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    hash: String,
+) -> Result<CommitPatch, String> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    /// Big enough for any patch a human reviews; past this the cost is all in
+    /// shipping and rendering megabytes of generated diff (lockfiles, vendored
+    /// trees) that nobody reads line by line.
+    const MAX_PATCH_BYTES: usize = 2 * 1024 * 1024;
+    static CACHE: OnceLock<Mutex<HashMap<String, CommitPatch>>> = OnceLock::new();
+
+    let top = repo_path(&state, &repo)?;
+    let hash = checked_hash(&hash)?;
+    let cache_key = format!("{}\x1f{hash}", top.display());
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = cache.lock().unwrap().get(&cache_key) {
+        return Ok(hit.clone());
+    }
+
+    // Merges print no patch under plain `git show`; that is reported as an
+    // empty patch rather than reaching for a combined diff the renderer
+    // cannot display anyway.
+    let mut patch = run(git(&top).args(["show", "--patch", "--format=", &hash]))?;
+
+    let mut files = 0_u32;
+    let mut adds = 0_u32;
+    let mut dels = 0_u32;
+    for line in patch.lines() {
+        if line.starts_with("diff --git ") {
+            files += 1;
+        } else if line.starts_with("+++") || line.starts_with("---") {
+            // File headers, not content.
+        } else if line.starts_with('+') {
+            adds += 1;
+        } else if line.starts_with('-') {
+            dels += 1;
+        }
+    }
+
+    let truncated = patch.len() > MAX_PATCH_BYTES;
+    if truncated {
+        // Cut on a line boundary so the last hunk the renderer sees is valid.
+        let cut = patch[..MAX_PATCH_BYTES]
+            .rfind('\n')
+            .unwrap_or(MAX_PATCH_BYTES);
+        patch.truncate(cut);
+    }
+
+    let result = CommitPatch {
+        patch,
+        files_changed: files,
+        insertions: adds,
+        deletions: dels,
+        truncated,
+    };
+    cache.lock().unwrap().insert(cache_key, result.clone());
+    Ok(result)
+}
+
+
+
+/// Whether the GitHub CLI is installed and who it is signed in as. Powers the
+/// Integrations settings section: "install it", "sign in", "signed in as X,
+/// sign out" are three different states and the UI has to tell them apart.
+#[derive(Serialize, Clone)]
+pub struct GhAuth {
+    pub installed: bool,
+    /// Resolved path, so the settings screen can show what it found.
+    pub path: String,
+    pub authenticated: bool,
+    /// Login name when signed in.
+    pub account: String,
+    pub host: String,
+    /// gh's own message when something is off — shown verbatim rather than
+    /// paraphrased, since it usually says exactly what to do.
+    pub detail: String,
+}
+
+#[tauri::command]
+pub async fn gh_auth() -> Result<GhAuth, String> {
+    let bin = gh_bin();
+    let installed = Command::new(&bin)
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !installed {
+        return Ok(GhAuth {
+            installed: false,
+            path: String::new(),
+            authenticated: false,
+            account: String::new(),
+            host: String::new(),
+            detail: String::new(),
+        });
+    }
+    // `gh api user` is the honest test: `gh auth status` reports a stored
+    // token even when it has been revoked server-side.
+    let mut cmd = Command::new(&bin);
+    cmd.env("GH_PROMPT_DISABLED", "1");
+    cmd.args(["api", "user", "--jq", ".login"]);
+    let (authenticated, account, detail) = match cmd.output() {
+        Ok(o) if o.status.success() => (
+            true,
+            String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            String::new(),
+        ),
+        Ok(o) => (
+            false,
+            String::new(),
+            String::from_utf8_lossy(&o.stderr).trim().lines().next().unwrap_or("").to_string(),
+        ),
+        Err(e) => (false, String::new(), e.to_string()),
+    };
+    let host = Command::new(&bin)
+        .args(["auth", "status"])
+        .output()
+        .ok()
+        .map(|o| {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            text.lines()
+                .find(|l| l.trim_start().starts_with("Logged in to"))
+                .and_then(|l| l.split_whitespace().nth(3).map(String::from))
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    Ok(GhAuth {
+        installed: true,
+        path: bin,
+        authenticated,
+        account,
+        host,
+        detail,
+    })
+}
+
+
+/// The repo's browsable web URL, derived from origin. Empty when there is no
+/// origin or it isn't an http/ssh remote we can rewrite (a local path, say).
+///
+/// Both remote spellings normalise to the same https base:
+///   git@github.com:owner/repo.git  ->  https://github.com/owner/repo
+///   https://github.com/owner/repo.git
+#[tauri::command]
+pub async fn git_remote_url(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+) -> Result<String, String> {
+    let top = repo_path(&state, &repo)?;
+    let raw = run(git(&top).args(["remote", "get-url", "origin"])).unwrap_or_default();
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(String::new());
+    }
+    let url = if let Some(rest) = raw.strip_prefix("git@") {
+        // host:owner/repo -> host/owner/repo
+        match rest.split_once(':') {
+            Some((host, path)) => format!("https://{host}/{path}"),
+            None => return Ok(String::new()),
+        }
+    } else if raw.starts_with("https://") || raw.starts_with("http://") {
+        raw.to_string()
+    } else if let Some(rest) = raw.strip_prefix("ssh://git@") {
+        format!("https://{rest}")
+    } else {
+        // file:// or a bare path — nothing to browse.
+        return Ok(String::new());
+    };
+    Ok(url.trim_end_matches('/').trim_end_matches(".git").to_string())
+}
+
+// ---------- work audit: what did the agents leave behind ----------
+//
+// The question this answers is NOT "which branches exist" — it is "which of
+// these can I delete, and which hold work that exists nowhere else". Agents
+// create worktrees and branches faster than anyone can track, then move on;
+// what is left behind is indistinguishable at a glance from active work.
+//
+// Safety is about EXISTENCE, not merge status: uncommitted files live only in
+// that directory, and unpushed commits live only in this clone. Those are the
+// two states where deleting loses work for good. Merge status is about
+// clutter — a merged branch is safe to remove, it is just noise until you do.
+
+#[derive(Serialize, Clone)]
+pub struct BranchWork {
+    pub branch: String,
+    /// Worktree holding it, if any. None = a branch nobody checked out.
+    pub worktree: Option<String>,
+    pub is_main: bool,
+    /// Worktree directory is gone; the record is stale.
+    pub prunable: bool,
+    pub current: bool,
+    /// Uncommitted files in its worktree. Only this directory has them.
+    pub dirty: u32,
+    /// Commits not on its upstream (or, with no upstream, not on base).
+    pub ahead: u32,
+    pub behind: u32,
+    pub upstream: Option<String>,
+    /// Upstream was deleted — on GitHub, what happens when a PR merges with
+    /// "delete branch on merge" on. Strong signal the work landed.
+    pub upstream_gone: bool,
+    /// Tip is an ancestor of base: merged the plain way.
+    pub merged: bool,
+    pub last_commit: String,
+    pub age_days: u32,
+    pub subject: String,
+    pub author: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct WorkAudit {
+    /// Branch merge status was measured against.
+    pub base: String,
+    /// True when git could not report counts against base (needs git 2.41+
+    /// for %(ahead-behind:)) — the UI then hides "unpushed" for branches
+    /// with no upstream rather than showing a wrong zero.
+    pub counts_degraded: bool,
+    pub items: Vec<BranchWork>,
+}
+
+/// The branch merges are measured against: origin's default branch when it is
+/// knowable, else a local main/master, else the current branch (which makes
+/// every other branch read as unmerged — correct, if unhelpful).
+fn default_base(top: &Path) -> String {
+    if let Ok(sym) = run(git(top).args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])) {
+        let s = sym.trim();
+        if !s.is_empty() {
+            return s.to_string();
+        }
+    }
+    for cand in ["origin/main", "origin/master", "main", "master"] {
+        if run(git(top).args(["rev-parse", "--verify", "--quiet", cand])).is_ok() {
+            return cand.to_string();
+        }
+    }
+    run(git(top).args(["rev-parse", "--abbrev-ref", "HEAD"]))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "HEAD".into())
+}
+
+#[tauri::command]
+pub async fn git_work_audit(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+) -> Result<WorkAudit, String> {
+    let top = repo_path(&state, &repo)?;
+    let base = default_base(&top);
+
+    // Worktrees first: this is the only part that costs a process per entry
+    // (a status per worktree), and it is what gives us dirty counts.
+    let worktrees = list_worktrees(&top)?;
+    let current = run(git(&top).args(["rev-parse", "--abbrev-ref", "HEAD"]))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    // Every local branch in ONE call: upstream, tracking, date, subject,
+    // author. Never per-branch — a repo with 24 agent worktrees would spawn a
+    // process storm for a panel that should feel instant.
+    const FIELDS: &str = "%(refname:short)%1f%(upstream:short)%1f%(upstream:track)%1f%(committerdate:unix)%1f%(contents:subject)%1f%(authorname)";
+    let refs = run(git(&top).args(["for-each-ref", "--format", FIELDS, "refs/heads"]))?;
+
+    // Ahead/behind vs base needs git 2.41+. Asked for separately so an older
+    // git degrades to "no counts" instead of failing the whole listing.
+    let mut vs_base: std::collections::HashMap<String, (u32, u32)> = Default::default();
+    let ab_fmt = format!("%(refname:short)%1f%(ahead-behind:{base})");
+    let counts_degraded = match run(git(&top).args(["for-each-ref", "--format", &ab_fmt, "refs/heads"]))
+    {
+        Ok(out) => {
+            for line in out.lines() {
+                let mut f = line.split('\x1f');
+                let (Some(name), Some(counts)) = (f.next(), f.next()) else { continue };
+                let mut n = counts.split_whitespace();
+                if let (Some(a), Some(b)) = (n.next(), n.next()) {
+                    if let (Ok(a), Ok(b)) = (a.parse(), b.parse()) {
+                        vs_base.insert(name.to_string(), (a, b));
+                    }
+                }
+            }
+            vs_base.is_empty()
+        }
+        Err(_) => true,
+    };
+
+    let merged: std::collections::HashSet<String> =
+        run(git(&top).args(["branch", "--merged", &base, "--format", "%(refname:short)"]))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let mut items = Vec::new();
+    for line in refs.lines() {
+        let f: Vec<&str> = line.split('\x1f').collect();
+        if f.len() < 6 {
+            continue;
+        }
+        let branch = f[0].to_string();
+        let upstream = (!f[1].is_empty()).then(|| f[1].to_string());
+        let track = f[2];
+        let upstream_gone = track.contains("gone");
+        // "[ahead 2, behind 1]" — absent entirely when in sync.
+        let parse_track = |kw: &str| -> u32 {
+            track
+                .split(|c| c == '[' || c == ']' || c == ',')
+                .find_map(|p| p.trim().strip_prefix(kw))
+                .and_then(|n| n.trim().parse().ok())
+                .unwrap_or(0)
+        };
+        // With an upstream, "unpushed" means ahead of it. Without one, the
+        // work exists only here, so measure against base instead.
+        let (ahead, behind) = if upstream.is_some() && !upstream_gone {
+            (parse_track("ahead "), parse_track("behind "))
+        } else {
+            vs_base.get(&branch).copied().unwrap_or((0, 0))
+        };
+        let ts: u64 = f[3].parse().unwrap_or(now);
+        let wt = worktrees.iter().find(|w| w.branch.as_deref() == Some(branch.as_str()));
+        items.push(BranchWork {
+            worktree: wt.map(|w| w.path.clone()),
+            is_main: wt.map(|w| w.is_main).unwrap_or(false),
+            prunable: wt.map(|w| w.prunable.is_some()).unwrap_or(false),
+            current: branch == current,
+            dirty: wt.map(|w| w.dirty).unwrap_or(0),
+            ahead,
+            behind,
+            upstream,
+            upstream_gone,
+            merged: merged.contains(&branch),
+            last_commit: f[3].to_string(),
+            age_days: ((now.saturating_sub(ts)) / 86_400) as u32,
+            subject: f[4].to_string(),
+            author: f[5].to_string(),
+            branch,
+        });
+    }
+
+    Ok(WorkAudit { base, counts_degraded, items })
+}
+
+
+/// Commits a branch has that the base does not — the "what is in here" list
+/// behind a Loose ends row. Metadata only: no patches, so this is one process
+/// and paints instantly (see the branch patch command for the heavy half).
+#[tauri::command]
+pub async fn git_branch_commits(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    branch: String,
+) -> Result<Vec<CommitInfo>, String> {
+    let top = repo_path(&state, &repo)?;
+    let branch = checked_ref(&branch)?;
+    let base = default_base(&top);
+    // base..branch — commits on the branch and not on base. Bounded: a branch
+    // with thousands of commits is a fork, not a loose end.
+    let out = run(git(&top).args([
+        "log",
+        "-200",
+        "--date=short",
+        "--pretty=format:%H\x1f%h\x1f%an\x1f%ad\x1f%s\x1f%D",
+        &format!("{base}..{branch}"),
+    ]))
+    .unwrap_or_default();
+    Ok(out
+        .lines()
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split('\x1f').collect();
+            if f.len() < 5 {
+                return None;
+            }
+            Some(CommitInfo {
+                hash: f[0].to_string(),
+                short: f[1].to_string(),
+                author: f[2].to_string(),
+                date: f[3].to_string(),
+                subject: f[4].to_string(),
+                refs: f.get(5).unwrap_or(&"").to_string(),
+            })
+        })
+        .collect())
+}
+
+/// A branch's patch. `uncommitted` gives the working-tree changes in its
+/// worktree (never cached — they change as you look at them); otherwise the
+/// cumulative diff of base...branch (cached: for a given pair of tips it can
+/// not change).
+#[tauri::command]
+pub async fn git_branch_patch(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    branch: String,
+    worktree: Option<String>,
+    uncommitted: bool,
+) -> Result<CommitPatch, String> {
+    const MAX_PATCH_BYTES: usize = 2 * 1024 * 1024;
+    let top = repo_path(&state, &repo)?;
+    let branch = checked_ref(&branch)?;
+
+    let mut patch = if uncommitted {
+        let dir = match worktree {
+            // The worktree is a registered workspace root; scope-check it like
+            // any other path from the UI.
+            Some(w) => check_scope(&state, Path::new(&w))?,
+            None => top.clone(),
+        };
+        // Tracked changes, plus untracked files rendered as additions —
+        // `git diff` alone would silently omit brand-new files, which is
+        // exactly the work most at risk of being thrown away.
+        let mut p = run(git(&dir).args(["diff", "HEAD"])).unwrap_or_default();
+        let untracked =
+            run(git(&dir).args(["ls-files", "--others", "--exclude-standard"])).unwrap_or_default();
+        for file in untracked.lines().filter(|l| !l.trim().is_empty()).take(100) {
+            if let Ok(extra) = run(git(&dir).args([
+                "diff",
+                "--no-index",
+                "--",
+                "/dev/null",
+                file,
+            ])) {
+                p.push_str(&extra);
+            } else if let Ok(extra) = run(git(&dir).args([
+                "diff",
+                "--no-index",
+                "--binary",
+                "--",
+                "/dev/null",
+                file,
+            ])) {
+                p.push_str(&extra);
+            }
+        }
+        p
+    } else {
+        let base = default_base(&top);
+        run(git(&top).args(["diff", &format!("{base}...{branch}")])).unwrap_or_default()
+    };
+
+    let mut files = 0_u32;
+    let mut adds = 0_u32;
+    let mut dels = 0_u32;
+    for line in patch.lines() {
+        if line.starts_with("diff --git ") {
+            files += 1;
+        } else if line.starts_with("+++") || line.starts_with("---") {
+        } else if line.starts_with('+') {
+            adds += 1;
+        } else if line.starts_with('-') {
+            dels += 1;
+        }
+    }
+    let truncated = patch.len() > MAX_PATCH_BYTES;
+    if truncated {
+        let cut = patch[..MAX_PATCH_BYTES].rfind('\n').unwrap_or(MAX_PATCH_BYTES);
+        patch.truncate(cut);
+    }
+    Ok(CommitPatch { patch, files_changed: files, insertions: adds, deletions: dels, truncated })
+}
+
+// ---------- tickets (issue #15) ----------
+//
+// One row shape for every tracker. GitHub Issues arrive through the user's
+// own `gh` CLI — zero configuration, inherits their auth, exactly like the
+// PR list. Linear is opt-in via a personal API key the frontend stores
+// locally; the request goes straight from this machine to api.linear.app
+// via curl (matching the shell-out-no-deps pattern), with the key delivered
+// through curl's stdin config so it never appears in a process list.
+
+#[derive(Serialize, Clone)]
+pub struct TicketInfo {
+    /// "#42" for GitHub, "ENG-123" for Linear.
+    pub id: String,
+    pub title: String,
+    /// Human-readable state name ("open", "In Progress").
+    pub state: String,
+    /// Coarse machine type — GitHub: open/closed; Linear: its state.type
+    /// (triage/backlog/unstarted/started).
+    pub state_type: String,
+    pub assignee: Option<String>,
+    pub mine: bool,
+    pub url: String,
+    /// The tracker's own suggested branch name when it has one (Linear's
+    /// branchName). GitHub has none; the frontend matches its
+    /// "<number>-slug" branch convention instead.
+    pub branch: Option<String>,
+    /// Markdown description. Fetched with the list rather than on demand —
+    /// both trackers return it in the same call, so a detail view costs no
+    /// extra round trip.
+    pub body: String,
+    /// Human priority label when the tracker has one ("High"); empty otherwise.
+    pub priority: String,
+}
+
+#[tauri::command]
+pub async fn gh_issue_list(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+) -> Result<Vec<TicketInfo>, String> {
+    let top = repo_path(&state, &repo)?;
+    let mut cmd = gh_in(&top);
+    cmd.args([
+        "issue", "list", "--state", "all", "--limit", "80", "--json",
+        "number,title,state,url,assignees,updatedAt,body,labels",
+    ]);
+    let out = run_net(&mut cmd)?;
+    let v: serde_json::Value =
+        serde_json::from_str(&out).map_err(|e| format!("gh returned unexpected output: {e}"))?;
+    let me = run_net(&mut {
+        let mut c = gh_in(&top);
+        c.args(["api", "user", "--jq", ".login"]);
+        c
+    })
+    .unwrap_or_default()
+    .trim()
+    .to_string();
+
+    Ok(v.as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|i| {
+                    let assignees: Vec<String> = i["assignees"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x["login"].as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let state = i["state"].as_str().unwrap_or("").to_lowercase();
+                    TicketInfo {
+                        id: format!("#{}", i["number"].as_u64().unwrap_or(0)),
+                        title: i["title"].as_str().unwrap_or("").to_string(),
+                        state_type: state.clone(),
+                        state,
+                        mine: !me.is_empty() && assignees.iter().any(|a| a == &me),
+                        assignee: assignees.into_iter().next(),
+                        url: i["url"].as_str().unwrap_or("").to_string(),
+                        branch: None,
+                        body: i["body"].as_str().unwrap_or("").to_string(),
+                        // GitHub has no priority field; surface a priority/P0
+                        // style label if the repo uses one.
+                        priority: i["labels"]
+                            .as_array()
+                            .and_then(|ls| {
+                                ls.iter().find_map(|l| {
+                                    let n = l["name"].as_str().unwrap_or("");
+                                    let low = n.to_lowercase();
+                                    (low.starts_with("p0")
+                                        || low.starts_with("p1")
+                                        || low.starts_with("priority"))
+                                    .then(|| n.to_string())
+                                })
+                            })
+                            .unwrap_or_default(),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+#[tauri::command]
+pub async fn linear_issues(api_key: String) -> Result<Vec<TicketInfo>, String> {
+    use std::io::Write;
+    if api_key.trim().is_empty() {
+        return Err("no Linear API key".into());
+    }
+    // Active work only — completed/canceled would bury the list.
+    let query = r#"{ viewer { id } issues(first: 100, orderBy: updatedAt, filter: { state: { type: { in: ["triage", "backlog", "unstarted", "started"] } } }) { nodes { identifier title url branchName description priorityLabel state { name type } assignee { id displayName } } } }"#;
+    let body = serde_json::json!({ "query": query }).to_string();
+    let mut child = std::process::Command::new(tool_path("curl"))
+        .args([
+            "-sS",
+            "--max-time",
+            "15",
+            "-K",
+            "-", // read config (the auth header) from stdin — keeps the key out of argv
+            "-H",
+            "Content-Type: application/json",
+            "--data-binary",
+            &body,
+            "https://api.linear.app/graphql",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("curl not available: {e}"))?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or("curl stdin unavailable")?
+        .write_all(format!("header = \"Authorization: {}\"\n", api_key.trim()).as_bytes())
+        .map_err(|e| e.to_string())?;
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!(
+            "Linear request failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout))
+        .map_err(|_| "Linear returned unexpected output".to_string())?;
+    if let Some(err) = v["errors"].as_array().and_then(|a| a.first()) {
+        return Err(format!(
+            "Linear: {}",
+            err["message"].as_str().unwrap_or("request rejected")
+        ));
+    }
+    let viewer = v["data"]["viewer"]["id"].as_str().unwrap_or("").to_string();
+    Ok(v["data"]["issues"]["nodes"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|i| {
+                    let assignee_id = i["assignee"]["id"].as_str().unwrap_or("");
+                    TicketInfo {
+                        id: i["identifier"].as_str().unwrap_or("").to_string(),
+                        title: i["title"].as_str().unwrap_or("").to_string(),
+                        state: i["state"]["name"].as_str().unwrap_or("").to_string(),
+                        state_type: i["state"]["type"].as_str().unwrap_or("").to_string(),
+                        assignee: i["assignee"]["displayName"].as_str().map(String::from),
+                        mine: !viewer.is_empty() && assignee_id == viewer,
+                        url: i["url"].as_str().unwrap_or("").to_string(),
+                        branch: i["branchName"].as_str().map(String::from),
+                        body: i["description"].as_str().unwrap_or("").to_string(),
+                        priority: match i["priorityLabel"].as_str().unwrap_or("") {
+                            // Linear reports "No priority" for unset — treat
+                            // that as no label rather than rendering it.
+                            "No priority" => String::new(),
+                            other => other.to_string(),
+                        },
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default())
 }
