@@ -1704,3 +1704,73 @@ pub async fn relay_accept_file(
         .map_err(|e| format!("couldn't spawn transfer thread: {e}"))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{TcpListener, TcpStream};
+
+    /// Accept the way relay_host_start's loop does: a non-blocking listener,
+    /// polled. `apply_fix` mirrors host_conn clearing the inherited flag.
+    fn host_side(listener: &TcpListener, code: &str, apply_fix: bool) -> bool {
+        let stream = loop {
+            match listener.accept() {
+                Ok((s, _)) => break s,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(20))
+                }
+                Err(_) => return false,
+            }
+        };
+        if apply_fix {
+            let _ = stream.set_nonblocking(false);
+        }
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+        let Some((mut s, mut r, binding)) = secure::handshake(&stream, code, false) else {
+            return false;
+        };
+        identity::exchange(&mut s, &mut r, &binding, true).is_some()
+    }
+
+    fn client_side(addr: std::net::SocketAddr, code: &str) -> bool {
+        let Ok(stream) = TcpStream::connect(addr) else { return false };
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+        let Some((mut s, mut r, binding)) = secure::handshake(&stream, code, true) else {
+            return false;
+        };
+        identity::exchange(&mut s, &mut r, &binding, false).is_some()
+    }
+
+    fn run_join(apply_fix: bool) -> (bool, bool) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let code = new_code();
+        let c = code.clone();
+        let client = thread::spawn(move || client_side(addr, &c));
+        let host_ok = host_side(&listener, &code, apply_fix);
+        (host_ok, client.join().unwrap_or(false))
+    }
+
+    /// A join completes end to end: SPAKE2 over a real socket, then the
+    /// signed identity exchange, against a socket from a non-blocking listener.
+    #[test]
+    fn join_completes_over_accepted_socket() {
+        let (host_ok, client_ok) = run_join(true);
+        assert!(host_ok, "host side of the handshake failed");
+        assert!(client_ok, "client side of the handshake failed");
+    }
+
+    /// The regression guard. Without clearing the inherited non-blocking flag
+    /// the host's first handshake read returns WouldBlock instantly and the
+    /// join dies — which is exactly what shipped in 0.2.1 on macOS. If this
+    /// ever starts passing on a BSD-derived platform the fix has been undone.
+    #[test]
+    #[cfg(target_vendor = "apple")]
+    fn join_fails_without_clearing_inherited_nonblocking() {
+        let (host_ok, _) = run_join(false);
+        assert!(!host_ok, "expected the unfixed accept path to fail on macOS");
+    }
+}
