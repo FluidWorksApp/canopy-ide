@@ -4392,6 +4392,7 @@ a.btn-mini {
    padding, so rows drop their own frames. */
 .ap-body .agent-row,
 .ap-body .restore-row {
+  position: relative;
   padding: 6px 10px 6px 8px;
   border: none;
   border-top: 1px solid var(--border);
@@ -4427,10 +4428,57 @@ a.btn-mini {
   padding: 2px 10px 6px 8px;
 }
 
-.ap-body .restore-actions,
+/* Corner actions: the row's right edge was empty space, and two full-width
+   buttons per row made a list of four sessions read as a form. */
+.ap-body .restore-actions {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin: 0;
+  opacity: 0;
+}
+
 .ap-body .agent-stats {
   margin-top: 4px;
   opacity: 0;
+}
+
+.row-act {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 5px;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 10px;
+}
+
+/* The label appears on hover of the button itself — the icons carry the
+   meaning, the words confirm it before a destructive click. */
+.row-act-label {
+  display: none;
+}
+
+.row-act:hover .row-act-label {
+  display: inline;
+}
+
+.row-act-go:hover {
+  color: var(--ok);
+  border-color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+
+.row-act-del:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
 }
 
 /* Four stacked restore rows meant eight always-on buttons; reveal on the

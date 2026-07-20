@@ -22,6 +22,22 @@ export interface Restorable {
 const lastHumanPrompt = (prompts?: string[]) =>
   [...(prompts ?? [])].reverse().find((p) => p.trim() && !p.trimStart().startsWith("<"));
 
+/** Sessions restored during this run. A resumed session keeps its id, so it
+ *  drops off the list once its agent emits a hook event — but that can take
+ *  until the first tool call, and for CLIs read straight from disk (omp) no
+ *  event ever arrives. Recording the click closes both gaps immediately. */
+const restoredThisRun = new Set<string>();
+
+export function markRestored(sessionId: string) {
+  restoredThisRun.add(sessionId);
+}
+
+/** A live agent terminal, for suppressing sessions that are already running. */
+export interface LiveAgent {
+  agentId: string;
+  cwd: string;
+}
+
 /**
  * Sessions worth offering to restore, newest first.
  *
@@ -34,14 +50,25 @@ export function restorableFrom(
   digests: ipc.SessionDigest[],
   stats: ipc.SessionStats[],
   liveSessionIds: string[],
+  liveAgents: LiveAgent[] = [],
 ): Restorable[] {
   const alivePtys = new Set(stats.map((s) => String(s.id)));
   const dead = (d: ipc.SessionDigest) => !!d.surface && !alivePtys.has(d.surface);
+  // Same CLI, same directory, running right now — that work is open, whatever
+  // its session id. This is the only signal for agents whose sessions are read
+  // from disk rather than reported through hooks.
+  const runningHere = (d: ipc.SessionDigest) => {
+    const dir = d.resume_cwd || d.cwd || "";
+    if (!dir) return false;
+    return liveAgents.some((a) => a.cwd === dir && a.agentId === (d.agent ?? "claude"));
+  };
   return digests
     .filter(
       (d) =>
         d.session_id &&
         !/-pty\d*$/.test(d.session_id) &&
+        !restoredThisRun.has(d.session_id) &&
+        !runningHere(d) &&
         (dead(d) || !liveSessionIds.includes(d.session_id)) &&
         // Claude writes no transcript until the first prompt, so a promptless
         // claude session can only fail to resume. Other agents capture

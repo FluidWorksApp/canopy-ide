@@ -5,7 +5,7 @@ import * as ipc from "../ipc";
 import { getSettings } from "../settings";
 import { AGENT_CLIS, AGENT_PATTERN, restoreCommand } from "../projects";
 import { restorableFrom } from "../restorable";
-import { AgentIcon, TerminalIcon } from "./icons";
+import { AgentIcon, RestartIcon, TerminalIcon, TrashIcon } from "./icons";
 import type { PendingItem } from "../notifications";
 
 interface AgentsPanelProps {
@@ -533,32 +533,38 @@ export function AgentsPanel({
                 <div className="restore-prompt">
                   {last ?? <em>(no prompt captured for this session)</em>}
                 </div>
+                {/* Two icon actions in the row's own top-right corner: the
+                    empty column beside the text was doing nothing, and two
+                    full-width buttons per row made four sessions look like a
+                    form. Labels come back on hover. */}
                 <div className="restore-actions">
                   {cmd ? (
                     <button
-                      className="btn-mini"
-                      title={cmd}
+                      className="row-act row-act-go"
+                      title={`Restore this session — ${cmd}`}
                       onClick={() => onRestore?.(runIn, cmd, agentId, agentId)}
                     >
-                      Restore
+                      <RestartIcon size={13} />
+                      <span className="row-act-label">Restore</span>
                     </button>
-                  ) : d.resumable === false ? (
-                    // The agent wrote no transcript, so every --resume against
-                    // this id fails. Say so rather than hand over a button whose
-                    // only outcome is a red error in a terminal.
-                    <span className="restore-unsupported" title={d.cwd}>
-                      no saved history — can't resume
-                    </span>
                   ) : (
+                    // The agent wrote no transcript (or its CLI can't reopen
+                    // by id), so every --resume against this fails. Say so
+                    // rather than offer a button whose only outcome is a red
+                    // error in a terminal.
                     <span
                       className="restore-unsupported"
-                      title={`${agentId} cannot reopen a specific past session by id`}
+                      title={
+                        d.resumable === false
+                          ? "No saved history for this session"
+                          : `${agentId} cannot reopen a specific past session by id`
+                      }
                     >
-                      no resume support
+                      can't resume
                     </span>
                   )}
                   <button
-                    className="btn-mini"
+                    className="row-act row-act-del"
                     title="Forget this session — removes it from this list"
                     onClick={() => {
                       void ipc.sessionForget(d.session_id).then(() =>
@@ -566,7 +572,8 @@ export function AgentsPanel({
                       );
                     }}
                   >
-                    Forget
+                    <TrashIcon size={13} />
+                    <span className="row-act-label">Forget</span>
                   </button>
                 </div>
               </div>

@@ -273,6 +273,18 @@ export function AgentsIcon({ size = 18, className }: IconProps) {
 }
 
 
+/** Delete/forget: a trash can. */
+export function TrashIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M4 7h16" />
+      <path d="M9.5 7V5.2A1.2 1.2 0 0 1 10.7 4h2.6a1.2 1.2 0 0 1 1.2 1.2V7" />
+      <path d="M6.5 7.5 7.3 19a1.6 1.6 0 0 0 1.6 1.5h6.2a1.6 1.6 0 0 0 1.6-1.5L17.5 7.5" />
+      <path d="M10.5 11v6M13.5 11v6" strokeWidth={1.5} />
+    </svg>
+  );
+}
+
 /** A commit: a node on a line, the way every git UI draws one. */
 export function CommitIcon({ size = 14, className }: IconProps) {
   return (
