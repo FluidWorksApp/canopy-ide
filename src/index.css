@@ -2649,8 +2649,7 @@ body,
 .notice {
   position: fixed;
   bottom: 34px;
-  left: 50%;
-  transform: translateX(-50%);
+  right: 16px;
   z-index: 300;
   max-width: 60vw;
   padding: 8px 14px;
