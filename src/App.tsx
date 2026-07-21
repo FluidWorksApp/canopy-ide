@@ -116,6 +116,21 @@ export default function App() {
   const [relayChat, setRelayChat] = useState<ipc.RelayChatMsg[]>([]);
   const [relayInbox, setRelayInbox] = useState<ipc.RelayCommandMsg[]>([]);
   const [relayTransfers, setRelayTransfers] = useState<import("./types").RelayTransfer[]>([]);
+  const relayIntentional = useRef(false);
+  const prevRelayRole = useRef(relayStatus.role);
+  useEffect(() => {
+    const was = prevRelayRole.current;
+    const now = relayStatus.role;
+    prevRelayRole.current = now;
+    if ((was === "host" || was === "client") && now === "off") {
+      if (relayIntentional.current) {
+        relayIntentional.current = false;
+      } else {
+        notify("Disconnected from the team relay.", "error");
+        void nativeNotify("Canopy — Team", "Disconnected from the team relay.");
+      }
+    }
+  }, [relayStatus.role, notify, nativeNotify]);
   // Live editing. The manager is a plain mutable object deliberately kept out
   // of React state — it holds Monaco models and per-keystroke session state,
   // neither of which survives being copied. `collabTick` is how a change in it
@@ -689,6 +704,7 @@ export default function App() {
       setRelayStatus(await ipc.relayHostStart(name, visibility, port));
     },
     hostStop: async () => {
+      relayIntentional.current = true;
       setRelayStatus(await ipc.relayHostStop());
       setRelayChat([]);
     },
@@ -699,6 +715,7 @@ export default function App() {
       setRelayStatus(await ipc.relayConnect(addr, code, name));
     },
     disconnect: async () => {
+      relayIntentional.current = true;
       setRelayStatus(await ipc.relayDisconnect());
       setRelayChat([]);
     },

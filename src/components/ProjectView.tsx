@@ -2455,7 +2455,17 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 </span>
               )}
               {t.key === "team" && teamBadge > 0 && (
-                <span className="rail-badge rail-badge-urgent">{Math.min(teamBadge, 99)}</span>
+                <span
+                  className={`rail-badge rail-badge-urgent ${relay.status.role !== "off" ? "rail-badge-with-dot" : ""}`}
+                >
+                  {Math.min(teamBadge, 99)}
+                </span>
+              )}
+              {t.key === "team" && relay.status.role !== "off" && (
+                <span
+                  className="rail-conn"
+                  title={relay.status.role === "host" ? "Hosting a relay" : "Connected to a relay"}
+                />
               )}
             </button>
           ))}
