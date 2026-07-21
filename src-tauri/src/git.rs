@@ -488,6 +488,61 @@ pub async fn git_push(
     run_net(&mut cmd).map(|o| if o.is_empty() { "Pushed".into() } else { o })
 }
 
+#[derive(Serialize, Clone)]
+pub struct CloneResult {
+    /// Absolute path of the freshly cloned working tree.
+    pub path: String,
+    /// The directory name git chose — a good default component label.
+    pub name: String,
+}
+
+/// Derive the directory `git clone` would create from a URL: the last path
+/// segment, minus a trailing `.git`. Handles https/ssh/scp-style remotes.
+fn clone_dir_name(url: &str) -> Option<String> {
+    let trimmed = url.trim().trim_end_matches('/');
+    // scp form (git@host:owner/repo) has no scheme; split on ':' and '/' alike.
+    let last = trimmed.rsplit(['/', ':']).next()?;
+    let name = last.strip_suffix(".git").unwrap_or(last).trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// Clone a repository into `parent` (a directory the user picked). Returns the
+/// new working tree so the caller can register it as a project component.
+///
+/// No scope check: like `workspace_add`, this is the app being *granted* a new
+/// location the user chose, not reaching into an existing one. `git()` sets
+/// GIT_TERMINAL_PROMPT=0, so a private URL with no credential helper fails with
+/// git's own message rather than hanging on a prompt with no TTY. Args go after
+/// `--` so a URL starting with `-` can't be read as a flag.
+#[tauri::command]
+pub async fn git_clone(parent: String, url: String) -> Result<CloneResult, String> {
+    let url = url.trim().to_string();
+    if url.is_empty() {
+        return Err("enter a git URL".into());
+    }
+    let parent = PathBuf::from(&parent)
+        .canonicalize()
+        .map_err(|_| "the folder to clone into doesn't exist".to_string())?;
+    if !parent.is_dir() {
+        return Err("the clone location is not a folder".into());
+    }
+    let name = clone_dir_name(&url).ok_or("couldn't read a repository name from that URL")?;
+    let dest = parent.join(&name);
+    if dest.exists() {
+        return Err(format!("a folder named \"{name}\" already exists here"));
+    }
+    let dest_str = dest.to_string_lossy().to_string();
+    // `git()` wants a repo dir; clone has none yet, so run it from `parent`.
+    let mut cmd = git(&parent);
+    cmd.args(["clone", "--progress", "--", &url, &dest_str]);
+    run_net(&mut cmd)?;
+    Ok(CloneResult { path: dest_str, name })
+}
+
 // ---------- diff & log ----------
 
 /// Unified diff for one path. `staged` selects index-vs-HEAD instead of

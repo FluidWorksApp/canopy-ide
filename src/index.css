@@ -1149,7 +1149,7 @@ body,
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-  margin-top: 6px;
+  margin-top: 16px;
 }
 
 .btn:disabled {
@@ -2432,6 +2432,73 @@ body,
 
 .pd-add-dir {
   align-self: stretch;
+}
+
+/* Two equal ways to add a directory: browse for one, or clone a repo. */
+.pd-add-row {
+  display: flex;
+  gap: 8px;
+}
+.pd-add-choice {
+  flex: 1;
+}
+
+/* Clone: an input-group that reads as one control — icon, url, attached Clone
+   button — plus a cancel to collapse back to the button. */
+.pd-clone {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.pd-clone-group {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.pd-clone-group:focus-within {
+  border-color: var(--accent);
+}
+.pd-clone-icon {
+  display: flex;
+  align-items: center;
+  padding: 0 4px 0 10px;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+.pd-clone-url {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  padding: 8px 8px;
+  font-size: 13px;
+}
+.pd-clone-url:focus {
+  outline: none;
+}
+.pd-clone-go {
+  flex: 0 0 auto;
+  border-radius: 0;
+  border: none;
+  border-left: 1px solid var(--border);
+}
+.pd-clone-cancel {
+  flex: 0 0 auto;
+  align-self: center;
+}
+.pd-clone-error {
+  color: var(--danger);
+  font-size: 12px;
+}
+.pd-clone-hint {
+  color: var(--text-dim);
+  font-size: 12px;
 }
 
 /* ---------- settings + help dialogs ---------- */
