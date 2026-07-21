@@ -401,6 +401,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   const closeTabRef = useRef<(id: string) => void>(() => {});
+  const openFileRef = useRef<(path: string, opts?: { diff?: boolean }) => Promise<void>>(
+    async () => {},
+  );
 
   // Process stats for THIS project's terminals only. Subscribed here rather
   // than in App: the monitor emits every 2s, and holding the array at App
@@ -601,6 +604,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       }
       relay.collab.onServeFile = async (r, relPath, to) => {
         const abs = r.endsWith("/") ? r + relPath : `${r}/${relPath}`;
+        // Open it in our own editor and bring it to the front, so the sharer
+        // sees and can follow whatever a teammate opens.
+        await openFileRef.current(abs);
         let session = shared.current.get(abs);
         if (!session) {
           let model = monaco.editor.getModel(monaco.Uri.file(abs));
@@ -616,6 +622,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           shared.current.set(abs, session);
         }
         session.offerTo(to, relPath.split("/").pop() ?? relPath, languageForPath(abs) ?? null);
+        const opener = relay.status.members.find((m) => m.id === to)?.name ?? "A teammate";
+        onNotice(`${opener} opened ${relPath.split("/").pop() ?? relPath}`);
       };
       relay.collab.shareProject(root, project.name, member);
       onNotice(`Sharing "${project.name}" with ${memberName} — they can open any file live.`, "success");
@@ -1221,6 +1229,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [rootsKey, patchFile],
   );
+  openFileRef.current = openFile;
 
   const saveFile = useCallback(
     async (path: string) => {
