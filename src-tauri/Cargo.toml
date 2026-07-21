@@ -64,7 +64,6 @@ tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
 # Native notifications for team-relay activity while the app is unfocused
 tauri-plugin-notification = "2"
-igd = { version = "0.12.1", default-features = false }
 
 # Unix signals for killing whole PTY process groups (no zombies)
 [target.'cfg(unix)'.dependencies]

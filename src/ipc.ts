@@ -454,12 +454,6 @@ export interface RelayStatus {
   visibility: "local" | "public" | null;
   /** Host only, public mode: the internet-facing address teammates dial. */
   public_ip: string | null;
-  /** Host only, public mode: did the router accept a UPnP port mapping?
-   *  null = not applicable (local relay). false = the advertised address is
-   *  very likely unreachable until the port is forwarded by hand. */
-  port_mapped: boolean | null;
-  /** Why the mapping failed, when it did. */
-  port_map_note: string | null;
   members: RelayMember[];
 }
 

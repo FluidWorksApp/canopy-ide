@@ -111,7 +111,7 @@ export default function App() {
   // (received + our own sends); the inbox holds commands awaiting action.
   const [relayStatus, setRelayStatus] = useState<ipc.RelayStatus>({
     role: "off", code: null, port: null, ips: [], addr: null, self_id: null, name: null,
-    visibility: null, public_ip: null, port_mapped: null, port_map_note: null, members: [],
+    visibility: null, public_ip: null, members: [],
   });
   const [relayChat, setRelayChat] = useState<ipc.RelayChatMsg[]>([]);
   const [relayInbox, setRelayInbox] = useState<ipc.RelayCommandMsg[]>([]);
@@ -171,6 +171,13 @@ export default function App() {
     }
     seenMembers.current = now;
   }, [relayStatus]);
+
+  // A session opening or closing (ours or a guest's) has no relay frame of its
+  // own on the local side, so the manager pokes us to re-read `activeCount` for
+  // the global collaborating indicator.
+  useEffect(() => {
+    collab.current!.onChange = () => setCollabTick((n) => n + 1);
+  }, []);
 
   // Persist as it grows. The length guard means clearing the in-memory view on
   // disconnect can't wipe the stored history.
@@ -779,6 +786,17 @@ export default function App() {
           </button>
         </div>
         <div className="titlebar-spacer" />
+        {collabTick >= 0 && collab.current!.activeCount > 0 && (
+          <div
+            className="collab-live"
+            title={`Live collaboration in progress — ${collab.current!.activeCount} shared ${
+              collab.current!.activeCount === 1 ? "file" : "files"
+            }`}
+          >
+            <span className="collab-live-dot" />
+            Collaborating
+          </div>
+        )}
         <button
           className="btn project-manage-btn"
           title="Manage projects — open, create, edit, delete"

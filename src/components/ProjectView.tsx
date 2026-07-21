@@ -28,6 +28,7 @@ import {
   CheckIcon,
   FailIcon,
   LiveDot,
+  LiveShareIcon,
   PlayIcon,
   RestartIcon,
   StopIcon,
@@ -1770,20 +1771,21 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           setOpen={setRunMenuOpen}
         />
         <div className="pane-actions">
-          {/* Live share. Only offered for a source buffer on a live relay:
-              the other viewers are read-only projections with no operation
-              model, so there is nothing to synchronise. */}
+          {/* Live share. Offered for any open file on a live relay with a
+              teammate connected — whatever the file is, if it has a text buffer
+              it can be edited together; shareFileLive reports the rare case
+              (e.g. a binary preview) with no buffer to synchronise. */}
           {activeTab?.type === "file" &&
-            (activeTab.file.kind === "code" || activeTab.file.view === "source") &&
             relay.status.role !== "off" &&
             relay.status.members.some((m) => m.id !== relay.status.self_id) && (
               <div className="cli-menu-anchor">
                 <button
-                  className={`btn ${shared.current.has(activeTab.file.path) ? "btn-accent" : ""}`}
+                  className={`btn btn-icon-text ${shared.current.has(activeTab.file.path) ? "btn-accent" : ""}`}
                   title="Edit this file live with a teammate"
                   onClick={() => setShareMenuOpen((v) => !v)}
                 >
-                  {shared.current.has(activeTab.file.path) ? "Sharing ⇄" : "Share live"}
+                  <LiveShareIcon size={14} />
+                  {shared.current.has(activeTab.file.path) ? "Sharing" : "Share live"}
                 </button>
                 {shareMenuOpen && (
                   <div className="cli-menu" onMouseLeave={() => setShareMenuOpen(false)}>

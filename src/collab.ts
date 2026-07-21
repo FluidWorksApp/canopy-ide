@@ -436,7 +436,16 @@ export class CollabManager {
   private guests = new Map<string, { name: string; ownerName: string }>();
   onOffer: ((doc: string) => void) | null = null;
   onNotice: ((text: string) => void) | null = null;
+  /** Fires whenever the set of live sessions changes, so a view can re-read
+   *  `activeCount` for the global "collaborating" indicator. */
+  onChange: (() => void) | null = null;
   selfId = "";
+
+  /** How many live sessions we own or have joined. Zero means nothing is being
+   *  collaborated on right now. */
+  get activeCount(): number {
+    return this.sessions.size;
+  }
 
   private wire: Wire = {
     selfId: "",
@@ -461,6 +470,7 @@ export class CollabManager {
     const s = new OwnerSession(doc, model, this.wire, path);
     s.onNotice = (t) => this.onNotice?.(t);
     this.sessions.set(doc, s);
+    this.onChange?.();
     return s;
   }
 
@@ -509,6 +519,7 @@ export class CollabManager {
       s.onNotice = (t) => this.onNotice?.(t);
       this.sessions.set(msg.doc, s);
       this.guests.set(msg.doc, { name: offer.name, ownerName: msg.from_name });
+      this.onChange?.();
       this.onOffer?.(msg.doc);
       return;
     }
@@ -535,6 +546,7 @@ export class CollabManager {
     s.dispose();
     this.sessions.delete(doc);
     this.guests.delete(doc);
+    this.onChange?.();
   }
 
   /** The relay went away. Every session is over; guests keep their buffer as a

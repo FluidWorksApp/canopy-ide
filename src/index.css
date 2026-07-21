@@ -200,6 +200,49 @@ body,
   flex: 1;
 }
 
+/* Always-visible "live collaboration in progress" indicator. Sits in the
+   titlebar so it shows on every tab and project, not just the shared file. */
+.collab-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  margin-right: 4px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #f2544b;
+  background: rgba(239, 68, 68, 0.13);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  user-select: none;
+  white-space: nowrap;
+}
+.collab-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ef4444;
+  animation: collab-blink 1.15s ease-in-out infinite;
+}
+@keyframes collab-blink {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55);
+  }
+  55% {
+    opacity: 0.3;
+    box-shadow: 0 0 0 5px rgba(239, 68, 68, 0);
+  }
+}
+
+/* A button carrying a leading icon next to its label. */
+.btn-icon-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .root-chip {
   background: var(--bg-raised);
   border: 1px solid var(--border);
