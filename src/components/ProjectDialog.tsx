@@ -1,6 +1,7 @@
 // Create/edit a project: name + labeled component directories.
 import { useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import * as ipc from "../ipc";
 import type { Component, Project } from "../projects";
 import { newProjectId } from "../projects";
 import { useEscape } from "../useEscape";
@@ -16,6 +17,10 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
   const [components, setComponents] = useState<Component[]>(
     existing?.components ?? [],
   );
+  const [cloneOpen, setCloneOpen] = useState(false);
+  const [cloneUrl, setCloneUrl] = useState("");
+  const [cloning, setCloning] = useState(false);
+  const [cloneError, setCloneError] = useState<string | null>(null);
 
   const addComponent = async () => {
     const selection = await openDialog({ directory: true, multiple: true });
@@ -26,6 +31,36 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
     if (additions.length) {
       setComponents((prev) => [...prev, ...additions]);
       if (!name && additions[0]) setName(additions[0].label);
+    }
+  };
+
+  // Clone a repo and add its working tree as a directory — same Component shape
+  // the rest of the flow already consumes, so nothing downstream changes. The
+  // user picks WHERE to clone (a parent folder); git makes the repo subdir.
+  const cloneFromUrl = async () => {
+    const url = cloneUrl.trim();
+    if (!url || cloning) return;
+    const parent = await openDialog({
+      directory: true,
+      multiple: false,
+      title: "Choose a folder to clone the repository into",
+    });
+    if (typeof parent !== "string") return; // cancelled the picker
+    setCloneError(null);
+    setCloning(true);
+    try {
+      const res = await ipc.gitClone(parent, url);
+      if (components.some((c) => c.path === res.path)) {
+        setCloneError("That folder is already part of this project.");
+        return;
+      }
+      setComponents((prev) => [...prev, { path: res.path, label: res.name }]);
+      if (!name) setName(res.name);
+      setCloneUrl("");
+    } catch (e) {
+      setCloneError(String(e));
+    } finally {
+      setCloning(false);
     }
   };
 
@@ -159,9 +194,67 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
               </div>
             </div>
           ))}
-          <button className="btn pd-add-dir" onClick={() => void addComponent()}>
-            ＋ Add directory…
-          </button>
+          <div className="pd-add-row">
+            <button className="btn pd-add-choice" onClick={() => void addComponent()}>
+              ＋ Add directory…
+            </button>
+            {!cloneOpen && (
+              <button
+                className="btn pd-add-choice"
+                onClick={() => setCloneOpen(true)}
+                title="Clone a git repository and add it as a directory"
+              >
+                ↧ Clone from git…
+              </button>
+            )}
+          </div>
+          {cloneOpen && (
+            <div className="pd-clone">
+              <div className="pd-clone-group">
+                <span className="pd-clone-icon" aria-hidden>↧</span>
+                <input
+                  className="pd-clone-url"
+                  autoFocus
+                  placeholder="https://github.com/user/repo.git"
+                  value={cloneUrl}
+                  disabled={cloning}
+                  onChange={(e) => {
+                    setCloneUrl(e.target.value);
+                    if (cloneError) setCloneError(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void cloneFromUrl();
+                    }
+                  }}
+                />
+                <button
+                  className="btn btn-accent pd-clone-go"
+                  disabled={!cloneUrl.trim() || cloning}
+                  onClick={() => void cloneFromUrl()}
+                >
+                  {cloning ? "Cloning…" : "Clone"}
+                </button>
+              </div>
+              {!cloning && (
+                <button
+                  className="btn-icon pd-clone-cancel"
+                  title="Cancel"
+                  onClick={() => {
+                    setCloneOpen(false);
+                    setCloneError(null);
+                  }}
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+          )}
+          {cloneError && <div className="pd-clone-error">{cloneError}</div>}
+          {cloning && (
+            <div className="pd-clone-hint">Cloning — this can take a moment for large repos…</div>
+          )}
         </div>
         <div className="modal-actions">
           <button className="btn" onClick={onCancel}>

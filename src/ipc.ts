@@ -268,6 +268,14 @@ export const gitFetch = (repo: string) => invoke<string>("git_fetch", { repo });
 export const gitPull = (repo: string) => invoke<string>("git_pull", { repo });
 export const gitPush = (repo: string, setUpstream = false) =>
   invoke<string>("git_push", { repo, setUpstream });
+/** Clone `url` into `parent` (a folder the user picked). Returns the new
+ *  working tree so the caller can register it as a project component. */
+export interface CloneResult {
+  path: string;
+  name: string;
+}
+export const gitClone = (parent: string, url: string) =>
+  invoke<CloneResult>("git_clone", { parent, url });
 export const gitDiff = (repo: string, path: string, staged: boolean) =>
   invoke<string>("git_diff", { repo, path, staged });
 export interface CommitDetail {

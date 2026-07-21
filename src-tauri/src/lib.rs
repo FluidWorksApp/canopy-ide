@@ -220,6 +220,7 @@ pub fn run() {
             git::git_fetch,
             git::git_pull,
             git::git_push,
+            git::git_clone,
             git::git_diff,
             git::git_log,
             git::git_commit_detail,
