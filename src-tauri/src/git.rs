@@ -1475,6 +1475,9 @@ pub struct BranchWork {
     pub upstream_gone: bool,
     /// Tip is an ancestor of base: merged the plain way.
     pub merged: bool,
+    /// An integration branch (main/develop/…) or the base itself — never
+    /// offered for cleanup or deletion, however "merged" it reads.
+    pub protected: bool,
     pub last_commit: String,
     pub age_days: u32,
     pub subject: String,
@@ -1510,6 +1513,18 @@ fn default_base(top: &Path) -> String {
     run(git(top).args(["rev-parse", "--abbrev-ref", "HEAD"]))
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "HEAD".into())
+}
+
+/// Branches that must never be offered for cleanup or deletion: the integration
+/// branches every repo keeps forever, plus whatever this repo's base actually
+/// is. `base` may carry a remote prefix (origin/main) — compare on the leaf.
+fn is_protected_branch(name: &str, base: &str) -> bool {
+    let base_leaf = base.rsplit('/').next().unwrap_or(base);
+    name == base_leaf
+        || matches!(
+            name,
+            "main" | "master" | "develop" | "development" | "trunk" | "staging" | "production"
+        )
 }
 
 #[tauri::command]
@@ -1606,6 +1621,7 @@ pub async fn git_work_audit(
             upstream,
             upstream_gone,
             merged: merged.contains(&branch),
+            protected: is_protected_branch(&branch, &base),
             last_commit: f[3].to_string(),
             age_days: ((now.saturating_sub(ts)) / 86_400) as u32,
             subject: f[4].to_string(),
@@ -1617,6 +1633,35 @@ pub async fn git_work_audit(
     Ok(WorkAudit { base, counts_degraded, items })
 }
 
+
+/// Delete a local branch. `force` uses `-D` (needed for a squash-merged branch
+/// whose remote is gone — git can't see it as merged), else the safe `-d` which
+/// refuses to drop unmerged work. Protected and current branches are refused
+/// here too, not only hidden in the UI: this command is reachable from page
+/// script, so the guard can't live only in the frontend.
+#[tauri::command]
+pub async fn git_branch_delete(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    branch: String,
+    force: bool,
+) -> Result<String, String> {
+    let top = repo_path(&state, &repo)?;
+    let branch = checked_ref(&branch)?;
+    let base = default_base(&top);
+    if is_protected_branch(&branch, &base) {
+        return Err(format!("{branch} is a protected branch and can't be deleted here"));
+    }
+    let current = run(git(&top).args(["rev-parse", "--abbrev-ref", "HEAD"]))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if branch == current {
+        return Err("can't delete the branch you're on — switch away first".into());
+    }
+    let flag = if force { "-D" } else { "-d" };
+    run(git(&top).args(["branch", flag, &branch]))?;
+    Ok(format!("Deleted {branch}"))
+}
 
 /// Commits a branch has that the base does not — the "what is in here" list
 /// behind a Loose ends row. Metadata only: no patches, so this is one process

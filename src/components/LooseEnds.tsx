@@ -105,7 +105,11 @@ export function LooseEnds({
   if (!audit) return <div className="tree-empty">{busy ? "Auditing…" : "—"}</div>;
 
   const groups = BUCKETS.map((b) => {
-    const items = audit.items.filter((x) => bucketOf(x, audit.counts_degraded) === b.id);
+    let items = audit.items.filter((x) => bucketOf(x, audit.counts_degraded) === b.id);
+    // main/develop/the base compare as "merged" against themselves, so they'd
+    // land in the deletable group and sit next to a delete button. They are
+    // never loose ends — keep them out of cleanup entirely.
+    if (b.id === "cleanable") items = items.filter((x) => !x.protected);
     // Danger groups newest-first (that's what you were just doing); the
     // cleanup group oldest-first, because the most forgotten is the most
     // deletable and that's the whole point of the view.
@@ -120,8 +124,15 @@ export function LooseEnds({
     return k === "uncommitted" || k === "unpushed";
   }).length;
   const cleanable = audit.items.filter(
-    (b) => bucketOf(b, audit.counts_degraded) === "cleanable",
+    (b) => !b.protected && bucketOf(b, audit.counts_degraded) === "cleanable",
   ).length;
+  // The subset we can delete right now: merged/remote-gone branches with no
+  // worktree checked out (git won't delete a branch that's checked out — those
+  // use Remove-worktree first). The audit already guarantees these hold no
+  // unpushed unique work, so a force delete is safe and reliable (a plain -d
+  // refuses squash-merged branches and ones merged into base but not HEAD).
+  const cleanableBranches =
+    groups.find((g) => g.id === "cleanable")?.items.filter((b) => !b.worktree) ?? [];
   const visible = showAll ? groups : groups.filter((g) => g.id !== "cleanable");
 
   const removeWorktree = (b: ipc.BranchWork) => {
@@ -139,6 +150,49 @@ export function LooseEnds({
         })
         .catch((e) => onNotice(String(e), "error"));
     });
+  };
+
+  const deleteBranch = (b: ipc.BranchWork) => {
+    if (!repo || b.protected) return;
+    onConfirm(
+      `Delete branch ${b.branch}? Its work is already on ${audit.base}; only the local branch ref goes.`,
+      () => {
+        void ipc
+          .gitBranchDelete(repo, b.branch, true)
+          .then((m) => {
+            onNotice(m, "success");
+            void load();
+          })
+          .catch((e) => onNotice(String(e), "error"));
+      },
+    );
+  };
+
+  const cleanupAll = () => {
+    if (!repo || cleanableBranches.length === 0) return;
+    const n = cleanableBranches.length;
+    onConfirm(
+      `Delete ${n} merged branch${n === 1 ? "" : "es"}? Their work is already on ${audit.base}.`,
+      () => {
+        void (async () => {
+          let ok = 0;
+          for (const b of cleanableBranches) {
+            try {
+              await ipc.gitBranchDelete(repo, b.branch, true);
+              ok++;
+            } catch {
+              // Skip anything git refuses (e.g. an unexpected checkout) and
+              // keep going; the recheck below shows what's left.
+            }
+          }
+          onNotice(
+            `Cleaned up ${ok} branch${ok === 1 ? "" : "es"}.`,
+            ok > 0 ? "success" : "error",
+          );
+          void load();
+        })();
+      },
+    );
   };
 
   return (
@@ -168,6 +222,18 @@ export function LooseEnds({
           <div className={`loose-head loose-head-${g.id}`} title={g.hint}>
             {g.label}
             <span className="badge">{g.items.length}</span>
+            {g.id === "cleanable" && cleanableBranches.length > 0 && (
+              <>
+                <span className="git-spacer" />
+                <button
+                  className="btn-mini btn-danger"
+                  title={`Delete ${cleanableBranches.length} merged local branch${cleanableBranches.length === 1 ? "" : "es"}`}
+                  onClick={cleanupAll}
+                >
+                  Clean up {cleanableBranches.length}
+                </button>
+              </>
+            )}
           </div>
           {g.items.map((b) => (
             <div
@@ -246,6 +312,15 @@ export function LooseEnds({
                       onClick={() => removeWorktree(b)}
                     >
                       Remove
+                    </button>
+                  )}
+                  {g.id === "cleanable" && !b.worktree && !b.protected && (
+                    <button
+                      className="btn-mini btn-danger"
+                      title="Delete this local branch — its work is already on the base"
+                      onClick={() => deleteBranch(b)}
+                    >
+                      Delete
                     </button>
                   )}
                 </span>
