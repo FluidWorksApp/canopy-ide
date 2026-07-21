@@ -250,6 +250,11 @@ fn update_digest(
                 // titles or picking the newest file by mtime both silently
                 // attach to the wrong session.
                 "surface": std::env::var("CANOPY_PTY").ok(),
+                // Pty ids reset per app launch and every instance writes here, so
+                // `surface` alone collides across instances/restarts. This tag,
+                // unique per launch, is what the panel pairs on so one instance's
+                // "term #5" digest can't bind to another's terminal.
+                "instance": std::env::var("CANOPY_INSTANCE").ok(),
             })
         });
 

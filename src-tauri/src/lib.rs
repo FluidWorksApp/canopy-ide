@@ -191,6 +191,7 @@ pub fn run() {
             pty::pty_kill,
             pty::pty_kill_all,
             pty::pty_set_title,
+            pty::instance_id,
             fsx::workspace_add,
             fsx::workspace_remove,
             fsx::workspace_list,

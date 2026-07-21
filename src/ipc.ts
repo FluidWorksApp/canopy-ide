@@ -192,6 +192,9 @@ export const onAppStats = (cb: (s: AppStats) => void): Promise<UnlistenFn> =>
 
 export const killProcess = (pid: number) => invoke<void>("kill_process", { pid });
 export const hookBridgePath = () => invoke<string | null>("hook_bridge_path");
+/** This app launch's instance tag — pair with SessionDigest.instance so a
+ *  digest from another instance/run can't bind to this instance's terminals. */
+export const instanceId = () => invoke<string>("instance_id");
 export const onAgentEvent = (cb: (line: string) => void): Promise<UnlistenFn> =>
   listen<string>("agent:event", (event) => cb(event.payload));
 
@@ -404,6 +407,12 @@ export interface SessionDigest {
    *  on titles or newest-file-by-mtime guesses, and a wrong guess attaches to
    *  someone else's conversation. */
   surface?: string;
+  /** The app launch that spawned this session's terminal (env CANOPY_INSTANCE).
+   *  `surface` (the PTY id) resets to 1 every launch and every instance writes
+   *  to the same sessions dir, so it collides across instances/restarts; pairing
+   *  a digest to a live terminal must also match this. Absent for pre-upgrade
+   *  digests. */
+  instance?: string;
   /** Directory the agent's resume must run in — claude files a conversation
    *  under its project root, not the directory the agent ran in. Derived in
    *  agents.rs; may differ from `cwd`. */
