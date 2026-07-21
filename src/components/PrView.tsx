@@ -2,11 +2,12 @@
 // actions. The patch is rendered by @git-diff-view/react — a unified patch
 // can't be re-expanded into whole files, so Monaco's DiffEditor (which needs
 // both sides in full) structurally can't render one.
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useEscape } from "../useEscape";
 import { DiffView, DiffModeEnum } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import * as ipc from "../ipc";
+import { renderMarkdown } from "../markdown";
 import type { Notify, RelayHandle } from "../types";
 import { TeamIcon } from "./icons";
 // NB: PR diffs arrive as real patches from `gh pr diff`, so they go straight
@@ -36,6 +37,40 @@ const MERGE_LABEL: Record<MergeMethod, string> = {
   merge: "Create a merge commit",
   rebase: "Rebase and merge",
 };
+
+// Rendering a whole multi-file diff at once — every file's DiffView, syntax-
+// highlighted, synchronously — is what froze the tab on a big PR (a lockfile
+// churn is tens of thousands of lines). So: parse once, collapse by default on
+// large PRs, mount each diff only when expanded, and refuse to inline-render an
+// absurdly large file.
+const AUTO_EXPAND_TOTAL = 500; // whole-PR changed lines under which we open all
+const AUTO_EXPAND_FILE = 200; // biggest file we auto-open individually on a big PR
+const AUTO_EXPAND_BUDGET = 1200; // total auto-opened lines on a big PR
+const HIGHLIGHT_MAX = 800; // syntax-highlight only files at/under this many lines
+const RENDER_CAP = 4000; // never inline-render a file bigger than this
+
+interface FilePatch {
+  path: string;
+  patch: string;
+  additions: number;
+  deletions: number;
+  changed: number;
+  binary: boolean;
+}
+
+/** Per-file adds/dels straight off the patch text — cheap, one pass. */
+function fileStats(patch: string): Omit<FilePatch, "path" | "patch"> {
+  let additions = 0;
+  let deletions = 0;
+  let binary = false;
+  for (const line of patch.split("\n")) {
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("+")) additions++;
+    else if (line.startsWith("-")) deletions++;
+    else if (line.startsWith("Binary files ")) binary = true;
+  }
+  return { additions, deletions, changed: additions + deletions, binary };
+}
 
 /** Compact relative age for an ISO 8601 timestamp (e.g. gh's createdAt). */
 const ago = (iso?: string) => {
@@ -170,9 +205,60 @@ export function PrView({ repo, pr, onNotice, relay }: PrViewProps) {
     }
   };
 
-  // The patch is one blob covering many files; split it per file so each gets
-  // its own diff widget with a header.
-  const files = patch ? splitPatch(patch) : [];
+  // The patch is one blob covering many files; split it per file (once, not on
+  // every keystroke) and tag each with its size.
+  const files = useMemo<FilePatch[]>(
+    () =>
+      patch
+        ? splitPatch(patch).map((f) => ({ ...f, ...fileStats(f.patch) }))
+        : [],
+    [patch],
+  );
+  const totalChanged = useMemo(
+    () => files.reduce((n, f) => n + f.changed, 0),
+    [files],
+  );
+  const totalAdd = useMemo(() => files.reduce((n, f) => n + f.additions, 0), [files]);
+  const totalDel = useMemo(() => files.reduce((n, f) => n + f.deletions, 0), [files]);
+
+  // The PR body is markdown (headings, tables, code) — render it, don't dump it
+  // as raw text. renderMarkdown sanitizes with DOMPurify, which matters: a PR
+  // body is authored by whoever opened it, and raw HTML in the webview reaches
+  // every Tauri command. Memoised so it isn't re-parsed on each keystroke.
+  const bodyHtml = useMemo(() => (body.trim() ? renderMarkdown(body) : ""), [body]);
+
+  // Which files' diffs are actually mounted. Small PRs open everything (it's
+  // cheap and you want to read it all); big PRs open only the small, human
+  // files up to a budget and leave lockfile-scale churn collapsed, so the tab
+  // paints instantly instead of blocking on a highlight of 28k lines.
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    if (!files.length) {
+      setExpanded(new Set());
+      return;
+    }
+    if (totalChanged <= AUTO_EXPAND_TOTAL) {
+      setExpanded(new Set(files.map((f) => f.path)));
+      return;
+    }
+    const open = new Set<string>();
+    let budget = AUTO_EXPAND_BUDGET;
+    for (const f of files) {
+      if (f.binary || f.changed > AUTO_EXPAND_FILE || budget - f.changed < 0) continue;
+      open.add(f.path);
+      budget -= f.changed;
+    }
+    setExpanded(open);
+  }, [files, totalChanged]);
+
+  const toggleFile = (path: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  const allOpen = files.length > 0 && expanded.size === files.length;
 
   return (
     <div className="pr-view">
@@ -294,32 +380,84 @@ export function PrView({ repo, pr, onNotice, relay }: PrViewProps) {
       </div>
 
       <div className="pr-body">
-        {body.trim() && <pre className="pr-description">{body.trim()}</pre>}
+        {bodyHtml && (
+          <div
+            className="markdown-body pr-description"
+            dangerouslySetInnerHTML={{ __html: bodyHtml }}
+          />
+        )}
 
         {error && <div className="pr-error">{error}</div>}
         {!patch && !error && <div className="pr-loading">Loading diff…</div>}
 
-        {files.map((f) => (
-          <div key={f.path} className="pr-file">
-            <div className="pr-file-head">{f.path}</div>
-            <DiffView
-              // Only hunks — a patch has no full file content to give it, which
-              // is exactly why Monaco's DiffEditor can't render this. fileName
-              // drives syntax highlighting via the extension.
-              data={{
-                hunks: [f.patch],
-                oldFile: { fileName: f.path },
-                newFile: { fileName: f.path },
-              }}
-              diffViewMode={split ? DiffModeEnum.Split : DiffModeEnum.Unified}
-              diffViewHighlight
-              diffViewTheme="dark"
-              diffViewWrap
-              diffViewAddWidget={false}
-              diffViewFontSize={12}
-            />
+        {files.length > 0 && (
+          <div className="pr-files-bar">
+            <span>
+              {files.length} file{files.length === 1 ? "" : "s"} changed
+              <span className="pr-stat pr-add"> +{totalAdd}</span>
+              <span className="pr-stat pr-del"> −{totalDel}</span>
+            </span>
+            {totalChanged > AUTO_EXPAND_TOTAL && (
+              <span className="pr-files-note">large diff — files collapsed for speed</span>
+            )}
+            <span className="git-spacer" />
+            <button
+              className="btn-mini"
+              onClick={() =>
+                setExpanded(allOpen ? new Set() : new Set(files.map((f) => f.path)))
+              }
+            >
+              {allOpen ? "Collapse all" : "Expand all"}
+            </button>
           </div>
-        ))}
+        )}
+
+        {files.map((f) => {
+          const open = expanded.has(f.path);
+          return (
+            <div key={f.path} className="pr-file">
+              <div className="pr-file-head" onClick={() => toggleFile(f.path)}>
+                <span className="pr-file-chevron">{open ? "▾" : "▸"}</span>
+                <span className="pr-file-path" title={f.path}>{f.path}</span>
+                {f.binary ? (
+                  <span className="pr-file-stat">binary</span>
+                ) : (
+                  <>
+                    <span className="pr-file-stat pr-add">+{f.additions}</span>
+                    <span className="pr-file-stat pr-del">−{f.deletions}</span>
+                  </>
+                )}
+              </div>
+              {open &&
+                (f.binary ? (
+                  <div className="pr-file-note">Binary file — not shown.</div>
+                ) : f.changed > RENDER_CAP ? (
+                  <div className="pr-file-note">
+                    {f.changed.toLocaleString()} changed lines — too large to render inline.{" "}
+                    <a href={`${pr.url}/files`}>Open on GitHub</a>
+                  </div>
+                ) : (
+                  <DiffView
+                    // Only hunks — a patch has no full file content to give it,
+                    // which is exactly why Monaco's DiffEditor can't render this.
+                    // fileName drives syntax highlighting via the extension.
+                    // Highlight is the expensive part, so skip it on big files.
+                    data={{
+                      hunks: [f.patch],
+                      oldFile: { fileName: f.path },
+                      newFile: { fileName: f.path },
+                    }}
+                    diffViewMode={split ? DiffModeEnum.Split : DiffModeEnum.Unified}
+                    diffViewHighlight={f.changed <= HIGHLIGHT_MAX}
+                    diffViewTheme="dark"
+                    diffViewWrap
+                    diffViewAddWidget={false}
+                    diffViewFontSize={12}
+                  />
+                ))}
+            </div>
+          );
+        })}
       </div>
 
       {/* Review is outward-facing: it posts to a real repo under the user's
