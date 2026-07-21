@@ -4496,6 +4496,44 @@ textarea,
   font-style: italic;
 }
 
+/* Recoverable crash panel — shown by ErrorBoundary instead of a blank window. */
+.crash-fallback {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  height: 100%;
+  padding: 32px;
+  overflow: auto;
+}
+.crash-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--danger);
+}
+.crash-msg {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-width: 720px;
+}
+
+/* Per-row forget: stays out of the way until the row is hovered. */
+.resume-forget {
+  flex: 0 0 auto;
+  opacity: 0;
+  color: var(--text-dim);
+}
+.resume-row:hover .resume-forget {
+  opacity: 0.6;
+}
+.resume-forget:hover {
+  opacity: 1 !important;
+  color: var(--danger);
+}
+
 /* Anchors styled as buttons (open-on-remote actions). */
 a.btn,
 a.btn-mini {
