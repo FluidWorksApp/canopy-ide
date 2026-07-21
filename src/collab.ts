@@ -195,6 +195,13 @@ abstract class Session {
  *  that can persist it and the only one that can order operations. */
 export class OwnerSession extends Session {
   private revision = 0;
+  /** True once the document has been changed (by anyone) since it was last
+   *  written to disk — this is what makes a shared file show up as a
+   *  "collaborated change" the owner can see and save. Set on the first edit,
+   *  cleared by markSaved(). */
+  edited = false;
+  /** Fires when `edited` flips, so the owner's Changes list can re-read. */
+  onEdited: (() => void) | null = null;
   /** history[r] took the document from revision r to r+1. Kept only as far
    *  back as the slowest peer's base — but v1 keeps all of it, because a
    *  session is one file for one sitting and the memory is not the problem
@@ -220,7 +227,22 @@ export class OwnerSession extends Session {
     return this.revision;
   }
 
+  /** Clear the edited flag after the owner writes the file to disk. */
+  markSaved() {
+    if (this.edited) {
+      this.edited = false;
+      this.onEdited?.();
+    }
+  }
+
   private broadcast(ops: Op[], author: string) {
+    // broadcast runs for BOTH a local edit and an applied remote edit (see
+    // receive), so this catches every change to the owner's document from any
+    // peer. Only the false->true transition needs to signal the UI.
+    if (!this.edited) {
+      this.edited = true;
+      this.onEdited?.();
+    }
     this.revision += 1;
     this.history.push(ops);
     this.wire.send(null, this.doc, {
@@ -498,9 +520,37 @@ export class CollabManager {
     const doc = newDocId();
     const s = new OwnerSession(doc, model, this.wire, path);
     s.onNotice = (t) => this.onNotice?.(t);
+    // An edit to a shared file must refresh the owner's Changes list.
+    s.onEdited = () => this.onChange?.();
     this.sessions.set(doc, s);
     this.onChange?.();
     return s;
+  }
+
+  /** Files this app owns and is sharing live, with whether each has unsaved
+   *  edits — the owner's view of "what teammates are changing in my code".
+   *  Only OwnerSessions have a path; guest sessions are deliberately excluded. */
+  ownerChanges(): { doc: string; path: string; name: string; edited: boolean }[] {
+    const out: { doc: string; path: string; name: string; edited: boolean }[] = [];
+    for (const [doc, s] of this.sessions) {
+      if (s instanceof OwnerSession) {
+        out.push({
+          doc,
+          path: s.path,
+          name: s.path.split(/[\\/]/).pop() ?? s.path,
+          edited: s.edited,
+        });
+      }
+    }
+    return out;
+  }
+
+  /** After the owner writes a shared file to disk, clear its edited flag so it
+   *  leaves the collaborated-changes list (git then tracks it normally). */
+  markOwnerSaved(path: string) {
+    for (const s of this.sessions.values()) {
+      if (s instanceof OwnerSession && s.path === path) s.markSaved();
+    }
   }
 
   /** Accept an offer: ask the owner to let us in. The reply is a snapshot,
