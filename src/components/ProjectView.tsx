@@ -1576,16 +1576,53 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     [onNotice, onDismissPending],
   );
 
-  // Looking at the terminal IS reading its cards. When the active tab is the
-  // terminal a pending item came from, the item's job is done — same rule as
-  // the tab unread-dot. This is also what keeps answered-in-terminal asks
-  // from lingering as stale cards.
+  // Respond to a permission prompt straight from the panel by synthesising the
+  // keystroke the user would type: Allow presses the accept option (first in
+  // claude/codex's numbered prompt), Deny sends Escape — which cancels the tool
+  // in both and can never miscount into a "yes, don't ask again". Same PTY-write
+  // path as answerQuestion, so it inherits the same terminal-focus behaviour.
+  const respondPermission = useCallback(
+    (item: PendingItem, decision: "approve" | "deny") => {
+      const termTabs = tabsRef.current.filter(
+        (t): t is TermSubTab => t.type === "terminal",
+      );
+      const target =
+        termTabs.find((t) => t.ptyId != null && t.ptyId === item.pty) ??
+        termTabs.find((t) => item.cwd === t.cwd || item.cwd.startsWith(t.cwd + "/"));
+      if (target?.ptyId == null) {
+        onNotice("Can't find the terminal this prompt came from — answer there.");
+        return;
+      }
+      const ptyId = target.ptyId;
+      if (decision === "approve") {
+        void ipc.ptyWrite(ptyId, "1");
+        setTimeout(() => void ipc.ptyWrite(ptyId, "\r"), 150);
+      } else {
+        void ipc.ptyWrite(ptyId, "\x1b");
+      }
+      onDismissPending(item.key);
+      setActiveTabId(target.id);
+      setTimeout(() => termHandles.current.get(target.id)?.focus(), 50);
+    },
+    [onNotice, onDismissPending],
+  );
+
+  // Looking at the terminal clears its *calm* cards — a "finished" notice has
+  // done its job once your eye is on the tab. But an urgent card (a question,
+  // a permission prompt) is the agent BLOCKED on you: focusing the terminal is
+  // not answering it, and clearing it there is exactly how a question vanishes
+  // from the panel the moment you glance at the tab it's in — the bug where a
+  // visible prompt never shows in "Needs your input". Those stay until they
+  // self-resolve: the answer produces a later hook event, which clears the
+  // card in derivePending. Manual ✕ is always available in the meantime.
   useEffect(() => {
     if (!visible || !activeTabId) return;
     const tab = tabsRef.current.find((t) => t.id === activeTabId);
     if (tab?.type !== "terminal" || tab.ptyId == null) return;
     for (const item of pending) {
-      if (item.pty != null && item.pty === tab.ptyId) onDismissPending(item.key);
+      if (item.kind === "idle" && item.pty != null && item.pty === tab.ptyId) {
+        onDismissPending(item.key);
+      }
     }
   }, [activeTabId, visible, pending, onDismissPending]);
 
@@ -2752,6 +2789,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           pending={pending}
           onDismissPending={onDismissPending}
           onAnswer={answerQuestion}
+          onRespond={respondPermission}
           onJumpToTerminal={jumpToTerminal}
           onJumpToPty={jumpToPty}
           roots={roots}
@@ -2761,6 +2799,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onRestore={(cwd, cmd, title, agentId) =>
             addTerminal(cwd, cmd, title, AGENT_CLIS.find((c) => c.id === agentId)?.icon)
           }
+          onNotice={onNotice}
         />
       )}
     </div>

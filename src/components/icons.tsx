@@ -285,6 +285,16 @@ export function TrashIcon({ size = 14, className }: IconProps) {
   );
 }
 
+/** A crescent moon — hibernate an idle agent (kill its terminal to reclaim
+ *  memory; the session stays resumable). */
+export function MoonIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M20 14.5A8 8 0 0 1 9.5 4a7 7 0 1 0 10.5 10.5z" />
+    </svg>
+  );
+}
+
 /** A commit: a node on a line, the way every git UI draws one. */
 export function CommitIcon({ size = 14, className }: IconProps) {
   return (

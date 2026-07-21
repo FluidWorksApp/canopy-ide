@@ -395,6 +395,14 @@ export interface SessionDigest {
   branch?: string;
   agent?: string;
   idle?: boolean;
+  /** Lifecycle state derived from the hook stream by canopy_hook.rs:
+   *  "working" (a turn is in flight), "waiting" (blocked on the user),
+   *  "idle" (finished, nothing outstanding) or "ended" (session closed).
+   *  Absent for pre-upgrade digests and CLIs read straight from disk. */
+  state?: "working" | "waiting" | "idle" | "ended";
+  /** Subagents (Claude's Task tool) that finished in the current turn, zeroed
+   *  when the next human prompt starts. */
+  subagents?: number;
   updated?: number;
   prompts?: string[];
   files?: string[];
