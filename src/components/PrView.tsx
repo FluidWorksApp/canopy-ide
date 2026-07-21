@@ -29,6 +29,33 @@ const REVIEW_LABEL: Record<Review, string> = {
   comment: "Comment",
 };
 
+type MergeMethod = "squash" | "merge" | "rebase";
+
+const MERGE_LABEL: Record<MergeMethod, string> = {
+  squash: "Squash and merge",
+  merge: "Create a merge commit",
+  rebase: "Rebase and merge",
+};
+
+/** Compact relative age for an ISO 8601 timestamp (e.g. gh's createdAt). */
+const ago = (iso?: string) => {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "";
+  const d = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (d < 60) return "just now";
+  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
+  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
+  return `${Math.floor(d / 86400)}d ago`;
+};
+
+/** Full local date & time for an ISO 8601 timestamp — the exact moment raised. */
+const absTime = (iso?: string) => {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? "" : new Date(t).toLocaleString();
+};
+
 export function PrView({ repo, pr, onNotice, relay }: PrViewProps) {
   const [patch, setPatch] = useState<string | null>(null);
   const [body, setBody] = useState("");
@@ -37,7 +64,17 @@ export function PrView({ repo, pr, onNotice, relay }: PrViewProps) {
   const [comment, setComment] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<Review | null>(null);
-  useEscape(() => setConfirm(null), confirm != null);
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const [mergeConfirm, setMergeConfirm] = useState<MergeMethod | null>(null);
+  const [closeConfirm, setCloseConfirm] = useState(false);
+  useEscape(
+    () => {
+      setConfirm(null);
+      setMergeConfirm(null);
+      setCloseConfirm(false);
+    },
+    confirm != null || mergeConfirm != null || closeConfirm,
+  );
   const [done, setDone] = useState<string | null>(null);
   const [askOpen, setAskOpen] = useState(false);
 
@@ -95,6 +132,44 @@ export function PrView({ repo, pr, onNotice, relay }: PrViewProps) {
     }
   };
 
+  const merge = async (method: MergeMethod) => {
+    setBusy(true);
+    try {
+      const msg = await ipc.ghPrMerge(repo, pr.number, method);
+      setDone(msg);
+      onNotice(msg, "success");
+    } catch (err) {
+      onNotice(String(err), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const close = async () => {
+    setBusy(true);
+    try {
+      const msg = await ipc.ghPrClose(repo, pr.number);
+      setDone(msg);
+      onNotice(msg, "success");
+    } catch (err) {
+      onNotice(String(err), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const ready = async () => {
+    setBusy(true);
+    try {
+      const msg = await ipc.ghPrReady(repo, pr.number);
+      onNotice(msg, "success");
+    } catch (err) {
+      onNotice(String(err), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   // The patch is one blob covering many files; split it per file so each gets
   // its own diff widget with a header.
   const files = patch ? splitPatch(patch) : [];
@@ -110,9 +185,23 @@ export function PrView({ repo, pr, onNotice, relay }: PrViewProps) {
           <span>
             {pr.author} wants to merge <code>{pr.branch}</code> → <code>{pr.base}</code>
           </span>
+          {pr.created && (
+            <span className="pr-when" title={absTime(pr.created)}>
+              opened {ago(pr.created)}
+            </span>
+          )}
           <span className="pr-stat pr-add">+{pr.additions}</span>
           <span className="pr-stat pr-del">−{pr.deletions}</span>
           {pr.review_decision && <span className="pr-decision">{pr.review_decision.toLowerCase().replace("_", " ")}</span>}
+          {pr.checks && (
+            <span
+              className={`pr-checks ${pr.checks === "PASS" ? "pr-ok" : pr.checks === "FAIL" ? "pr-bad" : "pr-pending"}`}
+              title={pr.checks_summary}
+            >
+              {pr.checks === "PASS" ? "checks passed" : pr.checks === "FAIL" ? "checks failed" : "checks running"}
+            </span>
+          )}
+          {pr.mergeable === "CONFLICTING" && <span className="pr-checks pr-bad">conflicts</span>}
           <span className="git-spacer" />
           <button className="btn-mini" onClick={() => setSplit((v) => !v)}>
             {split ? "Unified" : "Split"}
@@ -129,6 +218,54 @@ export function PrView({ repo, pr, onNotice, relay }: PrViewProps) {
           >
             Checkout
           </button>
+          {pr.draft && pr.state === "OPEN" && (
+            <button
+              className="btn-mini"
+              title="Take this PR out of draft so it can be reviewed and merged"
+              disabled={busy}
+              onClick={() => void ready()}
+            >
+              Mark ready
+            </button>
+          )}
+          {!pr.draft && pr.state === "OPEN" && (
+            <div className="cli-menu-anchor">
+              <button
+                className={`btn-mini ${pr.review_decision === "APPROVED" && pr.mergeable !== "CONFLICTING" && pr.checks !== "FAIL" ? "btn-accent" : ""}`}
+                title="Merge this PR on GitHub"
+                disabled={busy}
+                onClick={() => setMergeOpen((v) => !v)}
+              >
+                Merge ▾
+              </button>
+              {mergeOpen && (
+                <div className="cli-menu" onMouseLeave={() => setMergeOpen(false)}>
+                  {(["squash", "merge", "rebase"] as MergeMethod[]).map((m) => (
+                    <div
+                      key={m}
+                      className="cli-item"
+                      onClick={() => {
+                        setMergeOpen(false);
+                        setMergeConfirm(m);
+                      }}
+                    >
+                      <span>{MERGE_LABEL[m]}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {pr.state === "OPEN" && (
+            <button
+              className="btn-mini"
+              title="Close this PR without merging"
+              disabled={busy}
+              onClick={() => setCloseConfirm(true)}
+            >
+              Close
+            </button>
+          )}
           {teammates.length > 0 && (
             <div className="cli-menu-anchor">
               <button
@@ -238,6 +375,80 @@ export function PrView({ repo, pr, onNotice, relay }: PrViewProps) {
                 }}
               >
                 {REVIEW_LABEL[confirm]}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {mergeConfirm && (
+        <div className="confirm-backdrop" onClick={() => setMergeConfirm(null)}>
+          <div className="confirm" onClick={(e) => e.stopPropagation()}>
+            <p>
+              {MERGE_LABEL[mergeConfirm]} <strong>#{pr.number} {pr.title}</strong> into{" "}
+              <code>{pr.base}</code> on GitHub?
+            </p>
+            <p className="confirm-sub">
+              This lands <code>{pr.branch}</code> on <code>{pr.base}</code> in the real
+              repository and closes the pull request. It can't be undone here.
+            </p>
+            {pr.mergeable === "CONFLICTING" && (
+              <p className="confirm-warn">
+                GitHub reports merge conflicts — this will likely be rejected.
+              </p>
+            )}
+            {pr.checks === "FAIL" && (
+              <p className="confirm-warn">Some checks are failing ({pr.checks_summary}).</p>
+            )}
+            {pr.checks === "PENDING" && (
+              <p className="confirm-warn">Checks are still running ({pr.checks_summary}).</p>
+            )}
+            {pr.review_decision === "CHANGES_REQUESTED" && (
+              <p className="confirm-warn">Changes were requested on this PR.</p>
+            )}
+            <div className="confirm-actions">
+              <button className="btn" onClick={() => setMergeConfirm(null)}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-accent"
+                disabled={busy}
+                onClick={() => {
+                  const m = mergeConfirm;
+                  setMergeConfirm(null);
+                  void merge(m);
+                }}
+              >
+                {MERGE_LABEL[mergeConfirm]}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {closeConfirm && (
+        <div className="confirm-backdrop" onClick={() => setCloseConfirm(false)}>
+          <div className="confirm" onClick={(e) => e.stopPropagation()}>
+            <p>
+              Close <strong>#{pr.number} {pr.title}</strong> without merging?
+            </p>
+            <p className="confirm-sub">
+              The pull request closes on GitHub and its author is notified. You can reopen
+              it there later.
+            </p>
+            <div className="confirm-actions">
+              <button className="btn" onClick={() => setCloseConfirm(false)}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-danger-solid"
+                disabled={busy}
+                onClick={() => {
+                  setCloseConfirm(false);
+                  void close();
+                }}
+              >
+                Close PR
               </button>
             </div>
           </div>

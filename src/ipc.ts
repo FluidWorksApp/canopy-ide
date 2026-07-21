@@ -307,11 +307,18 @@ export interface PrInfo {
   draft: boolean;
   state: string;
   url: string;
+  created: string;
   updated: string;
   review_decision: string;
   additions: number;
   deletions: number;
   mine: boolean;
+  /** "MERGEABLE", "CONFLICTING", or "UNKNOWN". */
+  mergeable: string;
+  /** Rolled-up CI state: "PASS", "FAIL", "PENDING", or "" when no checks ran. */
+  checks: string;
+  /** Human count for a tooltip, e.g. "3/4 checks passed" ("" when none). */
+  checks_summary: string;
 }
 
 export interface WorktreeInfo {
@@ -386,6 +393,15 @@ export const ghPrReview = (
 ) => invoke<string>("gh_pr_review", { repo, number, action, body });
 export const ghPrCheckout = (repo: string, number: number) =>
   invoke<string>("gh_pr_checkout", { repo, number });
+export const ghPrMerge = (
+  repo: string,
+  number: number,
+  method: "squash" | "merge" | "rebase",
+) => invoke<string>("gh_pr_merge", { repo, number, method });
+export const ghPrClose = (repo: string, number: number) =>
+  invoke<string>("gh_pr_close", { repo, number });
+export const ghPrReady = (repo: string, number: number) =>
+  invoke<string>("gh_pr_ready", { repo, number });
 
 // ---------- cross-session context ----------
 
