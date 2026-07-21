@@ -699,6 +699,49 @@ struct Inner {
     /// Live outgoing file offers by token — flipping the flag retires the
     /// one-shot listener serving that file.
     transfers: HashMap<String, Arc<AtomicBool>>,
+    /// Sender-side offer context by token, kept so a `file-pull` (the receiver
+    /// couldn't reach us directly) can stream the same file over the relay.
+    offers_out: HashMap<String, OfferOut>,
+    /// Receiver-side reassembly pipes by token: the relay reader thread decodes
+    /// each `file-data` frame and pushes the plaintext to the transfer thread.
+    tunnel_pipes: HashMap<String, TunnelPipe>,
+}
+
+/// What a sender needs to serve a file over the relay when the direct path is
+/// blocked. Mirrors the arguments the direct `serve_file` already holds.
+struct OfferOut {
+    path: String,
+    name: String,
+    size: u64,
+    /// The member the offer was made to — the only peer we'll stream to, so a
+    /// sniffed `file-pull` from anyone else can't redirect the bytes.
+    to_id: String,
+    /// UI correlation id for this send (shared with the direct path).
+    id: String,
+    /// Shared with the direct one-shot server: flipping it retires both.
+    alive: Arc<AtomicBool>,
+    /// A `file-pull` only starts one stream; a duplicate is ignored.
+    started: bool,
+}
+
+/// One plaintext chunk (or a decode/decrypt failure) on its way from the relay
+/// reader thread to the transfer thread draining a tunnelled receive.
+enum TunnelEvent {
+    Data(Vec<u8>),
+    Fail,
+}
+
+/// Receiver-side reassembly state for one tunnelled transfer. `next_seq` and
+/// `key` are only ever touched from the single reader thread that owns this
+/// connection, under the `Inner` lock, so no per-pipe lock is needed.
+struct TunnelPipe {
+    tx: std::sync::mpsc::SyncSender<TunnelEvent>,
+    /// Derived once `file-begin` supplies the per-transfer salt.
+    key: Option<[u8; 32]>,
+    /// Next chunk index expected — the AEAD nonce and an ordering check.
+    next_seq: u64,
+    /// The sender we asked; frames claiming this token from anyone else are dropped.
+    from_id: Option<String>,
 }
 
 #[derive(Default)]
@@ -874,6 +917,10 @@ fn retire_transfers(inner: &mut Inner) {
         alive.store(false, Ordering::SeqCst);
     }
     inner.transfers.clear();
+    inner.offers_out.clear();
+    // Dropping each pipe closes its channel, so any in-flight tunnelled receive
+    // wakes, finds the file short, and fails cleanly instead of hanging.
+    inner.tunnel_pipes.clear();
 }
 
 fn stop_host(inner: &mut Inner) {
@@ -1277,7 +1324,7 @@ fn serve_peer(
             }
         };
         if let Some((targets, emit_local, frame, event)) = plan {
-            deliver_frame(&app, &targets, &frame, event, emit_local);
+            deliver_frame(&app, &inner, &targets, &frame, event, emit_local);
         }
     }
     remove_peer(&app, &inner, &my_id);
@@ -1328,6 +1375,7 @@ fn route_targets(
 /// Host-side fan-out, phase 2: the blocking part. Call with NO lock held.
 fn deliver_frame(
     app: &AppHandle,
+    inner: &Arc<Mutex<Inner>>,
     targets: &[Arc<Mutex<secure::Sender>>],
     frame: &Frame,
     event: &str,
@@ -1342,7 +1390,13 @@ fn deliver_frame(
                 let _ = app.emit(event, m.clone());
             }
             Frame::Command(m) => {
-                let _ = app.emit(event, m.clone());
+                // A file-tunnel frame addressed to us (the host is the transfer
+                // endpoint) drives the transfer instead of hitting the UI. A
+                // client<->client tunnel frame is relayed above with
+                // emit_local=false, so the host never assembles it.
+                if !handle_file_tunnel(app, inner, m) {
+                    let _ = app.emit(event, m.clone());
+                }
             }
             Frame::Collab(m) => {
                 let _ = app.emit(event, m.clone());
@@ -1531,7 +1585,11 @@ fn run_client(
                         let _ = reader_app.emit("relay:chat", msg);
                     }
                     Frame::Command(msg) => {
-                        let _ = reader_app.emit("relay:command", msg);
+                        // File-tunnel frames drive a transfer in the backend and
+                        // must never surface as Team-panel commands.
+                        if !handle_file_tunnel(&reader_app, &reader_inner, &msg) {
+                            let _ = reader_app.emit("relay:command", msg);
+                        }
                     }
                     Frame::Collab(msg) => {
                         let _ = reader_app.emit("relay:collab", msg);
@@ -1712,13 +1770,297 @@ fn deliver(inner: &Inner, to: Option<String>, frame: Frame) -> Result<(), String
     Err("Not connected to a relay.".into())
 }
 
-// ---------- file transfer (direct peer-to-peer) ----------
+// ---------- file transfer ----------
 //
-// The relay carries only the OFFER (name, size, hash, where to fetch, a
-// one-time token); the bytes go straight from sender to receiver on an
-// ephemeral one-shot listener. The token is high-entropy, so it derives the
-// ChaCha20-Poly1305 keys directly — the stream is encrypted and authenticated
-// end-to-end, and SHA-256 confirms the whole file matches the offer.
+// The relay carries the OFFER (name, size, hash, where to fetch, a one-time
+// token). The receiver first tries the DIRECT path: dial the sender's ephemeral
+// one-shot listener and pull the bytes peer-to-peer. That stays fully
+// end-to-end (the relay never sees a byte) and is what runs on a LAN or between
+// reachable peers.
+//
+// When the direct dial fails — a firewall or NAT between the two, which is the
+// common internet case — the receiver falls back to TUNNELLING the bytes over
+// the relay connection it already holds (`file-pull`/`begin`/`data`/`end`
+// command frames). Each chunk is sealed under a key derived from the offer
+// token, so a relaying host forwarding client<->client traffic sees only
+// ciphertext; when one endpoint IS the host, the hop is the transfer and stays
+// end-to-end. SHA-256 confirms the whole file matches the offer either way.
+
+/// Plaintext bytes per tunnelled chunk. Base64 (~1.33x) plus the JSON command
+/// envelope must stay under the secure channel's 2 MiB frame ceiling; 1 MiB in
+/// leaves comfortable headroom.
+const TUNNEL_CHUNK: usize = 1024 * 1024;
+
+/// Per-transfer AEAD key: the offer token keyed by a fresh random salt (sent in
+/// the clear in `file-begin`) so counter-from-zero nonces never repeat across
+/// transfers sharing a token. Mirrors `secure::file_channel`'s construction.
+fn tunnel_key(token: &str, salt: &[u8]) -> [u8; 32] {
+    secure::derive(token.as_bytes(), Some(salt), b"canopy-file-relay")
+}
+
+/// 12-byte ChaCha20-Poly1305 nonce from a chunk index: 4 zero bytes + 64-bit BE
+/// counter, unique per (key) because each transfer's salt makes the key unique.
+fn tunnel_nonce(seq: u64) -> [u8; 12] {
+    let mut n = [0u8; 12];
+    n[4..].copy_from_slice(&seq.to_be_bytes());
+    n
+}
+
+fn tunnel_seal(key: &[u8; 32], seq: u64, plaintext: &[u8]) -> Option<Vec<u8>> {
+    use chacha20poly1305::aead::{Aead, KeyInit};
+    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    cipher.encrypt(Nonce::from_slice(&tunnel_nonce(seq)), plaintext).ok()
+}
+
+fn tunnel_open(key: &[u8; 32], seq: u64, ciphertext: &[u8]) -> Option<Vec<u8>> {
+    use chacha20poly1305::aead::{Aead, KeyInit};
+    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    cipher.decrypt(Nonce::from_slice(&tunnel_nonce(seq)), ciphertext).ok()
+}
+
+fn b64_encode(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(s).ok()
+}
+
+/// Build one of our own file-tunnel command frames. `from`/`from_name` are the
+/// authenticated identity the host will stamp anyway; setting them keeps a
+/// client's upstream frame self-consistent.
+fn file_command(from: &str, from_name: &str, to: &str, kind: &str, payload: Value) -> Frame {
+    Frame::Command(CommandMsg {
+        id: new_id(),
+        from: from.to_string(),
+        from_name: from_name.to_string(),
+        to: Some(to.to_string()),
+        kind: kind.to_string(),
+        payload,
+        ts: now_ms(),
+    })
+}
+
+/// Intercept the internal file-tunnel command kinds so they drive the transfer
+/// instead of surfacing in the Team panel. Returns true if it was one of ours
+/// (and was handled here), false for every user-facing command.
+fn handle_file_tunnel(app: &AppHandle, inner: &Arc<Mutex<Inner>>, msg: &CommandMsg) -> bool {
+    match msg.kind.as_str() {
+        "file-pull" => {
+            start_tunnel_send(app, inner, msg);
+            true
+        }
+        "file-begin" => {
+            tunnel_begin(inner, msg);
+            true
+        }
+        "file-data" => {
+            tunnel_data(inner, msg);
+            true
+        }
+        "file-end" => {
+            tunnel_end(inner, msg);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Sender side: the receiver couldn't reach us directly and asked us to stream
+/// over the relay. Serve the same file the offer named, to the member it named.
+fn start_tunnel_send(app: &AppHandle, inner: &Arc<Mutex<Inner>>, msg: &CommandMsg) {
+    let Some(token) = msg.payload.get("token").and_then(|v| v.as_str()).map(str::to_string) else {
+        return;
+    };
+    // Everything the stream needs, resolved under one brief lock; the blocking
+    // sends happen off-lock so the relay mutex isn't held across the network.
+    let plan = {
+        let mut guard = inner.lock().unwrap();
+        let (from, from_name) = match sender_context(&guard) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let Some(offer) = guard.offers_out.get(&token) else { return };
+        // Only stream to the member the offer was for — never to whoever's
+        // `file-pull` this happened to be.
+        if offer.started || offer.to_id != msg.from {
+            return;
+        }
+        let sender = match &guard.host {
+            Some(host) => host.peers.get(&offer.to_id).map(|p| p.sender.clone()),
+            None => guard.client.as_ref().map(|c| c.sender.clone()),
+        };
+        let Some(sender) = sender else { return };
+        let ctx = (
+            sender,
+            offer.path.clone(),
+            offer.name.clone(),
+            offer.size,
+            offer.to_id.clone(),
+            offer.id.clone(),
+            offer.alive.clone(),
+            from,
+            from_name,
+        );
+        guard.offers_out.get_mut(&token).unwrap().started = true;
+        ctx
+    };
+    let (sender, path, name, size, to_id, id, alive, from, from_name) = plan;
+    let app = app.clone();
+    let inner = inner.clone();
+    let _ = thread::Builder::new().name("relay-send-file-tunnel".into()).spawn(move || {
+        let done_ok = stream_file_over_relay(
+            &app, &sender, &path, &name, size, &token, &id, &to_id, &alive, &from, &from_name,
+        );
+        // Retire the direct one-shot server too (it's still parked in accept);
+        // its cleanup closure clears `transfers`/`offers_out`.
+        alive.store(false, Ordering::SeqCst);
+        inner.lock().unwrap().offers_out.remove(&token);
+        let _ = done_ok;
+    });
+}
+
+/// Read `path` and push it to `to_id` as sealed `file-data` chunks. Returns
+/// whether the whole file went out.
+#[allow(clippy::too_many_arguments)]
+fn stream_file_over_relay(
+    app: &AppHandle,
+    sender: &Arc<Mutex<secure::Sender>>,
+    path: &str,
+    name: &str,
+    size: u64,
+    token: &str,
+    id: &str,
+    to_id: &str,
+    alive: &Arc<AtomicBool>,
+    from: &str,
+    from_name: &str,
+) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        emit_transfer(app, id, "out", name, size, false, "The file vanished before it was sent.".into(), Some(to_id));
+        return false;
+    };
+    let salt = {
+        let mut s = [0u8; 16];
+        s[..8].copy_from_slice(&secure_u64().to_be_bytes());
+        s[8..].copy_from_slice(&secure_u64().to_be_bytes());
+        s
+    };
+    let key = tunnel_key(token, &salt);
+    let begin = file_command(from, from_name, to_id, "file-begin", serde_json::json!({
+        "token": token, "salt": b64_encode(&salt), "size": size,
+    }));
+    if !peer_send(sender, &begin) {
+        emit_transfer(app, id, "out", name, size, false, "Lost the relay connection.".into(), Some(to_id));
+        return false;
+    }
+    emit_progress(app, id, "out", name, 0, size);
+    let mut buf = vec![0u8; TUNNEL_CHUNK];
+    let mut seq: u64 = 0;
+    let mut done: u64 = 0;
+    let mut marked: u64 = 0;
+    loop {
+        if !alive.load(Ordering::SeqCst) {
+            return false;
+        }
+        let n = match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => {
+                emit_transfer(app, id, "out", name, size, false, "Reading the file failed mid-send.".into(), Some(to_id));
+                return false;
+            }
+        };
+        let Some(ct) = tunnel_seal(&key, seq, &buf[..n]) else { return false };
+        let frame = file_command(from, from_name, to_id, "file-data", serde_json::json!({
+            "token": token, "seq": seq, "data": b64_encode(&ct),
+        }));
+        if !peer_send(sender, &frame) {
+            emit_transfer(app, id, "out", name, size, false, "The relay connection dropped mid-send.".into(), Some(to_id));
+            return false;
+        }
+        seq += 1;
+        done += n as u64;
+        if done - marked >= PROGRESS_STEP {
+            marked = done;
+            emit_progress(app, id, "out", name, done, size);
+        }
+    }
+    let end = file_command(from, from_name, to_id, "file-end", serde_json::json!({ "token": token }));
+    let _ = peer_send(sender, &end);
+    emit_progress(app, id, "out", name, size, size);
+    emit_transfer(app, id, "out", name, size, true, name.to_string(), Some(to_id));
+    true
+}
+
+/// Receiver side: the sender is about to stream. Derive this transfer's key
+/// from the salt it chose.
+fn tunnel_begin(inner: &Arc<Mutex<Inner>>, msg: &CommandMsg) {
+    let Some(token) = msg.payload.get("token").and_then(|v| v.as_str()) else { return };
+    let Some(salt) = msg.payload.get("salt").and_then(|v| v.as_str()).and_then(b64_decode) else {
+        return;
+    };
+    let mut guard = inner.lock().unwrap();
+    let Some(pipe) = guard.tunnel_pipes.get_mut(token) else { return };
+    if pipe.from_id.as_deref() != Some(msg.from.as_str()) {
+        return;
+    }
+    pipe.key = Some(tunnel_key(token, &salt));
+    pipe.next_seq = 0;
+}
+
+/// Receiver side: decode one chunk and hand it to the transfer thread. Decode
+/// and decrypt run here (cheap, off the transfer's disk path); the bounded
+/// channel applies backpressure so a slow disk throttles the network.
+fn tunnel_data(inner: &Arc<Mutex<Inner>>, msg: &CommandMsg) {
+    let Some(token) = msg.payload.get("token").and_then(|v| v.as_str()).map(str::to_string) else {
+        return;
+    };
+    let seq = msg.payload.get("seq").and_then(|v| v.as_u64());
+    let data = msg.payload.get("data").and_then(|v| v.as_str()).map(str::to_string);
+    // Pull what we need out from under the lock; never send on the (possibly
+    // full, hence blocking) channel while holding the relay mutex.
+    let taken = {
+        let mut guard = inner.lock().unwrap();
+        let Some(pipe) = guard.tunnel_pipes.get_mut(&token) else { return };
+        if pipe.from_id.as_deref() != Some(msg.from.as_str()) {
+            return;
+        }
+        let Some(key) = pipe.key else { return };
+        let expected = pipe.next_seq;
+        pipe.next_seq += 1;
+        (pipe.tx.clone(), key, expected)
+    };
+    let (tx, key, expected) = taken;
+    let event = match (seq, data) {
+        (Some(seq), Some(data)) if seq == expected => match b64_decode(&data)
+            .and_then(|ct| tunnel_open(&key, seq, &ct))
+        {
+            Some(pt) => TunnelEvent::Data(pt),
+            None => TunnelEvent::Fail,
+        },
+        _ => TunnelEvent::Fail,
+    };
+    let _ = tx.send(event);
+}
+
+/// Receiver side: the sender finished. Dropping the pipe closes the channel, so
+/// the transfer thread wakes, finalizes, and verifies the hash.
+fn tunnel_end(inner: &Arc<Mutex<Inner>>, msg: &CommandMsg) {
+    let Some(token) = msg.payload.get("token").and_then(|v| v.as_str()) else { return };
+    let mut guard = inner.lock().unwrap();
+    if let Some(pipe) = guard.tunnel_pipes.get(token) {
+        if pipe.from_id.as_deref() != Some(msg.from.as_str()) {
+            return;
+        }
+    }
+    guard.tunnel_pipes.remove(token);
+}
+
 
 #[derive(Serialize, Clone)]
 pub struct TransferEvent {
@@ -1901,6 +2243,17 @@ pub async fn relay_offer_file(
     {
         let mut inner = state.inner.lock().unwrap();
         inner.transfers.insert(token.clone(), alive.clone());
+        // Keep the offer's context so a `file-pull` (the receiver couldn't
+        // reach the listener) can stream the same file over the relay instead.
+        inner.offers_out.insert(token.clone(), OfferOut {
+            path: path.clone(),
+            name: name.clone(),
+            size,
+            to_id: to_id.clone(),
+            id: transfer_id.clone(),
+            alive: alive.clone(),
+            started: false,
+        });
         let (from, from_name) = sender_context(&inner)?;
         let msg = CommandMsg {
             id: new_id(),
@@ -1923,7 +2276,9 @@ pub async fn relay_offer_file(
         .spawn(move || {
             serve_file(&app, &transfer_id, listener, &path, &name, size, &token, &alive, &to_name, &to_id);
             alive.store(false, Ordering::SeqCst);
-            inner_arc.lock().unwrap().transfers.remove(&token);
+            let mut inner = inner_arc.lock().unwrap();
+            inner.transfers.remove(&token);
+            inner.offers_out.remove(&token);
         })
         .map_err(|e| format!("couldn't spawn transfer thread: {e}"))?;
     Ok(())
@@ -2022,6 +2377,7 @@ fn serve_file(
 #[tauri::command]
 pub async fn relay_accept_file(
     app: AppHandle,
+    state: State<'_, RelayManager>,
     name: String,
     size: u64,
     sha256: String,
@@ -2034,6 +2390,7 @@ pub async fn relay_accept_file(
 ) -> Result<(), String> {
     let id = new_id();
     let from_id = from;
+    let inner_arc = state.inner.clone();
     thread::Builder::new()
         .name("relay-receive-file".into())
         .spawn(move || {
@@ -2054,11 +2411,18 @@ pub async fn relay_accept_file(
                 }
             }
             let Some(stream) = stream else {
-                emit_transfer(
-                    &app, &id, "in", &name, size, false,
-                    "Couldn't reach the sender directly — a firewall or NAT between you is blocking the peer-to-peer connection.".into(),
-                    from_id.as_deref(),
-                );
+                // Direct dial blocked (firewall/NAT). Fall back to pulling the
+                // bytes over the relay connection we already hold, if we know
+                // who to ask.
+                let Some(from_peer) = from_id.clone() else {
+                    emit_transfer(
+                        &app, &id, "in", &name, size, false,
+                        "Couldn't reach the sender directly — a firewall or NAT between you is blocking the peer-to-peer connection.".into(),
+                        from_id.as_deref(),
+                    );
+                    return;
+                };
+                receive_over_relay(&app, &inner_arc, &id, &name, size, &sha256, &token, &dest, &from_peer);
                 return;
             };
             let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
@@ -2128,6 +2492,120 @@ pub async fn relay_accept_file(
     Ok(())
 }
 
+/// Receiver side of the relay tunnel: register a reassembly pipe, ask the
+/// sender to stream (`file-pull`), then drain plaintext chunks the reader
+/// thread decodes into it — writing, hashing, and finalising exactly as the
+/// direct path does. Blocks until the transfer ends, so it runs on the
+/// `relay-receive-file` thread the direct path already spawned.
+#[allow(clippy::too_many_arguments)]
+fn receive_over_relay(
+    app: &AppHandle,
+    inner: &Arc<Mutex<Inner>>,
+    id: &str,
+    name: &str,
+    size: u64,
+    sha256: &str,
+    token: &str,
+    dest: &str,
+    from_peer: &str,
+) {
+    use sha2::{Digest, Sha256};
+    // Bounded so a slow disk throttles the reader thread (and thus the network)
+    // rather than letting chunks pile up in memory.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<TunnelEvent>(4);
+    {
+        let mut guard = inner.lock().unwrap();
+        let (from, from_name) = match sender_context(&guard) {
+            Ok(v) => v,
+            Err(e) => {
+                emit_transfer(app, id, "in", name, size, false, e, Some(from_peer));
+                return;
+            }
+        };
+        // Register the pipe and send the pull under one lock, so the sender's
+        // reply can never race ahead of the pipe that receives it.
+        guard.tunnel_pipes.insert(token.to_string(), TunnelPipe {
+            tx,
+            key: None,
+            next_seq: 0,
+            from_id: Some(from_peer.to_string()),
+        });
+        let frame = file_command(&from, &from_name, from_peer, "file-pull", serde_json::json!({ "token": token }));
+        if let Err(e) = deliver(&guard, Some(from_peer.to_string()), frame) {
+            guard.tunnel_pipes.remove(token);
+            drop(guard);
+            emit_transfer(app, id, "in", name, size, false, e, Some(from_peer));
+            return;
+        }
+    }
+
+    let clear_pipe = || {
+        inner.lock().unwrap().tunnel_pipes.remove(token);
+    };
+    let part = format!("{dest}.canopy-part");
+    let Ok(mut out) = std::fs::File::create(&part) else {
+        clear_pipe();
+        emit_transfer(app, id, "in", name, size, false, format!("Can't write to {dest}."), Some(from_peer));
+        return;
+    };
+    emit_progress(app, id, "in", name, 0, size);
+    let mut hasher = Sha256::new();
+    let mut got = 0u64;
+    let mut marked = 0u64;
+    let mut failed = false;
+    loop {
+        match rx.recv() {
+            Ok(TunnelEvent::Data(chunk)) => {
+                hasher.update(&chunk);
+                if out.write_all(&chunk).is_err() {
+                    drop(out);
+                    let _ = std::fs::remove_file(&part);
+                    clear_pipe();
+                    emit_transfer(app, id, "in", name, size, false, format!("Writing {dest} failed — disk full?"), Some(from_peer));
+                    return;
+                }
+                got += chunk.len() as u64;
+                if got - marked >= PROGRESS_STEP {
+                    marked = got;
+                    emit_progress(app, id, "in", name, got, size);
+                }
+            }
+            Ok(TunnelEvent::Fail) => {
+                failed = true;
+                break;
+            }
+            // Channel closed: `file-end` (whole file arrived) or the relay link
+            // dropped (partial). The size/hash checks below tell the two apart.
+            Err(_) => break,
+        }
+    }
+    drop(out);
+    clear_pipe();
+    if failed {
+        let _ = std::fs::remove_file(&part);
+        emit_transfer(app, id, "in", name, size, false, "The transfer was corrupted in flight — nothing was kept.".into(), Some(from_peer));
+        return;
+    }
+    if got < size {
+        let _ = std::fs::remove_file(&part);
+        emit_transfer(app, id, "in", name, size, false, "The connection dropped before the whole file arrived.".into(), Some(from_peer));
+        return;
+    }
+    let digest = format!("{:x}", hasher.finalize());
+    if digest != sha256.to_lowercase() {
+        let _ = std::fs::remove_file(&part);
+        emit_transfer(app, id, "in", name, size, false, "Integrity check failed — the received bytes don't match the offer. Nothing was kept.".into(), Some(from_peer));
+        return;
+    }
+    if let Err(e) = std::fs::rename(&part, dest) {
+        let _ = std::fs::remove_file(&part);
+        emit_transfer(app, id, "in", name, size, false, format!("Couldn't save to {dest}: {e}"), Some(from_peer));
+        return;
+    }
+    emit_progress(app, id, "in", name, size, size);
+    emit_transfer(app, id, "in", name, size, true, dest.to_string(), Some(from_peer));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2154,6 +2632,34 @@ mod tests {
         for c in cases {
             serde_json::from_str::<CollabBody>(c).unwrap_or_else(|e| panic!("{c}: {e}"));
         }
+    }
+
+    /// Tunnelled chunks must round-trip under the token+salt key, and a wrong
+    /// chunk index (a reorder or a tamper) must fail to open — the ordering
+    /// check and the AEAD together are what keep a relayed transfer honest.
+    #[test]
+    fn tunnel_chunks_seal_and_open() {
+        let key = tunnel_key("0123456789abcdef0123456789abcdef", b"salty-salt-16byt");
+        let plain = b"the quick brown fox jumps over the lazy dog";
+        let sealed0 = tunnel_seal(&key, 0, plain).unwrap();
+        let sealed1 = tunnel_seal(&key, 1, plain).unwrap();
+        // Same plaintext, different seq -> different ciphertext (nonce differs).
+        assert_ne!(sealed0, sealed1);
+        assert_eq!(tunnel_open(&key, 0, &sealed0).unwrap(), plain);
+        assert_eq!(tunnel_open(&key, 1, &sealed1).unwrap(), plain);
+        // A chunk opened at the wrong index is rejected, not silently accepted.
+        assert!(tunnel_open(&key, 1, &sealed0).is_none());
+        // A different salt yields a different key, so nothing decrypts.
+        let other = tunnel_key("0123456789abcdef0123456789abcdef", b"different-16bytes");
+        assert!(tunnel_open(&other, 0, &sealed0).is_none());
+    }
+
+    /// The base64 hop the tunnel puts chunks through for JSON transport must be
+    /// lossless for arbitrary bytes.
+    #[test]
+    fn tunnel_base64_round_trips() {
+        let bytes: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+        assert_eq!(b64_decode(&b64_encode(&bytes)).unwrap(), bytes);
     }
 
     /// A collab frame has to survive the same encode/decode the relay does to

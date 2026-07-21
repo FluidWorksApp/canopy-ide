@@ -50,6 +50,8 @@ sha2 = "0.10"
 spake2 = "0.4"
 hkdf = "0.12"
 chacha20poly1305 = "0.10"
+# Compact text encoding for binary file chunks tunnelled as JSON relay frames.
+base64 = "0.22"
 # OS CSPRNG for per-transfer key-derivation salts (nonce separation across
 # file-transfer retries). Already present transitively via spake2/rand_core.
 getrandom = "0.2"
