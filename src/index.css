@@ -472,6 +472,7 @@ body,
 
 .rail-badge {
   position: absolute;
+  z-index: 2;
   /* Clear of the glyph: at 34px the badge used to sit on top of the icon. */
   top: -3px;
   right: -4px;
@@ -5307,4 +5308,17 @@ a.btn-mini {
   top: 100%;
   z-index: 40;
   min-width: 160px;
+}
+
+.rail-conn {
+  position: absolute;
+  top: -3px;
+  right: -4px;
+  z-index: 1;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ok, #3fb950);
+  border: 2px solid var(--bg);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--ok, #3fb950) 70%, transparent);
 }
