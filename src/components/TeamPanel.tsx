@@ -261,12 +261,22 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
               <span>port {s.port} — no LAN address found</span>
             )}
           </div>
-          {s.visibility === "public" && (
-            <div className="team-note">
-              Joins from the internet need TCP port {s.port} forwarded to this
-              machine on your router.
-            </div>
-          )}
+          {s.visibility === "public" &&
+            (s.port_mapped ? (
+              <div className="team-note team-note-ok">
+                Your router forwarded TCP port {s.port} to this machine, so the
+                address above is reachable from the internet. Canopy closes the
+                mapping again when you stop hosting.
+              </div>
+            ) : (
+              <div className="team-note team-note-warn">
+                <strong>Not reachable from the internet yet.</strong> Canopy
+                couldn't open the port automatically
+                {s.port_map_note ? ` — ${s.port_map_note}` : ""}. Forward TCP
+                port {s.port} to this machine on your router, or switch to Local
+                and share your LAN address instead.
+              </div>
+            ))}
           <div className="team-host-actions">
             <button
               className="btn"

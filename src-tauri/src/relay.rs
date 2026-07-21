@@ -1087,6 +1087,19 @@ fn host_conn_quic(
 /// One joined connection, host side: secure handshake, authenticate, register,
 /// then relay each frame until the peer hangs up.
 fn host_conn(app: AppHandle, inner: Arc<Mutex<Inner>>, stream: TcpStream, alive: Arc<AtomicBool>) {
+    // The listener is non-blocking so the accept loop can poll `alive`, and on
+    // BSD-derived platforms — macOS included — accept() hands back a socket
+    // that INHERITED that flag. Linux does not, which is why this only ever
+    // broke on a Mac.
+    //
+    // It has to be cleared before the timeouts below, because a timeout is
+    // silently ignored on a non-blocking socket: the first handshake read
+    // returns WouldBlock immediately, recv() maps that to None via `.ok()?`,
+    // and the host reads "the peer hung up" and drops a connection that had
+    // only just arrived. Every join on macOS failed this way, local and
+    // public alike, and the swallowed error left nothing to diagnose it by.
+    // The file-transfer accept path already does this; this one was missed.
+    let _ = stream.set_nonblocking(false);
     // A join must arrive promptly; port-scanners and half-open connections
     // get dropped instead of parked forever.
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
@@ -1206,118 +1219,58 @@ fn serve_peer(
     loop {
         let Some(bytes) = receiver.recv() else { break };
         let Ok(frame) = serde_json::from_slice::<Frame>(&bytes) else { continue };
-        let guard = inner.lock().unwrap();
-        let Some(host) = guard.host.as_ref() else { break };
-        if !alive.load(Ordering::SeqCst) || !host.peers.contains_key(&my_id) {
-            break;
-        }
-        match frame {
-            Frame::Chat(mut msg) => {
-                // The connection is the identity — whatever the frame claimed.
-                msg.from = my_id.clone();
-                msg.from_name = my_name.clone();
-                msg.ts = now_ms();
-                if msg.id.is_empty() {
-                    msg.id = new_id();
-                }
-                route(&app, host, &my_id, msg.to.clone(), Frame::Chat(msg.clone()), "relay:chat");
+        // Decide everything that needs the lock, then drop it before writing a
+        // single byte to a socket.
+        let plan: Option<(Vec<Arc<Mutex<secure::Sender>>>, bool, Frame, &str)> = {
+            let guard = inner.lock().unwrap();
+            let Some(host) = guard.host.as_ref() else { break };
+            if !alive.load(Ordering::SeqCst) || !host.peers.contains_key(&my_id) {
+                break;
             }
-            Frame::Command(mut msg) => {
-                msg.from = my_id.clone();
-                msg.from_name = my_name.clone();
-                msg.ts = now_ms();
-                if msg.id.is_empty() {
-                    msg.id = new_id();
+            match frame {
+                Frame::Chat(mut msg) => {
+                    // The connection is the identity — whatever the frame claimed.
+                    msg.from = my_id.clone();
+                    msg.from_name = my_name.clone();
+                    msg.ts = now_ms();
+                    if msg.id.is_empty() {
+                        msg.id = new_id();
+                    }
+                    let (targets, local) = route_targets(host, &my_id, &msg.to);
+                    Some((targets, local, Frame::Chat(msg), "relay:chat"))
                 }
-                route(&app, host, &my_id, msg.to.clone(), Frame::Command(msg.clone()), "relay:command");
+                Frame::Command(mut msg) => {
+                    msg.from = my_id.clone();
+                    msg.from_name = my_name.clone();
+                    msg.ts = now_ms();
+                    if msg.id.is_empty() {
+                        msg.id = new_id();
+                    }
+                    let (targets, local) = route_targets(host, &my_id, &msg.to);
+                    Some((targets, local, Frame::Command(msg), "relay:command"))
+                }
+                Frame::Collab(mut msg) => {
+                    msg.from = my_id.clone();
+                    msg.from_name = my_name.clone();
+                    msg.ts = now_ms();
+                    if msg.id.is_empty() {
+                        msg.id = new_id();
+                    }
+                    let (targets, local) = route_targets(host, &my_id, &msg.to);
+                    Some((targets, local, Frame::Collab(msg), "relay:collab"))
+                }
+                Frame::Ping => host
+                    .peers
+                    .get(&my_id)
+                    .map(|p| (vec![p.sender.clone()], false, Frame::Pong, "")),
+                _ => None,
             }
-            Frame::Collab(mut msg) => {
-                msg.from = my_id.clone();
-                msg.from_name = my_name.clone();
-                msg.ts = now_ms();
-                if msg.id.is_empty() {
-                    msg.id = new_id();
-                }
-                // Chat and commands are occasional, so `route` writing sockets
-                // with the relay mutex held costs nothing visible. Collab is a
-                // frame per keystroke per editor: holding the ONE global lock
-                // across a blocking write here would serialise the whole app
-                // behind the slowest peer's TCP window. So pick the targets
-                // under the lock (pure, cheap) and write after dropping it —
-                // the sender handles stay valid because each is an Arc.
-                let for_us = msg.to.as_deref() == Some(host.self_id.as_str()) || msg.to.is_none();
-                let targets = collab_targets(host, &my_id, &msg.to);
-                drop(guard);
-                if for_us {
-                    let _ = app.emit("relay:collab", msg.clone());
-                }
-                let frame = Frame::Collab(msg);
-                for target in targets {
-                    let _ = peer_send(&target, &frame);
-                }
-            }
-            Frame::Ping => {
-                if let Some(peer) = host.peers.get(&my_id) {
-                    let _ = peer_send(&peer.sender, &Frame::Pong);
-                }
-            }
-            _ => {}
+        };
+        if let Some((targets, emit_local, frame, event)) = plan {
+            deliver_frame(&app, &targets, &frame, event, emit_local);
         }
     }
     remove_peer(&app, &inner, &my_id);
-}
-
-/// Who a collab frame goes to, resolved as pure data so the caller can release
-/// the relay mutex before it writes a byte. Cloning the `Arc<Mutex<Sender>>`
-/// (not the Sender) is what makes that split possible.
-fn collab_targets(
-    host: &Host,
-    sender: &str,
-    to: &Option<String>,
-) -> Vec<Arc<Mutex<secure::Sender>>> {
-    match to {
-        None => host
-            .peers
-            .iter()
-            .filter(|(id, _)| id.as_str() != sender)
-            .map(|(_, peer)| peer.sender.clone())
-            .collect(),
-        Some(target) => host
-            .peers
-            .get(target)
-            .map(|peer| vec![peer.sender.clone()])
-            .unwrap_or_default(),
-    }
-}
-
-/// Host-side fan-out for a member's frame: everyone (except the sender), one
-/// peer, or the host itself — the last lands only in our own UI.
-fn route(app: &AppHandle, host: &Host, sender: &str, to: Option<String>, frame: Frame, event: &str) {
-    let emit_local = |frame: &Frame| match frame {
-        Frame::Chat(m) => {
-            let _ = app.emit(event, m.clone());
-        }
-        Frame::Command(m) => {
-            let _ = app.emit(event, m.clone());
-        }
-        _ => {}
-    };
-    match to {
-        None => {
-            for (id, peer) in &host.peers {
-                if id != sender {
-                    let _ = peer_send(&peer.sender, &frame);
-                }
-            }
-            emit_local(&frame);
-        }
-        Some(target) if target == host.self_id => emit_local(&frame),
-        Some(target) => {
-            if let Some(peer) = host.peers.get(&target) {
-                let _ = peer_send(&peer.sender, &frame);
-            }
-        }
-    }
 }
 
 fn remove_peer(app: &AppHandle, inner: &Arc<Mutex<Inner>>, id: &str) {
@@ -1327,6 +1280,65 @@ fn remove_peer(app: &AppHandle, inner: &Arc<Mutex<Inner>>, id: &str) {
         let _ = peer.shutdown.close();
         broadcast_presence(host);
         emit_state(app, &guard);
+    }
+}
+
+/// Host-side fan-out, phase 1: work out who a frame goes to.
+///
+/// Split from the sending half deliberately. This is pure and runs under the
+/// global lock; `deliver` does the blocking socket writes and must NOT. Fusing
+/// them meant one unresponsive peer held the whole relay's mutex for up to the
+/// 5s write timeout — per peer — and every unrelated operation (status polls,
+/// other members' messages, joins, stopping the relay) queued behind it.
+///
+/// Returns the senders to write to, and whether the frame also belongs in our
+/// own UI.
+fn route_targets(
+    host: &Host,
+    sender: &str,
+    to: &Option<String>,
+) -> (Vec<Arc<Mutex<secure::Sender>>>, bool) {
+    match to {
+        None => (
+            host.peers
+                .iter()
+                .filter(|(id, _)| id.as_str() != sender)
+                .map(|(_, p)| p.sender.clone())
+                .collect(),
+            true,
+        ),
+        Some(target) if *target == host.self_id => (Vec::new(), true),
+        Some(target) => (
+            host.peers.get(target).map(|p| p.sender.clone()).into_iter().collect(),
+            false,
+        ),
+    }
+}
+
+/// Host-side fan-out, phase 2: the blocking part. Call with NO lock held.
+fn deliver_frame(
+    app: &AppHandle,
+    targets: &[Arc<Mutex<secure::Sender>>],
+    frame: &Frame,
+    event: &str,
+    emit_local: bool,
+) {
+    for sender in targets {
+        let _ = peer_send(sender, frame);
+    }
+    if emit_local {
+        match frame {
+            Frame::Chat(m) => {
+                let _ = app.emit(event, m.clone());
+            }
+            Frame::Command(m) => {
+                let _ = app.emit(event, m.clone());
+            }
+            Frame::Collab(m) => {
+                let _ = app.emit(event, m.clone());
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1637,7 +1649,7 @@ pub async fn relay_send_collab(
         };
         let frame = Frame::Collab(msg);
         if let Some(host) = &inner.host {
-            let targets = collab_targets(host, &host.self_id, &to);
+            let targets = route_targets(host, &host.self_id, &to).0;
             if targets.is_empty() && to.is_some() {
                 return Err("That member is no longer connected.".into());
             }
@@ -2109,6 +2121,7 @@ pub async fn relay_accept_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{TcpListener, TcpStream};
 
     /// The frontend composes these bodies by hand in TypeScript, so the two
     /// definitions are only kept honest by something that parses the exact
@@ -2173,7 +2186,71 @@ mod tests {
             peers: HashMap::new(),
             alive: Arc::new(AtomicBool::new(true)),
         };
-        assert!(collab_targets(&host, "someone", &None).is_empty());
-        assert!(collab_targets(&host, "someone", &Some("nobody".into())).is_empty());
+        assert!(route_targets(&host, "someone", &None).0.is_empty());
+        assert!(route_targets(&host, "someone", &Some("nobody".into())).0.is_empty());
+    }
+
+    /// Accept the way relay_host_start's loop does: a non-blocking listener,
+    /// polled. `apply_fix` mirrors host_conn clearing the inherited flag.
+    fn host_side(listener: &TcpListener, code: &str, apply_fix: bool) -> bool {
+        let stream = loop {
+            match listener.accept() {
+                Ok((s, _)) => break s,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(20))
+                }
+                Err(_) => return false,
+            }
+        };
+        if apply_fix {
+            let _ = stream.set_nonblocking(false);
+        }
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+        let Some((mut s, mut r, binding)) = secure::handshake_tcp(&stream, code, false) else {
+            return false;
+        };
+        identity::exchange(&mut s, &mut r, &binding, true).is_some()
+    }
+
+    fn client_side(addr: std::net::SocketAddr, code: &str) -> bool {
+        let Ok(stream) = TcpStream::connect(addr) else { return false };
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+        let Some((mut s, mut r, binding)) = secure::handshake_tcp(&stream, code, true) else {
+            return false;
+        };
+        identity::exchange(&mut s, &mut r, &binding, false).is_some()
+    }
+
+    fn run_join(apply_fix: bool) -> (bool, bool) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let code = new_code();
+        let c = code.clone();
+        let client = thread::spawn(move || client_side(addr, &c));
+        let host_ok = host_side(&listener, &code, apply_fix);
+        (host_ok, client.join().unwrap_or(false))
+    }
+
+    /// A join completes end to end: SPAKE2 over a real socket, then the
+    /// signed identity exchange, against a socket from a non-blocking listener.
+    #[test]
+    fn join_completes_over_accepted_socket() {
+        let (host_ok, client_ok) = run_join(true);
+        assert!(host_ok, "host side of the handshake failed");
+        assert!(client_ok, "client side of the handshake failed");
+    }
+
+    /// The regression guard. Without clearing the inherited non-blocking flag
+    /// the host's first handshake read returns WouldBlock instantly and the
+    /// join dies — which is exactly what shipped in 0.2.1 on macOS. If this
+    /// ever starts passing on a BSD-derived platform the fix has been undone.
+    #[test]
+    #[cfg(target_vendor = "apple")]
+    fn join_fails_without_clearing_inherited_nonblocking() {
+        let (host_ok, _) = run_join(false);
+        assert!(!host_ok, "expected the unfixed accept path to fail on macOS");
     }
 }

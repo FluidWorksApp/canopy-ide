@@ -111,7 +111,7 @@ export default function App() {
   // (received + our own sends); the inbox holds commands awaiting action.
   const [relayStatus, setRelayStatus] = useState<ipc.RelayStatus>({
     role: "off", code: null, port: null, ips: [], addr: null, self_id: null, name: null,
-    visibility: null, public_ip: null, members: [],
+    visibility: null, public_ip: null, port_mapped: null, port_map_note: null, members: [],
   });
   const [relayChat, setRelayChat] = useState<ipc.RelayChatMsg[]>([]);
   const [relayInbox, setRelayInbox] = useState<ipc.RelayCommandMsg[]>([]);
