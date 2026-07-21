@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/session.png" alt="Canopy running an agent alongside the whole stack — the RUNS rail shows each service live with its CPU and memory, and the model and session cost sit in the status bar" width="900">
+  <img src="docs/screenshots/launcher.png" alt="The Canopy launcher — a plain shell or any agent CLI (Claude Code, Codex, Amp, Aider, Gemini, OpenCode) one click away, with a “pick up where you left off” list of resumable sessions" width="900">
 </p>
 
 ## What is Canopy?
@@ -58,10 +58,11 @@ result.
 
 ## A closer look
 
-**Start however you want to work.** Open a project and pick a plain shell or any
-agent CLI — Canopy never hands you a terminal you didn't ask for.
+**See what's running.** Run commands and dev servers launch into the RUNS rail —
+services, not sessions — each with a live status dot and its own CPU/memory,
+while the model and session cost sit in the status bar.
 
-<img src="docs/screenshots/launcher.png" alt="The launcher grid: Shell, Claude Code, Codex, Aider, Gemini, and more" width="820">
+<img src="docs/screenshots/session.png" alt="The RUNS rail — each service running natively with its own live CPU and memory, next to the model and session cost in the status bar" width="820">
 
 **Review every change.** A built-in Git panel — branches, worktrees, PRs, and
 staged/unstaged changes with side-by-side diffs. Commit without leaving the app.
