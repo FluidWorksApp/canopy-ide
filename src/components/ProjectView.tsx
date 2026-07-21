@@ -1269,6 +1269,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   );
   const changedPaths = new Set(changeGroups.flatMap((g) => g.files.map((f) => f.abs)));
   const changeCount = changeGroups.reduce((n, g) => n + g.files.length, 0);
+  const teamBadge =
+    relay.inbox.length + Object.values(relay.unread).reduce((a, b) => a + b, 0);
   const sectionOpen = (path: string) => openSections[path] ?? true;
   const pending = pendingForRoots(derivePending(projectEvents), roots).filter(
     (i) => !dismissedPending.has(i.key),
@@ -2452,8 +2454,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                   {pending.length}
                 </span>
               )}
-              {t.key === "team" && relay.inbox.length > 0 && (
-                <span className="rail-badge rail-badge-urgent">{relay.inbox.length}</span>
+              {t.key === "team" && teamBadge > 0 && (
+                <span className="rail-badge rail-badge-urgent">{Math.min(teamBadge, 99)}</span>
               )}
             </button>
           ))}
