@@ -571,11 +571,62 @@ pub struct PrInfo {
     pub draft: bool,
     pub state: String,
     pub url: String,
+    pub created: String,
     pub updated: String,
     pub review_decision: String,
     pub additions: u32,
     pub deletions: u32,
     pub mine: bool,
+    /// GitHub's mergeability: "MERGEABLE", "CONFLICTING", or "UNKNOWN".
+    pub mergeable: String,
+    /// Rolled-up CI state: "PASS", "FAIL", "PENDING", or "" when no checks ran.
+    pub checks: String,
+    /// Human count for a tooltip, e.g. "3/4 checks passed" ("" when none).
+    pub checks_summary: String,
+}
+
+/// Collapse gh's `statusCheckRollup` (a mix of CheckRun and StatusContext
+/// entries with different shapes) into one state plus a "passed/total" summary.
+/// Any failure wins over pending, pending over success — the same precedence
+/// GitHub shows on the merge box.
+fn roll_up_checks(rollup: &serde_json::Value) -> (String, String) {
+    let Some(items) = rollup.as_array() else {
+        return (String::new(), String::new());
+    };
+    if items.is_empty() {
+        return (String::new(), String::new());
+    }
+    let (mut passed, mut failed, mut pending) = (0u32, 0u32, 0u32);
+    for it in items {
+        // CheckRun: has `status` (QUEUED/IN_PROGRESS/COMPLETED) + `conclusion`.
+        // StatusContext: has `state` (SUCCESS/FAILURE/PENDING/ERROR).
+        if let Some(state) = it["state"].as_str() {
+            match state {
+                "SUCCESS" => passed += 1,
+                "PENDING" | "EXPECTED" => pending += 1,
+                _ => failed += 1, // FAILURE, ERROR
+            }
+        } else {
+            let status = it["status"].as_str().unwrap_or("");
+            if status != "COMPLETED" {
+                pending += 1;
+            } else {
+                match it["conclusion"].as_str().unwrap_or("") {
+                    "SUCCESS" | "NEUTRAL" | "SKIPPED" => passed += 1,
+                    _ => failed += 1, // FAILURE, CANCELLED, TIMED_OUT, ACTION_REQUIRED, STARTUP_FAILURE
+                }
+            }
+        }
+    }
+    let total = passed + failed + pending;
+    let state = if failed > 0 {
+        "FAIL"
+    } else if pending > 0 {
+        "PENDING"
+    } else {
+        "PASS"
+    };
+    (state.to_string(), format!("{passed}/{total} checks passed"))
 }
 
 /// gh infers the repository from the working directory, which avoids parsing
@@ -644,7 +695,7 @@ pub async fn gh_pr_list(
     let mut cmd = gh_in(&top);
     cmd.args([
         "pr", "list", "--limit", "50", "--state", "open", "--json",
-        "number,title,author,headRefName,baseRefName,isDraft,state,url,updatedAt,reviewDecision,additions,deletions",
+        "number,title,author,headRefName,baseRefName,isDraft,state,url,createdAt,updatedAt,reviewDecision,additions,deletions,mergeable,statusCheckRollup",
     ]);
     let out = run_net(&mut cmd)?;
     let v: serde_json::Value =
@@ -663,6 +714,7 @@ pub async fn gh_pr_list(
             arr.iter()
                 .map(|p| {
                     let author = p["author"]["login"].as_str().unwrap_or("").to_string();
+                    let (checks, checks_summary) = roll_up_checks(&p["statusCheckRollup"]);
                     PrInfo {
                         number: p["number"].as_u64().unwrap_or(0) as u32,
                         title: p["title"].as_str().unwrap_or("").to_string(),
@@ -673,10 +725,14 @@ pub async fn gh_pr_list(
                         draft: p["isDraft"].as_bool().unwrap_or(false),
                         state: p["state"].as_str().unwrap_or("").to_string(),
                         url: p["url"].as_str().unwrap_or("").to_string(),
+                        created: p["createdAt"].as_str().unwrap_or("").to_string(),
                         updated: p["updatedAt"].as_str().unwrap_or("").to_string(),
                         review_decision: p["reviewDecision"].as_str().unwrap_or("").to_string(),
                         additions: p["additions"].as_u64().unwrap_or(0) as u32,
                         deletions: p["deletions"].as_u64().unwrap_or(0) as u32,
+                        mergeable: p["mergeable"].as_str().unwrap_or("UNKNOWN").to_string(),
+                        checks,
+                        checks_summary,
                     }
                 })
                 .collect()
@@ -754,6 +810,58 @@ pub async fn gh_pr_checkout(
     cmd.args(["pr", "checkout", &number.to_string()]);
     run_net(&mut cmd)?;
     Ok(format!("Checked out #{number}"))
+}
+
+/// Merge a PR through `gh pr merge`. This is outward-facing and lands commits on
+/// the base branch, so the UI always confirms before calling it. `method` picks
+/// how history is written — one of the three GitHub offers.
+#[tauri::command]
+pub async fn gh_pr_merge(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    number: u32,
+    method: String,
+) -> Result<String, String> {
+    let top = repo_path(&state, &repo)?;
+    let (flag, verb) = match method.as_str() {
+        "squash" => ("--squash", "Squashed and merged"),
+        "merge" => ("--merge", "Merged"),
+        "rebase" => ("--rebase", "Rebased and merged"),
+        other => return Err(format!("unsupported merge method: {other}")),
+    };
+    let mut cmd = gh_in(&top);
+    cmd.args(["pr", "merge", &number.to_string(), flag]);
+    run_net(&mut cmd)?;
+    Ok(format!("{verb} #{number}"))
+}
+
+/// Close a PR without merging. Outward-facing (others see it close), so the UI
+/// confirms first.
+#[tauri::command]
+pub async fn gh_pr_close(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    number: u32,
+) -> Result<String, String> {
+    let top = repo_path(&state, &repo)?;
+    let mut cmd = gh_in(&top);
+    cmd.args(["pr", "close", &number.to_string()]);
+    run_net(&mut cmd)?;
+    Ok(format!("Closed #{number}"))
+}
+
+/// Take a draft PR out of draft so it can be reviewed and merged.
+#[tauri::command]
+pub async fn gh_pr_ready(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    number: u32,
+) -> Result<String, String> {
+    let top = repo_path(&state, &repo)?;
+    let mut cmd = gh_in(&top);
+    cmd.args(["pr", "ready", &number.to_string()]);
+    run_net(&mut cmd)?;
+    Ok(format!("#{number} is ready for review"))
 }
 
 // ---------- worktrees ----------

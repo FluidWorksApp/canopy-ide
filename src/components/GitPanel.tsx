@@ -33,6 +33,25 @@ interface GitPanelProps {
 
 type Section = "changes" | "branches" | "worktrees" | "loose" | "history" | "prs";
 
+/** Compact relative age for an ISO 8601 timestamp (e.g. gh's createdAt). */
+const ago = (iso?: string) => {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "";
+  const d = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (d < 60) return "just now";
+  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
+  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
+  return `${Math.floor(d / 86400)}d ago`;
+};
+
+/** Full local date & time for an ISO 8601 timestamp — the exact moment raised. */
+const absTime = (iso?: string) => {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? "" : new Date(t).toLocaleString();
+};
+
 export function GitPanel({
   components,
   onOpenDiff,
@@ -692,10 +711,43 @@ export function GitPanel({
                 onClick={() => repo && onOpenPr(repo, pr)}
               >
                 <span className="git-pr-num">#{pr.number}</span>
-                <span className="git-pr-title">
-                  {pr.draft && <span className="git-pr-draft">draft</span>}
-                  {pr.title}
-                </span>
+                <div className="git-pr-main">
+                  <span className="git-pr-title">
+                    {pr.draft && <span className="git-pr-draft">draft</span>}
+                    {pr.title}
+                  </span>
+                  <span className="git-pr-refs">
+                    <code>{pr.branch}</code> → <code>{pr.base}</code>
+                    {pr.created && (
+                      <span className="git-pr-age" title={absTime(pr.created)}>
+                        · opened {ago(pr.created)}
+                      </span>
+                    )}
+                    {pr.checks === "PASS" && (
+                      <span className="git-pr-checks git-pr-ok" title={pr.checks_summary}>
+                        · checks passed
+                      </span>
+                    )}
+                    {pr.checks === "FAIL" && (
+                      <span className="git-pr-checks git-pr-bad" title={pr.checks_summary}>
+                        · checks failed
+                      </span>
+                    )}
+                    {pr.checks === "PENDING" && (
+                      <span className="git-pr-checks git-pr-pending" title={pr.checks_summary}>
+                        · checks running
+                      </span>
+                    )}
+                    {pr.mergeable === "CONFLICTING" && (
+                      <span className="git-pr-checks git-pr-bad">· conflicts</span>
+                    )}
+                    {pr.review_decision === "APPROVED" &&
+                      pr.mergeable !== "CONFLICTING" &&
+                      pr.checks !== "FAIL" && (
+                        <span className="git-pr-mergeable">· approved, ready to merge</span>
+                      )}
+                  </span>
+                </div>
                 <span className="git-pr-meta">
                   {pr.review_decision === "APPROVED" && (
                     <CheckIcon size={11} className="git-pr-approved" />
