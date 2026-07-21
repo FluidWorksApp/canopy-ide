@@ -146,10 +146,30 @@ git add -A
 git commit --quiet -m "Release v$V"
 git push --quiet -u origin "$BRANCH"
 
+# Open the PR right here — a pushed branch with no PR is a dead end that always
+# needed a manual follow-up. Best-effort: if `gh` is missing or unauthenticated
+# we still succeeded (the branch is pushed), so print the manual step instead of
+# failing the release.
+PR_URL=""
+if command -v gh >/dev/null 2>&1; then
+  PR_URL=$(gh pr create --base main --head "$BRANCH" \
+    --title "Release v$V" \
+    --body "Version bump to v$V — the branch contains nothing but the bump. Merge this, then cut the release with: ./scripts/bump-version.sh --tag $V" \
+    2>/dev/null) || PR_URL=""
+fi
+
 echo
-echo "Pushed $BRANCH (version bumped to $V). Next:"
-echo "  1. Open a PR $BRANCH -> main and merge it."
-echo "  2. Then cut the release:  ./scripts/bump-version.sh --tag $V"
+if [ -n "$PR_URL" ]; then
+  echo "Pushed $BRANCH and opened its PR: $PR_URL"
+  echo "Next:"
+  echo "  1. Merge that PR."
+  echo "  2. Then cut the release:  ./scripts/bump-version.sh --tag $V"
+else
+  echo "Pushed $BRANCH (version bumped to $V). Next:"
+  echo "  1. Open a PR $BRANCH -> main and merge it"
+  echo "     (gh not found or not authenticated — do it in the web UI)."
+  echo "  2. Then cut the release:  ./scripts/bump-version.sh --tag $V"
+fi
 echo
 echo "Step 2 tags main AFTER the merge, so the tag lands on the real commit"
 echo "and CI builds the draft release from it."
