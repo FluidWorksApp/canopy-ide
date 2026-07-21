@@ -226,6 +226,7 @@ pub fn run() {
             git::git_commit_patch,
             git::git_worktrees,
             git::git_work_audit,
+            git::git_branch_delete,
             git::git_remote_url,
             git::git_branch_commits,
             git::git_branch_patch,

@@ -253,6 +253,11 @@ export const gitRepoStatus = (repo: string) => invoke<RepoStatus>("git_repo_stat
 export const gitBranches = (repo: string) => invoke<BranchInfo[]>("git_branches", { repo });
 export const gitCheckout = (repo: string, branch: string, create = false) =>
   invoke<string>("git_checkout", { repo, branch, create });
+/** Delete a local branch. `force` (git -D) is needed for a squash-merged branch
+ *  whose remote is gone; otherwise the safe -d refuses unmerged work. Protected
+ *  and current branches are refused by the backend. */
+export const gitBranchDelete = (repo: string, branch: string, force = false) =>
+  invoke<string>("git_branch_delete", { repo, branch, force });
 export const gitStage = (repo: string, paths: string[]) =>
   invoke<void>("git_stage", { repo, paths });
 export const gitUnstage = (repo: string, paths: string[]) =>
@@ -346,6 +351,8 @@ export interface BranchWork {
   upstream: string | null;
   upstream_gone: boolean;
   merged: boolean;
+  /** Integration branch (main/develop/…) or the base — never cleanable. */
+  protected: boolean;
   last_commit: string;
   age_days: number;
   subject: string;
