@@ -99,6 +99,12 @@ export function AgentsPanel({
   const [showHookHelp, setShowHookHelp] = useState(false);
   const [setupResult, setSetupResult] = useState<string | null>(null);
   const [digests, setDigests] = useState<ipc.SessionDigest[]>([]);
+  // This app launch's tag, so a digest from another instance/run (same reset-to-1
+  // PTY id, same shared sessions dir) can't be paired with our terminals.
+  const [thisInstance, setThisInstance] = useState<string | null>(null);
+  useEffect(() => {
+    void ipc.instanceId().then(setThisInstance).catch(() => {});
+  }, []);
   const [showShared, setShowShared] = useState(false);
   const settings = getSettings();
 
@@ -180,6 +186,13 @@ export function AgentsPanel({
     const bySurface = new Map<string, ipc.SessionDigest>();
     for (const d of digests) {
       if (!d.surface) continue;
+      // A PTY id (`surface`) is only unique within one app launch, but the
+      // sessions dir is shared across every instance and survives restarts —
+      // so a digest tagged with a different `instance` is another window's (or
+      // a pre-restart) session that happens to have reused this id. Skip it, or
+      // its prompt shows under the wrong terminal. Digests without a tag are
+      // pre-upgrade and fall back to surface-only.
+      if (thisInstance && d.instance && d.instance !== thisInstance) continue;
       const prev = bySurface.get(d.surface);
       if (!prev || (d.updated ?? 0) > (prev.updated ?? 0)) bySurface.set(d.surface, d);
     }
@@ -195,7 +208,7 @@ export function AgentsPanel({
         dir: (s.cwd || "").split("/").filter(Boolean).pop() ?? "",
       };
     });
-  }, [stats, digests]);
+  }, [stats, digests, thisInstance]);
 
   // An agent session and a plain shell answer different questions — "what is
   // it working on?" vs "what's running in it?" — so they get separate heads.

@@ -17,9 +17,9 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, State};
 
@@ -32,6 +32,29 @@ const DEFAULT_HIGH_WATER: usize = 2 * 1024 * 1024;
 /// one whose history never existed. Long enough for that, short enough that
 /// quitting the app never feels stuck.
 const GRACE: Duration = Duration::from_millis(2500);
+
+/// A tag unique to this app launch, stamped onto every terminal it spawns
+/// (env `CANOPY_INSTANCE`) and recorded in each session digest. Pid distinguishes
+/// concurrent instances; the launch timestamp distinguishes a restart that reuses
+/// a pid. Used to pair a session digest with the terminal it actually belongs to,
+/// since the pty id alone is not unique across instances or restarts.
+pub fn instance_token() -> &'static str {
+    static TOKEN: OnceLock<String> = OnceLock::new();
+    TOKEN.get_or_init(|| {
+        let pid = std::process::id();
+        let ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        format!("{pid:x}-{ms:x}")
+    })
+}
+
+/// This launch's instance tag, for the frontend to match against digests.
+#[tauri::command]
+pub fn instance_id() -> String {
+    instance_token().to_string()
+}
 
 pub struct Session {
     pub id: u32,
@@ -227,6 +250,11 @@ pub fn pty_spawn(
     // from a terminal we own and (b) name the tab it came from.
     cmd.env("CANOPY", "1");
     cmd.env("CANOPY_PTY", id.to_string());
+    // Pty ids reset to 1 every app launch and every instance writes to the same
+    // ~/.canopy/sessions, so the pty id alone can't tell one instance's "term
+    // #5" from another's — which silently binds one agent's digest to another's
+    // terminal in the panel. This tag makes the pairing unambiguous.
+    cmd.env("CANOPY_INSTANCE", instance_token());
     let cwd = cwd
         .or_else(|| dirs_home())
         .unwrap_or_else(|| "/".to_string());
