@@ -204,6 +204,32 @@ const tabId = () =>
     ? crypto.randomUUID()
     : `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
+/** A one-line label for a tab, for the "all tabs" overflow menu. */
+function tabDisplayLabel(t: SubTab): string {
+  switch (t.type) {
+    case "terminal":
+      return t.customTitle ?? t.title;
+    case "file":
+      return t.file.name;
+    case "pr":
+      return `#${t.pr.number} ${t.pr.title}`;
+    case "ticket":
+      return `${t.ticket.id} ${t.ticket.title}`;
+    case "commit":
+      return `${t.short} ${t.subject}`;
+    case "branch":
+      return t.branch.branch;
+    case "chat":
+      return t.name;
+    case "collab":
+      return t.name;
+    case "review":
+      return t.review.title;
+    case "shared-project":
+      return t.name;
+  }
+}
+
 /** One entry in a right-hand rail (a shell or a running command). */
 interface RailChip {
   id: string;
@@ -1060,6 +1086,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // Menu shortcuts — only the visible project reacts.
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
+  // Keep the active tab in view when it changes (cycling, jumping, closing) —
+  // a strip that scrolls but doesn't follow leaves you looking at the wrong tabs.
+  const activeTabElRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!visible) return;
+    activeTabElRef.current?.scrollIntoView({ inline: "nearest", block: "nearest" });
+  }, [activeTabId, visible]);
   useEffect(() => {
     if (!visible) return;
     const closeTabHandler = () => {
@@ -1072,14 +1105,40 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     const toggleSidebarHandler = () => setCollapsed((v) => !v);
     const quickOpen = () => setPalette("files");
     const findInFiles = () => setPalette("search");
-    const cycle = (dir: 1 | -1) => () => {
+    const cycleTabs = (dir: 1 | -1) => {
       const list = tabsRef.current;
       if (list.length < 2) return;
       const i = list.findIndex((t) => t.id === activeTabIdRef.current);
       setActiveTabId(list[(i + dir + list.length) % list.length].id);
     };
-    const next = cycle(1);
-    const prev = cycle(-1);
+    // The tab-cycle chord is a native menu accelerator, but when focus is in
+    // the webview (Monaco/xterm) macOS never routes it to the menu — the
+    // unhandled key just rings the system bell ("tuk"). Handle it here in
+    // capture phase, preventDefault to silence the bell, and record the time so
+    // the menu handler (if it also fires, in a native-focus context) doesn't
+    // double-cycle. The keydown path always acts, so key-repeat is never
+    // dropped — only a paired menu event is suppressed.
+    const lastKeydownNav = { t: 0 };
+    const recentKeydown = () => Date.now() - lastKeydownNav.t < 150;
+    const onKeydown = (e: KeyboardEvent) => {
+      if (!visibleRef.current) return;
+      // Ctrl+Cmd+Arrow (matches the "Next/Previous Tab" accelerators).
+      if (!(e.ctrlKey && (e.metaKey || e.altKey))) return;
+      if (e.code === "ArrowRight" || e.code === "ArrowLeft") {
+        e.preventDefault();
+        lastKeydownNav.t = Date.now();
+        cycleTabs(e.code === "ArrowRight" ? 1 : -1);
+      }
+    };
+    const next = () => {
+      if (recentKeydown()) return;
+      cycleTabs(1);
+    };
+    const prev = () => {
+      if (recentKeydown()) return;
+      cycleTabs(-1);
+    };
+    window.addEventListener("keydown", onKeydown, true);
     // Settings asks for interactive CLI flows (gh auth login/logout, brew
     // install) to run somewhere the user can actually answer prompts.
     const runCommand = (e: Event) => {
@@ -1100,6 +1159,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       window.removeEventListener("menu:close-tab", closeTabHandler);
       window.removeEventListener("menu:new-terminal", newTerminalHandler);
       window.removeEventListener("menu:toggle-sidebar", toggleSidebarHandler);
+      window.removeEventListener("keydown", onKeydown, true);
       window.removeEventListener("menu:next-tab", next);
       window.removeEventListener("menu:prev-tab", prev);
       window.removeEventListener("menu:quick-open", quickOpen);
@@ -1147,10 +1207,16 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       if (closing?.type === "shared-project") {
         collabRef.current.leaveProject(closing.doc);
       }
+      const closingIndex = prev.findIndex((t) => t.id === id);
       const next = prev.filter((t) => t.id !== id);
-      setActiveTabId((active) =>
-        active === id ? (next.length ? next[next.length - 1].id : null) : active,
-      );
+      setActiveTabId((active) => {
+        if (active !== id) return active;
+        if (next.length === 0) return null;
+        // Land on the neighbour that took the closed tab's place (the tab to
+        // its right), or the new last one when the last tab was closed — so
+        // closing left-to-right stays predictable instead of jumping away.
+        return next[Math.min(closingIndex, next.length - 1)].id;
+      });
       return next;
     });
   }, []);
@@ -1418,6 +1484,18 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   );
   const changedPaths = new Set(changeGroups.flatMap((g) => g.files.map((f) => f.abs)));
   const changeCount = changeGroups.reduce((n, g) => n + g.files.length, 0);
+  // Files teammates are editing live in a project we're sharing — no git
+  // presence until saved, scoped to this project's roots.
+  const collabChanges = useMemo(
+    () =>
+      relay.collab
+        .ownerChanges()
+        .filter((c) => rootsRef.current.some((r) => c.path === r || c.path.startsWith(r + "/"))),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [relay.collabTick, rootsKey],
+  );
+  const collabEditedCount = collabChanges.filter((c) => c.edited).length;
+  const collabPaths = new Set(collabChanges.filter((c) => c.edited).map((c) => c.path));
   const teamBadge =
     relay.inbox.length + Object.values(relay.unread).reduce((a, b) => a + b, 0);
   const sectionOpen = (path: string) => openSections[path] ?? true;
@@ -1730,6 +1808,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 {group.map((tab) => (
               <div
                 key={tab.id}
+                ref={tab.id === activeTabId ? activeTabElRef : undefined}
                 className={`tab ${tab.id === activeTabId ? "tab-active" : ""} ${
                   (tab.type === "terminal" || tab.type === "chat") && tab.unread
                     ? "tab-unread"
@@ -1800,7 +1879,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 ) : tab.type === "shared-project" ? (
                   <LiveShareIcon size={12} className="tab-collab-icon" />
                 ) : (
-                  tab.file.external != null && <span className="tab-external">●</span>
+                  <>
+                    {/* Live-collaborated file: a teammate is editing this one,
+                        distinct from a plain unsaved dot. */}
+                    {tab.type === "file" && collabPaths.has(tab.file.path) && (
+                      <TeamIcon size={11} className="tab-collab-icon" />
+                    )}
+                    {tab.file.external != null && <span className="tab-external">●</span>}
+                  </>
                 )}
                 {tab.type === "terminal" && renamingTabId === tab.id ? (
                   <input
@@ -1878,6 +1964,25 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           setOpen={setRunMenuOpen}
         />
         <div className="pane-actions">
+          {/* Jump to any open tab — the strip caps tab width and scrolls, so a
+              crowded strip stays navigable without hunting. */}
+          {stripTabs.length > 4 && (
+            <button
+              className="btn-icon"
+              title="All open tabs"
+              onClick={(e) =>
+                tabMenu.open(
+                  e,
+                  stripTabs.map((t) => ({
+                    label: `${t.id === activeTabId ? "› " : ""}${tabDisplayLabel(t)}`,
+                    onClick: () => setActiveTabId(t.id),
+                  })),
+                )
+              }
+            >
+              ⌄
+            </button>
+          )}
           {/* Live share. Offered for any open file on a live relay with a
               teammate connected — whatever the file is, if it has a text buffer
               it can be edited together; shareFileLive reports the rare case
@@ -2607,6 +2712,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           loading={changesLoading}
           onOpen={(p) => void openFile(p, { diff: true })}
           onRefresh={() => void refreshChanges()}
+          collab={collabChanges}
+          onOpenCollab={(p) => void openFile(p, { diff: true })}
+          onSaveCollab={(p) =>
+            void saveFile(p).then(() => {
+              relay.collab.markOwnerSaved(p);
+              void refreshChanges();
+            })
+          }
         />
       )}
       {sideTab === "trackers" && (
@@ -2674,8 +2787,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               }}
             >
               <t.Icon size={18} />
-              {t.key === "changes" && changeCount > 0 && (
-                <span className="rail-badge">{Math.min(changeCount, 99)}</span>
+              {t.key === "changes" && changeCount + collabEditedCount > 0 && (
+                <span className="rail-badge">{Math.min(changeCount + collabEditedCount, 99)}</span>
               )}
               {t.key === "agents" && pending.length > 0 && (
                 <span

@@ -1393,18 +1393,15 @@ body,
   display: flex;
   overflow-x: auto;
   flex: 1;
-  /* Same as .run-rail/.project-tabs: already scrollable, scrollbar-width:none
-     just hid that fact. */
-  scrollbar-width: thin;
+  /* No visible scrollbar on the tab row: this WebView renders the overlay
+     scrollbar as a thick bar under the tabs. The active tab scrolls itself
+     into view (see the follow effect) and shift/trackpad wheel still scroll,
+     so scrollability isn't lost — just the ugly bar. */
+  scrollbar-width: none;
 }
 
 .tabs::-webkit-scrollbar {
-  height: 4px;
-}
-
-.tabs::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 2px;
+  display: none;
 }
 
 .tab {
@@ -1417,6 +1414,17 @@ body,
   cursor: pointer;
   border-right: 1px solid var(--border);
   white-space: nowrap;
+  /* A single tab never dominates the strip — long PR/ticket titles ellipsize
+     instead of pushing everything else off-screen. */
+  max-width: 200px;
+  flex: 0 0 auto;
+}
+
+.tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
 .tab-active {
@@ -2072,6 +2080,46 @@ body,
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+/* ---------- collaborated (live, unsaved) changes ---------- */
+
+.changes-collab .change-group-head {
+  color: var(--accent);
+}
+
+.change-collab-row .change-dir {
+  flex: 1;
+}
+
+/* A small "live" pill, distinct from the git-status letter badges, so a
+   teammate's unsaved live edit reads differently from a tracked change. */
+.change-collab-tag {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--on-accent);
+  background: var(--accent);
+  border-radius: 4px;
+  padding: 0 5px;
+  width: auto;
+  flex: 0 0 auto;
+}
+
+.change-collab-save {
+  margin-left: auto;
+  flex: 0 0 auto;
+  visibility: hidden;
+}
+
+.change-collab-row:hover .change-collab-save {
+  visibility: visible;
+}
+
+/* A live-collaborated file tab: a teammate is editing it. */
+.tab-collab-icon {
+  color: var(--accent);
 }
 
 /* ---------- agents panel ---------- */
