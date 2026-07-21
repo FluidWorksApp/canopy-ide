@@ -5309,10 +5309,6 @@ a.btn-mini {
   min-width: 160px;
 }
 
-.rail-badge-with-dot {
-  right: 8px;
-}
-
 .rail-conn {
   position: absolute;
   top: -3px;
