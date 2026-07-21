@@ -454,17 +454,14 @@ export interface RelayStatus {
   visibility: "local" | "public" | null;
   /** Host only, public mode: the internet-facing address teammates dial. */
   public_ip: string | null;
-  /** Host only, public mode: did the router accept a UPnP port mapping?
-   *  null = not applicable (local relay). false = the advertised address is
-   *  very likely unreachable until the port is forwarded by hand. */
-  port_mapped: boolean | null;
-  /** Why the mapping failed, when it did. */
-  port_map_note: string | null;
   members: RelayMember[];
 }
 
 export interface RelayChatMsg {
   id: string;
+  /** Set on entries synthesised from a completed file transfer, so the
+   *  conversation records what was sent/received as well as what was said. */
+  file?: { name: string; path: string | null; direction: "in" | "out" };
   from: string;
   from_name: string;
   /** null = everyone; an id = a direct message. */
@@ -506,6 +503,20 @@ export const onRelayChat = (cb: (m: RelayChatMsg) => void): Promise<UnlistenFn> 
 export const onRelayCommand = (cb: (m: RelayCommandMsg) => void): Promise<UnlistenFn> =>
   listen<RelayCommandMsg>("relay:command", (e) => cb(e.payload));
 
+/** Live collaborative editing. `doc` is an opaque id minted by the sharer; the
+ *  backend never learns which file it refers to, and no path is ever sent —
+ *  see docs/collab-editing.md §5. Separate from sendCommand because this runs
+ *  at a frame per keystroke and must not touch the inbox or notifications. */
+export const relaySendCollab = (
+  to: string | null,
+  doc: string,
+  body: import("./collab").CollabBody,
+) => invoke<void>("relay_send_collab", { to, doc, body });
+export const onRelayCollab = (
+  cb: (m: import("./collab").CollabMsg) => void,
+): Promise<UnlistenFn> =>
+  listen<import("./collab").CollabMsg>("relay:collab", (e) => cb(e.payload));
+
 /** A "file-offer" command's payload: where to fetch, the one-time token that
  *  gates the fetch, and the hash the received bytes must match. */
 export interface RelayFileOffer {
@@ -525,6 +536,9 @@ export interface RelayTransferEvent {
   ok: boolean;
   /** in+ok: saved path; out+ok: receiver's name; !ok: what failed. */
   detail: string;
+  /** The member on the other end, so a finished transfer can be filed into
+   *  that conversation instead of only flashing past as a toast. */
+  peer: string | null;
 }
 
 export interface RelayTransferProgress {
@@ -540,8 +554,8 @@ export interface RelayTransferProgress {
  *  relay:transfer event. */
 export const relayOfferFile = (to: string, path: string) =>
   invoke<void>("relay_offer_file", { to, path });
-export const relayAcceptFile = (offer: RelayFileOffer, dest: string) =>
-  invoke<void>("relay_accept_file", { ...offer, dest });
+export const relayAcceptFile = (offer: RelayFileOffer, dest: string, from?: string | null) =>
+  invoke<void>("relay_accept_file", { ...offer, dest, from: from ?? null });
 export const onRelayTransfer = (cb: (e: RelayTransferEvent) => void): Promise<UnlistenFn> =>
   listen<RelayTransferEvent>("relay:transfer", (e) => cb(e.payload));
 export const onRelayTransferProgress = (

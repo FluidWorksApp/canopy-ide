@@ -4,6 +4,8 @@ mod fsx;
 mod git;
 mod lsp;
 mod pty;
+mod punch;
+mod qstream;
 mod relay;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
@@ -261,6 +263,7 @@ pub fn run() {
             relay::relay_status,
             relay::relay_send_chat,
             relay::relay_send_command,
+            relay::relay_send_collab,
             relay::relay_offer_file,
             relay::relay_accept_file,
         ])

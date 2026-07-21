@@ -1,6 +1,6 @@
 // Shell: project tabs on top; each open project is a fully mounted (hidden
 // when inactive) ProjectView so its terminals keep running across switches.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "./ipc";
 import {
   emptyWorkspace,
@@ -15,6 +15,7 @@ import {
 } from "./projects";
 import type { AgentEventEntry, NoticeKind, RelayHandle } from "./types";
 import { derivePending, pendingForRoots } from "./notifications";
+import { CollabManager, safeName } from "./collab";
 import { ProjectView } from "./components/ProjectView";
 import { ProjectDialog } from "./components/ProjectDialog";
 import { ProjectManager } from "./components/ProjectManager";
@@ -110,11 +111,33 @@ export default function App() {
   // (received + our own sends); the inbox holds commands awaiting action.
   const [relayStatus, setRelayStatus] = useState<ipc.RelayStatus>({
     role: "off", code: null, port: null, ips: [], addr: null, self_id: null, name: null,
-    visibility: null, public_ip: null, port_mapped: null, port_map_note: null, members: [],
+    visibility: null, public_ip: null, members: [],
   });
   const [relayChat, setRelayChat] = useState<ipc.RelayChatMsg[]>([]);
   const [relayInbox, setRelayInbox] = useState<ipc.RelayCommandMsg[]>([]);
   const [relayTransfers, setRelayTransfers] = useState<import("./types").RelayTransfer[]>([]);
+  const relayIntentional = useRef(false);
+  const prevRelayRole = useRef(relayStatus.role);
+  useEffect(() => {
+    const was = prevRelayRole.current;
+    const now = relayStatus.role;
+    prevRelayRole.current = now;
+    if ((was === "host" || was === "client") && now === "off") {
+      if (relayIntentional.current) {
+        relayIntentional.current = false;
+      } else {
+        notify("Disconnected from the team relay.", "error");
+        void nativeNotify("Canopy — Team", "Disconnected from the team relay.");
+      }
+    }
+  }, [relayStatus.role, notify, nativeNotify]);
+  // Live editing. The manager is a plain mutable object deliberately kept out
+  // of React state — it holds Monaco models and per-keystroke session state,
+  // neither of which survives being copied. `collabTick` is how a change in it
+  // reaches the render tree.
+  const collab = useRef<CollabManager | null>(null);
+  if (!collab.current) collab.current = new CollabManager();
+  const [collabTick, setCollabTick] = useState(0);
   // The relay we're persisting chat under = the host's stable identity key.
   // Null when off, so the persist effect never writes an empty transcript.
   const relayChatLabel = useRef<string | null>(null);
@@ -128,6 +151,34 @@ export default function App() {
       relayChatLabel.current = null;
     }
   }, [relayStatus]);
+  // The collab manager follows the relay's lifecycle: it needs our member id to
+  // recognise its own operations coming back, and every session is over the
+  // moment the relay is. Members who vanish take their carets with them —
+  // otherwise a caret sits on a line forever after its owner closed the lid.
+  const seenMembers = useRef<string[]>([]);
+  useEffect(() => {
+    const mgr = collab.current!;
+    if (relayStatus.role === "off") {
+      seenMembers.current = [];
+      mgr.reset();
+      setCollabTick((n) => n + 1);
+      return;
+    }
+    if (relayStatus.self_id) mgr.setSelf(relayStatus.self_id);
+    const now = relayStatus.members.map((m) => m.id);
+    for (const gone of seenMembers.current.filter((id) => !now.includes(id))) {
+      mgr.dropMember(gone);
+    }
+    seenMembers.current = now;
+  }, [relayStatus]);
+
+  // A session opening or closing (ours or a guest's) has no relay frame of its
+  // own on the local side, so the manager pokes us to re-read `activeCount` for
+  // the global collaborating indicator.
+  useEffect(() => {
+    collab.current!.onChange = () => setCollabTick((n) => n + 1);
+  }, []);
+
   // Persist as it grows. The length guard means clearing the in-memory view on
   // disconnect can't wipe the stored history.
   useEffect(() => {
@@ -138,6 +189,15 @@ export default function App() {
   // Which conversation is on screen (null = team chat, undefined = none) —
   // a toast for a message the user is already reading is noise.
   const activeChatRef = useRef<string | null | undefined>(undefined);
+  // Per-conversation "last read" timestamps, so the Team panel can show how
+  // many messages each member (and the everyone channel) has waiting. Keyed by
+  // convoKey: "" for the team channel, the member id for a DM. A message counts
+  // as unread when it postdates the last time that conversation was on screen.
+  const [chatSeen, setChatSeen] = useState<Record<string, number>>({});
+  const markSeen = useCallback((peer: string | null) => {
+    const key = peer ?? "";
+    setChatSeen((s) => ({ ...s, [key]: Date.now() }));
+  }, []);
   const [updateAvail, setUpdateAvail] = useState<UpdateAvailability>(null);
   const [updateProgress, setUpdateProgress] = useState<number | null>(null);
   // "Later" mutes that version for this run; the next launch may ask again.
@@ -272,7 +332,11 @@ export default function App() {
         // chat (null). Toast only when that conversation isn't on screen.
         const convo = m.to === null ? null : m.from;
         const text = m.text.length > 120 ? `${m.text.slice(0, 120)}…` : m.text;
-        if (activeChatRef.current !== convo) {
+        // If the user is looking at this conversation, it's already read;
+        // otherwise it stays unread (the panel badge) and we toast.
+        if (activeChatRef.current === convo) {
+          markSeen(convo);
+        } else {
           notify(`${m.from_name}: ${text}`);
         }
         void nativeNotify(
@@ -287,11 +351,26 @@ export default function App() {
         const text =
           m.kind === "open-pr" && pr
             ? `${m.from_name} asked you to review PR #${pr.number}: ${pr.title}`
-            : m.kind === "file-offer" && file
-              ? `${m.from_name} wants to send you ${file}`
-              : `${m.from_name} sent a ${m.kind} command`;
+            : m.kind === "review"
+              ? `${m.from_name} asked you to review ${(m.payload as { title?: string } | null)?.title ?? "a branch"}`
+              : m.kind === "file-offer" && file
+                ? `${m.from_name} wants to send you ${file}`
+                : `${m.from_name} sent a ${m.kind} command`;
         notify(`${text} — see the Team panel`);
         void nativeNotify("Canopy — Team", text);
+      }),
+      ipc.onRelayCollab((m) => {
+        const mgr = collab.current!;
+        const known = mgr.get(m.doc) !== undefined;
+        mgr.receive(m);
+        setCollabTick((n) => n + 1);
+        // Only the invitation is worth interrupting for. Everything else on
+        // this channel is a keystroke.
+        if (!known && m.body.kind === "offer") {
+          const what = `${m.from_name} wants to edit ${safeName(m.body.name)} with you`;
+          notify(`${what} — see the Team panel`);
+          void nativeNotify("Canopy — Team", what);
+        }
       }),
       ipc.onRelayTransferProgress((p) => {
         // Upsert the live row; a progress tick can arrive before any terminal
@@ -320,6 +399,30 @@ export default function App() {
               : `Sending ${t.name} failed: ${t.detail}`;
         notify(msg, t.ok ? "success" : "error");
         void nativeNotify("Canopy — File transfer", msg);
+        // A completed transfer is part of the conversation, not just a toast
+        // that scrolls away: record it in the transcript with the peer it was
+        // with (a DM, since files are always one-to-one), so history shows what
+        // was sent and received alongside what was said. Only successes — a
+        // failed transfer left nothing to reference.
+        if (t.ok && t.peer) {
+          const selfId = relayStatus.self_id ?? "";
+          const fileMsg: ipc.RelayChatMsg = {
+            id: `file-${t.id}`,
+            from: t.direction === "out" ? selfId : t.peer,
+            from_name: t.direction === "out" ? "you" : "",
+            to: t.direction === "out" ? t.peer : selfId,
+            text: "",
+            ts: Date.now(),
+            file: {
+              name: t.name,
+              path: t.direction === "in" ? t.detail : null,
+              direction: t.direction,
+            },
+          };
+          setRelayChat((prev) =>
+            prev.some((m) => m.id === fileMsg.id) ? prev : [...prev.slice(-499), fileMsg],
+          );
+        }
         // Mark the row terminal, then retire it after a beat so the bar's
         // final state is visible before it disappears.
         setRelayTransfers((prev) => {
@@ -583,15 +686,32 @@ export default function App() {
   const relaySendCommand = useCallback(async (to: string | null, kind: string, payload: unknown) => {
     await ipc.relaySendCommand(to, kind, payload);
   }, []);
+  // Unread-per-conversation, derived: a message someone else sent, newer than
+  // the last time that conversation was read. "" is the team channel; a member
+  // id is a DM. Own messages never count.
+  const unread = useMemo(() => {
+    const self = relayStatus.self_id;
+    const counts: Record<string, number> = {};
+    for (const m of relayChat) {
+      if (m.from === self) continue;
+      const key = m.to === null ? "" : m.to === self ? m.from : null;
+      if (key === null) continue;
+      if (m.ts > (chatSeen[key] ?? 0)) counts[key] = (counts[key] ?? 0) + 1;
+    }
+    return counts;
+  }, [relayChat, chatSeen, relayStatus.self_id]);
   const relay: RelayHandle = {
     status: relayStatus,
     chat: relayChat,
     inbox: relayInbox,
     transfers: relayTransfers,
+    collab: collab.current,
+    collabTick,
     hostStart: async (name, visibility, port) => {
       setRelayStatus(await ipc.relayHostStart(name, visibility, port));
     },
     hostStop: async () => {
+      relayIntentional.current = true;
       setRelayStatus(await ipc.relayHostStop());
       setRelayChat([]);
     },
@@ -602,6 +722,7 @@ export default function App() {
       setRelayStatus(await ipc.relayConnect(addr, code, name));
     },
     disconnect: async () => {
+      relayIntentional.current = true;
       setRelayStatus(await ipc.relayDisconnect());
       setRelayChat([]);
     },
@@ -610,7 +731,10 @@ export default function App() {
     dismissInbox: (id) => setRelayInbox((prev) => prev.filter((m) => m.id !== id)),
     reportActiveChat: (peer) => {
       activeChatRef.current = peer;
+      // Opening (or having open) a conversation reads it.
+      if (peer !== undefined) markSeen(peer);
     },
+    unread,
   };
 
   if (!loaded) return null;
@@ -662,6 +786,17 @@ export default function App() {
           </button>
         </div>
         <div className="titlebar-spacer" />
+        {collabTick >= 0 && collab.current!.activeCount > 0 && (
+          <div
+            className="collab-live"
+            title={`Live collaboration in progress — ${collab.current!.activeCount} shared ${
+              collab.current!.activeCount === 1 ? "file" : "files"
+            }`}
+          >
+            <span className="collab-live-dot" />
+            Collaborating
+          </div>
+        )}
         <button
           className="btn project-manage-btn"
           title="Manage projects — open, create, edit, delete"

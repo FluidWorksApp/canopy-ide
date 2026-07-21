@@ -400,3 +400,17 @@ export function TeamIcon({ size = 14, className }: IconProps) {
     </svg>
   );
 }
+
+// Broadcast/live: a solid core with signal arcs, for sharing a file or project
+// live with the team.
+export function LiveShareIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <circle cx="12" cy="12" r="2.5" fill="currentColor" stroke="none" />
+      <path d="M7.4 7.4a6.5 6.5 0 0 0 0 9.2" />
+      <path d="M16.6 16.6a6.5 6.5 0 0 0 0-9.2" />
+      <path d="M4.6 4.6a10.4 10.4 0 0 0 0 14.8" />
+      <path d="M19.4 19.4a10.4 10.4 0 0 0 0-14.8" />
+    </svg>
+  );
+}

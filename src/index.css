@@ -200,6 +200,49 @@ body,
   flex: 1;
 }
 
+/* Always-visible "live collaboration in progress" indicator. Sits in the
+   titlebar so it shows on every tab and project, not just the shared file. */
+.collab-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  margin-right: 4px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #f2544b;
+  background: rgba(239, 68, 68, 0.13);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  user-select: none;
+  white-space: nowrap;
+}
+.collab-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ef4444;
+  animation: collab-blink 1.15s ease-in-out infinite;
+}
+@keyframes collab-blink {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55);
+  }
+  55% {
+    opacity: 0.3;
+    box-shadow: 0 0 0 5px rgba(239, 68, 68, 0);
+  }
+}
+
+/* A button carrying a leading icon next to its label. */
+.btn-icon-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .root-chip {
   background: var(--bg-raised);
   border: 1px solid var(--border);
@@ -472,6 +515,7 @@ body,
 
 .rail-badge {
   position: absolute;
+  z-index: 2;
   /* Clear of the glyph: at 34px the badge used to sit on top of the icon. */
   top: -3px;
   right: -4px;
@@ -2778,8 +2822,7 @@ body,
 .notice {
   position: fixed;
   bottom: 34px;
-  left: 50%;
-  transform: translateX(-50%);
+  right: 16px;
   z-index: 300;
   max-width: 60vw;
   padding: 8px 14px;
@@ -5290,32 +5333,184 @@ a.btn-mini {
 
 /* ---------- team relay: identity trust badges ---------- */
 
-.team-trust {
-  font-size: 10px;
-  padding: 0 5px;
-  border-radius: 4px;
+/* Trust as one glyph. A green tick reads instantly and takes no width from
+   the name; the hover title still carries the fingerprint for anyone who
+   wants it. Only "changed" escalates to a filled warning. */
+.team-mark {
+  font-size: 12px;
   flex: 0 0 auto;
-  white-space: nowrap;
-  border: 1px solid transparent;
+  line-height: 1;
+  cursor: help;
 }
 
-.team-trust-known {
+.team-mark-ok {
   color: var(--ok);
-  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
 }
 
-.team-trust-new {
-  color: var(--text-dim);
-  border-color: var(--border);
-}
-
-.team-trust-relayed {
+/* First contact and host-asserted are legitimate but not yet independently
+   verified — a dimmer tick, not the confident green. */
+.team-mark-new,
+.team-mark-relayed {
   color: var(--text-dim);
 }
 
-.team-trust-changed {
+.team-mark-changed {
   color: var(--on-accent);
   background: var(--danger);
-  border-color: var(--danger);
+  border-radius: 4px;
+  padding: 0 4px;
   font-weight: 600;
+}
+
+/* Pushes the unread count to the row's right edge (the File/Chat buttons that
+   used to hold this side are gone — the whole row is the click target now). */
+.team-member-spacer {
+  margin-left: auto;
+}
+
+/* Unread count: the one thing a member row needs to shout. */
+.team-unread {
+  flex: 0 0 auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 11px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.team-unread-total {
+  margin-left: 6px;
+}
+
+/* Attach lives in the composer, a quiet icon beside what you're typing —
+   not a button competing with the person's name in the member list. */
+.chat-attach {
+  flex: 0 0 auto;
+  font-size: 15px;
+  line-height: 1;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: none;
+  border: 1px solid transparent;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.chat-attach:hover:not(:disabled) {
+  opacity: 1;
+  background: var(--bg-raised);
+}
+
+.chat-attach:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+/* ---------- live collaborative editing ---------- */
+/* Remote carets are Monaco decorations rather than overlay widgets: a widget
+   needs pixel coordinates and re-measuring on every scroll and font change,
+   and a caret that lags the text it is pointing at is worse than none. */
+.collab-cursor-caret::before {
+  content: "";
+  position: absolute;
+  width: 2px;
+  height: 1.2em;
+  background: var(--accent);
+  z-index: 5;
+}
+.collab-selection {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: 2px;
+}
+
+.collab-view {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.collab-editor {
+  flex: 1;
+  min-height: 0;
+}
+.collab-banner {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-bottom: 1px solid var(--border);
+}
+/* The owner leaving is the one state the user must not misread as "still
+   shared" — their edits stop going anywhere and nothing will be saved. */
+.collab-banner-orphaned {
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+  color: var(--text);
+}
+.tab-collab-icon {
+  opacity: 0.8;
+}
+
+/* A file that moved through a conversation, shown inline in its transcript —
+   clicking reveals a received file in Finder. */
+.chat-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  font-size: 12px;
+}
+.chat-file:hover {
+  border-color: var(--accent);
+}
+.chat-file-icon {
+  flex: 0 0 auto;
+}
+.chat-file-name {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+.chat-file-dir {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* The Request-review control anchors its member dropdown. */
+.review-send {
+  position: relative;
+  display: inline-block;
+}
+.review-menu {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 40;
+  min-width: 160px;
+}
+
+.rail-conn {
+  position: absolute;
+  top: -3px;
+  right: -4px;
+  z-index: 1;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ok, #3fb950);
+  border: 2px solid var(--bg);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--ok, #3fb950) 70%, transparent);
 }

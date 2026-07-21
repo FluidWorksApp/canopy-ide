@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -110,6 +110,70 @@ pub struct CommandMsg {
     pub ts: u64,
 }
 
+/// One text operation in the collaborative-editing stream. Offsets are UTF-16
+/// code units so they land in Monaco's coordinate space without a conversion
+/// layer on either side.
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(tag = "op", rename_all = "lowercase")]
+pub enum CollabOp {
+    Retain { n: u32 },
+    Insert { s: String },
+    Delete { n: u32 },
+}
+
+/// What a collab frame is saying about a document. Typed rather than a free
+/// `Value` (the way `CommandMsg::payload` is) so a malformed body is refused at
+/// the relay instead of being fanned out to every peer for the frontend to
+/// puzzle over — the collab path runs at one frame per keystroke, so it is the
+/// last place to be forgiving.
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum CollabBody {
+    /// Owner -> peer: "I am sharing a file live." `name` is a BASENAME FOR
+    /// DISPLAY ONLY and is re-sanitised on the receiving side. A path never
+    /// crosses this wire — see docs/collab-editing.md §5, invariant COLLAB-1.
+    Offer { name: String, lang: Option<String> },
+    /// Peer -> owner: "let me in." Refused unless the sender was offered it.
+    Open,
+    /// Owner -> peer: the whole document at `rev`, on open or on resync.
+    Snapshot { rev: u64, text: String },
+    /// The edit stream. Peer -> owner: `rev` is the base the ops were composed
+    /// against. Owner -> everyone: `rev` is the new authoritative revision and
+    /// `author` is whose op it is, so the author recognises its own ack.
+    Ops {
+        rev: u64,
+        ops: Vec<CollabOp>,
+        #[serde(default)]
+        author: String,
+        /// Owner's document hash at `rev`, sent every few revisions. A peer
+        /// that computes a different one has diverged and asks to resync,
+        /// which is what keeps a transform bug from becoming silent corruption.
+        #[serde(default)]
+        hash: Option<String>,
+    },
+    /// Peer -> owner: "I disagree with you about the document, send it again."
+    Resync { reason: String },
+    /// Owner unshares, or a peer leaves the document.
+    Close { reason: String },
+    /// Presence. Unsequenced and droppable; `rev` lets a stale one be
+    /// transformed into place rather than drawn in the wrong spot.
+    Cursor { anchor: u32, head: u32, rev: u64 },
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct CollabMsg {
+    pub id: String,
+    pub from: String,
+    pub from_name: String,
+    pub to: Option<String>,
+    /// The document. Opaque 128-bit CSPRNG token minted by the owner; the only
+    /// way any peer can name a document, and it resolves to a path in exactly
+    /// one process (the owner's) and only via an explicit local share.
+    pub doc: String,
+    pub body: CollabBody,
+    pub ts: u64,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 enum Frame {
@@ -123,6 +187,11 @@ enum Frame {
     Presence { members: Vec<Member> },
     Chat(ChatMsg),
     Command(CommandMsg),
+    /// Live collaborative editing. Deliberately its own variant rather than a
+    /// `Command` kind: commands land in the Team panel's inbox and raise a
+    /// notification, which is right for "review this PR" and catastrophic for
+    /// a frame per keystroke.
+    Collab(CollabMsg),
     Ping,
     Pong,
 }
@@ -144,7 +213,7 @@ fn peer_send(sender: &Arc<Mutex<secure::Sender>>, frame: &Frame) -> bool {
 /// key: an attacker gets one online guess per connection (which the tarpit
 /// throttles) and learns nothing from eavesdropping. HKDF splits that key
 /// per-direction; ChaCha20-Poly1305 encrypts and authenticates every frame.
-mod secure {
+pub(crate) mod secure {
     use chacha20poly1305::aead::{Aead, KeyInit};
     use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
     use hkdf::Hkdf;
@@ -187,7 +256,7 @@ mod secure {
         salt
     }
 
-    fn write_prefixed(mut w: &TcpStream, data: &[u8]) -> std::io::Result<()> {
+    fn write_prefixed(w: &mut dyn Write, data: &[u8]) -> std::io::Result<()> {
         w.write_all(&(data.len() as u32).to_be_bytes())?;
         w.write_all(data)?;
         w.flush()
@@ -205,12 +274,23 @@ mod secure {
         Ok(buf)
     }
 
+    /// A duplex byte pipe the secure layer runs over. Boxed rather than generic
+    /// so `Sender`/`Receiver` stay concrete types and don't ripple type
+    /// parameters through `Host`/`Client`/`Peer`. TCP supplies two cloned
+    /// halves of one socket; the UDP transport supplies its own reliable-stream
+    /// halves. The crypto neither knows nor cares which — the whole point of
+    /// this split (see punch.rs) is that the pipe under it changed from a TCP
+    /// listener CGNAT blocks to a hole-punched UDP path it doesn't.
+    pub type BoxWrite = Box<dyn Write + Send>;
+    pub type BoxRead = Box<dyn Read + Send>;
+
     /// The encrypting half of a channel. NOT internally synchronised — wrap it
-    /// in a Mutex; the counter nonce demands serialised sends.
+    /// in a Mutex; the counter nonce demands serialised sends, and the counter
+    /// only stays in step because the pipe below is reliable and ordered.
     pub struct Sender {
         cipher: ChaCha20Poly1305,
         counter: u64,
-        stream: TcpStream,
+        writer: BoxWrite,
     }
 
     impl Sender {
@@ -220,7 +300,7 @@ mod secure {
                 return false;
             };
             self.counter = self.counter.wrapping_add(1);
-            write_prefixed(&self.stream, &ct).is_ok()
+            write_prefixed(&mut self.writer, &ct).is_ok()
         }
     }
 
@@ -229,7 +309,7 @@ mod secure {
     pub struct Receiver {
         cipher: ChaCha20Poly1305,
         counter: u64,
-        reader: BufReader<TcpStream>,
+        reader: BufReader<BoxRead>,
     }
 
     impl Receiver {
@@ -242,19 +322,26 @@ mod secure {
         }
     }
 
-    fn channel(stream: &TcpStream, send_key: [u8; 32], recv_key: [u8; 32]) -> Option<(Sender, Receiver)> {
-        Some((
+    /// Build the two halves from an ALREADY-wrapped reader (the handshake reads
+    /// through the same BufReader it hands on, so buffered bytes aren't lost).
+    fn channel(
+        writer: BoxWrite,
+        reader: BufReader<BoxRead>,
+        send_key: [u8; 32],
+        recv_key: [u8; 32],
+    ) -> (Sender, Receiver) {
+        (
             Sender {
                 cipher: ChaCha20Poly1305::new(Key::from_slice(&send_key)),
                 counter: 0,
-                stream: stream.try_clone().ok()?,
+                writer,
             },
             Receiver {
                 cipher: ChaCha20Poly1305::new(Key::from_slice(&recv_key)),
                 counter: 0,
-                reader: BufReader::new(stream.try_clone().ok()?),
+                reader,
             },
-        ))
+        )
     }
 
     /// SPAKE2 over the raw stream, keyed by `code`. The joining client is the
@@ -264,20 +351,24 @@ mod secure {
     /// always completes), but with a mismatched key, so the first real frame
     /// fails to decrypt. That is where a bad code is rejected.
     pub fn handshake(
-        stream: &TcpStream,
+        mut writer: BoxWrite,
+        reader: BoxRead,
         code: &str,
         initiator: bool,
     ) -> Option<(Sender, Receiver, [u8; 32])> {
+        // The SAME BufReader is used for the handshake read and then handed to
+        // the Receiver — a fresh one could strand bytes the first read buffered.
+        let mut br = BufReader::new(reader);
         let (state, mine) = Spake2::<Ed25519Group>::start_symmetric(
             &Password::new(code.as_bytes()),
             &Identity::new(b"canopy-relay"),
         );
         let theirs = if initiator {
-            write_prefixed(stream, &mine).ok()?;
-            read_prefixed(&mut { stream }).ok()?
+            write_prefixed(&mut writer, &mine).ok()?;
+            read_prefixed(&mut br).ok()?
         } else {
-            let t = read_prefixed(&mut { stream }).ok()?;
-            write_prefixed(stream, &mine).ok()?;
+            let t = read_prefixed(&mut br).ok()?;
+            write_prefixed(&mut writer, &mine).ok()?;
             t
         };
         let key = state.finish(&theirs).ok()?;
@@ -290,7 +381,7 @@ mod secure {
         // session (so an identity frame can't be replayed).
         let binding = derive(&key, None, b"canopy-relay identity-binding");
         let (send_key, recv_key) = if initiator { (i2r, r2i) } else { (r2i, i2r) };
-        let (sender, receiver) = channel(stream, send_key, recv_key)?;
+        let (sender, receiver) = channel(writer, br, send_key, recv_key);
         Some((sender, receiver, binding))
     }
 
@@ -303,14 +394,20 @@ mod secure {
     /// keys unique so counter-from-0 nonces are safe. Bulk flows
     /// sender->receiver; the receiver's first frame authenticates it (only a
     /// holder of the token can produce a decryptable one).
-    pub fn file_channel(stream: &TcpStream, token: &str, is_sender: bool) -> Option<(Sender, Receiver)> {
+    pub fn file_channel(
+        mut writer: BoxWrite,
+        reader: BoxRead,
+        token: &str,
+        is_sender: bool,
+    ) -> Option<(Sender, Receiver)> {
+        let mut br = BufReader::new(reader);
         // The sender picks the salt and sends it first; the receiver reads it.
         let salt = if is_sender {
             let salt = random_salt();
-            write_prefixed(stream, &salt).ok()?;
+            write_prefixed(&mut writer, &salt).ok()?;
             salt
         } else {
-            let got = read_prefixed(&mut { stream }).ok()?;
+            let got = read_prefixed(&mut br).ok()?;
             if got.len() != 16 {
                 return None;
             }
@@ -320,16 +417,32 @@ mod secure {
         };
         let s2r = derive(token.as_bytes(), Some(&salt), b"canopy-file sender->receiver");
         let r2s = derive(token.as_bytes(), Some(&salt), b"canopy-file receiver->sender");
-        if is_sender {
-            channel(stream, s2r, r2s)
-        } else {
-            channel(stream, r2s, s2r)
-        }
+        let (send_key, recv_key) = if is_sender { (s2r, r2s) } else { (r2s, s2r) };
+        Some(channel(writer, br, send_key, recv_key))
     }
 
     /// Break a channel's underlying socket so a blocked `recv` returns.
     pub fn shutdown(stream: &TcpStream) {
         let _ = stream.shutdown(Shutdown::Both);
+    }
+
+    /// TCP convenience: clone the socket into the two boxed halves the generic
+    /// `handshake` now takes. Keeps the LAN callers a one-word change while the
+    /// UDP transport builds its own halves and calls `handshake` directly.
+    pub fn handshake_tcp(
+        stream: &TcpStream,
+        code: &str,
+        initiator: bool,
+    ) -> Option<(Sender, Receiver, [u8; 32])> {
+        let w: BoxWrite = Box::new(stream.try_clone().ok()?);
+        let r: BoxRead = Box::new(stream.try_clone().ok()?);
+        handshake(w, r, code, initiator)
+    }
+
+    pub fn file_channel_tcp(stream: &TcpStream, token: &str, is_sender: bool) -> Option<(Sender, Receiver)> {
+        let w: BoxWrite = Box::new(stream.try_clone().ok()?);
+        let r: BoxRead = Box::new(stream.try_clone().ok()?);
+        file_channel(w, r, token, is_sender)
     }
 }
 
@@ -507,14 +620,33 @@ mod identity {
 
 // ---------- state ----------
 
+/// How to forcibly break a peer's connection so a thread blocked in `recv`
+/// wakes up. TCP shuts the socket down; QUIC closes the connection. Kept
+/// lock-free (no `secure::Sender` mutex) so closing a dead peer can't block on
+/// a send still in flight.
+enum Closer {
+    Tcp(TcpStream),
+    Quic(quinn::Connection),
+}
+
+impl Closer {
+    fn close(&self) {
+        match self {
+            Closer::Tcp(s) => {
+                let _ = s.shutdown(Shutdown::Both);
+            }
+            Closer::Quic(c) => c.close(0u32.into(), b"bye"),
+        }
+    }
+}
+
 struct Peer {
     member: Member,
     /// Encrypted writer to this peer. Every fan-out (chat, presence, ping)
     /// locks it — the AEAD counter nonce forbids concurrent sends.
     sender: Arc<Mutex<secure::Sender>>,
-    /// A bare clone of the socket, only for `shutdown` on teardown — lock-free
-    /// so closing a dead peer can't block on a send in flight.
-    shutdown: TcpStream,
+    /// Teardown handle, transport-agnostic — see `Closer`.
+    shutdown: Closer,
 }
 
 struct Host {
@@ -528,11 +660,6 @@ struct Host {
     visibility: String,
     /// Discovered when visibility is "public"; None when the lookup failed.
     public_ip: Option<String>,
-    /// None for a local relay. Some(Ok) when the router accepted a UPnP
-    /// mapping for our port; Some(Err(reason)) when it did not, so the panel
-    /// can tell the host to forward it by hand rather than let them hand out
-    /// an address that silently goes nowhere.
-    port_map: Option<Result<(), String>>,
     peers: HashMap<String, Peer>,
     /// Flips false on stop; the listener and every reader checks it before
     /// touching state, so threads of a stopped relay can't haunt the next one.
@@ -551,7 +678,7 @@ struct Client {
     host_trust: String,
     /// Encrypted writer to the host (which relays onward).
     sender: Arc<Mutex<secure::Sender>>,
-    shutdown: TcpStream,
+    shutdown: Closer,
     alive: Arc<AtomicBool>,
 }
 
@@ -599,14 +726,6 @@ pub struct RelayStatus {
     /// Host only, public visibility: the internet-facing address teammates
     /// dial. None while unknown (lookup failed / local mode).
     pub public_ip: Option<String>,
-    /// Host only, public visibility: did the router accept a UPnP mapping for
-    /// our port? None when not applicable (local relay). Some(false) means the
-    /// advertised address is very likely unreachable until the port is
-    /// forwarded by hand — the panel says so rather than letting the host hand
-    /// out an address that goes nowhere.
-    pub port_mapped: Option<bool>,
-    /// Why the mapping failed, when it did.
-    pub port_map_note: Option<String>,
     pub members: Vec<Member>,
 }
 
@@ -653,8 +772,6 @@ fn status_of(inner: &Inner) -> RelayStatus {
             name: Some(host.name.clone()),
             visibility: Some(host.visibility.clone()),
             public_ip: host.public_ip.clone(),
-            port_mapped: host.port_map.as_ref().map(|r| r.is_ok()),
-            port_map_note: host.port_map.as_ref().and_then(|r| r.as_ref().err().cloned()),
             members: host_members(host),
         };
     }
@@ -689,8 +806,6 @@ fn status_of(inner: &Inner) -> RelayStatus {
             name: Some(client.name.clone()),
             visibility: None,
             public_ip: None,
-            port_mapped: None,
-            port_map_note: None,
             members,
         };
     }
@@ -704,51 +819,7 @@ fn status_of(inner: &Inner) -> RelayStatus {
         name: None,
         visibility: None,
         public_ip: None,
-        port_mapped: None,
-        port_map_note: None,
         members: Vec::new(),
-    }
-}
-
-/// Ask the router to forward our port to this machine (UPnP IGD).
-///
-/// Public hosting used to look like it worked while being unreachable: we
-/// looked up the public IP, printed `1.2.3.4:6679`, and left the host to
-/// discover from a teammate's timeout that nothing was forwarded. Most home
-/// routers will open the port on request, so ask — and when they refuse, say
-/// so plainly instead of advertising an address that goes nowhere.
-///
-/// Returns Ok on a mapping the router accepted, Err with a short reason
-/// otherwise. Never fatal: a public relay with no mapping still works for
-/// anyone who forwards the port by hand.
-fn map_port(port: u16) -> Result<(), String> {
-    use igd::{search_gateway, PortMappingProtocol, SearchOptions};
-    let local = local_ips()
-        .into_iter()
-        .find_map(|ip| ip.parse::<std::net::Ipv4Addr>().ok())
-        .ok_or("no IPv4 address on this machine")?;
-    let gw = search_gateway(SearchOptions {
-        timeout: Some(Duration::from_secs(3)),
-        ..Default::default()
-    })
-    .map_err(|e| format!("no UPnP router found ({e})"))?;
-    // A finite lease so a crashed Canopy doesn't leave the port open forever;
-    // renewed implicitly each time hosting starts. Routers that reject a
-    // 12-hour lease usually accept a permanent one, so try that second.
-    let addr = std::net::SocketAddrV4::new(local, port);
-    gw.add_port(PortMappingProtocol::TCP, port, addr, 43_200, "Canopy relay")
-        .or_else(|_| gw.add_port(PortMappingProtocol::TCP, port, addr, 0, "Canopy relay"))
-        .map_err(|e| format!("router refused the mapping ({e})"))
-}
-
-/// Best-effort release of the mapping from `map_port`.
-fn unmap_port(port: u16) {
-    use igd::{search_gateway, PortMappingProtocol, SearchOptions};
-    if let Ok(gw) = search_gateway(SearchOptions {
-        timeout: Some(Duration::from_secs(2)),
-        ..Default::default()
-    }) {
-        let _ = gw.remove_port(PortMappingProtocol::TCP, port);
     }
 }
 
@@ -798,15 +869,9 @@ fn retire_transfers(inner: &mut Inner) {
 fn stop_host(inner: &mut Inner) {
     retire_transfers(inner);
     if let Some(host) = inner.host.take() {
-        // Give the port back if we opened it. Best-effort and off-thread: the
-        // router round-trip must not stall stopping the relay.
-        if matches!(host.port_map, Some(Ok(()))) {
-            let port = host.port;
-            std::thread::spawn(move || unmap_port(port));
-        }
         host.alive.store(false, Ordering::SeqCst);
         for peer in host.peers.values() {
-            let _ = peer.shutdown.shutdown(Shutdown::Both);
+            let _ = peer.shutdown.close();
         }
     }
 }
@@ -815,7 +880,7 @@ fn stop_client(inner: &mut Inner) {
     retire_transfers(inner);
     if let Some(client) = inner.client.take() {
         client.alive.store(false, Ordering::SeqCst);
-        let _ = client.shutdown.shutdown(Shutdown::Both);
+        let _ = client.shutdown.close();
     }
 }
 
@@ -839,6 +904,22 @@ pub async fn relay_host_start(
             return Err("Connected to another relay — disconnect first.".into());
         }
     }
+    let alive = Arc::new(AtomicBool::new(true));
+    let name = if name.trim().is_empty() { "host".to_string() } else { name.trim().to_string() };
+    let visibility = match visibility.as_deref() {
+        Some("public") => "public".to_string(),
+        _ => "local".to_string(),
+    };
+
+    // "Public" means over the internet, which in practice means carrier NAT,
+    // which a TCP listener cannot traverse (an inbound SYN to an unopened port
+    // is dropped — every internet join timed out this way). So public hosting
+    // takes the UDP + STUN + hole-punch + QUIC path; local network stays TCP,
+    // untouched, since a LAN has no wall in the way.
+    if visibility == "public" {
+        return host_public(app, inner_arc, name, alive).await;
+    }
+
     let want = port.unwrap_or(DEFAULT_PORT);
     // Requested port first; if the default is taken (another Canopy on this
     // machine, say) fall back to an ephemeral one rather than failing —
@@ -852,19 +933,7 @@ pub async fn relay_host_start(
     listener
         .set_nonblocking(true)
         .map_err(|e| format!("listener setup failed: {e}"))?;
-
-    let alive = Arc::new(AtomicBool::new(true));
-    let name = if name.trim().is_empty() { "host".to_string() } else { name.trim().to_string() };
-    let visibility = match visibility.as_deref() {
-        Some("public") => "public".to_string(),
-        _ => "local".to_string(),
-    };
-    // Blocking curl (≤8s worst case) before the relay reports ready — the
-    // address is the thing the host exists to hand out, so "started but I
-    // can't tell you where" would be a worse trade.
-    let public_ip = if visibility == "public" { fetch_public_ip() } else { None };
-    // Only meaningful for a public relay; a LAN host needs nothing forwarded.
-    let port_map = if visibility == "public" { Some(map_port(actual)) } else { None };
+    let public_ip = None;
     let host = Host {
         code: new_code(),
         port: actual,
@@ -872,7 +941,6 @@ pub async fn relay_host_start(
         name,
         visibility,
         public_ip,
-        port_map,
         peers: HashMap::new(),
         alive: alive.clone(),
     };
@@ -915,7 +983,7 @@ pub async fn relay_host_start(
                     if let Some(host) = &inner.host {
                         for peer in host.peers.values() {
                             if !peer_send(&peer.sender, &Frame::Ping) {
-                                let _ = peer.shutdown.shutdown(Shutdown::Both);
+                                let _ = peer.shutdown.close();
                             }
                         }
                     }
@@ -926,6 +994,94 @@ pub async fn relay_host_start(
 
     emit_state(&app, &inner_arc.lock().unwrap());
     Ok(status)
+}
+
+/// Host over the internet: bind UDP, discover the reachable public address via
+/// STUN (which also opens the NAT mapping), then run a QUIC server on that
+/// socket. quinn multiplexes every joiner over the one socket, so each arrives
+/// as a `QuicPeer` we drive with `serve_peer` exactly like a TCP accept.
+///
+/// Known limit for a first cut: an idle QUIC server sends nothing, so if no
+/// joiner arrives within the NAT's idle window (~30s) the mapping lapses and
+/// the address goes stale. In practice the host shares the address and the
+/// joiner connects promptly; a host-side keepalive to hold the hole open
+/// indefinitely is a follow-up.
+async fn host_public(
+    app: AppHandle,
+    inner_arc: Arc<Mutex<Inner>>,
+    name: String,
+    alive: Arc<AtomicBool>,
+) -> Result<RelayStatus, String> {
+    let sock = UdpSocket::bind(("0.0.0.0", DEFAULT_PORT))
+        .or_else(|_| UdpSocket::bind("0.0.0.0:0"))
+        .map_err(|e| format!("Couldn't open a UDP port: {e}"))?;
+    let local_port = sock.local_addr().map_err(|e| e.to_string())?.port();
+    // The reachable address teammates dial. STUN reveals it AND, by sending
+    // out first, opens the hole that makes inbound packets arrive.
+    let (public_ip, port) = match crate::punch::discover(&sock) {
+        Ok(a) => (Some(a.ip().to_string()), a.port()),
+        Err(_) => (None, local_port),
+    };
+    let peer_rx = crate::qstream::serve(sock, alive.clone())?;
+
+    let host = Host {
+        code: new_code(),
+        port,
+        self_id: new_id(),
+        name,
+        visibility: "public".to_string(),
+        public_ip,
+        peers: HashMap::new(),
+        alive: alive.clone(),
+    };
+    let status = {
+        let mut inner = inner_arc.lock().unwrap();
+        inner.host = Some(host);
+        status_of(&inner)
+    };
+
+    // Pull each connecting peer and hand it to serve_peer, keyed by the code
+    // current at connect time (so New Code stops admitting new joiners).
+    let app2 = app.clone();
+    let accept_inner = inner_arc.clone();
+    let accept_alive = alive.clone();
+    thread::Builder::new()
+        .name("relay-quic-accept".into())
+        .spawn(move || {
+            while accept_alive.load(Ordering::SeqCst) {
+                let Ok(qp) = peer_rx.recv() else { break };
+                let code = match accept_inner.lock().unwrap().host.as_ref() {
+                    Some(h) => h.code.clone(),
+                    None => break,
+                };
+                let app3 = app2.clone();
+                let inner3 = accept_inner.clone();
+                let alive3 = accept_alive.clone();
+                thread::spawn(move || host_conn_quic(app3, inner3, qp, code, alive3));
+            }
+        })
+        .map_err(|e| format!("couldn't spawn accept thread: {e}"))?;
+
+    emit_state(&app, &inner_arc.lock().unwrap());
+    Ok(status)
+}
+
+/// A joined QUIC peer, host side: run the handshake over its stream halves,
+/// then the shared serve_peer loop. QUIC reads block natively, so the
+/// on_joined hook is a no-op.
+fn host_conn_quic(
+    app: AppHandle,
+    inner: Arc<Mutex<Inner>>,
+    qp: crate::qstream::QuicPeer,
+    code: String,
+    alive: Arc<AtomicBool>,
+) {
+    let crate::qstream::QuicPeer { writer, reader, conn } = qp;
+    let Some((sender, receiver, binding)) = secure::handshake(writer, reader, &code, false) else {
+        conn.close(0u32.into(), b"handshake");
+        return;
+    };
+    serve_peer(app, inner, sender, receiver, binding, alive, Closer::Quic(conn), || {});
 }
 
 /// One joined connection, host side: secure handshake, authenticate, register,
@@ -960,11 +1116,41 @@ fn host_conn(app: AppHandle, inner: Arc<Mutex<Inner>>, stream: TcpStream, alive:
         }
         host.code.clone()
     };
-    let Some((mut sender, mut receiver, binding)) = secure::handshake(&stream, &code, false) else {
+    let Some((sender, receiver, binding)) = secure::handshake_tcp(&stream, &code, false) else {
         secure::shutdown(&stream);
         return;
     };
+    let Ok(dup) = stream.try_clone() else {
+        secure::shutdown(&stream);
+        return;
+    };
+    // TCP reads must block once the peer has joined: the join arrives promptly
+    // under the timeout set above, but conversation may then pause for minutes.
+    // (QUIC blocks natively, so its caller passes a no-op.)
+    let block = stream.try_clone().ok();
+    serve_peer(app, inner, sender, receiver, binding, alive, Closer::Tcp(dup), move || {
+        if let Some(s) = block {
+            let _ = s.set_read_timeout(None);
+        }
+    });
+}
 
+/// The transport-agnostic half of hosting one peer: identity exchange, register
+/// under the lock (Welcome then Presence), then relay each frame until the peer
+/// leaves. Shared by the TCP accept loop (`host_conn`) and the QUIC accept loop
+/// — each hands over an already-established secure channel plus a `Closer` to
+/// break it, and an `on_joined` hook to flip the transport to blocking reads.
+#[allow(clippy::too_many_arguments)]
+fn serve_peer(
+    app: AppHandle,
+    inner: Arc<Mutex<Inner>>,
+    mut sender: secure::Sender,
+    mut receiver: secure::Receiver,
+    binding: [u8; 32],
+    alive: Arc<AtomicBool>,
+    closer: Closer,
+    on_joined: impl FnOnce(),
+) {
     // Identity exchange (peer proves possession of its long-term key, bound to
     // this session) then the Join frame. A wrong code produced a different
     // session key, so both fail to decrypt — that is how a bad code is now
@@ -973,17 +1159,16 @@ fn host_conn(app: AppHandle, inner: Arc<Mutex<Inner>>, stream: TcpStream, alive:
     // a mistyped code barely notices.
     let Some(peer_key) = identity::exchange(&mut sender, &mut receiver, &binding, false) else {
         thread::sleep(Duration::from_secs(2));
-        secure::shutdown(&stream);
+        closer.close();
         return;
     };
     let name = match receiver.recv().and_then(|b| serde_json::from_slice::<Frame>(&b).ok()) {
         Some(Frame::Join { name, .. }) => name,
         _ => {
-            secure::shutdown(&stream);
+            closer.close();
             return;
         }
     };
-    let Ok(shutdown) = stream.try_clone() else { return };
     let sender = Arc::new(Mutex::new(sender));
 
     // Register under the lock. Order matters on the new peer's wire: Welcome
@@ -1011,7 +1196,7 @@ fn host_conn(app: AppHandle, inner: Arc<Mutex<Inner>>, stream: TcpStream, alive:
                     trust,
                 },
                 sender: sender.clone(),
-                shutdown,
+                shutdown: closer,
             },
         );
         let members = host_members(host);
@@ -1030,7 +1215,7 @@ fn host_conn(app: AppHandle, inner: Arc<Mutex<Inner>>, stream: TcpStream, alive:
     };
 
     // Joined: reads now block until the peer speaks or disconnects.
-    let _ = stream.set_read_timeout(None);
+    on_joined();
     loop {
         let Some(bytes) = receiver.recv() else { break };
         let Ok(frame) = serde_json::from_slice::<Frame>(&bytes) else { continue };
@@ -1064,6 +1249,16 @@ fn host_conn(app: AppHandle, inner: Arc<Mutex<Inner>>, stream: TcpStream, alive:
                     let (targets, local) = route_targets(host, &my_id, &msg.to);
                     Some((targets, local, Frame::Command(msg), "relay:command"))
                 }
+                Frame::Collab(mut msg) => {
+                    msg.from = my_id.clone();
+                    msg.from_name = my_name.clone();
+                    msg.ts = now_ms();
+                    if msg.id.is_empty() {
+                        msg.id = new_id();
+                    }
+                    let (targets, local) = route_targets(host, &my_id, &msg.to);
+                    Some((targets, local, Frame::Collab(msg), "relay:collab"))
+                }
                 Frame::Ping => host
                     .peers
                     .get(&my_id)
@@ -1082,7 +1277,7 @@ fn remove_peer(app: &AppHandle, inner: &Arc<Mutex<Inner>>, id: &str) {
     let mut guard = inner.lock().unwrap();
     let Some(host) = guard.host.as_mut() else { return };
     if let Some(peer) = host.peers.remove(id) {
-        let _ = peer.shutdown.shutdown(Shutdown::Both);
+        let _ = peer.shutdown.close();
         broadcast_presence(host);
         emit_state(app, &guard);
     }
@@ -1137,6 +1332,9 @@ fn deliver_frame(
                 let _ = app.emit(event, m.clone());
             }
             Frame::Command(m) => {
+                let _ = app.emit(event, m.clone());
+            }
+            Frame::Collab(m) => {
                 let _ = app.emit(event, m.clone());
             }
             _ => {}
@@ -1202,32 +1400,75 @@ pub async fn relay_connect(
                 ))
         })
         .map_err(|_| format!("Not a valid address: {full}"))?;
-    let stream = TcpStream::connect_timeout(&sock_addr, Duration::from_secs(5))
-        .map_err(|e| format!("Couldn't reach {full}: {e}"))?;
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let name = if name.trim().is_empty() { "guest".to_string() } else { name.trim().to_string() };
-    // SPAKE2 as the initiator, keyed by the code we were given.
-    let Some((mut sender, mut receiver, binding)) = secure::handshake(&stream, code.trim(), true) else {
-        return Err("Couldn't establish a secure channel — check the address and that the relay is running.".into());
-    };
+
+    // A LAN address is reached directly over TCP — no wall in the way. A public
+    // address means the internet, i.e. carrier NAT, so take the UDP hole-punch
+    // + QUIC path. Same SPAKE2 handshake and relay logic either way.
+    if is_private_addr(&sock_addr.ip().to_string()) {
+        let stream = TcpStream::connect_timeout(&sock_addr, Duration::from_secs(5))
+            .map_err(|e| format!("Couldn't reach {full}: {e}"))?;
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+        let Some((sender, receiver, binding)) = secure::handshake_tcp(&stream, code.trim(), true) else {
+            return Err("Couldn't establish a secure channel — check the address and that the relay is running.".into());
+        };
+        let closer = Closer::Tcp(stream.try_clone().map_err(|e| e.to_string())?);
+        let block = stream.try_clone().ok();
+        run_client(app, inner_arc, sender, receiver, binding, closer, name, full, move || {
+            if let Some(s) = block {
+                let _ = s.set_read_timeout(None);
+            }
+        })
+    } else {
+        let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("Couldn't open a UDP port: {e}"))?;
+        let (writer, reader, conn) =
+            crate::qstream::connect(sock, sock_addr, true, Duration::from_secs(12))
+                .map_err(|e| format!("Couldn't reach {full}: {e}"))?;
+        let Some((sender, receiver, binding)) = secure::handshake(writer, reader, code.trim(), true) else {
+            conn.close(0u32.into(), b"handshake");
+            return Err("Couldn't establish a secure channel — check the address and that the relay is running.".into());
+        };
+        run_client(app, inner_arc, sender, receiver, binding, Closer::Quic(conn), name, full, || {})
+    }
+}
+
+/// The transport-agnostic half of joining a relay: identity exchange, Join,
+/// Welcome, register as the client, then read frames until the host hangs up.
+/// Shared by the TCP (LAN) and QUIC (internet) join paths; `on_welcome` flips
+/// TCP to blocking reads once joined (QUIC blocks natively, so a no-op).
+#[allow(clippy::too_many_arguments)]
+fn run_client(
+    app: AppHandle,
+    inner_arc: Arc<Mutex<Inner>>,
+    mut sender: secure::Sender,
+    mut receiver: secure::Receiver,
+    binding: [u8; 32],
+    closer: Closer,
+    name: String,
+    full: String,
+    on_welcome: impl FnOnce(),
+) -> Result<RelayStatus, String> {
     // Prove our identity and verify the host's, bound to this session. A wrong
     // code yields a mismatched key, so this fails — reported as a refused code.
     let Some(host_key) = identity::exchange(&mut sender, &mut receiver, &binding, true) else {
+        closer.close();
         return Err("The relay refused the connection — wrong code, or it isn't reachable.".into());
     };
-    // TOFU: is this the same host key we pinned for this host name before? We
-    // don't know the host's name yet (it arrives in Welcome), so pin below.
     let sender = Arc::new(Mutex::new(sender));
     if !peer_send(&sender, &Frame::Join { code: String::new(), name: name.clone() }) {
+        closer.close();
         return Err("Couldn't talk to the relay.".into());
     }
     // Welcome is our first encrypted frame back.
     let (self_id, members) = match receiver.recv().and_then(|b| serde_json::from_slice::<Frame>(&b).ok()) {
         Some(Frame::Welcome { self_id, members }) => (self_id, members),
-        _ => return Err("The relay refused the connection — wrong code, or it isn't reachable.".into()),
+        _ => {
+            closer.close();
+            return Err("The relay refused the connection — wrong code, or it isn't reachable.".into());
+        }
     };
-    let _ = stream.set_read_timeout(None);
+    on_welcome();
     // Pin the host under its advertised name; a changed key for a name we've
     // joined before is the warning TOFU exists to raise.
     let host_name = members
@@ -1239,14 +1480,14 @@ pub async fn relay_connect(
 
     let alive = Arc::new(AtomicBool::new(true));
     let client = Client {
-        addr: full.clone(),
+        addr: full,
         self_id,
         name,
         members,
         host_key,
         host_trust,
         sender: sender.clone(),
-        shutdown: stream.try_clone().map_err(|e| e.to_string())?,
+        shutdown: closer,
         alive: alive.clone(),
     };
     let status = {
@@ -1281,6 +1522,9 @@ pub async fn relay_connect(
                     }
                     Frame::Command(msg) => {
                         let _ = reader_app.emit("relay:command", msg);
+                    }
+                    Frame::Collab(msg) => {
+                        let _ = reader_app.emit("relay:collab", msg);
                     }
                     Frame::Ping => {
                         let _ = peer_send(&reader_sender, &Frame::Pong);
@@ -1376,6 +1620,59 @@ pub async fn relay_send_command(
     Ok(msg)
 }
 
+/// Put a collab frame of ours on the wire. Same split as the host-side relay
+/// path: everything that needs the relay mutex happens first and yields plain
+/// data, then the lock is dropped and only then does a socket get written. At a
+/// frame per keystroke this is the difference between a lock held for
+/// nanoseconds and one held for a network round-trip.
+///
+/// Note this carries no path and mints no document: `doc` is a token the
+/// frontend already holds, and the backend never learns what file it means.
+#[tauri::command]
+pub async fn relay_send_collab(
+    state: State<'_, RelayManager>,
+    to: Option<String>,
+    doc: String,
+    body: CollabBody,
+) -> Result<(), String> {
+    let (frame, targets, upstream) = {
+        let inner = state.inner.lock().unwrap();
+        let (from, from_name) = sender_context(&inner)?;
+        let msg = CollabMsg {
+            id: new_id(),
+            from,
+            from_name,
+            to: to.clone(),
+            doc,
+            body,
+            ts: now_ms(),
+        };
+        let frame = Frame::Collab(msg);
+        if let Some(host) = &inner.host {
+            let targets = route_targets(host, &host.self_id, &to).0;
+            if targets.is_empty() && to.is_some() {
+                return Err("That member is no longer connected.".into());
+            }
+            (frame, targets, None)
+        } else if let Some(client) = &inner.client {
+            (frame, Vec::new(), Some(client.sender.clone()))
+        } else {
+            return Err("Not connected to a relay.".into());
+        }
+    };
+    if let Some(sender) = upstream {
+        return if peer_send(&sender, &frame) {
+            Ok(())
+        } else {
+            Err("Lost the relay connection.".into())
+        };
+    }
+    for target in targets {
+        let _ = peer_send(&target, &frame);
+    }
+    Ok(())
+}
+
 /// Put a frame of ours on the wire. Host: straight to the target peer(s) —
 /// we ARE the relay. Client: to the host, which routes it. The sender's own
 /// UI appends the returned message; nothing is echoed back.
@@ -1425,6 +1722,9 @@ pub struct TransferEvent {
     pub ok: bool,
     /// in+ok: the saved path; out+ok: the receiver's name; !ok: what failed.
     pub detail: String,
+    /// The member on the other end, so a completed transfer can be filed into
+    /// that conversation's history instead of only flashing past as a toast.
+    pub peer: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -1436,7 +1736,8 @@ struct TransferProgress {
     total: u64,
 }
 
-fn emit_transfer(app: &AppHandle, id: &str, direction: &str, name: &str, total: u64, ok: bool, detail: String) {
+#[allow(clippy::too_many_arguments)]
+fn emit_transfer(app: &AppHandle, id: &str, direction: &str, name: &str, total: u64, ok: bool, detail: String, peer: Option<&str>) {
     let _ = app.emit(
         "relay:transfer",
         TransferEvent {
@@ -1446,6 +1747,7 @@ fn emit_transfer(app: &AppHandle, id: &str, direction: &str, name: &str, total: 
             total,
             ok,
             detail,
+            peer: peer.map(str::to_string),
         },
     );
 }
@@ -1528,6 +1830,7 @@ pub async fn relay_offer_file(
     to: String,
     path: String,
 ) -> Result<(), String> {
+    let to_id = to.clone();
     let meta = std::fs::metadata(&path).map_err(|e| format!("Can't read that file: {e}"))?;
     if !meta.is_file() {
         return Err("Only single files can be sent (zip a folder first).".into());
@@ -1608,7 +1911,7 @@ pub async fn relay_offer_file(
     thread::Builder::new()
         .name("relay-send-file".into())
         .spawn(move || {
-            serve_file(&app, &transfer_id, listener, &path, &name, size, &token, &alive, &to_name);
+            serve_file(&app, &transfer_id, listener, &path, &name, size, &token, &alive, &to_name, &to_id);
             alive.store(false, Ordering::SeqCst);
             inner_arc.lock().unwrap().transfers.remove(&token);
         })
@@ -1629,6 +1932,7 @@ fn serve_file(
     token: &str,
     alive: &Arc<AtomicBool>,
     to_name: &str,
+    to_id: &str,
 ) {
     let deadline = Instant::now() + OFFER_TTL;
     loop {
@@ -1654,7 +1958,7 @@ fn serve_file(
         // Token-keyed AEAD. The receiver's first frame must decrypt under the
         // token-derived key — only a holder of the offer's token can produce
         // one, so a successful decrypt IS the authentication.
-        let Some((mut sender, mut receiver)) = secure::file_channel(&stream, token, true) else {
+        let Some((mut sender, mut receiver)) = secure::file_channel_tcp(&stream, token, true) else {
             let _ = stream.shutdown(Shutdown::Both);
             continue;
         };
@@ -1663,7 +1967,7 @@ fn serve_file(
             continue;
         }
         let Ok(mut file) = std::fs::File::open(path) else {
-            emit_transfer(app, id, "out", name, size, false, "The file vanished before it was picked up.".into());
+            emit_transfer(app, id, "out", name, size, false, "The file vanished before it was picked up.".into(), Some(to_id));
             return;
         };
         emit_progress(app, id, "out", name, 0, size);
@@ -1694,7 +1998,7 @@ fn serve_file(
         let _ = stream.shutdown(Shutdown::Both);
         if sent_ok {
             emit_progress(app, id, "out", name, size, size);
-            emit_transfer(app, id, "out", name, size, true, to_name.to_string());
+            emit_transfer(app, id, "out", name, size, true, to_name.to_string(), Some(to_id));
             return;
         }
         // Receiver dropped mid-pull — keep the offer alive for a retry.
@@ -1714,8 +2018,12 @@ pub async fn relay_accept_file(
     addrs: Vec<String>,
     token: String,
     dest: String,
+    // Who offered it — carried through so the finished transfer lands in their
+    // conversation rather than only in a toast that scrolls away.
+    from: Option<String>,
 ) -> Result<(), String> {
     let id = new_id();
+    let from_id = from;
     thread::Builder::new()
         .name("relay-receive-file".into())
         .spawn(move || {
@@ -1739,19 +2047,20 @@ pub async fn relay_accept_file(
                 emit_transfer(
                     &app, &id, "in", &name, size, false,
                     "Couldn't reach the sender directly — a firewall or NAT between you is blocking the peer-to-peer connection.".into(),
+                    from_id.as_deref(),
                 );
                 return;
             };
             let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
             let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
-            let Some((mut sender, mut receiver)) = secure::file_channel(&stream, &token, false) else {
-                emit_transfer(&app, &id, "in", &name, size, false, "Couldn't set up the secure channel.".into());
+            let Some((mut sender, mut receiver)) = secure::file_channel_tcp(&stream, &token, false) else {
+                emit_transfer(&app, &id, "in", &name, size, false, "Couldn't set up the secure channel.".into(), from_id.as_deref());
                 return;
             };
             // Authenticate to the sender: only we (holding the token) can send
             // a frame that decrypts under the token-derived key.
             if !sender.send(b"canopy-file") {
-                emit_transfer(&app, &id, "in", &name, size, false, "Handshake with the sender failed.".into());
+                emit_transfer(&app, &id, "in", &name, size, false, "Handshake with the sender failed.".into(), from_id.as_deref());
                 return;
             }
             // Receive into a sibling temp file and rename onto `dest` only
@@ -1763,7 +2072,7 @@ pub async fn relay_accept_file(
             // `dest` either stays untouched or becomes the complete file.
             let part = format!("{dest}.canopy-part");
             let Ok(mut out) = std::fs::File::create(&part) else {
-                emit_transfer(&app, &id, "in", &name, size, false, format!("Can't write to {dest}."));
+                emit_transfer(&app, &id, "in", &name, size, false, format!("Can't write to {dest}."), from_id.as_deref());
                 return;
             };
             emit_progress(&app, &id, "in", &name, 0, size);
@@ -1776,7 +2085,7 @@ pub async fn relay_accept_file(
                 if out.write_all(&chunk).is_err() {
                     drop(out);
                     let _ = std::fs::remove_file(&part);
-                    emit_transfer(&app, &id, "in", &name, size, false, format!("Writing {dest} failed — disk full?"));
+                    emit_transfer(&app, &id, "in", &name, size, false, format!("Writing {dest} failed — disk full?"), from_id.as_deref());
                     return;
                 }
                 got += chunk.len() as u64;
@@ -1788,22 +2097,22 @@ pub async fn relay_accept_file(
             drop(out);
             if got < size {
                 let _ = std::fs::remove_file(&part);
-                emit_transfer(&app, &id, "in", &name, size, false, "The connection dropped before the whole file arrived.".into());
+                emit_transfer(&app, &id, "in", &name, size, false, "The connection dropped before the whole file arrived.".into(), from_id.as_deref());
                 return;
             }
             let digest = format!("{:x}", hasher.finalize());
             if digest != sha256.to_lowercase() {
                 let _ = std::fs::remove_file(&part);
-                emit_transfer(&app, &id, "in", &name, size, false, "Integrity check failed — the received bytes don't match the offer. Nothing was kept.".into());
+                emit_transfer(&app, &id, "in", &name, size, false, "Integrity check failed — the received bytes don't match the offer. Nothing was kept.".into(), from_id.as_deref());
                 return;
             }
             if let Err(e) = std::fs::rename(&part, &dest) {
                 let _ = std::fs::remove_file(&part);
-                emit_transfer(&app, &id, "in", &name, size, false, format!("Couldn't save to {dest}: {e}"));
+                emit_transfer(&app, &id, "in", &name, size, false, format!("Couldn't save to {dest}: {e}"), from_id.as_deref());
                 return;
             }
             emit_progress(&app, &id, "in", &name, size, size);
-            emit_transfer(&app, &id, "in", &name, size, true, dest.clone());
+            emit_transfer(&app, &id, "in", &name, size, true, dest.clone(), from_id.as_deref());
         })
         .map_err(|e| format!("couldn't spawn transfer thread: {e}"))?;
     Ok(())
@@ -1813,6 +2122,73 @@ pub async fn relay_accept_file(
 mod tests {
     use super::*;
     use std::net::{TcpListener, TcpStream};
+
+    /// The frontend composes these bodies by hand in TypeScript, so the two
+    /// definitions are only kept honest by something that parses the exact
+    /// shape the frontend emits. A silent tag mismatch here would present as
+    /// "collaborative editing does nothing", with no error anywhere.
+    #[test]
+    fn parses_the_bodies_the_frontend_sends() {
+        let cases = [
+            r#"{"kind":"offer","name":"relay.rs","lang":"rust"}"#,
+            r#"{"kind":"open"}"#,
+            r#"{"kind":"snapshot","rev":7,"text":"hello"}"#,
+            r#"{"kind":"ops","rev":8,"ops":[{"op":"retain","n":3},{"op":"insert","s":"x"},{"op":"delete","n":2}],"author":"abc","hash":null}"#,
+            r#"{"kind":"resync","reason":"hash"}"#,
+            r#"{"kind":"close","reason":"left"}"#,
+            r#"{"kind":"cursor","anchor":1,"head":4,"rev":8}"#,
+        ];
+        for c in cases {
+            serde_json::from_str::<CollabBody>(c).unwrap_or_else(|e| panic!("{c}: {e}"));
+        }
+    }
+
+    /// A collab frame has to survive the same encode/decode the relay does to
+    /// every other frame, and land back as `Collab` rather than being eaten by
+    /// an earlier variant's tag.
+    #[test]
+    fn collab_frame_round_trips() {
+        let frame = Frame::Collab(CollabMsg {
+            id: "i".into(),
+            from: "f".into(),
+            from_name: "n".into(),
+            to: None,
+            doc: "d".into(),
+            body: CollabBody::Ops {
+                rev: 1,
+                ops: vec![CollabOp::Retain { n: 2 }, CollabOp::Insert { s: "hi".into() }],
+                author: "f".into(),
+                hash: Some("deadbeef".into()),
+            },
+            ts: 0,
+        });
+        let bytes = serde_json::to_vec(&frame).unwrap();
+        assert!(matches!(
+            serde_json::from_slice::<Frame>(&bytes).unwrap(),
+            Frame::Collab(_)
+        ));
+    }
+
+    /// Fan-out must skip the sender — echoing an operation back to its author
+    /// would have the guest apply its own edit twice.
+    #[test]
+    fn broadcast_targets_exclude_the_sender() {
+        // Constructing a Peer needs a live socket, so this checks the routing
+        // decision the only way that stays a unit test: an empty peer table
+        // still yields the right shape for both addressing modes.
+        let host = Host {
+            code: "0000000".into(),
+            port: 0,
+            self_id: "host".into(),
+            name: "h".into(),
+            visibility: "local".into(),
+            public_ip: None,
+            peers: HashMap::new(),
+            alive: Arc::new(AtomicBool::new(true)),
+        };
+        assert!(route_targets(&host, "someone", &None).0.is_empty());
+        assert!(route_targets(&host, "someone", &Some("nobody".into())).0.is_empty());
+    }
 
     /// Accept the way relay_host_start's loop does: a non-blocking listener,
     /// polled. `apply_fix` mirrors host_conn clearing the inherited flag.
@@ -1831,7 +2207,7 @@ mod tests {
         }
         let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
         let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-        let Some((mut s, mut r, binding)) = secure::handshake(&stream, code, false) else {
+        let Some((mut s, mut r, binding)) = secure::handshake_tcp(&stream, code, false) else {
             return false;
         };
         identity::exchange(&mut s, &mut r, &binding, true).is_some()
@@ -1841,7 +2217,7 @@ mod tests {
         let Ok(stream) = TcpStream::connect(addr) else { return false };
         let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
         let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-        let Some((mut s, mut r, binding)) = secure::handshake(&stream, code, true) else {
+        let Some((mut s, mut r, binding)) = secure::handshake_tcp(&stream, code, true) else {
             return false;
         };
         identity::exchange(&mut s, &mut r, &binding, false).is_some()

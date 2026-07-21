@@ -21,26 +21,27 @@ interface TeamPanelProps {
 /** "123 4567" — grouped the way people read codes to each other. */
 const prettyCode = (code: string) => `${code.slice(0, 3)} ${code.slice(3)}`;
 
-/** A member's trust-on-first-use standing. "changed" is the one that matters —
- *  a name we've talked to before now presenting a different identity key, which
- *  is what a reused join code being used to impersonate a teammate looks like. */
-function TrustBadge({ trust, keyHex }: { trust: string; keyHex: string | null }) {
+/** Trust as a single glyph, not a word. A green tick is "this is who they were
+ *  last time"; the one case that still needs words is "changed", because a name
+ *  reappearing under a different identity key is exactly how a reused join code
+ *  gets used to impersonate a teammate — that one must not be quiet. */
+function TrustMark({ trust, keyHex }: { trust: string; keyHex: string | null }) {
   const fp = keyHex ? keyHex.slice(0, 8) : "";
   if (trust === "changed") {
     return (
-      <span className="team-trust team-trust-changed" title={`Identity key CHANGED for this name — verify out-of-band before trusting. Key ${fp}…`}>
-        ⚠ key changed
+      <span className="team-mark team-mark-changed" title={`Identity key CHANGED for this name — verify out-of-band before trusting. Key ${fp}…`}>
+        ⚠
       </span>
     );
   }
   if (trust === "known") {
-    return <span className="team-trust team-trust-known" title={`Verified — same identity key as before (${fp}…)`}>✓ verified</span>;
+    return <span className="team-mark team-mark-ok" title={`Verified — same identity key as before (${fp}…)`}>✓</span>;
   }
   if (trust === "new") {
-    return <span className="team-trust team-trust-new" title={`First time seeing this identity (${fp}…) — pinned now, verified on next join`}>• new</span>;
+    return <span className="team-mark team-mark-new" title={`First time seeing this identity (${fp}…) — pinned now, verified on next join`}>✓</span>;
   }
   if (trust === "relayed") {
-    return <span className="team-trust team-trust-relayed" title="Identity asserted by the host, not directly verified by you">via host</span>;
+    return <span className="team-mark team-mark-relayed" title="Identity asserted by the host, not directly verified by you">✓</span>;
   }
   return null;
 }
@@ -103,7 +104,7 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
     const dest = await save({ title: `Save ${offer.name}`, defaultPath: offer.name });
     if (!dest) return;
     try {
-      await ipc.relayAcceptFile(offer, dest);
+      await ipc.relayAcceptFile(offer, dest, item.from);
       relay.dismissInbox(item.id);
       onNotice(`Receiving ${offer.name}…`);
     } catch (err) {
@@ -112,40 +113,31 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
   };
 
   const others = s.members.filter((m) => m.id !== s.self_id);
+  const totalUnread = Object.values(relay.unread).reduce((a, b) => a + b, 0);
 
-  const memberRow = (m: RelayMember) => (
-    <div
-      key={m.id}
-      className="team-member"
-      title={`Chat with ${m.name}`}
-      onClick={() => onOpenChat(m.id, m.name)}
-    >
-      <LiveDot size={7} className="team-live" />
-      <span className="team-member-name">{m.name}</span>
-      {m.is_host && <span className="team-tag">host</span>}
-      <TrustBadge trust={m.trust} keyHex={m.key} />
-      {m.joined_ms > 0 && <span className="team-member-age">{ago(m.joined_ms)}</span>}
-      <button
-        className="btn-mini"
-        title={`Send ${m.name} a file — direct, peer-to-peer`}
-        onClick={(e) => {
-          e.stopPropagation();
-          void offerFileTo(m.id, m.name, onNotice);
-        }}
+  // A member row IS the chat entry: the person, whether they're verified (a
+  // tick, nothing more), and how many messages are waiting. No File/Chat
+  // buttons — the whole row opens the conversation, and files are sent from
+  // inside it. File-sending lives with the message you're writing, not as a
+  // sibling of the person's name.
+  const memberRow = (m: RelayMember) => {
+    const n = relay.unread[m.id] ?? 0;
+    return (
+      <div
+        key={m.id}
+        className="team-member"
+        title={`Chat with ${m.name}`}
+        onClick={() => onOpenChat(m.id, m.name)}
       >
-        File
-      </button>
-      <button
-        className="btn-mini"
-        onClick={(e) => {
-          e.stopPropagation();
-          onOpenChat(m.id, m.name);
-        }}
-      >
-        Chat
-      </button>
-    </div>
-  );
+        <LiveDot size={7} className="team-live" />
+        <span className="team-member-name">{m.name}</span>
+        {m.is_host && <span className="team-tag">host</span>}
+        <TrustMark trust={m.trust} keyHex={m.key} />
+        <span className="team-member-spacer" />
+        {n > 0 && <span className="team-unread" title={`${n} unread`}>{n}</span>}
+      </div>
+    );
+  };
 
   const publicAddr = s.public_ip && s.port ? `${s.public_ip}:${s.port}` : null;
   const localAddr = s.ips[0] && s.port ? `${s.ips[0]}:${s.port}` : null;
@@ -269,22 +261,6 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
               <span>port {s.port} — no LAN address found</span>
             )}
           </div>
-          {s.visibility === "public" &&
-            (s.port_mapped ? (
-              <div className="team-note team-note-ok">
-                Your router forwarded TCP port {s.port} to this machine, so the
-                address above is reachable from the internet. Canopy closes the
-                mapping again when you stop hosting.
-              </div>
-            ) : (
-              <div className="team-note team-note-warn">
-                <strong>Not reachable from the internet yet.</strong> Canopy
-                couldn't open the port automatically
-                {s.port_map_note ? ` — ${s.port_map_note}` : ""}. Forward TCP
-                port {s.port} to this machine on your router, or switch to Local
-                and share your LAN address instead.
-              </div>
-            ))}
           <div className="team-host-actions">
             <button
               className="btn"
@@ -326,6 +302,11 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
         <>
           <div className="team-section-head">
             Members <span className="badge">{s.members.length}</span>
+            {totalUnread > 0 && (
+              <span className="team-unread team-unread-total" title={`${totalUnread} unread`}>
+                {totalUnread}
+              </span>
+            )}
           </div>
           <div
             className="team-member team-everyone"
@@ -334,15 +315,12 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
           >
             <TeamIcon size={13} />
             <span className="team-member-name">Everyone</span>
-            <button
-              className="btn-mini"
-              onClick={(e) => {
-                e.stopPropagation();
-                onOpenChat(null, "Team chat");
-              }}
-            >
-              Chat
-            </button>
+            <span className="team-member-spacer" />
+            {(relay.unread[""] ?? 0) > 0 && (
+              <span className="team-unread" title={`${relay.unread[""]} unread`}>
+                {relay.unread[""]}
+              </span>
+            )}
           </div>
           {others.map(memberRow)}
           {others.length === 0 && (
@@ -389,6 +367,43 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
         </>
       )}
 
+      {/* Live-edit invitations. Deliberately not folded into `inbox`: a collab
+          offer resolves into an editor tab, not a command to act on once, and
+          accepting one is the moment access is granted. */}
+      {relay.collab.offers.size > 0 && (
+        <>
+          <div className="team-section-head">
+            Live edit <span className="badge badge-urgent">{relay.collab.offers.size}</span>
+          </div>
+          {[...relay.collab.offers].map(([doc, offer]) => (
+            <div key={doc} className="team-inbox-item">
+              <div className="team-inbox-head">
+                <TeamIcon size={13} className="team-inbox-icon" />
+                <span className="team-inbox-from">{offer.fromName}</span>
+              </div>
+              <div className="team-inbox-body">
+                Wants to edit <strong>{offer.name}</strong> with you, live. Your copy
+                stays in memory — only they can save it.
+              </div>
+              <div className="team-inbox-actions">
+                <button
+                  className="btn-mini btn-accent"
+                  onClick={() => {
+                    relay.collab.accept(doc);
+                    onNotice(`Opening ${offer.name}…`);
+                  }}
+                >
+                  Join
+                </button>
+                <button className="btn-mini" onClick={() => relay.collab.dismiss(doc)}>
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          ))}
+        </>
+      )}
+
       {relay.inbox.length > 0 && (
         <>
           <div className="team-section-head">
@@ -401,6 +416,10 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
                 : undefined;
             const file =
               item.kind === "file-offer" ? (item.payload as ipc.RelayFileOffer) : undefined;
+            const review =
+              item.kind === "review"
+                ? (item.payload as { title?: string; insertions?: number; deletions?: number })
+                : undefined;
             return (
               <div key={item.id} className="team-inbox-item">
                 <div className="team-inbox-head">
@@ -415,9 +434,11 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
                 <div className="team-inbox-body">
                   {pr
                     ? `Review PR #${pr.number}: ${pr.title}`
-                    : file
-                      ? `Wants to send you ${file.name} (${prettySize(file.size)})`
-                      : `${item.kind} — ${JSON.stringify(item.payload)}`}
+                    : review
+                      ? `Review ${review.title} (+${review.insertions ?? 0} −${review.deletions ?? 0})`
+                      : file
+                        ? `Wants to send you ${file.name} (${prettySize(file.size)})`
+                        : `${item.kind} — ${JSON.stringify(item.payload)}`}
                 </div>
                 <div className="team-inbox-actions">
                   {file ? (
