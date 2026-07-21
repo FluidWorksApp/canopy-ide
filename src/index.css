@@ -3494,17 +3494,17 @@ body,
   padding: 10px 14px;
 }
 
+/* The PR body renders as markdown (.markdown-body) inside this card frame. */
 .pr-description {
-  white-space: pre-wrap;
   background: var(--bg-alt);
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 10px;
-  font-family: inherit;
-  font-size: 12px;
-  color: var(--text-dim);
+  padding: 12px 14px;
   margin-bottom: 12px;
 }
+.pr-description.markdown-body { font-size: 13px; }
+.pr-description.markdown-body > :first-child { margin-top: 0; }
+.pr-description.markdown-body > :last-child { margin-bottom: 0; }
 
 .pr-file {
   border: 1px solid var(--border);
@@ -3514,13 +3514,47 @@ body,
 }
 
 .pr-file-head {
-  padding: 5px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
   background: var(--bg-alt);
-  border-bottom: 1px solid var(--border);
   font-family: ui-monospace, monospace;
   font-size: 11px;
   color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
 }
+.pr-file-head:hover { color: var(--text); }
+.pr-file-chevron { flex: 0 0 auto; font-size: 9px; opacity: 0.7; }
+.pr-file-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.pr-file-stat { flex: 0 0 auto; font-size: 10px; }
+/* Open file: the head gains a sibling (the diff), so it reads as a header. */
+.pr-file-head:not(:only-child) { border-bottom: 1px solid var(--border); }
+
+/* Summary + expand/collapse control above the file list. */
+.pr-files-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.pr-files-note { color: var(--warn); font-size: 11px; }
+.pr-file-note {
+  padding: 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.pr-file-note a { color: var(--accent); }
 
 .pr-loading,
 .pr-error { padding: 12px; font-size: 12px; color: var(--text-dim); }
