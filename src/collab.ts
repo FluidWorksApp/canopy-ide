@@ -62,7 +62,10 @@ export type CollabBody =
   | { kind: "ops"; rev: number; ops: Op[]; author: string; hash: string | null }
   | { kind: "resync"; reason: string }
   | { kind: "close"; reason: string }
-  | { kind: "cursor"; anchor: number; head: number; rev: number };
+  | { kind: "cursor"; anchor: number; head: number; rev: number }
+  | { kind: "project-offer"; name: string }
+  | { kind: "project-tree"; paths: string[] }
+  | { kind: "project-open"; path: string };
 
 export interface CollabMsg {
   id: string;
@@ -434,17 +437,43 @@ export class CollabManager {
   /** Guest sessions that exist, with just enough to label a tab. Separate from
    *  the session itself so a view can be opened without reaching into one. */
   private guests = new Map<string, { name: string; ownerName: string }>();
+  /** Projects we are sharing: project doc id -> its root, display name, and the
+   *  members we've invited (one project, many members — not one per member). */
+  private ownedProjects = new Map<
+    string,
+    { root: string; name: string; members: Set<string> }
+  >();
+  /** Project invitations received, awaiting accept or dismiss. */
+  readonly projectOffers = new Map<string, { from: string; fromName: string; name: string }>();
+  /** Projects we have joined (as a guest): doc id -> owner + the file tree. */
+  readonly joinedProjects = new Map<
+    string,
+    { from: string; fromName: string; name: string; paths: string[] }
+  >();
+  /** Owners whose file offers we auto-accept, because we asked for the file by
+   *  opening it from their shared tree. Without this a project open would pop a
+   *  manual "accept?" for a file the guest explicitly clicked. */
+  private autoAccept = new Set<string>();
   onOffer: ((doc: string) => void) | null = null;
   onNotice: ((text: string) => void) | null = null;
   /** Fires whenever the set of live sessions changes, so a view can re-read
    *  `activeCount` for the global "collaborating" indicator. */
   onChange: (() => void) | null = null;
+  /** Owner: list a shared project's files, as paths RELATIVE to its root. */
+  onListProject: ((root: string) => Promise<string[]>) | null = null;
+  /** Owner: a peer asked for `relPath`; read it and share it live to `to`. */
+  onServeFile: ((root: string, relPath: string, to: string) => void) | null = null;
+  /** A project invitation arrived (peer wants to share their project). */
+  onProjectOffer: ((doc: string) => void) | null = null;
+  /** A project's tree arrived; open its browser. */
+  onProjectJoined: ((doc: string) => void) | null = null;
   selfId = "";
 
-  /** How many live sessions we own or have joined. Zero means nothing is being
-   *  collaborated on right now. */
+  /** Whether any collaboration is live: an open file session, a project we're
+   *  sharing (even before a file is opened), or one we've joined. Drives the
+   *  "Collaborating" pill — and so the only place to stop, its cross. */
   get activeCount(): number {
-    return this.sessions.size;
+    return this.sessions.size + this.ownedProjects.size + this.joinedProjects.size;
   }
 
   private wire: Wire = {
@@ -486,11 +515,157 @@ export class CollabManager {
     this.offers.delete(doc);
   }
 
+  /** Start (or extend) sharing a whole project with a member. Sharing the same
+   *  project with a second member reuses the one project doc rather than
+   *  minting another; inviting someone already invited is a no-op. The root
+   *  never leaves this object — only relative paths cross the wire. */
+  shareProject(root: string, name: string, to: string): string {
+    let doc = this.ownedProjectFor(root);
+    if (!doc) {
+      doc = newDocId();
+      this.ownedProjects.set(doc, { root, name, members: new Set() });
+    }
+    const owned = this.ownedProjects.get(doc)!;
+    if (!owned.members.has(to)) {
+      owned.members.add(to);
+      this.wire.send(to, doc, { kind: "project-offer", name: safeName(name) });
+    }
+    this.onChange?.();
+    return doc;
+  }
+
+  /** Members a project (by root) is already shared with, so the share menu can
+   *  mark them instead of offering a duplicate invite. */
+  projectSharedWith(root: string): ReadonlySet<string> {
+    const doc = this.ownedProjectFor(root);
+    return doc ? this.ownedProjects.get(doc)!.members : new Set<string>();
+  }
+
+  /** Accept a project invitation: ask the owner for its file tree. */
+  acceptProject(doc: string) {
+    const offer = this.projectOffers.get(doc);
+    if (!offer) return;
+    this.wire.send(offer.from, doc, { kind: "open" });
+  }
+
+  dismissProject(doc: string) {
+    this.projectOffers.delete(doc);
+    this.onChange?.();
+  }
+
+  /** Guest: open one file from a joined project's tree. The owner answers with
+   *  an ordinary file offer, which we auto-accept (see `autoAccept`). */
+  openProjectFile(projectDoc: string, relPath: string) {
+    const joined = this.joinedProjects.get(projectDoc);
+    if (!joined) return;
+    this.wire.send(joined.from, projectDoc, { kind: "project-open", path: relPath });
+  }
+
+  /** The project doc we are sharing for `root`, if any — so a view can tell
+   *  whether to offer "Share project" or "Stop sharing". */
+  ownedProjectFor(root: string): string | undefined {
+    for (const [doc, p] of this.ownedProjects) if (p.root === root) return doc;
+    return undefined;
+  }
+
+  /** Owner: stop sharing a project and end every live file under it. The guest
+   *  gets a close on the project (their tree tab goes) and on each open file. */
+  stopSharingProject(projectDoc: string) {
+    const owned = this.ownedProjects.get(projectDoc);
+    if (!owned) return;
+    this.ownedProjects.delete(projectDoc);
+    this.wire.send(null, projectDoc, {
+      kind: "close",
+      reason: "The owner stopped sharing the project.",
+    });
+    const prefix = owned.root.endsWith("/") ? owned.root : `${owned.root}/`;
+    for (const [doc, s] of [...this.sessions]) {
+      if (s instanceof OwnerSession && s.path.startsWith(prefix)) this.close(doc);
+    }
+    if (this.ownedProjects.size === 0) this.onServeFile = null;
+    this.onChange?.();
+  }
+
+  /** End every collaboration this app is part of: unshare our projects and
+   *  files, leave every project we joined, and close every live session. Peers
+   *  are told, so their tabs end too. This is what the "Collaborating" pill's
+   *  cross triggers. */
+  stopAll() {
+    for (const doc of [...this.ownedProjects.keys()]) this.stopSharingProject(doc);
+    for (const doc of [...this.joinedProjects.keys()]) this.leaveProject(doc);
+    for (const doc of [...this.sessions.keys()]) this.close(doc);
+    this.onChange?.();
+  }
+
+  /** Guest: leave a project we joined (its tree tab is closing). */
+  leaveProject(projectDoc: string) {
+    const joined = this.joinedProjects.get(projectDoc);
+    if (!joined) return;
+    this.joinedProjects.delete(projectDoc);
+    // Stop auto-accepting this owner's file offers once no joined project of
+    // theirs remains.
+    if (![...this.joinedProjects.values()].some((p) => p.from === joined.from)) {
+      this.autoAccept.delete(joined.from);
+    }
+    this.onChange?.();
+  }
+
   receive(msg: CollabMsg) {
     const existing = this.sessions.get(msg.doc);
     if (existing) {
       existing.receive(msg);
       existing.paint();
+      return;
+    }
+    // Project-scope frames. A project doc has no OT session of its own — it is
+    // a directory, not a document.
+    if (msg.body.kind === "project-offer") {
+      this.projectOffers.set(msg.doc, {
+        from: msg.from,
+        fromName: msg.from_name,
+        name: safeName(msg.body.name),
+      });
+      this.onChange?.();
+      this.onProjectOffer?.(msg.doc);
+      return;
+    }
+    if (msg.body.kind === "project-tree") {
+      const known = this.projectOffers.get(msg.doc);
+      this.projectOffers.delete(msg.doc);
+      this.joinedProjects.set(msg.doc, {
+        from: msg.from,
+        fromName: msg.from_name,
+        name: known?.name ?? "project",
+        paths: msg.body.paths,
+      });
+      this.autoAccept.add(msg.from);
+      this.onChange?.();
+      this.onProjectJoined?.(msg.doc);
+      return;
+    }
+    if (msg.body.kind === "project-open") {
+      const owned = this.ownedProjects.get(msg.doc);
+      if (owned) this.onServeFile?.(owned.root, msg.body.path, msg.from);
+      return;
+    }
+    if (msg.body.kind === "close" && this.joinedProjects.has(msg.doc)) {
+      const joined = this.joinedProjects.get(msg.doc)!;
+      this.joinedProjects.delete(msg.doc);
+      if (![...this.joinedProjects.values()].some((p) => p.from === joined.from)) {
+        this.autoAccept.delete(joined.from);
+      }
+      this.onChange?.();
+      return;
+    }
+    if (msg.body.kind === "open" && this.ownedProjects.has(msg.doc)) {
+      // A peer accepted our project invite; answer with the file tree.
+      const { root } = this.ownedProjects.get(msg.doc)!;
+      const from = msg.from;
+      const doc = msg.doc;
+      void (async () => {
+        const paths = (await this.onListProject?.(root)) ?? [];
+        this.wire.send(from, doc, { kind: "project-tree", paths });
+      })();
       return;
     }
     if (msg.body.kind === "offer") {
@@ -500,6 +675,9 @@ export class CollabManager {
         name: safeName(msg.body.name),
         lang: msg.body.lang,
       });
+      // A file we asked for by clicking it in a shared tree: open it without a
+      // second prompt.
+      if (this.autoAccept.has(msg.from)) this.accept(msg.doc);
       this.onOffer?.(msg.doc);
       return;
     }
@@ -562,5 +740,9 @@ export class CollabManager {
       this.guests.delete(doc);
     }
     this.offers.clear();
+    this.ownedProjects.clear();
+    this.projectOffers.clear();
+    this.joinedProjects.clear();
+    this.autoAccept.clear();
   }
 }

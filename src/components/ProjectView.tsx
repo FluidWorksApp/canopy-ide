@@ -11,6 +11,7 @@ import { getSettings } from "../settings";
 import { modelFor, monaco, languageForPath } from "../monaco-setup";
 import { GuestSession, OwnerSession } from "../collab";
 import { CollabView } from "./CollabView";
+import { SharedProjectView } from "./SharedProjectView";
 import type { AgentCli, Project } from "../projects";
 import { AGENT_CLIS, AGENT_PATTERN, checkInstalledClis, startCommand } from "../projects";
 import {
@@ -163,8 +164,19 @@ interface CollabSubTab {
   ownerName: string;
 }
 
+/** A whole project someone else shared, live: a browsable tree of their files,
+ *  each opened on demand into a CollabSubTab. */
+interface SharedProjectSubTab {
+  id: string;
+  type: "shared-project";
+  doc: string;
+  name: string;
+  ownerName: string;
+}
+
 type SubTab =
   | CollabSubTab
+  | SharedProjectSubTab
   | TermSubTab
   | FileSubTab
   | PrSubTab
@@ -368,6 +380,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   useEscape(() => setRootCreate(null), rootCreate != null);
   const [cliMenuOpen, setCliMenuOpen] = useState(false);
   const [shareMenuOpen, setShareMenuOpen] = useState(false);
+  const [shareProjectMenuOpen, setShareProjectMenuOpen] = useState(false);
   const [shellMenuOpen, setShellMenuOpen] = useState(false);
   const [runMenuOpen, setRunMenuOpen] = useState(false);
   const [installed, setInstalled] = useState<Record<string, boolean>>({});
@@ -575,6 +588,51 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     [onNotice, relay],
   );
 
+  /** Share the whole project with a member. The teammate browses the file tree
+   *  and opens any file on demand; each open resolves to the same live-edit
+   *  path as `shareFileLive`. Setting `onServeFile` here makes THIS project the
+   *  one that answers those opens. */
+  const shareProjectLive = useCallback(
+    (member: string, memberName: string) => {
+      const root = rootsRef.current[0];
+      if (!root) {
+        onNotice("This project has no folder to share.", "error");
+        return;
+      }
+      relay.collab.onServeFile = async (r, relPath, to) => {
+        const abs = r.endsWith("/") ? r + relPath : `${r}/${relPath}`;
+        let session = shared.current.get(abs);
+        if (!session) {
+          let model = monaco.editor.getModel(monaco.Uri.file(abs));
+          if (!model) {
+            try {
+              model = modelFor(abs, await ipc.fsReadText(abs));
+            } catch {
+              onNotice(`Couldn't open ${relPath} to share.`, "error");
+              return;
+            }
+          }
+          session = relay.collab.share(abs, model);
+          shared.current.set(abs, session);
+        }
+        session.offerTo(to, relPath.split("/").pop() ?? relPath, languageForPath(abs) ?? null);
+      };
+      relay.collab.shareProject(root, project.name, member);
+      onNotice(`Sharing "${project.name}" with ${memberName} — they can open any file live.`, "success");
+    },
+    [onNotice, relay, project.name],
+  );
+
+  // Keep our owned-file handles in step with the manager: when a share ends
+  // (the "Collaborating" cross, a closed tab, the relay dropping), drop the
+  // stale entry so the file's "Share live" button stops reading as "Sharing".
+  useEffect(() => {
+    for (const [path, session] of [...shared.current]) {
+      if (!relay.collab.get(session.doc)) shared.current.delete(path);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [relay.collabTick]);
+
   // A guest session appears only when the owner answers our `open` with a
   // snapshot, so the tab is opened from the manager's state rather than at the
   // moment we accept — there is nothing to show until the text arrives.
@@ -591,6 +649,26 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [relay.collabTick]);
+
+  // A teammate shared their whole project: open one browser for it in the
+  // project that's in front (guarding on `visible` keeps it from opening a
+  // duplicate in every other mounted project).
+  useEffect(() => {
+    if (!visible) return;
+    const open = tabsRef.current.filter(
+      (t): t is SharedProjectSubTab => t.type === "shared-project",
+    );
+    for (const [doc, meta] of relay.collab.joinedProjects) {
+      if (open.some((t) => t.doc === doc)) continue;
+      const id = tabId();
+      setTabs((prev) => [
+        ...prev,
+        { id, type: "shared-project", doc, name: meta.name, ownerName: meta.fromName },
+      ]);
+      setActiveTabId(id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [relay.collabTick, visible]);
 
   // Tell App which conversation is in front so it can skip toasts for it —
   // only the visible project speaks, or every mounted one would overwrite it.
@@ -1058,6 +1136,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           .find((m) => m.uri.scheme === "canopy-collab" && m.uri.path.startsWith(`/${closing.doc}/`))
           ?.dispose();
       }
+      if (closing?.type === "shared-project") {
+        collabRef.current.leaveProject(closing.doc);
+      }
       const next = prev.filter((t) => t.id !== id);
       setActiveTabId((active) =>
         active === id ? (next.length ? next[next.length - 1].id : null) : active,
@@ -1066,6 +1147,17 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     });
   }, []);
   closeTabRef.current = closeTab;
+
+  // The owner stopped sharing (or we left from elsewhere): close any shared
+  // -project tab whose project is no longer joined.
+  useEffect(() => {
+    for (const t of tabsRef.current) {
+      if (t.type === "shared-project" && !relay.collab.joinedProjects.has(t.doc)) {
+        closeTabRef.current(t.id);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [relay.collabTick]);
 
   // ---------- files ----------
 
@@ -1672,7 +1764,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                                 ? `${tab.name} — live, owned by ${tab.ownerName}`
                                 : tab.type === "review"
                                   ? `Review from ${tab.review.from}: ${tab.review.title}`
-                                  : tab.file.path
+                                  : tab.type === "shared-project"
+                                    ? `${tab.name} — shared live by ${tab.ownerName}`
+                                    : tab.file.path
                 }
               >
                 {tab.type === "terminal" ? (
@@ -1694,6 +1788,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                   <TeamIcon size={12} className="tab-collab-icon" />
                 ) : tab.type === "review" ? (
                   <PullRequestIcon size={12} className="tab-pr-icon" />
+                ) : tab.type === "shared-project" ? (
+                  <LiveShareIcon size={12} className="tab-collab-icon" />
                 ) : (
                   tab.file.external != null && <span className="tab-external">●</span>
                 )}
@@ -1736,7 +1832,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                                   ? `${tab.name} ⇄`
                                   : tab.type === "review"
                                     ? tab.review.title
-                                    : `${tab.file.name}${tab.file.dirty ? " •" : ""}`}
+                                    : tab.type === "shared-project"
+                                      ? tab.name
+                                      : `${tab.file.name}${tab.file.dirty ? " •" : ""}`}
                   </span>
                 )}
                 <span
@@ -1812,6 +1910,54 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                       ))}
                   </div>
                 )}
+              </div>
+            )}
+          {/* Share the whole project: a teammate browses the tree and opens any
+              file live. Available whenever the relay has a teammate, regardless
+              of what tab is in front. Stopping is done from the "Collaborating"
+              pill in the titlebar, not here — one place to end a session. */}
+          {relay.status.role !== "off" &&
+            relay.status.members.some((m) => m.id !== relay.status.self_id) && (
+              <div className="cli-menu-anchor">
+                <button
+                  className={`btn btn-icon-text ${
+                    relay.collab.ownedProjectFor(roots[0] ?? "") ? "btn-accent" : ""
+                  }`}
+                  title="Share this whole project live — teammates open any file to edit together"
+                  onClick={() => setShareProjectMenuOpen((v) => !v)}
+                >
+                  <LiveShareIcon size={14} />
+                  {relay.collab.ownedProjectFor(roots[0] ?? "") ? "Sharing project" : "Share project"}
+                </button>
+                {shareProjectMenuOpen &&
+                  (() => {
+                    const sharedWith = relay.collab.projectSharedWith(roots[0] ?? "");
+                    return (
+                      <div className="cli-menu" onMouseLeave={() => setShareProjectMenuOpen(false)}>
+                        {relay.status.members
+                          .filter((m) => m.id !== relay.status.self_id)
+                          .map((m) => {
+                            const already = sharedWith.has(m.id);
+                            return (
+                              <div
+                                key={m.id}
+                                className={`cli-item ${already ? "cli-item-done" : ""}`}
+                                onClick={() => {
+                                  if (already) return;
+                                  setShareProjectMenuOpen(false);
+                                  shareProjectLive(m.id, m.name);
+                                }}
+                              >
+                                <span>
+                                  <TeamIcon size={15} className="cli-icon" /> {m.name}
+                                </span>
+                                {already && <span className="cli-item-tick">✓ sharing</span>}
+                              </div>
+                            );
+                          })}
+                      </div>
+                    );
+                  })()}
               </div>
             )}
           {activeTab?.type === "file" &&
@@ -2006,6 +2152,15 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               </div>
             );
           })()}
+        {activeTab?.type === "shared-project" && (
+          <SharedProjectView
+            key={activeTab.id}
+            name={activeTab.name}
+            ownerName={activeTab.ownerName}
+            paths={relay.collab.joinedProjects.get(activeTab.doc)?.paths ?? []}
+            onOpen={(relPath) => relay.collab.openProjectFile(activeTab.doc, relPath)}
+          />
+        )}
         {activeTab?.type === "file" && (
           <FileView
             key={activeTab.id}

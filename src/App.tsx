@@ -176,7 +176,23 @@ export default function App() {
   // own on the local side, so the manager pokes us to re-read `activeCount` for
   // the global collaborating indicator.
   useEffect(() => {
-    collab.current!.onChange = () => setCollabTick((n) => n + 1);
+    const mgr = collab.current!;
+    mgr.onChange = () => setCollabTick((n) => n + 1);
+    // Owner side of project sharing: list the shared root's files as paths
+    // relative to it — an absolute path never crosses the wire (COLLAB-1).
+    mgr.onListProject = async (root) => {
+      const prefix = root.endsWith("/") ? root : `${root}/`;
+      const abs = await ipc.fsListFiles([root]);
+      return abs.filter((p) => p.startsWith(prefix)).map((p) => p.slice(prefix.length));
+    };
+    mgr.onProjectOffer = (doc) => {
+      const o = mgr.projectOffers.get(doc);
+      if (!o) return;
+      const what = `${o.fromName} wants to share their project "${o.name}" with you`;
+      notify(`${what} — see the Team panel`);
+      void nativeNotify("Canopy — Team", what);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Persist as it grows. The length guard means clearing the in-memory view on
@@ -789,12 +805,20 @@ export default function App() {
         {collabTick >= 0 && collab.current!.activeCount > 0 && (
           <div
             className="collab-live"
-            title={`Live collaboration in progress — ${collab.current!.activeCount} shared ${
-              collab.current!.activeCount === 1 ? "file" : "files"
-            }`}
+            title="Live collaboration in progress — click ✕ to end every share and session"
           >
             <span className="collab-live-dot" />
             Collaborating
+            <button
+              className="collab-live-stop"
+              title="Stop collaborating — end every share and live session"
+              onClick={() => {
+                collab.current!.stopAll();
+                notify("Collaboration ended.");
+              }}
+            >
+              ✕
+            </button>
           </div>
         )}
         <button
