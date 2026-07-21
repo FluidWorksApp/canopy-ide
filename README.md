@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/FluidWorksApp/canopy-ide/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/FluidWorksApp/canopy-ide?sort=semver&label=download"></a>
   <a href="./LICENSE.md"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey">
   <img alt="No Electron" src="https://img.shields.io/badge/no-electron-brightgreen">
 </p>
 
@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/session.png" alt="An agent running in a Canopy terminal, with a live panel showing every session in the project" width="900">
+  <img src="docs/screenshots/session.png" alt="Canopy running an agent alongside the whole stack — the RUNS rail shows each service live with its CPU and memory, and the model and session cost sit in the status bar" width="900">
 </p>
 
 ## What is Canopy?
@@ -73,6 +73,27 @@ the project; open files as sub-tabs next to the terminals running your agents.
 
 <img src="docs/screenshots/files.png" alt="The file tree beside a running Claude Code session" width="820">
 
+**Your tickets, in the IDE.** Pull **Linear** and **GitHub Issues** into a rail
+beside the code, grouped by state. Open a ticket to read the whole thing inline,
+then *Start work* — Canopy spins up a worktree on its branch and launches the
+agent CLI of your choice with the ticket as its opening context. No auto-commit,
+no auto-PR; that stays yours.
+
+<img src="docs/screenshots/issues.png" alt="The Issues rail — Linear and GitHub Issues in one list, grouped In Progress / Todo / Backlog" width="820">
+
+**Build with your team, peer-to-peer.** One person hosts — their Canopy *is* the
+relay — and teammates join with a code. Chat, request reviews, share a whole
+project, and co-edit files live, all end-to-end encrypted (SPAKE2 join code,
+ChaCha20-Poly1305 on every message and file) with no server in the middle.
+
+<img src="docs/screenshots/team-relay.png" alt="The Team panel — host a relay or join one with a host address and a code, reachable over local network or the internet" width="820">
+
+**Open anything, install nothing.** Markdown (with Mermaid), CSVs, spreadsheets,
+Word docs, PDFs, images, and Jupyter notebooks all render natively in the
+workspace — no extensions, no marketplace, no config.
+
+<img src="docs/screenshots/notebook.png" alt="A Jupyter notebook rendered natively in Canopy — markdown cells and code cells with a pandas DataFrame output" width="820">
+
 ## Install
 
 Download from [**canopyide.dev**](https://canopyide.dev/) — or on macOS:
@@ -90,7 +111,7 @@ Or grab your platform directly — these links always point at the newest releas
 | Linux — AppImage | [`Canopy-linux-x86_64.AppImage`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-linux-x86_64.AppImage) | in-app auto-update |
 | Linux — Debian/Ubuntu | [`Canopy-linux-x86_64.deb`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-linux-x86_64.deb) | via your package manager |
 | Linux — Fedora/RHEL | [`Canopy-linux-x86_64.rpm`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-linux-x86_64.rpm) | via your package manager |
-| Windows | coming soon | — |
+| Windows — x86_64 | [`Canopy-windows-x86_64-setup.exe`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-windows-x86_64-setup.exe) | in-app auto-update |
 
 All versions and release notes are on the
 [releases page](https://github.com/FluidWorksApp/canopy-ide/releases). The
