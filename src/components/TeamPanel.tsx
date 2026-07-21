@@ -367,6 +367,43 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
         </>
       )}
 
+      {/* Project shares: a teammate is offering their whole project. Accepting
+          opens a browsable tree; opening any file from it is what starts a live
+          edit of that file. */}
+      {relay.collab.projectOffers.size > 0 && (
+        <>
+          <div className="team-section-head">
+            Live project <span className="badge badge-urgent">{relay.collab.projectOffers.size}</span>
+          </div>
+          {[...relay.collab.projectOffers].map(([doc, offer]) => (
+            <div key={doc} className="team-inbox-item">
+              <div className="team-inbox-head">
+                <TeamIcon size={13} className="team-inbox-icon" />
+                <span className="team-inbox-from">{offer.fromName}</span>
+              </div>
+              <div className="team-inbox-body">
+                Wants to share their project <strong>{offer.name}</strong> with you — browse
+                the files and open any of them to edit together, live.
+              </div>
+              <div className="team-inbox-actions">
+                <button
+                  className="btn-mini btn-accent"
+                  onClick={() => {
+                    relay.collab.acceptProject(doc);
+                    onNotice(`Opening ${offer.name}…`);
+                  }}
+                >
+                  Open
+                </button>
+                <button className="btn-mini" onClick={() => relay.collab.dismissProject(doc)}>
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          ))}
+        </>
+      )}
+
       {/* Live-edit invitations. Deliberately not folded into `inbox`: a collab
           offer resolves into an editor tab, not a command to act on once, and
           accepting one is the moment access is granted. */}

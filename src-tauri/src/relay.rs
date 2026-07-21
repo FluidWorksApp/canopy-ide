@@ -158,6 +158,16 @@ pub enum CollabBody {
     /// Presence. Unsequenced and droppable; `rev` lets a stale one be
     /// transformed into place rather than drawn in the wrong spot.
     Cursor { anchor: u32, head: u32, rev: u64 },
+    /// Owner -> peer: "I am sharing my whole project live." `name` is a display
+    /// label; the project's files are requested and opened one at a time.
+    ProjectOffer { name: String },
+    /// Owner -> peer: the project's file list, as paths RELATIVE to the shared
+    /// root — never an absolute path (COLLAB-1). Sent when the peer accepts.
+    ProjectTree { paths: Vec<String> },
+    /// Peer -> owner: "open this file for me." `path` is one of the relative
+    /// paths from the tree; the owner resolves it inside the shared root and
+    /// shares it as an ordinary live document.
+    ProjectOpen { path: String },
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -2137,6 +2147,9 @@ mod tests {
             r#"{"kind":"resync","reason":"hash"}"#,
             r#"{"kind":"close","reason":"left"}"#,
             r#"{"kind":"cursor","anchor":1,"head":4,"rev":8}"#,
+            r#"{"kind":"project-offer","name":"canopy"}"#,
+            r#"{"kind":"project-tree","paths":["src/main.rs","README.md"]}"#,
+            r#"{"kind":"project-open","path":"src/main.rs"}"#,
         ];
         for c in cases {
             serde_json::from_str::<CollabBody>(c).unwrap_or_else(|e| panic!("{c}: {e}"));

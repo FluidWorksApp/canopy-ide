@@ -224,6 +224,26 @@ body,
   background: #ef4444;
   animation: collab-blink 1.15s ease-in-out infinite;
 }
+.collab-live-stop {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-left: 2px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(239, 68, 68, 0.22);
+  color: #f2544b;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+.collab-live-stop:hover {
+  background: #ef4444;
+  color: #fff;
+}
 @keyframes collab-blink {
   0%,
   100% {
@@ -960,6 +980,19 @@ body,
 
 .cli-item:hover {
   background: var(--bg-alt);
+}
+
+.cli-item-done {
+  cursor: default;
+  opacity: 0.6;
+}
+.cli-item-done:hover {
+  background: transparent;
+}
+.cli-item-tick {
+  color: var(--accent);
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .cli-install {
@@ -5410,6 +5443,36 @@ a.btn-mini {
 .chat-attach:disabled {
   opacity: 0.3;
   cursor: default;
+}
+
+/* ---------- shared project browser (a teammate's whole project) ---------- */
+.shared-project {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.shared-project-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--accent);
+}
+.shared-project-title {
+  font-weight: 700;
+  color: var(--fg);
+}
+.shared-project-sub {
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+.shared-tree {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 0 10px;
 }
 
 /* ---------- live collaborative editing ---------- */

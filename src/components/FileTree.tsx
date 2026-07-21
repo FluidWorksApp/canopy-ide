@@ -17,6 +17,13 @@ interface FileTreeProps {
   onNotice?: Notify;
   /** Render root contents directly (the caller already shows a labeled header). */
   hideRootHeader?: boolean;
+  /** Override how a directory's entries are fetched. Defaults to the local
+   *  filesystem; a live-shared project passes a reader backed by the tree its
+   *  owner sent over the relay. */
+  readDir?: (path: string) => Promise<ipc.DirEntry[]>;
+  /** No git overlay, no filesystem watch, no rename/delete/create — for a tree
+   *  that isn't the local disk (a teammate's shared project). */
+  readOnly?: boolean;
 }
 
 interface DirState {
@@ -66,6 +73,8 @@ export function FileTree({
   onRemoveRoot,
   onNotice,
   hideRootHeader,
+  readDir,
+  readOnly,
 }: FileTreeProps) {
   const { menu, open, close } = useContextMenu();
   const [prompt, setPrompt] = useState<{
@@ -168,7 +177,7 @@ export function FileTree({
 
   const loadDir = useCallback(async (path: string) => {
     try {
-      const entries = await ipc.fsReadDir(path);
+      const entries = await (readDir ?? ipc.fsReadDir)(path);
       setDirs((prev) => ({
         ...prev,
         [path]: { entries, expanded: prev[path]?.expanded ?? true },
@@ -181,7 +190,7 @@ export function FileTree({
         return next;
       });
     }
-  }, []);
+  }, [readDir]);
 
   const toggleDir = useCallback(
     (path: string) => {
@@ -204,13 +213,15 @@ export function FileTree({
     for (const root of roots) {
       if (!dirsRef.current[root]) {
         toggleDir(root);
-        void loadGit(root);
+        if (!readOnly) void loadGit(root);
       }
     }
-  }, [roots, toggleDir, loadGit]);
+  }, [roots, toggleDir, loadGit, readOnly]);
 
-  // Refresh loaded directories touched by external changes (debounced).
+  // Refresh loaded directories touched by external changes (debounced). A
+  // shared project isn't on this disk, so there is nothing local to watch.
   useEffect(() => {
+    if (readOnly) return;
     let pending = new Set<string>();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const unlisten = ipc.onFsChange((e) => {
@@ -230,7 +241,7 @@ export function FileTree({
       clearTimeout(timer);
       void unlisten.then((fn) => fn());
     };
-  }, [loadDir]);
+  }, [loadDir, readOnly]);
 
   // ---------- context menu ----------
 
@@ -315,7 +326,9 @@ export function FileTree({
             onClick={() =>
               entry.is_dir ? toggleDir(entry.path) : onOpenFile(entry.path)
             }
-            onContextMenu={(e) => open(e, itemsFor(entry.path, entry.is_dir, entry.name))}
+            onContextMenu={(e) => {
+              if (!readOnly) open(e, itemsFor(entry.path, entry.is_dir, entry.name));
+            }}
           >
             <span className="tree-chevron">
               {entry.is_dir ? (expanded ? "▾" : "▸") : ""}
@@ -335,7 +348,7 @@ export function FileTree({
     <div
       className="file-tree"
       // Blank space below the tree still belongs to the first root.
-      onContextMenu={(e) => roots[0] && open(e, emptyItems(roots[0]))}
+      onContextMenu={(e) => !readOnly && roots[0] && open(e, emptyItems(roots[0]))}
     >
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={close} />}
 
