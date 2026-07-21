@@ -1,6 +1,6 @@
 [package]
 name = "canopy"
-version = "0.2.1"
+version = "0.2.2"
 description = "Local-first, memory-light, vibe-coding-first IDE"
 authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
 license = "MIT"
