@@ -38,6 +38,40 @@ export function markRestored(sessionId: string) {
   restoredAt.set(sessionId, Date.now());
 }
 
+/** Sessions the user has explicitly forgotten, keyed to the transcript mtime at
+ *  the moment they forgot it. Persisted, unlike `restoredAt` — a forget must
+ *  survive the poll that re-reads digests from disk, or the row just comes
+ *  straight back (which it did). Keyed by timestamp, not a bare tombstone, so
+ *  "forget" means "I'm done with this stale one": if the same session is later
+ *  written to again (real new activity, a higher mtime) it returns. */
+const FORGOTTEN_KEY = "canopy.forgotten-sessions";
+
+function readForgotten(): Record<string, number> {
+  try {
+    return JSON.parse(localStorage.getItem(FORGOTTEN_KEY) ?? "{}") as Record<string, number>;
+  } catch {
+    return {};
+  }
+}
+
+function writeForgotten(store: Record<string, number>) {
+  try {
+    localStorage.setItem(FORGOTTEN_KEY, JSON.stringify(store));
+  } catch {
+    // A lost convenience record is not worth interrupting anyone over.
+  }
+}
+
+/** Forget one or more restorable sessions so they stop resurfacing. Pass the
+ *  digests as seen now; their `updated` mtime is the reappear threshold. */
+export function forgetSessions(digests: ipc.SessionDigest[]) {
+  const store = readForgotten();
+  for (const d of digests) {
+    if (d.session_id) store[d.session_id] = d.updated ?? Number.MAX_SAFE_INTEGER;
+  }
+  writeForgotten(store);
+}
+
 interface LiveAgent {
   agentId: string;
   cwd: string;
@@ -75,6 +109,7 @@ export function restorableFrom(
   liveSessionIds: string[],
 ): Restorable[] {
   const alivePtys = new Set(stats.map((s) => String(s.id)));
+  const forgotten = readForgotten();
   const dead = (d: ipc.SessionDigest) => !!d.surface && !alivePtys.has(d.surface);
   const liveAgents = liveAgentsFrom(stats);
   // Same CLI, same directory, running right now — that work is open, whatever
@@ -90,6 +125,12 @@ export function restorableFrom(
     .filter((d) => {
       const id = d.session_id;
       if (!id || /-pty\d*$/.test(id)) return false;
+
+      // Forgotten by the user, and the transcript hasn't been written since —
+      // stay gone. A newer mtime (real new activity) crosses the threshold and
+      // brings it back.
+      const forgottenAt = forgotten[id];
+      if (forgottenAt != null && (d.updated ?? 0) <= forgottenAt) return false;
 
       // Open right now — it belongs in the running list, not this one.
       if (runningHere(d) || (!dead(d) && liveSessionIds.includes(id))) {

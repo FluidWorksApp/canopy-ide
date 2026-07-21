@@ -4,6 +4,7 @@ import "./index.css";
 import { monacoReady } from "./monaco-setup";
 import { applyTheme, getSettings, watchSystemTheme } from "./settings";
 import App from "./App.tsx";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 
 // Before first paint, so there's no flash of the wrong palette.
 applyTheme(getSettings().theme, getSettings().customAccent);
@@ -69,6 +70,10 @@ monacoReady
   .then(() => jsLog("info", "monaco services initialized"))
   .catch((err) => jsLog("error", `monaco services failed to initialize: ${err}`))
   .finally(() => {
-    createRoot(document.getElementById("root")!).render(<App />);
+    createRoot(document.getElementById("root")!).render(
+      <ErrorBoundary label="Canopy">
+        <App />
+      </ErrorBoundary>,
+    );
     jsLog("info", "app mounted");
   });

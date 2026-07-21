@@ -61,7 +61,7 @@ import { CommitView } from "./CommitView";
 import { ReviewView, type ReviewPayload } from "./ReviewView";
 import { BranchView } from "./BranchView";
 import { ticketBranch, ticketContext, ticketWorktree } from "../trackers";
-import { markRestored, restorableFrom, type Restorable } from "../restorable";
+import { forgetSessions, markRestored, restorableFrom, type Restorable } from "../restorable";
 import {
   forgetTerminals,
   rememberTerminals,
@@ -69,6 +69,7 @@ import {
   type RememberedTerminal,
 } from "../terminalMemory";
 import { PrView } from "./PrView";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { TeamPanel } from "./TeamPanel";
 import { ChatView } from "./ChatView";
 
@@ -866,6 +867,19 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const resumeSession = useCallback(
     (r: Restorable) => {
       if (!r.command || !r.cwd) return;
+      // Already open — focus that tab instead of spawning a second identical
+      // resume. The resume command carries the session id, so command+cwd
+      // uniquely identifies the terminal running this exact session; without
+      // this, "Restore all", a double-click, or the row reappearing all stack
+      // duplicate tabs of the same conversation.
+      const open = tabsRef.current.find(
+        (t): t is TermSubTab =>
+          t.type === "terminal" && t.command === r.command && t.cwd === r.cwd,
+      );
+      if (open) {
+        setActiveTabId(open.id);
+        return;
+      }
       // Hide it immediately rather than waiting for the next poll; the mark
       // is a bridge until the agent shows up in the process list, after which
       // the row's presence tracks whether that terminal is still open.
@@ -1044,7 +1058,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         setTabs((prev) =>
           prev.map((t) =>
             t.id === id && t.type === "terminal"
-              ? { ...t, epoch: (t.epoch ?? 0) + 1 }
+              ? // Re-clear exit state here too: the old pty's kill can emit a
+                // late pty:exit in the gap since t=0 that flips `exited` back on.
+                { ...t, epoch: (t.epoch ?? 0) + 1, exited: false, exitCode: undefined }
               : t,
           ),
         );
@@ -2170,7 +2186,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 initialCommand={
                   tab.run && tab.command ? `${tab.command}; exit $?` : tab.command
                 }
-                onSpawned={(ptyId) => patchTab(tab.id, { ptyId })}
+                onSpawned={(ptyId) =>
+                  // A freshly spawned pty is alive by definition, so clear any
+                  // stale exited/failed state. Restart kills the old pty and
+                  // remounts a beat later; that kill's late pty:exit can land in
+                  // the gap and wrongly mark the tab failed while THIS new
+                  // process is the one now running (a red ✕ on a live server).
+                  patchTab(tab.id, { ptyId, exited: false, exitCode: undefined })
+                }
                 onExited={(code) => {
                   // Shell tabs close on exit; run tabs stay so the output and
                   // exit status remain readable.
@@ -2195,6 +2218,12 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               />
             </div>
           ))}
+        {/* A non-terminal view throwing (a PR diff, an editor, a ticket) must
+            not take the app — or the running terminals beside it — down. Keyed
+            by tab so switching away from a crashed view clears the fallback.
+            Terminals stay outside: they're display-toggled, not unmounted, and
+            catching here would kill their PTYs. */}
+        <ErrorBoundary key={activeTab?.id ?? "none"} label="this tab">
         {activeTab?.type === "branch" && (
           <BranchView
             relay={relay}
@@ -2297,6 +2326,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             }
           />
         )}
+        </ErrorBoundary>
         {tabs.length === 0 && (
           <div className="editor-empty">
             <h2>{project.name}</h2>
@@ -2347,10 +2377,12 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                     </button>
                     <button
                       className="btn-icon"
-                      title="Forget the remembered terminals for this project"
+                      title="Forget everything here — remembered terminals and restorable agent sessions — for this project"
                       onClick={() => {
                         forgetTerminals(project.id);
                         setRemembered([]);
+                        forgetSessions(restorable.map((r) => r.digest));
+                        setRestorable([]);
                       }}
                     >
                       ✕
@@ -2393,6 +2425,19 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                     ) : (
                       <span className="resume-unsupported">can't resume</span>
                     )}
+                    <button
+                      className="btn-icon resume-forget"
+                      title="Forget this session — stops it resurfacing unless it's used again"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        forgetSessions([r.digest]);
+                        setRestorable((prev) =>
+                          prev.filter((x) => x.digest.session_id !== r.digest.session_id),
+                        );
+                      }}
+                    >
+                      ✕
+                    </button>
                   </div>
                 ))}
 
