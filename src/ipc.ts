@@ -231,10 +231,13 @@ export interface RepoStatus {
 }
 
 export interface BranchInfo {
+  /** Logical branch name — never an `origin/…` tracking ref. */
   name: string;
   current: boolean;
-  upstream: string | null;
-  remote: boolean;
+  /** On a remote but not checked out locally; selecting it checks it out. */
+  remote_only: boolean;
+  /** A local branch that also exists on the remote (already pushed). */
+  synced: boolean;
   subject: string;
 }
 

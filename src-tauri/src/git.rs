@@ -63,10 +63,14 @@ pub struct RepoStatus {
 
 #[derive(Serialize, Clone)]
 pub struct BranchInfo {
+    /// Logical branch name — never an `origin/…` tracking ref.
     pub name: String,
     pub current: bool,
-    pub upstream: Option<String>,
-    pub remote: bool,
+    /// Exists on a remote but not checked out locally; selecting it checks it
+    /// out (git auto-creates the local tracking branch).
+    pub remote_only: bool,
+    /// A local branch that also exists on the remote (already pushed).
+    pub synced: bool,
     pub subject: String,
 }
 
@@ -278,8 +282,15 @@ pub async fn git_branches(
     repo: String,
 ) -> Result<Vec<BranchInfo>, String> {
     let top = repo_path(&state, &repo)?;
-    // Unit-separator format: branch names can contain almost anything else.
-    let fmt = "%(refname:short)\x1f%(HEAD)\x1f%(upstream:short)\x1f%(contents:subject)";
+    // One row per *logical* branch, not per ref. A raw ref list shows `main`,
+    // its `origin/main` tracking copy, and the `origin/HEAD` symref (whose short
+    // name is a bare `origin`) all as separate lines — noise no one asked for.
+    // We fold each local branch together with its remote twin, drop symrefs, and
+    // surface only the remote branches that aren't checked out yet.
+    //
+    // `%(refname)` (full) tells local from remote reliably; `%(symref)` is
+    // non-empty only for HEAD pointers, which we skip.
+    let fmt = "%(refname)\x1f%(refname:short)\x1f%(HEAD)\x1f%(symref)\x1f%(contents:subject)";
     let out = run(git(&top).args([
         "for-each-ref",
         "--sort=-committerdate",
@@ -287,31 +298,73 @@ pub async fn git_branches(
         "refs/heads",
         "refs/remotes",
     ]))?;
-    let mut branches = Vec::new();
+
+    struct Ref<'a> {
+        full: &'a str,
+        short: &'a str,
+        is_head: bool,
+        subject: &'a str,
+    }
+    let mut refs: Vec<Ref> = Vec::new();
     for line in out.lines() {
         let f: Vec<&str> = line.split('\x1f').collect();
-        if f.is_empty() || f[0].is_empty() {
+        if f.len() < 5 || f[1].is_empty() {
             continue;
         }
-        let name = f[0].to_string();
-        // origin/HEAD is a symref pointer, not a branch anyone checks out.
-        if name.ends_with("/HEAD") {
+        // Symref (origin/HEAD, whatever its short name renders as) — a pointer,
+        // not a branch anyone checks out.
+        if !f[3].is_empty() {
             continue;
         }
-        branches.push(BranchInfo {
-            current: f.get(1).map(|s| *s == "*").unwrap_or(false),
-            upstream: f.get(2).filter(|s| !s.is_empty()).map(|s| s.to_string()),
-            remote: name.starts_with("origin/") || name.matches('/').count() >= 1 && !name.starts_with("refs/heads"),
-            subject: f.get(3).unwrap_or(&"").to_string(),
-            name,
+        refs.push(Ref {
+            full: f[0],
+            short: f[1],
+            is_head: f[2] == "*",
+            subject: f[4],
         });
     }
-    // for-each-ref can't tell us which are remotes reliably from the name alone;
-    // re-derive from the ref namespace instead.
-    let locals = run(git(&top).args(["for-each-ref", "--format=%(refname:short)", "refs/heads"]))?;
-    let local_set: Vec<&str> = locals.lines().collect();
-    for b in branches.iter_mut() {
-        b.remote = !local_set.contains(&b.name.as_str());
+
+    // The logical name of a remote ref is its short name minus the remote (first
+    // path segment): `origin/feat/x` -> `feat/x`.
+    let logical = |r: &Ref| -> String {
+        if r.full.starts_with("refs/remotes/") {
+            r.short.splitn(2, '/').nth(1).unwrap_or(r.short).to_string()
+        } else {
+            r.short.to_string()
+        }
+    };
+    let local_names: std::collections::HashSet<String> = refs
+        .iter()
+        .filter(|r| r.full.starts_with("refs/heads/"))
+        .map(|r| r.short.to_string())
+        .collect();
+    let remote_logicals: std::collections::HashSet<String> = refs
+        .iter()
+        .filter(|r| r.full.starts_with("refs/remotes/"))
+        .map(logical)
+        .collect();
+
+    // Build in committerdate order, emitting each logical branch once: a local
+    // ref always wins; a remote ref is emitted only when it has no local twin.
+    let mut branches = Vec::new();
+    let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for r in &refs {
+        let name = logical(r);
+        if emitted.contains(&name) {
+            continue;
+        }
+        let is_local = r.full.starts_with("refs/heads/");
+        if !is_local && local_names.contains(&name) {
+            continue; // remote twin of a local branch — folded into the local row
+        }
+        emitted.insert(name.clone());
+        branches.push(BranchInfo {
+            current: r.is_head,
+            remote_only: !is_local,
+            synced: is_local && remote_logicals.contains(&name),
+            subject: r.subject.to_string(),
+            name,
+        });
     }
     Ok(branches)
 }

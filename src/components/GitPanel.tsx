@@ -499,23 +499,43 @@ export function GitPanel({
           </div>
           {branches
             .filter((b) => b.name.toLowerCase().includes(branchFilter.toLowerCase()))
+            // Current branch first, then your local ones (by recency), then the
+            // "on GitHub" branches you haven't pulled down — sort is stable, so
+            // the backend's recency order is preserved within each group.
+            .slice()
+            .sort(
+              (a, b) =>
+                (a.current === b.current ? 0 : a.current ? -1 : 1) ||
+                (a.remote_only === b.remote_only ? 0 : a.remote_only ? 1 : -1),
+            )
             .map((b) => (
               <div
                 key={b.name}
-                className={`git-branch-row ${b.current ? "git-branch-current" : ""}`}
-                title={`${b.subject}${b.upstream ? `\ntracking ${b.upstream}` : ""}`}
+                className={`git-branch-row ${b.current ? "git-branch-current" : ""} ${b.remote_only ? "git-branch-remote" : ""}`}
+                title={
+                  b.current
+                    ? `${b.name} — you're on this branch\n${b.subject}`
+                    : b.remote_only
+                      ? `${b.name} — on GitHub. Click to check it out here.\n${b.subject}`
+                      : b.synced
+                        ? `${b.name} — click to switch\n${b.subject}`
+                        : `${b.name} — local only, not pushed yet. Click to switch.\n${b.subject}`
+                }
                 onClick={() =>
                   !b.current &&
                   repo &&
-                  void act("checkout", () =>
-                    // Checking out a remote branch creates a local tracking one,
-                    // which is what git does for `git checkout origin/x` anyway.
-                    ipc.gitCheckout(repo, b.remote ? b.name.replace(/^origin\//, "") : b.name, false),
-                  )
+                  // A remote-only name (no origin/ prefix) checks out and starts
+                  // tracking it — the same DWIM git does for `git checkout x`.
+                  void act("checkout", () => ipc.gitCheckout(repo, b.name, false))
                 }
               >
-                <span className="git-branch-mark">{b.current ? "●" : b.remote ? "☁" : "○"}</span>
+                <span className="git-branch-mark">{b.current ? "●" : b.remote_only ? "☁" : "○"}</span>
                 <span className="git-branch-name">{b.name}</span>
+                {b.remote_only ? (
+                  <span className="git-branch-tag git-branch-tag-remote">on GitHub</span>
+                ) : (
+                  !b.synced && <span className="git-branch-tag">not pushed</span>
+                )}
                 <span className="git-branch-subject">{b.subject}</span>
               </div>
             ))}
