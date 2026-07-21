@@ -3303,8 +3303,25 @@ body,
 
 .git-branch-row:hover { background: var(--bg-raised); color: var(--text); }
 .git-branch-current { color: var(--ok); }
+/* Remote-only branches are secondary — dimmer, cloud mark. */
+.git-branch-remote { opacity: 0.7; }
 .git-branch-mark { flex: 0 0 10px; font-size: 8px; }
 .git-branch-name { white-space: nowrap; }
+
+/* Small state chips: "not pushed" (local-only) / "on GitHub" (remote-only). */
+.git-branch-tag {
+  flex: 0 0 auto;
+  font-size: 9px;
+  padding: 0 5px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  opacity: 0.8;
+}
+.git-branch-tag-remote {
+  border-color: var(--accent);
+  color: var(--accent);
+}
 
 .git-branch-subject {
   flex: 1;
