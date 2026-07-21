@@ -1,12 +1,27 @@
 // Agent management: one row per terminal session, named after the agent CLI
 // detected inside its process tree, with CPU/memory for the runaway guard.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
 import { AGENT_CLIS, AGENT_PATTERN, restoreCommand } from "../projects";
 import { restorableFrom } from "../restorable";
-import { AgentIcon, RestartIcon, TerminalIcon, TrashIcon } from "./icons";
+import { AgentIcon, MoonIcon, RestartIcon, TerminalIcon, TrashIcon } from "./icons";
 import type { PendingItem } from "../notifications";
+
+/** Colour + label for the lifecycle dot on a running-agent row. `working` is
+ *  the only state that pulses — a moving dot in a column of still ones is
+ *  where the eye lands first. */
+const STATE_META: Record<string, { cls: string; label: string }> = {
+  working: { cls: "st-working", label: "working" },
+  waiting: { cls: "st-waiting", label: "waiting on you" },
+  idle: { cls: "st-idle", label: "idle — finished a turn" },
+  ended: { cls: "st-ended", label: "session ended" },
+};
+
+/** CLIs whose approval prompt is a numbered/Escape menu we can drive by
+ *  synthesising keystrokes. Anything else gets "answer in terminal" instead of
+ *  buttons that might type into the wrong UI. */
+const KEYSTROKE_APPROVAL_AGENTS = new Set(["claude", "codex"]);
 
 interface AgentsPanelProps {
   stats: ipc.SessionStats[];
@@ -15,6 +30,10 @@ interface AgentsPanelProps {
   onDismissPending?: (key: string) => void;
   /** Answer a single-select question by clicking its option in the panel. */
   onAnswer?: (item: PendingItem, optionIndex: number) => void;
+  /** Respond to a permission prompt without leaving the panel: approve types
+   *  the accept key into the agent's terminal, deny sends Escape. Only offered
+   *  for numbered-prompt CLIs (claude/codex). */
+  onRespond?: (item: PendingItem, decision: "approve" | "deny") => void;
   onJumpToTerminal?: (item: PendingItem) => void;
   /** Focus the tab a running session is in. Separate from onJumpToTerminal:
    *  that one guesses a tab from a notification's cwd, this one has the pty
@@ -28,6 +47,8 @@ interface AgentsPanelProps {
   liveSessionIds?: string[];
   /** Reopen a past agent session: runs `cmd` in `cwd` as a new terminal. */
   onRestore?: (cwd: string, cmd: string, title: string, agentId: string) => void;
+  /** Toasts for background actions (auto-hibernation) the user didn't click. */
+  onNotice?: (msg: string) => void;
 }
 
 /** Compact relative age; the panel is narrow and "3h" beats a timestamp. */
@@ -95,6 +116,8 @@ export function AgentsPanel({
   onShareContext,
   liveSessionIds = [],
   onRestore,
+  onRespond,
+  onNotice,
 }: AgentsPanelProps) {
   const [showHookHelp, setShowHookHelp] = useState(false);
   const [setupResult, setSetupResult] = useState<string | null>(null);
@@ -215,6 +238,47 @@ export function AgentsPanel({
   const agentSessions = sessions.filter((x) => x.agent);
   const termSessions = sessions.filter((x) => !x.agent);
 
+  // Agents are running but not one of them has a digest — nothing is streaming
+  // from their hooks, which is exactly why a question or task never appears in
+  // this panel. A single digest anywhere proves hooks work, so this only fires
+  // when they're genuinely not wired up. Nudge the one-click setup rather than
+  // leave the panel silently blind.
+  const noHookSignal =
+    agentSessions.length > 0 && agentSessions.every((x) => !x.digest);
+
+  // Hibernate an agent: kill its terminal to reclaim the memory, keeping the
+  // session digest (which is already the restore record) so the row reappears
+  // under "Restorable" and its own --resume brings it back with history.
+  const hibernate = (id: number) => void ipc.ptyKill(id);
+
+  // Auto-hibernation. Reclaim the stalest *finished* agents once a project is
+  // over its cap — never one mid-turn or blocked on the user, and never twice
+  // (a killed pty lingers in `stats` until the next poll, and pty ids are
+  // monotonic within a run, so a set of ids we've already reclaimed is enough
+  // to keep the toast from repeating and ptyKill from firing on the dead).
+  const hibernatedRef = useRef<Set<number>>(new Set());
+  useEffect(() => {
+    if (!settings.autoHibernate) return;
+    const cap = Math.max(1, settings.maxLiveAgents);
+    const live = agentSessions.filter((x) => !hibernatedRef.current.has(x.session.id));
+    if (live.length <= cap) return;
+    const reclaimable = live
+      .filter((x) => x.digest?.state === "idle" || x.digest?.state === "ended")
+      .sort((a, b) => (a.digest?.updated ?? 0) - (b.digest?.updated ?? 0));
+    const victims = reclaimable.slice(0, live.length - cap);
+    for (const v of victims) {
+      hibernatedRef.current.add(v.session.id);
+      hibernate(v.session.id);
+    }
+    if (victims.length > 0) {
+      onNotice?.(
+        `Hibernated ${victims.length} idle agent${
+          victims.length > 1 ? "s" : ""
+        } to free memory — resume from Restorable.`,
+      );
+    }
+  }, [agentSessions, settings.autoHibernate, settings.maxLiveAgents, onNotice]);
+
   /** Registry id for a process name, so the row can wear the CLI's mark. */
   const agentIdOf = (procName: string) =>
     AGENT_CLIS.find((c) => procName === c.bin || procName.startsWith(c.bin))?.id ?? "agent";
@@ -223,6 +287,11 @@ export function AgentsPanel({
     const runaway =
       s.total_cpu > settings.runawayCpuPercent ||
       s.total_mem_bytes > settings.runawayMemBytes;
+    // Lifecycle dot: only for agent rows the hook stream has spoken for.
+    const st = agent && digest?.state ? STATE_META[digest.state] : undefined;
+    // Only reclaim an agent that has finished — never one mid-turn or blocked.
+    const canHibernate =
+      !!agent && (digest?.state === "idle" || digest?.state === "ended");
     // What the human last asked for. The highest-signal line about a session:
     // "fix the login redirect" identifies it in a way that cpu, memory and a
     // directory never will.
@@ -243,6 +312,9 @@ export function AgentsPanel({
           .join("\n")}
       >
         <div className="agent-main">
+          {/* Lifecycle at a glance: green pulse = working, amber = waiting on
+              you, grey = idle, faded = ended. */}
+          {st && <span className={`agent-state-dot ${st.cls}`} title={st.label} />}
           {/* The CLI's own mark, not its name in bold — the panel is a column
               of near-identical rows and a glyph reads faster than a word. */}
           {agent ? (
@@ -261,6 +333,24 @@ export function AgentsPanel({
           {digest?.branch && (
             <span className="agent-branch" title={`On branch ${digest.branch}`}>
               {digest.branch}
+            </span>
+          )}
+          {/* Blocked on you, stated on the row itself so it survives whether
+              or not the transient card is up and whichever tab is focused —
+              the durable "needs input" signal, not a fleeting event. */}
+          {digest?.state === "waiting" && (
+            <span className="agent-needs-you" title="This agent is waiting for your answer">
+              needs you
+            </span>
+          )}
+          {/* Helpers this turn spawned, so a quiet-looking row that's actually
+              fanning out work reads as busy rather than idle. */}
+          {(digest?.subagents ?? 0) > 0 && (
+            <span
+              className="agent-subagents"
+              title={`${digest?.subagents} subagent${digest?.subagents === 1 ? "" : "s"} finished this turn`}
+            >
+              ⑃ {digest?.subagents}
             </span>
           )}
           <span className="agent-session">term #{s.id}</span>
@@ -287,6 +377,18 @@ export function AgentsPanel({
           <span>{s.total_cpu.toFixed(0)}% cpu</span>
           <span>{fmtMem(s.total_mem_bytes)}</span>
           <span>{s.procs.length} procs</span>
+          {canHibernate && (
+            <button
+              className="btn-icon"
+              title="Hibernate — frees memory now; resume later from Restorable with its history"
+              onClick={(e) => {
+                e.stopPropagation();
+                hibernate(s.id);
+              }}
+            >
+              <MoonIcon size={12} />
+            </button>
+          )}
           <button
             className="btn-icon btn-danger"
             title={`Kill terminal #${s.id}${agent ? ` and the ${agent.name} running in it` : ""}`}
@@ -384,7 +486,36 @@ export function AgentsPanel({
                   ))}
                 </>
               ) : (
-                <div className="pending-q-text">🔔 {item.message}</div>
+                <>
+                  <div className="pending-q-text">🔔 {item.message}</div>
+                  {/* Respond without leaving the panel: Allow types the accept
+                      key, Deny sends Escape. Only for CLIs whose prompt we can
+                      drive by keystroke — the rest fall back to the terminal. */}
+                  {onRespond && KEYSTROKE_APPROVAL_AGENTS.has(item.agent) && (
+                    <div className="pending-respond">
+                      <button
+                        className="pending-approve"
+                        title="Allow — types the accept key into the terminal"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onRespond(item, "approve");
+                        }}
+                      >
+                        ✓ Allow
+                      </button>
+                      <button
+                        className="pending-deny"
+                        title="Deny — sends Escape to the terminal"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onRespond(item, "deny");
+                        }}
+                      >
+                        ✕ Deny
+                      </button>
+                    </div>
+                  )}
+                </>
               )}
               <div className="pending-footer">
                 <span className="event-time">{new Date(item.ts).toLocaleTimeString()}</span>
@@ -489,6 +620,19 @@ export function AgentsPanel({
           </button>
         }
       >
+
+      {noHookSignal && !showHookHelp && (
+        <div className="hook-nudge">
+          <span>
+            Agents are running, but no events are streaming in — questions,
+            tasks and tokens won't show until hooks are set up.
+          </span>
+          <button className="btn btn-accent" onClick={() => void autoSetup("claude")}>
+            Set up Claude Code hooks
+          </button>
+          {setupResult && <p className="hook-result">{setupResult}</p>}
+        </div>
+      )}
 
       {showHookHelp && hookPath && (
         <div className="hook-help">

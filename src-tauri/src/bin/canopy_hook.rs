@@ -220,6 +220,40 @@ fn publish_to_bus(raw: &str, event: &serde_json::Value) {
     }
 }
 
+/// The lifecycle state a hook event implies: `working` (a turn is in flight),
+/// `waiting` (blocked on the user — a question or permission prompt), `idle`
+/// (finished a turn, nothing outstanding), or `ended` (the session closed).
+/// Returns None for events that don't move the state (compaction, anything
+/// unrecognised), so the prior state stands rather than being reset.
+fn state_for(hook_event: &str, event: &serde_json::Value) -> Option<&'static str> {
+    let tool = event["tool_name"].as_str().unwrap_or("");
+    let msg = event["message"].as_str().unwrap_or("").to_lowercase();
+    Some(match hook_event {
+        "SessionStart" | "Stop" => "idle",
+        "SessionEnd" => "ended",
+        "UserPromptSubmit" | "PostToolUse" => "working",
+        // Every tool but the questionnaire means the turn is progressing; the
+        // questionnaire itself is the agent blocking on an answer.
+        "PreToolUse" => {
+            if tool == "AskUserQuestion" {
+                "waiting"
+            } else {
+                "working"
+            }
+        }
+        // A "waiting for input" line is a completion notice, not a request —
+        // the same text the frontend keys on to tell those two apart.
+        "Notification" | "PermissionRequest" => {
+            if msg.contains("waiting for") {
+                "idle"
+            } else {
+                "waiting"
+            }
+        }
+        _ => return None,
+    })
+}
+
 /// One file per session; this process is the only writer for its own session,
 /// and hook invocations within a session are serial.
 fn update_digest(
@@ -281,10 +315,31 @@ fn update_digest(
     if let Some(b) = git_branch(cwd) {
         digest["branch"] = serde_json::json!(b);
     }
-    if hook_event == "Stop" {
-        digest["idle"] = serde_json::json!(true);
-    } else {
-        digest["idle"] = serde_json::json!(false);
+
+    // Lifecycle state, derived from the event. The panel shows it as a dot and
+    // hibernation reads it to know which agents are safe to reclaim; both must
+    // read the exact same stream the cards do, so `state_for` mirrors the
+    // frontend's own reading of these events. An event that says nothing about
+    // state (compaction, an unrecognised name) leaves the prior state standing.
+    let prev_state = digest["state"].as_str().unwrap_or("idle").to_string();
+    let state = match state_for(hook_event, event) {
+        Some(s) => s.to_string(),
+        None => prev_state,
+    };
+    digest["state"] = serde_json::json!(state);
+    // `idle` is still what peer_context and older readers key on; derive it from
+    // the richer state so the two can never disagree.
+    digest["idle"] = serde_json::json!(state == "idle" || state == "ended");
+
+    // Subagents (Claude dispatches them through the Task tool) that finished
+    // this turn. Counted from SubagentStop and zeroed when a new human turn
+    // begins, so the panel badge reads "this turn spawned N helpers" rather
+    // than an ever-growing session total.
+    if hook_event == "UserPromptSubmit" {
+        digest["subagents"] = serde_json::json!(0);
+    } else if hook_event == "SubagentStop" {
+        let n = digest["subagents"].as_u64().unwrap_or(0) + 1;
+        digest["subagents"] = serde_json::json!(n);
     }
 
     // What the human actually asked for — the highest-signal, lowest-token

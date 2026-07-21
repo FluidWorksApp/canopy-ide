@@ -87,6 +87,15 @@ export interface Settings {
   relayName: string;
   /** Last relay address joined, prefilled on the next join. */
   relayAddr: string;
+  /** Reclaim memory from finished background agents automatically. Off by
+   *  default: hibernating kills the terminal, and a terminal's scrollback
+   *  exists nowhere else — so this stays a choice, never a surprise. When on,
+   *  only sessions that are idle or ended (never mid-turn) and beyond
+   *  `maxLiveAgents`, oldest first, are hibernated; each stays resumable. */
+  autoHibernate: boolean;
+  /** How many agent terminals to keep live per project before auto-hibernation
+   *  starts reclaiming the stalest idle ones. */
+  maxLiveAgents: number;
 }
 
 // NB: stored settings override these (see getSettings), so flipping a default
@@ -102,6 +111,8 @@ const DEFAULTS: Settings = {
   defaultAgent: "claude",
   relayName: "",
   relayAddr: "",
+  autoHibernate: false,
+  maxLiveAgents: 8,
   trackerKeys: {},
   theme: "default",
   customAccent: "",

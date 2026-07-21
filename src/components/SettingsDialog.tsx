@@ -255,6 +255,35 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     Canopy never commits, pushes or opens a PR on your behalf.
                   </span>
                 </Item>
+                <Item
+                  name="Hibernate idle agents"
+                  desc="Reclaim memory from finished background agents automatically. Hibernating kills the terminal — its scrollback exists nowhere else — so only sessions that are idle or ended (never mid-turn) and beyond the limit below are ever touched, oldest first, and each stays resumable from the Restorable list."
+                >
+                  <label className="set-inline-check">
+                    <input
+                      type="checkbox"
+                      checked={s.autoHibernate}
+                      onChange={(e) => patch({ autoHibernate: e.target.checked })}
+                    />
+                    <span>Hibernate the stalest idle agents past the limit</span>
+                  </label>
+                </Item>
+                <Item
+                  name="Live agents per project"
+                  desc="How many agent terminals to keep before auto-hibernation starts reclaiming the stalest idle ones. Only applies when the option above is on."
+                >
+                  <input
+                    type="number"
+                    min={1}
+                    max={64}
+                    value={s.maxLiveAgents}
+                    disabled={!s.autoHibernate}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      if (Number.isFinite(v) && v >= 1) patch({ maxLiveAgents: Math.floor(v) });
+                    }}
+                  />
+                </Item>
               </>
             )}
 

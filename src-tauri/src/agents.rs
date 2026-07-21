@@ -1066,13 +1066,20 @@ fn setup_claude_hooks(home: &str, bridge: &str) -> Result<String, String> {
     let mut changed = 0;
     // PreToolUse:AskUserQuestion captures questionnaires before they block.
     // UserPromptSubmit and SessionStart are the only two events that can inject
-    // context back into a session — the rest are observation only.
+    // context back into a session — the rest are observation only. SessionEnd
+    // gives the panel a real "ended" state instead of inferring it from a
+    // stale process; PreCompact marks the context reset so the token tray can
+    // start a fresh count. Neither fires per tool call, so they add no
+    // hot-path spawns the way a general PreToolUse would.
     for (event, matcher) in [
         ("PostToolUse", None),
         ("Stop", None),
         ("Notification", None),
         ("UserPromptSubmit", None),
         ("SessionStart", None),
+        ("SessionEnd", None),
+        ("PreCompact", None),
+        ("SubagentStop", None),
         ("PreToolUse", Some("AskUserQuestion")),
     ] {
         let list = hooks.entry(event).or_insert_with(|| serde_json::json!([]));
@@ -1150,6 +1157,7 @@ fn setup_codex_hooks(home: &str, bridge: &str) -> Result<String, String> {
         "SessionStart",
         "UserPromptSubmit",
         "Stop",
+        "SessionEnd",
         "PostToolUse",
         "PermissionRequest",
     ] {

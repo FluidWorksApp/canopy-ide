@@ -2141,6 +2141,46 @@ body,
   font-weight: 600;
 }
 
+/* Lifecycle dot: one glance tells working from waiting-on-you from finished. */
+.agent-state-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+.agent-state-dot.st-working {
+  background: var(--ok, #9ece6a);
+  animation: agent-pulse 1.4s ease-in-out infinite;
+}
+.agent-state-dot.st-waiting {
+  background: var(--warn, #e0af68);
+}
+.agent-state-dot.st-idle {
+  background: var(--text-dim);
+}
+.agent-state-dot.st-ended {
+  background: transparent;
+  border: 1px solid var(--text-dim);
+  opacity: 0.6;
+}
+@keyframes agent-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 rgba(158, 206, 106, 0.45);
+  }
+  50% {
+    opacity: 0.55;
+    box-shadow: 0 0 0 3px rgba(158, 206, 106, 0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .agent-state-dot.st-working {
+    animation: none;
+  }
+}
+
 .agent-session {
   color: var(--text-dim);
   font-size: 11px;
@@ -2165,6 +2205,47 @@ body,
   border: 1px solid var(--danger);
   border-radius: 8px;
   padding: 0 6px;
+}
+
+/* Blocked-on-you, stated on the row. Loud on purpose — the whole point is that
+   it can't be missed the way a bare dot can. */
+.agent-needs-you {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--on-accent, #1a1b26);
+  background: var(--warn, #e0af68);
+  border-radius: 8px;
+  padding: 0 7px;
+  line-height: 16px;
+  text-transform: lowercase;
+}
+
+.agent-subagents {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 6px;
+}
+
+/* Running agents with no hook signal: the panel is blind until setup. */
+.hook-nudge {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 10px 8px;
+  padding: 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  background: rgba(224, 175, 104, 0.08);
+  border: 1px solid rgba(224, 175, 104, 0.35);
+  border-radius: 8px;
+}
+.hook-nudge button {
+  align-self: flex-start;
 }
 
 .hook-help {
@@ -2658,6 +2739,32 @@ body,
 
 .pending-jump {
   color: var(--accent);
+}
+
+/* Approve / deny a permission prompt without leaving the panel. */
+.pending-respond {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.pending-respond button {
+  flex: 1;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  color: var(--text);
+  cursor: pointer;
+}
+.pending-respond .pending-approve:hover {
+  border-color: var(--ok, #9ece6a);
+  color: var(--ok, #9ece6a);
+}
+.pending-respond .pending-deny:hover {
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 .rail-badge-urgent,
