@@ -257,6 +257,7 @@ pub fn run() {
             agents::which_check,
             agents::cli_versions,
             agents::setup_agent_hooks,
+            agents::agent_hooks_installed,
             agents::claude_session_stats,
             agents::hook_bridge_path,
             agents::set_context_scopes,

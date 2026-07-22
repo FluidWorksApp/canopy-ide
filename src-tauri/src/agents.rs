@@ -364,6 +364,32 @@ pub async fn setup_agent_hooks(agent: String) -> Result<String, String> {
     }
 }
 
+/// Whether our hooks are already present in an agent CLI's config, read-only.
+/// The panel needs this to tell "hooks aren't installed" (offer to set them up)
+/// apart from "hooks are installed, but these agents predate them" (restart to
+/// stream) — two states a missing session digest alone can't distinguish. A
+/// config file that references any of our MARKERS is one we've hooked.
+#[tauri::command]
+pub async fn agent_hooks_installed(agent: String) -> bool {
+    let Ok(home) = std::env::var("HOME") else { return false };
+    // The config file each agent's hooks live in — the same file its
+    // `setup_*` writes to, checked for our markers rather than re-derived.
+    let config = match agent.as_str() {
+        "claude" => Some(format!("{home}/.claude/settings.json")),
+        "codex" => Some(format!("{home}/.codex/config.toml")),
+        "aider" => Some(format!("{home}/.aider.conf.yml")),
+        // Plugin/hook-file agents drop a whole file rather than editing config;
+        // presence of the installed marker path is the signal there. Kept out of
+        // this check (the nudge only auto-installs Claude) until each is wired.
+        _ => None,
+    };
+    let Some(config) = config else { return false };
+    match std::fs::read_to_string(&config) {
+        Ok(raw) => MARKERS.iter().any(|m| raw.contains(m)),
+        Err(_) => false,
+    }
+}
+
 /// Aider has no hook system, but `notifications-command` runs an arbitrary
 /// command whenever it is waiting for input — after a turn AND at y/n
 /// confirms (verified in its io.py). The helper's --event mode synthesizes
