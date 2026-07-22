@@ -2010,6 +2010,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     t.type === "terminal" &&
     (AGENT_PATTERN.test(t.command ?? "") ||
       (t.ptyId != null && agentPtyIds.has(t.ptyId)));
+  // A single dot carries an agent tab's whole state: orange sharp-pulse when it
+  // wants attention (unread — set by OSC or the went-quiet heuristic), gray
+  // soft-pulse while its work burns CPU, gray steady when idle.
+  const busyPtyIds = new Set(
+    projectStats.filter((s) => s.total_cpu > 10).map((s) => s.id),
+  );
+  const tabStatus = (t: TermSubTab): "attention" | "working" | "idle" =>
+    t.unread ? "attention" : t.ptyId != null && busyPtyIds.has(t.ptyId) ? "working" : "idle";
   const stripTabs = tabs.filter((t) => t.type !== "terminal" || !t.run);
   const shellTabs = stripTabs.filter(
     (t): t is TermSubTab => t.type === "terminal" && !isAgentTab(t),
@@ -2159,9 +2167,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 key={tab.id}
                 ref={tab.id === activeTabId ? activeTabElRef : undefined}
                 className={`tab ${tab.id === activeTabId ? "tab-active" : ""} ${
-                  (tab.type === "terminal" || tab.type === "chat") && tab.unread
-                    ? "tab-unread"
-                    : ""
+                  tab.type === "chat" && tab.unread ? "tab-unread" : ""
                 } ${tab.type !== "terminal" ? "tab-doc" : isAgentTab(tab) ? "tab-agent" : ""} ${
                   tab.id === flashTabId ? "tab-flash" : ""
                 }`}
@@ -2209,7 +2215,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 }
               >
                 {tab.type === "terminal" ? (
-                  <span className="tab-term-icon">{tab.icon ?? "❯_"}</span>
+                  <span className={`tab-status tab-status-${tabStatus(tab)}`} aria-hidden />
                 ) : tab.type === "pr" ? (
                   <PullRequestIcon size={12} className="tab-pr-icon" />
                 ) : tab.type === "ticket" ? (
