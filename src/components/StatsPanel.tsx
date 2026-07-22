@@ -135,8 +135,10 @@ export function StatsPanel({ visible }: { visible: boolean }) {
     () => groupBy(supported, (u) => u.model ?? "unknown"),
     [supported],
   );
+  // Newest first — a stable order that doesn't reshuffle as live costs tick
+  // (sorting by cost made rows swap places on every poll).
   const sessions = useMemo(
-    () => [...supported].sort((a, b) => (sessionCost(b) ?? 0) - (sessionCost(a) ?? 0)),
+    () => [...supported].sort((a, b) => b.updated - a.updated),
     [supported],
   );
 
@@ -175,14 +177,21 @@ export function StatsPanel({ visible }: { visible: boolean }) {
             </div>
           </div>
 
-          <div className="ap-head">
+          <div className="ap-head stats-section-head">
             <span className="ap-title">By CLI</span>
           </div>
           <table className="stats-table">
+            <colgroup>
+              <col style={{ width: "34%" }} />
+              <col style={{ width: "16%" }} />
+              <col style={{ width: "18%" }} />
+              <col style={{ width: "15%" }} />
+              <col style={{ width: "17%" }} />
+            </colgroup>
             <thead>
               <tr>
                 <th>CLI</th>
-                <th className="stats-num">Sessions</th>
+                <th className="stats-num">Sess</th>
                 <th className="stats-num">↑ Sent</th>
                 <th className="stats-num">↓ Recv</th>
                 <th className="stats-num">Cost</th>
@@ -194,7 +203,7 @@ export function StatsPanel({ visible }: { visible: boolean }) {
                   <td>
                     <span className="stats-agent">
                       <AgentIcon id={g.key} size={13} />
-                      {agentName(g.key)}
+                      <span className="stats-agent-name">{agentName(g.key)}</span>
                     </span>
                   </td>
                   <td className="stats-num">{g.sessions}</td>
@@ -208,10 +217,16 @@ export function StatsPanel({ visible }: { visible: boolean }) {
             </tbody>
           </table>
 
-          <div className="ap-head">
+          <div className="ap-head stats-section-head">
             <span className="ap-title">By model</span>
           </div>
           <table className="stats-table">
+            <colgroup>
+              <col style={{ width: "40%" }} />
+              <col style={{ width: "20%" }} />
+              <col style={{ width: "18%" }} />
+              <col style={{ width: "22%" }} />
+            </colgroup>
             <thead>
               <tr>
                 <th>Model</th>
@@ -236,10 +251,16 @@ export function StatsPanel({ visible }: { visible: boolean }) {
             </tbody>
           </table>
 
-          <div className="ap-head">
+          <div className="ap-head stats-section-head">
             <span className="ap-title">Sessions</span>
           </div>
           <table className="stats-table">
+            <colgroup>
+              <col style={{ width: "40%" }} />
+              <col style={{ width: "20%" }} />
+              <col style={{ width: "18%" }} />
+              <col style={{ width: "22%" }} />
+            </colgroup>
             <tbody>
               {sessions.slice(0, 40).map((u) => {
                 const c = sessionCost(u);
