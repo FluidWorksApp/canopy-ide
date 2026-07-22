@@ -711,6 +711,35 @@ body,
   overflow-y: auto;
 }
 
+/* Stats chip: an icon button in the corner that opens the all-CLI usage popup. */
+.status-stats-anchor {
+  position: relative;
+}
+
+.status-stats-btn {
+  display: inline-flex;
+  align-items: center;
+  background: none;
+  border: none;
+  padding: 0 2px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.status-stats-btn:hover {
+  color: var(--accent);
+}
+
+/* The usage panel rendered inside a tray popup: wider than a menu, scrollable,
+   and it brings its own padding. */
+.status-stats-menu {
+  width: 380px;
+  max-width: calc(100vw - 24px);
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 0;
+}
+
 .bd-row {
   display: flex;
   align-items: center;
@@ -782,6 +811,140 @@ body,
 .bd-ports {
   color: var(--ok);
   font-size: 10px;
+}
+
+/* All-CLI token/cost total, pinned above the resource tree. Accent border so
+   it reads as the headline, not another project group. */
+.bd-usage {
+  margin-top: 0;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+}
+
+.bd-usage .bd-nums {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ---- Statistics panel ---- */
+.stats-panel {
+  padding-bottom: 14px;
+  font-size: 12px;
+}
+
+.stats-empty,
+.stats-note {
+  padding: 10px 12px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.stats-note {
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+/* Headline metrics: cost first, then the token flow and session count. */
+.stats-overview {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  padding: 6px 12px 12px;
+}
+
+.stats-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px 11px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.stats-metric-val {
+  font-size: 17px;
+  font-weight: 650;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.stats-metric:first-child .stats-metric-val {
+  color: var(--accent);
+}
+
+.stats-metric-lbl {
+  font-size: 9.5px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.stats-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 4px;
+}
+
+.stats-table th {
+  text-align: left;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 2px 12px 5px;
+  border-bottom: 1px solid var(--border);
+}
+
+.stats-table td {
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  vertical-align: middle;
+}
+
+.stats-table tr:last-child td {
+  border-bottom: none;
+}
+
+.stats-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.stats-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.stats-sess-title,
+.stats-model {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 150px;
+  display: inline-block;
+  vertical-align: bottom;
+}
+
+.stats-model {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.stats-cost {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.stats-dim {
+  color: var(--text-dim);
 }
 
 .bd-core {

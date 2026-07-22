@@ -259,6 +259,7 @@ pub fn run() {
             agents::setup_agent_hooks,
             agents::agent_hooks_installed,
             agents::claude_session_stats,
+            agents::agent_usage,
             agents::hook_bridge_path,
             agents::set_context_scopes,
             agents::session_digests,
