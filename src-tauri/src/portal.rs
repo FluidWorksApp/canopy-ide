@@ -275,6 +275,13 @@ pub async fn remote_set_theme(
     Ok(())
 }
 
+/// A QR SVG for any URL — so the desktop can point the code at the LAN address
+/// or the active tunnel URL depending on the chosen scope.
+#[tauri::command]
+pub fn remote_qr(text: String) -> Option<String> {
+    qr_svg_of(&text)
+}
+
 #[tauri::command]
 pub async fn remote_status(mgr: tauri::State<'_, RemoteManager>) -> Result<RemoteStatus, String> {
     Ok(mgr

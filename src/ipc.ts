@@ -630,6 +630,27 @@ export const remoteRotatePin = () => invoke<RemoteStatus>("remote_rotate_pin");
  *  desktop's skin. */
 export const remoteSetTheme = (theme: Record<string, string>) =>
   invoke<void>("remote_set_theme", { theme });
+/** A QR SVG for any URL (LAN address or the active tunnel URL). */
+export const remoteQr = (text: string) => invoke<string | null>("remote_qr", { text });
+
+/** Public-link tunnel (Cloudflare / ngrok / Tailscale). Exposes the portal to
+ *  the internet so it loads from any browser without router config. */
+export interface TunnelState {
+  running: boolean;
+  provider: string | null;
+  url: string | null;
+  message: string | null;
+}
+export const tunnelStart = (provider: string, port: number, token?: string) =>
+  invoke<TunnelState>("tunnel_start", { provider, port, token });
+export const tunnelStop = () => invoke<TunnelState>("tunnel_stop");
+export const tunnelStatus = () => invoke<TunnelState>("tunnel_status");
+export const onTunnelState = (cb: (s: TunnelState) => void): Promise<UnlistenFn> =>
+  listen<TunnelState>("tunnel:state", (e) => cb(e.payload));
+
+/** Which of these commands are installed (login-shell PATH). */
+export const whichCheck = (commands: string[]) =>
+  invoke<Record<string, boolean>>("which_check", { commands });
 /** Resolves with the stamped message — the sender's UI appends it; the relay
  *  never echoes a frame back to its author. */
 export const relaySendChat = (to: string | null, text: string) =>

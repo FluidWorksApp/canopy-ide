@@ -119,20 +119,34 @@ function sortRows(a: AgentRow, b: AgentRow): number {
  * authoritatively from `livePtys` (the snapshot), with the `stats` event as a
  * fallback and the source of CPU/mem. `stats` also overlays live resource use.
  */
+const normCwd = (p?: string) => (p ?? '').replace(/\/+$/, '')
+
 export function buildRows(
   sessions: Digest[],
   usage: Usage[],
   stats: Map<number, Stat>,
   instance: string,
-  livePtys: Set<number>,
+  livePtys: Pty[],
 ): AgentRow[] {
   const usageBy = new Map(usage.map((u) => [u.session_id, u]))
+  const ptyById = new Map(livePtys.map((p) => [p.id, p]))
   return sessions
     .filter((d) => d.agent)
     .map((d, i) => {
-      const ptyId = d.instance === instance && d.surface ? Number(d.surface) : undefined
-      const live = ptyId !== undefined && (livePtys.has(ptyId) || stats.has(ptyId))
-      const liveStat = ptyId !== undefined ? stats.get(ptyId) : undefined
+      // The digest's surface id links it to a PTY. It's "live" (attachable) when
+      // that id is a currently-running PTY AND either the digest is from this
+      // app instance or its cwd matches that PTY's — the cwd check makes it
+      // robust to instance-token churn without risking a cross-instance id
+      // collision. `stats` is a secondary source of liveness + CPU/mem.
+      const surfaceId = d.surface ? Number(d.surface) : undefined
+      const livePty = surfaceId !== undefined ? ptyById.get(surfaceId) : undefined
+      const sameInst = d.instance === instance
+      const live =
+        surfaceId !== undefined &&
+        ((!!livePty && (sameInst || normCwd(livePty.cwd) === normCwd(d.cwd))) ||
+          (sameInst && stats.has(surfaceId)))
+      const ptyId = live ? surfaceId : undefined
+      const liveStat = surfaceId !== undefined ? stats.get(surfaceId) : undefined
       const u = d.session_id ? usageBy.get(d.session_id) : undefined
       return {
         key: d.session_id || `${d.instance ?? ''}:${d.surface ?? i}`,

@@ -22,7 +22,7 @@ import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
 import * as ipc from "../ipc";
 import { availableMonoFonts, fontLabel, fontStack } from "../fonts";
 import { AgentIcon, TrackerIcon } from "./icons";
-import { AGENT_CLIS } from "../projects";
+import { AGENT_CLIS, currentPlatform } from "../projects";
 
 export type SettingsTab =
   | "appearance"
@@ -430,7 +430,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
               </>
             )}
 
-            {tab === "remote" && <RemoteSettings />}
+            {tab === "remote" && <RemoteSettings runInTerminal={runInTerminal} />}
 
             {tab === "integrations" && (
               <>
@@ -709,31 +709,133 @@ function readThemeTokens(): Record<string, string> {
   return out;
 }
 
-function RemoteSettings() {
+/** Public-link tunnel providers, with the per-OS install command (same model as
+ *  the prerequisite installers) and whether they need an account token. */
+const TUNNELS: {
+  id: string;
+  name: string;
+  bin: string;
+  needsToken: boolean;
+  blurb: string;
+  tokenHelp?: string;
+  note?: string;
+  install: Record<"macos" | "windows" | "linux", string>;
+}[] = [
+  {
+    id: "cloudflare",
+    name: "Cloudflare",
+    bin: "cloudflared",
+    needsToken: false,
+    blurb: "No account — an instant https:// link. Recommended.",
+    install: {
+      macos: "brew install cloudflared",
+      windows: "winget install --id Cloudflare.cloudflared -e --source winget",
+      linux: "curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared",
+    },
+  },
+  {
+    id: "ngrok",
+    name: "ngrok",
+    bin: "ngrok",
+    needsToken: true,
+    blurb: "Paste your free authtoken.",
+    tokenHelp: "From dashboard.ngrok.com → Your Authtoken.",
+    install: {
+      macos: "brew install ngrok",
+      windows: "winget install --id ngrok.ngrok -e --source winget",
+      linux: "curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null && echo 'deb https://ngrok-agent.s3.amazonaws.com buster main' | sudo tee /etc/apt/sources.list.d/ngrok.list && sudo apt update && sudo apt install ngrok",
+    },
+  },
+  {
+    id: "tailscale",
+    name: "Tailscale",
+    bin: "tailscale",
+    needsToken: false,
+    blurb: "Uses Funnel for a public link.",
+    note: "Requires Funnel enabled in your tailnet admin (plain Tailscale needs the app on both devices).",
+    install: {
+      macos: "brew install tailscale",
+      windows: "winget install --id tailscale.tailscale -e --source winget",
+      linux: "curl -fsSL https://tailscale.com/install.sh | sh",
+    },
+  },
+];
+
+function RemoteSettings({
+  runInTerminal,
+}: {
+  runInTerminal: (command: string, title: string) => void;
+}) {
   const [status, setStatus] = useState<ipc.RemoteStatus | null>(null);
   const [busy, setBusy] = useState(false);
+  const [scope, setScope] = useState<"local" | "internet">("local");
+  const [provider, setProvider] = useState("cloudflare");
+  const [tunnel, setTunnel] = useState<ipc.TunnelState>({
+    running: false,
+    provider: null,
+    url: null,
+    message: null,
+  });
+  const [installed, setInstalled] = useState<Record<string, boolean>>({});
+  const [token, setToken] = useState(() => trackerKey("ngrok"));
+  const [qr, setQr] = useState<string | null>(null);
 
   useEffect(() => {
     void ipc.remoteStatus().then(setStatus).catch(() => setStatus(null));
+    void ipc.tunnelStatus().then(setTunnel).catch(() => {});
+    void ipc
+      .whichCheck(TUNNELS.map((t) => t.bin))
+      .then(setInstalled)
+      .catch(() => {});
+    const un = ipc.onTunnelState(setTunnel);
+    return () => void un.then((f) => f());
   }, []);
 
-  // Hand the portal our theme whenever remote access is on (and it rarely
-  // changes mid-session, so on-enable is enough to keep it in the same skin).
+  // Push our theme to the portal whenever remote access is on.
   useEffect(() => {
     if (status?.enabled) void ipc.remoteSetTheme(readThemeTokens()).catch(() => {});
   }, [status?.enabled]);
+
+  const on = status?.enabled ?? false;
+  const lanUrl = status?.urls?.[0] ?? null;
+  const activeUrl = scope === "internet" ? tunnel.url : lanUrl;
+
+  // Repoint the QR at whichever URL the chosen scope resolves to.
+  useEffect(() => {
+    if (!on || !activeUrl) {
+      setQr(null);
+      return;
+    }
+    void ipc.remoteQr(activeUrl).then(setQr).catch(() => setQr(null));
+  }, [on, activeUrl]);
 
   const run = (op: () => Promise<ipc.RemoteStatus>) => {
     setBusy(true);
     void op().then(setStatus).catch(() => {}).finally(() => setBusy(false));
   };
-  const on = status?.enabled ?? false;
+  const prov = TUNNELS.find((t) => t.id === provider)!;
+  const provInstalled = installed[prov.bin] ?? true;
+
+  const startTunnel = () => {
+    if (!status) return;
+    setBusy(true);
+    const tok = prov.needsToken ? token.trim() : undefined;
+    void ipc
+      .tunnelStart(provider, status.port, tok)
+      .then(setTunnel)
+      .catch((e) => setTunnel({ running: false, provider, url: null, message: String(e) }))
+      .finally(() => setBusy(false));
+  };
+  const stopTunnel = () => {
+    setBusy(true);
+    void ipc.tunnelStop().then(setTunnel).finally(() => setBusy(false));
+  };
 
   return (
     <>
       <Item
         name="Remote access"
-        desc="Drive your agents from a phone or browser on your network. A dedicated PIN unlocks a control panel that lists every project and agent, streams each agent's output, and lets you reply, approve, or stop them. Off by default; the PIN is separate from the team join code."
+        desc="Drive your agents from a phone or browser. A dedicated PIN unlocks a control panel that lists every project and agent, streams each agent's output, and lets you reply, approve, or stop them. Off by default; the PIN is separate from the team join code."
       >
         <button
           className="btn"
@@ -746,23 +848,49 @@ function RemoteSettings() {
 
       {on && (
         <>
+          {/* Scope toggle — the QR follows this. */}
+          <Item name="Reach" desc="Who can open the portal — and what the QR points at.">
+            <div style={{ display: "inline-flex", border: "1px solid var(--border, #2a2f3a)", borderRadius: 9, overflow: "hidden" }}>
+              {(["local", "internet"] as const).map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setScope(s)}
+                  style={{
+                    padding: "7px 14px",
+                    border: "none",
+                    background: scope === s ? "var(--accent, #7aa2f7)" : "transparent",
+                    color: scope === s ? "var(--on-accent, #fff)" : "var(--text, #ccc)",
+                    fontWeight: 600,
+                  }}
+                >
+                  {s === "local" ? "This network" : "Internet"}
+                </button>
+              ))}
+            </div>
+          </Item>
+
           <Item
             name="Scan to connect"
-            desc="On the same Wi-Fi: scan this with your phone's camera, then enter the PIN below."
+            desc={
+              scope === "local"
+                ? "Same Wi-Fi: scan with your phone's camera, then enter the PIN."
+                : tunnel.url
+                  ? "Scan from anywhere, then enter the PIN. This link works on any network."
+                  : "Start a public link below — the QR will point at it."
+            }
           >
             <div className="set-inline" style={{ alignItems: "center", gap: 16 }}>
-              {status?.qr_svg && (
+              {qr ? (
                 <div
-                  style={{
-                    width: 148,
-                    height: 148,
-                    padding: 8,
-                    background: "#fff",
-                    borderRadius: 8,
-                    flex: "none",
-                  }}
-                  dangerouslySetInnerHTML={{ __html: status.qr_svg }}
+                  style={{ width: 148, height: 148, padding: 8, background: "#fff", borderRadius: 8, flex: "none" }}
+                  dangerouslySetInnerHTML={{ __html: qr }}
                 />
+              ) : (
+                <div
+                  style={{ width: 148, height: 148, borderRadius: 8, flex: "none", background: "var(--bg-raised, #1f2335)", display: "grid", placeItems: "center", color: "var(--text-dim, #888)", fontSize: 12, textAlign: "center", padding: 10 }}
+                >
+                  {scope === "internet" ? "no public link yet" : "…"}
+                </div>
               )}
               <div>
                 <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 4 }}>PIN</div>
@@ -776,26 +904,104 @@ function RemoteSettings() {
             </div>
           </Item>
 
-          <Item name="Or type the address" desc="Same Wi-Fi — open one of these and enter the PIN.">
-            <div style={{ display: "grid", gap: 6, justifyItems: "start" }}>
-              {status?.urls.map((u) => (
-                <Copyable key={u} text={u} />
-              ))}
-            </div>
-          </Item>
-
-          {status?.public_url && (
-            <Item
-              name="Over the internet"
-              desc={`Forward TCP port ${status.port} on your router to this computer, then use the address below. (A tunnel like Tailscale or Cloudflare works too, and adds HTTPS.)`}
-            >
-              <Copyable text={status.public_url} />
+          {scope === "local" && (
+            <Item name="Or type the address" desc="Same Wi-Fi — open one of these and enter the PIN.">
+              <div style={{ display: "grid", gap: 6, justifyItems: "start" }}>
+                {status?.urls.map((u) => (
+                  <Copyable key={u} text={u} />
+                ))}
+              </div>
             </Item>
+          )}
+
+          {scope === "internet" && (
+            <>
+              <Item name="Public link via" desc="Canopy runs the tunnel for you; the link loads in any browser, no router setup.">
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {TUNNELS.map((t) => (
+                    <button
+                      key={t.id}
+                      onClick={() => setProvider(t.id)}
+                      style={{
+                        padding: "7px 12px",
+                        borderRadius: 8,
+                        border: `1px solid ${provider === t.id ? "var(--accent, #7aa2f7)" : "var(--border, #2a2f3a)"}`,
+                        background: provider === t.id ? "color-mix(in srgb, var(--accent, #7aa2f7) 16%, transparent)" : "transparent",
+                        color: "var(--text, #ccc)",
+                        fontWeight: 600,
+                      }}
+                    >
+                      {t.name}
+                    </button>
+                  ))}
+                </div>
+              </Item>
+
+              <Item name={prov.name} desc={prov.note ? `${prov.blurb} ${prov.note}` : prov.blurb}>
+                <div style={{ display: "grid", gap: 10, justifyItems: "start", width: "100%" }}>
+                  {prov.needsToken && (
+                    <div style={{ display: "grid", gap: 4, width: "100%", maxWidth: 380 }}>
+                      <input
+                        type="password"
+                        className="set-wide"
+                        placeholder="ngrok authtoken"
+                        value={token}
+                        onChange={(e) => {
+                          setToken(e.target.value);
+                          setTrackerKey("ngrok", e.target.value.trim());
+                        }}
+                      />
+                      {prov.tokenHelp && (
+                        <div style={{ fontSize: 12, color: "var(--text-dim, #888)" }}>{prov.tokenHelp}</div>
+                      )}
+                    </div>
+                  )}
+
+                  {!provInstalled ? (
+                    <button
+                      className="btn"
+                      onClick={() => runInTerminal(prov.install[currentPlatform()], `Install ${prov.name}`)}
+                    >
+                      Install {prov.name}
+                    </button>
+                  ) : tunnel.running && tunnel.provider === provider ? (
+                    <button className="btn" disabled={busy} onClick={stopTunnel}>
+                      Stop public link
+                    </button>
+                  ) : (
+                    <button
+                      className="btn"
+                      disabled={busy || (prov.needsToken && !token.trim())}
+                      onClick={startTunnel}
+                    >
+                      Start public link
+                    </button>
+                  )}
+
+                  {tunnel.url && tunnel.provider === provider && (
+                    <Copyable text={tunnel.url} />
+                  )}
+                  {tunnel.message && (
+                    <div
+                      style={{
+                        fontSize: 12,
+                        color: tunnel.running ? "var(--text-dim, #888)" : "var(--danger, #f7768e)",
+                        whiteSpace: "pre-wrap",
+                        maxWidth: 460,
+                        fontFamily: tunnel.running ? undefined : "ui-monospace, monospace",
+                      }}
+                    >
+                      {tunnel.message}
+                    </div>
+                  )}
+                </div>
+              </Item>
+            </>
           )}
 
           <Item
             name="Security"
-            desc="⚠ While this is on, anyone with the PIN on a reachable network can send input to your agents and approve their actions. Turn it off when you're done."
+            desc="⚠ While this is on, anyone with the PIN on a reachable network (or the public link) can send input to your agents and approve their actions. Turn it off when you're done."
           >
             <span />
           </Item>

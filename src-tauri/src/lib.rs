@@ -7,6 +7,7 @@ mod lsp;
 mod portal;
 mod pty;
 mod punch;
+mod tunnel;
 mod qstream;
 mod relay;
 
@@ -160,6 +161,7 @@ pub fn run() {
         .manage(lsp::LspManager::default())
         .manage(relay::RelayManager::default())
         .manage(portal::RemoteManager::default())
+        .manage(tunnel::TunnelManager::default())
         .manage(dictation::DictationManager::default())
         .manage(cli::pending_from_env())
         .setup(|app| {
@@ -305,6 +307,10 @@ pub fn run() {
             portal::remote_status,
             portal::remote_rotate_pin,
             portal::remote_set_theme,
+            portal::remote_qr,
+            tunnel::tunnel_start,
+            tunnel::tunnel_stop,
+            tunnel::tunnel_status,
             dictation::dictation_models,
             dictation::dictation_status,
             dictation::dictation_download,
@@ -324,6 +330,8 @@ pub fn run() {
                 app.state::<relay::RelayManager>().shutdown();
                 // ... and stop the remote-access server.
                 app.state::<portal::RemoteManager>().shutdown();
+                // ... and any public-link tunnel process.
+                app.state::<tunnel::TunnelManager>().kill_all();
             }
         });
 }

@@ -86,7 +86,7 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
   const [usage, setUsage] = useState<Usage[]>([])
   const [instance, setInstance] = useState('')
   const [stats, setStats] = useState<Map<number, Stat>>(new Map())
-  const [livePtys, setLivePtys] = useState<Set<number>>(new Set())
+  const [livePtys, setLivePtys] = useState<Pty[]>([])
   const [route, setRoute] = useState<Route>({ name: 'home' })
   const wireRef = useRef<Wire | null>(null)
   const transportRef = useRef<Transport | null>(null)
@@ -104,7 +104,7 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
         setSessions((m.sessions as Digest[]) ?? [])
         setUsage((m.usage as Usage[]) ?? [])
         setInstance(m.instance ?? '')
-        setLivePtys(new Set(((m.ptys as Pty[]) ?? []).map((p) => p.id)))
+        setLivePtys((m.ptys as Pty[]) ?? [])
         applyTheme(m.theme as Record<string, string> | undefined)
       } else if (m.t === 'event') {
         if (m.name === 'pty:stats') {
