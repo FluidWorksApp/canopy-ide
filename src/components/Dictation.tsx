@@ -68,8 +68,11 @@ export function Dictation() {
     }
     if (p !== "idle" && p !== "notice") return;
     // "loading" covers both the one-time model load and mic warm-up; the
-    // backend answers only once the mic is actually capturing.
+    // backend answers only once the mic is actually capturing. Clear any stale
+    // detail so a fast (already-resident) start shows the plain label, not a
+    // leftover "loading model" line from a previous first-use start.
     setPhase("loading");
+    setDetail("");
     try {
       // Empty model id = the backend's default (first registry entry).
       const r = await ipc.dictationStart(getSettings().dictationModel);
@@ -105,6 +108,10 @@ export function Dictation() {
       } else if (p.phase === "extract") {
         setPhase("downloading");
         setDetail("unpacking…");
+      } else if (p.phase === "load") {
+        // First-use model load: reassure that a multi-second wait isn't a hang.
+        setPhase("loading");
+        setDetail("loading model — first use is slow…");
       } else if (p.phase === "ready") {
         notice(`Voice model ready — press ${formatHotkey(getSettings().dictationHotkey)} to dictate`);
       } else if (p.phase === "error") {
@@ -123,7 +130,7 @@ export function Dictation() {
   const keys = formatHotkey(getSettings().dictationHotkey);
   const label = {
     downloading: `Downloading voice model… ${detail || ""}`,
-    loading: "Starting dictation…",
+    loading: detail || "Starting dictation…",
     recording: `Listening — ${keys} inserts, Esc cancels`,
     transcribing: "Transcribing…",
     notice: detail,
