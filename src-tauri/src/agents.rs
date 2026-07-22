@@ -1217,22 +1217,57 @@ fn setup_codex_hooks(home: &str, bridge: &str) -> Result<String, String> {
 }
 
 /// Legacy notify fallback for codex versions without the hooks system.
+///
+/// `notify` is a bare top-level key, so it MUST sit above the first table
+/// header. Appending it to the end of the file is a bug: codex writes tables of
+/// its own (e.g. `[tui.model_availability_nux]`), and if the file ends inside
+/// one the appended key gets absorbed into that table — codex then fails to
+/// load config at all ("invalid type: sequence, expected u32"). So we splice
+/// notify in before the first table header, and heal any copy we misplaced.
 fn setup_codex_notify(home: &str, bridge: &str) -> Result<String, String> {
     let dir = std::path::PathBuf::from(home).join(".codex");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join("config.toml");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    if existing.contains("agent-events.jsonl") {
-        return Ok("already".into());
-    }
-    if existing.lines().any(|l| l.trim_start().starts_with("notify")) {
+
+    let is_ours = |l: &str| l.trim_start().starts_with("notify") && l.contains(bridge);
+    // A notify line that isn't ours is the user's own — leave the file alone.
+    if existing
+        .lines()
+        .any(|l| l.trim_start().starts_with("notify") && !is_ours(l))
+    {
         return Err("custom notify present".into());
     }
+
     // Codex passes the notification JSON as an argument, not stdin.
-    let line = format!(
-        "notify = [\"/bin/sh\", \"-c\", \"printf '%s\\\\n' \\\"$0\\\" >> {bridge}\"]\n"
+    let notify = format!(
+        "notify = [\"/bin/sh\", \"-c\", \"printf '%s\\\\n' \\\"$0\\\" >> {bridge}\"]"
     );
-    std::fs::write(&path, format!("{existing}\n{line}")).map_err(|e| e.to_string())?;
+
+    // Drop any copy we wrote before (which may have been absorbed into a
+    // table), then reinsert before the first table header — the only place a
+    // bare key is guaranteed to belong to the document root.
+    let kept: Vec<&str> = existing.lines().filter(|l| !is_ours(l)).collect();
+    let mut insert_at = kept
+        .iter()
+        .position(|l| l.trim_start().starts_with('['))
+        .unwrap_or(kept.len());
+    // Keep notify above any blank lines that pad the first table, so a
+    // correctly-placed file re-runs as a no-op instead of drifting downward.
+    while insert_at > 0 && kept[insert_at - 1].trim().is_empty() {
+        insert_at -= 1;
+    }
+    let mut lines: Vec<String> = kept.iter().map(|s| s.to_string()).collect();
+    lines.insert(insert_at, notify);
+
+    let mut rebuilt = lines.join("\n");
+    if rebuilt.is_empty() || existing.ends_with('\n') {
+        rebuilt.push('\n');
+    }
+    if rebuilt == existing {
+        return Ok("already".into());
+    }
+    std::fs::write(&path, rebuilt).map_err(|e| e.to_string())?;
     Ok("installed".into())
 }
 
