@@ -131,6 +131,29 @@ export interface ClaudeSessionStats {
 export const claudeSessionStats = (transcriptPath: string) =>
   invoke<ClaudeSessionStats>("claude_session_stats", { transcriptPath });
 
+/** One agent session's token/cost usage, summed across its turns. `cost` is
+ *  set only when the CLI records its own (omp); otherwise estimate from
+ *  `model`. `supported` is false for CLIs whose usage Canopy can't read yet
+ *  (amp/aider/opencode) — the row is returned so the CLI mix stays honest. */
+export interface AgentSessionUsage {
+  session_id: string;
+  agent: string;
+  cwd: string;
+  title: string | null;
+  model: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  cost: number | null;
+  turns: number;
+  updated: number;
+  supported: boolean;
+}
+/** Usage for every session Canopy knows, across all supported CLIs. Drives the
+ *  Statistics panel and the status-tray grand total. */
+export const agentUsage = () => invoke<AgentSessionUsage[]>("agent_usage");
+
 export interface FsChange {
   root: string;
   paths: string[];
