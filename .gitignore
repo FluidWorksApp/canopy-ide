@@ -36,3 +36,8 @@ dist-ssr
 /.design-sync/
 pnpm-lock.yaml
 .claude/
+
+# CI-staged ONNX Runtime libraries (bundled as app resources; not committed)
+src-tauri/onnxruntime/*.dylib
+src-tauri/onnxruntime/*.so
+src-tauri/onnxruntime/*.dll

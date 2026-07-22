@@ -1,0 +1,2 @@
+# ONNX Runtime dylibs are fetched per-platform in CI (release.yml) and staged here.
+# Do not commit the binaries; this file just keeps the resource dir present.
