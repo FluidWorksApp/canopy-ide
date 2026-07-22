@@ -273,6 +273,18 @@ export function AgentsIcon({ size = 18, className }: IconProps) {
 }
 
 
+/** Statistics: a bar chart. Reads as "totals & breakdowns" at rail size. */
+export function StatsIcon({ size = 18, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M4 20h16" />
+      <rect x="5.5" y="12" width="3.4" height="6" rx="0.8" />
+      <rect x="10.3" y="8" width="3.4" height="10" rx="0.8" />
+      <rect x="15.1" y="4.5" width="3.4" height="13.5" rx="0.8" />
+    </svg>
+  );
+}
+
 /** Delete/forget: a trash can. */
 export function TrashIcon({ size = 14, className }: IconProps) {
   return (

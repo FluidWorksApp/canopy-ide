@@ -364,6 +364,32 @@ pub async fn setup_agent_hooks(agent: String) -> Result<String, String> {
     }
 }
 
+/// Whether our hooks are already present in an agent CLI's config, read-only.
+/// The panel needs this to tell "hooks aren't installed" (offer to set them up)
+/// apart from "hooks are installed, but these agents predate them" (restart to
+/// stream) — two states a missing session digest alone can't distinguish. A
+/// config file that references any of our MARKERS is one we've hooked.
+#[tauri::command]
+pub async fn agent_hooks_installed(agent: String) -> bool {
+    let Ok(home) = std::env::var("HOME") else { return false };
+    // The config file each agent's hooks live in — the same file its
+    // `setup_*` writes to, checked for our markers rather than re-derived.
+    let config = match agent.as_str() {
+        "claude" => Some(format!("{home}/.claude/settings.json")),
+        "codex" => Some(format!("{home}/.codex/config.toml")),
+        "aider" => Some(format!("{home}/.aider.conf.yml")),
+        // Plugin/hook-file agents drop a whole file rather than editing config;
+        // presence of the installed marker path is the signal there. Kept out of
+        // this check (the nudge only auto-installs Claude) until each is wired.
+        _ => None,
+    };
+    let Some(config) = config else { return false };
+    match std::fs::read_to_string(&config) {
+        Ok(raw) => MARKERS.iter().any(|m| raw.contains(m)),
+        Err(_) => false,
+    }
+}
+
 /// Aider has no hook system, but `notifications-command` runs an arbitrary
 /// command whenever it is waiting for input — after a turn AND at y/n
 /// confirms (verified in its io.py). The helper's --event mode synthesizes
@@ -1191,22 +1217,57 @@ fn setup_codex_hooks(home: &str, bridge: &str) -> Result<String, String> {
 }
 
 /// Legacy notify fallback for codex versions without the hooks system.
+///
+/// `notify` is a bare top-level key, so it MUST sit above the first table
+/// header. Appending it to the end of the file is a bug: codex writes tables of
+/// its own (e.g. `[tui.model_availability_nux]`), and if the file ends inside
+/// one the appended key gets absorbed into that table — codex then fails to
+/// load config at all ("invalid type: sequence, expected u32"). So we splice
+/// notify in before the first table header, and heal any copy we misplaced.
 fn setup_codex_notify(home: &str, bridge: &str) -> Result<String, String> {
     let dir = std::path::PathBuf::from(home).join(".codex");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join("config.toml");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    if existing.contains("agent-events.jsonl") {
-        return Ok("already".into());
-    }
-    if existing.lines().any(|l| l.trim_start().starts_with("notify")) {
+
+    let is_ours = |l: &str| l.trim_start().starts_with("notify") && l.contains(bridge);
+    // A notify line that isn't ours is the user's own — leave the file alone.
+    if existing
+        .lines()
+        .any(|l| l.trim_start().starts_with("notify") && !is_ours(l))
+    {
         return Err("custom notify present".into());
     }
+
     // Codex passes the notification JSON as an argument, not stdin.
-    let line = format!(
-        "notify = [\"/bin/sh\", \"-c\", \"printf '%s\\\\n' \\\"$0\\\" >> {bridge}\"]\n"
+    let notify = format!(
+        "notify = [\"/bin/sh\", \"-c\", \"printf '%s\\\\n' \\\"$0\\\" >> {bridge}\"]"
     );
-    std::fs::write(&path, format!("{existing}\n{line}")).map_err(|e| e.to_string())?;
+
+    // Drop any copy we wrote before (which may have been absorbed into a
+    // table), then reinsert before the first table header — the only place a
+    // bare key is guaranteed to belong to the document root.
+    let kept: Vec<&str> = existing.lines().filter(|l| !is_ours(l)).collect();
+    let mut insert_at = kept
+        .iter()
+        .position(|l| l.trim_start().starts_with('['))
+        .unwrap_or(kept.len());
+    // Keep notify above any blank lines that pad the first table, so a
+    // correctly-placed file re-runs as a no-op instead of drifting downward.
+    while insert_at > 0 && kept[insert_at - 1].trim().is_empty() {
+        insert_at -= 1;
+    }
+    let mut lines: Vec<String> = kept.iter().map(|s| s.to_string()).collect();
+    lines.insert(insert_at, notify);
+
+    let mut rebuilt = lines.join("\n");
+    if rebuilt.is_empty() || existing.ends_with('\n') {
+        rebuilt.push('\n');
+    }
+    if rebuilt == existing {
+        return Ok("already".into());
+    }
+    std::fs::write(&path, rebuilt).map_err(|e| e.to_string())?;
     Ok("installed".into())
 }
 
@@ -1296,6 +1357,455 @@ pub async fn claude_session_stats(transcript_path: String) -> Result<ClaudeSessi
     Ok(stats)
 }
 
+// ---------- cross-CLI usage aggregation ----------
+//
+// The status tray (claude_session_stats above) follows one live Claude session.
+// The Statistics panel wants the whole picture: every session Canopy knows,
+// across every CLI, summed into token/cost totals and per-CLI / per-model
+// breakdowns. Each CLI records usage in its own transcript format, so a small
+// per-agent fold normalizes them into one shape.
+
+/// Normalized token/cost usage for one agent session, summed across its turns.
+/// `cost` is set only when the CLI records its own cost (omp); otherwise it is
+/// None and the frontend estimates from `model` + a pricing table (as the tray
+/// already does for Claude).
+#[derive(Serialize, Clone, Default)]
+pub struct AgentSessionUsage {
+    pub session_id: String,
+    pub agent: String,
+    pub cwd: String,
+    pub title: Option<String>,
+    pub model: Option<String>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cost: Option<f64>,
+    pub turns: u64,
+    pub updated: u64,
+    /// Whether Canopy can read token usage for this agent. False for
+    /// server-side (amp) or not-yet-parsed CLIs — the row is still returned so
+    /// the CLI mix stays honest, but its numbers are zero.
+    pub supported: bool,
+}
+
+/// Accumulator a per-agent fold writes into. Same fields as the wire struct,
+/// minus session identity.
+#[derive(Clone, Default)]
+struct Usage {
+    model: Option<String>,
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_creation: u64,
+    cost: Option<f64>,
+    turns: u64,
+}
+
+/// Byte offset + folded usage per transcript, so each poll only parses bytes
+/// appended since the last one (transcripts are append-only JSONL). Separate
+/// from STATS_CACHE, which serves the single-session status tray.
+static USAGE_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<std::path::PathBuf, (u64, Usage)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Fold the JSONL lines appended to `path` since last seen into a cached Usage
+/// via `f`. Incremental (byte-offset cache), truncation-safe (resets on
+/// shrink), and never parses a partial trailing line. `f` may add (claude/omp
+/// count per turn) or overwrite (codex reports cumulative totals) — both
+/// compose correctly with the append-only cache, since each line is folded
+/// exactly once.
+fn fold_usage(path: &std::path::Path, f: impl Fn(&serde_json::Value, &mut Usage)) -> Usage {
+    use std::io::{Read, Seek, SeekFrom};
+    let (mut offset, mut usage) = USAGE_CACHE
+        .lock()
+        .unwrap()
+        .get(path)
+        .cloned()
+        .unwrap_or((0, Usage::default()));
+    let Ok(len) = std::fs::metadata(path).map(|m| m.len()) else {
+        return usage;
+    };
+    if len < offset {
+        offset = 0;
+        usage = Usage::default();
+    }
+    if len > offset {
+        let Ok(mut file) = std::fs::File::open(path) else {
+            return usage;
+        };
+        if file.seek(SeekFrom::Start(offset)).is_err() {
+            return usage;
+        }
+        let mut raw = String::new();
+        if file.read_to_string(&mut raw).is_err() {
+            return usage;
+        }
+        let consumed = raw.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        for line in raw[..consumed].lines() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                f(&v, &mut usage);
+            }
+        }
+        offset += consumed as u64;
+        USAGE_CACHE
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf(), (offset, usage.clone()));
+    }
+    usage
+}
+
+/// Claude Code JSONL: assistant lines carry `message.usage.*`, summed per turn.
+fn fold_claude(v: &serde_json::Value, u: &mut Usage) {
+    if v["type"] != "assistant" {
+        return;
+    }
+    let m = &v["message"];
+    if let Some(model) = m["model"].as_str() {
+        u.model = Some(model.to_string());
+    }
+    let usage = &m["usage"];
+    u.input += usage["input_tokens"].as_u64().unwrap_or(0);
+    u.output += usage["output_tokens"].as_u64().unwrap_or(0);
+    u.cache_read += usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
+    u.cache_creation += usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+    u.turns += 1;
+}
+
+/// oh-my-pi JSONL: assistant `message` entries carry `usage` (camelCase) plus a
+/// pre-computed `usage.cost.total` — the only CLI here that reports real cost.
+fn fold_omp(v: &serde_json::Value, u: &mut Usage) {
+    if v["type"] != "message" {
+        return;
+    }
+    let m = &v["message"];
+    if m["role"] != "assistant" {
+        return;
+    }
+    let usage = &m["usage"];
+    if usage.is_null() {
+        return;
+    }
+    if let Some(model) = m["model"].as_str() {
+        u.model = Some(model.to_string());
+    }
+    u.input += usage["input"].as_u64().unwrap_or(0);
+    u.output += usage["output"].as_u64().unwrap_or(0);
+    u.cache_read += usage["cacheRead"].as_u64().unwrap_or(0);
+    u.cache_creation += usage["cacheWrite"].as_u64().unwrap_or(0);
+    if let Some(c) = usage["cost"]["total"].as_f64() {
+        u.cost = Some(u.cost.unwrap_or(0.0) + c);
+    }
+    u.turns += 1;
+}
+
+/// Codex rollout JSONL: model in `turn_context`, token counts in a
+/// `token_count` event. Counts are *cumulative session totals*, so tokens are
+/// overwritten (last wins), not summed — and `input_tokens` already includes
+/// the cached portion, which we split back out to mirror Claude's shape.
+fn fold_codex(v: &serde_json::Value, u: &mut Usage) {
+    match v["type"].as_str() {
+        Some("turn_context") => {
+            if let Some(model) = v["payload"]["model"].as_str() {
+                u.model = Some(model.to_string());
+            }
+        }
+        Some("event_msg") => {
+            let payload = &v["payload"];
+            if payload["type"] != "token_count" {
+                return;
+            }
+            let total = &payload["info"]["total_token_usage"];
+            if total.is_null() {
+                return;
+            }
+            let input = total["input_tokens"].as_u64().unwrap_or(0);
+            let cached = total["cached_input_tokens"].as_u64().unwrap_or(0);
+            u.cache_read = cached;
+            u.input = input.saturating_sub(cached);
+            u.output = total["output_tokens"].as_u64().unwrap_or(0);
+            u.turns += 1;
+        }
+        _ => {}
+    }
+}
+
+/// One session's identity + resolved transcript path, before folding.
+struct Candidate {
+    agent: String,
+    session_id: String,
+    cwd: String,
+    title: Option<String>,
+    path: Option<std::path::PathBuf>,
+    updated: u64,
+}
+
+fn secs_mtime(meta: &std::fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// The bucketed Claude transcript for a session id, if it is on disk.
+fn claude_transcript_path(home: &str, session_id: &str) -> Option<std::path::PathBuf> {
+    let bucket = transcript_bucket(session_id)?;
+    let path = std::path::PathBuf::from(home)
+        .join(".claude/projects")
+        .join(bucket)
+        .join(format!("{session_id}.jsonl"));
+    path.exists().then_some(path)
+}
+
+/// Sessions Canopy learned about from hook digests (~/.canopy/sessions). Covers
+/// Claude (and any hook-reporting CLI); omp/codex are filled in from their own
+/// stores below, so only Claude paths are resolved here.
+fn canopy_digest_candidates(home: &str) -> Vec<Candidate> {
+    let dir = std::path::PathBuf::from(home).join(".canopy").join("sessions");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(&p) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let Some(session_id) = v["session_id"].as_str() else {
+            continue;
+        };
+        let agent = v["agent"].as_str().unwrap_or("claude").to_string();
+        let cwd = v["launch_cwd"]
+            .as_str()
+            .or_else(|| v["cwd"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let title = v["prompts"]
+            .as_array()
+            .and_then(|a| a.last())
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
+        let updated = v["updated"]
+            .as_u64()
+            .or_else(|| entry.metadata().ok().as_ref().map(secs_mtime))
+            .unwrap_or(0);
+        let path = (agent == "claude")
+            .then(|| claude_transcript_path(home, session_id))
+            .flatten();
+        out.push(Candidate {
+            agent,
+            session_id: session_id.to_string(),
+            cwd,
+            title,
+            path,
+            updated,
+        });
+    }
+    out
+}
+
+/// The most recent oh-my-pi sessions, read straight from its store (no hook
+/// needed). Header records give id/cwd/title; the file itself carries usage.
+fn omp_sessions(home: &str) -> Vec<Candidate> {
+    use std::io::{BufRead, BufReader};
+    const MAX: usize = 60;
+    let root = std::path::PathBuf::from(home).join(".omp/agent/sessions");
+    let Ok(dirs) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut files: Vec<(u64, std::path::PathBuf)> = Vec::new();
+    for dir in dirs.flatten() {
+        let Ok(entries) = std::fs::read_dir(dir.path()) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let mtime = e.metadata().ok().as_ref().map(secs_mtime).unwrap_or(0);
+            files.push((mtime, p));
+        }
+    }
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.truncate(MAX);
+    files
+        .into_iter()
+        .filter_map(|(mtime, path)| {
+            let f = std::fs::File::open(&path).ok()?;
+            let (mut id, mut cwd, mut title) = (String::new(), String::new(), String::new());
+            for line in BufReader::new(f).lines().take(8).map_while(Result::ok) {
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                match v["type"].as_str() {
+                    Some("session") => {
+                        id = v["id"].as_str().unwrap_or("").to_string();
+                        cwd = v["cwd"].as_str().unwrap_or("").to_string();
+                        if title.is_empty() {
+                            title = v["title"].as_str().unwrap_or("").to_string();
+                        }
+                    }
+                    Some("title") => title = v["title"].as_str().unwrap_or("").to_string(),
+                    _ => {}
+                }
+                if !id.is_empty() && !title.is_empty() {
+                    break;
+                }
+            }
+            if id.is_empty() {
+                return None;
+            }
+            Some(Candidate {
+                agent: "omp".into(),
+                session_id: id,
+                cwd,
+                title: (!title.is_empty()).then_some(title),
+                path: Some(path),
+                updated: mtime,
+            })
+        })
+        .collect()
+}
+
+/// Recursively gather `.jsonl` files with their mtimes, bounded by `depth` so a
+/// deep tree can't run away.
+fn collect_jsonl(dir: &std::path::Path, depth: usize, out: &mut Vec<(u64, std::path::PathBuf)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if depth > 0 {
+                collect_jsonl(&p, depth - 1, out);
+            }
+        } else if p.extension().and_then(|x| x.to_str()) == Some("jsonl") {
+            let mtime = e.metadata().ok().as_ref().map(secs_mtime).unwrap_or(0);
+            out.push((mtime, p));
+        }
+    }
+}
+
+/// The most recent Codex sessions, from its date-bucketed rollout store. The
+/// session id and cwd come from the `session_meta` header at the top of each
+/// rollout.
+fn codex_sessions(home: &str) -> Vec<Candidate> {
+    use std::io::{BufRead, BufReader};
+    const MAX: usize = 60;
+    let root = std::path::PathBuf::from(home).join(".codex/sessions");
+    let mut files: Vec<(u64, std::path::PathBuf)> = Vec::new();
+    collect_jsonl(&root, 4, &mut files);
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.truncate(MAX);
+    files
+        .into_iter()
+        .filter_map(|(mtime, path)| {
+            let f = std::fs::File::open(&path).ok()?;
+            let (mut id, mut cwd) = (String::new(), String::new());
+            for line in BufReader::new(f).lines().take(4).map_while(Result::ok) {
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                if v["type"] == "session_meta" {
+                    id = v["payload"]["id"].as_str().unwrap_or("").to_string();
+                    cwd = v["payload"]["cwd"].as_str().unwrap_or("").to_string();
+                    break;
+                }
+            }
+            if id.is_empty() {
+                return None;
+            }
+            Some(Candidate {
+                agent: "codex".into(),
+                session_id: id,
+                cwd,
+                title: None,
+                path: Some(path),
+                updated: mtime,
+            })
+        })
+        .collect()
+}
+
+/// Keep the best candidate per (agent, session id): a resolved path beats none,
+/// then newer beats older. Lets a hook digest and a disk-store scan of the same
+/// session collapse to one row.
+fn upsert(map: &mut HashMap<(String, String), Candidate>, c: Candidate) {
+    let key = (c.agent.clone(), c.session_id.clone());
+    let better = match map.get(&key) {
+        None => true,
+        Some(prev) => {
+            (c.path.is_some() && prev.path.is_none())
+                || (c.path.is_some() == prev.path.is_some() && c.updated > prev.updated)
+        }
+    };
+    if better {
+        map.insert(key, c);
+    }
+}
+
+/// Token + cost usage for every session Canopy currently knows, across all
+/// supported CLIs. Powers the Statistics panel and the status-tray grand total.
+/// "Known" = hook digests (Claude and any hook-reporting CLI) plus the most
+/// recent sessions in omp's and Codex's own stores — not a full-history scan.
+#[tauri::command]
+pub async fn agent_usage() -> Result<Vec<AgentSessionUsage>, String> {
+    let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
+    let mut by_key: HashMap<(String, String), Candidate> = HashMap::new();
+    for c in canopy_digest_candidates(&home) {
+        upsert(&mut by_key, c);
+    }
+    for c in omp_sessions(&home) {
+        upsert(&mut by_key, c);
+    }
+    for c in codex_sessions(&home) {
+        upsert(&mut by_key, c);
+    }
+
+    let mut out = Vec::new();
+    for c in by_key.into_values() {
+        let supported = matches!(c.agent.as_str(), "claude" | "codex" | "omp");
+        let usage = match (supported, c.path.as_deref()) {
+            (true, Some(path)) => match c.agent.as_str() {
+                "claude" => fold_usage(path, fold_claude),
+                "omp" => fold_usage(path, fold_omp),
+                "codex" => fold_usage(path, fold_codex),
+                _ => Usage::default(),
+            },
+            _ => Usage::default(),
+        };
+        out.push(AgentSessionUsage {
+            session_id: c.session_id,
+            agent: c.agent,
+            cwd: c.cwd,
+            title: c.title,
+            model: usage.model,
+            input_tokens: usage.input,
+            output_tokens: usage.output,
+            cache_read_tokens: usage.cache_read,
+            cache_creation_tokens: usage.cache_creation,
+            cost: usage.cost,
+            turns: usage.turns,
+            updated: c.updated,
+            supported,
+        });
+    }
+    // A supported session with no parsed turns spent nothing — drop it as noise.
+    // Unsupported rows are kept so the panel can name what it can't measure.
+    out.retain(|u| !u.supported || u.turns > 0);
+    out.sort_by(|a, b| b.updated.cmp(&a.updated));
+    Ok(out)
+}
+
 /// Check which commands exist on the user's login-shell PATH (GUI apps don't
 /// inherit it). Used by the agent-CLI launcher to offer launch vs. install.
 #[tauri::command]
@@ -1325,6 +1835,113 @@ pub async fn which_check(commands: Vec<String>) -> HashMap<String, bool> {
     result
 }
 
+/// One CLI's version pair: what's on disk vs what its registry publishes.
+/// Either side is None when unknown — not installed, unparseable output, no
+/// registry to ask, or the probe timed out.
+#[derive(Serialize, Clone, Default)]
+pub struct CliVersions {
+    pub installed: Option<String>,
+    pub latest: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct CliVersionQuery {
+    pub bin: String,
+    /// Registry JSON endpoint carrying the newest version (npm `/latest` doc
+    /// or PyPI `/json`). None skips the network fetch — the frontend passes
+    /// None both for registry-less CLIs and when its latest-cache is fresh.
+    #[serde(rename = "latestUrl")]
+    pub latest_url: Option<String>,
+}
+
+/// First `x.y[.z…]` token in `s` where every dot-segment is numeric. Hand
+/// rolled because it is the only pattern match in the codebase — not worth a
+/// regex dependency. Splitting on anything that isn't a digit or a dot means
+/// prerelease suffixes ("1.2.3-beta") yield their release core ("1.2.3").
+fn first_version_token(s: &str) -> Option<String> {
+    for tok in s.split(|c: char| !c.is_ascii_digit() && c != '.') {
+        let tok = tok.trim_matches('.');
+        if tok.is_empty() {
+            continue;
+        }
+        let segs: Vec<&str> = tok.split('.').collect();
+        if segs.len() >= 2
+            && segs
+                .iter()
+                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        {
+            return Some(tok.to_string());
+        }
+    }
+    None
+}
+
+/// Installed vs latest versions for the agent CLIs. Installed comes from
+/// `<bin> --version` on the login-shell PATH (GUI apps don't inherit it);
+/// latest from the CLI's registry via curl — the app deliberately has no HTTP
+/// stack, and the webview CSP blocks registry origins, so the system curl is
+/// the transport. Probes run concurrently and are individually timeboxed: one
+/// hung `--version` must not wedge the whole launcher refresh.
+#[tauri::command]
+pub async fn cli_versions(queries: Vec<CliVersionQuery>) -> HashMap<String, CliVersions> {
+    let mut out: HashMap<String, CliVersions> = queries
+        .iter()
+        .map(|q| (q.bin.clone(), CliVersions::default()))
+        .collect();
+    #[cfg(unix)]
+    {
+        let mut tasks = Vec::new();
+        for q in queries {
+            tasks.push(tokio::spawn(async move {
+                let mut v = CliVersions::default();
+                // Same charset guard as which_check — the name lands in a shell line.
+                if q.bin
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+                {
+                    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+                    let probe = tokio::process::Command::new(shell)
+                        .args(["-lc", &format!("{} --version 2>&1", q.bin)])
+                        .kill_on_drop(true)
+                        .output();
+                    if let Ok(Ok(o)) =
+                        tokio::time::timeout(Duration::from_secs(10), probe).await
+                    {
+                        v.installed = first_version_token(&String::from_utf8_lossy(&o.stdout));
+                    }
+                }
+                if let Some(url) = q.latest_url.filter(|u| u.starts_with("https://")) {
+                    let fetch = tokio::process::Command::new("curl")
+                        .args(["-fsSL", "-m", "8", url.as_str()])
+                        .kill_on_drop(true)
+                        .output();
+                    if let Ok(Ok(o)) =
+                        tokio::time::timeout(Duration::from_secs(10), fetch).await
+                    {
+                        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&o.stdout) {
+                            // npm `/latest` → top-level "version"; PyPI → info.version.
+                            v.latest = json
+                                .get("version")
+                                .and_then(|x| x.as_str())
+                                .or_else(|| json.pointer("/info/version").and_then(|x| x.as_str()))
+                                .and_then(first_version_token);
+                        }
+                    }
+                }
+                (q.bin, v)
+            }));
+        }
+        for t in tasks {
+            if let Ok((bin, v)) = t.await {
+                out.insert(bin, v);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = queries;
+    out
+}
+
 /// Kill an arbitrary process (used by the Agents panel / runaway guard for
 /// killing a specific process inside a session without tearing the session down).
 #[tauri::command]
@@ -1347,6 +1964,23 @@ pub async fn kill_process(pid: u32) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::claude_bucket;
+    use super::first_version_token;
+
+    /// Real `--version` output shapes from the registered CLIs, plus the
+    /// noise cases: a bare CLI name has no version, and a prerelease suffix
+    /// yields its release core.
+    #[test]
+    fn version_token_matches_real_cli_output() {
+        assert_eq!(first_version_token("2.1.217 (Claude Code)").as_deref(), Some("2.1.217"));
+        assert_eq!(first_version_token("codex-cli 0.98.0").as_deref(), Some("0.98.0"));
+        assert_eq!(first_version_token("aider 0.86.1").as_deref(), Some("0.86.1"));
+        assert_eq!(first_version_token("v1.2").as_deref(), Some("1.2"));
+        assert_eq!(first_version_token("1.2.3-beta.4").as_deref(), Some("1.2.3"));
+        assert_eq!(first_version_token("opencode"), None);
+        assert_eq!(first_version_token(""), None);
+        // A lone integer (an exit code, a count) must not read as a version.
+        assert_eq!(first_version_token("exit 1"), None);
+    }
 
     /// Mirrors the encoding claude applies to bucket directories under
     /// ~/.claude/projects. The `.claude/worktrees` case is the isolation model,

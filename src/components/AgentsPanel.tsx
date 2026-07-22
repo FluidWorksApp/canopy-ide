@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
 import { AGENT_CLIS, AGENT_PATTERN, restoreCommand } from "../projects";
-import { restorableFrom } from "../restorable";
+import { forgetSessions, restorableFrom } from "../restorable";
 import { AgentIcon, MoonIcon, RestartIcon, TerminalIcon, TrashIcon } from "./icons";
 import type { PendingItem } from "../notifications";
 
@@ -28,8 +28,11 @@ interface AgentsPanelProps {
   hookPath: string | null;
   pending?: PendingItem[];
   onDismissPending?: (key: string) => void;
-  /** Answer a single-select question by clicking its option in the panel. */
-  onAnswer?: (item: PendingItem, optionIndex: number) => void;
+  /** Answer a questionnaire from the panel. `selections[q]` is the option
+   *  index(es) chosen for question q — one for single-select, zero-or-more for
+   *  multi-select. The backend synthesises the keystrokes to fill the (possibly
+   *  multi-step) terminal form. */
+  onAnswer?: (item: PendingItem, selections: number[][]) => void;
   /** Respond to a permission prompt without leaving the panel: approve types
    *  the accept key into the agent's terminal, deny sends Escape. Only offered
    *  for numbered-prompt CLIs (claude/codex). */
@@ -39,6 +42,10 @@ interface AgentsPanelProps {
    *  that one guesses a tab from a notification's cwd, this one has the pty
    *  id in hand and is exact. */
   onJumpToPty?: (ptyId: number) => void;
+  /** The pty of the terminal tab currently in front, so its row can be
+   *  highlighted — the reverse of onJumpToPty: relate the tab you're on back to
+   *  its row in the list. Null when the active tab isn't a terminal. */
+  activePty?: number | null;
   /** Cross-session context sharing for this project. */
   roots: string[];
   shareContext: boolean;
@@ -111,6 +118,7 @@ export function AgentsPanel({
   onAnswer,
   onJumpToTerminal,
   onJumpToPty,
+  activePty,
   roots,
   shareContext,
   onShareContext,
@@ -121,6 +129,47 @@ export function AgentsPanel({
 }: AgentsPanelProps) {
   const [showHookHelp, setShowHookHelp] = useState(false);
   const [setupResult, setSetupResult] = useState<string | null>(null);
+  // null while we haven't checked yet — the nudge stays hidden until we know,
+  // so it never flashes the wrong message. See the effect keyed on noHookSignal.
+  const [hooksInstalled, setHooksInstalled] = useState<boolean | null>(null);
+  // Dismissing the "restart to stream" hint sticks across panels and launches:
+  // once you know the agents just predate the hooks, you don't need telling in
+  // every project. The genuine "not set up" nudge ignores this and always shows.
+  const [hintDismissed, setHintDismissed] = useState(
+    () => localStorage.getItem("canopy.hookHintDismissed") === "1",
+  );
+  const dismissHint = () => {
+    localStorage.setItem("canopy.hookHintDismissed", "1");
+    setHintDismissed(true);
+  };
+  // Per-card selections for multi-step questionnaires, keyed by item.key;
+  // picks[key][questionIndex] is the option index(es) chosen for that question.
+  // A lone single-select question answers on the click and never lands here.
+  const [picks, setPicks] = useState<Record<string, number[][]>>({});
+  const emptyPicks = (item: PendingItem) =>
+    (item.questions ?? []).map(() => [] as number[]);
+  const picksFor = (item: PendingItem) => picks[item.key] ?? emptyPicks(item);
+  const choose = (item: PendingItem, qi: number, oi: number, multi: boolean) => {
+    setPicks((prev) => {
+      const cur = (prev[item.key] ?? emptyPicks(item)).map((a) => [...a]);
+      cur[qi] = multi
+        ? cur[qi].includes(oi)
+          ? cur[qi].filter((x) => x !== oi)
+          : [...cur[qi], oi]
+        : [oi];
+      return { ...prev, [item.key]: cur };
+    });
+  };
+  const answerable = (item: PendingItem) =>
+    (item.questions ?? []).every((_, qi) => (picksFor(item)[qi]?.length ?? 0) > 0);
+  const submitAnswers = (item: PendingItem) => {
+    onAnswer?.(item, picksFor(item));
+    setPicks(({ [item.key]: _drop, ...rest }) => rest);
+  };
+  // A single single-select question answers on the option click itself; a
+  // multi-select or multi-question form collects picks and submits together.
+  const instantAnswer = (item: PendingItem) =>
+    (item.questions?.length ?? 0) === 1 && !item.questions?.[0]?.multiSelect;
   const [digests, setDigests] = useState<ipc.SessionDigest[]>([]);
   // This app launch's tag, so a digest from another instance/run (same reset-to-1
   // PTY id, same shared sessions dir) can't be paired with our terminals.
@@ -246,6 +295,19 @@ export function AgentsPanel({
   const noHookSignal =
     agentSessions.length > 0 && agentSessions.every((x) => !x.digest);
 
+  // No digest could mean hooks aren't installed OR that these agents were
+  // started before they were — opposite fixes. Ask the backend which it is, so
+  // the panel offers "set up" only when they're genuinely missing and otherwise
+  // says "restart to stream". Re-checked whenever the silence appears (e.g.
+  // right after a one-click setup), never polled.
+  useEffect(() => {
+    if (!noHookSignal) {
+      setHooksInstalled(null);
+      return;
+    }
+    void ipc.agentHooksInstalled("claude").then(setHooksInstalled).catch(() => {});
+  }, [noHookSignal, setupResult]);
+
   // Hibernate an agent: kill its terminal to reclaim the memory, keeping the
   // session digest (which is already the restore record) so the row reappears
   // under "Restorable" and its own --resume brings it back with history.
@@ -301,7 +363,7 @@ export function AgentsPanel({
         key={s.id}
         className={`agent-row ${runaway ? "agent-runaway" : ""} ${
           onJumpToPty ? "agent-row-jump" : ""
-        }`}
+        } ${s.id === activePty ? "agent-row-active" : ""}`}
         // The whole row goes to its terminal. Listing what is running without
         // a way to reach it made the panel a read-only status board; the row
         // already identifies the session, so it should also be the way there.
@@ -323,6 +385,10 @@ export function AgentsPanel({
             <TerminalIcon size={13} className="ap-mark" />
           )}
           <span className="agent-name">{agent?.name ?? s.title}</span>
+          {/* Kept on the left, right after the name: the hover stats overlay is
+              anchored to the row's right edge, so a badge over there gets buried
+              the moment you hover the very row you're trying to inspect. */}
+          {runaway && <span className="runaway-badge">runaway?</span>}
           {dir && (
             <span className="agent-dir" title={s.cwd}>
               {dir}
@@ -370,7 +436,6 @@ export function AgentsPanel({
               :{p}
             </button>
           ))}
-          {runaway && <span className="runaway-badge">runaway?</span>}
         </div>
         {task && <div className="agent-task">{task}</div>}
         <div className="agent-stats">
@@ -439,51 +504,78 @@ export function AgentsPanel({
             >
               {item.kind === "question" ? (
                 <>
-                  {(item.questions ?? []).map((q, i) => (
-                    <div key={i} className="pending-question">
-                      {q.header && <span className="pending-chip">{q.header}</span>}
-                      <div className="pending-q-text">{q.question}</div>
-                      <div className="pending-options">
-                        {q.options.map((o, oi) => {
-                          // Single-select, single-question asks answer from
-                          // the panel. Multi-select needs the toggle UI, and
-                          // multi-question forms step through questions in the
-                          // terminal — a digit there could answer the wrong
-                          // one. Those jump instead.
-                          const clickable =
-                            onAnswer &&
-                            !q.multiSelect &&
-                            (item.questions?.length ?? 0) === 1;
-                          return (
-                            <div
-                              key={o.label}
-                              className={`pending-option ${clickable ? "pending-option-clickable" : ""}`}
-                              title={
-                                clickable
-                                  ? "Answer with this option"
-                                  : "Multi-select — answer in the terminal"
-                              }
-                              onClick={
-                                clickable
-                                  ? (e) => {
-                                      e.stopPropagation();
-                                      onAnswer(item, oi);
-                                    }
-                                  : undefined
-                              }
-                            >
-                              <span className="pending-option-label">
-                                {q.multiSelect ? "☐" : "○"} {o.label}
-                              </span>
-                              {o.description && (
-                                <span className="pending-option-desc">{o.description}</span>
-                              )}
-                            </div>
-                          );
-                        })}
+                  {(item.questions ?? []).map((q, i) => {
+                    const sel = picksFor(item)[i] ?? [];
+                    return (
+                      <div key={i} className="pending-question">
+                        {q.header && <span className="pending-chip">{q.header}</span>}
+                        <div className="pending-q-text">{q.question}</div>
+                        <div className="pending-options">
+                          {q.options.map((o, oi) => {
+                            // Every option is now selectable in the panel. A
+                            // lone single-select answers on the click; anything
+                            // multi-step (multi-select, or several questions)
+                            // records the pick here and submits via the button
+                            // below. The synthesised keystrokes fill the
+                            // terminal form; it stays reachable as the fallback.
+                            const chosen = sel.includes(oi);
+                            const mark = q.multiSelect
+                              ? chosen
+                                ? "☑"
+                                : "☐"
+                              : chosen
+                                ? "◉"
+                                : "○";
+                            return (
+                              <div
+                                key={o.label}
+                                className={`pending-option ${onAnswer ? "pending-option-clickable" : ""} ${
+                                  chosen ? "pending-option-chosen" : ""
+                                }`}
+                                title={onAnswer ? "Select this option" : "Answer in the terminal"}
+                                onClick={
+                                  onAnswer
+                                    ? (e) => {
+                                        e.stopPropagation();
+                                        if (instantAnswer(item)) onAnswer(item, [[oi]]);
+                                        else choose(item, i, oi, !!q.multiSelect);
+                                      }
+                                    : undefined
+                                }
+                              >
+                                <span className="pending-option-label">
+                                  {mark} {o.label}
+                                </span>
+                                {o.description && (
+                                  <span className="pending-option-desc">{o.description}</span>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
+                  {/* Multi-step forms submit all picks as one keystroke
+                      sequence. A lone single-select answered on click above, so
+                      it shows no button. */}
+                  {onAnswer && !instantAnswer(item) && (
+                    <button
+                      className="btn btn-accent pending-submit"
+                      disabled={!answerable(item)}
+                      title={
+                        answerable(item)
+                          ? "Send these answers to the terminal"
+                          : "Choose an option for every question first"
+                      }
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        submitAnswers(item);
+                      }}
+                    >
+                      {(item.questions?.length ?? 0) > 1 ? "Submit answers" : "Submit answer"}
+                    </button>
+                  )}
                 </>
               ) : (
                 <>
@@ -621,7 +713,8 @@ export function AgentsPanel({
         }
       >
 
-      {noHookSignal && !showHookHelp && (
+      {/* Hooks genuinely absent — offer the one-click setup. */}
+      {noHookSignal && !showHookHelp && hooksInstalled === false && (
         <div className="hook-nudge">
           <span>
             Agents are running, but no events are streaming in — questions,
@@ -631,6 +724,21 @@ export function AgentsPanel({
             Set up Claude Code hooks
           </button>
           {setupResult && <p className="hook-result">{setupResult}</p>}
+        </div>
+      )}
+
+      {/* Hooks are installed; these agents just predate them. Say the thing that
+          actually fixes it (restart) instead of the setup button, and let it be
+          dismissed — otherwise it nags in every project forever. */}
+      {noHookSignal && !showHookHelp && hooksInstalled === true && !hintDismissed && (
+        <div className="hook-nudge">
+          <span>
+            Hooks are set up, but these agents started before that — restart one
+            to stream its questions, tasks and tokens here.
+          </span>
+          <button className="btn" onClick={dismissHint}>
+            Got it
+          </button>
         </div>
       )}
 
@@ -751,9 +859,16 @@ export function AgentsPanel({
                     className="row-act row-act-del"
                     title="Forget this session — removes it from this list"
                     onClick={() => {
-                      void ipc.sessionForget(d.session_id).then(() =>
-                        setDigests((prev) => prev.filter((x) => x.session_id !== d.session_id)),
-                      );
+                      // Tombstone first: sessions read from a CLI's own on-disk
+                      // store (omp) aren't in ~/.canopy/sessions, so deleting
+                      // that file can't stop them — the next poll re-reads them
+                      // from omp's dir and they come straight back. The
+                      // persistent forget is what restorableFrom actually
+                      // filters on, so it's the only thing that makes an omp
+                      // session stay gone.
+                      forgetSessions([d]);
+                      void ipc.sessionForget(d.session_id).catch(() => {});
+                      setDigests((prev) => prev.filter((x) => x.session_id !== d.session_id));
                     }}
                   >
                     <TrashIcon size={13} />

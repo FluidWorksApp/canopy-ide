@@ -13,7 +13,15 @@ import { GuestSession, OwnerSession } from "../collab";
 import { CollabView } from "./CollabView";
 import { SharedProjectView } from "./SharedProjectView";
 import type { AgentCli, Project } from "../projects";
-import { AGENT_CLIS, AGENT_PATTERN, checkInstalledClis, startCommand } from "../projects";
+import {
+  AGENT_CLIS,
+  AGENT_PATTERN,
+  checkCliUpdates,
+  checkInstalledClis,
+  startCommand,
+  updateCommand,
+} from "../projects";
+import type { CliUpdate } from "../projects";
 import {
   AgentIcon,
   AgentsIcon,
@@ -413,6 +421,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const [installed, setInstalled] = useState<Record<string, boolean>>({});
   const installedRef = useRef(installed);
   installedRef.current = installed;
+  const [cliUpdates, setCliUpdates] = useState<Record<string, CliUpdate>>({});
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
   const [palette, setPalette] = useState<PaletteMode | null>(null);
   // When set, the whole project's file surface (tree, quick-open, search, new
@@ -1080,9 +1089,17 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     () => void checkInstalledClis().then(setInstalled),
     [],
   );
+  // Version probing runs `<bin> --version` per CLI plus (at most 6-hourly) a
+  // registry fetch — slower than which_check, so it rides in the background
+  // and the launcher renders whatever the last probe knew.
+  const refreshUpdates = useCallback(
+    () => void checkCliUpdates().then(setCliUpdates),
+    [],
+  );
   useEffect(() => {
     refreshInstalled();
-  }, [refreshInstalled]);
+    refreshUpdates();
+  }, [refreshInstalled, refreshUpdates]);
 
   // Looking at a tab is what marks it read. As an effect rather than something
   // hung off the tab's onClick, so every route in — clicking, Ctrl+Tab cycling,
@@ -1462,6 +1479,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // ---------- render ----------
 
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null;
+  // The pty of the terminal tab in front, so the Agents panel can highlight its
+  // row — relating the tab you're looking at back to its entry in the list.
+  const activePty = activeTab?.type === "terminal" ? activeTab.ptyId : null;
   const runTabs = tabs.filter(
     (t): t is TermSubTab => t.type === "terminal" && Boolean(t.run),
   );
@@ -1566,12 +1586,20 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     [stats],
   );
 
-  // Answer a questionnaire straight from the panel: type the option's number
-  // into the agent's terminal (Claude Code's ask UI selects by digit), then
-  // Enter a beat later. The card dismisses immediately — the hook stream
-  // resolves it for real once the tool call completes.
-  const answerQuestion = useCallback(
-    (item: PendingItem, optionIndex: number) => {
+  // Answer a questionnaire straight from the panel by synthesising the
+  // keystrokes the user would type into the agent's terminal. Claude's ask UI
+  // selects an option by its digit and confirms with Enter; a multi-question
+  // form advances to the next question on each Enter and ends on a Submit tab
+  // the final Enter presses; a multi-select question toggles each chosen digit
+  // before its confirming Enter. `selections[q]` is the option index(es) picked
+  // for question q — one for single-select, zero-or-more for multi-select.
+  //
+  // Keystrokes are spaced out: the TUI needs a beat to register a key and
+  // repaint before the next lands. The card dismisses immediately — the hook
+  // stream resolves it for real once the tool call completes, and the terminal
+  // is right there if a key mis-lands (best-effort, by design).
+  const answerQuestions = useCallback(
+    (item: PendingItem, selections: number[][]) => {
       const termTabs = tabsRef.current.filter(
         (t): t is TermSubTab => t.type === "terminal",
       );
@@ -1583,8 +1611,19 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         return;
       }
       const ptyId = target.ptyId;
-      void ipc.ptyWrite(ptyId, String(optionIndex + 1));
-      setTimeout(() => void ipc.ptyWrite(ptyId, "\r"), 150);
+      let delay = 0;
+      const press = (keys: string) => {
+        const at = delay;
+        setTimeout(() => void ipc.ptyWrite(ptyId, keys), at);
+        delay += 150;
+      };
+      for (const chosen of selections) {
+        for (const oi of chosen) press(String(oi + 1)); // highlight/toggle option(s)
+        press("\r"); // confirm this question (advances if more follow)
+      }
+      // A multi-question form ends on its Submit tab; the trailing Enter presses
+      // it. A single question's Enter above already submitted, so no extra.
+      if ((item.questions?.length ?? 0) > 1) press("\r");
       onDismissPending(item.key);
       setActiveTabId(target.id);
       setTimeout(() => termHandles.current.get(target.id)?.focus(), 50);
@@ -1693,6 +1732,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     }
   };
 
+  /** Run `cli`'s updater in a run tab. Its exit re-probes versions (see
+   *  onExited), so the badge clears the moment the update lands — no timers. */
+  const runCliUpdate = (cli: AgentCli, at?: string) => {
+    const cwd = at ?? components[0]?.path;
+    if (!cwd) return;
+    addTerminal(cwd, updateCommand(cli), `update ${cli.name}`, "⬆", true);
+  };
+
   /** The launcher list — shell plus every agent CLI — for a given directory.
    *  Shared by the ＋ menu, the empty-state grid and the component right-click
    *  menu so the three can't drift apart. */
@@ -1706,7 +1753,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     ...AGENT_CLIS.map((cli) => ({
       label: cli.name,
       icon: <AgentIcon id={cli.id} size={15} />,
-      hint: installed[cli.bin] ? undefined : "install",
+      // A context-menu row has one click target, so the update hint here is
+      // informational — the ＋ menu and launch grid carry the clickable badge.
+      hint: installed[cli.bin]
+        ? cliUpdates[cli.bin]?.hasUpdate
+          ? `⇡ ${cliUpdates[cli.bin]?.latest}`
+          : undefined
+        : "install",
       onClick: () => launchCli(cli, cwd),
     })),
   ];
@@ -2157,8 +2210,12 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               title="New terminal / agent"
               onClick={() => {
                 // Opening the launcher re-probes, so a CLI installed outside
-                // Canopy (or in another project) shows as installed here.
-                if (!cliMenuOpen) refreshInstalled();
+                // Canopy (or in another project) shows as installed here —
+                // and its update badge reflects that install, not a stale one.
+                if (!cliMenuOpen) {
+                  refreshInstalled();
+                  refreshUpdates();
+                }
                 setCliMenuOpen((v) => !v);
               }}
             >
@@ -2191,6 +2248,20 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                       <AgentIcon id={cli.id} size={15} className="cli-icon" /> {cli.name}
                     </span>
                     {!installed[cli.bin] && <span className="cli-install">install</span>}
+                    {installed[cli.bin] && cliUpdates[cli.bin]?.hasUpdate && (
+                      <span
+                        className="cli-update"
+                        title={`${cliUpdates[cli.bin]?.installed} → ${cliUpdates[cli.bin]?.latest} — click to update`}
+                        onClick={(e) => {
+                          // The row launches; only the badge updates.
+                          e.stopPropagation();
+                          setCliMenuOpen(false);
+                          runCliUpdate(cli);
+                        }}
+                      >
+                        ⇡ {cliUpdates[cli.bin]?.latest}
+                      </span>
+                    )}
                   </div>
                 ))}
               </div>
@@ -2236,10 +2307,16 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                   // exit status remain readable.
                   if (tab.run) {
                     patchTab(tab.id, { exited: true, exitCode: code, ptyId: null });
-                    // An installer finishing is the moment "install" labels
-                    // go stale — re-probe right now, not on a timer.
-                    if (AGENT_CLIS.some((c) => c.install === tab.command)) {
+                    // An installer or updater finishing is the moment
+                    // "install" labels and update badges go stale — re-probe
+                    // right now, not on a timer.
+                    if (
+                      AGENT_CLIS.some(
+                        (c) => c.install === tab.command || updateCommand(c) === tab.command,
+                      )
+                    ) {
                       refreshInstalled();
+                      refreshUpdates();
                     }
                   } else closeTab(tab.id);
                 }}
@@ -2386,6 +2463,20 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                   <AgentIcon id={cli.id} size={26} />
                   <span>{cli.name}</span>
                   {!installed[cli.bin] && <span className="launch-install">install</span>}
+                  {installed[cli.bin] && cliUpdates[cli.bin]?.hasUpdate && (
+                    <span
+                      className="launch-update"
+                      title={`${cliUpdates[cli.bin]?.installed} → ${cliUpdates[cli.bin]?.latest} — click to update`}
+                      onClick={(e) => {
+                        // The card launches; only the badge updates. A span
+                        // because a button can't nest inside the card button.
+                        e.stopPropagation();
+                        runCliUpdate(cli);
+                      }}
+                    >
+                      ⇡ {cliUpdates[cli.bin]?.latest}
+                    </span>
+                  )}
                 </button>
               ))}
             </div>
@@ -2833,10 +2924,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           hookPath={hookPath}
           pending={pending}
           onDismissPending={onDismissPending}
-          onAnswer={answerQuestion}
+          onAnswer={answerQuestions}
           onRespond={respondPermission}
           onJumpToTerminal={jumpToTerminal}
           onJumpToPty={jumpToPty}
+          activePty={activePty}
           roots={roots}
           shareContext={Boolean(project.shareContext)}
           onShareContext={onShareContext}

@@ -1,28 +1,12 @@
 // Bottom status tray: git branch, running agent, model, tokens, estimated
 // cost. Token/model data comes from Claude Code session transcripts (path
 // arrives via hook events); cost is an estimate from a static pricing map.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as ipc from "../ipc";
+import { estimateCost, sessionCost } from "../pricing";
+import { StatsPanel } from "./StatsPanel";
+import { StatsIcon } from "./icons";
 import type { AgentEventEntry } from "../types";
-
-// $/MTok (input, output, cache-read ≈ 0.1× input). Estimates only.
-const PRICING: [RegExp, { in: number; out: number }][] = [
-  [/fable|mythos/i, { in: 10, out: 50 }],
-  [/opus/i, { in: 5, out: 25 }],
-  [/sonnet/i, { in: 3, out: 15 }],
-  [/haiku/i, { in: 1, out: 5 }],
-];
-
-function estimateCost(s: ipc.ClaudeSessionStats): number | null {
-  if (!s.model) return null;
-  const price = PRICING.find(([re]) => re.test(s.model!))?.[1];
-  if (!price) return null;
-  return (
-    (s.input_tokens + s.cache_creation_tokens * 1.25) * (price.in / 1e6) +
-    s.cache_read_tokens * (price.in * 0.1) / 1e6 +
-    s.output_tokens * (price.out / 1e6)
-  );
-}
 
 const fmtMem = (bytes: number) =>
   bytes >= 1024 * 1024 * 1024
@@ -75,6 +59,26 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
   // while it is open — the rest of the time this component costs nothing.
   const [breakdown, setBreakdown] = useState(false);
   const [allSessions, setAllSessions] = useState<ipc.SessionStats[]>([]);
+  // All-CLI usage & cost popup, anchored to the stats chip in the corner.
+  const [statsOpen, setStatsOpen] = useState(false);
+  const statsAnchorRef = useRef<HTMLSpanElement>(null);
+  // Native dismissal: click anywhere outside, or Escape. Mouse-leave felt
+  // flimsy on a panel this size — the cursor grazes the edge and it vanishes.
+  useEffect(() => {
+    if (!statsOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (!statsAnchorRef.current?.contains(e.target as Node)) setStatsOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setStatsOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [statsOpen]);
   // Popups anchored to a chip must escape .status-bar's overflow:hidden (it
   // clips its one-line row — and clipped everything that pops above it, so
   // only a shadow sliver ever showed). Fixed positioning, measured from the
@@ -91,11 +95,24 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
     ? ({ position: "fixed", right: menuPos.right, bottom: menuPos.bottom } as const)
     : undefined;
   const [openSessions, setOpenSessions] = useState<Record<number, boolean>>({});
+  // All-CLI token/cost usage, for the grand-total row atop the popup. Fetched
+  // (not streamed) only while the popup is open — it costs nothing otherwise.
+  const [usage, setUsage] = useState<ipc.AgentSessionUsage[]>([]);
   useEffect(() => {
     if (!breakdown) return;
     const sub = ipc.onPtyStats(setAllSessions);
+    let cancelled = false;
+    const pull = () =>
+      void ipc.agentUsage().then((u) => {
+        if (!cancelled) setUsage(u);
+      }).catch(() => {});
+    pull();
+    const timer = setInterval(pull, 8_000);
     return () => {
+      cancelled = true;
+      clearInterval(timer);
       setAllSessions([]);
+      setUsage([]);
       void sub.then((fn) => fn());
     };
   }, [breakdown]);
@@ -238,12 +255,39 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
                 if (other.length > 0) groups.push({ name: "Other terminals", sessions: other });
                 const termCpu = allSessions.reduce((n, s) => n + s.total_cpu, 0);
                 const termMem = allSessions.reduce((n, s) => n + s.total_mem_bytes, 0);
+                const usSent = usage.reduce(
+                  (n, u) => n + u.input_tokens + u.cache_read_tokens + u.cache_creation_tokens,
+                  0,
+                );
+                const usRecv = usage.reduce((n, u) => n + u.output_tokens, 0);
+                let usCost = 0;
+                let usEst = false;
+                let usPriced = false;
+                for (const u of usage) {
+                  const c = sessionCost(u);
+                  if (c != null) {
+                    usCost += c;
+                    usPriced = true;
+                    if (u.cost == null) usEst = true;
+                  }
+                }
                 return (
                   <>
-                    {/* No grand-total row: the chip this popped from already
-                        shows it. Each project is a section header with its
-                        terminal tabs listed beneath; a tab expands to its
-                        processes on click. */}
+                    {/* The cpu/mem chip this popped from already shows the
+                        resource total, but not tokens/cost — so lead with an
+                        all-CLI usage total, then the per-project resource tree. */}
+                    {usage.length > 0 && (
+                      <div
+                        className="bd-head bd-usage"
+                        title="Tokens sent/received and estimated cost across every session Canopy tracks (all CLIs)"
+                      >
+                        <span>Tokens · cost · all CLIs</span>
+                        <span className="bd-nums">
+                          ↑{fmtTokens(usSent)} ↓{fmtTokens(usRecv)}
+                          {usPriced && ` · ${usEst ? "~" : ""}$${usCost.toFixed(2)}`}
+                        </span>
+                      </div>
+                    )}
                     {groups.map((g) => {
                       const cpu = g.sessions.reduce((n, s) => n + s.total_cpu, 0);
                       const mem = g.sessions.reduce((n, s) => n + s.total_mem_bytes, 0);
@@ -402,6 +446,23 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
           ~${cost.toFixed(2)}
         </span>
       )}
+      <span className="status-item status-stats-anchor" ref={statsAnchorRef}>
+        <button
+          className={`status-stats-btn ${statsOpen ? "is-open" : ""}`}
+          title="Usage & cost across all CLIs"
+          onClick={(e) => {
+            anchorMenu(e);
+            setStatsOpen((v) => !v);
+          }}
+        >
+          <StatsIcon size={13} />
+        </button>
+        {statsOpen && (
+          <div className="status-menu status-stats-menu" style={menuStyle}>
+            <StatsPanel visible={statsOpen} />
+          </div>
+        )}
+      </span>
     </div>
   );
 }
