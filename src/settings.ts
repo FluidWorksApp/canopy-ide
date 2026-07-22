@@ -38,6 +38,62 @@ export const THEMES: { id: Theme; label: string }[] = [
  *  engine actually wants. */
 export type CursorStyle = "block" | "underline" | "bar";
 
+/** A dictation hotkey as captured from a keydown: the modifier flags plus the
+ *  physical `KeyboardEvent.code` (layout-independent, so it survives non-US
+ *  keyboards). */
+export interface Hotkey {
+  meta: boolean;
+  ctrl: boolean;
+  alt: boolean;
+  shift: boolean;
+  code: string;
+}
+
+const IS_MAC =
+  typeof navigator !== "undefined" && navigator.platform.toUpperCase().includes("MAC");
+
+/** Default dictation hotkey: ⌘D on Mac, Alt+D elsewhere (plain Ctrl+D is shell
+ *  EOF, so it's deliberately avoided). */
+export const DEFAULT_DICTATION_HOTKEY: Hotkey = IS_MAC
+  ? { meta: true, ctrl: false, alt: false, shift: false, code: "KeyD" }
+  : { meta: false, ctrl: false, alt: true, shift: false, code: "KeyD" };
+
+/** Render a hotkey for display, e.g. "⌘D" or "Alt+Shift+D". */
+export function formatHotkey(h: Hotkey): string {
+  const parts: string[] = [];
+  if (IS_MAC) {
+    if (h.ctrl) parts.push("⌃");
+    if (h.alt) parts.push("⌥");
+    if (h.shift) parts.push("⇧");
+    if (h.meta) parts.push("⌘");
+  } else {
+    if (h.ctrl) parts.push("Ctrl");
+    if (h.alt) parts.push("Alt");
+    if (h.shift) parts.push("Shift");
+    if (h.meta) parts.push("Win");
+  }
+  parts.push(keyLabel(h.code));
+  return IS_MAC ? parts.join("") : parts.join("+");
+}
+
+/** Human label for a KeyboardEvent.code (KeyD → "D", Digit1 → "1"). */
+export function keyLabel(code: string): string {
+  if (code.startsWith("Key")) return code.slice(3);
+  if (code.startsWith("Digit")) return code.slice(5);
+  return code;
+}
+
+/** Does this keydown match the configured hotkey? */
+export function matchesHotkey(e: KeyboardEvent, h: Hotkey): boolean {
+  return (
+    e.code === h.code &&
+    e.metaKey === h.meta &&
+    e.ctrlKey === h.ctrl &&
+    e.altKey === h.alt &&
+    e.shiftKey === h.shift
+  );
+}
+
 export const TERMINAL_FONT_DEFAULT =
   "'SF Mono', Menlo, Monaco, 'JetBrains Mono', 'Fira Code', monospace";
 export const EDITOR_FONT_DEFAULT =
@@ -96,6 +152,16 @@ export interface Settings {
   /** How many agent terminals to keep live per project before auto-hibernation
    *  starts reclaiming the stalest idle ones. */
   maxLiveAgents: number;
+
+  // ---- Voice dictation ----
+  /** Hotkey that toggles dictation (start/insert). */
+  dictationHotkey: Hotkey;
+  /** Registry id of the ASR model to use (see dictation.rs MODELS). Empty
+   *  means "the default model" so a stored blank never pins a missing id. */
+  dictationModel: string;
+  /** Optional BCP-47 language hint passed at transcription time. Empty =
+   *  auto-detect (what multilingual models do anyway). */
+  dictationLanguage: string;
 }
 
 // NB: stored settings override these (see getSettings), so flipping a default
@@ -123,6 +189,9 @@ const DEFAULTS: Settings = {
   editorFontSize: 13,
   editorCursorStyle: "bar",
   editorCursorBlink: true,
+  dictationHotkey: DEFAULT_DICTATION_HOTKEY,
+  dictationModel: "",
+  dictationLanguage: "",
 };
 
 const KEY = "canopy.settings";

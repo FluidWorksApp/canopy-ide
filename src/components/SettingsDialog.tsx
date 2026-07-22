@@ -10,7 +10,10 @@ import {
   getSettings,
   updateSettings,
   THEMES,
+  formatHotkey,
+  DEFAULT_DICTATION_HOTKEY,
   type CursorStyle,
+  type Hotkey,
   type Settings,
   type Theme,
 } from "../settings";
@@ -21,7 +24,14 @@ import { availableMonoFonts, fontLabel, fontStack } from "../fonts";
 import { AgentIcon, TrackerIcon } from "./icons";
 import { AGENT_CLIS } from "../projects";
 
-export type SettingsTab = "appearance" | "agents" | "editor" | "terminal" | "guard" | "integrations";
+export type SettingsTab =
+  | "appearance"
+  | "agents"
+  | "editor"
+  | "terminal"
+  | "dictation"
+  | "guard"
+  | "integrations";
 
 interface SettingsDialogProps {
   onClose: () => void;
@@ -33,6 +43,7 @@ const TABS: { id: SettingsTab; label: string }[] = [
   { id: "agents", label: "Agents" },
   { id: "editor", label: "Editor" },
   { id: "terminal", label: "Terminal" },
+  { id: "dictation", label: "Dictation" },
   { id: "guard", label: "Process guard" },
   { id: "integrations", label: "Integrations" },
 ];
@@ -379,6 +390,8 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
               </>
             )}
 
+            {tab === "dictation" && <DictationSettings />}
+
             {tab === "guard" && (
               <>
                 <Item
@@ -556,5 +569,203 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
         </div>
       </div>
     </div>
+  );
+}
+
+/** Voice dictation setup: the model is a one-time ~700 MB download; after
+ *  that everything runs locally. Lives here so setup is discoverable before
+ *  the first shortcut press (which would otherwise trigger the download). */
+/** BCP-47 → display name for the languages our models cover. */
+const LANG_NAMES: Record<string, string> = {
+  en: "English", es: "Spanish", fr: "French", de: "German", it: "Italian",
+  pt: "Portuguese", nl: "Dutch", pl: "Polish", ru: "Russian", uk: "Ukrainian",
+  cs: "Czech", sk: "Slovak", hr: "Croatian", ro: "Romanian", bg: "Bulgarian",
+  hu: "Hungarian", fi: "Finnish", da: "Danish", sv: "Swedish", el: "Greek",
+  et: "Estonian", lv: "Latvian", lt: "Lithuanian", sl: "Slovenian", mt: "Maltese",
+  zh: "Chinese", yue: "Cantonese", ja: "Japanese", ko: "Korean",
+};
+const langName = (code: string) => LANG_NAMES[code] ?? code;
+
+/** Capture a single keystroke and store it as the dictation hotkey. While
+ *  armed, the next non-modifier keydown (with its modifiers) becomes the
+ *  binding. Escape cancels; the physical `code` is stored so it survives
+ *  non-US layouts. */
+function HotkeyCapture({ value, onChange }: { value: Hotkey; onChange: (h: Hotkey) => void }) {
+  const [arming, setArming] = useState(false);
+  useEffect(() => {
+    if (!arming) return;
+    const onKey = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape") {
+        setArming(false);
+        return;
+      }
+      // Ignore lone modifier presses — wait for the actual key.
+      if (["Meta", "Control", "Alt", "Shift"].includes(e.key)) return;
+      onChange({
+        meta: e.metaKey,
+        ctrl: e.ctrlKey,
+        alt: e.altKey,
+        shift: e.shiftKey,
+        code: e.code,
+      });
+      setArming(false);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [arming, onChange]);
+
+  return (
+    <span className="set-inline">
+      <button
+        className={`btn dictation-hotkey ${arming ? "dictation-hotkey-arming" : ""}`}
+        onClick={() => setArming((a) => !a)}
+      >
+        {arming ? "Press a key…" : formatHotkey(value)}
+      </button>
+      <button className="btn" onClick={() => onChange(DEFAULT_DICTATION_HOTKEY)}>
+        Reset
+      </button>
+    </span>
+  );
+}
+
+function DictationSettings() {
+  const [models, setModels] = useState<ipc.DictationModel[]>([]);
+  const [progress, setProgress] = useState<Record<string, string>>({});
+  const [err, setErr] = useState<string | null>(null);
+  const [s, setS] = useState<Settings>(() => getSettings());
+  const patch = (p: Partial<Settings>) => setS(updateSettings(p));
+  const refresh = () => void ipc.dictationModels().then(setModels).catch(() => {});
+
+  useEffect(() => {
+    refresh();
+    const sub = ipc.onDictationProgress((p) => {
+      if (p.phase === "download") {
+        setProgress((m) => ({ ...m, [p.model]: `${Math.floor(p.pct)}%` }));
+      } else if (p.phase === "extract") {
+        setProgress((m) => ({ ...m, [p.model]: "unpacking…" }));
+      } else {
+        setProgress((m) => {
+          const next = { ...m };
+          delete next[p.model];
+          return next;
+        });
+        if (p.phase === "error") setErr(p.message ?? "Download failed");
+        refresh();
+      }
+    });
+    return () => void sub.then((fn) => fn());
+  }, []);
+
+  // The active model: the stored id, or the registry default when unset.
+  const activeId = s.dictationModel || models.find((m) => m.is_default)?.id || "";
+  const active = models.find((m) => m.id === activeId);
+
+  return (
+    <>
+      <Item
+        name="Shortcut"
+        desc="Press this anywhere — terminal, editor, or any text field — to start dictating; press again to insert the transcription. Esc cancels a recording. Everything runs locally; audio never leaves this machine."
+      >
+        <HotkeyCapture value={s.dictationHotkey} onChange={(h) => patch({ dictationHotkey: h })} />
+      </Item>
+
+      <Item
+        name="Model"
+        desc="Choose which local speech model to use. The first is installed on first use; others download on demand. Larger models are more accurate; Moonshine is fastest for English."
+      >
+        <div className="dictation-models">
+          {models.map((m) => {
+            const dl = progress[m.id];
+            return (
+              <label key={m.id} className="dictation-model">
+                <input
+                  type="radio"
+                  name="dictation-model"
+                  checked={m.id === activeId}
+                  onChange={() => patch({ dictationModel: m.id, dictationLanguage: "" })}
+                />
+                <span className="dictation-model-main">
+                  <span className="dictation-model-name">
+                    {m.name}
+                    {m.is_default && <span className="dictation-tag">default</span>}
+                  </span>
+                  <span className="dictation-model-sub">
+                    {m.multilingual ? `${m.languages.length} languages` : langName(m.languages[0])}
+                    {" · ~"}
+                    {m.size_mb} MB
+                  </span>
+                </span>
+                {dl ? (
+                  <span className="dictation-model-state">{dl}</span>
+                ) : m.downloaded ? (
+                  <button
+                    className="btn dictation-model-btn"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      setErr(null);
+                      void ipc
+                        .dictationDeleteModel(m.id)
+                        .then(refresh)
+                        .catch((er) => setErr(String(er)));
+                    }}
+                  >
+                    Remove
+                  </button>
+                ) : (
+                  <button
+                    className="btn btn-accent dictation-model-btn"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      setErr(null);
+                      setProgress((mm) => ({ ...mm, [m.id]: "0%" }));
+                      void ipc.dictationDownload(m.id).catch((er) => {
+                        setProgress((mm) => {
+                          const next = { ...mm };
+                          delete next[m.id];
+                          return next;
+                        });
+                        setErr(String(er));
+                      });
+                    }}
+                  >
+                    Install
+                  </button>
+                )}
+              </label>
+            );
+          })}
+        </div>
+      </Item>
+
+      {active && (
+        <Item
+          name="Language"
+          desc={
+            active.multilingual
+              ? "Auto-detect works well; pick a language to bias transcription when you always dictate in one."
+              : "This model is English-only."
+          }
+        >
+          <select
+            className="set-wide"
+            disabled={!active.multilingual}
+            value={s.dictationLanguage}
+            onChange={(e) => patch({ dictationLanguage: e.target.value })}
+          >
+            <option value="">Auto-detect</option>
+            {active.languages.map((code) => (
+              <option key={code} value={code}>
+                {langName(code)}
+              </option>
+            ))}
+          </select>
+        </Item>
+      )}
+
+      {err && <div className="set-item-desc set-error">{err}</div>}
+    </>
   );
 }

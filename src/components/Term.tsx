@@ -419,6 +419,18 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         else unlistenDrop = un;
       });
 
+    // Dictated text. Same contract as the drop handler above: the event is
+    // window-global, exactly one Term — the active one — may act, and the
+    // text goes through term.paste() so bracketed-paste applies.
+    const onDictationText = (e: Event) => {
+      if (!activeRef.current) return;
+      const text = (e as CustomEvent).detail as string;
+      if (!text) return;
+      term.paste(text);
+      term.focus();
+    };
+    window.addEventListener("canopy:dictation-text", onDictationText);
+
     // Debounced resize: propose, let the pty apply it and SIGWINCH the child,
     // then match the grid to what it confirmed. A hidden tab proposes nothing
     // and is left alone until it is shown, which fires this again.
@@ -441,6 +453,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       observer.disconnect();
       window.removeEventListener(THEME_CHANGE_EVENT, onThemeChange);
       window.removeEventListener("focus", onFocus);
+      window.removeEventListener("canopy:dictation-text", onDictationText);
       dataSub.dispose();
       titleSub.dispose();
       oscSubs.forEach((s) => s.dispose());

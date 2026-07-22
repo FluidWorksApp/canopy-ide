@@ -38,5 +38,13 @@
 	-->
 	<key>com.apple.security.cs.allow-dyld-environment-variables</key>
 	<true/>
+
+	<!--
+	  Voice dictation records from the microphone (⌘D). The hardened runtime
+	  denies audio input outright without this; the user still gets the normal
+	  macOS permission prompt on first use.
+	-->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
 </dict>
 </plist>

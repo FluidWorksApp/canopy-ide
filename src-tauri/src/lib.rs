@@ -1,5 +1,6 @@
 mod agents;
 mod cli;
+mod dictation;
 mod fsx;
 mod git;
 mod lsp;
@@ -157,6 +158,7 @@ pub fn run() {
         .manage(fsx::WorkspaceManager::default())
         .manage(lsp::LspManager::default())
         .manage(relay::RelayManager::default())
+        .manage(dictation::DictationManager::default())
         .manage(cli::pending_from_env())
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -275,6 +277,13 @@ pub fn run() {
             relay::relay_send_collab,
             relay::relay_offer_file,
             relay::relay_accept_file,
+            dictation::dictation_models,
+            dictation::dictation_status,
+            dictation::dictation_download,
+            dictation::dictation_delete_model,
+            dictation::dictation_start,
+            dictation::dictation_stop,
+            dictation::dictation_cancel,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

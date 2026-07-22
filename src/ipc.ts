@@ -673,3 +673,51 @@ export const ghAuth = () => invoke<GhAuth>("gh_auth");
 export const ghIssueList = (repo: string) => invoke<TicketInfo[]>("gh_issue_list", { repo });
 export const linearIssues = (apiKey: string) =>
   invoke<TicketInfo[]>("linear_issues", { apiKey });
+
+// ---- voice dictation (local ASR: Parakeet / SenseVoice / Moonshine) ----
+
+export interface DictationModel {
+  id: string;
+  name: string;
+  /** BCP-47 language codes the model covers. */
+  languages: string[];
+  size_mb: number;
+  downloaded: boolean;
+  multilingual: boolean;
+  is_default: boolean;
+}
+
+export interface DictationStatus {
+  recording: boolean;
+  /** Model id currently downloading, if any. */
+  downloading: string | null;
+  /** Model id currently loaded in memory, if any. */
+  loaded: string | null;
+}
+
+export interface DictationProgress {
+  /** Which model this event is about. */
+  model: string;
+  phase: "download" | "extract" | "ready" | "error";
+  pct: number;
+  message: string | null;
+}
+
+export const dictationModels = () => invoke<DictationModel[]>("dictation_models");
+export const dictationStatus = () => invoke<DictationStatus>("dictation_status");
+export const dictationDownload = (modelId: string) =>
+  invoke<void>("dictation_download", { modelId });
+export const dictationDeleteModel = (modelId: string) =>
+  invoke<void>("dictation_delete_model", { modelId });
+/** Resolves to "recording" (mic live) or "downloading" (model fetch started). */
+export const dictationStart = (modelId: string) =>
+  invoke<string>("dictation_start", { modelId });
+/** Stops the mic and resolves to the transcribed text. `language` is an
+ *  optional BCP-47 hint (empty/undefined = auto-detect). */
+export const dictationStop = (language?: string) =>
+  invoke<string>("dictation_stop", { language: language || null });
+export const dictationCancel = () => invoke<void>("dictation_cancel");
+export const onDictationProgress = (
+  cb: (p: DictationProgress) => void,
+): Promise<UnlistenFn> =>
+  listen<DictationProgress>("dictation:progress", (e) => cb(e.payload));

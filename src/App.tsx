@@ -21,6 +21,7 @@ import { ProjectDialog } from "./components/ProjectDialog";
 import { ProjectManager } from "./components/ProjectManager";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { HelpDialog } from "./components/HelpDialog";
+import { Dictation } from "./components/Dictation";
 import { Onboarding } from "./components/Onboarding";
 import { Welcome } from "./components/Welcome";
 import { shouldOnboard, markOnboarded } from "./onboarding";
@@ -1049,6 +1050,7 @@ export default function App() {
           }}
         />
       )}
+      <Dictation />
     </div>
   );
 }
