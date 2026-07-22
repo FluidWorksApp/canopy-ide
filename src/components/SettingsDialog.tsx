@@ -650,9 +650,9 @@ function Toggle({ checked, disabled, onChange }: { checked: boolean; disabled?: 
       disabled={disabled}
       onClick={onChange}
       style={{
-        width: 46,
-        height: 27,
-        borderRadius: 14,
+        width: 40,
+        height: 23,
+        borderRadius: 12,
         border: "none",
         padding: 3,
         cursor: "pointer",
@@ -664,11 +664,11 @@ function Toggle({ checked, disabled, onChange }: { checked: boolean; disabled?: 
       <span
         style={{
           display: "block",
-          width: 21,
-          height: 21,
+          width: 17,
+          height: 17,
           borderRadius: "50%",
           background: "#fff",
-          transform: checked ? "translateX(19px)" : "translateX(0)",
+          transform: checked ? "translateX(17px)" : "translateX(0)",
           transition: "transform .15s",
         }}
       />
@@ -894,15 +894,16 @@ function RemoteSettings({
   };
 
   const seg = (opts: { id: string; label: string }[], value: string, onChange: (v: string) => void) => (
-    <div style={{ display: "inline-flex", border: "1px solid var(--border)", borderRadius: 9, overflow: "hidden" }}>
+    <div style={{ display: "inline-flex", border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
       {opts.map((o) => (
         <button
           key={o.id}
           onClick={() => onChange(o.id)}
           style={{
-            padding: "7px 16px",
+            padding: "5px 13px",
             border: "none",
             cursor: "pointer",
+            fontSize: 13,
             background: value === o.id ? "var(--accent)" : "transparent",
             color: value === o.id ? "var(--on-accent)" : "var(--text)",
             fontWeight: 600,
