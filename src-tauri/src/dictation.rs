@@ -87,6 +87,11 @@ const TARGET_RATE: u32 = 16_000;
 const MAX_SECONDS: u32 = 600;
 
 fn find_def(id: &str) -> Result<&'static ModelDef, String> {
+    // Settings store a blank id to mean "the default model" (so a stored id can
+    // never pin a since-removed model). Resolve that to the first registered
+    // model — otherwise starting dictation before an explicit pick fails with
+    // "Unknown dictation model:".
+    let id = if id.is_empty() { MODELS[0].id } else { id };
     MODELS
         .iter()
         .find(|m| m.id == id)
