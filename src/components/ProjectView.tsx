@@ -59,7 +59,7 @@ import { FileTree } from "./FileTree";
 import { FileView } from "./FileView";
 import { ChangesPanel, type ChangeGroup } from "./ChangesPanel";
 import { useEscape } from "../useEscape";
-import { AgentsPanel } from "./AgentsPanel";
+import { AgentsPanel, digestBySurface } from "./AgentsPanel";
 import { StatusBar } from "./StatusBar";
 import { Palette, type PaletteMode } from "./Palette";
 import { GitPanel } from "./GitPanel";
@@ -819,6 +819,32 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     },
     [onNotice, openPr, openReview, relay],
   );
+
+  // Session digests + this launch's tag, so the "Agent Workspace" drawer can
+  // resolve the agent behind the active terminal the same way AgentsPanel does
+  // (by PTY surface id). Polled while an agent terminal is open; idle otherwise.
+  const [wsDigests, setWsDigests] = useState<ipc.SessionDigest[]>([]);
+  const [thisInstance, setThisInstance] = useState<string | null>(null);
+  const [wsDrawerOpen, setWsDrawerOpen] = useState(false);
+  useEffect(() => {
+    void ipc.instanceId().then(setThisInstance).catch(() => {});
+  }, []);
+  useEffect(() => {
+    const load = () =>
+      void ipc
+        .sessionDigests()
+        .then((d) =>
+          setWsDigests(
+            d.filter((x) =>
+              rootsRef.current.some((r) => x.cwd === r || (x.cwd ?? "").startsWith(r + "/")),
+            ),
+          ),
+        )
+        .catch(() => {});
+    load();
+    const t = setInterval(load, 4000);
+    return () => clearInterval(t);
+  }, []);
 
   // Restorable agent sessions, loaded while the launcher (empty state) is on
   // screen — that is precisely the moment "you left three agents mid-thought"
@@ -1950,6 +1976,37 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       };
     });
 
+  // The agent behind the active *terminal* tab, if any — the "Agent Workspace"
+  // toggle and its drawer only exist here. An agent terminal is paired to its
+  // digest by surface id (same map AgentsPanel uses); the repo is matched from
+  // the digest cwd, and the backend's worktree check is the real gate anyway.
+  const agentTermWs =
+    activeTab?.type === "terminal" && isAgentTab(activeTab) && activeTab.ptyId != null
+      ? (() => {
+          const digest = digestBySurface(wsDigests, thisInstance).get(String(activeTab.ptyId));
+          if (!digest) return null;
+          const cwd = digest.cwd ?? digest.launch_cwd ?? activeTab.cwd ?? "";
+          const repo =
+            components.find((c) => cwd === c.path || cwd.startsWith(c.path + "/"))?.path ?? null;
+          return { repo, digest, ptyId: activeTab.ptyId as number };
+        })()
+      : null;
+  // Close the drawer when its agent is no longer the front terminal — it should
+  // never linger over a plain shell or a different agent's terminal.
+  const wsKey = agentTermWs ? agentTermWs.digest.session_id : null;
+  useEffect(() => {
+    if (!wsKey) setWsDrawerOpen(false);
+  }, [wsKey]);
+  // Esc closes the drawer, matching every other overlay in the app.
+  useEffect(() => {
+    if (!wsDrawerOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setWsDrawerOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [wsDrawerOpen]);
+
   const mainArea = (
     <div className="project-main">
       {tabMenu.menu && (
@@ -2246,6 +2303,19 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 {activeTab.file.view === "preview" ? "Source" : "Preview"}
               </button>
             )}
+          {/* This agent's workspace — files, diffs, commits & PR — slides in
+              over the live terminal. Only on agent terminals; a plain shell has
+              no workspace to show. */}
+          {agentTermWs && (
+            <button
+              className={`btn btn-icon-text ${wsDrawerOpen ? "btn-accent" : ""}`}
+              title="Agent Workspace — files, diffs, commits & PR (Esc to close)"
+              onClick={() => setWsDrawerOpen((v) => !v)}
+            >
+              <AgentIcon id={agentTermWs.digest.agent ?? "agent"} size={14} />
+              Agent Workspace
+            </button>
+          )}
           {activeTab?.type === "terminal" && (
             <>
               <button
@@ -2713,6 +2783,49 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 )}
               </div>
             )}
+          </div>
+        )}
+        {/* Agent Workspace drawer — a glassmorphic panel that slides in over
+            the live terminal. An OVERLAY, never a layout panel: the terminal
+            underneath stays mounted (unmounting a Term kills its PTY). Kept in
+            the DOM while an agent terminal is front so it can animate; the
+            heavy AgentWorkspaceView only mounts while open. */}
+        {agentTermWs && (
+          <div
+            className={`workspace-drawer-layer ${wsDrawerOpen ? "open" : ""}`}
+            aria-hidden={!wsDrawerOpen}
+          >
+            <div className="workspace-drawer-scrim" onClick={() => setWsDrawerOpen(false)} />
+            <aside className="workspace-drawer" role="dialog" aria-label="Agent workspace">
+              <div className="workspace-drawer-head">
+                <span className="workspace-drawer-title">
+                  <AgentIcon id={agentTermWs.digest.agent ?? "agent"} size={14} />
+                  Agent Workspace
+                </span>
+                <button
+                  className="btn-icon"
+                  title="Close (Esc)"
+                  onClick={() => setWsDrawerOpen(false)}
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="workspace-drawer-body">
+                {wsDrawerOpen && (
+                  <AgentWorkspaceView
+                    key={agentTermWs.digest.session_id}
+                    repo={agentTermWs.repo}
+                    digest={agentTermWs.digest}
+                    ptyId={agentTermWs.ptyId}
+                    onOpenCommit={openCommit}
+                    onOpenPr={openPr}
+                    onJumpToPty={jumpToPty}
+                    onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
+                    onNotice={onNotice}
+                  />
+                )}
+              </div>
+            </aside>
           </div>
         )}
       </div>

@@ -79,6 +79,28 @@ export const lastHumanPrompt = (prompts?: string[]) =>
     .reverse()
     .find((p) => p.trim().length > 0 && !p.trimStart().startsWith("<"));
 
+/** Pair each terminal (by the PTY `surface` id the hook recorded from our spawn
+ *  env) with the newest digest tagged for this app launch — an exact identity,
+ *  not a cwd/title guess. Shared with ProjectView so the Agents panel and the
+ *  workspace drawer resolve the same session for a given terminal. */
+export function digestBySurface(
+  digests: ipc.SessionDigest[],
+  thisInstance: string | null,
+): Map<string, ipc.SessionDigest> {
+  const bySurface = new Map<string, ipc.SessionDigest>();
+  for (const d of digests) {
+    if (!d.surface) continue;
+    // A PTY id is only unique within one app launch, but the sessions dir is
+    // shared across instances and restarts — so a digest tagged with another
+    // `instance` reused this id and must be skipped. Untagged digests are
+    // pre-upgrade and fall back to surface-only.
+    if (thisInstance && d.instance && d.instance !== thisInstance) continue;
+    const prev = bySurface.get(d.surface);
+    if (!prev || (d.updated ?? 0) > (prev.updated ?? 0)) bySurface.set(d.surface, d);
+  }
+  return bySurface;
+}
+
 const fmtMem = (bytes: number) =>
   bytes > 1024 * 1024 * 1024
     ? `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`
@@ -259,19 +281,7 @@ export function AgentsPanel({
     // claudes in the same directory are indistinguishable by cwd, and matching
     // on titles or newest-file-by-mtime attaches to the wrong one silently.
     // Newest wins if a terminal has hosted more than one session in its life.
-    const bySurface = new Map<string, ipc.SessionDigest>();
-    for (const d of digests) {
-      if (!d.surface) continue;
-      // A PTY id (`surface`) is only unique within one app launch, but the
-      // sessions dir is shared across every instance and survives restarts —
-      // so a digest tagged with a different `instance` is another window's (or
-      // a pre-restart) session that happens to have reused this id. Skip it, or
-      // its prompt shows under the wrong terminal. Digests without a tag are
-      // pre-upgrade and fall back to surface-only.
-      if (thisInstance && d.instance && d.instance !== thisInstance) continue;
-      const prev = bySurface.get(d.surface);
-      if (!prev || (d.updated ?? 0) > (prev.updated ?? 0)) bySurface.set(d.surface, d);
-    }
+    const bySurface = digestBySurface(digests, thisInstance);
     return stats.map((s) => {
       const agent = s.procs.find(
         (p) => AGENT_PATTERN.test(p.name) || AGENT_PATTERN.test(p.cmd.split(" ")[0] ?? ""),

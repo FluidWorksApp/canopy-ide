@@ -1926,6 +1926,78 @@ body,
   padding: 0 6px;
 }
 
+/* ---------- Agent Workspace drawer ----------
+   A glassmorphic panel that slides in from the right over the live terminal.
+   It is an OVERLAY inside .project-content (position: relative), so the
+   terminal underneath is never unmounted — unmounting a Term kills its PTY.
+   Colours are color-mix() over the theme tokens so the frost adapts to every
+   theme (including the light "daylight" one) without a per-theme override. */
+.workspace-drawer-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none; /* closed: clicks fall through to the terminal */
+}
+.workspace-drawer-layer.open {
+  pointer-events: auto;
+}
+
+.workspace-drawer-scrim {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--bg) 45%, transparent);
+  opacity: 0;
+  transition: opacity 220ms ease;
+}
+.workspace-drawer-layer.open .workspace-drawer-scrim {
+  opacity: 1;
+}
+
+.workspace-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(580px, 82%);
+  display: flex;
+  flex-direction: column;
+  background: color-mix(in srgb, var(--bg-raised) 72%, transparent);
+  backdrop-filter: blur(22px) saturate(150%);
+  -webkit-backdrop-filter: blur(22px) saturate(150%);
+  border-left: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+  box-shadow: -26px 0 64px -22px rgba(0, 0, 0, 0.55);
+  transform: translateX(101%);
+  transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+.workspace-drawer-layer.open .workspace-drawer {
+  transform: translateX(0);
+}
+
+.workspace-drawer-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 8px 8px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  background: color-mix(in srgb, var(--bg-raised) 40%, transparent);
+}
+.workspace-drawer-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  color: var(--text);
+}
+.workspace-drawer-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
 /* ---------- editor ---------- */
 
 .editor-pane {
