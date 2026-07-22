@@ -31,7 +31,8 @@ export type SettingsTab =
   | "terminal"
   | "dictation"
   | "guard"
-  | "integrations";
+  | "integrations"
+  | "remote";
 
 interface SettingsDialogProps {
   onClose: () => void;
@@ -46,6 +47,7 @@ const TABS: { id: SettingsTab; label: string }[] = [
   { id: "dictation", label: "Dictation" },
   { id: "guard", label: "Process guard" },
   { id: "integrations", label: "Integrations" },
+  { id: "remote", label: "Remote access" },
 ];
 
 const CURSOR_OPTIONS: { id: CursorStyle; label: string }[] = [
@@ -428,6 +430,8 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
               </>
             )}
 
+            {tab === "remote" && <RemoteSettings />}
+
             {tab === "integrations" && (
               <>
                 {TRACKERS.map((p) => (
@@ -590,6 +594,217 @@ const langName = (code: string) => LANG_NAMES[code] ?? code;
  *  armed, the next non-modifier keydown (with its modifiers) becomes the
  *  binding. Escape cancels; the physical `code` is stored so it survives
  *  non-US layouts. */
+/** Copy to the clipboard, with a hidden-textarea fallback for webviews where
+ *  the async clipboard API is unavailable. */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+}
+
+/** A click-to-copy pill: shows the value and a Copy/✓ affordance. */
+function Copyable({
+  text,
+  display,
+  big,
+}: {
+  text: string;
+  display?: React.ReactNode;
+  big?: boolean;
+}) {
+  const [copied, setCopied] = useState(false);
+  const onClick = () => {
+    void copyText(text).then((ok) => {
+      if (!ok) return;
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    });
+  };
+  return (
+    <button
+      type="button"
+      className="copyable"
+      onClick={onClick}
+      title="Click to copy"
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 8,
+        cursor: "pointer",
+        border: "1px solid var(--line, #2a2f3a)",
+        background: "var(--raised, #1f2335)",
+        color: "inherit",
+        borderRadius: 6,
+        padding: big ? "4px 12px" : "4px 10px",
+        font: "inherit",
+        maxWidth: "100%",
+      }}
+    >
+      <code
+        style={{
+          fontSize: big ? 26 : 13,
+          letterSpacing: big ? 5 : 0,
+          background: "transparent",
+          padding: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {display ?? text}
+      </code>
+      <span
+        style={{
+          fontSize: 11,
+          opacity: copied ? 1 : 0.6,
+          color: copied ? "var(--accent, #7aa2f7)" : "inherit",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {copied ? "✓ Copied" : "Copy"}
+      </span>
+    </button>
+  );
+}
+
+/** Canopy Remote — turn on the embedded control-panel server, show the PIN and
+ *  the connect URL. Off by default; see src-tauri/src/portal.rs. */
+/** Canopy's theme CSS variables, read live from the DOM so the portal inherits
+ *  the exact skin (including a custom accent). */
+const THEME_VARS = [
+  "bg",
+  "bg-alt",
+  "bg-raised",
+  "border",
+  "text",
+  "text-dim",
+  "accent",
+  "danger",
+  "ok",
+  "warn",
+  "on-accent",
+];
+function readThemeTokens(): Record<string, string> {
+  const cs = getComputedStyle(document.documentElement);
+  const out: Record<string, string> = {};
+  for (const v of THEME_VARS) {
+    const val = cs.getPropertyValue(`--${v}`).trim();
+    if (val) out[v] = val;
+  }
+  return out;
+}
+
+function RemoteSettings() {
+  const [status, setStatus] = useState<ipc.RemoteStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    void ipc.remoteStatus().then(setStatus).catch(() => setStatus(null));
+  }, []);
+
+  // Hand the portal our theme whenever remote access is on (and it rarely
+  // changes mid-session, so on-enable is enough to keep it in the same skin).
+  useEffect(() => {
+    if (status?.enabled) void ipc.remoteSetTheme(readThemeTokens()).catch(() => {});
+  }, [status?.enabled]);
+
+  const run = (op: () => Promise<ipc.RemoteStatus>) => {
+    setBusy(true);
+    void op().then(setStatus).catch(() => {}).finally(() => setBusy(false));
+  };
+  const on = status?.enabled ?? false;
+
+  return (
+    <>
+      <Item
+        name="Remote access"
+        desc="Drive your agents from a phone or browser on your network. A dedicated PIN unlocks a control panel that lists every project and agent, streams each agent's output, and lets you reply, approve, or stop them. Off by default; the PIN is separate from the team join code."
+      >
+        <button
+          className="btn"
+          disabled={busy}
+          onClick={() => run(on ? ipc.remoteDisable : ipc.remoteEnable)}
+        >
+          {on ? "Turn off" : "Turn on"}
+        </button>
+      </Item>
+
+      {on && (
+        <>
+          <Item
+            name="Scan to connect"
+            desc="On the same Wi-Fi: scan this with your phone's camera, then enter the PIN below."
+          >
+            <div className="set-inline" style={{ alignItems: "center", gap: 16 }}>
+              {status?.qr_svg && (
+                <div
+                  style={{
+                    width: 148,
+                    height: 148,
+                    padding: 8,
+                    background: "#fff",
+                    borderRadius: 8,
+                    flex: "none",
+                  }}
+                  dangerouslySetInnerHTML={{ __html: status.qr_svg }}
+                />
+              )}
+              <div>
+                <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 4 }}>PIN</div>
+                <Copyable text={status?.pin ?? ""} big />
+                <div style={{ marginTop: 10 }}>
+                  <button className="btn" disabled={busy} onClick={() => run(ipc.remoteRotatePin)}>
+                    New PIN
+                  </button>
+                </div>
+              </div>
+            </div>
+          </Item>
+
+          <Item name="Or type the address" desc="Same Wi-Fi — open one of these and enter the PIN.">
+            <div style={{ display: "grid", gap: 6, justifyItems: "start" }}>
+              {status?.urls.map((u) => (
+                <Copyable key={u} text={u} />
+              ))}
+            </div>
+          </Item>
+
+          {status?.public_url && (
+            <Item
+              name="Over the internet"
+              desc={`Forward TCP port ${status.port} on your router to this computer, then use the address below. (A tunnel like Tailscale or Cloudflare works too, and adds HTTPS.)`}
+            >
+              <Copyable text={status.public_url} />
+            </Item>
+          )}
+
+          <Item
+            name="Security"
+            desc="⚠ While this is on, anyone with the PIN on a reachable network can send input to your agents and approve their actions. Turn it off when you're done."
+          >
+            <span />
+          </Item>
+        </>
+      )}
+    </>
+  );
+}
+
 function HotkeyCapture({ value, onChange }: { value: Hotkey; onChange: (h: Hotkey) => void }) {
   const [arming, setArming] = useState(false);
   useEffect(() => {

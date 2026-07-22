@@ -24,7 +24,17 @@ path = "src/bin/canopy_hook.rs"
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
-tokio = { version = "1", features = ["rt", "sync", "time", "macros", "process"] }
+tokio = { version = "1", features = ["rt", "sync", "time", "macros", "process", "net"] }
+# Canopy Remote: an embedded HTTP + WebSocket server that serves the mobile
+# control portal and bridges it to the local command surface (projects, agent
+# status, PTY I/O). axum is the tokio-native choice and reuses the runtime Tauri
+# already runs; include_dir bakes the built portal SPA into the binary so it
+# ships offline with no runtime asset-path resolution.
+axum = { version = "0.7", features = ["ws"] }
+include_dir = "0.7"
+# A scannable QR of the portal URL so pairing a phone is "scan + type the PIN".
+# Pure-Rust encoder; the SVG is hand-built from the matrix (no render feature).
+qrcode = { version = "0.14", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rcgen = { version = "0.13", default-features = false, features = ["ring"] }

@@ -607,6 +607,29 @@ export const relayRegenerateCode = () => invoke<RelayStatus>("relay_regenerate_c
 export const relayConnect = (addr: string, code: string, name: string) =>
   invoke<RelayStatus>("relay_connect", { addr, code, name });
 export const relayDisconnect = () => invoke<RelayStatus>("relay_disconnect");
+
+/** Canopy Remote — the embedded control-panel server (src-tauri/src/portal.rs).
+ *  Separate from the team relay: this drives your own agents from a browser. */
+export interface RemoteStatus {
+  enabled: boolean;
+  port: number;
+  /** The PIN to enter in the portal — present only while enabled. */
+  pin: string | null;
+  /** Same-network `http://<lan-ip>:<port>/remote` addresses. */
+  urls: string[];
+  /** `http://<public-ip>:<port>/remote` — needs TCP <port> port-forwarded. */
+  public_url: string | null;
+  /** Inline SVG QR of the primary LAN URL, for scan-to-connect. */
+  qr_svg: string | null;
+}
+export const remoteStatus = () => invoke<RemoteStatus>("remote_status");
+export const remoteEnable = () => invoke<RemoteStatus>("remote_enable");
+export const remoteDisable = () => invoke<RemoteStatus>("remote_disable");
+export const remoteRotatePin = () => invoke<RemoteStatus>("remote_rotate_pin");
+/** Push the current theme tokens (var name → color) so the portal matches the
+ *  desktop's skin. */
+export const remoteSetTheme = (theme: Record<string, string>) =>
+  invoke<void>("remote_set_theme", { theme });
 /** Resolves with the stamped message — the sender's UI appends it; the relay
  *  never echoes a frame back to its author. */
 export const relaySendChat = (to: string | null, text: string) =>

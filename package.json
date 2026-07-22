@@ -14,7 +14,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "build:hook": "node scripts/prepare-sidecar.mjs",
-    "build:hook:release": "node scripts/prepare-sidecar.mjs --release"
+    "build:hook:release": "node scripts/prepare-sidecar.mjs --release",
+    "build:portal": "vite build --config portal/vite.config.ts"
   },
   "dependencies": {
     "@codingame/monaco-vscode-files-service-override": "~25.1.2",

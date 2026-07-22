@@ -4,6 +4,7 @@ mod dictation;
 mod fsx;
 mod git;
 mod lsp;
+mod portal;
 mod pty;
 mod punch;
 mod qstream;
@@ -158,6 +159,7 @@ pub fn run() {
         .manage(fsx::WorkspaceManager::default())
         .manage(lsp::LspManager::default())
         .manage(relay::RelayManager::default())
+        .manage(portal::RemoteManager::default())
         .manage(dictation::DictationManager::default())
         .manage(cli::pending_from_env())
         .setup(|app| {
@@ -298,6 +300,11 @@ pub fn run() {
             relay::relay_send_collab,
             relay::relay_offer_file,
             relay::relay_accept_file,
+            portal::remote_enable,
+            portal::remote_disable,
+            portal::remote_status,
+            portal::remote_rotate_pin,
+            portal::remote_set_theme,
             dictation::dictation_models,
             dictation::dictation_status,
             dictation::dictation_download,
@@ -315,6 +322,8 @@ pub fn run() {
                 app.state::<lsp::LspManager>().kill_all();
                 // ... and no relay socket either.
                 app.state::<relay::RelayManager>().shutdown();
+                // ... and stop the remote-access server.
+                app.state::<portal::RemoteManager>().shutdown();
             }
         });
 }

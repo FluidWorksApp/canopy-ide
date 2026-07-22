@@ -14,7 +14,7 @@
 
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -22,10 +22,28 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, State};
+use tokio::sync::broadcast;
 
 const FLUSH_INTERVAL: Duration = Duration::from_millis(10);
 const READ_BUF_SIZE: usize = 64 * 1024;
 const DEFAULT_HIGH_WATER: usize = 2 * 1024 * 1024;
+/// Per-session output retained for a remote (Canopy Remote) attach: a
+/// late-joining browser gets this many recent bytes as a catch-up snapshot
+/// before the live tail. The local WebView is unaffected and keeps its own
+/// xterm scrollback — this ring exists only to seed remote viewers.
+const SCROLLBACK_CAP: usize = 256 * 1024;
+/// Bounded fan-out queue to remote subscribers. Lossy on lag by design: a slow
+/// phone is dropped to a resync, never allowed to stall the agent.
+const BROADCAST_CAP: usize = 512;
+
+/// What a remote subscriber receives off a session's fan-out: coalesced output
+/// bytes, or a size change so a remote terminal can render the TUI at the same
+/// grid the PTY is actually using (not the phone's width).
+#[derive(Clone)]
+pub enum PtyEvent {
+    Data(Arc<[u8]>),
+    Resize(u16, u16),
+}
 /// How long a terminal's process group gets to exit on SIGTERM before we force
 /// it. Agent CLIs use this window to flush their conversation transcript and run
 /// their stop hooks — the difference between a session you can resume later and
@@ -70,6 +88,16 @@ pub struct Session {
     pending: Mutex<Vec<u8>>,
     outstanding: AtomicUsize,
     high_water: usize,
+    /// Recent output kept for remote (Canopy Remote) attach — a catch-up
+    /// snapshot only, independent of the WebView's own scrollback.
+    scrollback: Mutex<VecDeque<u8>>,
+    /// The PTY's current grid, so a remote viewer can size its terminal to match
+    /// what the desktop set (the pty is the authority — see PtyGeometry).
+    size: Mutex<(u16, u16)>,
+    /// Fans output + resize events out to remote subscribers, alongside the
+    /// WebView `Channel`. Bounded + lossy so remote lag never touches PTY
+    /// backpressure.
+    subscribers: broadcast::Sender<PtyEvent>,
 }
 
 #[derive(Default)]
@@ -110,6 +138,54 @@ impl PtyManager {
         self.sessions.clone()
     }
 
+    /// Look up a live session by id.
+    pub fn get(&self, id: u32) -> Option<Arc<Session>> {
+        self.sessions.lock().unwrap().get(&id).cloned()
+    }
+
+    /// Write bytes to a session's PTY stdin. Shared by the `pty_write` command
+    /// and the remote portal so both drive agent input through one path.
+    pub fn write(&self, id: u32, data: &str) -> Result<(), String> {
+        let session = self.get(id).ok_or_else(|| format!("no pty session {id}"))?;
+        // Bind before returning so the MutexGuard temporary is dropped before
+        // `session` — returning the expression directly outlives the Arc.
+        let result = session
+            .writer
+            .lock()
+            .unwrap()
+            .write_all(data.as_bytes())
+            .map_err(|e| e.to_string());
+        result
+    }
+
+    /// Tear a session down (SIGTERM, grace, SIGKILL) on a detached thread, as
+    /// `pty_kill` does. Shared with the remote portal's kill/restart controls.
+    pub fn kill(&self, id: u32) -> Result<(), String> {
+        let session = self.get(id).ok_or_else(|| format!("no pty session {id}"))?;
+        thread::spawn(move || session.terminate());
+        Ok(())
+    }
+
+    /// Attach a remote consumer (Canopy Remote): returns the current scrollback
+    /// snapshot plus a live receiver of subsequent output chunks, or None if the
+    /// session is gone. The subscribe and the snapshot are taken under the same
+    /// scrollback lock that `record_remote` holds across its append+broadcast,
+    /// so the snapshot and the receiver stream join with no gap and no overlap.
+    /// The receiver is bounded and lossy — on `Lagged` the caller re-`attach`es
+    /// for a fresh snapshot rather than expecting every byte.
+    pub fn attach(
+        &self,
+        id: u32,
+    ) -> Option<(u16, u16, Vec<u8>, broadcast::Receiver<PtyEvent>)> {
+        let session = self.get(id)?;
+        let ring = session.scrollback.lock().unwrap();
+        let rx = session.subscribers.subscribe();
+        let snapshot = ring.iter().copied().collect();
+        drop(ring);
+        let (cols, rows) = *session.size.lock().unwrap();
+        Some((cols, rows, snapshot, rx))
+    }
+
     /// Stop every session; called on app exit so no child processes outlive us.
     ///
     /// Signals them all first and *then* waits once, rather than terminating them
@@ -140,6 +216,28 @@ impl PtyManager {
 }
 
 impl Session {
+    /// Feed a freshly-flushed chunk to remote consumers: append to the bounded
+    /// scrollback and fan it out to any subscribers, both under one lock so an
+    /// attaching viewer never sees a torn boundary. Best-effort — no subscribers
+    /// (or a lagging one) is fine and never blocks the flusher.
+    fn record_remote(&self, data: &[u8]) {
+        let mut ring = self.scrollback.lock().unwrap();
+        ring.extend(data.iter().copied());
+        let overflow = ring.len().saturating_sub(SCROLLBACK_CAP);
+        if overflow > 0 {
+            ring.drain(0..overflow);
+        }
+        // Err just means nobody is attached right now; ignore it.
+        let _ = self.subscribers.send(PtyEvent::Data(Arc::from(data)));
+    }
+
+    /// Record a new grid size and tell remote subscribers, so a remote terminal
+    /// re-sizes to the PTY's actual columns/rows instead of guessing.
+    fn record_resize(&self, cols: u16, rows: u16) {
+        *self.size.lock().unwrap() = (cols, rows);
+        let _ = self.subscribers.send(PtyEvent::Resize(cols, rows));
+    }
+
     /// Ask the process group to exit, and force it only if it refuses.
     ///
     /// This used to send SIGKILL outright. SIGKILL is uncatchable, so agent CLIs
@@ -286,6 +384,9 @@ pub fn pty_spawn(
         pending: Mutex::new(Vec::new()),
         outstanding: AtomicUsize::new(0),
         high_water: high_water.unwrap_or(DEFAULT_HIGH_WATER),
+        scrollback: Mutex::new(VecDeque::new()),
+        size: Mutex::new((cols, rows)),
+        subscribers: broadcast::channel(BROADCAST_CAP).0,
     });
 
     state.sessions.lock().unwrap().insert(id, session.clone());
@@ -345,6 +446,12 @@ pub fn pty_spawn(
                     };
                     match chunk {
                         Some(data) => {
+                            // Mirror to remote subscribers + scrollback (Canopy
+                            // Remote) first, while `data` is still borrowable and
+                            // before the WebView `send` moves it. Both paths are
+                            // independent of the WebView backpressure below, so a
+                            // remote viewer can never wedge the agent.
+                            session.record_remote(&data);
                             session.outstanding.fetch_add(data.len(), Ordering::SeqCst);
                             if on_data.send(InvokeResponseBody::Raw(data)).is_err() {
                                 // WebView side is gone; stop streaming.
@@ -382,14 +489,7 @@ pub fn pty_spawn(
 
 #[tauri::command]
 pub fn pty_write(state: State<'_, PtyManager>, id: u32, data: String) -> Result<(), String> {
-    let session = get_session(&state, id)?;
-    let result = session
-        .writer
-        .lock()
-        .unwrap()
-        .write_all(data.as_bytes())
-        .map_err(|e| e.to_string());
-    result
+    state.write(id, &data)
 }
 
 /// Frontend ack after xterm.js consumes a chunk — releases backpressure.
@@ -439,6 +539,8 @@ pub fn pty_resize(
             pixel_height: 0,
         })
         .map_err(|e| e.to_string())?;
+    // Mirror the new grid to any remote viewers so they re-size to match.
+    session.record_resize(cols, rows);
     Ok(PtyGeometry { cols, rows })
 }
 
@@ -452,7 +554,6 @@ pub fn pty_kill_all(state: State<'_, PtyManager>) {
 
 #[tauri::command]
 pub fn pty_kill(state: State<'_, PtyManager>, id: u32) -> Result<(), String> {
-    let session = get_session(&state, id)?;
     // Return at once and tear down on a detached thread. terminate() blocks for
     // up to GRACE (2.5s) waiting for the agent to flush its transcript before
     // the final SIGKILL — and this command runs on the main thread, so doing
@@ -462,8 +563,7 @@ pub fn pty_kill(state: State<'_, PtyManager>, id: u32) -> Result<(), String> {
     // synchronously inside terminate() before the grace poll, so the shell
     // starts shutting down immediately regardless of when this thread is
     // scheduled.
-    thread::spawn(move || session.terminate());
-    Ok(())
+    state.kill(id)
 }
 
 #[tauri::command]

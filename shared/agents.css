@@ -1,0 +1,241 @@
+/* Styles for the shared agent/project components. Driven entirely by Canopy's
+ * theme CSS variables (--bg, --bg-raised, --border, --text, --text-dim,
+ * --accent, --ok, --warn, --danger, --on-accent) so they match whichever skin
+ * the host pushes. Fallbacks keep them legible before a theme arrives. */
+
+.card {
+  --_line: var(--border, #232a36);
+  --_raise: var(--bg-raised, #141a24);
+  --_text: var(--text, #e6edf3);
+  --_dim: var(--text-dim, #8b98ac);
+  --_ok: var(--ok, #3fb950);
+  --_warn: var(--warn, #e3b341);
+  --_accent: var(--accent, #4c8dff);
+  position: relative;
+  display: block;
+  width: 100%;
+  text-align: left;
+  color: var(--_text);
+  background: var(--_raise);
+  border: 1px solid var(--_line);
+  border-radius: 14px;
+  padding: 13px 15px 13px 18px;
+  font: inherit;
+  cursor: default;
+  overflow: hidden;
+  animation: rise 0.36s both;
+  animation-delay: calc(var(--i, 0) * 22ms);
+}
+button.card {
+  -webkit-tap-highlight-color: transparent;
+}
+button.card.on {
+  cursor: pointer;
+}
+button.card.on:active {
+  transform: scale(0.992);
+  border-color: color-mix(in srgb, var(--_accent) 55%, var(--_line));
+}
+.card.off {
+  opacity: 0.56;
+}
+
+/* left status rail */
+.rail {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--_dim);
+}
+.rail.working {
+  background: var(--_ok);
+}
+.rail.waiting {
+  background: var(--_warn);
+}
+.rail.idle,
+.rail.ended {
+  background: color-mix(in srgb, var(--_dim) 60%, transparent);
+}
+
+.card.attn {
+  border-color: color-mix(in srgb, var(--_warn) 45%, var(--_line));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--_warn) 22%, transparent);
+  animation: rise 0.36s both, attn 2.6s ease-in-out infinite 0.4s;
+}
+
+/* status dot */
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--text-dim, #8b98ac);
+}
+.dot.working {
+  background: var(--ok, #3fb950);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok, #3fb950) 22%, transparent);
+  animation: breathe 1.8s ease-in-out infinite;
+}
+.dot.waiting {
+  background: var(--warn, #e3b341);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn, #e3b341) 22%, transparent);
+}
+.dot.idle {
+  background: var(--text-dim, #8b98ac);
+}
+.dot.ended {
+  background: color-mix(in srgb, var(--text-dim, #8b98ac) 50%, transparent);
+}
+
+/* agent card internals */
+.agent-main {
+  min-width: 0;
+}
+.agent-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.agent-name {
+  font-weight: 650;
+  font-size: 15px;
+  letter-spacing: -0.01em;
+}
+.agent-state {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-dim, #8b98ac);
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
+.agent-state.warn {
+  color: var(--warn, #e3b341);
+  font-weight: 600;
+}
+.chev {
+  color: var(--text-dim, #8b98ac);
+  font-size: 19px;
+  line-height: 1;
+  margin-left: 2px;
+  opacity: 0.7;
+}
+.agent-prompt {
+  margin-top: 7px;
+  font-size: 13.5px;
+  line-height: 1.4;
+  color: var(--text, #e6edf3);
+  opacity: 0.92;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.agent-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 9px;
+  font-size: 11.5px;
+  color: var(--text-dim, #8b98ac);
+}
+
+/* chips + pills */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-dim, #8b98ac);
+  background: color-mix(in srgb, var(--text-dim, #8b98ac) 12%, transparent);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+.chip.mono,
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 20px;
+  padding: 2px 9px;
+  white-space: nowrap;
+}
+.pill .dot {
+  width: 6px;
+  height: 6px;
+}
+.pill.ok {
+  color: var(--ok, #3fb950);
+  background: color-mix(in srgb, var(--ok, #3fb950) 14%, transparent);
+}
+.pill.warn {
+  color: var(--warn, #e3b341);
+  background: color-mix(in srgb, var(--warn, #e3b341) 16%, transparent);
+}
+.pill.muted {
+  color: var(--text-dim, #8b98ac);
+  background: color-mix(in srgb, var(--text-dim, #8b98ac) 12%, transparent);
+}
+
+/* project card */
+.project-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 10px;
+}
+.project-name {
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: -0.01em;
+  margin-right: auto;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok, #3fb950) 24%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--ok, #3fb950) 8%, transparent);
+  }
+}
+@keyframes attn {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--warn, #e3b341) 22%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn, #e3b341) 14%, transparent);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .card,
+  .dot.working,
+  .card.attn {
+    animation: none !important;
+  }
+}
