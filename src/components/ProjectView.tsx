@@ -1937,7 +1937,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const runCliUpdate = (cli: AgentCli, at?: string) => {
     const cwd = at ?? components[0]?.path;
     if (!cwd) return;
-    addTerminal(cwd, updateCommand(cli), `update ${cli.name}`, "⬆", true);
+    // Route to the command matched to the install source (e.g. `brew upgrade`);
+    // fall back to the CLI's own updater when the source is a plain registry.
+    const cmd = cliUpdates[cli.bin]?.updateCmd ?? updateCommand(cli);
+    addTerminal(cwd, cmd, `update ${cli.name}`, "⬆", true);
   };
 
   /** The launcher list — shell plus every agent CLI — for a given directory.
@@ -2577,6 +2580,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                     // "install" labels and update badges go stale — re-probe
                     // right now, not on a timer.
                     if (
+                      tab.command?.startsWith("brew upgrade ") ||
                       AGENT_CLIS.some(
                         (c) => c.install === tab.command || updateCommand(c) === tab.command,
                       )

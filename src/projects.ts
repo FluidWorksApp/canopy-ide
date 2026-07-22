@@ -388,6 +388,11 @@ export interface CliUpdate {
   latest?: string;
   /** `latest` is strictly newer than `installed` (both sides known). */
   hasUpdate: boolean;
+  /** Package manager that owns the install, when detected ("homebrew"). */
+  managedBy?: string;
+  /** Upgrade command matched to the install source (e.g. `brew upgrade
+   *  claude-code`); overrides the CLI's own updater when present. */
+  updateCmd?: string;
 }
 
 const LATEST_CACHE_KEY = "canopy.cliLatest.v1";
@@ -429,7 +434,15 @@ export async function checkCliUpdates(): Promise<Record<string, CliUpdate>> {
     Date.now() - cached.at < LATEST_TTL_MS;
   try {
     const res = await invoke<
-      Record<string, { installed: string | null; latest: string | null }>
+      Record<
+        string,
+        {
+          installed: string | null;
+          latest: string | null;
+          managedBy?: string | null;
+          update?: string | null;
+        }
+      >
     >("cli_versions", {
       queries: AGENT_CLIS.map((c) => ({
         bin: c.bin,
@@ -454,6 +467,8 @@ export async function checkCliUpdates(): Promise<Record<string, CliUpdate>> {
         installed,
         latest: newest,
         hasUpdate: !!(installed && newest && cmpVersions(newest, installed) > 0),
+        managedBy: v.managedBy ?? undefined,
+        updateCmd: v.update ?? undefined,
       };
     }
     return out;
