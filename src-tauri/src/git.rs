@@ -1806,13 +1806,95 @@ pub async fn agent_workspace(
 
     let top = repo_path(&state, &repo)?;
     let base = default_base(&top);
+    let touched = digest
+        .get("files")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|f| f.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    workspace_join(
+        &top,
+        base,
+        session_id,
+        dstr("agent"),
+        dstr("state"),
+        digest.get("updated").and_then(|v| v.as_u64()),
+        touched,
+        dstr("cwd"),
+        dstr("branch"),
+    )
+}
 
-    // Resolve the digest's cwd to a workdir this repo actually owns. Git's own
-    // worktree list is the authority, compared canonically — agent-made
-    // worktrees were never registered as workspace roots (see git_branch_patch
-    // for the full rationale).
+/// Same workspace, keyed on a live terminal's cwd rather than a hook digest —
+/// so a hookless CLI (codex, agy, …) gets the full branch/diff/commit/PR view
+/// too. Identity (`agent`) comes from the caller (the process tree), never from
+/// a stale digest that a reused PTY might still carry. A `session_id` is optional
+/// enrichment: when a hook wrote one, its state and reported-file list ride along.
+#[tauri::command]
+pub async fn agent_workspace_at(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    cwd: String,
+    agent: Option<String>,
+    session_id: Option<String>,
+) -> Result<AgentWorkspace, String> {
+    let top = repo_path(&state, &repo)?;
+    let base = default_base(&top);
+    // Digest enrichment only when the id is present and well-formed (same guard
+    // as agent_workspace); everything below the identity line is git-derived
+    // from `cwd`, so a missing or malformed id degrades to a bare workspace.
+    let valid = |s: &str| {
+        !s.is_empty()
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            && !s.contains("..")
+    };
+    let (sid, state_s, updated, touched, branch_fallback) = match session_id.as_deref() {
+        Some(s) if valid(s) => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let digest: Option<serde_json::Value> = std::fs::read_to_string(
+                PathBuf::from(&home)
+                    .join(".canopy")
+                    .join("sessions")
+                    .join(format!("{s}.json")),
+            )
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok());
+            let d = digest.as_ref();
+            let dstr = |k: &str| d.and_then(|v| v.get(k)).and_then(|v| v.as_str()).map(str::to_string);
+            let touched = d
+                .and_then(|v| v.get("files"))
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|f| f.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            let updated = d.and_then(|v| v.get("updated")).and_then(|v| v.as_u64());
+            (s.to_string(), dstr("state"), updated, touched, dstr("branch"))
+        }
+        _ => (String::new(), None, None, Vec::new(), None),
+    };
+    workspace_join(&top, base, sid, agent, state_s, updated, touched, Some(cwd), branch_fallback)
+}
+
+/// The git half of an agent workspace, shared by the digest-keyed
+/// `agent_workspace` and the cwd-keyed `agent_workspace_at`: resolve the cwd to
+/// a workdir this repo owns, then read the live branch, counts and commit list.
+/// Identity (`agent`/`state`/`touched`) is supplied by the caller — from a hook
+/// digest when there is one, or from the live process when there isn't.
+#[allow(clippy::too_many_arguments)]
+fn workspace_join(
+    top: &Path,
+    base: String,
+    session_id: String,
+    agent: Option<String>,
+    state: Option<String>,
+    updated: Option<u64>,
+    touched: Vec<String>,
+    cwd: Option<String>,
+    branch_fallback: Option<String>,
+) -> Result<AgentWorkspace, String> {
+    // Resolve the cwd to a workdir this repo actually owns. Git's own worktree
+    // list is the authority, compared canonically — agent-made worktrees were
+    // never registered as workspace roots (see git_branch_patch for the full
+    // rationale).
     let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    let cwd = dstr("cwd");
     let mut workdir: Option<PathBuf> = None;
     let mut cwd_missing = false;
     if let Some(c) = cwd.as_deref() {
@@ -1820,8 +1902,8 @@ pub async fn agent_workspace(
         if dir.is_dir() {
             if let Some(wt_top) = toplevel_of(dir) {
                 let want = canon(&wt_top);
-                if want == canon(&top)
-                    || list_worktrees(&top)?
+                if want == canon(top)
+                    || list_worktrees(top)?
                         .iter()
                         .any(|w| canon(Path::new(&w.path)) == want)
                 {
@@ -1832,10 +1914,10 @@ pub async fn agent_workspace(
             cwd_missing = true;
         }
     }
-    let isolated = workdir.as_deref().map(|w| canon(w) != canon(&top)).unwrap_or(false);
+    let isolated = workdir.as_deref().map(|w| canon(w) != canon(top)).unwrap_or(false);
 
-    // The live branch beats the digest's snapshot; the snapshot still names
-    // the branch after the workdir is gone.
+    // The live branch beats the snapshot; the snapshot still names the branch
+    // after the workdir is gone.
     let (mut branch, mut detached) = (None, false);
     if let Some(w) = &workdir {
         let (b, d) = head_branch(w);
@@ -1843,7 +1925,7 @@ pub async fn agent_workspace(
         detached = d;
     }
     if branch.is_none() && !detached {
-        branch = dstr("branch");
+        branch = branch_fallback;
     }
     let on_base = !detached
         && branch
@@ -1865,7 +1947,7 @@ pub async fn agent_workspace(
         // symbolic-ref passes trivially. A weird name degrades to no counts
         // rather than failing the whole view.
         if let Some(b) = branch.as_deref().and_then(|b| checked_ref(b).ok()) {
-            if let Ok(out) = run(git(&top).args([
+            if let Ok(out) = run(git(top).args([
                 "rev-list",
                 "--left-right",
                 "--count",
@@ -1875,26 +1957,22 @@ pub async fn agent_workspace(
                 behind = n.next().and_then(|v| v.parse().ok()).unwrap_or(0);
                 ahead = n.next().and_then(|v| v.parse().ok()).unwrap_or(0);
             }
-            merged = git(&top)
+            merged = git(top)
                 .args(["merge-base", "--is-ancestor", &b, &base])
                 .output()
                 .map(|o| o.status.success())
                 .unwrap_or(false);
-            commits = branch_commits_of(&top, &base, &b);
+            commits = branch_commits_of(top, &base, &b);
         }
     }
 
     Ok(AgentWorkspace {
         session_id,
-        agent: dstr("agent"),
-        state: dstr("state"),
+        agent,
+        state,
         cwd,
-        updated: digest.get("updated").and_then(|v| v.as_u64()),
-        touched: digest
-            .get("files")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|f| f.as_str().map(str::to_string)).collect())
-            .unwrap_or_default(),
+        updated,
+        touched,
         branch,
         detached,
         base,

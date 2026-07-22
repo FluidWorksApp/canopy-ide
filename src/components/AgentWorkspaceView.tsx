@@ -15,7 +15,16 @@ import { AgentIcon, GitBranchIcon } from "./icons";
 interface AgentWorkspaceViewProps {
   /** Repo the agent's cwd resolved to; null renders the digest-only view. */
   repo: string | null;
-  digest: ipc.SessionDigest;
+  /** Authoritative agent id, from the live process tree — never a stale digest
+   *  a reused PTY might still carry. Drives the header mark and label. */
+  agent: string;
+  /** The agent's working directory. The git join is driven off this, so a
+   *  hookless CLI (codex, agy, …) gets a full workspace. */
+  cwd: string;
+  /** Hook session id, when a hook CLI wrote a digest — enrichment only. */
+  sessionId?: string;
+  /** The hook digest, when there is one: last prompt, state, reported files. */
+  digest?: ipc.SessionDigest;
   /** Live terminal hosting this session, when there is one. */
   ptyId?: number;
   onOpenCommit: (
@@ -39,6 +48,9 @@ const parentDir = (p: string) => p.split("/").filter(Boolean).slice(-2, -1)[0] ?
 
 export function AgentWorkspaceView({
   repo,
+  agent,
+  cwd,
+  sessionId,
   digest,
   ptyId,
   onOpenCommit,
@@ -64,7 +76,7 @@ export function AgentWorkspaceView({
     setWsErr(null);
     if (!repo) return;
     void ipc
-      .agentWorkspace(repo, digest.session_id)
+      .agentWorkspaceAt(repo, cwd, agent, sessionId)
       .then((w) => {
         if (!live) return;
         setWs(w);
@@ -75,7 +87,7 @@ export function AgentWorkspaceView({
     return () => {
       live = false;
     };
-  }, [repo, digest.session_id, digest.updated, tick]);
+  }, [repo, cwd, agent, sessionId, digest?.updated, tick]);
 
   useEffect(() => {
     let live = true;
@@ -127,9 +139,9 @@ export function AgentWorkspaceView({
     };
   }, [repo, ws?.branch, ws?.workdir, ws?.isolated, ws?.detached, ws?.on_base, pane, tick, onNotice]);
 
-  const st = ws?.state ? STATE_META[ws.state] : digest.state ? STATE_META[digest.state] : undefined;
-  const task = lastHumanPrompt(digest.prompts);
-  const touched = ws?.touched?.length ? ws.touched : (digest.files ?? []);
+  const st = ws?.state ? STATE_META[ws.state] : digest?.state ? STATE_META[digest.state] : undefined;
+  const task = lastHumanPrompt(digest?.prompts);
+  const touched = ws?.touched?.length ? ws.touched : (digest?.files ?? []);
   const branchable = !!ws?.branch && !ws.detached && !ws.on_base;
   const files = patch?.patch ? splitPatch(patch.patch) : [];
 
@@ -158,8 +170,8 @@ export function AgentWorkspaceView({
       <div className="ticket-view-head">
         <div className="ticket-view-title">
           {st && <span className={`agent-state-dot ${st.cls}`} title={st.label} />}
-          <AgentIcon id={digest.agent ?? "agent"} size={15} className="ticket-view-mark" />
-          <span>{digest.agent ?? "agent"}</span>
+          <AgentIcon id={agent} size={15} className="ticket-view-mark" />
+          <span>{agent}</span>
           {ws?.branch && (
             <span className="agent-branch" title={ws.detached ? "detached HEAD" : `On branch ${ws.branch}`}>
               <GitBranchIcon size={12} /> {ws.branch}
@@ -190,7 +202,7 @@ export function AgentWorkspaceView({
           {ws?.workdir && (
             <button
               className="btn"
-              onClick={() => onOpenTerminal(ws.workdir as string, ws.branch ?? digest.agent ?? "agent")}
+              onClick={() => onOpenTerminal(ws.workdir as string, ws.branch ?? agent)}
             >
               Open terminal here
             </button>

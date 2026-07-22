@@ -482,6 +482,16 @@ export interface AgentWorkspace {
 export const agentWorkspace = (repo: string, sessionId: string) =>
   invoke<AgentWorkspace>("agent_workspace", { repo, sessionId });
 
+/** Workspace keyed on a live terminal's cwd, so hookless CLIs (codex, agy, …)
+ *  get the same branch/diff/commit/PR view. `agent` is the authoritative id from
+ *  the process tree; `sessionId` is optional hook enrichment. */
+export const agentWorkspaceAt = (
+  repo: string,
+  cwd: string,
+  agent?: string,
+  sessionId?: string,
+) => invoke<AgentWorkspace>("agent_workspace_at", { repo, cwd, agent, sessionId });
+
 export const gitWorktrees = (repo: string) => invoke<WorktreeInfo[]>("git_worktrees", { repo });
 export const gitWorktreeAdd = (repo: string, path: string, branch: string, create: boolean) =>
   invoke<string>("git_worktree_add", { repo, path, branch, create });

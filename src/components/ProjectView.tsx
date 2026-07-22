@@ -167,7 +167,13 @@ interface AgentSubTab {
   type: "agent";
   /** Repo the agent's cwd matched; null renders the digest-only view. */
   repo: string | null;
-  digest: ipc.SessionDigest;
+  /** Authoritative agent id, from the live process tree. */
+  agent: string;
+  /** The agent's working directory — the git join is keyed off this. */
+  cwd: string;
+  /** Hook session id + digest when a hook CLI wrote one; enrichment only. */
+  sessionId?: string;
+  digest?: ipc.SessionDigest;
   /** Live terminal hosting the session, for the jump-back button. */
   ptyId?: number;
 }
@@ -249,8 +255,8 @@ function tabDisplayLabel(t: SubTab): string {
     case "branch":
       return t.branch.branch;
     case "agent":
-      return `${t.digest.agent ?? "agent"} · ${
-        t.digest.branch ?? t.digest.cwd?.split("/").pop() ?? t.digest.session_id.slice(0, 8)
+      return `${t.agent} · ${
+        t.digest?.branch ?? t.cwd.split("/").filter(Boolean).pop() ?? t.agent
       }`;
     case "chat":
       return t.name;
@@ -485,6 +491,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // Heuristic by design: it rings the tab, it never fabricates an urgent
   // pending card. Re-arms whenever the agent works again.
   const idleWatch = useRef(new Map<number, { busy: boolean; idle: number; flagged: boolean }>());
+  // A plain shell that an agent ran inside of is classified as an agent only
+  // while that process lives (see agentPtyIds in the render). Once the agent
+  // exits, the still-open shell would silently demote into the SHELLS rail and
+  // bump its count "by itself". Track ptys that have hosted an agent and, once
+  // the agent has been gone two ticks (guards a stats-sampling blip), close the
+  // tab instead of letting it reappear as a shell.
+  const agentLife = useRef(new Map<number, number>());
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
   useEffect(() => {
@@ -497,7 +510,26 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       );
       const mine = all.filter((s) => ids.has(s.id));
       for (const s of mine) {
-        if (!s.procs.some((p) => AGENT_PATTERN.test(p.name))) {
+        const hasAgent = s.procs.some((p) => AGENT_PATTERN.test(p.name));
+        if (hasAgent) {
+          agentLife.current.set(s.id, 0);
+        } else if (agentLife.current.has(s.id)) {
+          const gone = (agentLife.current.get(s.id) ?? 0) + 1;
+          if (gone >= 2) {
+            agentLife.current.delete(s.id);
+            const tab = tabsRef.current.find(
+              (t): t is TermSubTab => t.type === "terminal" && t.ptyId === s.id,
+            );
+            // A launched agent tab (command matches) or a run stays put; only a
+            // plain shell that hosted a now-exited agent gets closed.
+            if (tab && !tab.run && !AGENT_PATTERN.test(tab.command ?? "")) {
+              closeTabRef.current(tab.id);
+            }
+          } else {
+            agentLife.current.set(s.id, gone);
+          }
+        }
+        if (!hasAgent) {
           idleWatch.current.delete(s.id);
           continue;
         }
@@ -1115,18 +1147,36 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     [],
   );
 
-  /** Open an agent session's workspace as its own tab — the files it changed,
-   *  its commits, and the PR from its branch. The repo is matched from the
-   *  digest's cwd; the backend's worktree authorization is the real gate, so a
-   *  wrong guess degrades to an error banner, not someone else's diff. */
+  /** Open an agent's workspace as its own tab — the files it changed, its
+   *  commits, and the PR from its branch. Identity is the live agent (the
+   *  process running in the terminal), never a stale hook digest; the digest,
+   *  when present, is only enrichment. The repo is matched from the agent's
+   *  cwd; the backend's worktree authorization is the real gate, so a wrong
+   *  guess degrades to an error banner, not someone else's diff. */
   const openAgent = useCallback(
-    async (digest: ipc.SessionDigest, ptyId?: number) => {
+    async (p: {
+      agent: string;
+      cwd: string;
+      ptyId?: number;
+      sessionId?: string;
+      digest?: ipc.SessionDigest;
+    }) => {
+      // One workspace per live terminal; fall back to session id for the rare
+      // terminal-less case.
       const existing = tabsRef.current.find(
-        (t): t is AgentSubTab => t.type === "agent" && t.digest.session_id === digest.session_id,
+        (t): t is AgentSubTab =>
+          t.type === "agent" &&
+          (p.ptyId != null ? t.ptyId === p.ptyId : t.sessionId === p.sessionId),
       );
       if (existing) {
-        // The panel's copy is fresher (state and branch move); take it.
-        patchTabRaw(existing.id, { digest, ptyId } as Partial<SubTab>);
+        // The panel's copy is fresher (agent, cwd, state and branch all move).
+        patchTabRaw(existing.id, {
+          agent: p.agent,
+          cwd: p.cwd,
+          sessionId: p.sessionId,
+          digest: p.digest,
+          ptyId: p.ptyId,
+        } as Partial<SubTab>);
         setActiveTabId(existing.id);
         return;
       }
@@ -1135,7 +1185,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         const repos = await ipc.gitRepos(
           componentsRef.current.map((c) => [c.label, c.path] as [string, string]),
         );
-        const cwd = digest.cwd ?? digest.launch_cwd ?? "";
+        const cwd = p.cwd;
         repo =
           repos.find((r) => cwd === r.path || cwd.startsWith(`${r.path}/`))?.path ??
           // Sibling worktrees follow the `<repo>-wt-<branch>` convention.
@@ -1146,7 +1196,19 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         repo = null;
       }
       const id = tabId();
-      setTabs((prev) => [...prev, { id, type: "agent", repo, digest, ptyId }]);
+      setTabs((prev) => [
+        ...prev,
+        {
+          id,
+          type: "agent",
+          repo,
+          agent: p.agent,
+          cwd: p.cwd,
+          sessionId: p.sessionId,
+          digest: p.digest,
+          ptyId: p.ptyId,
+        },
+      ]);
       setActiveTabId(id);
     },
     [patchTabRaw],
@@ -2035,23 +2097,35 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     });
 
   // The agent behind the active *terminal* tab, if any — the "Agent Workspace"
-  // toggle and its drawer only exist here. An agent terminal is paired to its
-  // digest by surface id (same map AgentsPanel uses); the repo is matched from
-  // the digest cwd, and the backend's worktree check is the real gate anyway.
+  // toggle and its drawer only exist here. Identity is the live process (same
+  // resolution as the tab icon), so it's right for every agent CLI — not just
+  // the hook-reporting ones. The workspace is driven off the terminal's cwd;
+  // the hook digest, when there is one, only rides along as enrichment, and
+  // only when it genuinely belongs to this agent (a reused PTY can still carry
+  // a previous CLI's digest — attaching it is exactly the bug this replaces).
   const agentTermWs =
     activeTab?.type === "terminal" && isAgentTab(activeTab) && activeTab.ptyId != null
       ? (() => {
-          const digest = digestBySurface(wsDigests, thisInstance).get(String(activeTab.ptyId));
-          if (!digest) return null;
-          const cwd = digest.cwd ?? digest.launch_cwd ?? activeTab.cwd ?? "";
+          const stat = projectStats.find((s) => s.id === activeTab.ptyId);
+          const procs = stat?.procs ?? [];
+          const byProc = AGENT_CLIS.find((c) =>
+            procs.some((p) => p.name === c.bin || p.cmd.split(" ")[0]?.endsWith(c.bin)),
+          );
+          const byCommand = AGENT_CLIS.find((c) => (activeTab.command ?? "").startsWith(c.bin));
+          const agent = (byProc ?? byCommand)?.id ?? "agent";
+          // The live session cwd — the same source the Agents panel keys off,
+          // so the drawer and a panel-opened tab resolve the same workspace.
+          const cwd = stat?.cwd || activeTab.cwd || "";
           const repo =
             components.find((c) => cwd === c.path || cwd.startsWith(c.path + "/"))?.path ?? null;
-          return { repo, digest, ptyId: activeTab.ptyId as number };
+          const d = digestBySurface(wsDigests, thisInstance).get(String(activeTab.ptyId));
+          const digest = d && (d.agent ?? "agent") === agent ? d : undefined;
+          return { repo, agent, cwd, sessionId: digest?.session_id, digest, ptyId: activeTab.ptyId as number };
         })()
       : null;
-  // Close the drawer when its agent is no longer the front terminal — it should
-  // never linger over a plain shell or a different agent's terminal.
-  const wsKey = agentTermWs ? agentTermWs.digest.session_id : null;
+  // Close the drawer when its agent terminal is no longer front — key on the
+  // terminal (ptyId) so it survives a digestless agent, which has no session id.
+  const wsKey = agentTermWs ? String(agentTermWs.ptyId) : null;
   useEffect(() => {
     if (!wsKey) setWsDrawerOpen(false);
   }, [wsKey]);
@@ -2120,7 +2194,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                           : tab.type === "branch"
                             ? `${tab.branch.branch}\n${tab.branch.worktree ?? "no worktree"}`
                             : tab.type === "agent"
-                              ? `${tab.digest.agent ?? "agent"} workspace\n${tab.digest.cwd ?? ""}`
+                              ? `${tab.agent} workspace\n${tab.cwd}`
                               : tab.type === "chat"
                               ? tab.peer === null
                                 ? "Team chat — everyone on the relay"
@@ -2135,10 +2209,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 }
               >
                 {tab.type === "terminal" ? (
-                  <span className="tab-term-icon">
-                    {isAgentTab(tab) && <LiveDot size={6} className="tab-agent-live" />}
-                    {tab.icon ?? "❯_"}
-                  </span>
+                  <span className="tab-term-icon">{tab.icon ?? "❯_"}</span>
                 ) : tab.type === "pr" ? (
                   <PullRequestIcon size={12} className="tab-pr-icon" />
                 ) : tab.type === "ticket" ? (
@@ -2148,7 +2219,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 ) : tab.type === "branch" ? (
                   <GitBranchIcon size={12} className="tab-branch-icon" />
                 ) : tab.type === "agent" ? (
-                  <AgentIcon id={tab.digest.agent ?? "agent"} size={12} className="tab-branch-icon" />
+                  <AgentIcon id={tab.agent} size={12} className="tab-branch-icon" />
                 ) : tab.type === "chat" ? (
                   <TeamIcon size={12} className="tab-chat-icon" />
                 ) : tab.type === "collab" ? (
@@ -2370,7 +2441,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               title="Agent Workspace — files, diffs, commits & PR (Esc to close)"
               onClick={() => setWsDrawerOpen((v) => !v)}
             >
-              <AgentIcon id={agentTermWs.digest.agent ?? "agent"} size={14} />
+              <AgentIcon id={agentTermWs.agent} size={14} />
               Agent Workspace
             </button>
           )}
@@ -2542,6 +2613,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           <AgentWorkspaceView
             key={activeTab.id}
             repo={activeTab.repo}
+            agent={activeTab.agent}
+            cwd={activeTab.cwd}
+            sessionId={activeTab.sessionId}
             digest={activeTab.digest}
             ptyId={activeTab.ptyId}
             onOpenCommit={openCommit}
@@ -2890,7 +2964,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             <aside className="workspace-drawer" role="dialog" aria-label="Agent workspace">
               <div className="workspace-drawer-head">
                 <span className="workspace-drawer-title">
-                  <AgentIcon id={agentTermWs.digest.agent ?? "agent"} size={14} />
+                  <AgentIcon id={agentTermWs.agent} size={14} />
                   Agent Workspace
                 </span>
                 <button
@@ -2904,8 +2978,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               <div className="workspace-drawer-body">
                 {wsDrawerOpen && (
                   <AgentWorkspaceView
-                    key={agentTermWs.digest.session_id}
+                    key={agentTermWs.ptyId}
                     repo={agentTermWs.repo}
+                    agent={agentTermWs.agent}
+                    cwd={agentTermWs.cwd}
+                    sessionId={agentTermWs.sessionId}
                     digest={agentTermWs.digest}
                     ptyId={agentTermWs.ptyId}
                     onOpenCommit={openCommit}
@@ -3205,7 +3282,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onRespond={respondPermission}
           onJumpToTerminal={jumpToTerminal}
           onJumpToPty={jumpToPty}
-          onOpenAgent={(digest, ptyId) => void openAgent(digest, ptyId)}
+          onOpenAgent={(p) => void openAgent(p)}
           activePty={activePty}
           roots={roots}
           shareContext={Boolean(project.shareContext)}

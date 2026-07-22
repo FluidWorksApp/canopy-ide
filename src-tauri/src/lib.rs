@@ -259,6 +259,7 @@ pub fn run() {
             git::git_branch_commits,
             git::git_branch_patch,
             git::agent_workspace,
+            git::agent_workspace_at,
             git::git_worktree_add,
             git::git_worktree_remove,
             git::git_worktree_prune,

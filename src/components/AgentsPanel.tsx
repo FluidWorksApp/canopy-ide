@@ -42,9 +42,17 @@ interface AgentsPanelProps {
    *  that one guesses a tab from a notification's cwd, this one has the pty
    *  id in hand and is exact. */
   onJumpToPty?: (ptyId: number) => void;
-  /** Open an agent's workspace tab: its files, diffs, commits and PR. Rows
-   *  with a digest go here; the `term #n` chip still jumps to the terminal. */
-  onOpenAgent?: (digest: ipc.SessionDigest, ptyId: number) => void;
+  /** Open an agent's workspace tab: its files, diffs, commits and PR. Every
+   *  running agent goes here, keyed on the live process — the digest, when a
+   *  hook wrote one, is only enrichment; the `term #n` chip still jumps to the
+   *  terminal. */
+  onOpenAgent?: (p: {
+    agent: string;
+    cwd: string;
+    ptyId: number;
+    sessionId?: string;
+    digest?: ipc.SessionDigest;
+  }) => void;
   /** The pty of the terminal tab currently in front, so its row can be
    *  highlighted — the reverse of onJumpToPty: relate the tab you're on back to
    *  its row in the list. Null when the active tab isn't a terminal. */
@@ -378,12 +386,20 @@ export function AgentsPanel({
         className={`agent-row ${runaway ? "agent-runaway" : ""} ${
           onJumpToPty ? "agent-row-jump" : ""
         } ${s.id === activePty ? "agent-row-active" : ""}`}
-        // A row with a digest opens the agent's workspace — its files, diffs,
-        // commits and PR; the `term #n` chip remains the way to the terminal.
-        // Rows the hook stream hasn't spoken for (plain terminals) keep the
-        // old behavior: the terminal is all there is to show.
+        // Any running agent opens its workspace — files, diffs, commits and PR
+        // — keyed on the live process, so a hookless CLI (codex, agy, …) works
+        // just as a Claude does. The `term #n` chip remains the way to the
+        // terminal. Plain shells have no workspace, so they jump instead.
         onClick={() =>
-          digest && onOpenAgent ? onOpenAgent(digest, s.id) : onJumpToPty?.(s.id)
+          agent && onOpenAgent
+            ? onOpenAgent({
+                agent: agentIdOf(agent.name),
+                cwd: s.cwd,
+                ptyId: s.id,
+                sessionId: digest?.session_id,
+                digest,
+              })
+            : onJumpToPty?.(s.id)
         }
         // Rows truncate to one line each now; the full detail lives here.
         title={[
@@ -391,7 +407,7 @@ export function AgentsPanel({
           s.cwd,
           digest?.branch,
           task,
-          digest && onOpenAgent ? "Click to open this agent's workspace" : undefined,
+          agent && onOpenAgent ? "Click to open this agent's workspace" : undefined,
         ]
           .filter(Boolean)
           .join("\n")}
