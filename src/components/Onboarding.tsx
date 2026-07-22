@@ -38,7 +38,9 @@ const SLIDES: Slide[] = [
         The best interface for an AI agent is its own CLI, in a real terminal. A
         launcher starts any of them — <code>claude</code>, Codex, Amp, Aider,
         Gemini, OpenCode, oh-my-pi — with full TUI support, so{" "}
-        <code>vim</code>, <code>htop</code> and <code>tmux</code> just work.
+        <code>vim</code>, <code>htop</code> and <code>tmux</code> just work. Most
+        need <strong>Git</strong> and <strong>Node.js</strong> (npm) installed
+        first — the launcher shows an install command for each CLI you're missing.
       </>
     ),
   },

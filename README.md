@@ -118,6 +118,40 @@ All versions and release notes are on the
 [releases page](https://github.com/FluidWorksApp/canopy-ide/releases). The
 macOS build is signed and notarized. Prefer to build it yourself? See below.
 
+## Prerequisites
+
+Canopy runs out of the box, but the **agent CLIs it launches** and its **git
+features** rely on two common tools. Install these once and every launcher entry
+works — without them you'll hit errors like `'npm' is not recognized`.
+
+- **Git** — Canopy is built around git (branches, worktrees, diffs, PRs).
+- **Node.js 18+ (with npm)** — most agent CLIs install and run through npm
+  (Claude Code, Codex, Amp, OpenCode).
+
+**macOS**
+```sh
+xcode-select --install     # Git   (or: brew install git)
+brew install node          # Node.js + npm
+```
+
+**Windows** — winget is built into Windows 10/11. **Open a new terminal
+afterward** so `PATH` picks them up:
+```powershell
+winget install Git.Git
+winget install OpenJS.NodeJS.LTS
+```
+
+**Linux (Debian/Ubuntu)**
+```sh
+sudo apt update && sudo apt install -y git nodejs npm
+```
+For a newer Node than your distro ships, use
+[NodeSource](https://github.com/nodesource/distributions).
+
+Some CLIs bring their own runtime — **Aider** needs Python/pip, **Antigravity**
+its own installer — and Canopy's launcher shows the exact install command for
+each CLI you don't have yet. The tools above are what those commands depend on.
+
 ## Build from source
 
 Prerequisites: **Rust** (stable) and **Node 20+**. For TypeScript language
