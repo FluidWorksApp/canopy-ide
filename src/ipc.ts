@@ -418,6 +418,38 @@ export const gitRemoteUrl = (repo: string) => invoke<string>("git_remote_url", {
 
 export const gitWorkAudit = (repo: string) => invoke<WorkAudit>("git_work_audit", { repo });
 
+/** One agent session's work joined against git — metadata only; patches come
+ *  from gitBranchPatch and the PR match from ghPrList. */
+export interface AgentWorkspace {
+  session_id: string;
+  agent: string | null;
+  state: string | null;
+  cwd: string | null;
+  updated: number | null;
+  /** Files the agent itself reported editing — intent, capped by the hook;
+   *  the diff panes are the authoritative list. */
+  touched: string[];
+  /** Live HEAD of the workdir when it exists, else the digest's snapshot. */
+  branch: string | null;
+  detached: boolean;
+  base: string;
+  /** Working directly on the base/protected branch — no branch-scoped view. */
+  on_base: boolean;
+  /** Directory for uncommitted diffs; null when gone or owned elsewhere. */
+  workdir: string | null;
+  /** The workdir is a linked worktree, not the shared checkout. */
+  isolated: boolean;
+  cwd_missing: boolean;
+  dirty: number;
+  ahead: number;
+  behind: number;
+  merged: boolean;
+  commits: CommitInfo[];
+}
+
+export const agentWorkspace = (repo: string, sessionId: string) =>
+  invoke<AgentWorkspace>("agent_workspace", { repo, sessionId });
+
 export const gitWorktrees = (repo: string) => invoke<WorktreeInfo[]>("git_worktrees", { repo });
 export const gitWorktreeAdd = (repo: string, path: string, branch: string, create: boolean) =>
   invoke<string>("git_worktree_add", { repo, path, branch, create });

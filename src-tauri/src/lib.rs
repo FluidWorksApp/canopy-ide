@@ -231,6 +231,7 @@ pub fn run() {
             git::git_remote_url,
             git::git_branch_commits,
             git::git_branch_patch,
+            git::agent_workspace,
             git::git_worktree_add,
             git::git_worktree_remove,
             git::git_worktree_prune,

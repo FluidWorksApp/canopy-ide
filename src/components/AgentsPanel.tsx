@@ -11,7 +11,7 @@ import type { PendingItem } from "../notifications";
 /** Colour + label for the lifecycle dot on a running-agent row. `working` is
  *  the only state that pulses — a moving dot in a column of still ones is
  *  where the eye lands first. */
-const STATE_META: Record<string, { cls: string; label: string }> = {
+export const STATE_META: Record<string, { cls: string; label: string }> = {
   working: { cls: "st-working", label: "working" },
   waiting: { cls: "st-waiting", label: "waiting on you" },
   idle: { cls: "st-idle", label: "idle — finished a turn" },
@@ -42,6 +42,9 @@ interface AgentsPanelProps {
    *  that one guesses a tab from a notification's cwd, this one has the pty
    *  id in hand and is exact. */
   onJumpToPty?: (ptyId: number) => void;
+  /** Open an agent's workspace tab: its files, diffs, commits and PR. Rows
+   *  with a digest go here; the `term #n` chip still jumps to the terminal. */
+  onOpenAgent?: (digest: ipc.SessionDigest, ptyId: number) => void;
   /** The pty of the terminal tab currently in front, so its row can be
    *  highlighted — the reverse of onJumpToPty: relate the tab you're on back to
    *  its row in the list. Null when the active tab isn't a terminal. */
@@ -71,7 +74,7 @@ const ago = (secs?: number) => {
 /** Last thing the *human* typed. Hooks also record injected payloads
     (`<task-notification>…`, shared-context blocks) as prompts; an XML-ish
     blob identifies nothing, so skip anything that opens with a tag. */
-const lastHumanPrompt = (prompts?: string[]) =>
+export const lastHumanPrompt = (prompts?: string[]) =>
   [...(prompts ?? [])]
     .reverse()
     .find((p) => p.trim().length > 0 && !p.trimStart().startsWith("<"));
@@ -118,6 +121,7 @@ export function AgentsPanel({
   onAnswer,
   onJumpToTerminal,
   onJumpToPty,
+  onOpenAgent,
   activePty,
   roots,
   shareContext,
@@ -364,12 +368,21 @@ export function AgentsPanel({
         className={`agent-row ${runaway ? "agent-runaway" : ""} ${
           onJumpToPty ? "agent-row-jump" : ""
         } ${s.id === activePty ? "agent-row-active" : ""}`}
-        // The whole row goes to its terminal. Listing what is running without
-        // a way to reach it made the panel a read-only status board; the row
-        // already identifies the session, so it should also be the way there.
-        onClick={() => onJumpToPty?.(s.id)}
+        // A row with a digest opens the agent's workspace — its files, diffs,
+        // commits and PR; the `term #n` chip remains the way to the terminal.
+        // Rows the hook stream hasn't spoken for (plain terminals) keep the
+        // old behavior: the terminal is all there is to show.
+        onClick={() =>
+          digest && onOpenAgent ? onOpenAgent(digest, s.id) : onJumpToPty?.(s.id)
+        }
         // Rows truncate to one line each now; the full detail lives here.
-        title={[agent?.name ?? s.title, s.cwd, digest?.branch, task]
+        title={[
+          agent?.name ?? s.title,
+          s.cwd,
+          digest?.branch,
+          task,
+          digest && onOpenAgent ? "Click to open this agent's workspace" : undefined,
+        ]
           .filter(Boolean)
           .join("\n")}
       >
@@ -419,7 +432,16 @@ export function AgentsPanel({
               ⑃ {digest?.subagents}
             </span>
           )}
-          <span className="agent-session">term #{s.id}</span>
+          <button
+            className="agent-session"
+            title={`Go to terminal #${s.id}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onJumpToPty?.(s.id);
+            }}
+          >
+            term #{s.id}
+          </button>
           {/* A dev server in here, without opening the tab to find out. */}
           {s.ports?.map((p) => (
             <button

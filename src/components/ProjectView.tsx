@@ -68,6 +68,7 @@ import { TicketView } from "./TicketView";
 import { CommitView } from "./CommitView";
 import { ReviewView, type ReviewPayload } from "./ReviewView";
 import { BranchView } from "./BranchView";
+import { AgentWorkspaceView } from "./AgentWorkspaceView";
 import { ticketBranch, ticketContext, ticketWorktree } from "../trackers";
 import { forgetSessions, markRestored, restorableFrom, type Restorable } from "../restorable";
 import {
@@ -153,6 +154,17 @@ interface ReviewSubTab {
   review: ReviewPayload;
 }
 
+/** An agent session's workspace: its branch, diffs, commits and PR. */
+interface AgentSubTab {
+  id: string;
+  type: "agent";
+  /** Repo the agent's cwd matched; null renders the digest-only view. */
+  repo: string | null;
+  digest: ipc.SessionDigest;
+  /** Live terminal hosting the session, for the jump-back button. */
+  ptyId?: number;
+}
+
 interface ChatSubTab {
   id: string;
   type: "chat";
@@ -193,6 +205,7 @@ type SubTab =
   | CommitSubTab
   | BranchSubTab
   | ReviewSubTab
+  | AgentSubTab
   | ChatSubTab;
 
 const decoder = new TextDecoder();
@@ -228,6 +241,10 @@ function tabDisplayLabel(t: SubTab): string {
       return `${t.short} ${t.subject}`;
     case "branch":
       return t.branch.branch;
+    case "agent":
+      return `${t.digest.agent ?? "agent"} · ${
+        t.digest.branch ?? t.digest.cwd?.split("/").pop() ?? t.digest.session_id.slice(0, 8)
+      }`;
     case "chat":
       return t.name;
     case "collab":
@@ -1012,6 +1029,43 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       setActiveTabId(id);
     },
     [],
+  );
+
+  /** Open an agent session's workspace as its own tab — the files it changed,
+   *  its commits, and the PR from its branch. The repo is matched from the
+   *  digest's cwd; the backend's worktree authorization is the real gate, so a
+   *  wrong guess degrades to an error banner, not someone else's diff. */
+  const openAgent = useCallback(
+    async (digest: ipc.SessionDigest, ptyId?: number) => {
+      const existing = tabsRef.current.find(
+        (t): t is AgentSubTab => t.type === "agent" && t.digest.session_id === digest.session_id,
+      );
+      if (existing) {
+        // The panel's copy is fresher (state and branch move); take it.
+        patchTabRaw(existing.id, { digest, ptyId } as Partial<SubTab>);
+        setActiveTabId(existing.id);
+        return;
+      }
+      let repo: string | null = null;
+      try {
+        const repos = await ipc.gitRepos(
+          componentsRef.current.map((c) => [c.label, c.path] as [string, string]),
+        );
+        const cwd = digest.cwd ?? digest.launch_cwd ?? "";
+        repo =
+          repos.find((r) => cwd === r.path || cwd.startsWith(`${r.path}/`))?.path ??
+          // Sibling worktrees follow the `<repo>-wt-<branch>` convention.
+          repos.find((r) => cwd.startsWith(`${r.path}-wt-`))?.path ??
+          repos[0]?.path ??
+          null;
+      } catch {
+        repo = null;
+      }
+      const id = tabId();
+      setTabs((prev) => [...prev, { id, type: "agent", repo, digest, ptyId }]);
+      setActiveTabId(id);
+    },
+    [patchTabRaw],
   );
 
   /** Open an issue as its own tab, reusing one already open for it. */
@@ -1950,7 +2004,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                           ? `${tab.short} — ${tab.subject}`
                           : tab.type === "branch"
                             ? `${tab.branch.branch}\n${tab.branch.worktree ?? "no worktree"}`
-                            : tab.type === "chat"
+                            : tab.type === "agent"
+                              ? `${tab.digest.agent ?? "agent"} workspace\n${tab.digest.cwd ?? ""}`
+                              : tab.type === "chat"
                               ? tab.peer === null
                                 ? "Team chat — everyone on the relay"
                                 : `Direct chat with ${tab.name}`
@@ -1976,6 +2032,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                   <CommitIcon size={12} className="tab-commit-icon" />
                 ) : tab.type === "branch" ? (
                   <GitBranchIcon size={12} className="tab-branch-icon" />
+                ) : tab.type === "agent" ? (
+                  <AgentIcon id={tab.digest.agent ?? "agent"} size={12} className="tab-branch-icon" />
                 ) : tab.type === "chat" ? (
                   <TeamIcon size={12} className="tab-chat-icon" />
                 ) : tab.type === "collab" ? (
@@ -2027,7 +2085,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                             ? `${tab.short} ${tab.subject}`
                             : tab.type === "branch"
                               ? tab.branch.branch
-                              : tab.type === "chat"
+                              : tab.type === "agent"
+                                ? tabDisplayLabel(tab)
+                                : tab.type === "chat"
                                 ? tab.name
                                 : tab.type === "collab"
                                   ? `${tab.name} ⇄`
@@ -2345,6 +2405,19 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             repo={activeTab.repo}
             branch={activeTab.branch}
             onOpenCommit={openCommit}
+            onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
+            onNotice={onNotice}
+          />
+        )}
+        {activeTab?.type === "agent" && (
+          <AgentWorkspaceView
+            key={activeTab.id}
+            repo={activeTab.repo}
+            digest={activeTab.digest}
+            ptyId={activeTab.ptyId}
+            onOpenCommit={openCommit}
+            onOpenPr={openPr}
+            onJumpToPty={jumpToPty}
             onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
             onNotice={onNotice}
           />
@@ -2928,6 +3001,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onRespond={respondPermission}
           onJumpToTerminal={jumpToTerminal}
           onJumpToPty={jumpToPty}
+          onOpenAgent={(digest, ptyId) => void openAgent(digest, ptyId)}
           activePty={activePty}
           roots={roots}
           shareContext={Boolean(project.shareContext)}
