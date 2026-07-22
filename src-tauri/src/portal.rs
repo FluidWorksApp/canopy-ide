@@ -22,7 +22,7 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State as AxumState};
 use axum::http::{header, StatusCode, Uri};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use include_dir::{include_dir, Dir};
@@ -344,8 +344,10 @@ async fn ws_handler(
 /// index.html fallback so client-side routing works; everything else 404s.
 async fn asset_handler(uri: Uri) -> Response {
     let path = uri.path();
+    // The portal lives under /remote; send bare-domain hits (e.g. a tunnel URL
+    // opened without the path) there instead of 404ing.
     let Some(rest) = path.strip_prefix("/remote") else {
-        return (StatusCode::NOT_FOUND, "not found").into_response();
+        return Redirect::permanent("/remote/").into_response();
     };
     let rel = rest.trim_start_matches('/');
     if !rel.is_empty() {

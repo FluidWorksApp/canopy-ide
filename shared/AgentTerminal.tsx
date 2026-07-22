@@ -5,12 +5,9 @@ import type { Transport } from './transport'
 
 // A live view of one agent's PTY, over any Transport. Attaches on mount (the
 // transport replies with the grid size, a scrollback snapshot, then the live
-// tail), detaches on unmount.
-//
-// It is DISPLAY-ONLY: the terminal is the agent's screen, not an input. All
-// typing goes through the shell's own composer (a proper mobile text field) and
-// the control-key row, both of which write to the PTY — so there is exactly one
-// place to type, and a stray tap can't bring up a second keyboard.
+// tail), writes keystrokes typed into it straight back as input, detaches on
+// unmount. You can also type via the shell's composer + control-key row — both
+// paths write to the same PTY.
 //
 // Sizing is authoritative to the PTY, not the device: we render at the PTY's
 // exact cols/rows and scale the font so those columns fit the viewport width, so
@@ -23,10 +20,7 @@ export function AgentTerminal({ transport, pty }: { transport: Transport; pty: n
       fontSize: 12,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
       convertEol: false,
-      cursorBlink: false,
-      // Display-only: the composer + key row are the input path, so the terminal
-      // never grabs the mobile keyboard.
-      disableStdin: true,
+      cursorBlink: true,
       theme: { background: 'rgba(0,0,0,0)', foreground: '#c9d1d9' },
       allowTransparency: true,
     })
@@ -56,11 +50,14 @@ export function AgentTerminal({ transport, pty }: { transport: Transport; pty: n
       onData: (bytes) => term.write(bytes),
       onGone: () => term.write('\r\n\x1b[2m[session ended]\x1b[0m\r\n'),
     })
+    const onData = term.onData((d) => transport.writePty(pty, d))
+
     const ro = new ResizeObserver(() => rescale())
     if (ref.current) ro.observe(ref.current)
 
     return () => {
       detach()
+      onData.dispose()
       ro.disconnect()
       term.dispose()
     }

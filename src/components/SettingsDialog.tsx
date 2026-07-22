@@ -798,7 +798,11 @@ function RemoteSettings({
 
   const on = status?.enabled ?? false;
   const lanUrl = status?.urls?.[0] ?? null;
-  const activeUrl = scope === "internet" ? tunnel.url : lanUrl;
+  // The portal is served under /remote, so a tunnel's bare URL needs the path
+  // appended or it 404s at the domain root.
+  const withRemote = (u: string) => (u.endsWith("/remote") ? u : `${u.replace(/\/+$/, "")}/remote`);
+  const tunnelUrl = tunnel.url ? withRemote(tunnel.url) : null;
+  const activeUrl = scope === "internet" ? tunnelUrl : lanUrl;
 
   // Repoint the QR at whichever URL the chosen scope resolves to.
   useEffect(() => {
@@ -831,12 +835,25 @@ function RemoteSettings({
     void ipc.tunnelStop().then(setTunnel).finally(() => setBusy(false));
   };
 
+  const segBtn = (s: "local" | "internet", label: string) => (
+    <button
+      key={s}
+      onClick={() => setScope(s)}
+      style={{
+        padding: "7px 16px",
+        border: "none",
+        background: scope === s ? "var(--accent)" : "transparent",
+        color: scope === s ? "var(--on-accent)" : "var(--text)",
+        fontWeight: 600,
+      }}
+    >
+      {label}
+    </button>
+  );
+
   return (
     <>
-      <Item
-        name="Remote access"
-        desc="Drive your agents from a phone or browser. A dedicated PIN unlocks a control panel that lists every project and agent, streams each agent's output, and lets you reply, approve, or stop them. Off by default; the PIN is separate from the team join code."
-      >
+      <Item name="Remote access" desc="Drive your agents from your phone. PIN-gated; off by default.">
         <button
           className="btn"
           disabled={busy}
@@ -848,24 +865,10 @@ function RemoteSettings({
 
       {on && (
         <>
-          {/* Scope toggle — the QR follows this. */}
-          <Item name="Reach" desc="Who can open the portal — and what the QR points at.">
-            <div style={{ display: "inline-flex", border: "1px solid var(--border, #2a2f3a)", borderRadius: 9, overflow: "hidden" }}>
-              {(["local", "internet"] as const).map((s) => (
-                <button
-                  key={s}
-                  onClick={() => setScope(s)}
-                  style={{
-                    padding: "7px 14px",
-                    border: "none",
-                    background: scope === s ? "var(--accent, #7aa2f7)" : "transparent",
-                    color: scope === s ? "var(--on-accent, #fff)" : "var(--text, #ccc)",
-                    fontWeight: 600,
-                  }}
-                >
-                  {s === "local" ? "This network" : "Internet"}
-                </button>
-              ))}
+          <Item name="Reach">
+            <div style={{ display: "inline-flex", border: "1px solid var(--border)", borderRadius: 9, overflow: "hidden" }}>
+              {segBtn("local", "This network")}
+              {segBtn("internet", "Internet")}
             </div>
           </Item>
 
@@ -873,10 +876,10 @@ function RemoteSettings({
             name="Scan to connect"
             desc={
               scope === "local"
-                ? "Same Wi-Fi: scan with your phone's camera, then enter the PIN."
-                : tunnel.url
-                  ? "Scan from anywhere, then enter the PIN. This link works on any network."
-                  : "Start a public link below — the QR will point at it."
+                ? "Scan, then enter the PIN."
+                : tunnelUrl
+                  ? "Scan from anywhere, then enter the PIN."
+                  : "Start a public link below to get a scannable link."
             }
           >
             <div className="set-inline" style={{ alignItems: "center", gap: 16 }}>
@@ -886,9 +889,7 @@ function RemoteSettings({
                   dangerouslySetInnerHTML={{ __html: qr }}
                 />
               ) : (
-                <div
-                  style={{ width: 148, height: 148, borderRadius: 8, flex: "none", background: "var(--bg-raised, #1f2335)", display: "grid", placeItems: "center", color: "var(--text-dim, #888)", fontSize: 12, textAlign: "center", padding: 10 }}
-                >
+                <div style={{ width: 148, height: 148, borderRadius: 8, flex: "none", background: "var(--bg-raised)", display: "grid", placeItems: "center", color: "var(--text-dim)", fontSize: 12, textAlign: "center", padding: 10 }}>
                   {scope === "internet" ? "no public link yet" : "…"}
                 </div>
               )}
@@ -904,19 +905,15 @@ function RemoteSettings({
             </div>
           </Item>
 
-          {scope === "local" && (
-            <Item name="Or type the address" desc="Same Wi-Fi — open one of these and enter the PIN.">
-              <div style={{ display: "grid", gap: 6, justifyItems: "start" }}>
-                {status?.urls.map((u) => (
-                  <Copyable key={u} text={u} />
-                ))}
-              </div>
+          {scope === "local" && lanUrl && (
+            <Item name="Address">
+              <Copyable text={lanUrl} />
             </Item>
           )}
 
           {scope === "internet" && (
-            <>
-              <Item name="Public link via" desc="Canopy runs the tunnel for you; the link loads in any browser, no router setup.">
+            <Item name="Public link">
+              <div style={{ display: "grid", gap: 10, justifyItems: "start", width: "100%" }}>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                   {TUNNELS.map((t) => (
                     <button
@@ -925,9 +922,9 @@ function RemoteSettings({
                       style={{
                         padding: "7px 12px",
                         borderRadius: 8,
-                        border: `1px solid ${provider === t.id ? "var(--accent, #7aa2f7)" : "var(--border, #2a2f3a)"}`,
-                        background: provider === t.id ? "color-mix(in srgb, var(--accent, #7aa2f7) 16%, transparent)" : "transparent",
-                        color: "var(--text, #ccc)",
+                        border: `1px solid ${provider === t.id ? "var(--accent)" : "var(--border)"}`,
+                        background: provider === t.id ? "color-mix(in srgb, var(--accent) 16%, transparent)" : "transparent",
+                        color: "var(--text)",
                         fontWeight: 600,
                       }}
                     >
@@ -935,74 +932,49 @@ function RemoteSettings({
                     </button>
                   ))}
                 </div>
-              </Item>
-
-              <Item name={prov.name} desc={prov.note ? `${prov.blurb} ${prov.note}` : prov.blurb}>
-                <div style={{ display: "grid", gap: 10, justifyItems: "start", width: "100%" }}>
-                  {prov.needsToken && (
-                    <div style={{ display: "grid", gap: 4, width: "100%", maxWidth: 380 }}>
-                      <input
-                        type="password"
-                        className="set-wide"
-                        placeholder="ngrok authtoken"
-                        value={token}
-                        onChange={(e) => {
-                          setToken(e.target.value);
-                          setTrackerKey("ngrok", e.target.value.trim());
-                        }}
-                      />
-                      {prov.tokenHelp && (
-                        <div style={{ fontSize: 12, color: "var(--text-dim, #888)" }}>{prov.tokenHelp}</div>
-                      )}
-                    </div>
-                  )}
-
-                  {!provInstalled ? (
-                    <button
-                      className="btn"
-                      onClick={() => runInTerminal(prov.install[currentPlatform()], `Install ${prov.name}`)}
-                    >
-                      Install {prov.name}
-                    </button>
-                  ) : tunnel.running && tunnel.provider === provider ? (
-                    <button className="btn" disabled={busy} onClick={stopTunnel}>
-                      Stop public link
-                    </button>
-                  ) : (
-                    <button
-                      className="btn"
-                      disabled={busy || (prov.needsToken && !token.trim())}
-                      onClick={startTunnel}
-                    >
-                      Start public link
-                    </button>
-                  )}
-
-                  {tunnel.url && tunnel.provider === provider && (
-                    <Copyable text={tunnel.url} />
-                  )}
-                  {tunnel.message && (
-                    <div
-                      style={{
-                        fontSize: 12,
-                        color: tunnel.running ? "var(--text-dim, #888)" : "var(--danger, #f7768e)",
-                        whiteSpace: "pre-wrap",
-                        maxWidth: 460,
-                        fontFamily: tunnel.running ? undefined : "ui-monospace, monospace",
-                      }}
-                    >
-                      {tunnel.message}
-                    </div>
-                  )}
+                <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+                  {prov.note ? `${prov.blurb} ${prov.note}` : prov.blurb}
                 </div>
-              </Item>
-            </>
+
+                {prov.needsToken && (
+                  <input
+                    type="password"
+                    className="set-wide"
+                    placeholder={prov.tokenHelp ?? "ngrok authtoken"}
+                    value={token}
+                    onChange={(e) => {
+                      setToken(e.target.value);
+                      setTrackerKey("ngrok", e.target.value.trim());
+                    }}
+                    style={{ maxWidth: 380 }}
+                  />
+                )}
+
+                {!provInstalled ? (
+                  <button className="btn" onClick={() => runInTerminal(prov.install[currentPlatform()], `Install ${prov.name}`)}>
+                    Install {prov.name}
+                  </button>
+                ) : tunnel.running && tunnel.provider === provider ? (
+                  <button className="btn" disabled={busy} onClick={stopTunnel}>
+                    Stop public link
+                  </button>
+                ) : (
+                  <button className="btn" disabled={busy || (prov.needsToken && !token.trim())} onClick={startTunnel}>
+                    Start public link
+                  </button>
+                )}
+
+                {tunnelUrl && tunnel.provider === provider && <Copyable text={tunnelUrl} />}
+                {tunnel.message && (
+                  <div style={{ fontSize: 12, color: tunnel.running ? "var(--text-dim)" : "var(--danger)", whiteSpace: "pre-wrap", maxWidth: 460, fontFamily: tunnel.running ? undefined : "ui-monospace, monospace" }}>
+                    {tunnel.message}
+                  </div>
+                )}
+              </div>
+            </Item>
           )}
 
-          <Item
-            name="Security"
-            desc="⚠ While this is on, anyone with the PIN on a reachable network (or the public link) can send input to your agents and approve their actions. Turn it off when you're done."
-          >
+          <Item name="Security" desc="⚠ Anyone with the PIN can drive your agents. Turn off when you're done.">
             <span />
           </Item>
         </>
