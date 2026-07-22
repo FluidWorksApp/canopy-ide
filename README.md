@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/workspace.png" alt="Canopy — the agents rail (three sessions running, one flagged “needs you”, shared context on) beside a live Claude Code terminal, all in one window" width="900">
+  <img src="docs/screenshots/launcher.png" alt="Canopy on open — the launcher (a plain shell and every agent CLI one click away) above a “pick up where you left off” list that resumes agent sessions with their history and reopens terminals running their command" width="900">
 </p>
 
 ## What is Canopy?
