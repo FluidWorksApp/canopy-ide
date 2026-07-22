@@ -5228,6 +5228,14 @@ a.btn-mini {
   background: var(--bg-raised);
 }
 
+/* The row whose terminal tab is currently in front. A left accent bar (inset
+   shadow, so it adds no width and never shifts the row) plus the raised
+   background ties "the tab I'm on" to "this entry in the list". */
+.ap-body .agent-row-active {
+  background: var(--bg-raised);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
 .ap-body .restore-actions {
   position: absolute;
   top: 3px;
