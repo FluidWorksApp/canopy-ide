@@ -726,18 +726,24 @@ body,
   cursor: pointer;
 }
 
-.status-stats-btn:hover {
+.status-stats-btn:hover,
+.status-stats-btn.is-open {
   color: var(--accent);
 }
 
-/* The usage panel rendered inside a tray popup: wider than a menu, scrollable,
-   and it brings its own padding. */
+/* The usage panel rendered inside a tray popup: a fixed-width card that scrolls
+   vertically only. Fixed width + fixed table layout below is what keeps it from
+   reflowing (and a horizontal scrollbar from flickering) as live numbers tick. */
 .status-stats-menu {
-  width: 380px;
+  width: 452px;
   max-width: calc(100vw - 24px);
-  max-height: 70vh;
+  max-height: 74vh;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 0;
+  /* Scrollbar reserved so its appearance at the length threshold doesn't nudge
+     the content width. */
+  scrollbar-gutter: stable;
 }
 
 .bd-row {
@@ -829,8 +835,21 @@ body,
 
 /* ---- Statistics panel ---- */
 .stats-panel {
-  padding-bottom: 14px;
+  padding-bottom: 10px;
   font-size: 12px;
+}
+
+/* Section headers (By CLI / By model / Sessions) get an inset rule above so the
+   groups read as distinct blocks without extra chrome. */
+.stats-panel .ap-head + .stats-table,
+.stats-panel .stats-overview {
+  margin-top: 0;
+}
+
+.stats-panel .stats-section-head {
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
 }
 
 .stats-empty,
@@ -842,7 +861,7 @@ body,
 }
 
 .stats-note {
-  margin-top: 10px;
+  margin-top: 8px;
   border-top: 1px solid var(--border);
 }
 
@@ -850,25 +869,27 @@ body,
 .stats-overview {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 8px;
-  padding: 6px 12px 12px;
+  gap: 6px;
+  padding: 6px 10px 10px;
 }
 
 .stats-metric {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 9px 11px;
+  gap: 1px;
+  padding: 8px 10px;
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: 6px;
+  overflow: hidden;
 }
 
 .stats-metric-val {
-  font-size: 17px;
+  font-size: 16px;
   font-weight: 650;
   color: var(--text);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .stats-metric:first-child .stats-metric-val {
@@ -876,34 +897,40 @@ body,
 }
 
 .stats-metric-lbl {
-  font-size: 9.5px;
+  font-size: 9px;
   letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--text-dim);
 }
 
+/* Fixed layout: column widths come from <colgroup>, so cells never resize as
+   the numbers change — the single biggest source of the "wobble". */
 .stats-table {
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
-  margin: 0 0 4px;
+  margin: 0;
 }
 
 .stats-table th {
   text-align: left;
-  font-size: 9.5px;
+  font-size: 9px;
   font-weight: 600;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--text-dim);
-  padding: 2px 12px 5px;
+  padding: 0 12px 5px;
   border-bottom: 1px solid var(--border);
 }
 
 .stats-table td {
-  padding: 5px 12px;
+  padding: 4px 12px;
   border-bottom: 1px solid var(--border);
   color: var(--text);
   vertical-align: middle;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .stats-table tr:last-child td {
@@ -913,29 +940,31 @@ body,
 .stats-num {
   text-align: right;
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
 }
 
+/* Icon + name that truncates within its fixed cell instead of pushing the
+   number columns. */
 .stats-agent {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
 }
 
-.stats-sess-title,
-.stats-model {
+.stats-agent > svg {
+  flex: 0 0 auto;
+}
+
+.stats-agent-name,
+.stats-sess-title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 150px;
-  display: inline-block;
-  vertical-align: bottom;
+  min-width: 0;
 }
 
 .stats-model {
   color: var(--text-dim);
-  font-size: 11px;
 }
 
 .stats-cost {

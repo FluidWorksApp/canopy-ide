@@ -1,7 +1,7 @@
 // Bottom status tray: git branch, running agent, model, tokens, estimated
 // cost. Token/model data comes from Claude Code session transcripts (path
 // arrives via hook events); cost is an estimate from a static pricing map.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as ipc from "../ipc";
 import { estimateCost, sessionCost } from "../pricing";
 import { StatsPanel } from "./StatsPanel";
@@ -61,6 +61,24 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
   const [allSessions, setAllSessions] = useState<ipc.SessionStats[]>([]);
   // All-CLI usage & cost popup, anchored to the stats chip in the corner.
   const [statsOpen, setStatsOpen] = useState(false);
+  const statsAnchorRef = useRef<HTMLSpanElement>(null);
+  // Native dismissal: click anywhere outside, or Escape. Mouse-leave felt
+  // flimsy on a panel this size — the cursor grazes the edge and it vanishes.
+  useEffect(() => {
+    if (!statsOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (!statsAnchorRef.current?.contains(e.target as Node)) setStatsOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setStatsOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [statsOpen]);
   // Popups anchored to a chip must escape .status-bar's overflow:hidden (it
   // clips its one-line row — and clipped everything that pops above it, so
   // only a shadow sliver ever showed). Fixed positioning, measured from the
@@ -428,9 +446,9 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
           ~${cost.toFixed(2)}
         </span>
       )}
-      <span className="status-item status-stats-anchor">
+      <span className="status-item status-stats-anchor" ref={statsAnchorRef}>
         <button
-          className="status-stats-btn"
+          className={`status-stats-btn ${statsOpen ? "is-open" : ""}`}
           title="Usage & cost across all CLIs"
           onClick={(e) => {
             anchorMenu(e);
@@ -440,11 +458,7 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
           <StatsIcon size={13} />
         </button>
         {statsOpen && (
-          <div
-            className="status-menu status-stats-menu"
-            style={menuStyle}
-            onMouseLeave={() => setStatsOpen(false)}
-          >
+          <div className="status-menu status-stats-menu" style={menuStyle}>
             <StatsPanel visible={statsOpen} />
           </div>
         )}
