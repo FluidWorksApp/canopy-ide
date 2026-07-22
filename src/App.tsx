@@ -21,7 +21,9 @@ import { ProjectDialog } from "./components/ProjectDialog";
 import { ProjectManager } from "./components/ProjectManager";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { HelpDialog } from "./components/HelpDialog";
+import { Onboarding } from "./components/Onboarding";
 import { Welcome } from "./components/Welcome";
+import { shouldOnboard, markOnboarded } from "./onboarding";
 import { stopWorkspaceServers } from "./lsp/client";
 import { checkForUpdateAnyChannel, installUpdate, type UpdateAvailability } from "./updater";
 
@@ -73,6 +75,9 @@ export default function App() {
   const [manager, setManager] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState<null | { tab?: import("./components/SettingsDialog").SettingsTab }>(null);
   const [helpOpen, setHelpOpen] = useState(false);
+  // First-run walkthrough. Seeded once, after the workspace has loaded, so a
+  // fresh install lands on the welcome flow while returning users never see it.
+  const [onboarding, setOnboarding] = useState(false);
   // One delete confirm for every entry point (manager, Welcome) — deleting a
   // project was a bare single click before, one misclick from losing a setup.
   const [confirmDelete, setConfirmDelete] = useState<Project | null>(null);
@@ -561,6 +566,12 @@ export default function App() {
     };
   }, []);
 
+  // First launch on this machine: greet with the walkthrough once the
+  // workspace has loaded (so it sits above the empty Welcome, not a blank app).
+  useEffect(() => {
+    if (loaded && shouldOnboard()) setOnboarding(true);
+  }, [loaded]);
+
   // `canopy <dir>` delivery. Cold start: the arg waited in Rust state while
   // the webview booted — collect it once the workspace is loaded (opening a
   // project before load would be clobbered by setWs). Warm: a second CLI
@@ -1016,7 +1027,28 @@ export default function App() {
           onClose={() => setSettingsOpen(null)}
         />
       )}
-      {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
+      {helpOpen && (
+        <HelpDialog
+          onClose={() => setHelpOpen(false)}
+          onReplayIntro={() => {
+            setHelpOpen(false);
+            setOnboarding(true);
+          }}
+        />
+      )}
+      {onboarding && (
+        <Onboarding
+          onClose={() => {
+            markOnboarded();
+            setOnboarding(false);
+          }}
+          onCreateProject={() => {
+            markOnboarded();
+            setOnboarding(false);
+            setDialog({ mode: "new" });
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -5,6 +5,8 @@ import { useEscape } from "../useEscape";
 
 interface HelpDialogProps {
   onClose: () => void;
+  /** Re-open the first-run walkthrough on demand. */
+  onReplayIntro?: () => void;
 }
 
 const SHORTCUTS: [string, string][] = [
@@ -27,7 +29,7 @@ const SHORTCUTS: [string, string][] = [
   ["⌘⌫", "Terminal: delete line"],
 ];
 
-export function HelpDialog({ onClose }: HelpDialogProps) {
+export function HelpDialog({ onClose, onReplayIntro }: HelpDialogProps) {
   useEscape(onClose, true);
   const link = (url: string, label: string) => (
     <a
@@ -55,6 +57,19 @@ export function HelpDialog({ onClose }: HelpDialogProps) {
             right-clicking a directory in the sidebar. Terminals keep running
             when you switch projects.
           </p>
+          {onReplayIntro && (
+            <p>
+              <a
+                href="#"
+                onClick={(e) => {
+                  e.preventDefault();
+                  onReplayIntro();
+                }}
+              >
+                Replay the welcome walkthrough
+              </a>
+            </p>
+          )}
 
           <div className="set-head">Agents</div>
           <p>
