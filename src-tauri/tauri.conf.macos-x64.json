@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "_comment": "Intel-Mac-only overlay, merged via `tauri build --config` in release.yml. Bundles the ONNX Runtime dylib that ort's load-dynamic path loads at runtime (Intel Mac has no static prebuilt). NOT applied to the arm64 build, which links ONNX statically. The dylib is staged into src-tauri/frameworks/ by the 'Stage ONNX Runtime dylib' CI step.",
+  "bundle": {
+    "macOS": {
+      "frameworks": ["frameworks/libonnxruntime.dylib"]
+    }
+  }
+}

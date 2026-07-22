@@ -81,3 +81,13 @@ tauri-plugin-notification = "2"
 # Unix signals for killing whole PTY process groups (no zombies)
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Intel Macs have no ort/ONNX Runtime prebuilt — pyke dropped x86_64-apple-darwin
+# at ort rc.11, following ONNX Runtime dropping macOS x64 at 1.24. Every other
+# target keeps transcribe-rs's embedded static prebuilt; on x86_64 macOS ONLY,
+# switch ort to `load-dynamic` so it links a bundled libonnxruntime.dylib at
+# runtime instead of a missing compile-time binary (which is what aborted the
+# build, including for canopy-hook). Exact-pinned to unify with the ort that
+# transcribe-rs 0.3.11 pulls, so the feature applies to the one shared ort build.
+[target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic"] }
