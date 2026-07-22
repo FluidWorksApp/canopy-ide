@@ -18,6 +18,9 @@ import {
   AGENT_PATTERN,
   checkCliUpdates,
   checkInstalledClis,
+  checkInstalledPrereqs,
+  currentPlatform,
+  PREREQS,
   startCommand,
   updateCommand,
 } from "../projects";
@@ -436,6 +439,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const [shellMenuOpen, setShellMenuOpen] = useState(false);
   const [runMenuOpen, setRunMenuOpen] = useState(false);
   const [installed, setInstalled] = useState<Record<string, boolean>>({});
+  // Foundations (Git, Node/npm) the CLI installers depend on. Probed alongside
+  // the CLIs, so an install run tab's exit re-checks these too.
+  const [prereqs, setPrereqs] = useState<Record<string, boolean>>({});
   const installedRef = useRef(installed);
   installedRef.current = installed;
   const [cliUpdates, setCliUpdates] = useState<Record<string, CliUpdate>>({});
@@ -1165,10 +1171,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // Re-probed whenever it could have changed: an install run finishing, or
   // the launcher opening. A one-shot probe at mount meant a finished install
   // still showed — and re-ran — the installer on every click.
-  const refreshInstalled = useCallback(
-    () => void checkInstalledClis().then(setInstalled),
-    [],
-  );
+  const refreshInstalled = useCallback(() => {
+    void checkInstalledClis().then(setInstalled);
+    void checkInstalledPrereqs().then(setPrereqs);
+  }, []);
   // Version probing runs `<bin> --version` per CLI plus (at most 6-hourly) a
   // registry fetch — slower than which_check, so it rides in the background
   // and the launcher renders whatever the last probe knew.
@@ -2587,6 +2593,38 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         {tabs.length === 0 && (
           <div className="editor-empty">
             <h2>{project.name}</h2>
+            {/* Missing foundations the CLI installers themselves need (Node for
+                `npm install -g …`, git for everything). One-click install runs
+                the OS-correct command in a terminal, same as a CLI install, and
+                the tab's exit re-probes so the banner clears itself. */}
+            {PREREQS.some((p) => prereqs[p.bin] === false) && (
+              <div className="prereq-banner">
+                <span className="prereq-note">
+                  Missing prerequisites — the agent CLIs need these:
+                </span>
+                <div className="prereq-actions">
+                  {PREREQS.filter((p) => prereqs[p.bin] === false).map((p) => (
+                    <button
+                      key={p.id}
+                      className="prereq-install"
+                      title={`For ${p.why}\nruns: ${p.install[currentPlatform()]}`}
+                      onClick={() =>
+                        components[0] &&
+                        addTerminal(
+                          components[0].path,
+                          p.install[currentPlatform()],
+                          `install ${p.name}`,
+                          "⬇",
+                          true,
+                        )
+                      }
+                    >
+                      Install {p.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             {/* Same launchers as the ＋ menu, surfaced where the eye already is. */}
             <div className="launch-grid">
               <button

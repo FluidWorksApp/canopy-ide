@@ -2036,6 +2036,47 @@ body,
   max-width: 460px;
 }
 
+/* Missing-prerequisites prompt above the launcher — warn-toned so it reads as
+   "do this first", with the same install affordance the CLI cards use. */
+.prereq-banner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-top: 18px;
+  padding: 12px 16px;
+  max-width: 460px;
+  border: 1px solid var(--warn);
+  border-radius: 10px;
+  background: var(--bg-raised);
+}
+
+.prereq-note {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.prereq-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.prereq-install {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--on-accent, #1a1b26);
+  background: var(--warn, #e0af68);
+  border: none;
+  border-radius: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+}
+
+.prereq-install:hover {
+  filter: brightness(1.08);
+}
+
 .launch-card {
   position: relative;
   display: flex;

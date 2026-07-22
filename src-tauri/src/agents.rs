@@ -1832,6 +1832,25 @@ pub async fn which_check(commands: Vec<String>) -> HashMap<String, bool> {
             }
         }
     }
+    #[cfg(windows)]
+    {
+        // No login shell on Windows; `where <cmd>` (where.exe on PATH) exits 0
+        // when the command is found. Same charset guard as the unix branch so a
+        // name can't smuggle in extra arguments. Without this, every command
+        // (CLIs and prerequisites alike) read as "not installed" on Windows.
+        for c in &commands {
+            if c.chars().all(|ch| ch.is_alphanumeric() || ch == '-' || ch == '_') {
+                let ok = std::process::Command::new("where")
+                    .arg(c)
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                if let Some(found) = result.get_mut(c) {
+                    *found = ok;
+                }
+            }
+        }
+    }
     result
 }
 
