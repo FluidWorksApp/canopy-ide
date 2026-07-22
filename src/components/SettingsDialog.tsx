@@ -716,8 +716,8 @@ function Copyable({
     >
       <code
         style={{
-          fontSize: big ? 22 : 13,
-          letterSpacing: big ? 4 : 0,
+          fontSize: big ? 17 : 13,
+          letterSpacing: big ? 3 : 0,
           background: "transparent",
           padding: 0,
           overflow: "hidden",
