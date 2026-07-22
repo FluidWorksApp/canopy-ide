@@ -407,3 +407,120 @@ input {
   font-size: 18px;
   font-weight: 700;
 }
+
+/* ---- new-agent FAB + sheet ---- */
+.fab {
+  position: fixed;
+  right: 18px;
+  bottom: max(20px, env(safe-area-inset-bottom));
+  z-index: 20;
+  background: var(--accent);
+  color: var(--on-accent);
+  border: none;
+  border-radius: 24px;
+  padding: 13px 20px;
+  font-weight: 700;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.notice {
+  position: fixed;
+  left: 14px;
+  right: 14px;
+  bottom: max(80px, calc(env(safe-area-inset-bottom) + 70px));
+  z-index: 25;
+  background: var(--danger);
+  color: #fff;
+  border-radius: 12px;
+  padding: 12px 14px;
+  font-size: 13px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.notice-x {
+  float: right;
+  opacity: 0.8;
+}
+.sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: flex-end;
+  animation: fade 0.15s;
+}
+.sheet {
+  width: 100%;
+  max-width: 560px;
+  margin: 0 auto;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 18px 18px 0 0;
+  padding: 8px 18px max(20px, env(safe-area-inset-bottom));
+  animation: slideup 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.sheet-grip {
+  width: 40px;
+  height: 4px;
+  border-radius: 3px;
+  background: var(--border);
+  margin: 6px auto 12px;
+}
+.sheet h3 {
+  margin: 0 0 14px;
+  font-size: 17px;
+}
+.sheet label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  margin: 12px 0 5px;
+}
+.sheet select {
+  width: 100%;
+  padding: 11px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  color: var(--text);
+  font: inherit;
+}
+.cli-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.cli {
+  flex: none;
+  padding: 8px 13px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+}
+.cli.on {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.sheet-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 20px;
+}
+.sheet-actions .primary {
+  flex: 1;
+}
+@keyframes slideup {
+  from {
+    transform: translateY(100%);
+  }
+}
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+}

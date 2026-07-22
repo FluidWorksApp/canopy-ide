@@ -467,6 +467,21 @@ fn handle_client_msg(
                 let _ = p.app.state::<PtyManager>().kill(id as u32);
             }
         }
+        Some("spawn") => {
+            // Open a new headless PTY (a fresh terminal / agent) the client can
+            // then attach to. `command` (an agent CLI) runs in `cwd` if given.
+            let cwd = v.get("cwd").and_then(|x| x.as_str()).map(String::from);
+            let command = v.get("command").and_then(|x| x.as_str()).map(String::from);
+            let app = p.app.clone();
+            let out = out.clone();
+            tokio::spawn(async move {
+                let msg = match app.state::<PtyManager>().spawn_headless(app.clone(), cwd, command) {
+                    Ok(id) => json!({ "t": "spawned", "pty": id }),
+                    Err(e) => json!({ "t": "spawn-error", "message": e }),
+                };
+                let _ = out.send(msg.to_string()).await;
+            });
+        }
         Some("refresh") => {
             let out = out.clone();
             let app = p.app.clone();

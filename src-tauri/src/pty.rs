@@ -342,6 +342,47 @@ pub fn pty_spawn(
     high_water: Option<usize>,
     on_data: Channel<InvokeResponseBody>,
 ) -> Result<SpawnResult, String> {
+    state.spawn(app, cols, rows, cwd, shell, high_water, Some(on_data))
+}
+
+impl PtyManager {
+    /// Spawn a headless PTY (no WebView channel) that a remote client can attach
+    /// to — used by Canopy Remote to open a new terminal / agent from a phone.
+    /// Runs `command` (an agent CLI) in `cwd` if given. Returns the new PTY id.
+    pub fn spawn_headless(
+        &self,
+        app: AppHandle,
+        cwd: Option<String>,
+        command: Option<String>,
+    ) -> Result<u32, String> {
+        let res = self.spawn(app, 120, 32, cwd, None, None, None)?;
+        if let Some(cmd) = command {
+            let cmd = cmd.trim();
+            if !cmd.is_empty() {
+                // The PTY buffers stdin, so writing right after spawn is fine —
+                // the shell reads it once it's up. Mirrors the desktop's
+                // initial-command behaviour.
+                let _ = self.write(res.id, &format!("{cmd}\r"));
+            }
+        }
+        Ok(res.id)
+    }
+
+    /// The shared spawn core. `on_data` is the WebView streaming channel when a
+    /// desktop tab owns this PTY; `None` for a headless (remote-only) PTY, which
+    /// skips WebView backpressure so nothing stalls a headless agent's output.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn(
+        &self,
+        app: AppHandle,
+        cols: u16,
+        rows: u16,
+        cwd: Option<String>,
+        shell: Option<String>,
+        high_water: Option<usize>,
+        on_data: Option<Channel<InvokeResponseBody>>,
+    ) -> Result<SpawnResult, String> {
+    let state = self;
     // Clamp for the same reason pty_resize does: a terminal spawned into a
     // hidden tab measures 0, and a zero-column pty is meaningless. 80x24 is the
     // conventional fallback, and the frontend corrects it the moment the tab is
@@ -472,15 +513,18 @@ pub fn pty_spawn(
                     match chunk {
                         Some(data) => {
                             // Mirror to remote subscribers + scrollback (Canopy
-                            // Remote) first, while `data` is still borrowable and
-                            // before the WebView `send` moves it. Both paths are
-                            // independent of the WebView backpressure below, so a
-                            // remote viewer can never wedge the agent.
+                            // Remote) first, while `data` is still borrowable.
                             session.record_remote(&data);
-                            session.outstanding.fetch_add(data.len(), Ordering::SeqCst);
-                            if on_data.send(InvokeResponseBody::Raw(data)).is_err() {
-                                // WebView side is gone; stop streaming.
-                                session.terminate();
+                            // Only the WebView path uses outstanding-bytes
+                            // backpressure; a headless (remote-only) PTY has no
+                            // acker, so skip it or the reader would stall the
+                            // agent after high_water bytes of output.
+                            if let Some(ch) = &on_data {
+                                session.outstanding.fetch_add(data.len(), Ordering::SeqCst);
+                                if ch.send(InvokeResponseBody::Raw(data)).is_err() {
+                                    // WebView side is gone; stop streaming.
+                                    session.terminate();
+                                }
                             }
                         }
                         None => {
@@ -510,6 +554,7 @@ pub fn pty_spawn(
     }
 
     Ok(SpawnResult { id, pid, cols, rows })
+    }
 }
 
 #[tauri::command]

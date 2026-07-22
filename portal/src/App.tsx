@@ -88,6 +88,8 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
   const [stats, setStats] = useState<Map<number, Stat>>(new Map())
   const [livePtys, setLivePtys] = useState<Pty[]>([])
   const [route, setRoute] = useState<Route>({ name: 'home' })
+  const [newAgent, setNewAgent] = useState<{ open: boolean; projectId?: string }>({ open: false })
+  const [notice, setNotice] = useState<string | null>(null)
   const wireRef = useRef<Wire | null>(null)
   const transportRef = useRef<Transport | null>(null)
 
@@ -118,6 +120,12 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
               return next
             })
         }
+      } else if (m.t === 'spawned') {
+        setNewAgent({ open: false })
+        setRoute({ name: 'agent', pty: m.pty })
+      } else if (m.t === 'spawn-error') {
+        setNewAgent({ open: false })
+        setNotice(m.message || 'Could not start the agent.')
       }
     })
     wire.connect()
@@ -134,6 +142,8 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
   )
   const live = rows.filter((r) => r.live)
   const needs = live.filter((r) => r.needsYou).length
+  const spawn = (cwd: string, command?: string) =>
+    wireRef.current?.send({ t: 'spawn', cwd, command })
 
   if (route.name === 'agent' && transportRef.current) {
     const row = rows.find((r) => r.ptyId === route.pty)
@@ -219,6 +229,106 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
           </div>
         )}
       </section>
+
+      <button className="fab" onClick={() => setNewAgent({ open: true })}>
+        + New agent
+      </button>
+      {notice && (
+        <div className="notice" onClick={() => setNotice(null)}>
+          {notice} <span className="notice-x">✕</span>
+        </div>
+      )}
+      {newAgent.open && (
+        <NewAgentSheet
+          projects={projects}
+          initialProjectId={newAgent.projectId}
+          onLaunch={spawn}
+          onClose={() => setNewAgent({ open: false })}
+        />
+      )}
+    </div>
+  )
+}
+
+const CLIS = ['claude', 'codex', 'aider', 'gemini', 'opencode', 'amp', 'omp']
+
+/** Pick a project → component (cwd) → agent CLI, and launch a fresh terminal. */
+function NewAgentSheet({
+  projects,
+  initialProjectId,
+  onLaunch,
+  onClose,
+}: {
+  projects: Project[]
+  initialProjectId?: string
+  onLaunch: (cwd: string, command?: string) => void
+  onClose: () => void
+}) {
+  const [projectId, setProjectId] = useState(initialProjectId ?? projects[0]?.id ?? '')
+  const project = projects.find((p) => p.id === projectId) ?? projects[0]
+  const comps = project?.components ?? []
+  const [path, setPath] = useState(comps[0]?.path ?? '')
+  const [cli, setCli] = useState('claude')
+
+  const launch = () => {
+    const cwd = path || comps[0]?.path
+    if (!cwd) return
+    onLaunch(cwd, cli === 'shell' ? undefined : cli)
+  }
+
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="sheet-grip" />
+        <h3>New agent</h3>
+
+        <label>Project</label>
+        <select
+          value={projectId}
+          onChange={(e) => {
+            setProjectId(e.target.value)
+            const p = projects.find((x) => x.id === e.target.value)
+            setPath(p?.components?.[0]?.path ?? '')
+          }}
+        >
+          {projects.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+        </select>
+
+        <label>Folder</label>
+        <select value={path} onChange={(e) => setPath(e.target.value)}>
+          {comps.map((c) => (
+            <option key={c.path} value={c.path}>
+              {c.label}
+            </option>
+          ))}
+        </select>
+
+        <label>Agent</label>
+        <div className="cli-grid">
+          {[...CLIS, 'shell'].map((c) => (
+            <button
+              key={c}
+              className={`cli ${cli === c ? 'on' : ''}`}
+              onClick={() => setCli(c)}
+            >
+              {c}
+            </button>
+          ))}
+        </div>
+
+        <div className="sheet-actions">
+          <button className="ghost" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="primary" onClick={launch} disabled={!path}>
+            Launch {cli}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
