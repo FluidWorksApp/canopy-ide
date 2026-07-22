@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Canopy",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "identifier": "app.causeconnect.canopy",
   "build": {
     "frontendDist": "../dist",
@@ -54,7 +54,9 @@
     },
     "linux": {
       "deb": {
-        "depends": ["libasound2"]
+        "depends": [
+          "libasound2"
+        ]
       }
     }
   },
