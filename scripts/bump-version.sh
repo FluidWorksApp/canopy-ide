@@ -62,6 +62,27 @@ tag_exists() {
   return 1
 }
 
+# ---- worktree resolution -------------------------------------------------
+# `main` can only be checked out in ONE worktree at a time. If this script is
+# run from a different worktree (e.g. an agent-workspace on a feature branch),
+# `git checkout main` below would fail with:
+#   fatal: 'main' is already used by worktree at <path>
+# So find the worktree that currently holds `main` and run the release there.
+# If `main` isn't checked out anywhere, we stay put and check it out ourselves.
+main_worktree() {
+  git worktree list --porcelain | awk '
+    /^worktree /{wt=substr($0, 10)}
+    /^branch refs\/heads\/main$/{print wt; exit}
+  '
+}
+MAIN_WT="$(main_worktree)"
+CUR_WT="$(git rev-parse --show-toplevel)"
+if [ -n "$MAIN_WT" ] && [ "$MAIN_WT" != "$CUR_WT" ]; then
+  echo "note: 'main' is checked out at $MAIN_WT" >&2
+  echo "      (you launched this from $CUR_WT) — running the release there." >&2
+  cd "$MAIN_WT"
+fi
+
 git fetch --quiet origin
 
 # =============================================================================
