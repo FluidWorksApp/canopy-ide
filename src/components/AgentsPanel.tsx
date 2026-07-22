@@ -443,14 +443,14 @@ export function AgentsPanel({
             </span>
           )}
           <button
-            className="agent-session"
-            title={`Go to terminal #${s.id}`}
+            className="agent-session agent-session-icon"
+            title="Go to terminal"
             onClick={(e) => {
               e.stopPropagation();
               onJumpToPty?.(s.id);
             }}
           >
-            term #{s.id}
+            <TerminalIcon size={12} />
           </button>
           {/* A dev server in here, without opening the tab to find out. */}
           {s.ports?.map((p) => (

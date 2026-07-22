@@ -3,7 +3,7 @@
 // the PR raised from that branch. Same split as BranchView: metadata paints
 // first (one backend join, no patch bytes), each patch loads per pane, and
 // commit rows hand off to the commit tab rather than a second renderer.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { DiffView, DiffModeEnum } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import * as ipc from "../ipc";
@@ -29,6 +29,13 @@ interface AgentWorkspaceViewProps {
 }
 
 type Pane = "uncommitted" | "diff";
+
+// The reported-editing list is a quick-glance strip, not the authoritative diff
+// below — so it shows the basename (the full path lives in the tooltip and the
+// diff header) and folds everything past this many into a dropdown.
+const TOUCHED_LIMIT = 6;
+const basename = (p: string) => p.split("/").filter(Boolean).pop() ?? p;
+const parentDir = (p: string) => p.split("/").filter(Boolean).slice(-2, -1)[0] ?? "";
 
 export function AgentWorkspaceView({
   repo,
@@ -125,6 +132,26 @@ export function AgentWorkspaceView({
   const touched = ws?.touched?.length ? ws.touched : (digest.files ?? []);
   const branchable = !!ws?.branch && !ws.detached && !ws.on_base;
   const files = patch?.patch ? splitPatch(patch.patch) : [];
+
+  // Jump from a reported-editing chip to that file's diff section below. A
+  // reported path (relative to the hook's cwd) and a diff path (relative to the
+  // repo root) usually match outright; basename is the fallback. A chip with no
+  // match in the current pane isn't clickable — which is also how a file the
+  // agent touched in another worktree quietly reads as "not in this diff".
+  const fileRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const [flashPath, setFlashPath] = useState<string | null>(null);
+  const diffTarget = (t: string): string | null =>
+    files.find((f) => f.path === t)?.path ??
+    files.find((f) => basename(f.path) === basename(t))?.path ??
+    null;
+  const scrollToFile = (path: string) => {
+    const el = fileRefs.current.get(path);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+    setFlashPath(path);
+    window.setTimeout(() => setFlashPath((p) => (p === path ? null : p)), 1100);
+  };
+  const [showMoreTouched, setShowMoreTouched] = useState(false);
 
   return (
     <div className="ticket-view">
@@ -230,7 +257,10 @@ export function AgentWorkspaceView({
       )}
 
       {/* What the agent said it edited — its own report, capped by the hook.
-          The diff below is the authoritative list. */}
+          The diff below is the authoritative list. Shown as basename chips
+          (full path in the tooltip); clicking one jumps to its diff section.
+          Everything past TOUCHED_LIMIT folds into a dropdown so a long session
+          doesn't push the diff off-screen. */}
       {touched.length > 0 && (
         <div className="aw-touched">
           <div className="ticket-state-head">
@@ -238,11 +268,59 @@ export function AgentWorkspaceView({
             <span className="badge">{touched.length}</span>
           </div>
           <div className="aw-touched-list">
-            {touched.map((f) => (
-              <code key={f} className="aw-touched-file" title={f}>
-                {f}
-              </code>
-            ))}
+            {touched.slice(0, TOUCHED_LIMIT).map((f) => {
+              const target = diffTarget(f);
+              return target ? (
+                <button
+                  key={f}
+                  className="aw-touched-file aw-touched-file-link"
+                  title={`${f}\n\nJump to this file's diff`}
+                  onClick={() => scrollToFile(target)}
+                >
+                  {basename(f)}
+                </button>
+              ) : (
+                <code key={f} className="aw-touched-file" title={f}>
+                  {basename(f)}
+                </code>
+              );
+            })}
+            {touched.length > TOUCHED_LIMIT && (
+              <div className="aw-touched-more-anchor">
+                <button
+                  className="aw-touched-file aw-touched-more-btn"
+                  onClick={() => setShowMoreTouched((v) => !v)}
+                >
+                  +{touched.length - TOUCHED_LIMIT} more {showMoreTouched ? "▴" : "▾"}
+                </button>
+                {showMoreTouched && (
+                  <div
+                    className="aw-touched-more"
+                    onMouseLeave={() => setShowMoreTouched(false)}
+                  >
+                    {touched.slice(TOUCHED_LIMIT).map((f) => {
+                      const target = diffTarget(f);
+                      return (
+                        <button
+                          key={f}
+                          className="aw-touched-more-row"
+                          title={f}
+                          disabled={!target}
+                          onClick={() => {
+                            if (!target) return;
+                            setShowMoreTouched(false);
+                            scrollToFile(target);
+                          }}
+                        >
+                          <span className="aw-more-name">{basename(f)}</span>
+                          <span className="aw-more-dir">{parentDir(f) || "·"}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -314,7 +392,14 @@ export function AgentWorkspaceView({
           </div>
         ) : (
           files.map((f) => (
-            <div key={f.path} className="pr-file">
+            <div
+              key={f.path}
+              className={`pr-file ${flashPath === f.path ? "pr-file-flash" : ""}`}
+              ref={(el) => {
+                if (el) fileRefs.current.set(f.path, el);
+                else fileRefs.current.delete(f.path);
+              }}
+            >
               <div className="pr-file-name">{f.path}</div>
               <DiffView
                 data={{

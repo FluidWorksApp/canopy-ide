@@ -2489,6 +2489,16 @@ body,
   color: var(--text);
   text-decoration: underline;
 }
+/* Icon variant (go-to-terminal): no underline, just a quiet glyph that lifts on
+   hover. The PTY id it used to print was an internal reference with no meaning
+   to the user — the click still navigates. */
+.agent-session-icon {
+  display: inline-flex;
+  align-items: center;
+}
+.agent-session-icon:hover {
+  text-decoration: none;
+}
 
 .agent-stats {
   display: flex;
@@ -5000,6 +5010,101 @@ textarea,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Clickable chip: has a diff section to jump to. Reads as interactive and
+   lifts to the accent on hover; plain <code> chips (no diff match) stay quiet. */
+.aw-touched-file-link {
+  background: none;
+  font-family: ui-monospace, monospace;
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+.aw-touched-file-link:hover {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+
+/* Overflow dropdown: everything past TOUCHED_LIMIT lives here so a long
+   session's file list can't shove the diff down the page. */
+.aw-touched-more-anchor {
+  position: relative;
+  display: inline-flex;
+}
+.aw-touched-more-btn {
+  background: none;
+  cursor: pointer;
+  color: var(--text);
+  font-family: inherit;
+}
+.aw-touched-more-btn:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+.aw-touched-more {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 30;
+  min-width: 220px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: color-mix(in srgb, var(--bg-raised) 88%, transparent);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+  border-radius: 8px;
+  box-shadow: 0 16px 40px -16px rgba(0, 0, 0, 0.55);
+}
+.aw-touched-more-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  font-size: 11px;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+.aw-touched-more-row:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.aw-touched-more-row:disabled {
+  color: var(--text-dim);
+  cursor: default;
+}
+.aw-more-name {
+  font-family: ui-monospace, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.aw-more-dir {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+/* Brief highlight when a chip scrolls its diff section into view. */
+.pr-file-flash {
+  animation: pr-file-flash 1.1s ease-out;
+}
+@keyframes pr-file-flash {
+  0% {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent);
+  }
+  100% {
+    border-color: var(--border);
+    box-shadow: 0 0 0 0 transparent;
+  }
 }
 
 /* Actions stay out of the way until the row is pointed at. */
