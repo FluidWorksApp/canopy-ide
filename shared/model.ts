@@ -121,6 +121,8 @@ function rank(s: string): number {
   return s === 'working' ? 3 : s === 'waiting' ? 2 : s === 'idle' ? 1 : 0
 }
 
+const normCwd = (p?: string): string => (p ?? '').replace(/\/+$/, '')
+
 function sortRows(a: AgentRow, b: AgentRow): number {
   return (
     Number(b.needsYou) - Number(a.needsYou) ||
@@ -145,23 +147,27 @@ export function buildRows(
   livePtys: Pty[],
 ): AgentRow[] {
   const usageBy = new Map(usage.map((u) => [u.session_id, u]))
-  // A PTY id is attachable iff the backend reports it as currently running. That
-  // set (from PtyManager) is authoritative — no instance/cwd guessing. `stats`
-  // is a secondary liveness source and the source of CPU/mem.
-  const liveIds = new Set<number>([...livePtys.map((p) => p.id), ...stats.keys()])
 
-  // Most-recent digest first, so when several digests share a PTY id (a reused
-  // terminal across sessions) only the newest claims it as live.
+  // Most-recent digest first, so when several digests share a PTY id only the
+  // newest claims it as live.
   const ordered = sessions.filter((d) => d.agent).sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0))
   const claimed = new Set<number>()
 
   return ordered
     .map((d, i) => {
       const surfaceId = d.surface !== undefined ? Number(d.surface) : NaN
-      const hasId = Number.isFinite(surfaceId)
-      const live = hasId && liveIds.has(surfaceId) && !claimed.has(surfaceId)
+      // Live/attachable iff a currently-running PTY matches BOTH the digest's
+      // surface id AND its cwd. The cwd check (not id alone) is what stops a
+      // stale digest whose reused pty-id collides with a current one from
+      // showing up live under the wrong project.
+      const livePty = Number.isFinite(surfaceId)
+        ? livePtys.find(
+            (p) => p.id === surfaceId && normCwd(p.cwd) === normCwd(d.cwd) && !claimed.has(p.id),
+          )
+        : undefined
+      const live = !!livePty
       if (live) claimed.add(surfaceId)
-      const liveStat = hasId ? stats.get(surfaceId) : undefined
+      const liveStat = live ? stats.get(surfaceId) : undefined
       const u = d.session_id ? usageBy.get(d.session_id) : undefined
       return {
         key: d.session_id || `${d.instance ?? ''}:${d.surface ?? i}`,
@@ -187,13 +193,65 @@ export function buildRows(
     .sort(sortRows)
 }
 
-/** Agents whose cwd sits inside one of a project's component directories. */
-export function agentsForProject(project: Project, rows: AgentRow[]): AgentRow[] {
-  const roots = (project.components ?? []).map((c) => (c.path ?? '').replace(/\/+$/, ''))
-  return rows.filter((r) => {
-    const cwd = r.cwd ?? ''
-    return roots.some((root) => root && (cwd === root || cwd.startsWith(root + '/')))
-  })
+/** The single project an agent belongs to: the one with the deepest (most
+ *  specific) matching component path — so a broad path like ~/Documents never
+ *  steals an agent from a nested project. */
+export function bestProjectId(cwd: string | undefined, projects: Project[]): string | undefined {
+  const c = normCwd(cwd)
+  if (!c) return undefined
+  let bestId: string | undefined
+  let bestLen = -1
+  for (const p of projects) {
+    for (const comp of p.components ?? []) {
+      const r = normCwd(comp.path)
+      if (r && (c === r || c.startsWith(r + '/')) && r.length > bestLen) {
+        bestLen = r.length
+        bestId = p.id
+      }
+    }
+  }
+  return bestId
+}
+
+/** Agents that belong to `project` — i.e. whose deepest matching project is it. */
+export function agentsForProject(
+  project: Project,
+  rows: AgentRow[],
+  projects: Project[],
+): AgentRow[] {
+  return rows.filter((r) => bestProjectId(r.cwd, projects) === project.id)
+}
+
+// ---- agent identity -------------------------------------------------------
+
+/** Per-agent brand identity: a monochrome glyph (inherits the hue, so it tints
+ *  the badge) and a signature colour. The colour is the ONE place the portal
+ *  steps outside the pushed Canopy theme — it's the agent's identity, not the
+ *  app's chrome — which is what makes a list of agents read as distinct faces
+ *  rather than one grey column. Unknown agents fall back to the app accent. */
+export interface AgentMeta {
+  glyph: string
+  hue: string
+  label: string
+}
+export const AGENT_META: Record<string, AgentMeta> = {
+  claude: { glyph: '✳', hue: '#d97757', label: 'Claude' },
+  codex: { glyph: '⬢', hue: '#10a37f', label: 'Codex' },
+  gemini: { glyph: '✦', hue: '#6d7cf5', label: 'Gemini' },
+  aider: { glyph: '◆', hue: '#14b8a6', label: 'Aider' },
+  opencode: { glyph: '⬣', hue: '#a855f7', label: 'opencode' },
+  amp: { glyph: '✺', hue: '#f97316', label: 'Amp' },
+  omp: { glyph: '⬟', hue: '#ec4899', label: 'omp' },
+  shell: { glyph: '❯', hue: '#8894a8', label: 'shell' },
+}
+export function agentMeta(agent: string): AgentMeta {
+  return (
+    AGENT_META[agent?.toLowerCase?.() ?? ''] ?? {
+      glyph: '◈',
+      hue: 'var(--accent, #5b9dff)',
+      label: agent || 'agent',
+    }
+  )
 }
 
 // ---- formatters -----------------------------------------------------------

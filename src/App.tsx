@@ -670,6 +670,55 @@ export default function App() {
   openProjectRef.current = openProject;
   updateRef.current = update;
 
+  // A PTY opened from the phone (spawn_headless emits pty:spawned). Route it to
+  // the project whose component path most-specifically contains its cwd, open
+  // that project, and hand the tab to its ProjectView. The desktop mirrors the
+  // agent the phone started — same session, both surfaces driving one PTY.
+  useEffect(() => {
+    const norm = (p: string) => p.replace(/\/+$/, "");
+    // Deepest matching component path wins, so a broad root never steals an
+    // agent from a nested project (mirrors model.ts bestProjectId).
+    const projectForCwd = (cwd: string): string | undefined => {
+      const c = norm(cwd);
+      let bestId: string | undefined;
+      let bestLen = -1;
+      for (const p of wsRef.current.projects) {
+        for (const comp of p.components) {
+          const r = norm(comp.path);
+          if (r && (c === r || c.startsWith(r + "/")) && r.length > bestLen) {
+            bestLen = r.length;
+            bestId = p.id;
+          }
+        }
+      }
+      return bestId;
+    };
+    let un: (() => void) | undefined;
+    void ipc
+      .onPtySpawned(async (e) => {
+        const projectId = projectForCwd(e.cwd);
+        if (!projectId) {
+          notify(`A remote agent started in ${e.cwd}, outside any project.`, "info");
+          return;
+        }
+        await openProjectRef.current(projectId);
+        // One frame so a not-yet-open project's ProjectView mounts and registers
+        // its listener before the event fires; attachTerminal is idempotent by
+        // pty id, so a redundant dispatch just re-focuses the tab.
+        requestAnimationFrame(() =>
+          window.dispatchEvent(
+            new CustomEvent("canopy:attach-terminal", {
+              detail: { projectId, ptyId: e.id, cwd: e.cwd, title: e.title },
+            }),
+          ),
+        );
+      })
+      .then((u) => {
+        un = u;
+      });
+    return () => un?.();
+  }, [notify]);
+
   const saveProject = useCallback(
     async (project: Project) => {
       const state = wsRef.current;

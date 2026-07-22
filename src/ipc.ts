@@ -49,12 +49,39 @@ export const ptyKillAll = () => invoke<void>("pty_kill_all");
 export const ptySetTitle = (id: number, title: string) =>
   gone(invoke<void>("pty_set_title", { id, title }));
 
+/** Attach to a PTY that already exists (spawned headless from the remote
+ *  portal). Streams the scrollback snapshot first, then live output — the same
+ *  byte contract as ptySpawn's onData, but no ack/backpressure: a headless PTY
+ *  fans out over a lossy broadcast, so the desktop just consumes. Resolves with
+ *  the size the pty is running at, so the tab renders at the same grid. */
+export async function ptyAttach(
+  id: number,
+  onData: (bytes: Uint8Array) => void,
+): Promise<PtyGeometry> {
+  const channel = new Channel<ArrayBuffer | number[]>();
+  channel.onmessage = (data) =>
+    onData(data instanceof ArrayBuffer ? new Uint8Array(data) : Uint8Array.from(data));
+  return invoke("pty_attach", { id, onData: channel });
+}
+
 export interface PtyExit {
   id: number;
   exit_code: number | null;
 }
 export const onPtyExit = (cb: (e: PtyExit) => void): Promise<UnlistenFn> =>
   listen<PtyExit>("pty:exit", (event) => cb(event.payload));
+
+/** A PTY opened headlessly from the remote portal, announced so the desktop can
+ *  open a tab attached to it (via ptyAttach) in the matching project. */
+export interface PtySpawned {
+  id: number;
+  cwd: string;
+  title: string;
+  cols: number;
+  rows: number;
+}
+export const onPtySpawned = (cb: (e: PtySpawned) => void): Promise<UnlistenFn> =>
+  listen<PtySpawned>("pty:spawned", (event) => cb(event.payload));
 
 // ---------- Workspaces / FS ----------
 

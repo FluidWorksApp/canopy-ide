@@ -97,6 +97,10 @@ interface TermSubTab {
    *  survives the shell repainting its own title; cleared by renaming to empty. */
   customTitle?: string;
   ptyId: number | null;
+  /** When set, this tab attaches to an already-running headless PTY (spawned
+   *  from the remote portal) instead of spawning its own. Closing it detaches;
+   *  the agent keeps running for the phone. */
+  attachId?: number;
   command?: string;
   icon?: string;
   /** Launched from a component run command — lives in the run rail, not the
@@ -563,6 +567,54 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     },
     [],
   );
+
+  /** Open (or re-focus) a tab attached to a headless PTY the remote portal
+   *  spawned. Idempotent by pty id, so a re-dispatched event just re-focuses
+   *  the existing tab rather than stacking duplicates. */
+  const attachTerminal = useCallback(
+    (ptyId: number, cwd: string, title: string) => {
+      const existing = tabsRef.current.find(
+        (t): t is TermSubTab => t.type === "terminal" && t.attachId === ptyId,
+      );
+      if (existing) {
+        setActiveTabId(existing.id);
+        return;
+      }
+      const id = tabId();
+      setTabs((prev) => [
+        ...prev,
+        {
+          id,
+          type: "terminal",
+          cwd,
+          title: title || "agent",
+          ptyId,
+          attachId: ptyId,
+          icon: "📱",
+        },
+      ]);
+      setActiveTabId(id);
+    },
+    [],
+  );
+
+  // A PTY spawned from the phone (App routes pty:spawned to the project whose
+  // components own its cwd). Not gated on `visible`: a remote spawn can target a
+  // project sitting in the background, and the tab should be waiting there.
+  useEffect(() => {
+    const onAttach = (e: Event) => {
+      const d = (e as CustomEvent).detail as {
+        projectId: string;
+        ptyId: number;
+        cwd: string;
+        title: string;
+      };
+      if (d?.projectId !== project.id) return;
+      attachTerminal(d.ptyId, d.cwd, d.title);
+    };
+    window.addEventListener("canopy:attach-terminal", onAttach);
+    return () => window.removeEventListener("canopy:attach-terminal", onAttach);
+  }, [project.id, attachTerminal]);
 
   /** Open a pull request as its own tab, reusing one already open for it. */
   const openPr = useCallback((repo: string, pr: ipc.PrInfo) => {
@@ -2423,6 +2475,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 }}
                 cwd={tab.cwd}
                 active={tab.id === activeTabId && visible}
+                attachId={tab.attachId}
                 // A run tab's shell exits with its command's status, so the
                 // exit code below is the command's own — that's what makes
                 // one-shot runs (build, install) report truthfully instead of

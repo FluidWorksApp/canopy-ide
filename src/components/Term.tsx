@@ -43,6 +43,11 @@ interface TermProps {
   active: boolean;
   /** Typed into the shell right after spawn (e.g. launch an agent CLI). */
   initialCommand?: string;
+  /** Attach to an already-running PTY (spawned headless from the remote portal)
+   *  instead of spawning a fresh one. The tab mirrors that session's live
+   *  output and drives its input; closing the tab detaches, it does not kill the
+   *  agent (it stays controllable from the phone). */
+  attachId?: number;
   onSpawned: (ptyId: number) => void;
   onExited: (exitCode: number | null) => void;
   onTitle?: (title: string) => void;
@@ -51,9 +56,12 @@ interface TermProps {
 }
 
 export const Term = forwardRef<TermHandle, TermProps>(function Term(
-  { cwd, active, initialCommand, onSpawned, onExited, onTitle, onNotify },
+  { cwd, active, initialCommand, attachId, onSpawned, onExited, onTitle, onNotify },
   ref,
 ) {
+  // Frozen once: a Term never switches between spawn and attach mid-life, and
+  // the mount-once effect closes over it.
+  const attachIdRef = useRef(attachId);
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const ptyIdRef = useRef<number | null>(null);
@@ -306,49 +314,74 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     window.addEventListener("focus", onFocus);
     let unlistenExit: (() => void) | undefined;
 
-    void ipc
-      .ptySpawn(
-        {
-          // 0 tells Rust to fall back to 80x24; the first resize once the tab is
-          // visible corrects it.
-          cols: initial?.cols ?? 0,
-          rows: initial?.rows ?? 0,
-          cwd,
-          highWater: settings.ptyHighWater,
-        },
-        (bytes) => {
-          // Feed xterm's own write buffer and ack once it has consumed the
-          // chunk — this drives the Rust-side backpressure window. Never
-          // accumulate output in JS. (Read the ref inside the callback: early
-          // chunks can arrive before the spawn promise resolves.)
-          term.write(bytes, () => {
-            if (ptyIdRef.current != null) {
-              void ipc.ptyAck(ptyIdRef.current, bytes.length);
-            }
-          });
-        },
-      )
-      .then(async (result) => {
-        if (disposed) {
-          void ipc.ptyKill(result.id);
-          return;
-        }
-        ptyIdRef.current = result.id;
-        // Adopt whatever the pty opened at, including the 80x24 fallback when we
-        // proposed nothing — better a grid that matches the shell than one that
-        // looks right and wraps wrong.
-        applyGeometry(result);
-        onSpawned(result.id);
-        if (initialCommand) {
-          void ipc.ptyWrite(result.id, `${initialCommand}\r`);
-        }
-        unlistenExit = await ipc.onPtyExit((e) => {
-          if (e.id === result.id) onExited(e.exit_code);
-        });
-      })
-      .catch((err) => {
-        term.writeln(`\r\n\x1b[31mfailed to spawn shell: ${err}\x1b[0m`);
+    // Once the pty (fresh or attached) is bound: adopt its grid, wire exit, and
+    // announce the id. Shared by both paths below so they stay in lock-step.
+    const bound = async (id: number, geom: { cols: number; rows: number }) => {
+      ptyIdRef.current = id;
+      applyGeometry(geom);
+      onSpawned(id);
+      unlistenExit = await ipc.onPtyExit((e) => {
+        if (e.id === id) onExited(e.exit_code);
       });
+    };
+
+    if (attachIdRef.current != null) {
+      // Attach path: mirror a headless PTY the portal spawned. No ack — a
+      // headless session fans out over a lossy broadcast and never applies
+      // WebView backpressure — and no initial command (the portal already sent
+      // it). The scrollback snapshot arrives first, then the live tail.
+      const id = attachIdRef.current;
+      void ipc
+        .ptyAttach(id, (bytes) => {
+          if (!disposed) term.write(bytes);
+        })
+        .then((geom) => {
+          if (disposed) return; // detach only; never kill a remote-owned agent
+          void bound(id, geom);
+        })
+        .catch((err) => {
+          term.writeln(`\r\n\x1b[31mfailed to attach: ${err}\x1b[0m`);
+        });
+    } else {
+      void ipc
+        .ptySpawn(
+          {
+            // 0 tells Rust to fall back to 80x24; the first resize once the tab is
+            // visible corrects it.
+            cols: initial?.cols ?? 0,
+            rows: initial?.rows ?? 0,
+            cwd,
+            highWater: settings.ptyHighWater,
+          },
+          (bytes) => {
+            // Feed xterm's own write buffer and ack once it has consumed the
+            // chunk — this drives the Rust-side backpressure window. Never
+            // accumulate output in JS. (Read the ref inside the callback: early
+            // chunks can arrive before the spawn promise resolves.)
+            term.write(bytes, () => {
+              if (ptyIdRef.current != null) {
+                void ipc.ptyAck(ptyIdRef.current, bytes.length);
+              }
+            });
+          },
+        )
+        .then(async (result) => {
+          if (disposed) {
+            void ipc.ptyKill(result.id);
+            return;
+          }
+          // Adopt whatever the pty opened at, including the 80x24 fallback when
+          // we proposed nothing — better a grid that matches the shell than one
+          // that looks right and wraps wrong.
+          await bound(result.id, result);
+          if (initialCommand) {
+            void ipc.ptyWrite(result.id, `${initialCommand}\r`);
+          }
+        })
+        .catch((err) => {
+          term.writeln(`\r\n\x1b[31mfailed to spawn shell: ${err}\x1b[0m`);
+        });
+    }
 
     const dataSub = term.onData((data) => {
       if (ptyIdRef.current != null) void ipc.ptyWrite(ptyIdRef.current, data);
@@ -459,7 +492,11 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       oscSubs.forEach((s) => s.dispose());
       unlistenDrop?.();
       unlistenExit?.();
-      if (ptyIdRef.current != null) void ipc.ptyKill(ptyIdRef.current);
+      // Attached tabs detach on close — the agent was spawned from the phone and
+      // stays alive and controllable there. Only a tab that OWNS its pty kills it.
+      if (attachIdRef.current == null && ptyIdRef.current != null) {
+        void ipc.ptyKill(ptyIdRef.current);
+      }
       syncNowRef.current = null;
       term.dispose();
       termRef.current = null;

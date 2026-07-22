@@ -210,6 +210,7 @@ pub fn run() {
             cli::cli_take_pending_open,
             cli::cli_install_shim,
             pty::pty_spawn,
+            pty::pty_attach,
             pty::pty_write,
             pty::pty_ack,
             pty::pty_resize,

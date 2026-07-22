@@ -99,3 +99,9 @@ tauri-plugin-notification = "2"
 # Unix signals for killing whole PTY process groups (no zombies)
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+# `test` feature enables tauri::test::mock_app for exercising PTY spawn/attach
+# against a mock runtime. Dev-only, so the release build is unaffected.
+tauri = { version = "2.11.3", features = ["test"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }

@@ -112,6 +112,17 @@ pub struct PtyExit {
     pub exit_code: Option<u32>,
 }
 
+/// Emitted (`pty:spawned`) when a headless PTY is opened remotely, so the
+/// desktop can open a tab attached to it.
+#[derive(Serialize, Clone)]
+pub struct PtySpawned {
+    pub id: u32,
+    pub cwd: String,
+    pub title: String,
+    pub cols: u16,
+    pub rows: u16,
+}
+
 /// A live PTY session, minimally: enough for a remote client to know which
 /// agent digests are currently attachable (correlated by id == digest.surface).
 #[derive(Serialize, Clone)]
@@ -349,13 +360,13 @@ impl PtyManager {
     /// Spawn a headless PTY (no WebView channel) that a remote client can attach
     /// to — used by Canopy Remote to open a new terminal / agent from a phone.
     /// Runs `command` (an agent CLI) in `cwd` if given. Returns the new PTY id.
-    pub fn spawn_headless(
+    pub fn spawn_headless<R: tauri::Runtime>(
         &self,
-        app: AppHandle,
+        app: AppHandle<R>,
         cwd: Option<String>,
         command: Option<String>,
     ) -> Result<u32, String> {
-        let res = self.spawn(app, 120, 32, cwd, None, None, None)?;
+        let res = self.spawn(app.clone(), 120, 32, cwd, None, None, None)?;
         if let Some(cmd) = command {
             let cmd = cmd.trim();
             if !cmd.is_empty() {
@@ -365,16 +376,31 @@ impl PtyManager {
                 let _ = self.write(res.id, &format!("{cmd}\r"));
             }
         }
+        // Tell the desktop a new terminal/agent appeared so it can open a tab
+        // attached to it (pty_attach). Best-effort.
+        if let Some(s) = self.get(res.id) {
+            let _ = app.emit(
+                "pty:spawned",
+                PtySpawned {
+                    id: res.id,
+                    cwd: s.cwd.clone(),
+                    title: s.title.lock().unwrap().clone(),
+                    cols: res.cols,
+                    rows: res.rows,
+                },
+            );
+        }
         Ok(res.id)
     }
 
     /// The shared spawn core. `on_data` is the WebView streaming channel when a
     /// desktop tab owns this PTY; `None` for a headless (remote-only) PTY, which
     /// skips WebView backpressure so nothing stalls a headless agent's output.
+    /// Generic over the runtime so it can be exercised with a mock app in tests.
     #[allow(clippy::too_many_arguments)]
-    pub fn spawn(
+    pub fn spawn<R: tauri::Runtime>(
         &self,
-        app: AppHandle,
+        app: AppHandle<R>,
         cols: u16,
         rows: u16,
         cwd: Option<String>,
@@ -562,6 +588,49 @@ pub fn pty_write(state: State<'_, PtyManager>, id: u32, data: String) -> Result<
     state.write(id, &data)
 }
 
+/// Attach a desktop WebView to an ALREADY-running PTY (e.g. one a phone spawned):
+/// replay its scrollback, then forward live output onto `on_data`. Reuses the
+/// remote broadcast fan-out, so the flusher and the desktop-spawn path are
+/// untouched. Returns the PTY's current grid. Lossy on heavy floods (re-seeds on
+/// lag); fine for viewing a remote-spawned agent — a TUI redraws itself.
+#[tauri::command]
+pub fn pty_attach(
+    state: State<'_, PtyManager>,
+    id: u32,
+    on_data: Channel<InvokeResponseBody>,
+) -> Result<PtyGeometry, String> {
+    let (cols, rows, snapshot, mut rx) =
+        state.attach(id).ok_or_else(|| format!("no pty session {id}"))?;
+    if !snapshot.is_empty() {
+        let _ = on_data.send(InvokeResponseBody::Raw(snapshot));
+    }
+    let sessions = state.sessions();
+    thread::spawn(move || loop {
+        match rx.blocking_recv() {
+            Ok(PtyEvent::Data(bytes)) => {
+                if on_data.send(InvokeResponseBody::Raw(bytes.to_vec())).is_err() {
+                    break; // the WebView detached
+                }
+            }
+            Ok(PtyEvent::Resize(_, _)) => {}
+            Err(broadcast::error::RecvError::Lagged(_)) => {
+                // Fell behind a flood — re-seed from scrollback and resubscribe.
+                let Some(s) = sessions.lock().unwrap().get(&id).cloned() else {
+                    break;
+                };
+                let snap: Vec<u8> = s.scrollback.lock().unwrap().iter().copied().collect();
+                rx = s.subscribers.subscribe();
+                let _ = on_data.send(InvokeResponseBody::Raw(b"\x1bc".to_vec()));
+                if !snap.is_empty() {
+                    let _ = on_data.send(InvokeResponseBody::Raw(snap));
+                }
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    });
+    Ok(PtyGeometry { cols, rows })
+}
+
 /// Frontend ack after xterm.js consumes a chunk — releases backpressure.
 #[tauri::command]
 pub fn pty_ack(state: State<'_, PtyManager>, id: u32, bytes: usize) -> Result<(), String> {
@@ -668,4 +737,83 @@ fn dirs_home() -> Option<String> {
     std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// Poll a session's scrollback until it contains `needle` or we time out.
+    fn wait_for(pm: &PtyManager, id: u32, needle: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if let Some((_, _, snap, _)) = pm.attach(id) {
+                if String::from_utf8_lossy(&snap).contains(needle) {
+                    return true;
+                }
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    // Regression: the whole output pipeline (spawn -> reader -> flusher ->
+    // record_remote -> scrollback) must deliver a headless PTY's output, and a
+    // headless PTY must not stall for lack of a WebView acker.
+    #[test]
+    fn spawn_headless_streams_output_and_does_not_stall() {
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let id = pm
+            .spawn_headless(app.handle().clone(), Some("/tmp".into()), Some("echo REGRESS_MARKER".into()))
+            .expect("spawn");
+        let seen = wait_for(&pm, id, "REGRESS_MARKER", Duration::from_secs(8));
+        let _ = pm.kill(id);
+        assert!(seen, "headless PTY output never reached the scrollback");
+    }
+
+    // Regression: input written to a PTY reaches the child (the desktop + remote
+    // both drive input through PtyManager::write).
+    #[test]
+    fn write_reaches_the_child() {
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let id = pm.spawn_headless(app.handle().clone(), Some("/tmp".into()), None).expect("spawn");
+        thread::sleep(Duration::from_millis(400)); // let the shell come up
+        pm.write(id, "echo WRITE_MARKER\r").expect("write");
+        let seen = wait_for(&pm, id, "WRITE_MARKER", Duration::from_secs(8));
+        let _ = pm.kill(id);
+        assert!(seen, "written command output never appeared");
+    }
+
+    // A fresh attach replays the scrollback so a late viewer sees prior output.
+    #[test]
+    fn attach_snapshot_carries_prior_output() {
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let id = pm
+            .spawn_headless(app.handle().clone(), Some("/tmp".into()), Some("echo SNAPSHOT_MARKER".into()))
+            .expect("spawn");
+        assert!(wait_for(&pm, id, "SNAPSHOT_MARKER", Duration::from_secs(8)), "no output");
+        // A brand-new attach (as pty_attach does) must still see it via snapshot.
+        let (_c, _r, snap, _rx) = pm.attach(id).expect("attach");
+        let _ = pm.kill(id);
+        assert!(String::from_utf8_lossy(&snap).contains("SNAPSHOT_MARKER"));
+    }
+
+    // Regression: kill tears the session down (no leaked child / map entry).
+    #[test]
+    fn kill_removes_the_session() {
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let id = pm.spawn_headless(app.handle().clone(), Some("/tmp".into()), None).expect("spawn");
+        assert!(pm.get(id).is_some());
+        pm.kill(id).expect("kill");
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < deadline && pm.get(id).is_some() {
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(pm.get(id).is_none(), "session not removed after kill");
+    }
 }

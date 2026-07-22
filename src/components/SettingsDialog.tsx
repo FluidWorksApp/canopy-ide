@@ -857,9 +857,12 @@ function RemoteSettings({
   const on = status?.enabled ?? false;
   const lanUrl = status?.urls?.[0] ?? null;
   // The portal is served under /remote, so a tunnel's bare URL needs the path
-  // appended or it 404s at the domain root.
+  // appended or it 404s at the domain root. The URL/QR only belong to the
+  // SELECTED provider — switching tabs to one that isn't running shows no link.
   const withRemote = (u: string) => (u.endsWith("/remote") ? u : `${u.replace(/\/+$/, "")}/remote`);
-  const tunnelUrl = tunnel.url ? withRemote(tunnel.url) : null;
+  const tunnelForProvider = tunnel.provider === provider;
+  const tunnelUrl =
+    tunnelForProvider && tunnel.running && tunnel.url ? withRemote(tunnel.url) : null;
   const activeUrl = scope === "internet" ? tunnelUrl : lanUrl;
 
   // Repoint the QR at whichever URL the chosen scope resolves to.
@@ -987,7 +990,7 @@ function RemoteSettings({
                   </button>
                 )}
 
-                {tunnel.message && (
+                {tunnel.message && tunnelForProvider && (
                   <div style={{ fontSize: 12, color: tunnel.running ? "var(--text-dim)" : "var(--danger)", whiteSpace: "pre-wrap", maxWidth: 460, fontFamily: tunnel.running ? undefined : "ui-monospace, monospace" }}>
                     {tunnel.message}
                   </div>
@@ -996,47 +999,45 @@ function RemoteSettings({
             </Item>
           )}
 
-          <Item
-            name="Scan to connect"
-            desc={
-              scope === "local"
-                ? "Scan, then enter the PIN."
-                : tunnelUrl
-                  ? "Scan from anywhere, then enter the PIN."
-                  : "Start a public link above, then scan."
-            }
-          >
-            <div className="set-inline" style={{ alignItems: "center", gap: 18 }}>
-              {qr && (
-                <div
-                  style={{ width: 128, height: 128, padding: 7, background: "#fff", borderRadius: 10, flex: "none" }}
-                  dangerouslySetInnerHTML={{ __html: qr }}
-                />
-              )}
-              <div style={{ display: "grid", gap: 12, minWidth: 0, flex: 1 }}>
-                <div>
-                  <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 5 }}>PIN</div>
-                  <div style={{ display: "flex", alignItems: "stretch", gap: 8 }}>
-                    <Copyable text={status?.pin ?? ""} big />
-                    <button
-                      style={{ ...iconBtn, padding: "0 12px" }}
-                      title="Generate a new PIN"
-                      disabled={busy}
-                      onClick={() => run(ipc.remoteRotatePin)}
-                    >
-                      <RefreshIcon />
-                    </button>
+          {activeUrl && (
+            <Item
+              name="Scan to connect"
+              desc={
+                scope === "local"
+                  ? "Scan, then enter the PIN."
+                  : "Scan from anywhere, then enter the PIN."
+              }
+            >
+              <div className="set-inline" style={{ alignItems: "center", gap: 18 }}>
+                {qr && (
+                  <div
+                    style={{ width: 128, height: 128, padding: 7, background: "#fff", borderRadius: 10, flex: "none" }}
+                    dangerouslySetInnerHTML={{ __html: qr }}
+                  />
+                )}
+                <div style={{ display: "grid", gap: 12, minWidth: 0, flex: 1 }}>
+                  <div>
+                    <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 5 }}>PIN</div>
+                    <div style={{ display: "flex", alignItems: "stretch", gap: 8 }}>
+                      <Copyable text={status?.pin ?? ""} big />
+                      <button
+                        style={{ ...iconBtn, padding: "0 12px" }}
+                        title="Generate a new PIN"
+                        disabled={busy}
+                        onClick={() => run(ipc.remoteRotatePin)}
+                      >
+                        <RefreshIcon />
+                      </button>
+                    </div>
                   </div>
-                </div>
-                {activeUrl && (
                   <div style={{ minWidth: 0 }}>
                     <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 5 }}>Address</div>
                     <Copyable text={activeUrl} />
                   </div>
-                )}
+                </div>
               </div>
-            </div>
-          </Item>
+            </Item>
+          )}
         </>
       )}
     </>
