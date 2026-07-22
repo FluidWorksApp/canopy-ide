@@ -2787,6 +2787,27 @@ body,
   outline: 1px solid var(--accent);
 }
 
+/* A recorded pick in a multi-step form — reads as filled-in, distinct from the
+   hover outline so a chosen option stays obvious once the pointer moves on. */
+.pending-option-chosen {
+  outline: 1px solid var(--accent);
+}
+
+.pending-option-chosen .pending-option-label {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.pending-submit {
+  margin-top: 8px;
+  width: 100%;
+}
+
+.pending-submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .pending-chip {
   display: inline-block;
   font-size: 10px;

@@ -28,8 +28,11 @@ interface AgentsPanelProps {
   hookPath: string | null;
   pending?: PendingItem[];
   onDismissPending?: (key: string) => void;
-  /** Answer a single-select question by clicking its option in the panel. */
-  onAnswer?: (item: PendingItem, optionIndex: number) => void;
+  /** Answer a questionnaire from the panel. `selections[q]` is the option
+   *  index(es) chosen for question q — one for single-select, zero-or-more for
+   *  multi-select. The backend synthesises the keystrokes to fill the (possibly
+   *  multi-step) terminal form. */
+  onAnswer?: (item: PendingItem, selections: number[][]) => void;
   /** Respond to a permission prompt without leaving the panel: approve types
    *  the accept key into the agent's terminal, deny sends Escape. Only offered
    *  for numbered-prompt CLIs (claude/codex). */
@@ -134,6 +137,34 @@ export function AgentsPanel({
     localStorage.setItem("canopy.hookHintDismissed", "1");
     setHintDismissed(true);
   };
+  // Per-card selections for multi-step questionnaires, keyed by item.key;
+  // picks[key][questionIndex] is the option index(es) chosen for that question.
+  // A lone single-select question answers on the click and never lands here.
+  const [picks, setPicks] = useState<Record<string, number[][]>>({});
+  const emptyPicks = (item: PendingItem) =>
+    (item.questions ?? []).map(() => [] as number[]);
+  const picksFor = (item: PendingItem) => picks[item.key] ?? emptyPicks(item);
+  const choose = (item: PendingItem, qi: number, oi: number, multi: boolean) => {
+    setPicks((prev) => {
+      const cur = (prev[item.key] ?? emptyPicks(item)).map((a) => [...a]);
+      cur[qi] = multi
+        ? cur[qi].includes(oi)
+          ? cur[qi].filter((x) => x !== oi)
+          : [...cur[qi], oi]
+        : [oi];
+      return { ...prev, [item.key]: cur };
+    });
+  };
+  const answerable = (item: PendingItem) =>
+    (item.questions ?? []).every((_, qi) => (picksFor(item)[qi]?.length ?? 0) > 0);
+  const submitAnswers = (item: PendingItem) => {
+    onAnswer?.(item, picksFor(item));
+    setPicks(({ [item.key]: _drop, ...rest }) => rest);
+  };
+  // A single single-select question answers on the option click itself; a
+  // multi-select or multi-question form collects picks and submits together.
+  const instantAnswer = (item: PendingItem) =>
+    (item.questions?.length ?? 0) === 1 && !item.questions?.[0]?.multiSelect;
   const [digests, setDigests] = useState<ipc.SessionDigest[]>([]);
   // This app launch's tag, so a digest from another instance/run (same reset-to-1
   // PTY id, same shared sessions dir) can't be paired with our terminals.
@@ -468,51 +499,78 @@ export function AgentsPanel({
             >
               {item.kind === "question" ? (
                 <>
-                  {(item.questions ?? []).map((q, i) => (
-                    <div key={i} className="pending-question">
-                      {q.header && <span className="pending-chip">{q.header}</span>}
-                      <div className="pending-q-text">{q.question}</div>
-                      <div className="pending-options">
-                        {q.options.map((o, oi) => {
-                          // Single-select, single-question asks answer from
-                          // the panel. Multi-select needs the toggle UI, and
-                          // multi-question forms step through questions in the
-                          // terminal — a digit there could answer the wrong
-                          // one. Those jump instead.
-                          const clickable =
-                            onAnswer &&
-                            !q.multiSelect &&
-                            (item.questions?.length ?? 0) === 1;
-                          return (
-                            <div
-                              key={o.label}
-                              className={`pending-option ${clickable ? "pending-option-clickable" : ""}`}
-                              title={
-                                clickable
-                                  ? "Answer with this option"
-                                  : "Multi-select — answer in the terminal"
-                              }
-                              onClick={
-                                clickable
-                                  ? (e) => {
-                                      e.stopPropagation();
-                                      onAnswer(item, oi);
-                                    }
-                                  : undefined
-                              }
-                            >
-                              <span className="pending-option-label">
-                                {q.multiSelect ? "☐" : "○"} {o.label}
-                              </span>
-                              {o.description && (
-                                <span className="pending-option-desc">{o.description}</span>
-                              )}
-                            </div>
-                          );
-                        })}
+                  {(item.questions ?? []).map((q, i) => {
+                    const sel = picksFor(item)[i] ?? [];
+                    return (
+                      <div key={i} className="pending-question">
+                        {q.header && <span className="pending-chip">{q.header}</span>}
+                        <div className="pending-q-text">{q.question}</div>
+                        <div className="pending-options">
+                          {q.options.map((o, oi) => {
+                            // Every option is now selectable in the panel. A
+                            // lone single-select answers on the click; anything
+                            // multi-step (multi-select, or several questions)
+                            // records the pick here and submits via the button
+                            // below. The synthesised keystrokes fill the
+                            // terminal form; it stays reachable as the fallback.
+                            const chosen = sel.includes(oi);
+                            const mark = q.multiSelect
+                              ? chosen
+                                ? "☑"
+                                : "☐"
+                              : chosen
+                                ? "◉"
+                                : "○";
+                            return (
+                              <div
+                                key={o.label}
+                                className={`pending-option ${onAnswer ? "pending-option-clickable" : ""} ${
+                                  chosen ? "pending-option-chosen" : ""
+                                }`}
+                                title={onAnswer ? "Select this option" : "Answer in the terminal"}
+                                onClick={
+                                  onAnswer
+                                    ? (e) => {
+                                        e.stopPropagation();
+                                        if (instantAnswer(item)) onAnswer(item, [[oi]]);
+                                        else choose(item, i, oi, !!q.multiSelect);
+                                      }
+                                    : undefined
+                                }
+                              >
+                                <span className="pending-option-label">
+                                  {mark} {o.label}
+                                </span>
+                                {o.description && (
+                                  <span className="pending-option-desc">{o.description}</span>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
+                  {/* Multi-step forms submit all picks as one keystroke
+                      sequence. A lone single-select answered on click above, so
+                      it shows no button. */}
+                  {onAnswer && !instantAnswer(item) && (
+                    <button
+                      className="btn btn-accent pending-submit"
+                      disabled={!answerable(item)}
+                      title={
+                        answerable(item)
+                          ? "Send these answers to the terminal"
+                          : "Choose an option for every question first"
+                      }
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        submitAnswers(item);
+                      }}
+                    >
+                      {(item.questions?.length ?? 0) > 1 ? "Submit answers" : "Submit answer"}
+                    </button>
+                  )}
                 </>
               ) : (
                 <>

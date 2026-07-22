@@ -1583,12 +1583,20 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     [stats],
   );
 
-  // Answer a questionnaire straight from the panel: type the option's number
-  // into the agent's terminal (Claude Code's ask UI selects by digit), then
-  // Enter a beat later. The card dismisses immediately — the hook stream
-  // resolves it for real once the tool call completes.
-  const answerQuestion = useCallback(
-    (item: PendingItem, optionIndex: number) => {
+  // Answer a questionnaire straight from the panel by synthesising the
+  // keystrokes the user would type into the agent's terminal. Claude's ask UI
+  // selects an option by its digit and confirms with Enter; a multi-question
+  // form advances to the next question on each Enter and ends on a Submit tab
+  // the final Enter presses; a multi-select question toggles each chosen digit
+  // before its confirming Enter. `selections[q]` is the option index(es) picked
+  // for question q — one for single-select, zero-or-more for multi-select.
+  //
+  // Keystrokes are spaced out: the TUI needs a beat to register a key and
+  // repaint before the next lands. The card dismisses immediately — the hook
+  // stream resolves it for real once the tool call completes, and the terminal
+  // is right there if a key mis-lands (best-effort, by design).
+  const answerQuestions = useCallback(
+    (item: PendingItem, selections: number[][]) => {
       const termTabs = tabsRef.current.filter(
         (t): t is TermSubTab => t.type === "terminal",
       );
@@ -2902,7 +2910,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           hookPath={hookPath}
           pending={pending}
           onDismissPending={onDismissPending}
-          onAnswer={answerQuestion}
+          onAnswer={answerQuestions}
           onRespond={respondPermission}
           onJumpToTerminal={jumpToTerminal}
           onJumpToPty={jumpToPty}
