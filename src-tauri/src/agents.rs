@@ -822,10 +822,13 @@ pub async fn session_forget(session_id: String) -> Result<(), String> {
         return Err("invalid session id".into());
     }
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
-    let path = std::path::PathBuf::from(&home)
-        .join(".canopy")
-        .join("sessions")
-        .join(format!("{session_id}.json"));
+    let dir = std::path::PathBuf::from(&home).join(".canopy").join("sessions");
+    // The change journal is a sidecar of the digest — forgetting the session
+    // must take it too, or a long-lived machine slowly accumulates orphaned
+    // edit logs. Best-effort: its absence is fine, and it must not block the
+    // digest removal that is the actual point of forgetting.
+    let _ = std::fs::remove_file(dir.join(format!("{session_id}.edits.jsonl")));
+    let path = dir.join(format!("{session_id}.json"));
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
         // Already gone is the desired end state, not a failure.

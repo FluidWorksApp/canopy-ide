@@ -37,7 +37,7 @@ interface AgentWorkspaceViewProps {
   onNotice: Notify;
 }
 
-type Pane = "uncommitted" | "diff";
+type Pane = "edits" | "uncommitted" | "diff";
 
 // The reported-editing list is a quick-glance strip, not the authoritative diff
 // below — so it shows the basename (the full path lives in the tooltip and the
@@ -45,6 +45,32 @@ type Pane = "uncommitted" | "diff";
 const TOUCHED_LIMIT = 6;
 const basename = (p: string) => p.split("/").filter(Boolean).pop() ?? p;
 const parentDir = (p: string) => p.split("/").filter(Boolean).slice(-2, -1)[0] ?? "";
+
+// A journaled edit (old→new fragment) rendered as a single unified hunk, so it
+// paints with the same DiffView as every other diff in the app. Line numbers
+// are nominal (these are fragments, not whole files); a tight common
+// prefix/suffix keeps the hunk to the part that actually changed.
+function editToHunk(old: string | null, next: string | null): string {
+  const oldLines = old != null ? old.split("\n") : [];
+  const newLines = next != null ? next.split("\n") : [];
+  let p = 0;
+  while (p < oldLines.length && p < newLines.length && oldLines[p] === newLines[p]) p++;
+  let s = 0;
+  while (
+    s < oldLines.length - p &&
+    s < newLines.length - p &&
+    oldLines[oldLines.length - 1 - s] === newLines[newLines.length - 1 - s]
+  )
+    s++;
+  const ctxPre = oldLines.slice(Math.max(0, p - 2), p).map((l) => ` ${l}`);
+  const removed = oldLines.slice(p, oldLines.length - s).map((l) => `-${l}`);
+  const added = newLines.slice(p, newLines.length - s).map((l) => `+${l}`);
+  const ctxPost = oldLines.slice(oldLines.length - s, oldLines.length - s + 2).map((l) => ` ${l}`);
+  const body = [...ctxPre, ...removed, ...added, ...ctxPost].join("\n");
+  const oldCount = ctxPre.length + removed.length + ctxPost.length;
+  const newCount = ctxPre.length + added.length + ctxPost.length;
+  return `@@ -1,${oldCount} +1,${newCount} @@\n${body}`;
+}
 
 export function AgentWorkspaceView({
   repo,
@@ -68,6 +94,23 @@ export function AgentWorkspaceView({
   // undefined = still looking, null = looked and none.
   const [pr, setPr] = useState<ipc.PrInfo | null | undefined>(undefined);
   const [tick, setTick] = useState(0);
+  // The per-agent change journal: what THIS agent changed, attributed at hunk
+  // granularity even on a shared checkout. Empty for a hookless/pre-journal
+  // session, in which case only the tree view below has anything to show.
+  const [edits, setEdits] = useState<ipc.AgentEdit[]>([]);
+
+  useEffect(() => {
+    let live = true;
+    setEdits([]);
+    if (!sessionId) return;
+    void ipc
+      .agentEdits(repo, sessionId)
+      .then((e) => live && setEdits(e))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [repo, sessionId, digest?.updated, tick]);
 
   // The join: digest re-read fresh + branch/workdir/counts/commits. Refetched
   // on Refresh and whenever the panel hands over a newer digest.
@@ -80,14 +123,21 @@ export function AgentWorkspaceView({
       .then((w) => {
         if (!live) return;
         setWs(w);
-        // Default to the pane that has something in it, once, on first load.
-        setPane((p) => p ?? (w.dirty > 0 || w.on_base || w.detached ? "uncommitted" : "diff"));
       })
       .catch((e) => live && setWsErr(String(e)));
     return () => {
       live = false;
     };
   }, [repo, cwd, agent, sessionId, digest?.updated, tick]);
+
+  // Open on this agent's own edits when we have them — that's the per-agent
+  // view the shared-checkout tree can't give. Otherwise fall back to whichever
+  // tree pane has content. Set once, on first load.
+  useEffect(() => {
+    if (pane) return;
+    if (edits.length > 0) setPane("edits");
+    else if (ws) setPane(ws.dirty > 0 || ws.on_base || ws.detached ? "uncommitted" : "diff");
+  }, [edits, ws, pane]);
 
   useEffect(() => {
     let live = true;
@@ -124,6 +174,8 @@ export function AgentWorkspaceView({
     let live = true;
     setPatch(null);
     if (!repo || !ws?.branch || !pane) return;
+    // The edits pane is journal-only — no git patch to fetch.
+    if (pane === "edits") return;
     if (pane === "diff" && (ws.detached || ws.on_base)) return;
     void ipc
       .gitBranchPatch(
@@ -145,6 +197,28 @@ export function AgentWorkspaceView({
   const branchable = !!ws?.branch && !ws.detached && !ws.on_base;
   const files = patch?.patch ? splitPatch(patch.patch) : [];
 
+  // The set of paths this agent is known to have touched — from its own edit
+  // journal and its reported-editing list. Matched by basename too, since a
+  // journal path (repo-relative) and a diff path can differ by a worktree
+  // prefix. Used to split the shared-checkout tree diff into "this agent's" and
+  // "everyone else's".
+  const agentPaths = new Set<string>([...edits.map((e) => e.path), ...touched]);
+  const agentBasenames = new Set<string>([...agentPaths].map(basename));
+  const isAgentFile = (p: string) => agentPaths.has(p) || agentBasenames.has(basename(p));
+  const mine = files.filter((f) => isAgentFile(f.path));
+  const others = files.filter((f) => !isAgentFile(f.path));
+  // Whether we can attribute at all: with a journal or a reported list we can
+  // separate this agent's work; without either it's an undifferentiated tree.
+  const canAttribute = agentPaths.size > 0;
+
+  // Journal edits grouped by file, newest file last, preserving edit order.
+  const editsByFile: { path: string; items: ipc.AgentEdit[] }[] = [];
+  for (const e of edits) {
+    const g = editsByFile.find((x) => x.path === e.path);
+    if (g) g.items.push(e);
+    else editsByFile.push({ path: e.path, items: [e] });
+  }
+
   // Jump from a reported-editing chip to that file's diff section below. A
   // reported path (relative to the hook's cwd) and a diff path (relative to the
   // repo root) usually match outright; basename is the fallback. A chip with no
@@ -164,6 +238,35 @@ export function AgentWorkspaceView({
     window.setTimeout(() => setFlashPath((p) => (p === path ? null : p)), 1100);
   };
   const [showMoreTouched, setShowMoreTouched] = useState(false);
+  // On a shared checkout the tree diff also carries other agents' work; it's
+  // folded away by default so this agent's own files lead.
+  const [showOthers, setShowOthers] = useState(false);
+
+  const renderFile = (f: { path: string; patch: string }) => (
+    <div
+      key={f.path}
+      className={`pr-file ${flashPath === f.path ? "pr-file-flash" : ""}`}
+      ref={(el) => {
+        if (el) fileRefs.current.set(f.path, el);
+        else fileRefs.current.delete(f.path);
+      }}
+    >
+      <div className="pr-file-name">{f.path}</div>
+      <DiffView
+        data={{
+          hunks: [f.patch],
+          oldFile: { fileName: f.path },
+          newFile: { fileName: f.path },
+        }}
+        diffViewMode={split ? DiffModeEnum.Split : DiffModeEnum.Unified}
+        diffViewHighlight
+        diffViewTheme="dark"
+        diffViewWrap
+        diffViewAddWidget={false}
+        diffViewFontSize={12}
+      />
+    </div>
+  );
 
   return (
     <div className="ticket-view">
@@ -337,15 +440,26 @@ export function AgentWorkspaceView({
         </div>
       )}
 
-      {ws && (
+      {(ws || edits.length > 0) && (
         <div className="branch-panes">
-          <button
-            className={`btn-mini ${pane === "uncommitted" ? "btn-accent" : ""}`}
-            onClick={() => setPane("uncommitted")}
-          >
-            Uncommitted{ws.dirty > 0 ? ` (${ws.dirty})` : ""}
-          </button>
-          {branchable && (
+          {edits.length > 0 && (
+            <button
+              className={`btn-mini ${pane === "edits" ? "btn-accent" : ""}`}
+              title="Only the changes this agent made, attributed per hunk — accurate even on a shared checkout"
+              onClick={() => setPane("edits")}
+            >
+              This agent ({edits.length})
+            </button>
+          )}
+          {ws && (
+            <button
+              className={`btn-mini ${pane === "uncommitted" ? "btn-accent" : ""}`}
+              onClick={() => setPane("uncommitted")}
+            >
+              Uncommitted{ws.dirty > 0 ? ` (${ws.dirty})` : ""}
+            </button>
+          )}
+          {ws && branchable && (
             <button
               className={`btn-mini ${pane === "diff" ? "btn-accent" : ""}`}
               onClick={() => setPane("diff")}
@@ -353,7 +467,7 @@ export function AgentWorkspaceView({
               All changes vs base
             </button>
           )}
-          {patch && files.length > 0 && (
+          {pane !== "edits" && patch && files.length > 0 && (
             <>
               <span className="loose-ahead">+{patch.insertions}</span>
               <span className="loose-dirty">−{patch.deletions}</span>
@@ -392,44 +506,91 @@ export function AgentWorkspaceView({
           </div>
         )}
 
-        {!ws ? (
-          !wsErr && repo && <div className="tree-empty">Loading workspace…</div>
-        ) : !patch ? (
-          pane && <div className="tree-empty">Loading diff…</div>
-        ) : files.length === 0 ? (
-          <div className="tree-empty">
-            {pane === "uncommitted"
-              ? "No uncommitted changes in this workspace."
-              : "No differences from the base branch."}
-          </div>
-        ) : (
-          files.map((f) => (
-            <div
-              key={f.path}
-              className={`pr-file ${flashPath === f.path ? "pr-file-flash" : ""}`}
-              ref={(el) => {
-                if (el) fileRefs.current.set(f.path, el);
-                else fileRefs.current.delete(f.path);
-              }}
-            >
-              <div className="pr-file-name">{f.path}</div>
-              <DiffView
-                data={{
-                  hunks: [f.patch],
-                  oldFile: { fileName: f.path },
-                  newFile: { fileName: f.path },
-                }}
-                diffViewMode={split ? DiffModeEnum.Split : DiffModeEnum.Unified}
-                diffViewHighlight
-                diffViewTheme="dark"
-                diffViewWrap
-                diffViewAddWidget={false}
-                diffViewFontSize={12}
-              />
+        {/* This agent's own edits, from the change journal — attributed per
+            hunk, so even a file two agents co-edited shows only what THIS one
+            did. A superseded edit (a later write replaced it) is kept but
+            greyed, because it's still a true record of what the agent did. */}
+        {pane === "edits" &&
+          (editsByFile.length === 0 ? (
+            <div className="tree-empty">No edits recorded for this agent yet.</div>
+          ) : (
+            editsByFile.map((g) => (
+              <div key={g.path} className="pr-file">
+                <div className="pr-file-name">
+                  {g.path}
+                  <span className="badge">{g.items.length}</span>
+                </div>
+                {g.items.map((e, i) => (
+                  <div
+                    key={i}
+                    className={`aw-edit ${e.present ? "" : "aw-edit-superseded"}`}
+                    title={
+                      e.present
+                        ? `${e.tool} · still in the file`
+                        : `${e.tool} · superseded by a later change`
+                    }
+                  >
+                    {!e.present && <span className="aw-edit-tag">superseded</span>}
+                    <DiffView
+                      data={{
+                        hunks: [editToHunk(e.old, e.new)],
+                        oldFile: { fileName: g.path },
+                        newFile: { fileName: g.path },
+                      }}
+                      diffViewMode={split ? DiffModeEnum.Split : DiffModeEnum.Unified}
+                      diffViewHighlight
+                      diffViewTheme="dark"
+                      diffViewWrap
+                      diffViewAddWidget={false}
+                      diffViewFontSize={12}
+                    />
+                  </div>
+                ))}
+              </div>
+            ))
+          ))}
+
+        {pane !== "edits" &&
+          (!ws ? (
+            !wsErr && repo && <div className="tree-empty">Loading workspace…</div>
+          ) : !patch ? (
+            pane && <div className="tree-empty">Loading diff…</div>
+          ) : files.length === 0 ? (
+            <div className="tree-empty">
+              {pane === "uncommitted"
+                ? "No uncommitted changes in this workspace."
+                : "No differences from the base branch."}
             </div>
-          ))
-        )}
-        {patch?.truncated && (
+          ) : (
+            <>
+              {/* On a shared checkout the diff isn't per-agent, so lead with the
+                  files this agent is known to have touched and fold the rest
+                  away. When we can't attribute at all (no journal, no reported
+                  list), everything is just "the diff". */}
+              {(canAttribute ? mine : files).map(renderFile)}
+              {canAttribute && others.length > 0 && (
+                <div className="aw-others">
+                  <button
+                    className="ticket-state-head aw-others-head"
+                    onClick={() => setShowOthers((v) => !v)}
+                    title="Changes in this shared checkout that this agent didn't report making"
+                  >
+                    Other changes in this checkout
+                    <span className="badge">{others.length}</span>
+                    <span className="aw-others-caret">{showOthers ? "▴" : "▾"}</span>
+                  </button>
+                  {showOthers && others.map(renderFile)}
+                </div>
+              )}
+              {canAttribute && mine.length === 0 && others.length > 0 && !showOthers && (
+                <div className="tree-empty">
+                  None of the uncommitted files match what this agent reported —
+                  its changes may already be committed, or it worked elsewhere.
+                </div>
+              )}
+            </>
+          ))}
+        {patch?.truncated && pane !== "edits" && (
           <div className="tree-empty">
             Diff truncated at 2 MB — use <code>git diff</code> for the whole thing.
           </div>

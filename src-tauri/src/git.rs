@@ -1873,6 +1873,104 @@ pub async fn agent_workspace_at(
     workspace_join(&top, base, sid, agent, state_s, updated, touched, Some(cwd), branch_fallback)
 }
 
+/// One edit the agent authored, read back from its change journal. `present`
+/// says the `new` text is still in the file — a later edit by anyone supersedes
+/// it, which is how a co-edited file reads honestly: this agent's hunks, each
+/// marked live or superseded, regardless of what the shared working tree shows.
+#[derive(Serialize)]
+pub struct AgentEdit {
+    pub ts: u64,
+    /// Repo-relative when it resolves under this repo, else the recorded path.
+    pub path: String,
+    pub tool: String,
+    pub old: Option<String>,
+    pub new: Option<String>,
+    pub present: bool,
+}
+
+/// The per-agent change journal for a session: what *this* agent changed, at
+/// the moment it changed it (written by canopy_hook on each edit). Unlike the
+/// working-tree diff, this attributes hunks per agent even on a shared checkout.
+/// Newest last, capped. Missing journal (hookless CLI, or a session that predates
+/// journaling) simply returns empty — the caller falls back to the tree view.
+#[tauri::command]
+pub async fn agent_edits(
+    state: State<'_, WorkspaceManager>,
+    repo: Option<String>,
+    session_id: String,
+) -> Result<Vec<AgentEdit>, String> {
+    // Same allowlist guard as agent_workspace — the id is a file name.
+    if session_id.is_empty()
+        || !session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        || session_id.contains("..")
+    {
+        return Err("invalid session id".into());
+    }
+    let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
+    let jpath = PathBuf::from(&home)
+        .join(".canopy")
+        .join("sessions")
+        .join(format!("{session_id}.edits.jsonl"));
+    let Ok(raw) = std::fs::read_to_string(&jpath) else {
+        return Ok(vec![]);
+    };
+    // The present-check reads files; keep it inside the opened repo so a tampered
+    // journal can't turn this into an arbitrary-read. No repo → no present-check
+    // and no relativisation, but the authored edits still show.
+    let top = repo.as_deref().and_then(|r| repo_path(&state, r).ok());
+    let canon_top = top.as_deref().map(|t| std::fs::canonicalize(t).unwrap_or_else(|_| t.to_path_buf()));
+    // Read each touched file at most once.
+    let mut cache: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+    const MAX_EDITS: usize = 400;
+    let lines: Vec<&str> = raw.lines().collect();
+    let start = lines.len().saturating_sub(MAX_EDITS);
+    let mut out = Vec::new();
+    for line in &lines[start..] {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let abs = v["path"].as_str().unwrap_or("");
+        if abs.is_empty() {
+            continue;
+        }
+        let new = v["new"].as_str().map(str::to_string);
+        let old = v["old"].as_str().map(str::to_string);
+        // Only files under the opened repo are read; anything else is left
+        // unresolved (present = false) rather than touched.
+        let under_repo = canon_top
+            .as_ref()
+            .map(|t| std::fs::canonicalize(abs).map(|a| a.starts_with(t)).unwrap_or(false))
+            .unwrap_or(false);
+        let present = if under_repo {
+            let content = cache
+                .entry(abs.to_string())
+                .or_insert_with(|| std::fs::read_to_string(abs).ok());
+            match (&new, content.as_ref()) {
+                (Some(n), Some(c)) => {
+                    let needle = n.trim_end_matches("\n…(truncated)");
+                    !needle.is_empty() && c.contains(needle)
+                }
+                _ => false,
+            }
+        } else {
+            false
+        };
+        let path = canon_top
+            .as_ref()
+            .and_then(|t| std::fs::canonicalize(abs).ok().and_then(|a| a.strip_prefix(t).ok().map(|p| p.to_string_lossy().to_string())))
+            .unwrap_or_else(|| abs.to_string());
+        out.push(AgentEdit {
+            ts: v["ts"].as_u64().unwrap_or(0),
+            path,
+            tool: v["tool"].as_str().unwrap_or("").to_string(),
+            old,
+            new,
+            present,
+        });
+    }
+    Ok(out)
+}
+
 /// The git half of an agent workspace, shared by the digest-keyed
 /// `agent_workspace` and the cwd-keyed `agent_workspace_at`: resolve the cwd to
 /// a workdir this repo owns, then read the live branch, counts and commit list.

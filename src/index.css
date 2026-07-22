@@ -436,7 +436,7 @@ body,
 }
 
 /* One status dot per agent tab, replacing the per-agent glyph. Gray steady =
-   idle, gray soft-pulse = working (burning CPU), orange sharp-pulse = wants
+   idle, green soft-pulse = working (burning CPU), orange sharp-pulse = wants
    attention. One signal, read at a glance across a row of tabs. */
 .tab-status {
   width: 8px;
@@ -447,6 +447,7 @@ body,
 }
 
 .tab-status-working {
+  background: var(--ok);
   animation: tab-status-soft 1.5s ease-in-out infinite;
 }
 
@@ -5069,6 +5070,53 @@ textarea,
 
 .aw-touched {
   padding: 8px 14px 0;
+}
+
+/* One journaled edit: a self-contained old→new hunk the agent authored. */
+.aw-edit {
+  position: relative;
+  margin: 6px 0;
+}
+/* Superseded: a later write replaced it, so it's a historical record, not the
+   live state — dimmed and tagged, but kept, because the agent did do it. */
+.aw-edit-superseded {
+  opacity: 0.55;
+}
+.aw-edit-tag {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  z-index: 1;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0 5px;
+}
+
+/* The "everyone else's changes on this shared checkout" fold. */
+.aw-others {
+  margin-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+.aw-others-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-dim);
+}
+.aw-others-head:hover {
+  color: var(--text);
+}
+.aw-others-caret {
+  margin-left: auto;
 }
 
 .aw-touched-list {
