@@ -255,6 +255,7 @@ pub fn run() {
             lsp::lsp_stop,
             agents::kill_process,
             agents::which_check,
+            agents::cli_versions,
             agents::setup_agent_hooks,
             agents::claude_session_stats,
             agents::hook_bridge_path,

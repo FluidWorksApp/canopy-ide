@@ -179,6 +179,21 @@ export interface AgentCli {
    * the TUI is up, which works everywhere but is a beat slower.
    */
   prompt?: (text: string) => string;
+
+  /**
+   * Registry endpoint whose JSON carries the newest published version — npm's
+   * `/<pkg>/latest` doc or PyPI's `/pypi/<pkg>/json`. Absent for CLIs shipped
+   * by opaque installer scripts (agy, omp): there is no registry to ask, so
+   * they simply never show an update badge — never guess a version source.
+   */
+  latestUrl?: string;
+
+  /**
+   * The CLI's own self-update command, when it has one. Preferred over
+   * re-running `install`: an npm install can shadow a native install (claude's
+   * curl installer vs npm), whereas the self-updater updates in place.
+   */
+  update?: string;
 }
 
 /** Single-quote a string for a POSIX shell. */
@@ -191,6 +206,9 @@ export const AGENT_CLIS: AgentCli[] = [
     bin: "claude",
     icon: "✳",
     install: "npm install -g @anthropic-ai/claude-code",
+    latestUrl: "https://registry.npmjs.org/@anthropic-ai/claude-code/latest",
+    // Verified: `claude update` self-updates both the npm and native installs.
+    update: "claude update",
     // Verified: `-r, --resume [value]  Resume a conversation by session ID`.
     resume: (id) => `claude --resume ${id}`,
     // Verified: claude takes the opening prompt as a positional argument and
@@ -203,6 +221,7 @@ export const AGENT_CLIS: AgentCli[] = [
     bin: "codex",
     icon: "⌬",
     install: "npm install -g @openai/codex",
+    latestUrl: "https://registry.npmjs.org/@openai/codex/latest",
     // Verified: `codex resume <SESSION_ID>` — subcommand, id is positional and
     // takes a UUID or a session name.
     resume: (id) => `codex resume ${id}`,
@@ -216,10 +235,19 @@ export const AGENT_CLIS: AgentCli[] = [
     bin: "amp",
     icon: "⚡",
     install: "npm install -g @sourcegraph/amp",
+    latestUrl: "https://registry.npmjs.org/@sourcegraph/amp/latest",
     // Verified: `amp threads continue <threadId>`; thread ids look like T-<uuid>.
     resume: (id) => `amp threads continue ${id}`,
   },
-  { id: "aider", name: "Aider", bin: "aider", icon: "a", install: "python3 -m pip install -U aider-chat" },
+  {
+    id: "aider",
+    name: "Aider",
+    bin: "aider",
+    icon: "a",
+    // `-U` makes this the update command too.
+    install: "python3 -m pip install -U aider-chat",
+    latestUrl: "https://pypi.org/pypi/aider-chat/json",
+  },
   // Gemini CLI is gone from this list on purpose: Google killed its "Login
   // with Google" path for individuals (2026-06-18, "migrate to the Antigravity
   // suite") and Antigravity below is its named successor. Offering both meant
@@ -243,6 +271,9 @@ export const AGENT_CLIS: AgentCli[] = [
     bin: "opencode",
     icon: "▣",
     install: "npm install -g opencode-ai",
+    latestUrl: "https://registry.npmjs.org/opencode-ai/latest",
+    // Verified: `opencode upgrade` self-updates regardless of install method.
+    update: "opencode upgrade",
     // Verified: `-s, --session <id>` = "session id to continue". Treat the id as
     // opaque — enumerate via `opencode session list --format json`.
     resume: (id) => `opencode --session ${id}`,
@@ -280,6 +311,93 @@ export async function checkInstalledClis(): Promise<Record<string, boolean>> {
     return {};
   }
 }
+
+// ---------- CLI update detection ----------
+
+export interface CliUpdate {
+  /** Version reported by `<bin> --version`, when parseable. */
+  installed?: string;
+  /** Newest version the CLI's registry publishes, when it has a registry. */
+  latest?: string;
+  /** `latest` is strictly newer than `installed` (both sides known). */
+  hasUpdate: boolean;
+}
+
+const LATEST_CACHE_KEY = "canopy.cliLatest.v1";
+/** Registries publish a handful of releases a day at most; 6h keeps the badge
+ *  fresh without a network round-trip on every launcher open. */
+const LATEST_TTL_MS = 6 * 60 * 60 * 1000;
+
+/** Dot-segment numeric compare; >0 when `a` is newer. Registry versions and
+ *  `--version` output are both plain x.y.z for every CLI in the registry. */
+const cmpVersions = (a: string, b: string): number => {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d) return d;
+  }
+  return 0;
+};
+
+/**
+ * Installed vs latest version for every registered CLI. Installed versions are
+ * probed natively (`<bin> --version` on the login-shell PATH); latest versions
+ * come from each CLI's registry, cached for LATEST_TTL_MS so reopening the
+ * launcher doesn't hammer npm/PyPI. CLIs without a `latestUrl` never flag an
+ * update — unknown is unknown.
+ */
+export async function checkCliUpdates(): Promise<Record<string, CliUpdate>> {
+  let cached: { at: number; latest: Record<string, string> } | null = null;
+  try {
+    cached = JSON.parse(localStorage.getItem(LATEST_CACHE_KEY) ?? "null");
+  } catch {
+    // Corrupt cache — treat as absent and re-fetch.
+  }
+  const fresh =
+    cached != null &&
+    typeof cached.at === "number" &&
+    typeof cached.latest === "object" &&
+    cached.latest != null &&
+    Date.now() - cached.at < LATEST_TTL_MS;
+  try {
+    const res = await invoke<
+      Record<string, { installed: string | null; latest: string | null }>
+    >("cli_versions", {
+      queries: AGENT_CLIS.map((c) => ({
+        bin: c.bin,
+        latestUrl: fresh ? null : (c.latestUrl ?? null),
+      })),
+    });
+    const latest: Record<string, string> = fresh ? cached!.latest : {};
+    if (!fresh) {
+      for (const [bin, v] of Object.entries(res)) {
+        if (v.latest) latest[bin] = v.latest;
+      }
+      localStorage.setItem(
+        LATEST_CACHE_KEY,
+        JSON.stringify({ at: Date.now(), latest }),
+      );
+    }
+    const out: Record<string, CliUpdate> = {};
+    for (const [bin, v] of Object.entries(res)) {
+      const installed = v.installed ?? undefined;
+      const newest = latest[bin];
+      out[bin] = {
+        installed,
+        latest: newest,
+        hasUpdate: !!(installed && newest && cmpVersions(newest, installed) > 0),
+      };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/** The command that updates `cli` — its self-updater when verified, else its
+ *  installer (idempotent for npm -g and pip -U). */
+export const updateCommand = (cli: AgentCli) => cli.update ?? cli.install;
 
 /**
  * The command that reopens `sessionId` for `agentId`, or null when that agent
