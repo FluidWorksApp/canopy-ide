@@ -202,9 +202,16 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
     if (row.resumeCwd) spawn(row.resumeCwd, resumeCommand(row.agent, row.sessionId))
   }
 
+  // The route's view. The New-agent sheet and notice are lifted OUT of this
+  // switch and rendered once below, so they overlay EVERY route — a "New agent"
+  // button on the project page opens the sheet just like it does on home.
+  let body: React.ReactNode
+  const historyRow = route.name === 'history' ? rows.find((r) => r.key === route.key) : undefined
+  const projectFor = route.name === 'project' ? projects.find((p) => p.id === route.id) : undefined
+
   if (route.name === 'agent' && transportRef.current) {
     const row = rows.find((r) => r.ptyId === route.pty)
-    return (
+    body = (
       <Detail
         transport={transportRef.current}
         pty={route.pty}
@@ -212,33 +219,24 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
         onBack={() => setRoute({ name: 'home' })}
       />
     )
-  }
-
-  if (route.name === 'history') {
-    const row = rows.find((r) => r.key === route.key)
-    if (row) {
-      return <HistoryView row={row} onBack={() => setRoute({ name: 'home' })} onResume={() => resume(row)} />
-    }
-  }
-
-  if (route.name === 'project') {
-    const project = projects.find((p) => p.id === route.id)
-    if (project) {
-      return (
-        <ProjectDetail
-          project={project}
-          rows={agentsForProject(project, rows, projects)}
-          onBack={() => setRoute({ name: 'home' })}
-          onOpen={openAgent}
-          onNew={() => setNewAgent({ open: true, projectId: project.id })}
-        />
-      )
-    }
-  }
-
-  return (
-    <div className="app">
-      <header className="deck">
+  } else if (historyRow) {
+    body = (
+      <HistoryView row={historyRow} onBack={() => setRoute({ name: 'home' })} onResume={() => resume(historyRow)} />
+    )
+  } else if (projectFor) {
+    body = (
+      <ProjectDetail
+        project={projectFor}
+        rows={agentsForProject(projectFor, rows, projects)}
+        onBack={() => setRoute({ name: 'home' })}
+        onOpen={openAgent}
+        onNew={() => setNewAgent({ open: true, projectId: projectFor.id })}
+      />
+    )
+  } else {
+    body = (
+      <div className="app">
+        <header className="deck">
         <div className="deck-top">
           <div className="mark">
             <span className={`mark-dot ${up ? 'live' : 'down'}`} />
@@ -325,11 +323,18 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
         </section>
       )}
 
-      {tab === 'agents' && (
-        <button className="fab" onClick={() => setNewAgent({ open: true })}>
-          <IconPlus s={19} /> New agent
-        </button>
-      )}
+        {tab === 'agents' && (
+          <button className="fab" onClick={() => setNewAgent({ open: true })}>
+            <IconPlus s={19} /> New agent
+          </button>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <>
+      {body}
       {notice && (
         <div className="notice" onClick={() => setNotice(null)}>
           {notice} <span className="notice-x">✕</span>
@@ -343,7 +348,7 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
           onClose={() => setNewAgent({ open: false })}
         />
       )}
-    </div>
+    </>
   )
 }
 
@@ -663,7 +668,16 @@ function Detail({
             )}
           </span>
         </div>
-        <button className="danger sm" onClick={() => transport.killPty(pty)}>
+        <button
+          className="danger sm"
+          onClick={() => {
+            // Terminate the agent's PTY, then return to the list — the session
+            // drops off "Active" as its pty:exit propagates. Without the
+            // navigation the kill fired silently and the button read as dead.
+            transport.killPty(pty)
+            onBack()
+          }}
+        >
           <IconStop s={13} /> Stop
         </button>
       </header>
