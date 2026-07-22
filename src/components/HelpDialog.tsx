@@ -5,6 +5,8 @@ import { useEscape } from "../useEscape";
 
 interface HelpDialogProps {
   onClose: () => void;
+  /** Re-open the first-run walkthrough on demand. */
+  onReplayIntro?: () => void;
 }
 
 const SHORTCUTS: [string, string][] = [
@@ -13,6 +15,7 @@ const SHORTCUTS: [string, string][] = [
   ["⌘⇧M", "Manage projects (create, edit, delete)"],
   ["⌘⌥← / ⌘⌥→", "Previous / next project"],
   ["⌘T", "New terminal in the active project"],
+  ["⌃⇥ / ⌃⇧⇥", "Next / previous tab"],
   ["⌃⌘← / ⌃⌘→", "Previous / next tab"],
   ["⌘W", "Close tab"],
   ["⌘⇧W", "Close project"],
@@ -20,6 +23,7 @@ const SHORTCUTS: [string, string][] = [
   ["⌘⇧F", "Find in files"],
   ["⌘B", "Toggle sidebar"],
   ["⌘⇧Enter", "Focus mode (Esc leaves)"],
+  ["⌘D", "Voice dictation — speak, press again to insert (Esc cancels)"],
   ["⌘, ", "Settings"],
   ["⌥← / ⌥→", "Terminal: jump word left / right"],
   ["⌘← / ⌘→", "Terminal: start / end of line"],
@@ -27,7 +31,7 @@ const SHORTCUTS: [string, string][] = [
   ["⌘⌫", "Terminal: delete line"],
 ];
 
-export function HelpDialog({ onClose }: HelpDialogProps) {
+export function HelpDialog({ onClose, onReplayIntro }: HelpDialogProps) {
   useEscape(onClose, true);
   const link = (url: string, label: string) => (
     <a
@@ -55,6 +59,19 @@ export function HelpDialog({ onClose }: HelpDialogProps) {
             right-clicking a directory in the sidebar. Terminals keep running
             when you switch projects.
           </p>
+          {onReplayIntro && (
+            <p>
+              <a
+                href="#"
+                onClick={(e) => {
+                  e.preventDefault();
+                  onReplayIntro();
+                }}
+              >
+                Replay the welcome walkthrough
+              </a>
+            </p>
+          )}
 
           <div className="set-head">Agents</div>
           <p>

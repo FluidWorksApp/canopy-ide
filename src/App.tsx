@@ -21,6 +21,7 @@ import { ProjectDialog } from "./components/ProjectDialog";
 import { ProjectManager } from "./components/ProjectManager";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { HelpDialog } from "./components/HelpDialog";
+import { Dictation } from "./components/Dictation";
 import { Welcome } from "./components/Welcome";
 import { stopWorkspaceServers } from "./lsp/client";
 import { checkForUpdateAnyChannel, installUpdate, type UpdateAvailability } from "./updater";
@@ -1017,6 +1018,7 @@ export default function App() {
         />
       )}
       {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
+      <Dictation />
     </div>
   );
 }

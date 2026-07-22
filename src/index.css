@@ -5927,3 +5927,108 @@ a.btn-mini {
   border: 2px solid var(--bg);
   box-shadow: 0 0 4px color-mix(in srgb, var(--ok, #3fb950) 70%, transparent);
 }
+
+/* ---- voice dictation ---- */
+
+/* Floating status pill, bottom-center above the status bar. Above every
+   dialog (z 500): dictation is push-to-talk global, so its state must stay
+   visible whatever is open. */
+.dictation-pill {
+  position: fixed;
+  bottom: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  white-space: nowrap;
+}
+.dictation-recording {
+  border-color: color-mix(in srgb, var(--danger) 60%, transparent);
+}
+.dictation-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+  animation: dictation-pulse 1.2s ease-in-out infinite;
+}
+@keyframes dictation-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.8); }
+}
+
+.set-error {
+  color: var(--danger);
+}
+
+/* dictation settings: hotkey capture + model registry list */
+.dictation-hotkey {
+  min-width: 90px;
+  font-variant-numeric: tabular-nums;
+}
+.dictation-hotkey-arming {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.dictation-models {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.dictation-model {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.dictation-model:hover {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+.dictation-model-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.dictation-model-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.dictation-model-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.dictation-tag {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: var(--accent);
+}
+.dictation-model-state {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  min-width: 66px;
+  text-align: right;
+}
+.dictation-model-btn {
+  flex-shrink: 0;
+}
