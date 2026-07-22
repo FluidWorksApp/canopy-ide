@@ -312,6 +312,73 @@ export async function checkInstalledClis(): Promise<Record<string, boolean>> {
   }
 }
 
+// ---------- prerequisites (Git, Node/npm) ----------
+
+export type Platform = "macos" | "windows" | "linux";
+
+/** Which OS the webview runs on, for picking a per-platform install command.
+ *  Mirrors the navigator.platform check settings.ts already uses for ⌘D-vs-Alt+D
+ *  (WebKit reports "MacIntel" even on Apple Silicon, "Win32" on all Windows). */
+export function currentPlatform(): Platform {
+  const p =
+    typeof navigator !== "undefined" ? navigator.platform.toUpperCase() : "";
+  if (p.includes("MAC")) return "macos";
+  if (p.includes("WIN")) return "windows";
+  return "linux";
+}
+
+/** A tool the agent CLIs (and Canopy's git features) depend on but that Canopy
+ *  can't bundle — installed once via the platform's own package manager. */
+export interface Prereq {
+  id: string;
+  name: string;
+  /** Command to probe on PATH. */
+  bin: string;
+  /** One line: what needs it. */
+  why: string;
+  /** The install command to run in a terminal, per platform. */
+  install: Record<Platform, string>;
+}
+
+/** The foundations the one-click CLI installers themselves rely on: without
+ *  Node, `npm install -g …` dies with "'npm' is not recognized". Each `install`
+ *  runs in a terminal (visible, interruptible), exactly like a CLI install. */
+export const PREREQS: Prereq[] = [
+  {
+    id: "git",
+    name: "Git",
+    bin: "git",
+    why: "branches, worktrees, diffs and pull requests",
+    install: {
+      macos: "xcode-select --install",
+      windows: "winget install --id Git.Git -e --source winget",
+      linux: "sudo apt-get update && sudo apt-get install -y git",
+    },
+  },
+  {
+    id: "node",
+    name: "Node.js",
+    bin: "node",
+    why: "installing and running npm-based CLIs (Claude Code, Codex, Amp, OpenCode)",
+    install: {
+      macos: "brew install node",
+      windows: "winget install --id OpenJS.NodeJS.LTS -e --source winget",
+      linux: "sudo apt-get update && sudo apt-get install -y nodejs npm",
+    },
+  },
+];
+
+/** Which prerequisites are present on PATH — same probe as the CLIs. */
+export async function checkInstalledPrereqs(): Promise<Record<string, boolean>> {
+  try {
+    return await invoke<Record<string, boolean>>("which_check", {
+      commands: PREREQS.map((p) => p.bin),
+    });
+  } catch {
+    return {};
+  }
+}
+
 // ---------- CLI update detection ----------
 
 export interface CliUpdate {
