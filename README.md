@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/launcher.png" alt="The Canopy launcher — a plain shell or any agent CLI (Claude Code, Codex, Amp, Aider, Gemini, OpenCode) one click away, with a “pick up where you left off” list of resumable sessions" width="900">
+  <img src="docs/screenshots/workspace.png" alt="Canopy — the agents rail (three sessions running, one flagged “needs you”, shared context on) beside a live Claude Code terminal, all in one window" width="900">
 </p>
 
 ## What is Canopy?
@@ -55,24 +55,45 @@ result.
   the last thing you asked it, CPU/memory, and the port it's listening on.
 - **A real editor.** Monaco with TypeScript diagnostics, plus native viewers for
   Markdown (incl. Mermaid), HTML, PDF, spreadsheets, Jupyter notebooks and images.
+- **Dictate anywhere.** A configurable hotkey (`⌘D`) transcribes speech straight
+  to the cursor — a terminal, the editor, or an agent prompt. Fully on-device
+  (Parakeet / SenseVoice / Moonshine): no cloud, no upload, no formatting pass.
 
 ## A closer look
 
-**See what's running.** Run commands and dev servers launch into the RUNS rail —
-services, not sessions — each with a live status dot and its own CPU/memory,
-while the model and session cost sit in the status bar.
+The screenshots below follow the same arc as the app itself: **run a team of
+agents → review what each one produced → keep the whole stack in view → and never
+leave the window for git, tickets, dictation, teammates, or files.** Every shot
+is rendered straight from the real components, so the README can't drift from the
+app.
 
-<img src="docs/screenshots/session.png" alt="The RUNS rail — each service running natively with its own live CPU and memory, next to the model and session cost in the status bar" width="820">
+**Run a team of agents — and let them share context.** Every agent CLI gets a
+native tab. The agents rail shows each session's lifecycle at a glance (working /
+waiting / idle), its component and branch, the last thing you asked it, and
+what it needs from you. Flip *Shared context* on and each session sees a short
+summary of what the others touched, injected into its next prompt.
+
+<img src="docs/screenshots/agents.png" alt="The agents rail — three sessions running (Claude on canopy and the api, Codex on the worker), each with a lifecycle dot, component and branch, one flagged needs-you, with the shared-context toggle on" width="360">
+
+**Review what an agent produced.** Open a session as a tab and everything it did
+is in one place: the branch and worktree it works in, its uncommitted diff and
+the commits it added, the files it reported editing, and the pull request raised
+from that branch — the whole review, joined against git.
+
+<img src="docs/screenshots/agent-workspace.png" alt="An agent opened as a tab — Claude on feat/dictation-pill in an isolated worktree, uncommitted and ahead of base, an open PR with passing checks, the files it edited, its commits, and a live split diff" width="900">
+
+**See what's running — and what it costs.** Dev servers launch as native child
+processes, not stray shells, and every agent session's tokens and cost roll up
+per CLI, per model, and per session — so the bill never surprises you.
+
+<img src="docs/screenshots/usage.png" alt="Usage & cost across every session — totals plus a breakdown by CLI (Claude Code, Codex, oh-my-pi) and by model, with per-session tokens sent, received and cost" width="760">
 
 **Review every change.** A built-in Git panel — branches, worktrees, PRs, and
-staged/unstaged changes with side-by-side diffs. Commit without leaving the app.
+staged/unstaged changes with side-by-side diffs — and a *Loose ends* view that
+measures every branch against the base and surfaces what's uncommitted,
+unpushed, or safe to clean up, so nothing an agent wrote quietly disappears.
 
-<img src="docs/screenshots/git.png" alt="The Git panel with a side-by-side diff" width="820">
-
-**Browse and edit alongside your agents.** The file tree spans every component of
-the project; open files as sub-tabs next to the terminals running your agents.
-
-<img src="docs/screenshots/files.png" alt="The file tree beside a running Claude Code session" width="820">
+<img src="docs/screenshots/git-diff.png" alt="A side-by-side git diff of the working tree against HEAD, syntax-highlighted, with Stage, Discard and Open-file actions" width="820">
 
 **Your tickets, in the IDE.** Pull **Linear** and **GitHub Issues** into a rail
 beside the code, grouped by state. Open a ticket to read the whole thing inline,
@@ -80,20 +101,26 @@ then *Start work* — Canopy spins up a worktree on its branch and launches the
 agent CLI of your choice with the ticket as its opening context. No auto-commit,
 no auto-PR; that stays yours.
 
-<img src="docs/screenshots/issues.png" alt="The Issues rail — Linear and GitHub Issues in one list, grouped In Progress / Todo / Backlog" width="820">
+<img src="docs/screenshots/issue.png" alt="A GitHub issue opened in Canopy — the full markdown body rendered inline with a worktree branch chip and a Start-work · Claude Code button" width="820">
+
+**Dictate anywhere.** Press `⌘D` and talk — the transcript lands wherever your
+cursor is: a terminal, the editor, a commit message, an agent prompt. Speech
+recognition runs entirely on your machine; nothing is uploaded.
+
+<img src="docs/screenshots/dictation.png" alt="Dictating into an agent prompt — the words land at the cursor while Canopy's floating Listening pill shows the on-device voice model transcribing" width="820">
 
 **Build with your team, peer-to-peer.** One person hosts — their Canopy *is* the
 relay — and teammates join with a code. Chat, request reviews, share a whole
 project, and co-edit files live, all end-to-end encrypted (SPAKE2 join code,
 ChaCha20-Poly1305 on every message and file) with no server in the middle.
 
-<img src="docs/screenshots/team-relay.png" alt="The Team panel — host a relay or join one with a host address and a code, reachable over local network or the internet" width="820">
+<img src="docs/screenshots/team-relay.png" alt="The Team panel — hosting a relay with a join code and LAN address, members with trust ticks, live file transfers, and a for-you inbox of PR and review requests" width="360">
 
 **Open anything, install nothing.** Markdown (with Mermaid), CSVs, spreadsheets,
 Word docs, PDFs, images, and Jupyter notebooks all render natively in the
 workspace — no extensions, no marketplace, no config.
 
-<img src="docs/screenshots/notebook.png" alt="A Jupyter notebook rendered natively in Canopy — markdown cells and code cells with a pandas DataFrame output" width="820">
+<img src="docs/screenshots/notebook.png" alt="A Jupyter notebook rendered natively in Canopy — a markdown heading, code cells, and a pandas DataFrame shown as a real HTML table output" width="820">
 
 ## Install
 
