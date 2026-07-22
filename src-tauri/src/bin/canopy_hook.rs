@@ -30,6 +30,13 @@ use std::io::Read;
 
 const MAX_PROMPTS: usize = 6;
 const MAX_FILES: usize = 14;
+/// Per-edit content captured into the change journal — enough to render the
+/// hunk, capped so a giant Write can't bloat the log. Newlines are preserved
+/// (unlike `truncate`), since the whole point is to show the diff.
+const MAX_EDIT_CHARS: usize = 20_000;
+/// Stop journaling once a session's edit log passes this. Best-effort: a
+/// runaway session must not fill the disk, and the tail is the least useful part.
+const MAX_JOURNAL_BYTES: u64 = 4 * 1024 * 1024;
 /// Well under the 10k char cap: the real constraint is context pollution, not
 /// the limit. Injecting a wall of text every turn also breaks the prompt cache.
 const MAX_CONTEXT_CHARS: usize = 4_000;
@@ -379,11 +386,87 @@ fn update_digest(
         }
     }
 
+    // The per-agent change journal: the actual edits this session made, not just
+    // which files. On a shared checkout git can't attribute working-tree changes
+    // per agent, but this can — it records what *this* agent changed at the
+    // moment it changed it, so its workspace shows only its own hunks even when
+    // another agent later touches the same file. Best-effort; never blocks the
+    // digest write above.
+    append_edit_journal(session_id, agent, event);
+
     // Write via a temp file + rename so a reader never sees half a digest.
     let tmp = format!("{path}.tmp{}", std::process::id());
     std::fs::write(&tmp, serde_json::to_string(&digest)?)?;
     std::fs::rename(&tmp, &path)?;
     Ok(())
+}
+
+/// Char-truncate while preserving newlines — `truncate` flattens them, which is
+/// right for a one-line prompt but wrong for edit content we mean to diff.
+fn cap(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(max).collect();
+    format!("{cut}\n…(truncated)")
+}
+
+/// Append this edit to the session's change journal (`<id>.edits.jsonl`), one
+/// record per (sub)edit: the before/after text the agent authored, plus the
+/// file and a timestamp. Append-only so concurrent readers never see a partial
+/// record; entirely best-effort, so any failure is swallowed rather than
+/// breaking the hook. Only Claude-style edit tools carry old/new — a CLI that
+/// reports just a path still lands in the digest `files` list above.
+fn append_edit_journal(session_id: &str, agent: &str, event: &serde_json::Value) {
+    let tool = event["tool_name"].as_str().unwrap_or("");
+    if !matches!(tool, "Edit" | "Write" | "MultiEdit" | "NotebookEdit") {
+        return;
+    }
+    let ti = &event["tool_input"];
+    let Some(abs) = ti["file_path"].as_str().or_else(|| ti["notebook_path"].as_str()) else {
+        return;
+    };
+    let ts = now_secs();
+    let mk = |old: Option<&str>, new: Option<&str>| {
+        serde_json::json!({
+            "ts": ts,
+            "agent": agent,
+            "path": abs,
+            "tool": tool,
+            "old": old.map(|s| cap(s, MAX_EDIT_CHARS)),
+            "new": new.map(|s| cap(s, MAX_EDIT_CHARS)),
+        })
+    };
+    let mut records: Vec<serde_json::Value> = Vec::new();
+    match tool {
+        "Edit" => records.push(mk(ti["old_string"].as_str(), ti["new_string"].as_str())),
+        "MultiEdit" => {
+            if let Some(edits) = ti["edits"].as_array() {
+                for e in edits {
+                    records.push(mk(e["old_string"].as_str(), e["new_string"].as_str()));
+                }
+            }
+        }
+        "Write" => records.push(mk(None, ti["content"].as_str())),
+        "NotebookEdit" => records.push(mk(None, ti["new_source"].as_str())),
+        _ => {}
+    }
+    if records.is_empty() {
+        return;
+    }
+
+    let path = format!("{}/.canopy/sessions/{session_id}.edits.jsonl", home());
+    // Once the log passes the cap, stop appending — the head (what the agent did
+    // first) is more useful to keep than the tail, and this bounds disk use.
+    if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > MAX_JOURNAL_BYTES {
+        return;
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        use std::io::Write;
+        for r in records {
+            let _ = writeln!(f, "{r}");
+        }
+    }
 }
 
 fn git_branch(cwd: &str) -> Option<String> {

@@ -492,6 +492,23 @@ export const agentWorkspaceAt = (
   sessionId?: string,
 ) => invoke<AgentWorkspace>("agent_workspace_at", { repo, cwd, agent, sessionId });
 
+/** One edit the agent authored, from its change journal. `present` = the `new`
+ *  text is still in the file (a later edit by anyone supersedes it). */
+export interface AgentEdit {
+  ts: number;
+  path: string;
+  tool: string;
+  old: string | null;
+  new: string | null;
+  present: boolean;
+}
+
+/** The per-agent change journal: what this agent changed, at hunk granularity,
+ *  attributed even on a shared checkout. Empty for a hookless/pre-journal
+ *  session. */
+export const agentEdits = (repo: string | null, sessionId: string) =>
+  invoke<AgentEdit[]>("agent_edits", { repo, sessionId });
+
 export const gitWorktrees = (repo: string) => invoke<WorktreeInfo[]>("git_worktrees", { repo });
 export const gitWorktreeAdd = (repo: string, path: string, branch: string, create: boolean) =>
   invoke<string>("git_worktree_add", { repo, path, branch, create });

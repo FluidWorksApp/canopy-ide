@@ -822,10 +822,13 @@ pub async fn session_forget(session_id: String) -> Result<(), String> {
         return Err("invalid session id".into());
     }
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
-    let path = std::path::PathBuf::from(&home)
-        .join(".canopy")
-        .join("sessions")
-        .join(format!("{session_id}.json"));
+    let dir = std::path::PathBuf::from(&home).join(".canopy").join("sessions");
+    // The change journal is a sidecar of the digest — forgetting the session
+    // must take it too, or a long-lived machine slowly accumulates orphaned
+    // edit logs. Best-effort: its absence is fine, and it must not block the
+    // digest removal that is the actual point of forgetting.
+    let _ = std::fs::remove_file(dir.join(format!("{session_id}.edits.jsonl")));
+    let path = dir.join(format!("{session_id}.json"));
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
         // Already gone is the desired end state, not a failure.
@@ -1861,6 +1864,15 @@ pub async fn which_check(commands: Vec<String>) -> HashMap<String, bool> {
 pub struct CliVersions {
     pub installed: Option<String>,
     pub latest: Option<String>,
+    /// Package manager that owns the binary, when detectable ("homebrew"). The
+    /// install source, not a hardcoded assumption, decides both where "latest"
+    /// comes from and which upgrade command actually works.
+    #[serde(rename = "managedBy", skip_serializing_if = "Option::is_none")]
+    pub managed_by: Option<String>,
+    /// Upgrade command matched to the install source (e.g. `brew upgrade
+    /// claude-code`); None falls back to the CLI's own updater.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1895,6 +1907,32 @@ fn first_version_token(s: &str) -> Option<String> {
     None
 }
 
+/// The Homebrew package name for a canonicalized binary path, and whether it
+/// is a cask. `None` when the path isn't inside a Homebrew prefix — the binary
+/// came from npm, pip, a native installer, or a manual build, so its own
+/// updater (not `brew`) is the right upgrade route. A brew binary in `.../bin`
+/// symlinks into `Cellar/<formula>/…` or `Caskroom/<cask>/…`; the segment right
+/// after that marker is the package name.
+fn brew_pkg(path: &str) -> Option<(String, bool)> {
+    let (at, is_cask) = if let Some(i) = path.find("/Cellar/") {
+        (i + "/Cellar/".len(), false)
+    } else if let Some(i) = path.find("/Caskroom/") {
+        (i + "/Caskroom/".len(), true)
+    } else {
+        return None;
+    };
+    let pkg = path[at..].split('/').next()?;
+    // Names are conservative; anything odd must not reach the shell line below.
+    if pkg.is_empty()
+        || !pkg
+            .chars()
+            .all(|c| c.is_alphanumeric() || "-_.@+".contains(c))
+    {
+        return None;
+    }
+    Some((pkg.to_string(), is_cask))
+}
+
 /// Installed vs latest versions for the agent CLIs. Installed comes from
 /// `<bin> --version` on the login-shell PATH (GUI apps don't inherit it);
 /// latest from the CLI's registry via curl — the app deliberately has no HTTP
@@ -1913,37 +1951,93 @@ pub async fn cli_versions(queries: Vec<CliVersionQuery>) -> HashMap<String, CliV
         for q in queries {
             tasks.push(tokio::spawn(async move {
                 let mut v = CliVersions::default();
+                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
                 // Same charset guard as which_check — the name lands in a shell line.
                 if q.bin
                     .chars()
                     .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
                 {
-                    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-                    let probe = tokio::process::Command::new(shell)
-                        .args(["-lc", &format!("{} --version 2>&1", q.bin)])
+                    // One login shell (the costly part) yields both the version
+                    // string and the resolved binary path, split on a sentinel —
+                    // the path is how we learn who installed it.
+                    let probe = tokio::process::Command::new(&shell)
+                        .args([
+                            "-lc",
+                            &format!(
+                                "{0} --version 2>&1; echo '@@P@@'; command -v {0} 2>/dev/null",
+                                q.bin
+                            ),
+                        ])
                         .kill_on_drop(true)
                         .output();
-                    if let Ok(Ok(o)) =
-                        tokio::time::timeout(Duration::from_secs(10), probe).await
-                    {
-                        v.installed = first_version_token(&String::from_utf8_lossy(&o.stdout));
+                    if let Ok(Ok(o)) = tokio::time::timeout(Duration::from_secs(10), probe).await {
+                        let out = String::from_utf8_lossy(&o.stdout);
+                        let (ver, path) = out.split_once("@@P@@").unwrap_or((out.as_ref(), ""));
+                        v.installed = first_version_token(ver);
+                        if let Some((pkg, is_cask)) = std::fs::canonicalize(path.trim())
+                            .ok()
+                            .and_then(|c| brew_pkg(&c.to_string_lossy()))
+                        {
+                            v.managed_by = Some("homebrew".into());
+                            v.update = Some(if is_cask {
+                                format!("brew upgrade --cask {pkg}")
+                            } else {
+                                format!("brew upgrade {pkg}")
+                            });
+                            // Latest from brew's tap (its notion of newest, which
+                            // the install actually tracks), refreshed only when
+                            // the frontend asks — same gate as the registry path.
+                            if q.latest_url.is_some() {
+                                let flag = if is_cask { "--cask " } else { "" };
+                                let info = tokio::process::Command::new(&shell)
+                                    .args([
+                                        "-lc",
+                                        &format!("brew info --json=v2 {flag}{pkg} 2>/dev/null"),
+                                    ])
+                                    .kill_on_drop(true)
+                                    .output();
+                                if let Ok(Ok(o)) =
+                                    tokio::time::timeout(Duration::from_secs(10), info).await
+                                {
+                                    if let Ok(j) =
+                                        serde_json::from_slice::<serde_json::Value>(&o.stdout)
+                                    {
+                                        v.latest = j
+                                            .pointer("/formulae/0/versions/stable")
+                                            .and_then(|x| x.as_str())
+                                            .or_else(|| {
+                                                j.pointer("/casks/0/version").and_then(|x| x.as_str())
+                                            })
+                                            .and_then(first_version_token);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-                if let Some(url) = q.latest_url.filter(|u| u.starts_with("https://")) {
-                    let fetch = tokio::process::Command::new("curl")
-                        .args(["-fsSL", "-m", "8", url.as_str()])
-                        .kill_on_drop(true)
-                        .output();
-                    if let Ok(Ok(o)) =
-                        tokio::time::timeout(Duration::from_secs(10), fetch).await
-                    {
-                        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&o.stdout) {
-                            // npm `/latest` → top-level "version"; PyPI → info.version.
-                            v.latest = json
-                                .get("version")
-                                .and_then(|x| x.as_str())
-                                .or_else(|| json.pointer("/info/version").and_then(|x| x.as_str()))
-                                .and_then(first_version_token);
+                // Registry latest only when the install source isn't a package
+                // manager we route ourselves — an npm/PyPI number is meaningless
+                // for (and would falsely flag) a brew-managed binary.
+                if v.managed_by.is_none() {
+                    if let Some(url) = q.latest_url.filter(|u| u.starts_with("https://")) {
+                        let fetch = tokio::process::Command::new("curl")
+                            .args(["-fsSL", "-m", "8", url.as_str()])
+                            .kill_on_drop(true)
+                            .output();
+                        if let Ok(Ok(o)) =
+                            tokio::time::timeout(Duration::from_secs(10), fetch).await
+                        {
+                            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&o.stdout)
+                            {
+                                // npm `/latest` → top-level "version"; PyPI → info.version.
+                                v.latest = json
+                                    .get("version")
+                                    .and_then(|x| x.as_str())
+                                    .or_else(|| {
+                                        json.pointer("/info/version").and_then(|x| x.as_str())
+                                    })
+                                    .and_then(first_version_token);
+                            }
                         }
                     }
                 }
