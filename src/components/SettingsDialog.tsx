@@ -716,8 +716,8 @@ function Copyable({
     >
       <code
         style={{
-          fontSize: big ? 26 : 13,
-          letterSpacing: big ? 5 : 0,
+          fontSize: big ? 22 : 13,
+          letterSpacing: big ? 4 : 0,
           background: "transparent",
           padding: 0,
           overflow: "hidden",
@@ -1008,15 +1008,20 @@ function RemoteSettings({
             <div className="set-inline" style={{ alignItems: "center", gap: 18 }}>
               {qr && (
                 <div
-                  style={{ width: 148, height: 148, padding: 8, background: "#fff", borderRadius: 10, flex: "none" }}
+                  style={{ width: 128, height: 128, padding: 7, background: "#fff", borderRadius: 10, flex: "none" }}
                   dangerouslySetInnerHTML={{ __html: qr }}
                 />
               )}
               <div>
                 <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 5 }}>PIN</div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ display: "flex", alignItems: "stretch", gap: 8 }}>
                   <Copyable text={status?.pin ?? ""} big />
-                  <button style={iconBtn} title="Generate a new PIN" disabled={busy} onClick={() => run(ipc.remoteRotatePin)}>
+                  <button
+                    style={{ ...iconBtn, padding: "0 12px" }}
+                    title="Generate a new PIN"
+                    disabled={busy}
+                    onClick={() => run(ipc.remoteRotatePin)}
+                  >
                     <RefreshIcon />
                   </button>
                 </div>
