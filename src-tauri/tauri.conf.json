@@ -42,6 +42,9 @@
     "externalBin": [
       "binaries/canopy-hook"
     ],
+    "resources": [
+      "onnxruntime/*"
+    ],
     "publisher": "Cause Connect Pte Ltd",
     "copyright": "Copyright 2026 Cause Connect Pte Ltd. MIT licensed.",
     "licenseFile": "../LICENSE.md",

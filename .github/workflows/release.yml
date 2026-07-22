@@ -33,9 +33,7 @@ jobs:
             args: "--target aarch64-apple-darwin"
           - platform: macos-latest
             target: x86_64-apple-darwin
-            # Merges the Intel-Mac overlay that bundles the ONNX Runtime dylib
-            # (ort load-dynamic — no static prebuilt exists for x86_64 macOS).
-            args: "--target x86_64-apple-darwin --config src-tauri/tauri.conf.macos-x64.json"
+            args: "--target x86_64-apple-darwin"
           # 22.04, not latest: the glibc you build against is the *floor* for
           # what users can run. Building on 24.04 would exclude 22.04 users.
           - platform: ubuntu-22.04
@@ -128,28 +126,33 @@ jobs:
           fi
           echo "Identity present in keychain."
 
-      # Intel Macs have no ort/ONNX Runtime prebuilt (pyke dropped
-      # x86_64-apple-darwin at ort rc.11; ONNX Runtime dropped macOS x64 at
-      # 1.24). The app links ONNX via ort's load-dynamic and loads it from a
-      # bundled dylib, so stage Microsoft's last osx-x86_64 release (v1.23.0)
-      # into src-tauri/frameworks/, where the macos-x64 overlay config bundles
-      # it into Contents/Frameworks. tauri-action then codesigns it with the app;
-      # the runtime points ORT_DYLIB_PATH at it (see lib.rs). The arm64 build
-      # skips this entirely and links ONNX statically.
-      - name: Stage ONNX Runtime dylib for Intel Mac
-        if: matrix.target == 'x86_64-apple-darwin'
+      # ONNX Runtime is loaded dynamically on EVERY target (ort load-dynamic, see
+      # Cargo.toml), so every build ships Microsoft's official runtime as an app
+      # resource (bundle.resources: onnxruntime/* -> lib.rs sets ORT_DYLIB_PATH to
+      # it). One mechanism everywhere avoids both static-prebuilt failures: Intel
+      # macOS has no ort prebuilt, and the Linux prebuilt needs a too-new glibc.
+      # v1.23.0 is the last release carrying every desktop arch (incl. osx x64),
+      # and is inside ort rc.12's supported ONNX Runtime range (v1.17-v1.24).
+      - name: Stage ONNX Runtime (all platforms, for load-dynamic)
+        shell: bash
         run: |
           ORT_VER=1.23.0
-          curl -fSL -o "$RUNNER_TEMP/ort.tgz" \
-            "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VER}/onnxruntime-osx-x86_64-${ORT_VER}.tgz"
-          tar -xzf "$RUNNER_TEMP/ort.tgz" -C "$RUNNER_TEMP"
-          mkdir -p src-tauri/frameworks
-          cp "$RUNNER_TEMP/onnxruntime-osx-x86_64-${ORT_VER}/lib/libonnxruntime.${ORT_VER}.dylib" \
-            src-tauri/frameworks/libonnxruntime.dylib
-          # Standard @rpath install name for a bundled dylib (harmless for the
-          # load-dynamic dlopen, expected by codesign/relocation tooling).
-          install_name_tool -id "@rpath/libonnxruntime.dylib" src-tauri/frameworks/libonnxruntime.dylib
-          echo "Staged $(du -h src-tauri/frameworks/libonnxruntime.dylib | cut -f1) ONNX Runtime dylib"
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin)     A=osx-arm64;  EXT=tgz; IN=libonnxruntime.${ORT_VER}.dylib; OUT=libonnxruntime.dylib ;;
+            x86_64-apple-darwin)      A=osx-x86_64; EXT=tgz; IN=libonnxruntime.${ORT_VER}.dylib; OUT=libonnxruntime.dylib ;;
+            x86_64-unknown-linux-gnu) A=linux-x64;  EXT=tgz; IN=libonnxruntime.so.${ORT_VER};    OUT=libonnxruntime.so ;;
+            x86_64-pc-windows-msvc)   A=win-x64;    EXT=zip; IN=onnxruntime.dll;                 OUT=onnxruntime.dll ;;
+            *) echo "::error::unmapped target ${{ matrix.target }}"; exit 1 ;;
+          esac
+          PKG="onnxruntime-${A}-${ORT_VER}"
+          curl -fSL -o "$RUNNER_TEMP/ort.${EXT}" \
+            "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VER}/${PKG}.${EXT}"
+          # bsdtar (macOS/Windows) and GNU tar (Linux) both extract these; -z only
+          # for the gzip tarballs, plain for the Windows zip.
+          if [ "$EXT" = zip ]; then tar -xf "$RUNNER_TEMP/ort.zip" -C "$RUNNER_TEMP"; else tar -xzf "$RUNNER_TEMP/ort.${EXT}" -C "$RUNNER_TEMP"; fi
+          mkdir -p src-tauri/onnxruntime
+          cp "$RUNNER_TEMP/${PKG}/lib/${IN}" "src-tauri/onnxruntime/${OUT}"
+          echo "Staged ONNX Runtime ${ORT_VER} (${A}) -> src-tauri/onnxruntime/${OUT}"
 
       - uses: tauri-apps/tauri-action@v0
         env:

@@ -126,21 +126,6 @@ fn js_log(level: String, message: String) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Intel macOS has no static ONNX Runtime prebuilt, so ort is built with
-    // `load-dynamic` there (see Cargo.toml) and loads libonnxruntime at runtime.
-    // Point it at the dylib bundled into the app's Contents/Frameworks, before
-    // anything touches ort. Every other target links ONNX statically and ignores
-    // this. `binary/../Frameworks/libonnxruntime.dylib` from Contents/MacOS.
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    if std::env::var_os("ORT_DYLIB_PATH").is_none() {
-        if let Some(dylib) = std::env::current_exe().ok().and_then(|exe| {
-            exe.parent()
-                .and_then(|macos| macos.parent())
-                .map(|contents| contents.join("Frameworks").join("libonnxruntime.dylib"))
-        }) {
-            std::env::set_var("ORT_DYLIB_PATH", dylib);
-        }
-    }
     let builder = tauri::Builder::default();
     // Must be first: a second `canopy <dir>` invocation forwards its argv
     // here and exits, instead of starting an app that would fight this one
@@ -176,6 +161,25 @@ pub fn run() {
         .manage(dictation::DictationManager::default())
         .manage(cli::pending_from_env())
         .setup(|app| {
+            // ONNX Runtime is loaded dynamically on every platform (Cargo.toml
+            // builds ort with `load-dynamic`). Point ort at the libonnxruntime
+            // bundled as an app resource before any dictation touches it. If it
+            // isn't there (a dev build without the bundled lib), leave the var
+            // unset — ort then falls back to a system search.
+            if std::env::var_os("ORT_DYLIB_PATH").is_none() {
+                let lib = if cfg!(target_os = "windows") {
+                    "onnxruntime/onnxruntime.dll"
+                } else if cfg!(target_os = "macos") {
+                    "onnxruntime/libonnxruntime.dylib"
+                } else {
+                    "onnxruntime/libonnxruntime.so"
+                };
+                if let Ok(p) = app.path().resolve(lib, tauri::path::BaseDirectory::Resource) {
+                    if p.exists() {
+                        std::env::set_var("ORT_DYLIB_PATH", &p);
+                    }
+                }
+            }
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
