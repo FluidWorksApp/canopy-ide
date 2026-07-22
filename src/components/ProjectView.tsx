@@ -1608,8 +1608,19 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         return;
       }
       const ptyId = target.ptyId;
-      void ipc.ptyWrite(ptyId, String(optionIndex + 1));
-      setTimeout(() => void ipc.ptyWrite(ptyId, "\r"), 150);
+      let delay = 0;
+      const press = (keys: string) => {
+        const at = delay;
+        setTimeout(() => void ipc.ptyWrite(ptyId, keys), at);
+        delay += 150;
+      };
+      for (const chosen of selections) {
+        for (const oi of chosen) press(String(oi + 1)); // highlight/toggle option(s)
+        press("\r"); // confirm this question (advances if more follow)
+      }
+      // A multi-question form ends on its Submit tab; the trailing Enter presses
+      // it. A single question's Enter above already submitted, so no extra.
+      if ((item.questions?.length ?? 0) > 1) press("\r");
       onDismissPending(item.key);
       setActiveTabId(target.id);
       setTimeout(() => termHandles.current.get(target.id)?.focus(), 50);
