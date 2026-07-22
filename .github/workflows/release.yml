@@ -145,14 +145,23 @@ jobs:
             *) echo "::error::unmapped target ${{ matrix.target }}"; exit 1 ;;
           esac
           PKG="onnxruntime-${A}-${ORT_VER}"
-          curl -fSL -o "$RUNNER_TEMP/ort.${EXT}" \
+          # Work entirely in the checkout with RELATIVE paths. Absolute paths on
+          # the Windows runner ($RUNNER_TEMP = D:\a\_temp) break two ways under
+          # git-bash: backslashes get eaten, and tar reads the `D:` drive letter
+          # as a remote host:path ("Cannot connect to D:"). Relative paths dodge
+          # both. Downloads/extraction are scratch and removed before the build.
+          curl -fSL -o "ort.${EXT}" \
             "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VER}/${PKG}.${EXT}"
-          # bsdtar (macOS/Windows) and GNU tar (Linux) both extract these; -z only
-          # for the gzip tarballs, plain for the Windows zip.
-          if [ "$EXT" = zip ]; then tar -xf "$RUNNER_TEMP/ort.zip" -C "$RUNNER_TEMP"; else tar -xzf "$RUNNER_TEMP/ort.${EXT}" -C "$RUNNER_TEMP"; fi
+          # tgz: GNU tar (Linux) + bsdtar (macOS). zip: bsdtar (Windows/macOS).
+          if [ "$EXT" = zip ]; then tar -xf "ort.${EXT}"; else tar -xzf "ort.${EXT}"; fi
           mkdir -p src-tauri/onnxruntime
-          cp "$RUNNER_TEMP/${PKG}/lib/${IN}" "src-tauri/onnxruntime/${OUT}"
-          echo "Staged ONNX Runtime ${ORT_VER} (${A}) -> src-tauri/onnxruntime/${OUT}"
+          cp "${PKG}/lib/${IN}" "src-tauri/onnxruntime/${OUT}"
+          # Linux/Windows CPU builds ship a providers_shared lib next to the main
+          # one; copy it alongside (macOS has none). Harmless if unused, and it
+          # avoids a load failure if ort probes for it.
+          cp "${PKG}"/lib/*providers_shared* "src-tauri/onnxruntime/" 2>/dev/null || true
+          rm -rf "${PKG}" "ort.${EXT}"
+          echo "Staged ONNX Runtime ${ORT_VER} (${A}):"; ls -la src-tauri/onnxruntime/
 
       - uses: tauri-apps/tauri-action@v0
         env:
