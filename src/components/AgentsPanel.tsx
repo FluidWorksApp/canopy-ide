@@ -42,6 +42,10 @@ interface AgentsPanelProps {
    *  that one guesses a tab from a notification's cwd, this one has the pty
    *  id in hand and is exact. */
   onJumpToPty?: (ptyId: number) => void;
+  /** The pty of the terminal tab currently in front, so its row can be
+   *  highlighted — the reverse of onJumpToPty: relate the tab you're on back to
+   *  its row in the list. Null when the active tab isn't a terminal. */
+  activePty?: number | null;
   /** Cross-session context sharing for this project. */
   roots: string[];
   shareContext: boolean;
@@ -114,6 +118,7 @@ export function AgentsPanel({
   onAnswer,
   onJumpToTerminal,
   onJumpToPty,
+  activePty,
   roots,
   shareContext,
   onShareContext,
@@ -358,7 +363,7 @@ export function AgentsPanel({
         key={s.id}
         className={`agent-row ${runaway ? "agent-runaway" : ""} ${
           onJumpToPty ? "agent-row-jump" : ""
-        }`}
+        } ${s.id === activePty ? "agent-row-active" : ""}`}
         // The whole row goes to its terminal. Listing what is running without
         // a way to reach it made the panel a read-only status board; the row
         // already identifies the session, so it should also be the way there.

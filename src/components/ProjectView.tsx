@@ -1479,6 +1479,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // ---------- render ----------
 
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null;
+  // The pty of the terminal tab in front, so the Agents panel can highlight its
+  // row — relating the tab you're looking at back to its entry in the list.
+  const activePty = activeTab?.type === "terminal" ? activeTab.ptyId : null;
   const runTabs = tabs.filter(
     (t): t is TermSubTab => t.type === "terminal" && Boolean(t.run),
   );
@@ -2925,6 +2928,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onRespond={respondPermission}
           onJumpToTerminal={jumpToTerminal}
           onJumpToPty={jumpToPty}
+          activePty={activePty}
           roots={roots}
           shareContext={Boolean(project.shareContext)}
           onShareContext={onShareContext}
