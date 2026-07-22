@@ -12,8 +12,9 @@ import {
   buildRows,
   agentsForProject,
   applyTheme,
+  resumeCommand,
 } from '@shared/model'
-import { AgentCard, ProjectCard, Metric } from '@shared/components'
+import { AgentCard, ProjectCard } from '@shared/components'
 import { AgentTerminal } from '@shared/AgentTerminal'
 import type { Transport } from '@shared/transport'
 
@@ -77,7 +78,11 @@ function PinGate({ onToken }: { onToken: (t: string) => void }) {
   )
 }
 
-type Route = { name: 'home' } | { name: 'project'; id: string } | { name: 'agent'; pty: number }
+type Route =
+  | { name: 'home' }
+  | { name: 'project'; id: string }
+  | { name: 'agent'; pty: number }
+  | { name: 'history'; key: string }
 
 function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
   const [up, setUp] = useState(false)
@@ -144,6 +149,14 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
   const needs = live.filter((r) => r.needsYou).length
   const spawn = (cwd: string, command?: string) =>
     wireRef.current?.send({ t: 'spawn', cwd, command })
+  // Live agent → its terminal; offline agent → its history (with one-tap resume).
+  const openAgent = (row: AgentRow) =>
+    row.live && row.ptyId !== undefined
+      ? setRoute({ name: 'agent', pty: row.ptyId })
+      : setRoute({ name: 'history', key: row.key })
+  const resume = (row: AgentRow) => {
+    if (row.resumeCwd) spawn(row.resumeCwd, resumeCommand(row.agent, row.sessionId))
+  }
 
   if (route.name === 'agent' && transportRef.current) {
     const row = rows.find((r) => r.ptyId === route.pty)
@@ -157,6 +170,13 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
     )
   }
 
+  if (route.name === 'history') {
+    const row = rows.find((r) => r.key === route.key)
+    if (row) {
+      return <HistoryView row={row} onBack={() => setRoute({ name: 'home' })} onResume={() => resume(row)} />
+    }
+  }
+
   if (route.name === 'project') {
     const project = projects.find((p) => p.id === route.id)
     if (project) {
@@ -165,7 +185,7 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
           project={project}
           rows={agentsForProject(project, rows)}
           onBack={() => setRoute({ name: 'home' })}
-          onOpen={(pty) => setRoute({ name: 'agent', pty })}
+          onOpen={openAgent}
         />
       )
     }
@@ -173,23 +193,16 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
 
   return (
     <div className="app">
-      <div className="scanline" aria-hidden />
       <header className="bar">
         <div className="mark small">
           <span className={`mark-dot ${up ? 'live' : 'down'}`} />
           CANOPY<span className="mark-thin"> REMOTE</span>
         </div>
+        {needs > 0 && <span className="needs-pill">{needs} needs you</span>}
         <button className="ghost" onClick={onLogout}>
           Sign out
         </button>
       </header>
-
-      <div className="statline">
-        <Metric n={live.length} label="live" tone="ok" />
-        <Metric n={needs} label="need you" tone={needs ? 'warn' : ''} />
-        <Metric n={projects.length} label="projects" />
-        <span className={`conn ${up ? 'on' : 'off'}`}>{up ? 'connected' : 'reconnecting'}</span>
-      </div>
 
       {live.length > 0 && (
         <section className="block">
@@ -198,12 +211,7 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
           </div>
           <div className="list">
             {live.map((r, i) => (
-              <AgentCard
-                key={r.key}
-                row={r}
-                index={i}
-                onOpen={(pty) => setRoute({ name: 'agent', pty })}
-              />
+              <AgentCard key={r.key} row={r} index={i} onOpen={() => openAgent(r)} />
             ))}
           </div>
         </section>
@@ -342,14 +350,12 @@ function ProjectDetail({
   project: Project
   rows: AgentRow[]
   onBack: () => void
-  onOpen: (pty: number) => void
+  onOpen: (row: AgentRow) => void
 }) {
   const live = rows.filter((r) => r.live)
   const offline = rows.filter((r) => !r.live)
   return (
-    <div className="app">
-      <div className="scanline" aria-hidden />
-      <header className="bar">
+    <div className="app">      <header className="bar">
         <button className="ghost back" onClick={onBack}>
           ‹
         </button>
@@ -383,7 +389,7 @@ function ProjectDetail({
           </div>
           <div className="list">
             {live.map((r, i) => (
-              <AgentCard key={r.key} row={r} index={i} onOpen={onOpen} />
+              <AgentCard key={r.key} row={r} index={i} onOpen={() => onOpen(r)} />
             ))}
           </div>
         </section>
@@ -396,7 +402,72 @@ function ProjectDetail({
           </div>
           <div className="list">
             {offline.map((r, i) => (
-              <AgentCard key={r.key} row={r} index={live.length + i} />
+              <AgentCard key={r.key} row={r} index={live.length + i} onOpen={() => onOpen(r)} />
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  )
+}
+
+/** An offline agent's saved history, with one-tap resume (spawns its CLI's
+ *  resume command in this Canopy — so a session from any instance can be
+ *  revived and driven right here). */
+function HistoryView({
+  row,
+  onBack,
+  onResume,
+}: {
+  row: AgentRow
+  onBack: () => void
+  onResume: () => void
+}) {
+  const prompts = (row.prompts ?? []).filter((p) => p.trim() && !p.trim().startsWith('<'))
+  return (
+    <div className="app">
+      <header className="bar">
+        <button className="ghost back" onClick={onBack}>
+          ‹
+        </button>
+        <div className="crumb">
+          <span className="crumb-name">{row.agent}</span>
+          {row.branch && <span className="crumb-sub mono">⎇ {row.branch}</span>}
+        </div>
+        {row.resumeCwd && (
+          <button className="primary" onClick={onResume}>
+            Resume
+          </button>
+        )}
+      </header>
+
+      <section className="block">
+        <div className="subhead">
+          Conversation<span className="subhead-n">{prompts.length}</span>
+        </div>
+        {prompts.length === 0 ? (
+          <div className="empty">No saved prompts for this session.</div>
+        ) : (
+          <div className="history">
+            {prompts.map((p, i) => (
+              <div className="hprompt" key={i}>
+                {p}
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {row.files && row.files.length > 0 && (
+        <section className="block">
+          <div className="subhead">
+            Files touched<span className="subhead-n">{row.files.length}</span>
+          </div>
+          <div className="hfiles">
+            {row.files.map((f, i) => (
+              <code className="mono" key={i}>
+                {f}
+              </code>
             ))}
           </div>
         </section>

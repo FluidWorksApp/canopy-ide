@@ -4,14 +4,7 @@
 // them) and are driven entirely by Canopy's theme CSS variables.
 
 import type { ReactNode } from 'react'
-import {
-  type AgentRow,
-  type Project,
-  STATE_LABEL,
-  basename,
-  fmtMem,
-  fmtTokens,
-} from './model'
+import { type AgentRow, type Project, STATE_LABEL, basename, fmtTokens } from './model'
 
 export function StatusDot({ state }: { state: string }) {
   return <span className={`dot ${state}`} />
@@ -41,30 +34,24 @@ export function AgentCard({
 }: {
   row: AgentRow
   index?: number
-  onOpen?: (pty: number) => void
+  onOpen?: () => void
   trailing?: ReactNode
 }) {
-  const clickable = row.ptyId !== undefined && !!onOpen
-  const open = () => {
-    if (clickable) onOpen!(row.ptyId!)
-  }
+  const clickable = !!onOpen
   return (
     <button
-      className={`card agent state-${row.state} ${clickable ? 'on' : 'off'} ${
-        row.needsYou ? 'attn' : ''
-      }`}
+      className={`card agent state-${row.state} ${row.live ? 'on' : 'off'} ${row.needsYou ? 'attn' : ''}`}
       style={{ ['--i' as string]: index }}
-      onClick={clickable ? open : undefined}
+      onClick={onOpen}
       disabled={!clickable}
     >
-      <span className={`rail ${row.state}`} aria-hidden />
       <div className="agent-main">
         <div className="agent-top">
           <StatusDot state={row.state} />
           <span className="agent-name">{row.agent}</span>
           {row.branch && <Chip mono>⎇ {row.branch}</Chip>}
           <span className={`agent-state ${row.needsYou ? 'warn' : ''}`}>
-            {row.live ? STATE_LABEL[row.state] ?? row.state : 'offline'}
+            {row.live ? STATE_LABEL[row.state] ?? row.state : 'idle'}
           </span>
           {trailing}
           {clickable && <span className="chev">›</span>}
@@ -73,9 +60,7 @@ export function AgentCard({
         <div className="agent-meta">
           {row.cwd && <span className="mono">{basename(row.cwd)}</span>}
           {row.live && row.cpu !== undefined && <span className="mono">{Math.round(row.cpu)}%</span>}
-          {row.memBytes ? <span className="mono">{fmtMem(row.memBytes)}</span> : null}
           {row.tokens ? <span className="mono">{fmtTokens(row.tokens)} tok</span> : null}
-          {row.cost ? <span className="mono">${row.cost.toFixed(2)}</span> : null}
         </div>
       </div>
     </button>

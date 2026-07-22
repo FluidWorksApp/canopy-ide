@@ -81,6 +81,24 @@ export interface AgentRow {
   tokens?: number
   needsYou: boolean
   updated?: number
+  // For offline agents: history + one-tap resume.
+  prompts?: string[]
+  files?: string[]
+  resumeCwd?: string
+  sessionId?: string
+}
+
+/** The shell command that resumes an agent's saved session in its CLI. */
+export function resumeCommand(agent: string, sessionId?: string): string {
+  const id = sessionId?.trim()
+  switch (agent) {
+    case 'claude':
+      return id ? `claude --resume ${id}` : 'claude --continue'
+    case 'codex':
+      return id ? `codex resume ${id}` : 'codex'
+    default:
+      return id ? `${agent} --resume ${id}` : `${agent} --resume`
+  }
 }
 
 export const STATE_LABEL: Record<string, string> = {
@@ -160,6 +178,10 @@ export function buildRows(
         tokens: u ? u.input_tokens + u.output_tokens : undefined,
         needsYou: live && d.state === 'waiting',
         updated: d.updated,
+        prompts: d.prompts,
+        files: d.files,
+        resumeCwd: d.resume_cwd ?? d.cwd,
+        sessionId: d.session_id,
       }
     })
     .sort(sortRows)
