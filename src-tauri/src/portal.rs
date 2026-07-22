@@ -353,7 +353,10 @@ async fn asset_handler(uri: Uri) -> Response {
     if !rel.is_empty() {
         if let Some(file) = PORTAL_ASSETS.get_file(rel) {
             return (
-                [(header::CONTENT_TYPE, content_type(rel))],
+                [
+                    (header::CONTENT_TYPE, content_type(rel)),
+                    (header::CACHE_CONTROL, cache_control(rel)),
+                ],
                 file.contents().to_vec(),
             )
                 .into_response();
@@ -362,11 +365,26 @@ async fn asset_handler(uri: Uri) -> Response {
     // Directory or unknown sub-path → SPA entry point.
     match PORTAL_ASSETS.get_file("index.html") {
         Some(f) => (
-            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
             f.contents().to_vec(),
         )
             .into_response(),
         None => (StatusCode::NOT_FOUND, "portal not built").into_response(),
+    }
+}
+
+/// Vite emits content-hashed filenames under assets/, so those can be cached
+/// forever (a new build changes the hash); everything else must revalidate so a
+/// rebuild is always picked up. Lets the browser — and any tunnel/CDN in front —
+/// serve repeat loads from cache, which matters most over a higher-latency link.
+fn cache_control(rel: &str) -> &'static str {
+    if rel.starts_with("assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
     }
 }
 

@@ -617,7 +617,66 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
-/** A click-to-copy pill: shows the value and a Copy/✓ affordance. */
+function CopyIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="9" y="9" width="11" height="11" rx="2" />
+      <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+    </svg>
+  );
+}
+function CheckIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20 6 9 17l-5-5" />
+    </svg>
+  );
+}
+function RefreshIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+      <path d="M21 3v6h-6" />
+    </svg>
+  );
+}
+
+/** An on/off switch. */
+function Toggle({ checked, disabled, onChange }: { checked: boolean; disabled?: boolean; onChange: () => void }) {
+  return (
+    <button
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
+      onClick={onChange}
+      style={{
+        width: 46,
+        height: 27,
+        borderRadius: 14,
+        border: "none",
+        padding: 3,
+        cursor: "pointer",
+        flex: "none",
+        background: checked ? "var(--accent)" : "var(--border)",
+        transition: "background .15s",
+      }}
+    >
+      <span
+        style={{
+          display: "block",
+          width: 21,
+          height: 21,
+          borderRadius: "50%",
+          background: "#fff",
+          transform: checked ? "translateX(19px)" : "translateX(0)",
+          transition: "transform .15s",
+        }}
+      />
+    </button>
+  );
+}
+
+/** A click-to-copy pill: shows the value and a copy/✓ icon. */
 function Copyable({
   text,
   display,
@@ -670,13 +729,12 @@ function Copyable({
       </code>
       <span
         style={{
-          fontSize: 11,
-          opacity: copied ? 1 : 0.6,
+          display: "inline-flex",
+          opacity: copied ? 1 : 0.55,
           color: copied ? "var(--accent, #7aa2f7)" : "inherit",
-          whiteSpace: "nowrap",
         }}
       >
-        {copied ? "✓ Copied" : "Copy"}
+        {copied ? <CheckIcon /> : <CopyIcon />}
       </span>
     </button>
   );
@@ -835,103 +893,67 @@ function RemoteSettings({
     void ipc.tunnelStop().then(setTunnel).finally(() => setBusy(false));
   };
 
-  const segBtn = (s: "local" | "internet", label: string) => (
-    <button
-      key={s}
-      onClick={() => setScope(s)}
-      style={{
-        padding: "7px 16px",
-        border: "none",
-        background: scope === s ? "var(--accent)" : "transparent",
-        color: scope === s ? "var(--on-accent)" : "var(--text)",
-        fontWeight: 600,
-      }}
-    >
-      {label}
-    </button>
+  const seg = (opts: { id: string; label: string }[], value: string, onChange: (v: string) => void) => (
+    <div style={{ display: "inline-flex", border: "1px solid var(--border)", borderRadius: 9, overflow: "hidden" }}>
+      {opts.map((o) => (
+        <button
+          key={o.id}
+          onClick={() => onChange(o.id)}
+          style={{
+            padding: "7px 16px",
+            border: "none",
+            cursor: "pointer",
+            background: value === o.id ? "var(--accent)" : "transparent",
+            color: value === o.id ? "var(--on-accent)" : "var(--text)",
+            fontWeight: 600,
+          }}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
   );
+  const iconBtn = {
+    background: "var(--bg-raised)",
+    border: "1px solid var(--border)",
+    borderRadius: 8,
+    padding: "8px 9px",
+    color: "var(--text)",
+    cursor: "pointer",
+    display: "inline-flex",
+    alignItems: "center",
+  } as const;
 
   return (
     <>
-      <Item name="Remote access" desc="Drive your agents from your phone. PIN-gated; off by default.">
-        <button
-          className="btn"
-          disabled={busy}
-          onClick={() => run(on ? ipc.remoteDisable : ipc.remoteEnable)}
-        >
-          {on ? "Turn off" : "Turn on"}
-        </button>
+      <Item name="Remote access" desc="Drive your agents from your phone. A PIN unlocks a control panel; off by default.">
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <Toggle checked={on} disabled={busy} onChange={() => run(on ? ipc.remoteDisable : ipc.remoteEnable)} />
+          {on && (
+            <span style={{ fontSize: 12, color: "var(--text-dim)", lineHeight: 1.35, maxWidth: 460 }}>
+              ⚠ Anyone with the PIN can drive your agents — turn off when you're done.
+            </span>
+          )}
+        </div>
       </Item>
 
       {on && (
         <>
           <Item name="Reach">
-            <div style={{ display: "inline-flex", border: "1px solid var(--border)", borderRadius: 9, overflow: "hidden" }}>
-              {segBtn("local", "This network")}
-              {segBtn("internet", "Internet")}
-            </div>
+            {seg(
+              [
+                { id: "local", label: "This network" },
+                { id: "internet", label: "Internet" },
+              ],
+              scope,
+              (v) => setScope(v as "local" | "internet"),
+            )}
           </Item>
-
-          <Item
-            name="Scan to connect"
-            desc={
-              scope === "local"
-                ? "Scan, then enter the PIN."
-                : tunnelUrl
-                  ? "Scan from anywhere, then enter the PIN."
-                  : "Start a public link below to get a scannable link."
-            }
-          >
-            <div className="set-inline" style={{ alignItems: "center", gap: 16 }}>
-              {qr ? (
-                <div
-                  style={{ width: 148, height: 148, padding: 8, background: "#fff", borderRadius: 8, flex: "none" }}
-                  dangerouslySetInnerHTML={{ __html: qr }}
-                />
-              ) : (
-                <div style={{ width: 148, height: 148, borderRadius: 8, flex: "none", background: "var(--bg-raised)", display: "grid", placeItems: "center", color: "var(--text-dim)", fontSize: 12, textAlign: "center", padding: 10 }}>
-                  {scope === "internet" ? "no public link yet" : "…"}
-                </div>
-              )}
-              <div>
-                <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 4 }}>PIN</div>
-                <Copyable text={status?.pin ?? ""} big />
-                <div style={{ marginTop: 10 }}>
-                  <button className="btn" disabled={busy} onClick={() => run(ipc.remoteRotatePin)}>
-                    New PIN
-                  </button>
-                </div>
-              </div>
-            </div>
-          </Item>
-
-          {scope === "local" && lanUrl && (
-            <Item name="Address">
-              <Copyable text={lanUrl} />
-            </Item>
-          )}
 
           {scope === "internet" && (
-            <Item name="Public link">
-              <div style={{ display: "grid", gap: 10, justifyItems: "start", width: "100%" }}>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                  {TUNNELS.map((t) => (
-                    <button
-                      key={t.id}
-                      onClick={() => setProvider(t.id)}
-                      style={{
-                        padding: "7px 12px",
-                        borderRadius: 8,
-                        border: `1px solid ${provider === t.id ? "var(--accent)" : "var(--border)"}`,
-                        background: provider === t.id ? "color-mix(in srgb, var(--accent) 16%, transparent)" : "transparent",
-                        color: "var(--text)",
-                        fontWeight: 600,
-                      }}
-                    >
-                      {t.name}
-                    </button>
-                  ))}
-                </div>
+            <Item name="Public link" desc="Canopy runs the tunnel; the link loads in any browser, no router setup.">
+              <div style={{ display: "grid", gap: 12, justifyItems: "start", width: "100%" }}>
+                {seg(TUNNELS.map((t) => ({ id: t.id, label: t.name })), provider, setProvider)}
                 <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
                   {prov.note ? `${prov.blurb} ${prov.note}` : prov.blurb}
                 </div>
@@ -964,7 +986,6 @@ function RemoteSettings({
                   </button>
                 )}
 
-                {tunnelUrl && tunnel.provider === provider && <Copyable text={tunnelUrl} />}
                 {tunnel.message && (
                   <div style={{ fontSize: 12, color: tunnel.running ? "var(--text-dim)" : "var(--danger)", whiteSpace: "pre-wrap", maxWidth: 460, fontFamily: tunnel.running ? undefined : "ui-monospace, monospace" }}>
                     {tunnel.message}
@@ -974,9 +995,40 @@ function RemoteSettings({
             </Item>
           )}
 
-          <Item name="Security" desc="⚠ Anyone with the PIN can drive your agents. Turn off when you're done.">
-            <span />
+          <Item
+            name="Scan to connect"
+            desc={
+              scope === "local"
+                ? "Scan, then enter the PIN."
+                : tunnelUrl
+                  ? "Scan from anywhere, then enter the PIN."
+                  : "Start a public link above, then scan."
+            }
+          >
+            <div className="set-inline" style={{ alignItems: "center", gap: 18 }}>
+              {qr && (
+                <div
+                  style={{ width: 148, height: 148, padding: 8, background: "#fff", borderRadius: 10, flex: "none" }}
+                  dangerouslySetInnerHTML={{ __html: qr }}
+                />
+              )}
+              <div>
+                <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 5 }}>PIN</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <Copyable text={status?.pin ?? ""} big />
+                  <button style={iconBtn} title="Generate a new PIN" disabled={busy} onClick={() => run(ipc.remoteRotatePin)}>
+                    <RefreshIcon />
+                  </button>
+                </div>
+              </div>
+            </div>
           </Item>
+
+          {activeUrl && (
+            <Item name="Address">
+              <Copyable text={activeUrl} />
+            </Item>
+          )}
         </>
       )}
     </>
