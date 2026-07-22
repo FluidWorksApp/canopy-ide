@@ -153,7 +153,13 @@ jobs:
           curl -fSL -o "ort.${EXT}" \
             "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VER}/${PKG}.${EXT}"
           # tgz: GNU tar (Linux) + bsdtar (macOS). zip: bsdtar (Windows/macOS).
-          if [ "$EXT" = zip ]; then tar -xf "ort.${EXT}"; else tar -xzf "ort.${EXT}"; fi
+          # tgz: GNU tar (Linux) / bsdtar (macOS). zip (Windows only): git-bash's
+          # GNU tar can't read zip, so use PowerShell's built-in Expand-Archive.
+          if [ "$EXT" = zip ]; then
+            powershell -NoProfile -Command "Expand-Archive -Force -Path ort.zip -DestinationPath ."
+          else
+            tar -xzf "ort.${EXT}"
+          fi
           mkdir -p src-tauri/onnxruntime
           cp "${PKG}/lib/${IN}" "src-tauri/onnxruntime/${OUT}"
           # Linux/Windows CPU builds ship a providers_shared lib next to the main
