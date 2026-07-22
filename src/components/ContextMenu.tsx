@@ -5,7 +5,8 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 export interface MenuItem {
-  label: string;
+  /** Omitted only on a plain separator (`separator: true` with no label). */
+  label?: string;
   onClick?: () => void;
   danger?: boolean;
   /** Renders a divider; label is ignored. */
