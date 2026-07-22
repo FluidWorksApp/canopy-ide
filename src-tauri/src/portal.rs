@@ -370,7 +370,7 @@ async fn ws_conn(mut socket: WebSocket, p: Portal) {
 
     // Initial snapshot.
     let theme0 = p.theme.lock().unwrap().clone();
-    if out_tx.send(snapshot_msg(theme0).await).await.is_err() {
+    if out_tx.send(snapshot_msg(&p.app, theme0).await).await.is_err() {
         return;
     }
 
@@ -462,9 +462,10 @@ fn handle_client_msg(
         }
         Some("refresh") => {
             let out = out.clone();
+            let app = p.app.clone();
             let theme = p.theme.lock().unwrap().clone();
             tokio::spawn(async move {
-                let _ = out.send(snapshot_msg(theme).await).await;
+                let _ = out.send(snapshot_msg(&app, theme).await).await;
             });
         }
         _ => {}
@@ -527,17 +528,21 @@ fn pty_chunk(id: u32, bytes: &[u8]) -> String {
     json!({ "t": "pty", "pty": id, "b64": b64 }).to_string()
 }
 
-/// Projects + agent sessions + usage + theme, exactly as the desktop reads them.
-async fn snapshot_msg(theme: Option<Value>) -> String {
+/// Projects + agent sessions + usage + live PTYs + theme, as the desktop reads
+/// them. `ptys` is the authoritative live set (from PtyManager) so the client
+/// knows which agents are attachable without waiting on the pty:stats event.
+async fn snapshot_msg(app: &AppHandle, theme: Option<Value>) -> String {
     let projects = crate::fsx::store_load().await.unwrap_or_else(|_| "null".into());
     let projects: Value = serde_json::from_str(&projects).unwrap_or(Value::Null);
     let sessions = crate::agents::session_digests().await.unwrap_or_default();
     let usage = crate::agents::agent_usage().await.unwrap_or_default();
+    let ptys = app.state::<PtyManager>().summaries();
     json!({
         "t": "snapshot",
         "projects": projects,
         "sessions": sessions,
         "usage": usage,
+        "ptys": ptys,
         "instance": crate::pty::instance_token(),
         "theme": theme,
     })

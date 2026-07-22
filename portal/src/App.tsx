@@ -6,6 +6,7 @@ import {
   type Project,
   type Stat,
   type Usage,
+  type Pty,
   type Workspace,
   type AgentRow,
   buildRows,
@@ -85,6 +86,7 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
   const [usage, setUsage] = useState<Usage[]>([])
   const [instance, setInstance] = useState('')
   const [stats, setStats] = useState<Map<number, Stat>>(new Map())
+  const [livePtys, setLivePtys] = useState<Set<number>>(new Set())
   const [route, setRoute] = useState<Route>({ name: 'home' })
   const wireRef = useRef<Wire | null>(null)
   const transportRef = useRef<Transport | null>(null)
@@ -102,6 +104,7 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
         setSessions((m.sessions as Digest[]) ?? [])
         setUsage((m.usage as Usage[]) ?? [])
         setInstance(m.instance ?? '')
+        setLivePtys(new Set(((m.ptys as Pty[]) ?? []).map((p) => p.id)))
         applyTheme(m.theme as Record<string, string> | undefined)
       } else if (m.t === 'event') {
         if (m.name === 'pty:stats') {
@@ -126,8 +129,8 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
   }, [token, onLogout])
 
   const rows = useMemo(
-    () => buildRows(sessions, usage, stats, instance),
-    [sessions, usage, stats, instance],
+    () => buildRows(sessions, usage, stats, instance, livePtys),
+    [sessions, usage, stats, instance, livePtys],
   )
   const live = rows.filter((r) => r.live)
   const needs = live.filter((r) => r.needsYou).length

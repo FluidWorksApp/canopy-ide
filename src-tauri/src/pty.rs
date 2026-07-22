@@ -112,6 +112,15 @@ pub struct PtyExit {
     pub exit_code: Option<u32>,
 }
 
+/// A live PTY session, minimally: enough for a remote client to know which
+/// agent digests are currently attachable (correlated by id == digest.surface).
+#[derive(Serialize, Clone)]
+pub struct PtySummary {
+    pub id: u32,
+    pub cwd: String,
+    pub title: String,
+}
+
 #[derive(Serialize, Clone)]
 pub struct SpawnResult {
     pub id: u32,
@@ -141,6 +150,22 @@ impl PtyManager {
     /// Look up a live session by id.
     pub fn get(&self, id: u32) -> Option<Arc<Session>> {
         self.sessions.lock().unwrap().get(&id).cloned()
+    }
+
+    /// Every session live right now, so a remote client can determine which
+    /// agents are attachable authoritatively — without waiting on (or trusting)
+    /// the periodic `pty:stats` event.
+    pub fn summaries(&self) -> Vec<PtySummary> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .values()
+            .map(|s| PtySummary {
+                id: s.id,
+                cwd: s.cwd.clone(),
+                title: s.title.lock().unwrap().clone(),
+            })
+            .collect()
     }
 
     /// Write bytes to a session's PTY stdin. Shared by the `pty_write` command

@@ -47,6 +47,13 @@ export interface Stat {
   procs: { name: string; cmd: string }[]
 }
 
+/** A live PTY session, from the snapshot (authoritative liveness). */
+export interface Pty {
+  id: number
+  cwd: string
+  title: string
+}
+
 /** Token/cost roll-up per session (agent_usage). */
 export interface Usage {
   session_id: string
@@ -106,23 +113,26 @@ function sortRows(a: AgentRow, b: AgentRow): number {
 }
 
 /**
- * Fuse the three sources into ranked agent rows. `instance` is the current app
- * launch's token; a digest is "live" only when it belongs to this instance AND
- * a matching PTY appears in `stats` (correlated by the digest's `surface` id).
+ * Fuse the sources into ranked agent rows. `instance` is the current app
+ * launch's token; a digest is "live" (attachable) when it belongs to this
+ * instance AND its `surface` id is a currently-running PTY — known
+ * authoritatively from `livePtys` (the snapshot), with the `stats` event as a
+ * fallback and the source of CPU/mem. `stats` also overlays live resource use.
  */
 export function buildRows(
   sessions: Digest[],
   usage: Usage[],
   stats: Map<number, Stat>,
   instance: string,
+  livePtys: Set<number>,
 ): AgentRow[] {
   const usageBy = new Map(usage.map((u) => [u.session_id, u]))
   return sessions
     .filter((d) => d.agent)
     .map((d, i) => {
       const ptyId = d.instance === instance && d.surface ? Number(d.surface) : undefined
+      const live = ptyId !== undefined && (livePtys.has(ptyId) || stats.has(ptyId))
       const liveStat = ptyId !== undefined ? stats.get(ptyId) : undefined
-      const live = liveStat !== undefined
       const u = d.session_id ? usageBy.get(d.session_id) : undefined
       return {
         key: d.session_id || `${d.instance ?? ''}:${d.surface ?? i}`,
