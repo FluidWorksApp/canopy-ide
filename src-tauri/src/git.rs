@@ -1711,9 +1711,13 @@ pub async fn git_branch_commits(
     let top = repo_path(&state, &repo)?;
     let branch = checked_ref(&branch)?;
     let base = default_base(&top);
-    // base..branch — commits on the branch and not on base. Bounded: a branch
-    // with thousands of commits is a fork, not a loose end.
-    let out = run(git(&top).args([
+    Ok(branch_commits_of(&top, &base, &branch))
+}
+
+/// base..branch — commits on the branch and not on base. Bounded: a branch
+/// with thousands of commits is a fork, not a loose end.
+fn branch_commits_of(top: &Path, base: &str, branch: &str) -> Vec<CommitInfo> {
+    let out = run(git(top).args([
         "log",
         "-200",
         "--date=short",
@@ -1721,8 +1725,7 @@ pub async fn git_branch_commits(
         &format!("{base}..{branch}"),
     ]))
     .unwrap_or_default();
-    Ok(out
-        .lines()
+    out.lines()
         .filter_map(|line| {
             let f: Vec<&str> = line.split('\x1f').collect();
             if f.len() < 5 {
@@ -1737,7 +1740,174 @@ pub async fn git_branch_commits(
                 refs: f.get(5).unwrap_or(&"").to_string(),
             })
         })
-        .collect())
+        .collect()
+}
+
+/// One agent session's work, joined against git: the digest's cwd resolved to
+/// a workdir this repo owns, the live branch, counts, and the base..branch
+/// commit list. Metadata only — patches stay behind `git_branch_patch` and the
+/// PR match stays behind `gh_pr_list`, so this paints instantly.
+#[derive(Serialize)]
+pub struct AgentWorkspace {
+    pub session_id: String,
+    pub agent: Option<String>,
+    pub state: Option<String>,
+    pub cwd: Option<String>,
+    pub updated: Option<u64>,
+    /// Files the agent itself reported editing — intent, capped by the hook;
+    /// the diff panes are the authoritative list.
+    pub touched: Vec<String>,
+    /// Live HEAD of the workdir when it exists, else the digest's snapshot.
+    pub branch: Option<String>,
+    pub detached: bool,
+    pub base: String,
+    /// The agent works directly on the base/protected branch — there is no
+    /// branch-scoped view, only uncommitted changes.
+    pub on_base: bool,
+    /// Directory for uncommitted diffs, authorized against this repo's own
+    /// worktree list. None when the cwd is gone or belongs elsewhere.
+    pub workdir: Option<String>,
+    /// The workdir is a linked worktree, not the shared checkout.
+    pub isolated: bool,
+    pub cwd_missing: bool,
+    pub dirty: u32,
+    pub ahead: u32,
+    pub behind: u32,
+    pub merged: bool,
+    pub commits: Vec<CommitInfo>,
+}
+
+#[tauri::command]
+pub async fn agent_workspace(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    session_id: String,
+) -> Result<AgentWorkspace, String> {
+    // The id becomes a file name inside ~/.canopy/sessions — same guard as
+    // session_forget, expressed as an allowlist.
+    if session_id.is_empty()
+        || !session_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        || session_id.contains("..")
+    {
+        return Err("invalid session id".into());
+    }
+    let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
+    let digest_path = PathBuf::from(&home)
+        .join(".canopy")
+        .join("sessions")
+        .join(format!("{session_id}.json"));
+    let digest: serde_json::Value = std::fs::read_to_string(&digest_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .ok_or_else(|| "no digest for this session".to_string())?;
+    let dstr = |k: &str| digest.get(k).and_then(|v| v.as_str()).map(str::to_string);
+
+    let top = repo_path(&state, &repo)?;
+    let base = default_base(&top);
+
+    // Resolve the digest's cwd to a workdir this repo actually owns. Git's own
+    // worktree list is the authority, compared canonically — agent-made
+    // worktrees were never registered as workspace roots (see git_branch_patch
+    // for the full rationale).
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let cwd = dstr("cwd");
+    let mut workdir: Option<PathBuf> = None;
+    let mut cwd_missing = false;
+    if let Some(c) = cwd.as_deref() {
+        let dir = Path::new(c);
+        if dir.is_dir() {
+            if let Some(wt_top) = toplevel_of(dir) {
+                let want = canon(&wt_top);
+                if want == canon(&top)
+                    || list_worktrees(&top)?
+                        .iter()
+                        .any(|w| canon(Path::new(&w.path)) == want)
+                {
+                    workdir = Some(wt_top);
+                }
+            }
+        } else {
+            cwd_missing = true;
+        }
+    }
+    let isolated = workdir.as_deref().map(|w| canon(w) != canon(&top)).unwrap_or(false);
+
+    // The live branch beats the digest's snapshot; the snapshot still names
+    // the branch after the workdir is gone.
+    let (mut branch, mut detached) = (None, false);
+    if let Some(w) = &workdir {
+        let (b, d) = head_branch(w);
+        branch = b;
+        detached = d;
+    }
+    if branch.is_none() && !detached {
+        branch = dstr("branch");
+    }
+    let on_base = !detached
+        && branch
+            .as_deref()
+            .map(|b| is_protected_branch(b, &base))
+            .unwrap_or(false);
+
+    let mut dirty = 0u32;
+    if let Some(w) = &workdir {
+        if let Ok(s) = run(git(w).args(["status", "--porcelain"])) {
+            dirty = s.lines().filter(|l| !l.trim().is_empty()).count() as u32;
+        }
+    }
+
+    let (mut ahead, mut behind, mut merged) = (0u32, 0u32, false);
+    let mut commits = Vec::new();
+    if !detached && !on_base {
+        // checked_ref guards the digest-supplied fallback; a live branch from
+        // symbolic-ref passes trivially. A weird name degrades to no counts
+        // rather than failing the whole view.
+        if let Some(b) = branch.as_deref().and_then(|b| checked_ref(b).ok()) {
+            if let Ok(out) = run(git(&top).args([
+                "rev-list",
+                "--left-right",
+                "--count",
+                &format!("{base}...{b}"),
+            ])) {
+                let mut n = out.split_whitespace();
+                behind = n.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                ahead = n.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            }
+            merged = git(&top)
+                .args(["merge-base", "--is-ancestor", &b, &base])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            commits = branch_commits_of(&top, &base, &b);
+        }
+    }
+
+    Ok(AgentWorkspace {
+        session_id,
+        agent: dstr("agent"),
+        state: dstr("state"),
+        cwd,
+        updated: digest.get("updated").and_then(|v| v.as_u64()),
+        touched: digest
+            .get("files")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|f| f.as_str().map(str::to_string)).collect())
+            .unwrap_or_default(),
+        branch,
+        detached,
+        base,
+        on_base,
+        workdir: workdir.map(|w| w.to_string_lossy().to_string()),
+        isolated,
+        cwd_missing,
+        dirty,
+        ahead,
+        behind,
+        merged,
+        commits,
+    })
 }
 
 /// A branch's patch. `uncommitted` gives the working-tree changes in its

@@ -2407,6 +2407,15 @@ body,
 .agent-session {
   color: var(--text-dim);
   font-size: 11px;
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+  cursor: pointer;
+}
+.agent-session:hover {
+  color: var(--text);
+  text-decoration: underline;
 }
 
 .agent-stats {
@@ -4851,6 +4860,74 @@ textarea,
 
 .loose-age {
   margin-left: auto;
+}
+
+/* ---------- agent workspace tab ---------- */
+
+.aw-pr {
+  padding: 6px 14px 0;
+}
+
+.aw-pr-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  background: var(--bg-raised, rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+.aw-pr-card:hover {
+  border-color: var(--accent);
+}
+
+.aw-pr-num {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.aw-pr-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.aw-pr-none {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.aw-touched {
+  padding: 8px 14px 0;
+}
+
+.aw-touched-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  padding: 4px 0 2px;
+}
+
+.aw-touched-file {
+  font-size: 11px;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 6px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Actions stay out of the way until the row is pointed at. */
