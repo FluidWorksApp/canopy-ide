@@ -1012,28 +1012,30 @@ function RemoteSettings({
                   dangerouslySetInnerHTML={{ __html: qr }}
                 />
               )}
-              <div>
-                <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 5 }}>PIN</div>
-                <div style={{ display: "flex", alignItems: "stretch", gap: 8 }}>
-                  <Copyable text={status?.pin ?? ""} big />
-                  <button
-                    style={{ ...iconBtn, padding: "0 12px" }}
-                    title="Generate a new PIN"
-                    disabled={busy}
-                    onClick={() => run(ipc.remoteRotatePin)}
-                  >
-                    <RefreshIcon />
-                  </button>
+              <div style={{ display: "grid", gap: 12, minWidth: 0, flex: 1 }}>
+                <div>
+                  <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 5 }}>PIN</div>
+                  <div style={{ display: "flex", alignItems: "stretch", gap: 8 }}>
+                    <Copyable text={status?.pin ?? ""} big />
+                    <button
+                      style={{ ...iconBtn, padding: "0 12px" }}
+                      title="Generate a new PIN"
+                      disabled={busy}
+                      onClick={() => run(ipc.remoteRotatePin)}
+                    >
+                      <RefreshIcon />
+                    </button>
+                  </div>
                 </div>
+                {activeUrl && (
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 5 }}>Address</div>
+                    <Copyable text={activeUrl} />
+                  </div>
+                )}
               </div>
             </div>
           </Item>
-
-          {activeUrl && (
-            <Item name="Address">
-              <Copyable text={activeUrl} />
-            </Item>
-          )}
         </>
       )}
     </>
