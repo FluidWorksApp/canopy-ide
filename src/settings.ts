@@ -162,6 +162,17 @@ export interface Settings {
   /** Optional BCP-47 language hint passed at transcription time. Empty =
    *  auto-detect (what multilingual models do anyway). */
   dictationLanguage: string;
+
+  // ---- Remote access ----
+  /** Reach for the remote control panel: "local" (this network only) or
+   *  "internet" (public link via a tunnel). The server toggle and the tunnel
+   *  are backend state, but this is a UI selection that would otherwise reset
+   *  to "local" every time Settings is reopened. */
+  remoteReach: "local" | "internet";
+  /** Which tunnel provider the Public link section had selected (see TUNNELS
+   *  in SettingsDialog.tsx). Persisted alongside remoteReach so reopening
+   *  Settings restores the whole choice, not just the running link. */
+  remoteTunnelProvider: string;
 }
 
 // NB: stored settings override these (see getSettings), so flipping a default
@@ -192,6 +203,8 @@ const DEFAULTS: Settings = {
   dictationHotkey: DEFAULT_DICTATION_HOTKEY,
   dictationModel: "",
   dictationLanguage: "",
+  remoteReach: "local",
+  remoteTunnelProvider: "cloudflare",
 };
 
 const KEY = "canopy.settings";
