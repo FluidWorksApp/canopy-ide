@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
 import { AGENT_CLIS, AGENT_PATTERN, restoreCommand } from "../projects";
-import { restorableFrom } from "../restorable";
+import { forgetSessions, restorableFrom } from "../restorable";
 import { AgentIcon, MoonIcon, RestartIcon, TerminalIcon, TrashIcon } from "./icons";
 import type { PendingItem } from "../notifications";
 
@@ -751,9 +751,16 @@ export function AgentsPanel({
                     className="row-act row-act-del"
                     title="Forget this session — removes it from this list"
                     onClick={() => {
-                      void ipc.sessionForget(d.session_id).then(() =>
-                        setDigests((prev) => prev.filter((x) => x.session_id !== d.session_id)),
-                      );
+                      // Tombstone first: sessions read from a CLI's own on-disk
+                      // store (omp) aren't in ~/.canopy/sessions, so deleting
+                      // that file can't stop them — the next poll re-reads them
+                      // from omp's dir and they come straight back. The
+                      // persistent forget is what restorableFrom actually
+                      // filters on, so it's the only thing that makes an omp
+                      // session stay gone.
+                      forgetSessions([d]);
+                      void ipc.sessionForget(d.session_id).catch(() => {});
+                      setDigests((prev) => prev.filter((x) => x.session_id !== d.session_id));
                     }}
                   >
                     <TrashIcon size={13} />
