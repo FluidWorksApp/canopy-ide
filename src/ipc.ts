@@ -289,6 +289,11 @@ export const gitCheckout = (repo: string, branch: string, create = false) =>
  *  and current branches are refused by the backend. */
 export const gitBranchDelete = (repo: string, branch: string, force = false) =>
   invoke<string>("git_branch_delete", { repo, branch, force });
+/** Delete a branch on the remote — `git push origin --delete`. The remote twin
+ *  of gitBranchDelete; a fully-cleaned branch needs both. Protected branches are
+ *  refused by the backend. */
+export const gitBranchDeleteRemote = (repo: string, branch: string) =>
+  invoke<string>("git_branch_delete_remote", { repo, branch });
 export const gitStage = (repo: string, paths: string[]) =>
   invoke<void>("git_stage", { repo, paths });
 export const gitUnstage = (repo: string, paths: string[]) =>
@@ -444,8 +449,10 @@ export const ghPrMerge = (
   number: number,
   method: "squash" | "merge" | "rebase",
 ) => invoke<string>("gh_pr_merge", { repo, number, method });
-export const ghPrClose = (repo: string, number: number) =>
-  invoke<string>("gh_pr_close", { repo, number });
+/** Close a PR without merging. `deleteBranch` also throws away its branch (local
+ *  + remote) via `gh pr close --delete-branch` — the "close it and discard it". */
+export const ghPrClose = (repo: string, number: number, deleteBranch = false) =>
+  invoke<string>("gh_pr_close", { repo, number, deleteBranch });
 export const ghPrReady = (repo: string, number: number) =>
   invoke<string>("gh_pr_ready", { repo, number });
 

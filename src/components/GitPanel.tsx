@@ -6,8 +6,26 @@ import { useCallback, useEffect, useState } from "react";
 import * as ipc from "../ipc";
 import type { Notify } from "../types";
 import { useEscape } from "../useEscape";
+import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { CheckIcon, FailIcon, RestartIcon } from "./icons";
 import { LooseEnds } from "./LooseEnds";
+
+/** Open a URL in the user's real browser (PR pages, GitHub links). */
+const openExternal = (url: string) =>
+  void import("@tauri-apps/plugin-opener").then(({ openUrl }) => openUrl(url));
+
+/** The integration branches a right-click must never offer to delete. The Rust
+ *  core is the real guard (it also knows this repo's actual base); this is only
+ *  so the menu doesn't dangle a delete that would always fail. */
+const PROTECTED = new Set([
+  "main",
+  "master",
+  "develop",
+  "development",
+  "trunk",
+  "staging",
+  "production",
+]);
 
 interface GitPanelProps {
   components: { label: string; path: string }[];
@@ -76,8 +94,11 @@ export function GitPanel({
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [branchFilter, setBranchFilter] = useState("");
-  const [confirm, setConfirm] = useState<{ text: string; run: () => void } | null>(null);
+  const [confirm, setConfirm] = useState<
+    { text: string; run: () => void; okLabel?: string } | null
+  >(null);
   useEscape(() => setConfirm(null), confirm != null);
+  const ctx = useContextMenu();
 
   const key = components.map((c) => c.path).join("\n");
 
@@ -214,6 +235,183 @@ export function GitPanel({
       // Reconcile on success (confirm) and failure (revert) alike.
       .finally(() => void refresh());
   };
+
+  /** Close a PR (optionally deleting its branch) and drop it from the list. */
+  const closePr = async (pr: ipc.PrInfo, deleteBranch: boolean) => {
+    if (!repo) return;
+    setBusy("prs");
+    try {
+      const msg = await ipc.ghPrClose(repo, pr.number, deleteBranch);
+      onNotice(msg, "success");
+      setPrs((cur) => cur.filter((p) => p.number !== pr.number));
+      // Deleting the branch may have switched HEAD — refresh the branch view too.
+      if (deleteBranch) await refresh();
+    } catch (err) {
+      onNotice(String(err), "error");
+      await loadPrs();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // Right-click menus. Each is one plain-language label per real git/gh command,
+  // with the command itself shown as a dimmed hint — the point is that a casual
+  // coder can read what a row will run and learn the underlying operation.
+
+  const branchMenu = (b: ipc.BranchInfo): MenuItem[] => {
+    const items: MenuItem[] = [];
+    if (!b.current) {
+      items.push({
+        label: b.remote_only ? "Check out from GitHub" : "Switch to this branch",
+        hint: "git checkout",
+        onClick: () => repo && void act("checkout", () => ipc.gitCheckout(repo, b.name, false)),
+      });
+    }
+
+    // The branch you're on and protected branches never offer a delete — say why
+    // rather than dangling a menu item that would always be refused.
+    if (b.current) {
+      items.push({ separator: true });
+      items.push({ label: "On this branch — switch away to delete", disabled: true });
+      return items;
+    }
+    if (PROTECTED.has(b.name)) {
+      items.push({ separator: true });
+      items.push({ label: "Protected branch — can't delete", disabled: true });
+      return items;
+    }
+
+    items.push({ separator: true });
+
+    if (!b.remote_only) {
+      // Safe delete: git refuses if the branch holds commits not merged into the
+      // base, so it can never silently drop work.
+      items.push({
+        label: "Delete branch",
+        hint: "git branch -d",
+        danger: true,
+        onClick: () =>
+          setConfirm({
+            text: `Delete local branch ${b.name}?\n\nGit refuses if it holds unmerged commits — use “Force delete” for those.`,
+            okLabel: "Delete",
+            run: () =>
+              repo && void act("delete branch", () => ipc.gitBranchDelete(repo, b.name, false)),
+          }),
+      });
+      // Force delete: drops the branch even with unmerged commits, so this one
+      // can lose work that lives nowhere else.
+      items.push({
+        label: "Force delete branch",
+        hint: "git branch -D",
+        danger: true,
+        onClick: () =>
+          setConfirm({
+            text: `Force-delete local branch ${b.name}?\n\nCommits on it that aren't merged elsewhere will be lost. This cannot be undone.`,
+            okLabel: "Force delete",
+            run: () =>
+              repo &&
+              void act("force delete branch", () => ipc.gitBranchDelete(repo, b.name, true)),
+          }),
+      });
+    }
+
+    if (b.remote_only || b.synced) {
+      items.push({
+        label: "Delete on GitHub",
+        hint: "git push origin --delete",
+        danger: true,
+        onClick: () =>
+          setConfirm({
+            text: `Delete branch ${b.name} on GitHub?\n\nIt's removed from the remote for everyone. Anyone who still has it locally can push it back.`,
+            okLabel: "Delete on GitHub",
+            run: () =>
+              repo &&
+              void act("delete remote branch", () => ipc.gitBranchDeleteRemote(repo, b.name)),
+          }),
+      });
+    }
+    return items;
+  };
+
+  const worktreeMenu = (w: ipc.WorktreeInfo): MenuItem[] => {
+    const items: MenuItem[] = [];
+    if (activeWorktree !== w.path && !w.prunable && !w.bare) {
+      items.push({
+        label: "Use as project files",
+        onClick: () => repo && onUseWorktree(repo, w.path, w.branch ?? w.name),
+      });
+    }
+    items.push({
+      label: "Open terminal here",
+      onClick: () => onOpenTerminal(w.path, w.branch ?? w.name),
+    });
+    items.push({
+      label: "Reveal in Finder",
+      onClick: () => void ipc.fsReveal(w.path).catch(() => {}),
+    });
+    if (!w.is_main) {
+      items.push({ separator: true });
+      items.push({
+        label: "Remove worktree",
+        hint: "git worktree remove",
+        danger: true,
+        onClick: () =>
+          setConfirm({
+            text:
+              w.dirty > 0
+                ? `Remove worktree ${w.path}?\n\nIt has ${w.dirty} uncommitted change${
+                    w.dirty === 1 ? "" : "s"
+                  } that will be lost. This cannot be undone.`
+                : `Remove worktree ${w.path}?`,
+            okLabel: "Remove",
+            run: () =>
+              repo &&
+              void act("worktree remove", async () => {
+                const r = await ipc.gitWorktreeRemove(repo, w.path, w.dirty > 0);
+                await ipc.workspaceRemove(w.path).catch(() => {});
+                await loadWorktrees();
+                return r;
+              }),
+          }),
+      });
+    }
+    return items;
+  };
+
+  const prMenu = (pr: ipc.PrInfo): MenuItem[] => [
+    { label: "Open pull request", onClick: () => repo && onOpenPr(repo, pr) },
+    { label: "View on GitHub", onClick: () => openExternal(pr.url) },
+    { label: "Copy link", onClick: () => void navigator.clipboard.writeText(pr.url) },
+    { separator: true },
+    {
+      label: "Check out this PR",
+      hint: "gh pr checkout",
+      onClick: () => repo && void act("pr checkout", () => ipc.ghPrCheckout(repo, pr.number)),
+    },
+    { separator: true },
+    {
+      label: "Close pull request",
+      hint: "gh pr close",
+      danger: true,
+      onClick: () =>
+        setConfirm({
+          text: `Close pull request #${pr.number}?\n\nIt won't be merged. The branch ${pr.branch} is kept, so you can reopen the PR later.`,
+          okLabel: "Close PR",
+          run: () => void closePr(pr, false),
+        }),
+    },
+    {
+      label: "Close and delete branch",
+      hint: "gh pr close --delete-branch",
+      danger: true,
+      onClick: () =>
+        setConfirm({
+          text: `Close #${pr.number} and delete its branch ${pr.branch}?\n\nThe PR closes without merging and the branch is deleted locally and on GitHub. This throws the work away and cannot be undone.`,
+          okLabel: "Close & delete",
+          run: () => void closePr(pr, true),
+        }),
+    },
+  ];
 
   if (repos.length === 0) {
     return (
@@ -528,6 +726,7 @@ export function GitPanel({
                   // tracking it — the same DWIM git does for `git checkout x`.
                   void act("checkout", () => ipc.gitCheckout(repo, b.name, false))
                 }
+                onContextMenu={(e) => ctx.open(e, branchMenu(b))}
               >
                 <span className="git-branch-mark">{b.current ? "●" : b.remote_only ? "☁" : "○"}</span>
                 <span className="git-branch-name">{b.name}</span>
@@ -586,6 +785,7 @@ export function GitPanel({
               title={`${w.path}\n${w.head}${w.locked ? `\nlocked: ${w.locked}` : ""}${
                 w.prunable ? `\nprunable: ${w.prunable}` : ""
               }`}
+              onContextMenu={(e) => ctx.open(e, worktreeMenu(w))}
             >
               <div className="git-worktree-top">
                 <span className="git-worktree-mark">{w.is_main ? "★" : w.prunable ? "⚠" : "⑂"}</span>
@@ -729,6 +929,7 @@ export function GitPanel({
                 className="git-pr-row"
                 title={`${pr.branch} → ${pr.base}\n${pr.url}`}
                 onClick={() => repo && onOpenPr(repo, pr)}
+                onContextMenu={(e) => ctx.open(e, prMenu(pr))}
               >
                 <span className="git-pr-num">#{pr.number}</span>
                 <div className="git-pr-main">
@@ -799,11 +1000,15 @@ export function GitPanel({
                   setConfirm(null);
                 }}
               >
-                Discard
+                {confirm.okLabel ?? "Discard"}
               </button>
             </div>
           </div>
         </div>
+      )}
+
+      {ctx.menu && (
+        <ContextMenu x={ctx.menu.x} y={ctx.menu.y} items={ctx.menu.items} onClose={ctx.close} />
       )}
     </div>
   );

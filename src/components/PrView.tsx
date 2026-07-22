@@ -102,6 +102,7 @@ export function PrView({ repo, pr, onNotice, relay }: PrViewProps) {
   const [mergeOpen, setMergeOpen] = useState(false);
   const [mergeConfirm, setMergeConfirm] = useState<MergeMethod | null>(null);
   const [closeConfirm, setCloseConfirm] = useState(false);
+  const [closeDelBranch, setCloseDelBranch] = useState(false);
   useEscape(
     () => {
       setConfirm(null);
@@ -180,10 +181,10 @@ export function PrView({ repo, pr, onNotice, relay }: PrViewProps) {
     }
   };
 
-  const close = async () => {
+  const close = async (deleteBranch = false) => {
     setBusy(true);
     try {
-      const msg = await ipc.ghPrClose(repo, pr.number);
+      const msg = await ipc.ghPrClose(repo, pr.number, deleteBranch);
       setDone(msg);
       onNotice(msg, "success");
     } catch (err) {
@@ -572,8 +573,19 @@ export function PrView({ repo, pr, onNotice, relay }: PrViewProps) {
             </p>
             <p className="confirm-sub">
               The pull request closes on GitHub and its author is notified. You can reopen
-              it there later.
+              it there later{closeDelBranch ? " — but only if the branch still exists" : ""}.
             </p>
+            {/* Opt-in to the destructive half: gh pr close --delete-branch drops
+                the branch locally and on the remote, so reopening is no longer
+                possible. Off by default; a plain close keeps the work. */}
+            <label className="confirm-check">
+              <input
+                type="checkbox"
+                checked={closeDelBranch}
+                onChange={(e) => setCloseDelBranch(e.target.checked)}
+              />
+              Also delete the branch <code>{pr.branch}</code> (local + GitHub)
+            </label>
             <div className="confirm-actions">
               <button className="btn" onClick={() => setCloseConfirm(false)}>
                 Cancel
@@ -582,11 +594,13 @@ export function PrView({ repo, pr, onNotice, relay }: PrViewProps) {
                 className="btn btn-danger-solid"
                 disabled={busy}
                 onClick={() => {
+                  const del = closeDelBranch;
                   setCloseConfirm(false);
-                  void close();
+                  setCloseDelBranch(false);
+                  void close(del);
                 }}
               >
-                Close PR
+                {closeDelBranch ? "Close & delete" : "Close PR"}
               </button>
             </div>
           </div>

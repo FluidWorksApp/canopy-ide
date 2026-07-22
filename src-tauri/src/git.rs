@@ -944,18 +944,28 @@ pub async fn gh_pr_merge(
 }
 
 /// Close a PR without merging. Outward-facing (others see it close), so the UI
-/// confirms first.
+/// confirms first. With `delete_branch`, gh also deletes the PR's branch on the
+/// remote *and* the local copy if present — the full "close it and throw the
+/// work away" that `gh pr close --delete-branch` performs.
 #[tauri::command]
 pub async fn gh_pr_close(
     state: State<'_, WorkspaceManager>,
     repo: String,
     number: u32,
+    delete_branch: bool,
 ) -> Result<String, String> {
     let top = repo_path(&state, &repo)?;
     let mut cmd = gh_in(&top);
     cmd.args(["pr", "close", &number.to_string()]);
+    if delete_branch {
+        cmd.arg("--delete-branch");
+    }
     run_net(&mut cmd)?;
-    Ok(format!("Closed #{number}"))
+    Ok(if delete_branch {
+        format!("Closed #{number} and deleted its branch")
+    } else {
+        format!("Closed #{number}")
+    })
 }
 
 /// Take a draft PR out of draft so it can be reviewed and merged.
@@ -1661,6 +1671,32 @@ pub async fn git_branch_delete(
     let flag = if force { "-D" } else { "-d" };
     run(git(&top).args(["branch", flag, &branch]))?;
     Ok(format!("Deleted {branch}"))
+}
+
+/// Delete a branch on the remote — `git push origin --delete <branch>`. This is
+/// the twin of git_branch_delete: that one removes the *local* copy, this one
+/// removes the copy on GitHub, and a fully-cleaned branch needs both. Outward
+/// facing (everyone loses the branch), so the UI confirms first. Protected
+/// branches are refused here as well, so a stray right-click can't wipe `main`
+/// off the remote.
+#[tauri::command]
+pub async fn git_branch_delete_remote(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    branch: String,
+) -> Result<String, String> {
+    let top = repo_path(&state, &repo)?;
+    let branch = checked_ref(&branch)?;
+    let base = default_base(&top);
+    if is_protected_branch(&branch, &base) {
+        return Err(format!("{branch} is a protected branch and can't be deleted here"));
+    }
+    let mut cmd = git(&top);
+    // The push refspec `:branch` (empty source) is git's own way of saying
+    // "delete that ref on the remote"; --delete is the readable spelling of it.
+    cmd.args(["push", "origin", "--delete", &branch]);
+    run_net(&mut cmd)?;
+    Ok(format!("Deleted {branch} on GitHub"))
 }
 
 /// Commits a branch has that the base does not — the "what is in here" list

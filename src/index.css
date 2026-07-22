@@ -3719,6 +3719,25 @@ body,
   font-size: 11px;
 }
 
+/* Opt-in checkbox inside a confirm dialog (e.g. "also delete the branch"). */
+.confirm-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+}
+.confirm-check input {
+  cursor: pointer;
+}
+.confirm-check code {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
 .confirm-actions {
   display: flex;
   justify-content: flex-end;
