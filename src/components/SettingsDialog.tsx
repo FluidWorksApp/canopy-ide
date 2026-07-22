@@ -22,7 +22,7 @@ import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
 import * as ipc from "../ipc";
 import { availableMonoFonts, fontLabel, fontStack } from "../fonts";
 import { AgentIcon, TrackerIcon } from "./icons";
-import { AGENT_CLIS } from "../projects";
+import { AGENT_CLIS, currentPlatform } from "../projects";
 
 export type SettingsTab =
   | "appearance"
@@ -31,7 +31,8 @@ export type SettingsTab =
   | "terminal"
   | "dictation"
   | "guard"
-  | "integrations";
+  | "integrations"
+  | "remote";
 
 interface SettingsDialogProps {
   onClose: () => void;
@@ -46,6 +47,7 @@ const TABS: { id: SettingsTab; label: string }[] = [
   { id: "dictation", label: "Dictation" },
   { id: "guard", label: "Process guard" },
   { id: "integrations", label: "Integrations" },
+  { id: "remote", label: "Remote access" },
 ];
 
 const CURSOR_OPTIONS: { id: CursorStyle; label: string }[] = [
@@ -428,6 +430,8 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
               </>
             )}
 
+            {tab === "remote" && <RemoteSettings runInTerminal={runInTerminal} />}
+
             {tab === "integrations" && (
               <>
                 {TRACKERS.map((p) => (
@@ -590,6 +594,456 @@ const langName = (code: string) => LANG_NAMES[code] ?? code;
  *  armed, the next non-modifier keydown (with its modifiers) becomes the
  *  binding. Escape cancels; the physical `code` is stored so it survives
  *  non-US layouts. */
+/** Copy to the clipboard, with a hidden-textarea fallback for webviews where
+ *  the async clipboard API is unavailable. */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+}
+
+function CopyIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="9" y="9" width="11" height="11" rx="2" />
+      <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+    </svg>
+  );
+}
+function CheckIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20 6 9 17l-5-5" />
+    </svg>
+  );
+}
+function RefreshIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+      <path d="M21 3v6h-6" />
+    </svg>
+  );
+}
+
+/** An on/off switch. */
+function Toggle({ checked, disabled, onChange }: { checked: boolean; disabled?: boolean; onChange: () => void }) {
+  return (
+    <button
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
+      onClick={onChange}
+      style={{
+        width: 40,
+        height: 23,
+        borderRadius: 12,
+        border: "none",
+        padding: 3,
+        cursor: "pointer",
+        flex: "none",
+        background: checked ? "var(--accent)" : "var(--border)",
+        transition: "background .15s",
+      }}
+    >
+      <span
+        style={{
+          display: "block",
+          width: 17,
+          height: 17,
+          borderRadius: "50%",
+          background: "#fff",
+          transform: checked ? "translateX(17px)" : "translateX(0)",
+          transition: "transform .15s",
+        }}
+      />
+    </button>
+  );
+}
+
+/** A click-to-copy pill: shows the value and a copy/✓ icon. */
+function Copyable({
+  text,
+  display,
+  big,
+}: {
+  text: string;
+  display?: React.ReactNode;
+  big?: boolean;
+}) {
+  const [copied, setCopied] = useState(false);
+  const onClick = () => {
+    void copyText(text).then((ok) => {
+      if (!ok) return;
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    });
+  };
+  return (
+    <button
+      type="button"
+      className="copyable"
+      onClick={onClick}
+      title="Click to copy"
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 8,
+        cursor: "pointer",
+        border: "1px solid var(--line, #2a2f3a)",
+        background: "var(--raised, #1f2335)",
+        color: "inherit",
+        borderRadius: 6,
+        padding: big ? "4px 12px" : "4px 10px",
+        font: "inherit",
+        maxWidth: "100%",
+      }}
+    >
+      <code
+        style={{
+          fontSize: big ? 17 : 13,
+          letterSpacing: big ? 3 : 0,
+          background: "transparent",
+          padding: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {display ?? text}
+      </code>
+      <span
+        style={{
+          display: "inline-flex",
+          opacity: copied ? 1 : 0.55,
+          color: copied ? "var(--accent, #7aa2f7)" : "inherit",
+        }}
+      >
+        {copied ? <CheckIcon /> : <CopyIcon />}
+      </span>
+    </button>
+  );
+}
+
+/** Canopy Remote — turn on the embedded control-panel server, show the PIN and
+ *  the connect URL. Off by default; see src-tauri/src/portal.rs. */
+/** Canopy's theme CSS variables, read live from the DOM so the portal inherits
+ *  the exact skin (including a custom accent). */
+const THEME_VARS = [
+  "bg",
+  "bg-alt",
+  "bg-raised",
+  "border",
+  "text",
+  "text-dim",
+  "accent",
+  "danger",
+  "ok",
+  "warn",
+  "on-accent",
+];
+function readThemeTokens(): Record<string, string> {
+  const cs = getComputedStyle(document.documentElement);
+  const out: Record<string, string> = {};
+  for (const v of THEME_VARS) {
+    const val = cs.getPropertyValue(`--${v}`).trim();
+    if (val) out[v] = val;
+  }
+  return out;
+}
+
+/** Public-link tunnel providers, with the per-OS install command (same model as
+ *  the prerequisite installers) and whether they need an account token. */
+const TUNNELS: {
+  id: string;
+  name: string;
+  bin: string;
+  needsToken: boolean;
+  blurb: string;
+  tokenHelp?: string;
+  note?: string;
+  install: Record<"macos" | "windows" | "linux", string>;
+}[] = [
+  {
+    id: "cloudflare",
+    name: "Cloudflare",
+    bin: "cloudflared",
+    needsToken: false,
+    blurb: "No account — an instant https:// link. Recommended.",
+    install: {
+      macos: "brew install cloudflared",
+      windows: "winget install --id Cloudflare.cloudflared -e --source winget",
+      linux: "curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared",
+    },
+  },
+  {
+    id: "ngrok",
+    name: "ngrok",
+    bin: "ngrok",
+    needsToken: true,
+    blurb: "Paste your free authtoken.",
+    tokenHelp: "From dashboard.ngrok.com → Your Authtoken.",
+    install: {
+      macos: "brew install ngrok",
+      windows: "winget install --id ngrok.ngrok -e --source winget",
+      linux: "curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null && echo 'deb https://ngrok-agent.s3.amazonaws.com buster main' | sudo tee /etc/apt/sources.list.d/ngrok.list && sudo apt update && sudo apt install ngrok",
+    },
+  },
+  {
+    id: "tailscale",
+    name: "Tailscale",
+    bin: "tailscale",
+    needsToken: false,
+    blurb: "Uses Funnel for a public link.",
+    note: "Requires Funnel enabled in your tailnet admin (plain Tailscale needs the app on both devices).",
+    install: {
+      macos: "brew install tailscale",
+      windows: "winget install --id tailscale.tailscale -e --source winget",
+      linux: "curl -fsSL https://tailscale.com/install.sh | sh",
+    },
+  },
+];
+
+function RemoteSettings({
+  runInTerminal,
+}: {
+  runInTerminal: (command: string, title: string) => void;
+}) {
+  const [status, setStatus] = useState<ipc.RemoteStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [scope, setScope] = useState<"local" | "internet">("local");
+  const [provider, setProvider] = useState("cloudflare");
+  const [tunnel, setTunnel] = useState<ipc.TunnelState>({
+    running: false,
+    provider: null,
+    url: null,
+    message: null,
+  });
+  const [installed, setInstalled] = useState<Record<string, boolean>>({});
+  const [token, setToken] = useState(() => trackerKey("ngrok"));
+  const [qr, setQr] = useState<string | null>(null);
+
+  useEffect(() => {
+    void ipc.remoteStatus().then(setStatus).catch(() => setStatus(null));
+    void ipc.tunnelStatus().then(setTunnel).catch(() => {});
+    void ipc
+      .whichCheck(TUNNELS.map((t) => t.bin))
+      .then(setInstalled)
+      .catch(() => {});
+    const un = ipc.onTunnelState(setTunnel);
+    return () => void un.then((f) => f());
+  }, []);
+
+  // Push our theme to the portal whenever remote access is on.
+  useEffect(() => {
+    if (status?.enabled) void ipc.remoteSetTheme(readThemeTokens()).catch(() => {});
+  }, [status?.enabled]);
+
+  const on = status?.enabled ?? false;
+  const lanUrl = status?.urls?.[0] ?? null;
+  // The portal is served under /remote, so a tunnel's bare URL needs the path
+  // appended or it 404s at the domain root. The URL/QR only belong to the
+  // SELECTED provider — switching tabs to one that isn't running shows no link.
+  const withRemote = (u: string) => (u.endsWith("/remote") ? u : `${u.replace(/\/+$/, "")}/remote`);
+  const tunnelForProvider = tunnel.provider === provider;
+  const tunnelUrl =
+    tunnelForProvider && tunnel.running && tunnel.url ? withRemote(tunnel.url) : null;
+  const activeUrl = scope === "internet" ? tunnelUrl : lanUrl;
+
+  // Repoint the QR at whichever URL the chosen scope resolves to.
+  useEffect(() => {
+    if (!on || !activeUrl) {
+      setQr(null);
+      return;
+    }
+    void ipc.remoteQr(activeUrl).then(setQr).catch(() => setQr(null));
+  }, [on, activeUrl]);
+
+  const run = (op: () => Promise<ipc.RemoteStatus>) => {
+    setBusy(true);
+    void op().then(setStatus).catch(() => {}).finally(() => setBusy(false));
+  };
+  const prov = TUNNELS.find((t) => t.id === provider)!;
+  const provInstalled = installed[prov.bin] ?? true;
+
+  const startTunnel = () => {
+    if (!status) return;
+    setBusy(true);
+    const tok = prov.needsToken ? token.trim() : undefined;
+    void ipc
+      .tunnelStart(provider, status.port, tok)
+      .then(setTunnel)
+      .catch((e) => setTunnel({ running: false, provider, url: null, message: String(e) }))
+      .finally(() => setBusy(false));
+  };
+  const stopTunnel = () => {
+    setBusy(true);
+    void ipc.tunnelStop().then(setTunnel).finally(() => setBusy(false));
+  };
+
+  const seg = (opts: { id: string; label: string }[], value: string, onChange: (v: string) => void) => (
+    <div style={{ display: "inline-flex", border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
+      {opts.map((o) => (
+        <button
+          key={o.id}
+          onClick={() => onChange(o.id)}
+          style={{
+            padding: "5px 13px",
+            border: "none",
+            cursor: "pointer",
+            fontSize: 13,
+            background: value === o.id ? "var(--accent)" : "transparent",
+            color: value === o.id ? "var(--on-accent)" : "var(--text)",
+            fontWeight: 600,
+          }}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+  const iconBtn = {
+    background: "var(--bg-raised)",
+    border: "1px solid var(--border)",
+    borderRadius: 8,
+    padding: "8px 9px",
+    color: "var(--text)",
+    cursor: "pointer",
+    display: "inline-flex",
+    alignItems: "center",
+  } as const;
+
+  return (
+    <>
+      <Item name="Remote access" desc="Drive your agents from your phone. A PIN unlocks a control panel; off by default.">
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <Toggle checked={on} disabled={busy} onChange={() => run(on ? ipc.remoteDisable : ipc.remoteEnable)} />
+          {on && (
+            <span style={{ fontSize: 12, color: "var(--text-dim)", lineHeight: 1.35, maxWidth: 460 }}>
+              ⚠ Anyone with the PIN can drive your agents — turn off when you're done.
+            </span>
+          )}
+        </div>
+      </Item>
+
+      {on && (
+        <>
+          <Item name="Reach">
+            {seg(
+              [
+                { id: "local", label: "This network" },
+                { id: "internet", label: "Internet" },
+              ],
+              scope,
+              (v) => setScope(v as "local" | "internet"),
+            )}
+          </Item>
+
+          {scope === "internet" && (
+            <Item name="Public link" desc="Canopy runs the tunnel; the link loads in any browser, no router setup.">
+              <div style={{ display: "grid", gap: 12, justifyItems: "start", width: "100%" }}>
+                {seg(TUNNELS.map((t) => ({ id: t.id, label: t.name })), provider, setProvider)}
+                <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+                  {prov.note ? `${prov.blurb} ${prov.note}` : prov.blurb}
+                </div>
+
+                {prov.needsToken && (
+                  <input
+                    type="password"
+                    className="set-wide"
+                    placeholder={prov.tokenHelp ?? "ngrok authtoken"}
+                    value={token}
+                    onChange={(e) => {
+                      setToken(e.target.value);
+                      setTrackerKey("ngrok", e.target.value.trim());
+                    }}
+                    style={{ maxWidth: 380 }}
+                  />
+                )}
+
+                {!provInstalled ? (
+                  <button className="btn" onClick={() => runInTerminal(prov.install[currentPlatform()], `Install ${prov.name}`)}>
+                    Install {prov.name}
+                  </button>
+                ) : tunnel.running && tunnel.provider === provider ? (
+                  <button className="btn" disabled={busy} onClick={stopTunnel}>
+                    Stop public link
+                  </button>
+                ) : (
+                  <button className="btn" disabled={busy || (prov.needsToken && !token.trim())} onClick={startTunnel}>
+                    Start public link
+                  </button>
+                )}
+
+                {tunnel.message && tunnelForProvider && (
+                  <div style={{ fontSize: 12, color: tunnel.running ? "var(--text-dim)" : "var(--danger)", whiteSpace: "pre-wrap", maxWidth: 460, fontFamily: tunnel.running ? undefined : "ui-monospace, monospace" }}>
+                    {tunnel.message}
+                  </div>
+                )}
+              </div>
+            </Item>
+          )}
+
+          {activeUrl && (
+            <Item
+              name="Scan to connect"
+              desc={
+                scope === "local"
+                  ? "Scan, then enter the PIN."
+                  : "Scan from anywhere, then enter the PIN."
+              }
+            >
+              <div className="set-inline" style={{ alignItems: "center", gap: 18 }}>
+                {qr && (
+                  <div
+                    style={{ width: 128, height: 128, padding: 7, background: "#fff", borderRadius: 10, flex: "none" }}
+                    dangerouslySetInnerHTML={{ __html: qr }}
+                  />
+                )}
+                <div style={{ display: "grid", gap: 12, minWidth: 0, flex: 1 }}>
+                  <div>
+                    <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 5 }}>PIN</div>
+                    <div style={{ display: "flex", alignItems: "stretch", gap: 8 }}>
+                      <Copyable text={status?.pin ?? ""} big />
+                      <button
+                        style={{ ...iconBtn, padding: "0 12px" }}
+                        title="Generate a new PIN"
+                        disabled={busy}
+                        onClick={() => run(ipc.remoteRotatePin)}
+                      >
+                        <RefreshIcon />
+                      </button>
+                    </div>
+                  </div>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 5 }}>Address</div>
+                    <Copyable text={activeUrl} />
+                  </div>
+                </div>
+              </div>
+            </Item>
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
 function HotkeyCapture({ value, onChange }: { value: Hotkey; onChange: (h: Hotkey) => void }) {
   const [arming, setArming] = useState(false);
   useEffect(() => {

@@ -435,10 +435,56 @@ body,
   position: relative;
 }
 
-.tab-term-icon {
-  color: var(--ok);
-  font-size: 10px;
-  font-weight: 700;
+/* One status dot per agent tab, replacing the per-agent glyph. Gray steady =
+   idle, gray soft-pulse = working (burning CPU), orange sharp-pulse = wants
+   attention. One signal, read at a glance across a row of tabs. */
+.tab-status {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--text-dim);
+}
+
+.tab-status-working {
+  animation: tab-status-soft 1.5s ease-in-out infinite;
+}
+
+.tab-status-attention {
+  background: var(--warn);
+  animation: tab-status-sharp 0.85s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@keyframes tab-status-soft {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes tab-status-sharp {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--warn) 65%, transparent);
+  }
+  45% {
+    transform: scale(1.25);
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--warn) 0%, transparent);
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--warn) 0%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab-status-working,
+  .tab-status-attention {
+    animation: none;
+  }
 }
 
 /* Inline rename editor, sized to sit in place of the tab title. */
@@ -1657,15 +1703,6 @@ body,
 .tab-agent {
   color: var(--text);
   background: color-mix(in srgb, var(--accent) 9%, transparent);
-}
-
-.tab-agent .tab-term-icon {
-  color: var(--accent);
-}
-
-.tab-agent-live {
-  color: var(--ok);
-  margin-right: 3px;
 }
 
 .tab-doc {

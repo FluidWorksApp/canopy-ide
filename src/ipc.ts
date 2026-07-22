@@ -49,12 +49,39 @@ export const ptyKillAll = () => invoke<void>("pty_kill_all");
 export const ptySetTitle = (id: number, title: string) =>
   gone(invoke<void>("pty_set_title", { id, title }));
 
+/** Attach to a PTY that already exists (spawned headless from the remote
+ *  portal). Streams the scrollback snapshot first, then live output — the same
+ *  byte contract as ptySpawn's onData, but no ack/backpressure: a headless PTY
+ *  fans out over a lossy broadcast, so the desktop just consumes. Resolves with
+ *  the size the pty is running at, so the tab renders at the same grid. */
+export async function ptyAttach(
+  id: number,
+  onData: (bytes: Uint8Array) => void,
+): Promise<PtyGeometry> {
+  const channel = new Channel<ArrayBuffer | number[]>();
+  channel.onmessage = (data) =>
+    onData(data instanceof ArrayBuffer ? new Uint8Array(data) : Uint8Array.from(data));
+  return invoke("pty_attach", { id, onData: channel });
+}
+
 export interface PtyExit {
   id: number;
   exit_code: number | null;
 }
 export const onPtyExit = (cb: (e: PtyExit) => void): Promise<UnlistenFn> =>
   listen<PtyExit>("pty:exit", (event) => cb(event.payload));
+
+/** A PTY opened headlessly from the remote portal, announced so the desktop can
+ *  open a tab attached to it (via ptyAttach) in the matching project. */
+export interface PtySpawned {
+  id: number;
+  cwd: string;
+  title: string;
+  cols: number;
+  rows: number;
+}
+export const onPtySpawned = (cb: (e: PtySpawned) => void): Promise<UnlistenFn> =>
+  listen<PtySpawned>("pty:spawned", (event) => cb(event.payload));
 
 // ---------- Workspaces / FS ----------
 
@@ -455,6 +482,16 @@ export interface AgentWorkspace {
 export const agentWorkspace = (repo: string, sessionId: string) =>
   invoke<AgentWorkspace>("agent_workspace", { repo, sessionId });
 
+/** Workspace keyed on a live terminal's cwd, so hookless CLIs (codex, agy, …)
+ *  get the same branch/diff/commit/PR view. `agent` is the authoritative id from
+ *  the process tree; `sessionId` is optional hook enrichment. */
+export const agentWorkspaceAt = (
+  repo: string,
+  cwd: string,
+  agent?: string,
+  sessionId?: string,
+) => invoke<AgentWorkspace>("agent_workspace_at", { repo, cwd, agent, sessionId });
+
 export const gitWorktrees = (repo: string) => invoke<WorktreeInfo[]>("git_worktrees", { repo });
 export const gitWorktreeAdd = (repo: string, path: string, branch: string, create: boolean) =>
   invoke<string>("git_worktree_add", { repo, path, branch, create });
@@ -607,6 +644,50 @@ export const relayRegenerateCode = () => invoke<RelayStatus>("relay_regenerate_c
 export const relayConnect = (addr: string, code: string, name: string) =>
   invoke<RelayStatus>("relay_connect", { addr, code, name });
 export const relayDisconnect = () => invoke<RelayStatus>("relay_disconnect");
+
+/** Canopy Remote — the embedded control-panel server (src-tauri/src/portal.rs).
+ *  Separate from the team relay: this drives your own agents from a browser. */
+export interface RemoteStatus {
+  enabled: boolean;
+  port: number;
+  /** The PIN to enter in the portal — present only while enabled. */
+  pin: string | null;
+  /** Same-network `http://<lan-ip>:<port>/remote` addresses. */
+  urls: string[];
+  /** `http://<public-ip>:<port>/remote` — needs TCP <port> port-forwarded. */
+  public_url: string | null;
+  /** Inline SVG QR of the primary LAN URL, for scan-to-connect. */
+  qr_svg: string | null;
+}
+export const remoteStatus = () => invoke<RemoteStatus>("remote_status");
+export const remoteEnable = () => invoke<RemoteStatus>("remote_enable");
+export const remoteDisable = () => invoke<RemoteStatus>("remote_disable");
+export const remoteRotatePin = () => invoke<RemoteStatus>("remote_rotate_pin");
+/** Push the current theme tokens (var name → color) so the portal matches the
+ *  desktop's skin. */
+export const remoteSetTheme = (theme: Record<string, string>) =>
+  invoke<void>("remote_set_theme", { theme });
+/** A QR SVG for any URL (LAN address or the active tunnel URL). */
+export const remoteQr = (text: string) => invoke<string | null>("remote_qr", { text });
+
+/** Public-link tunnel (Cloudflare / ngrok / Tailscale). Exposes the portal to
+ *  the internet so it loads from any browser without router config. */
+export interface TunnelState {
+  running: boolean;
+  provider: string | null;
+  url: string | null;
+  message: string | null;
+}
+export const tunnelStart = (provider: string, port: number, token?: string) =>
+  invoke<TunnelState>("tunnel_start", { provider, port, token });
+export const tunnelStop = () => invoke<TunnelState>("tunnel_stop");
+export const tunnelStatus = () => invoke<TunnelState>("tunnel_status");
+export const onTunnelState = (cb: (s: TunnelState) => void): Promise<UnlistenFn> =>
+  listen<TunnelState>("tunnel:state", (e) => cb(e.payload));
+
+/** Which of these commands are installed (login-shell PATH). */
+export const whichCheck = (commands: string[]) =>
+  invoke<Record<string, boolean>>("which_check", { commands });
 /** Resolves with the stamped message — the sender's UI appends it; the relay
  *  never echoes a frame back to its author. */
 export const relaySendChat = (to: string | null, text: string) =>

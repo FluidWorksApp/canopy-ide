@@ -14,7 +14,7 @@
 
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -22,10 +22,28 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, State};
+use tokio::sync::broadcast;
 
 const FLUSH_INTERVAL: Duration = Duration::from_millis(10);
 const READ_BUF_SIZE: usize = 64 * 1024;
 const DEFAULT_HIGH_WATER: usize = 2 * 1024 * 1024;
+/// Per-session output retained for a remote (Canopy Remote) attach: a
+/// late-joining browser gets this many recent bytes as a catch-up snapshot
+/// before the live tail. The local WebView is unaffected and keeps its own
+/// xterm scrollback — this ring exists only to seed remote viewers.
+const SCROLLBACK_CAP: usize = 256 * 1024;
+/// Bounded fan-out queue to remote subscribers. Lossy on lag by design: a slow
+/// phone is dropped to a resync, never allowed to stall the agent.
+const BROADCAST_CAP: usize = 512;
+
+/// What a remote subscriber receives off a session's fan-out: coalesced output
+/// bytes, or a size change so a remote terminal can render the TUI at the same
+/// grid the PTY is actually using (not the phone's width).
+#[derive(Clone)]
+pub enum PtyEvent {
+    Data(Arc<[u8]>),
+    Resize(u16, u16),
+}
 /// How long a terminal's process group gets to exit on SIGTERM before we force
 /// it. Agent CLIs use this window to flush their conversation transcript and run
 /// their stop hooks — the difference between a session you can resume later and
@@ -70,6 +88,16 @@ pub struct Session {
     pending: Mutex<Vec<u8>>,
     outstanding: AtomicUsize,
     high_water: usize,
+    /// Recent output kept for remote (Canopy Remote) attach — a catch-up
+    /// snapshot only, independent of the WebView's own scrollback.
+    scrollback: Mutex<VecDeque<u8>>,
+    /// The PTY's current grid, so a remote viewer can size its terminal to match
+    /// what the desktop set (the pty is the authority — see PtyGeometry).
+    size: Mutex<(u16, u16)>,
+    /// Fans output + resize events out to remote subscribers, alongside the
+    /// WebView `Channel`. Bounded + lossy so remote lag never touches PTY
+    /// backpressure.
+    subscribers: broadcast::Sender<PtyEvent>,
 }
 
 #[derive(Default)]
@@ -82,6 +110,26 @@ pub struct PtyManager {
 pub struct PtyExit {
     pub id: u32,
     pub exit_code: Option<u32>,
+}
+
+/// Emitted (`pty:spawned`) when a headless PTY is opened remotely, so the
+/// desktop can open a tab attached to it.
+#[derive(Serialize, Clone)]
+pub struct PtySpawned {
+    pub id: u32,
+    pub cwd: String,
+    pub title: String,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// A live PTY session, minimally: enough for a remote client to know which
+/// agent digests are currently attachable (correlated by id == digest.surface).
+#[derive(Serialize, Clone)]
+pub struct PtySummary {
+    pub id: u32,
+    pub cwd: String,
+    pub title: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -108,6 +156,70 @@ pub struct PtyGeometry {
 impl PtyManager {
     pub fn sessions(&self) -> Arc<Mutex<HashMap<u32, Arc<Session>>>> {
         self.sessions.clone()
+    }
+
+    /// Look up a live session by id.
+    pub fn get(&self, id: u32) -> Option<Arc<Session>> {
+        self.sessions.lock().unwrap().get(&id).cloned()
+    }
+
+    /// Every session live right now, so a remote client can determine which
+    /// agents are attachable authoritatively — without waiting on (or trusting)
+    /// the periodic `pty:stats` event.
+    pub fn summaries(&self) -> Vec<PtySummary> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .values()
+            .map(|s| PtySummary {
+                id: s.id,
+                cwd: s.cwd.clone(),
+                title: s.title.lock().unwrap().clone(),
+            })
+            .collect()
+    }
+
+    /// Write bytes to a session's PTY stdin. Shared by the `pty_write` command
+    /// and the remote portal so both drive agent input through one path.
+    pub fn write(&self, id: u32, data: &str) -> Result<(), String> {
+        let session = self.get(id).ok_or_else(|| format!("no pty session {id}"))?;
+        // Bind before returning so the MutexGuard temporary is dropped before
+        // `session` — returning the expression directly outlives the Arc.
+        let result = session
+            .writer
+            .lock()
+            .unwrap()
+            .write_all(data.as_bytes())
+            .map_err(|e| e.to_string());
+        result
+    }
+
+    /// Tear a session down (SIGTERM, grace, SIGKILL) on a detached thread, as
+    /// `pty_kill` does. Shared with the remote portal's kill/restart controls.
+    pub fn kill(&self, id: u32) -> Result<(), String> {
+        let session = self.get(id).ok_or_else(|| format!("no pty session {id}"))?;
+        thread::spawn(move || session.terminate());
+        Ok(())
+    }
+
+    /// Attach a remote consumer (Canopy Remote): returns the current scrollback
+    /// snapshot plus a live receiver of subsequent output chunks, or None if the
+    /// session is gone. The subscribe and the snapshot are taken under the same
+    /// scrollback lock that `record_remote` holds across its append+broadcast,
+    /// so the snapshot and the receiver stream join with no gap and no overlap.
+    /// The receiver is bounded and lossy — on `Lagged` the caller re-`attach`es
+    /// for a fresh snapshot rather than expecting every byte.
+    pub fn attach(
+        &self,
+        id: u32,
+    ) -> Option<(u16, u16, Vec<u8>, broadcast::Receiver<PtyEvent>)> {
+        let session = self.get(id)?;
+        let ring = session.scrollback.lock().unwrap();
+        let rx = session.subscribers.subscribe();
+        let snapshot = ring.iter().copied().collect();
+        drop(ring);
+        let (cols, rows) = *session.size.lock().unwrap();
+        Some((cols, rows, snapshot, rx))
     }
 
     /// Stop every session; called on app exit so no child processes outlive us.
@@ -140,6 +252,28 @@ impl PtyManager {
 }
 
 impl Session {
+    /// Feed a freshly-flushed chunk to remote consumers: append to the bounded
+    /// scrollback and fan it out to any subscribers, both under one lock so an
+    /// attaching viewer never sees a torn boundary. Best-effort — no subscribers
+    /// (or a lagging one) is fine and never blocks the flusher.
+    fn record_remote(&self, data: &[u8]) {
+        let mut ring = self.scrollback.lock().unwrap();
+        ring.extend(data.iter().copied());
+        let overflow = ring.len().saturating_sub(SCROLLBACK_CAP);
+        if overflow > 0 {
+            ring.drain(0..overflow);
+        }
+        // Err just means nobody is attached right now; ignore it.
+        let _ = self.subscribers.send(PtyEvent::Data(Arc::from(data)));
+    }
+
+    /// Record a new grid size and tell remote subscribers, so a remote terminal
+    /// re-sizes to the PTY's actual columns/rows instead of guessing.
+    fn record_resize(&self, cols: u16, rows: u16) {
+        *self.size.lock().unwrap() = (cols, rows);
+        let _ = self.subscribers.send(PtyEvent::Resize(cols, rows));
+    }
+
     /// Ask the process group to exit, and force it only if it refuses.
     ///
     /// This used to send SIGKILL outright. SIGKILL is uncatchable, so agent CLIs
@@ -219,6 +353,62 @@ pub fn pty_spawn(
     high_water: Option<usize>,
     on_data: Channel<InvokeResponseBody>,
 ) -> Result<SpawnResult, String> {
+    state.spawn(app, cols, rows, cwd, shell, high_water, Some(on_data))
+}
+
+impl PtyManager {
+    /// Spawn a headless PTY (no WebView channel) that a remote client can attach
+    /// to — used by Canopy Remote to open a new terminal / agent from a phone.
+    /// Runs `command` (an agent CLI) in `cwd` if given. Returns the new PTY id.
+    pub fn spawn_headless<R: tauri::Runtime>(
+        &self,
+        app: AppHandle<R>,
+        cwd: Option<String>,
+        command: Option<String>,
+    ) -> Result<u32, String> {
+        let res = self.spawn(app.clone(), 120, 32, cwd, None, None, None)?;
+        if let Some(cmd) = command {
+            let cmd = cmd.trim();
+            if !cmd.is_empty() {
+                // The PTY buffers stdin, so writing right after spawn is fine —
+                // the shell reads it once it's up. Mirrors the desktop's
+                // initial-command behaviour.
+                let _ = self.write(res.id, &format!("{cmd}\r"));
+            }
+        }
+        // Tell the desktop a new terminal/agent appeared so it can open a tab
+        // attached to it (pty_attach). Best-effort.
+        if let Some(s) = self.get(res.id) {
+            let _ = app.emit(
+                "pty:spawned",
+                PtySpawned {
+                    id: res.id,
+                    cwd: s.cwd.clone(),
+                    title: s.title.lock().unwrap().clone(),
+                    cols: res.cols,
+                    rows: res.rows,
+                },
+            );
+        }
+        Ok(res.id)
+    }
+
+    /// The shared spawn core. `on_data` is the WebView streaming channel when a
+    /// desktop tab owns this PTY; `None` for a headless (remote-only) PTY, which
+    /// skips WebView backpressure so nothing stalls a headless agent's output.
+    /// Generic over the runtime so it can be exercised with a mock app in tests.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn<R: tauri::Runtime>(
+        &self,
+        app: AppHandle<R>,
+        cols: u16,
+        rows: u16,
+        cwd: Option<String>,
+        shell: Option<String>,
+        high_water: Option<usize>,
+        on_data: Option<Channel<InvokeResponseBody>>,
+    ) -> Result<SpawnResult, String> {
+    let state = self;
     // Clamp for the same reason pty_resize does: a terminal spawned into a
     // hidden tab measures 0, and a zero-column pty is meaningless. 80x24 is the
     // conventional fallback, and the frontend corrects it the moment the tab is
@@ -286,6 +476,9 @@ pub fn pty_spawn(
         pending: Mutex::new(Vec::new()),
         outstanding: AtomicUsize::new(0),
         high_water: high_water.unwrap_or(DEFAULT_HIGH_WATER),
+        scrollback: Mutex::new(VecDeque::new()),
+        size: Mutex::new((cols, rows)),
+        subscribers: broadcast::channel(BROADCAST_CAP).0,
     });
 
     state.sessions.lock().unwrap().insert(id, session.clone());
@@ -345,10 +538,19 @@ pub fn pty_spawn(
                     };
                     match chunk {
                         Some(data) => {
-                            session.outstanding.fetch_add(data.len(), Ordering::SeqCst);
-                            if on_data.send(InvokeResponseBody::Raw(data)).is_err() {
-                                // WebView side is gone; stop streaming.
-                                session.terminate();
+                            // Mirror to remote subscribers + scrollback (Canopy
+                            // Remote) first, while `data` is still borrowable.
+                            session.record_remote(&data);
+                            // Only the WebView path uses outstanding-bytes
+                            // backpressure; a headless (remote-only) PTY has no
+                            // acker, so skip it or the reader would stall the
+                            // agent after high_water bytes of output.
+                            if let Some(ch) = &on_data {
+                                session.outstanding.fetch_add(data.len(), Ordering::SeqCst);
+                                if ch.send(InvokeResponseBody::Raw(data)).is_err() {
+                                    // WebView side is gone; stop streaming.
+                                    session.terminate();
+                                }
                             }
                         }
                         None => {
@@ -378,18 +580,55 @@ pub fn pty_spawn(
     }
 
     Ok(SpawnResult { id, pid, cols, rows })
+    }
 }
 
 #[tauri::command]
 pub fn pty_write(state: State<'_, PtyManager>, id: u32, data: String) -> Result<(), String> {
-    let session = get_session(&state, id)?;
-    let result = session
-        .writer
-        .lock()
-        .unwrap()
-        .write_all(data.as_bytes())
-        .map_err(|e| e.to_string());
-    result
+    state.write(id, &data)
+}
+
+/// Attach a desktop WebView to an ALREADY-running PTY (e.g. one a phone spawned):
+/// replay its scrollback, then forward live output onto `on_data`. Reuses the
+/// remote broadcast fan-out, so the flusher and the desktop-spawn path are
+/// untouched. Returns the PTY's current grid. Lossy on heavy floods (re-seeds on
+/// lag); fine for viewing a remote-spawned agent — a TUI redraws itself.
+#[tauri::command]
+pub fn pty_attach(
+    state: State<'_, PtyManager>,
+    id: u32,
+    on_data: Channel<InvokeResponseBody>,
+) -> Result<PtyGeometry, String> {
+    let (cols, rows, snapshot, mut rx) =
+        state.attach(id).ok_or_else(|| format!("no pty session {id}"))?;
+    if !snapshot.is_empty() {
+        let _ = on_data.send(InvokeResponseBody::Raw(snapshot));
+    }
+    let sessions = state.sessions();
+    thread::spawn(move || loop {
+        match rx.blocking_recv() {
+            Ok(PtyEvent::Data(bytes)) => {
+                if on_data.send(InvokeResponseBody::Raw(bytes.to_vec())).is_err() {
+                    break; // the WebView detached
+                }
+            }
+            Ok(PtyEvent::Resize(_, _)) => {}
+            Err(broadcast::error::RecvError::Lagged(_)) => {
+                // Fell behind a flood — re-seed from scrollback and resubscribe.
+                let Some(s) = sessions.lock().unwrap().get(&id).cloned() else {
+                    break;
+                };
+                let snap: Vec<u8> = s.scrollback.lock().unwrap().iter().copied().collect();
+                rx = s.subscribers.subscribe();
+                let _ = on_data.send(InvokeResponseBody::Raw(b"\x1bc".to_vec()));
+                if !snap.is_empty() {
+                    let _ = on_data.send(InvokeResponseBody::Raw(snap));
+                }
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    });
+    Ok(PtyGeometry { cols, rows })
 }
 
 /// Frontend ack after xterm.js consumes a chunk — releases backpressure.
@@ -439,6 +678,8 @@ pub fn pty_resize(
             pixel_height: 0,
         })
         .map_err(|e| e.to_string())?;
+    // Mirror the new grid to any remote viewers so they re-size to match.
+    session.record_resize(cols, rows);
     Ok(PtyGeometry { cols, rows })
 }
 
@@ -452,7 +693,6 @@ pub fn pty_kill_all(state: State<'_, PtyManager>) {
 
 #[tauri::command]
 pub fn pty_kill(state: State<'_, PtyManager>, id: u32) -> Result<(), String> {
-    let session = get_session(&state, id)?;
     // Return at once and tear down on a detached thread. terminate() blocks for
     // up to GRACE (2.5s) waiting for the agent to flush its transcript before
     // the final SIGKILL — and this command runs on the main thread, so doing
@@ -462,8 +702,7 @@ pub fn pty_kill(state: State<'_, PtyManager>, id: u32) -> Result<(), String> {
     // synchronously inside terminate() before the grace poll, so the shell
     // starts shutting down immediately regardless of when this thread is
     // scheduled.
-    thread::spawn(move || session.terminate());
-    Ok(())
+    state.kill(id)
 }
 
 #[tauri::command]
@@ -498,4 +737,83 @@ fn dirs_home() -> Option<String> {
     std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// Poll a session's scrollback until it contains `needle` or we time out.
+    fn wait_for(pm: &PtyManager, id: u32, needle: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if let Some((_, _, snap, _)) = pm.attach(id) {
+                if String::from_utf8_lossy(&snap).contains(needle) {
+                    return true;
+                }
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    // Regression: the whole output pipeline (spawn -> reader -> flusher ->
+    // record_remote -> scrollback) must deliver a headless PTY's output, and a
+    // headless PTY must not stall for lack of a WebView acker.
+    #[test]
+    fn spawn_headless_streams_output_and_does_not_stall() {
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let id = pm
+            .spawn_headless(app.handle().clone(), Some("/tmp".into()), Some("echo REGRESS_MARKER".into()))
+            .expect("spawn");
+        let seen = wait_for(&pm, id, "REGRESS_MARKER", Duration::from_secs(8));
+        let _ = pm.kill(id);
+        assert!(seen, "headless PTY output never reached the scrollback");
+    }
+
+    // Regression: input written to a PTY reaches the child (the desktop + remote
+    // both drive input through PtyManager::write).
+    #[test]
+    fn write_reaches_the_child() {
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let id = pm.spawn_headless(app.handle().clone(), Some("/tmp".into()), None).expect("spawn");
+        thread::sleep(Duration::from_millis(400)); // let the shell come up
+        pm.write(id, "echo WRITE_MARKER\r").expect("write");
+        let seen = wait_for(&pm, id, "WRITE_MARKER", Duration::from_secs(8));
+        let _ = pm.kill(id);
+        assert!(seen, "written command output never appeared");
+    }
+
+    // A fresh attach replays the scrollback so a late viewer sees prior output.
+    #[test]
+    fn attach_snapshot_carries_prior_output() {
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let id = pm
+            .spawn_headless(app.handle().clone(), Some("/tmp".into()), Some("echo SNAPSHOT_MARKER".into()))
+            .expect("spawn");
+        assert!(wait_for(&pm, id, "SNAPSHOT_MARKER", Duration::from_secs(8)), "no output");
+        // A brand-new attach (as pty_attach does) must still see it via snapshot.
+        let (_c, _r, snap, _rx) = pm.attach(id).expect("attach");
+        let _ = pm.kill(id);
+        assert!(String::from_utf8_lossy(&snap).contains("SNAPSHOT_MARKER"));
+    }
+
+    // Regression: kill tears the session down (no leaked child / map entry).
+    #[test]
+    fn kill_removes_the_session() {
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let id = pm.spawn_headless(app.handle().clone(), Some("/tmp".into()), None).expect("spawn");
+        assert!(pm.get(id).is_some());
+        pm.kill(id).expect("kill");
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < deadline && pm.get(id).is_some() {
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(pm.get(id).is_none(), "session not removed after kill");
+    }
 }

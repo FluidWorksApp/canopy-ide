@@ -12,6 +12,13 @@ dist
 dist-ssr
 *.local
 
+# The Canopy Remote portal SPA is a build artifact (npm run build:portal, run by
+# tauri's beforeBuildCommand), but keep a committed placeholder index so the
+# crate's include_dir!("../portal/dist") still compiles on a fresh checkout.
+!portal/dist/
+portal/dist/*
+!portal/dist/index.html
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
