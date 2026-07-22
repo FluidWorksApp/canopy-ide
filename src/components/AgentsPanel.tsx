@@ -121,6 +121,19 @@ export function AgentsPanel({
 }: AgentsPanelProps) {
   const [showHookHelp, setShowHookHelp] = useState(false);
   const [setupResult, setSetupResult] = useState<string | null>(null);
+  // null while we haven't checked yet — the nudge stays hidden until we know,
+  // so it never flashes the wrong message. See the effect keyed on noHookSignal.
+  const [hooksInstalled, setHooksInstalled] = useState<boolean | null>(null);
+  // Dismissing the "restart to stream" hint sticks across panels and launches:
+  // once you know the agents just predate the hooks, you don't need telling in
+  // every project. The genuine "not set up" nudge ignores this and always shows.
+  const [hintDismissed, setHintDismissed] = useState(
+    () => localStorage.getItem("canopy.hookHintDismissed") === "1",
+  );
+  const dismissHint = () => {
+    localStorage.setItem("canopy.hookHintDismissed", "1");
+    setHintDismissed(true);
+  };
   const [digests, setDigests] = useState<ipc.SessionDigest[]>([]);
   // This app launch's tag, so a digest from another instance/run (same reset-to-1
   // PTY id, same shared sessions dir) can't be paired with our terminals.
@@ -246,6 +259,19 @@ export function AgentsPanel({
   const noHookSignal =
     agentSessions.length > 0 && agentSessions.every((x) => !x.digest);
 
+  // No digest could mean hooks aren't installed OR that these agents were
+  // started before they were — opposite fixes. Ask the backend which it is, so
+  // the panel offers "set up" only when they're genuinely missing and otherwise
+  // says "restart to stream". Re-checked whenever the silence appears (e.g.
+  // right after a one-click setup), never polled.
+  useEffect(() => {
+    if (!noHookSignal) {
+      setHooksInstalled(null);
+      return;
+    }
+    void ipc.agentHooksInstalled("claude").then(setHooksInstalled).catch(() => {});
+  }, [noHookSignal, setupResult]);
+
   // Hibernate an agent: kill its terminal to reclaim the memory, keeping the
   // session digest (which is already the restore record) so the row reappears
   // under "Restorable" and its own --resume brings it back with history.
@@ -323,6 +349,10 @@ export function AgentsPanel({
             <TerminalIcon size={13} className="ap-mark" />
           )}
           <span className="agent-name">{agent?.name ?? s.title}</span>
+          {/* Kept on the left, right after the name: the hover stats overlay is
+              anchored to the row's right edge, so a badge over there gets buried
+              the moment you hover the very row you're trying to inspect. */}
+          {runaway && <span className="runaway-badge">runaway?</span>}
           {dir && (
             <span className="agent-dir" title={s.cwd}>
               {dir}
@@ -370,7 +400,6 @@ export function AgentsPanel({
               :{p}
             </button>
           ))}
-          {runaway && <span className="runaway-badge">runaway?</span>}
         </div>
         {task && <div className="agent-task">{task}</div>}
         <div className="agent-stats">
@@ -621,7 +650,8 @@ export function AgentsPanel({
         }
       >
 
-      {noHookSignal && !showHookHelp && (
+      {/* Hooks genuinely absent — offer the one-click setup. */}
+      {noHookSignal && !showHookHelp && hooksInstalled === false && (
         <div className="hook-nudge">
           <span>
             Agents are running, but no events are streaming in — questions,
@@ -631,6 +661,21 @@ export function AgentsPanel({
             Set up Claude Code hooks
           </button>
           {setupResult && <p className="hook-result">{setupResult}</p>}
+        </div>
+      )}
+
+      {/* Hooks are installed; these agents just predate them. Say the thing that
+          actually fixes it (restart) instead of the setup button, and let it be
+          dismissed — otherwise it nags in every project forever. */}
+      {noHookSignal && !showHookHelp && hooksInstalled === true && !hintDismissed && (
+        <div className="hook-nudge">
+          <span>
+            Hooks are set up, but these agents started before that — restart one
+            to stream its questions, tasks and tokens here.
+          </span>
+          <button className="btn" onClick={dismissHint}>
+            Got it
+          </button>
         </div>
       )}
 

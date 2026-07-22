@@ -192,6 +192,11 @@ export const onAppStats = (cb: (s: AppStats) => void): Promise<UnlistenFn> =>
 
 export const killProcess = (pid: number) => invoke<void>("kill_process", { pid });
 export const hookBridgePath = () => invoke<string | null>("hook_bridge_path");
+/** Whether our hooks are already written into an agent CLI's config — lets the
+ *  panel tell "not set up" (offer setup) from "set up, but the agent predates
+ *  it" (restart to stream) rather than nagging on a missing digest alone. */
+export const agentHooksInstalled = (agent: string) =>
+  invoke<boolean>("agent_hooks_installed", { agent });
 /** This app launch's instance tag — pair with SessionDigest.instance so a
  *  digest from another instance/run can't bind to this instance's terminals. */
 export const instanceId = () => invoke<string>("instance_id");
