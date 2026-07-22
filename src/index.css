@@ -1003,6 +1003,19 @@ body,
   padding: 0 6px;
 }
 
+/* Newer version available — its own click target inside the row. */
+.cli-update {
+  font-size: 10px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 0 6px;
+  white-space: nowrap;
+}
+.cli-update:hover {
+  background: var(--bg-alt);
+}
+
 .cli-sep {
   height: 1px;
   background: var(--border);
@@ -1795,6 +1808,24 @@ body,
   color: var(--warn);
   border: 1px solid var(--warn);
   opacity: 0.75;
+}
+
+/* Newer version available — same corner as .launch-install, accent-colored. */
+.launch-update {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  font-size: 8px;
+  letter-spacing: 0.04em;
+  padding: 1px 4px;
+  border-radius: 3px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  opacity: 0.85;
+}
+.launch-update:hover {
+  opacity: 1;
+  background: var(--bg-alt);
 }
 
 .cli-icon svg,

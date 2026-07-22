@@ -1325,6 +1325,113 @@ pub async fn which_check(commands: Vec<String>) -> HashMap<String, bool> {
     result
 }
 
+/// One CLI's version pair: what's on disk vs what its registry publishes.
+/// Either side is None when unknown — not installed, unparseable output, no
+/// registry to ask, or the probe timed out.
+#[derive(Serialize, Clone, Default)]
+pub struct CliVersions {
+    pub installed: Option<String>,
+    pub latest: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct CliVersionQuery {
+    pub bin: String,
+    /// Registry JSON endpoint carrying the newest version (npm `/latest` doc
+    /// or PyPI `/json`). None skips the network fetch — the frontend passes
+    /// None both for registry-less CLIs and when its latest-cache is fresh.
+    #[serde(rename = "latestUrl")]
+    pub latest_url: Option<String>,
+}
+
+/// First `x.y[.z…]` token in `s` where every dot-segment is numeric. Hand
+/// rolled because it is the only pattern match in the codebase — not worth a
+/// regex dependency. Splitting on anything that isn't a digit or a dot means
+/// prerelease suffixes ("1.2.3-beta") yield their release core ("1.2.3").
+fn first_version_token(s: &str) -> Option<String> {
+    for tok in s.split(|c: char| !c.is_ascii_digit() && c != '.') {
+        let tok = tok.trim_matches('.');
+        if tok.is_empty() {
+            continue;
+        }
+        let segs: Vec<&str> = tok.split('.').collect();
+        if segs.len() >= 2
+            && segs
+                .iter()
+                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        {
+            return Some(tok.to_string());
+        }
+    }
+    None
+}
+
+/// Installed vs latest versions for the agent CLIs. Installed comes from
+/// `<bin> --version` on the login-shell PATH (GUI apps don't inherit it);
+/// latest from the CLI's registry via curl — the app deliberately has no HTTP
+/// stack, and the webview CSP blocks registry origins, so the system curl is
+/// the transport. Probes run concurrently and are individually timeboxed: one
+/// hung `--version` must not wedge the whole launcher refresh.
+#[tauri::command]
+pub async fn cli_versions(queries: Vec<CliVersionQuery>) -> HashMap<String, CliVersions> {
+    let mut out: HashMap<String, CliVersions> = queries
+        .iter()
+        .map(|q| (q.bin.clone(), CliVersions::default()))
+        .collect();
+    #[cfg(unix)]
+    {
+        let mut tasks = Vec::new();
+        for q in queries {
+            tasks.push(tokio::spawn(async move {
+                let mut v = CliVersions::default();
+                // Same charset guard as which_check — the name lands in a shell line.
+                if q.bin
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+                {
+                    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+                    let probe = tokio::process::Command::new(shell)
+                        .args(["-lc", &format!("{} --version 2>&1", q.bin)])
+                        .kill_on_drop(true)
+                        .output();
+                    if let Ok(Ok(o)) =
+                        tokio::time::timeout(Duration::from_secs(10), probe).await
+                    {
+                        v.installed = first_version_token(&String::from_utf8_lossy(&o.stdout));
+                    }
+                }
+                if let Some(url) = q.latest_url.filter(|u| u.starts_with("https://")) {
+                    let fetch = tokio::process::Command::new("curl")
+                        .args(["-fsSL", "-m", "8", url.as_str()])
+                        .kill_on_drop(true)
+                        .output();
+                    if let Ok(Ok(o)) =
+                        tokio::time::timeout(Duration::from_secs(10), fetch).await
+                    {
+                        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&o.stdout) {
+                            // npm `/latest` → top-level "version"; PyPI → info.version.
+                            v.latest = json
+                                .get("version")
+                                .and_then(|x| x.as_str())
+                                .or_else(|| json.pointer("/info/version").and_then(|x| x.as_str()))
+                                .and_then(first_version_token);
+                        }
+                    }
+                }
+                (q.bin, v)
+            }));
+        }
+        for t in tasks {
+            if let Ok((bin, v)) = t.await {
+                out.insert(bin, v);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = queries;
+    out
+}
+
 /// Kill an arbitrary process (used by the Agents panel / runaway guard for
 /// killing a specific process inside a session without tearing the session down).
 #[tauri::command]
@@ -1347,6 +1454,23 @@ pub async fn kill_process(pid: u32) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::claude_bucket;
+    use super::first_version_token;
+
+    /// Real `--version` output shapes from the registered CLIs, plus the
+    /// noise cases: a bare CLI name has no version, and a prerelease suffix
+    /// yields its release core.
+    #[test]
+    fn version_token_matches_real_cli_output() {
+        assert_eq!(first_version_token("2.1.217 (Claude Code)").as_deref(), Some("2.1.217"));
+        assert_eq!(first_version_token("codex-cli 0.98.0").as_deref(), Some("0.98.0"));
+        assert_eq!(first_version_token("aider 0.86.1").as_deref(), Some("0.86.1"));
+        assert_eq!(first_version_token("v1.2").as_deref(), Some("1.2"));
+        assert_eq!(first_version_token("1.2.3-beta.4").as_deref(), Some("1.2.3"));
+        assert_eq!(first_version_token("opencode"), None);
+        assert_eq!(first_version_token(""), None);
+        // A lone integer (an exit code, a count) must not read as a version.
+        assert_eq!(first_version_token("exit 1"), None);
+    }
 
     /// Mirrors the encoding claude applies to bucket directories under
     /// ~/.claude/projects. The `.claude/worktrees` case is the isolation model,
