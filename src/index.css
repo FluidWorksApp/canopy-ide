@@ -6142,3 +6142,89 @@ a.btn-mini {
   border: 2px solid var(--bg);
   box-shadow: 0 0 4px color-mix(in srgb, var(--ok, #3fb950) 70%, transparent);
 }
+
+/* ---------- onboarding walkthrough ---------- */
+
+.confirm.onboarding {
+  position: relative;
+  width: min(460px, 92vw);
+  max-width: min(460px, 92vw);
+  padding: 28px 26px 20px;
+  text-align: center;
+}
+
+.onboarding-skip {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.onboarding-skip:hover {
+  color: var(--text);
+}
+
+.onboarding-slide {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  min-height: 190px;
+  justify-content: center;
+}
+
+.onboarding-icon {
+  font-size: 40px;
+  line-height: 1;
+}
+
+.onboarding-title {
+  font-size: 15px;
+  color: var(--accent);
+}
+
+.onboarding-body {
+  color: var(--text-dim);
+  max-width: 360px;
+  margin: 0;
+  line-height: 1.55;
+}
+
+.onboarding-dots {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin: 18px 0 4px;
+}
+
+.onboarding-dot {
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--border);
+  cursor: pointer;
+  transition: background 0.15s, transform 0.15s;
+}
+
+.onboarding-dot:hover {
+  background: var(--text-dim);
+}
+
+.onboarding-dot-on {
+  background: var(--accent);
+  transform: scale(1.15);
+}
+
+.onboarding-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 12px;
+}
+
