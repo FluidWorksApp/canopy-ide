@@ -76,11 +76,14 @@ function FileName({ path, count, countTitle }: { path: string; count?: number; c
   );
 }
 
-// A journaled edit (old→new fragment) rendered as a single unified hunk, so it
+// A journaled edit (old→new fragment) rendered as a single unified diff, so it
 // paints with the same DiffView as every other diff in the app. Line numbers
 // are nominal (these are fragments, not whole files); a tight common
-// prefix/suffix keeps the hunk to the part that actually changed.
-function editToHunk(old: string | null, next: string | null): string {
+// prefix/suffix keeps the hunk to the part that actually changed. The `---`/`+++`
+// header is required, not decoration: @git-diff-view's parser scans for a `+++`
+// line and treats a headerless hunk as an empty diff, so without it the card
+// renders blank.
+function editToHunk(path: string, old: string | null, next: string | null): string {
   const oldLines = old != null ? old.split("\n") : [];
   const newLines = next != null ? next.split("\n") : [];
   let p = 0;
@@ -99,7 +102,7 @@ function editToHunk(old: string | null, next: string | null): string {
   const body = [...ctxPre, ...removed, ...added, ...ctxPost].join("\n");
   const oldCount = ctxPre.length + removed.length + ctxPost.length;
   const newCount = ctxPre.length + added.length + ctxPost.length;
-  return `@@ -1,${oldCount} +1,${newCount} @@\n${body}`;
+  return `--- a/${path}\n+++ b/${path}\n@@ -1,${oldCount} +1,${newCount} @@\n${body}`;
 }
 
 export function AgentWorkspaceView({
@@ -643,7 +646,7 @@ export function AgentWorkspaceView({
                     {!e.present && <span className="aw-edit-tag">superseded</span>}
                     <DiffView
                       data={{
-                        hunks: [editToHunk(e.old, e.new)],
+                        hunks: [editToHunk(g.path, e.old, e.new)],
                         oldFile: { fileName: g.path },
                         newFile: { fileName: g.path },
                       }}
