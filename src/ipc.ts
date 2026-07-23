@@ -18,7 +18,17 @@ export interface SpawnResult extends PtyGeometry {
 }
 
 export async function ptySpawn(
-  opts: { cols: number; rows: number; cwd?: string; shell?: string; highWater?: number },
+  opts: {
+    cols: number;
+    rows: number;
+    cwd?: string;
+    shell?: string;
+    highWater?: number;
+    /** A run tab: the shell runs this one command and exits with its status,
+     *  passed as shell args (correct on cmd.exe / PowerShell / POSIX) rather
+     *  than typed with a Bourne-only `; exit $?`. */
+    runCommand?: string;
+  },
   onData: (bytes: Uint8Array) => void,
 ): Promise<SpawnResult> {
   const channel = new Channel<ArrayBuffer | number[]>();

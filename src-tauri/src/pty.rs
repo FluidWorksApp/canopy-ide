@@ -351,9 +351,10 @@ pub fn pty_spawn(
     cwd: Option<String>,
     shell: Option<String>,
     high_water: Option<usize>,
+    run_command: Option<String>,
     on_data: Channel<InvokeResponseBody>,
 ) -> Result<SpawnResult, String> {
-    state.spawn(app, cols, rows, cwd, shell, high_water, Some(on_data))
+    state.spawn(app, cols, rows, cwd, shell, high_water, run_command, Some(on_data))
 }
 
 impl PtyManager {
@@ -366,7 +367,7 @@ impl PtyManager {
         cwd: Option<String>,
         command: Option<String>,
     ) -> Result<u32, String> {
-        let res = self.spawn(app.clone(), 120, 32, cwd, None, None, None)?;
+        let res = self.spawn(app.clone(), 120, 32, cwd, None, None, None, None)?;
         if let Some(cmd) = command {
             let cmd = cmd.trim();
             if !cmd.is_empty() {
@@ -406,6 +407,7 @@ impl PtyManager {
         cwd: Option<String>,
         shell: Option<String>,
         high_water: Option<usize>,
+        run_command: Option<String>,
         on_data: Option<Channel<InvokeResponseBody>>,
     ) -> Result<SpawnResult, String> {
     let state = self;
@@ -431,9 +433,24 @@ impl PtyManager {
 
     let shell = shell.unwrap_or_else(default_shell);
     let mut cmd = CommandBuilder::new(&shell);
-    // Login shell so the user's PATH / prompt setup loads, matching a real terminal.
-    #[cfg(unix)]
-    cmd.args(["-l"]);
+    match run_command.as_deref() {
+        // A run tab: the shell runs one command and exits with the command's own
+        // status, so a one-shot build/install reports truthfully instead of
+        // sitting at a prompt looking "running" forever. Passed as shell args
+        // (not typed into the shell) so it's correct on cmd.exe / PowerShell /
+        // POSIX alike — no `; exit $?` idiom that only parses in a Bourne shell.
+        Some(command) => {
+            for a in run_args(&shell, command) {
+                cmd.arg(a);
+            }
+        }
+        // A normal terminal: a login shell so the user's PATH / prompt setup
+        // loads, matching a real terminal.
+        None => {
+            #[cfg(unix)]
+            cmd.args(["-l"]);
+        }
+    }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     // Agent CLI hooks inherit these and use them to (a) prove the event came
@@ -730,6 +747,29 @@ fn default_shell() -> String {
     #[cfg(windows)]
     {
         std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
+    }
+}
+
+/// Shell arguments that run a single command and make the shell exit with the
+/// command's own status — the run-tab contract, expressed per shell rather than
+/// with the Bourne-only `command; exit $?` idiom (which cmd.exe mis-parses,
+/// handing `;`/`exit`/`$?` to the program as stray args). POSIX shells get
+/// `-l -i -c` so the login + interactive env — PATH from `.zprofile`/`.zshrc`,
+/// nvm, homebrew — matches a normal terminal; cmd.exe and PowerShell use their
+/// own run-and-exit flags. The shell name is matched by file stem, so `cmd.exe`
+/// and `pwsh.exe` resolve the same as bare `cmd` / `pwsh`.
+fn run_args(shell: &str, command: &str) -> Vec<String> {
+    let stem = std::path::Path::new(shell)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match stem.as_str() {
+        "cmd" => vec!["/c".into(), command.into()],
+        "powershell" | "pwsh" => {
+            vec!["-NoLogo".into(), "-Command".into(), command.into()]
+        }
+        _ => vec!["-l".into(), "-i".into(), "-c".into(), command.into()],
     }
 }
 

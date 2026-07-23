@@ -43,6 +43,10 @@ interface TermProps {
   active: boolean;
   /** Typed into the shell right after spawn (e.g. launch an agent CLI). */
   initialCommand?: string;
+  /** A run tab's one-shot command: the shell is spawned to run it and exit with
+   *  its status (native, per-shell), rather than typing it in. Mutually
+   *  exclusive with initialCommand. */
+  runCommand?: string;
   /** Attach to an already-running PTY (spawned headless from the remote portal)
    *  instead of spawning a fresh one. The tab mirrors that session's live
    *  output and drives its input; closing the tab detaches, it does not kill the
@@ -56,7 +60,7 @@ interface TermProps {
 }
 
 export const Term = forwardRef<TermHandle, TermProps>(function Term(
-  { cwd, active, initialCommand, attachId, onSpawned, onExited, onTitle, onNotify },
+  { cwd, active, initialCommand, runCommand, attachId, onSpawned, onExited, onTitle, onNotify },
   ref,
 ) {
   // Frozen once: a Term never switches between spawn and attach mid-life, and
@@ -352,6 +356,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
             rows: initial?.rows ?? 0,
             cwd,
             highWater: settings.ptyHighWater,
+            runCommand,
           },
           (bytes) => {
             // Feed xterm's own write buffer and ack once it has consumed the
@@ -374,7 +379,9 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
           // we proposed nothing — better a grid that matches the shell than one
           // that looks right and wraps wrong.
           await bound(result.id, result);
-          if (initialCommand) {
+          // A run tab's command was handed to the shell at spawn (runCommand),
+          // so it's already executing — only a typed initialCommand needs sending.
+          if (initialCommand && !runCommand) {
             void ipc.ptyWrite(result.id, `${initialCommand}\r`);
           }
         })
