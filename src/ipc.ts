@@ -835,7 +835,7 @@ export interface DictationStatus {
 export interface DictationProgress {
   /** Which model this event is about. */
   model: string;
-  phase: "download" | "extract" | "ready" | "error";
+  phase: "download" | "extract" | "load" | "ready" | "error";
   pct: number;
   message: string | null;
 }

@@ -323,9 +323,17 @@ fn start_capture() -> Result<Recording, String> {
 
     // 10s covers the one legitimately slow path: macOS showing the mic
     // permission prompt blocks the stream build until the user answers.
-    let rate = rx
-        .recv_timeout(std::time::Duration::from_secs(10))
-        .map_err(|_| "Microphone initialization timed out".to_string())??;
+    let rate = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(res) => res?,
+        Err(_) => {
+            // Signal the capture thread to stop so that, once its blocked
+            // stream build finally returns (e.g. a late permission answer), it
+            // tears the stream down and exits instead of holding the mic open
+            // forever on an orphaned thread.
+            stop.store(true, Ordering::Relaxed);
+            return Err("Microphone initialization timed out".to_string());
+        }
+    };
     Ok(Recording {
         stop,
         samples,
@@ -535,9 +543,27 @@ pub async fn dictation_start(
         inner.loaded_model.as_deref() != Some(def.id)
     };
     if need_load {
-        let engine = tauri::async_runtime::spawn_blocking(move || load_engine(def))
-            .await
-            .map_err(|e| e.to_string())??;
+        // Loading a multi-hundred-MB ONNX model is the one genuinely slow step
+        // on the start path, and — unlike the mic, which is capped at 10s — it
+        // had no time bound. A wedged load (corrupt files that still passed the
+        // .complete check, an ONNX session init that never returns) therefore
+        // left the UI stuck on "Starting dictation…" forever, with no way out.
+        // Announce the load so the pill can say so on first use, and cap the
+        // wait so a stuck load surfaces as an error instead of hanging.
+        emit_progress(&app, def.id, "load", 0.0, None);
+        let load = tauri::async_runtime::spawn_blocking(move || load_engine(def));
+        let engine = match tokio::time::timeout(std::time::Duration::from_secs(90), load).await {
+            Ok(joined) => joined.map_err(|e| e.to_string())??,
+            // The blocking load can't be cancelled, so it runs on to completion
+            // and is dropped; the user gets an actionable error either way.
+            Err(_) => {
+                return Err(
+                    "Loading the voice model timed out — the model files may be corrupt. \
+                     Remove and re-download the model in Settings → Dictation."
+                        .into(),
+                );
+            }
+        };
         let mut inner = state.0.lock().unwrap();
         inner.engine = Some(engine);
         inner.loaded_model = Some(def.id.to_string());
