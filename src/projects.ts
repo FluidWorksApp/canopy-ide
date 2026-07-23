@@ -302,6 +302,13 @@ export const AGENT_PATTERN = new RegExp(
   "i",
 );
 
+/** Interactive shells — the process sitting at the root of a plain terminal.
+ *  Lets us tell "the shell is idle at a prompt" (only shells running) from "the
+ *  shell is doing real work" (a server, a build), so a spent agent shell can be
+ *  reaped without closing one you're actively using. Login shells arrive as
+ *  "-zsh", hence the optional leading dash. */
+export const SHELL_PATTERN = /^-?(zsh|bash|sh|fish|dash|tcsh|csh|ksh|nu|pwsh|powershell|cmd)$/i;
+
 export async function checkInstalledClis(): Promise<Record<string, boolean>> {
   try {
     return await invoke<Record<string, boolean>>("which_check", {

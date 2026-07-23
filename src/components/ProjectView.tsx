@@ -16,6 +16,7 @@ import type { AgentCli, Project } from "../projects";
 import {
   AGENT_CLIS,
   AGENT_PATTERN,
+  SHELL_PATTERN,
   checkCliUpdates,
   checkInstalledClis,
   checkInstalledPrereqs,
@@ -520,19 +521,30 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         if (hasAgent) {
           agentLife.current.set(s.id, 0);
         } else if (agentLife.current.has(s.id)) {
-          const gone = (agentLife.current.get(s.id) ?? 0) + 1;
-          if (gone >= 2) {
+          // The agent is gone. If the user has since put this shell to real
+          // work — a server, a build, any non-shell/non-agent process still
+          // running — it's a working shell now, not a spent agent shell:
+          // stop tracking it and never auto-close it out from under them.
+          const hasRealWork = s.procs.some(
+            (p) => !SHELL_PATTERN.test(p.name) && !AGENT_PATTERN.test(p.name),
+          );
+          if (hasRealWork) {
             agentLife.current.delete(s.id);
-            const tab = tabsRef.current.find(
-              (t): t is TermSubTab => t.type === "terminal" && t.ptyId === s.id,
-            );
-            // A launched agent tab (command matches) or a run stays put; only a
-            // plain shell that hosted a now-exited agent gets closed.
-            if (tab && !tab.run && !AGENT_PATTERN.test(tab.command ?? "")) {
-              closeTabRef.current(tab.id);
-            }
           } else {
-            agentLife.current.set(s.id, gone);
+            const gone = (agentLife.current.get(s.id) ?? 0) + 1;
+            if (gone >= 2) {
+              agentLife.current.delete(s.id);
+              const tab = tabsRef.current.find(
+                (t): t is TermSubTab => t.type === "terminal" && t.ptyId === s.id,
+              );
+              // A launched agent tab (command matches) or a run stays put; only
+              // an idle plain shell that hosted a now-exited agent gets closed.
+              if (tab && !tab.run && !AGENT_PATTERN.test(tab.command ?? "")) {
+                closeTabRef.current(tab.id);
+              }
+            } else {
+              agentLife.current.set(s.id, gone);
+            }
           }
         }
         if (!hasAgent) {
