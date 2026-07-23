@@ -6,10 +6,10 @@
 // a binary that does not exist. That failure is invisible: Claude never reports
 // a hook that won't execute.
 //
-// Always builds for an explicit --target. CI cross-compiles the Intel macOS
-// build on an arm64 runner, so building for the host would stage an arm64
-// helper inside an x86_64 app — a mismatch that surfaces only on a user's Intel
-// Mac, at runtime, as hooks that silently do nothing.
+// Always builds for an explicit --target so the helper's arch matches the app
+// it ships inside. Building for the host arch instead would stage the wrong
+// helper in any cross-compiled app — a mismatch that surfaces only at runtime,
+// as hooks that silently do nothing.
 //
 // Tauri resolves externalBin entries by appending the target triple, then drops
 // the file next to the app binary (Canopy.app/Contents/MacOS/canopy-hook),
