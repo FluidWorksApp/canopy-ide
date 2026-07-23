@@ -11,6 +11,16 @@ import type { Notify } from "../types";
 import { splitPatch } from "./PrView";
 import { STATE_META, lastHumanPrompt } from "./AgentsPanel";
 import { AgentIcon, GitBranchIcon, RestartIcon } from "./icons";
+import { sessionCost } from "../pricing";
+
+// Compact number formats for the header stats strip — matched to the status
+// tray so the same session reads the same everywhere.
+const fmtTokens = (n: number) =>
+  n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
+const fmtCost = (n: number) => (n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`);
+/** Tokens Canopy sent the model — fresh input plus both cache legs. */
+const sentTokens = (u: ipc.AgentSessionUsage) =>
+  u.input_tokens + u.cache_read_tokens + u.cache_creation_tokens;
 
 interface AgentWorkspaceViewProps {
   /** Repo the agent's cwd resolved to; null renders the digest-only view. */
@@ -118,6 +128,29 @@ export function AgentWorkspaceView({
   const [edits, setEdits] = useState<ipc.AgentEdit[]>([]);
   // Manual refresh: the small icon in the header bumps this to re-read all.
   const [tick, setTick] = useState(0);
+  // This agent's token/cost usage, read from its own CLI store (Claude, Codex
+  // and omp today) — independent of hooks, so it shows even for a hookless
+  // codex. Matched by session id when we have one, else the most recent
+  // session in this cwd.
+  const [usage, setUsage] = useState<ipc.AgentSessionUsage | null>(null);
+  useEffect(() => {
+    let live = true;
+    void ipc
+      .agentUsage()
+      .then((rows) => {
+        if (!live) return;
+        const mine = rows.filter((u) => u.agent === agent && u.supported);
+        const byId = sessionId ? mine.find((u) => u.session_id === sessionId) : undefined;
+        const inCwd = mine
+          .filter((u) => u.cwd && (u.cwd === cwd || cwd.startsWith(u.cwd) || u.cwd.startsWith(cwd)))
+          .sort((a, b) => b.updated - a.updated);
+        setUsage(byId ?? inCwd[0] ?? null);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [agent, cwd, sessionId, digest?.updated, tick]);
 
   useEffect(() => {
     let live = true;
@@ -213,6 +246,7 @@ export function AgentWorkspaceView({
 
   const st = ws?.state ? STATE_META[ws.state] : digest?.state ? STATE_META[digest.state] : undefined;
   const task = lastHumanPrompt(digest?.prompts);
+  const cost = usage ? sessionCost(usage) : null;
   const touched = ws?.touched?.length ? ws.touched : (digest?.files ?? []);
   const branchable = !!ws?.branch && !ws.detached && !ws.on_base;
   const files = patch?.patch ? splitPatch(patch.patch) : [];
@@ -352,6 +386,43 @@ export function AgentWorkspaceView({
           )}
         </div>
         {task && <div className="agent-task">{task}</div>}
+        {/* What this agent is costing and doing — read from its own CLI store
+            (works for a hookless codex too); the state chip only appears when a
+            hook reports it. */}
+        {(usage || st) && (
+          <div className="aw-stats">
+            {st && (
+              <span className={`aw-stat-state ${st.cls}`} title={`Session state: ${st.label}`}>
+                {st.label}
+              </span>
+            )}
+            {usage?.model && (
+              <span className="aw-stat aw-stat-model" title="Model">
+                {usage.model}
+              </span>
+            )}
+            {usage && sentTokens(usage) > 0 && (
+              <>
+                <span className="aw-stat" title="Tokens sent (input + cache)">
+                  ↑{fmtTokens(sentTokens(usage))}
+                </span>
+                <span className="aw-stat" title="Tokens received (output)">
+                  ↓{fmtTokens(usage.output_tokens)}
+                </span>
+              </>
+            )}
+            {cost != null && (
+              <span className="aw-stat" title="Cost — estimated unless the CLI reports its own">
+                {fmtCost(cost)}
+              </span>
+            )}
+            {usage && usage.turns > 0 && (
+              <span className="aw-stat" title="Assistant turns">
+                {usage.turns} {usage.turns === 1 ? "turn" : "turns"}
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
       {/* States the git join can't paper over, said plainly instead of

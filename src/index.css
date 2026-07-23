@@ -2190,6 +2190,45 @@ body,
 .aw-banner .agent-branch {
   flex: 0 0 auto;
 }
+/* Stats strip: what the agent is costing and doing — model, tokens, cost,
+   turns, and its live state — in a quiet monospace row under the identity. */
+.aw-stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  margin-top: 8px;
+  font-size: 11.5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.aw-stat {
+  white-space: nowrap;
+}
+.aw-stat-model {
+  color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+  border-radius: 5px;
+  padding: 1px 7px;
+}
+.aw-stat-state {
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+/* Reuse the agent state colours (same tokens the AgentsPanel dot uses). */
+.aw-stat-state.st-working {
+  color: var(--ok);
+}
+.aw-stat-state.st-waiting {
+  color: var(--warn);
+}
+.aw-stat-state.st-ended,
+.aw-stat-state.st-idle {
+  color: var(--text-dim);
+}
 /* Make the close affordance unmistakable: a red-bordered target that reads as
    "close" at a glance, and fills solid red on hover/focus. */
 .workspace-overlay-close {
