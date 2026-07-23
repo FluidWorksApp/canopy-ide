@@ -854,6 +854,9 @@ export const dictationStart = (modelId: string) =>
 export const dictationStop = (language?: string) =>
   invoke<string>("dictation_stop", { language: language || null });
 export const dictationCancel = () => invoke<void>("dictation_cancel");
+/** Whether this build/platform can run dictation (false on Intel macOS, which
+ *  has no compatible ONNX Runtime). The UI hides dictation entirely when false. */
+export const dictationSupported = () => invoke<boolean>("dictation_supported");
 export const onDictationProgress = (
   cb: (p: DictationProgress) => void,
 ): Promise<UnlistenFn> =>

@@ -679,3 +679,12 @@ pub fn dictation_cancel(state: tauri::State<'_, DictationManager>) {
         // to join for — the samples are dropped with the handle.
     }
 }
+
+/// Whether this build can run dictation at all. It rides on the bundled ONNX
+/// Runtime, and no osx-x86_64 build exists for the version ort requires, so
+/// Intel macOS is unsupported — the UI hides dictation there rather than
+/// offering a feature that can only fail. Every shipped target returns true.
+#[tauri::command]
+pub fn dictation_supported() -> bool {
+    !(cfg!(target_os = "macos") && cfg!(target_arch = "x86_64"))
+}

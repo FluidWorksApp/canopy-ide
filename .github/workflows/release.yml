@@ -245,6 +245,7 @@ jobs:
               cp "$root"/rpm/*.rpm          "$stage/Canopy-linux-x86_64.rpm" ;;
             x86_64-pc-windows-msvc)
               cp "$root"/nsis/*-setup.exe   "$stage/Canopy-windows-x86_64-setup.exe" ;;
+            *) echo "::error::unmapped target ${{ matrix.target }} — no stable-name alias"; exit 1 ;;
           esac
           ls -l "$stage"
           # The release is still a draft at this point; gh resolves drafts by

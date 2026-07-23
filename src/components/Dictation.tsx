@@ -42,6 +42,10 @@ export function Dictation() {
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
   const noticeTimer = useRef<number | undefined>(undefined);
+  // Dictation needs the bundled ONNX Runtime, which unsupported builds (Intel
+  // macOS) lack. Default true so the hotkey works the instant the app mounts on
+  // every supported platform; go quiet only once we confirm it's unavailable.
+  const supportedRef = useRef(true);
 
   const notice = (msg: string) => {
     window.clearTimeout(noticeTimer.current);
@@ -84,12 +88,20 @@ export function Dictation() {
   };
 
   useEffect(() => {
+    // On an unsupported build the hotkey does nothing — don't even intercept it,
+    // let ⌘D fall through as usual.
+    void ipc
+      .dictationSupported()
+      .then((ok) => {
+        supportedRef.current = ok;
+      })
+      .catch(() => {});
     // Capture phase: the hotkey must win over xterm/Monaco key handling, and
     // Esc-while-recording must not fall through to focus-mode exit. The hotkey
     // is read fresh from settings on every press so re-binding takes effect
     // immediately, no reload.
     const onKey = (e: KeyboardEvent) => {
-      if (matchesHotkey(e, getSettings().dictationHotkey)) {
+      if (supportedRef.current && matchesHotkey(e, getSettings().dictationHotkey)) {
         e.preventDefault();
         e.stopPropagation();
         void toggle();

@@ -321,6 +321,7 @@ pub fn run() {
             dictation::dictation_start,
             dictation::dictation_stop,
             dictation::dictation_cancel,
+            dictation::dictation_supported,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
