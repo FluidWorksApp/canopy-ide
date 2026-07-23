@@ -10,7 +10,7 @@ import * as ipc from "../ipc";
 import type { Notify } from "../types";
 import { splitPatch } from "./PrView";
 import { STATE_META, lastHumanPrompt } from "./AgentsPanel";
-import { AgentIcon, GitBranchIcon } from "./icons";
+import { AgentIcon, GitBranchIcon, RestartIcon } from "./icons";
 
 interface AgentWorkspaceViewProps {
   /** Repo the agent's cwd resolved to; null renders the digest-only view. */
@@ -25,16 +25,16 @@ interface AgentWorkspaceViewProps {
   sessionId?: string;
   /** The hook digest, when there is one: last prompt, state, reported files. */
   digest?: ipc.SessionDigest;
-  /** Live terminal hosting this session, when there is one. */
-  ptyId?: number;
   onOpenCommit: (
     repo: string,
     commit: { hash: string; short: string; subject: string },
   ) => void;
   onOpenPr: (repo: string, pr: ipc.PrInfo) => void;
-  onJumpToPty?: (ptyId: number) => void;
   onOpenTerminal: (cwd: string, label: string) => void;
   onNotice: Notify;
+  /** When set, the header shows a close button — the overlay is the single
+   *  banner. The standalone agent tab omits it (the tab closes itself). */
+  onClose?: () => void;
 }
 
 type Pane = "edits" | "uncommitted" | "diff";
@@ -98,12 +98,11 @@ export function AgentWorkspaceView({
   cwd,
   sessionId,
   digest,
-  ptyId,
   onOpenCommit,
   onOpenPr,
-  onJumpToPty,
   onOpenTerminal,
   onNotice,
+  onClose,
 }: AgentWorkspaceViewProps) {
   const [ws, setWs] = useState<ipc.AgentWorkspace | null>(null);
   const [wsErr, setWsErr] = useState<string | null>(null);
@@ -113,11 +112,12 @@ export function AgentWorkspaceView({
   const [remote, setRemote] = useState("");
   // undefined = still looking, null = looked and none.
   const [pr, setPr] = useState<ipc.PrInfo | null | undefined>(undefined);
-  const [tick, setTick] = useState(0);
   // The per-agent change journal: what THIS agent changed, attributed at hunk
   // granularity even on a shared checkout. Empty for a hookless/pre-journal
   // session, in which case only the tree view below has anything to show.
   const [edits, setEdits] = useState<ipc.AgentEdit[]>([]);
+  // Manual refresh: the small icon in the header bumps this to re-read all.
+  const [tick, setTick] = useState(0);
 
   useEffect(() => {
     let live = true;
@@ -292,22 +292,22 @@ export function AgentWorkspaceView({
 
   return (
     <div className="ticket-view">
-      <div className="ticket-view-head">
+      {/* One banner for the whole workspace: identity, branch, where it's
+          working, and the window controls — no second header repeating the
+          agent name below it. The dropped chips (±uncommitted, ↑vs base) were
+          whole-checkout/whole-branch counts, not this agent's; the commit list
+          and the scoped diff below carry the real numbers. */}
+      <div className="ticket-view-head aw-banner">
         <div className="ticket-view-title">
           {st && <span className={`agent-state-dot ${st.cls}`} title={st.label} />}
-          <AgentIcon id={agent} size={15} className="ticket-view-mark" />
-          <span>{agent}</span>
+          <AgentIcon id={agent} size={16} className="ticket-view-mark" />
+          <span className="aw-agent">{agent}</span>
           {ws?.branch && (
             <span className="agent-branch" title={ws.detached ? "detached HEAD" : `On branch ${ws.branch}`}>
               <GitBranchIcon size={12} /> {ws.branch}
               {ws.detached ? " (detached)" : ""}
             </span>
           )}
-        </div>
-        {task && <div className="agent-task">{task}</div>}
-        <div className="ticket-view-meta">
-          {ws && ws.dirty > 0 && <span className="loose-dirty">±{ws.dirty} uncommitted</span>}
-          {ws && ws.ahead > 0 && <span className="loose-ahead">↑{ws.ahead} vs base</span>}
           {ws?.merged && <span className="loose-chip">merged</span>}
           {ws?.workdir && (
             <span
@@ -319,23 +319,39 @@ export function AgentWorkspaceView({
             </span>
           )}
           <span className="status-spacer" />
-          {ptyId != null && onJumpToPty && (
-            <button className="btn" onClick={() => onJumpToPty(ptyId)}>
-              Go to terminal
-            </button>
-          )}
-          {ws?.workdir && (
+          {/* Only for an isolated worktree: that directory isn't a tab anywhere
+              else, so a scratch shell pointed at it is the one thing closing
+              this overlay can't give you. On a shared checkout it's the repo
+              dir you already have shells in — no value, so it's omitted. */}
+          {ws?.isolated && ws.workdir && (
             <button
               className="btn"
+              title={`Open a shell in the worktree: ${ws.workdir}`}
               onClick={() => onOpenTerminal(ws.workdir as string, ws.branch ?? agent)}
             >
-              Open terminal here
+              New shell in worktree
             </button>
           )}
-          <button className="btn" onClick={() => setTick((t) => t + 1)}>
-            Refresh
+          <button
+            className="btn-icon aw-refresh"
+            title="Refresh — re-read this agent's changes"
+            aria-label="Refresh"
+            onClick={() => setTick((t) => t + 1)}
+          >
+            <RestartIcon size={14} />
           </button>
+          {onClose && (
+            <button
+              className="btn-icon workspace-overlay-close"
+              title="Close (Esc)"
+              aria-label="Close agent workspace"
+              onClick={onClose}
+            >
+              ✕
+            </button>
+          )}
         </div>
+        {task && <div className="agent-task">{task}</div>}
       </div>
 
       {/* States the git join can't paper over, said plainly instead of

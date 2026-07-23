@@ -2145,8 +2145,50 @@ body,
 .workspace-overlay-body {
   flex: 1;
   min-height: 0;
-  overflow: auto;
-  padding: 2px 6px 6px;
+  display: flex;
+  flex-direction: column;
+}
+/* AgentWorkspaceView is the single banner + its own scrolling body now, so let
+   it fill the glass and manage its own scroll — its header stays pinned. */
+.workspace-overlay-body > .ticket-view {
+  height: 100%;
+}
+/* Banner row: center everything on one line. The ticket header aligns text to
+   the baseline, which left the chips and the refresh/close icons riding high;
+   centering seats them all cleanly and fixes the refresh-button misalignment. */
+.aw-banner .ticket-view-title {
+  align-items: center;
+  gap: 9px;
+}
+.aw-banner .aw-refresh,
+.aw-banner .workspace-overlay-close {
+  flex: 0 0 auto;
+}
+.aw-agent {
+  font-weight: 650;
+  flex: 0 0 auto;
+}
+.aw-refresh {
+  color: var(--text-dim);
+}
+.aw-refresh:hover {
+  color: var(--text);
+}
+/* Location chip ("shared checkout · cause-dashboard"): a quiet pill, not a hard
+   box — dimmed, roomier padding, so it reads as context, not a control. */
+.aw-banner .ticket-view-chip {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-dim);
+  padding: 3px 10px;
+  border-radius: 6px;
+  border-color: color-mix(in srgb, var(--border) 80%, transparent);
+  white-space: nowrap;
+}
+/* The branch chip sits between the name and the location — give it consistent
+   vertical rhythm with the row. */
+.aw-banner .agent-branch {
+  flex: 0 0 auto;
 }
 /* Make the close affordance unmistakable: a red-bordered target that reads as
    "close" at a glance, and fills solid red on hover/focus. */

@@ -2636,10 +2636,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             cwd={activeTab.cwd}
             sessionId={activeTab.sessionId}
             digest={activeTab.digest}
-            ptyId={activeTab.ptyId}
             onOpenCommit={openCommit}
             onOpenPr={openPr}
-            onJumpToPty={jumpToPty}
             onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
             onNotice={onNotice}
           />
@@ -2998,28 +2996,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 aria-modal="true"
                 aria-label="Agent workspace"
               >
-                <header className="workspace-overlay-head">
-                  <span className="workspace-overlay-title">
-                    <AgentIcon id={agentTermWs.agent} size={16} />
-                    <span className="workspace-overlay-titletext">
-                      <span className="workspace-overlay-name">Agent Workspace</span>
-                      <span className="workspace-overlay-sub">
-                        {agentTermWs.agent}
-                        {agentTermWs.cwd
-                          ? ` · ${agentTermWs.cwd.split("/").filter(Boolean).pop()}`
-                          : ""}
-                      </span>
-                    </span>
-                  </span>
-                  <button
-                    className="btn-icon workspace-overlay-close"
-                    title="Close (Esc)"
-                    aria-label="Close agent workspace"
-                    onClick={() => setWsDrawerOpen(false)}
-                  >
-                    ✕
-                  </button>
-                </header>
+                {/* No chrome header here — AgentWorkspaceView's own banner is
+                    the single header, and it renders the close button (passed
+                    below) so the agent name/branch aren't repeated twice. */}
                 <div className="workspace-overlay-body">
                   {wsDrawerOpen && (
                     <AgentWorkspaceView
@@ -3029,12 +3008,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                       cwd={agentTermWs.cwd}
                       sessionId={agentTermWs.sessionId}
                       digest={agentTermWs.digest}
-                      ptyId={agentTermWs.ptyId}
                       onOpenCommit={openCommit}
                       onOpenPr={openPr}
-                      onJumpToPty={jumpToPty}
                       onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
                       onNotice={onNotice}
+                      onClose={() => setWsDrawerOpen(false)}
                     />
                   )}
                 </div>
