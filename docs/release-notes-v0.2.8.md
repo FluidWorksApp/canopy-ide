@@ -8,6 +8,11 @@
 - **Survives restarts and restores.** Terminal slot numbers get reassigned every time the app relaunches, which is exactly what used to cause the mix-up. The workspace now binds by session identity — from the live agent's own events, and from the resume command that names the session outright — so a resumed conversation resolves correctly even before it emits its first event, whatever slot it lands in.
 - **Fails safe instead of guessing.** In the rare case where a session can't be identified yet, the workspace shows an empty, repo-scoped view rather than confidently attaching an unrelated session's changes.
 - **The "This agent" pane now actually draws its diffs.** Each journaled edit is shown as a real before/after diff — the cards were rendering blank; they now paint like every other diff in the app, superseded edits included.
+- **A file's edits read as one real diff.** Instead of a stack of fragments each numbered from 1, the agent's edits to a file are stitched into a single diff with real line numbers, gaps between edits, and GitHub-style expand-context controls to reveal the surrounding lines.
+
+## Review the diff and send comments to the agent
+
+- **Comment on any line, route it to the agent.** Hover a line in any diff pane, click the "+", and leave a comment. Comments collect as drafts (with checkboxes) and persist across closing the workspace; when you're ready, send the selected ones — or all of them — to the agent as a single review. It's typed into the agent's live terminal, or the session is resumed first if it had ended.
 
 ## Remote portal — a terminal that fits your phone
 

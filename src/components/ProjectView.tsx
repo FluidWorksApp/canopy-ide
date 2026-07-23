@@ -22,6 +22,7 @@ import {
   checkInstalledPrereqs,
   currentPlatform,
   PREREQS,
+  restoreCommand,
   resumeSessionId,
   startCommand,
   updateCommand,
@@ -1758,6 +1759,70 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     return m;
   }, [projectEvents]);
   liveSessionIdsRef.current = liveSessionIds;
+  const liveSessionByPtyRef = useRef(liveSessionByPty);
+  liveSessionByPtyRef.current = liveSessionByPty;
+
+  // Deliver a message (a workspace review, today) to the agent that owns a
+  // session: typed into its live PTY when it has one, else the session is
+  // resumed and the text delivered once it reports back. Best-effort — returns
+  // whether it landed plus a line to show the user. The two-write (text, then a
+  // beat, then Enter) is the same pattern the agent seeder uses so the TUI has
+  // settled the paste before it submits.
+  const messageAgent = useCallback(
+    async (opts: {
+      ptyId?: number | null;
+      sessionId?: string;
+      agentId?: string;
+      cwd: string;
+      text: string;
+    }): Promise<{ delivered: boolean; note: string }> => {
+      const { sessionId, cwd, text } = opts;
+      const agentId = opts.agentId ?? "agent";
+      const alive = (pty: number | null | undefined): pty is number =>
+        pty != null && statsRef.current.some((s) => s.id === pty);
+      const typeInto = (pty: number) => {
+        void ipc.ptyWrite(pty, text);
+        window.setTimeout(() => void ipc.ptyWrite(pty, "\r"), 350);
+      };
+      const livePtyForSession = () =>
+        [...liveSessionByPtyRef.current.entries()].find(([p, sid]) => sid === sessionId && alive(p))?.[0];
+      // 1) The workspace's own terminal, if it's still live.
+      if (alive(opts.ptyId)) {
+        typeInto(opts.ptyId);
+        return { delivered: true, note: `Sent to ${agentId}.` };
+      }
+      // 2) Any live terminal running this session (it may have moved tabs).
+      const moved = sessionId ? livePtyForSession() : undefined;
+      if (moved != null) {
+        typeInto(moved);
+        return { delivered: true, note: `Sent to ${agentId}.` };
+      }
+      // 3) Ended: resume, wait for the session to report a PTY, then deliver.
+      if (!sessionId) {
+        return { delivered: false, note: "No live agent to receive the comments — open its terminal first." };
+      }
+      const cmd = restoreCommand(agentId, sessionId);
+      if (!cmd) {
+        return { delivered: false, note: `${agentId} can't be resumed to receive the comments.` };
+      }
+      addTerminal(cwd, cmd, agentId, AGENT_CLIS.find((c) => c.id === agentId)?.icon);
+      for (let i = 0; i < 40; i++) {
+        await new Promise((r) => setTimeout(r, 400));
+        const back = livePtyForSession();
+        if (back != null) {
+          // A moment past first paint before pasting into the resumed TUI.
+          await new Promise((r) => setTimeout(r, 800));
+          typeInto(back);
+          return { delivered: true, note: `Resumed ${agentId} and sent the comments.` };
+        }
+      }
+      return {
+        delivered: false,
+        note: "Resumed the session, but it didn't come back in time — your comments are still saved.",
+      };
+    },
+    [addTerminal],
+  );
   const runningAgents = projectStats.flatMap((s) =>
     s.procs
       .filter((p) => AGENT_PATTERN.test(p.name))
@@ -2703,6 +2768,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             onOpenPr={openPr}
             onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
             onNotice={onNotice}
+            onMessageAgent={(text) =>
+              messageAgent({
+                sessionId: activeTab.sessionId,
+                agentId: activeTab.agent,
+                cwd: activeTab.cwd,
+                text,
+              })
+            }
           />
         )}
         {activeTab?.type === "commit" && (
@@ -3075,6 +3148,15 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                       onOpenPr={openPr}
                       onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
                       onNotice={onNotice}
+                      onMessageAgent={(text) =>
+                        messageAgent({
+                          ptyId: agentTermWs.ptyId,
+                          sessionId: agentTermWs.sessionId,
+                          agentId: agentTermWs.agent,
+                          cwd: agentTermWs.cwd,
+                          text,
+                        })
+                      }
                       onClose={() => setWsDrawerOpen(false)}
                     />
                   )}
