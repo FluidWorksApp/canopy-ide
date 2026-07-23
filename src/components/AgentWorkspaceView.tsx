@@ -76,35 +76,6 @@ function FileName({ path, count, countTitle }: { path: string; count?: number; c
   );
 }
 
-// A journaled edit (old→new fragment) rendered as a single unified diff, so it
-// paints with the same DiffView as every other diff in the app. Line numbers
-// are nominal (these are fragments, not whole files); a tight common
-// prefix/suffix keeps the hunk to the part that actually changed. The `---`/`+++`
-// header is required, not decoration: @git-diff-view's parser scans for a `+++`
-// line and treats a headerless hunk as an empty diff, so without it the card
-// renders blank.
-function editToHunk(path: string, old: string | null, next: string | null): string {
-  const oldLines = old != null ? old.split("\n") : [];
-  const newLines = next != null ? next.split("\n") : [];
-  let p = 0;
-  while (p < oldLines.length && p < newLines.length && oldLines[p] === newLines[p]) p++;
-  let s = 0;
-  while (
-    s < oldLines.length - p &&
-    s < newLines.length - p &&
-    oldLines[oldLines.length - 1 - s] === newLines[newLines.length - 1 - s]
-  )
-    s++;
-  const ctxPre = oldLines.slice(Math.max(0, p - 2), p).map((l) => ` ${l}`);
-  const removed = oldLines.slice(p, oldLines.length - s).map((l) => `-${l}`);
-  const added = newLines.slice(p, newLines.length - s).map((l) => `+${l}`);
-  const ctxPost = oldLines.slice(oldLines.length - s, oldLines.length - s + 2).map((l) => ` ${l}`);
-  const body = [...ctxPre, ...removed, ...added, ...ctxPost].join("\n");
-  const oldCount = ctxPre.length + removed.length + ctxPost.length;
-  const newCount = ctxPre.length + added.length + ctxPost.length;
-  return `--- a/${path}\n+++ b/${path}\n@@ -1,${oldCount} +1,${newCount} @@\n${body}`;
-}
-
 export function AgentWorkspaceView({
   repo,
   agent,
@@ -644,11 +615,19 @@ export function AgentWorkspaceView({
                     }
                   >
                     {!e.present && <span className="aw-edit-tag">superseded</span>}
+                    {/* Hand the before/after text straight to the diff viewer as
+                        file content and let it compute the diff — these are
+                        fragments (an Edit's old_string/new_string, or a Write's
+                        whole body), so a real line-by-line diff of them is
+                        exactly the edit. A Write has no `old`, which reads as an
+                        all-added diff. */}
                     <DiffView
                       data={{
-                        hunks: [editToHunk(g.path, e.old, e.new)],
-                        oldFile: { fileName: g.path },
-                        newFile: { fileName: g.path },
+                        // No precomputed hunks — the viewer diffs the two
+                        // contents itself (empty hunks = "diff these for me").
+                        hunks: [],
+                        oldFile: { fileName: g.path, content: e.old ?? "" },
+                        newFile: { fileName: g.path, content: e.new ?? "" },
                       }}
                       diffViewMode={split ? DiffModeEnum.Split : DiffModeEnum.Unified}
                       diffViewHighlight
