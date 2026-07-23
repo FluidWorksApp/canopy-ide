@@ -966,7 +966,7 @@ function RemoteSettings({
           </Item>
 
           {scope === "internet" && (
-            <Item name="Public link" desc="Canopy runs the tunnel; the link loads in any browser, no router setup.">
+            <Item name="Public link" desc="Canopy runs one tunnel; the link loads in any browser, no router setup. Team sessions over the internet share this same link.">
               <div style={{ display: "grid", gap: 12, justifyItems: "start", width: "100%" }}>
                 {seg(TUNNELS.map((t) => ({ id: t.id, label: t.name })), provider, changeProvider)}
                 <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
