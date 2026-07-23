@@ -3012,7 +3012,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                     </span>
                   </span>
                   <button
-                    className="btn-icon"
+                    className="btn-icon workspace-overlay-close"
                     title="Close (Esc)"
                     aria-label="Close agent workspace"
                     onClick={() => setWsDrawerOpen(false)}

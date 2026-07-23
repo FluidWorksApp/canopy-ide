@@ -1629,6 +1629,15 @@ body,
   color: var(--text-dim);
   line-height: 1.5;
 }
+/* Secondary line under an empty state — e.g. why a shared-checkout agent's
+   changes can't be attributed. */
+.aw-note {
+  margin-top: 8px;
+  max-width: 54ch;
+  font-size: 12px;
+  line-height: 1.55;
+  opacity: 0.78;
+}
 
 /* ---------- tabs (editor + terminal) ---------- */
 
@@ -2138,6 +2147,30 @@ body,
   min-height: 0;
   overflow: auto;
   padding: 2px 6px 6px;
+}
+/* Make the close affordance unmistakable: a red-bordered target that reads as
+   "close" at a glance, and fills solid red on hover/focus. */
+.workspace-overlay-close {
+  flex: 0 0 auto;
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  padding: 5px 9px;
+  font-size: 13px;
+  line-height: 1;
+  transition:
+    background 0.14s ease,
+    color 0.14s ease;
+}
+.workspace-overlay-close:hover,
+.workspace-overlay-close:focus-visible {
+  background: var(--danger);
+  color: #fff;
+  outline: none;
+}
+.workspace-overlay-close:focus-visible {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger) 45%, transparent);
 }
 @media (prefers-reduced-motion: reduce) {
   .workspace-overlay-layer,

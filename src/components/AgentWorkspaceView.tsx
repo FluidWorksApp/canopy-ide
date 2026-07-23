@@ -220,16 +220,21 @@ export function AgentWorkspaceView({
   // The set of paths this agent is known to have touched — from its own edit
   // journal and its reported-editing list. Matched by basename too, since a
   // journal path (repo-relative) and a diff path can differ by a worktree
-  // prefix. Used to split the shared-checkout tree diff into "this agent's" and
-  // "everyone else's".
+  // prefix.
   const agentPaths = new Set<string>([...edits.map((e) => e.path), ...touched]);
   const agentBasenames = new Set<string>([...agentPaths].map(basename));
   const isAgentFile = (p: string) => agentPaths.has(p) || agentBasenames.has(basename(p));
-  const mine = files.filter((f) => isAgentFile(f.path));
-  const others = files.filter((f) => !isAgentFile(f.path));
-  // Whether we can attribute at all: with a journal or a reported list we can
-  // separate this agent's work; without either it's an undifferentiated tree.
-  const canAttribute = agentPaths.size > 0;
+  // This workspace shows ONLY this agent's work, never the rest of the tree.
+  // On an isolated worktree every change in the diff is this agent's by
+  // construction; on a shared checkout we can claim only the files it actually
+  // journaled or reported — the others belong to whoever else shares the
+  // checkout and are deliberately not shown here.
+  const isolated = !!ws?.isolated;
+  const mine = isolated ? files : files.filter((f) => isAgentFile(f.path));
+  // Whether we can attribute at all: an isolated worktree, a journal, or a
+  // reported list. Without any of these a shared-checkout diff is an
+  // undifferentiated tree we won't pass off as this agent's.
+  const canAttribute = isolated || agentPaths.size > 0;
 
   // Journal edits grouped by file, newest file last, preserving edit order.
   const editsByFile: { path: string; items: ipc.AgentEdit[] }[] = [];
@@ -258,9 +263,6 @@ export function AgentWorkspaceView({
     window.setTimeout(() => setFlashPath((p) => (p === path ? null : p)), 1100);
   };
   const [showMoreTouched, setShowMoreTouched] = useState(false);
-  // On a shared checkout the tree diff also carries other agents' work; it's
-  // folded away by default so this agent's own files lead.
-  const [showOthers, setShowOthers] = useState(false);
 
   const renderFile = (f: { path: string; patch: string }) => (
     <div
@@ -571,45 +573,28 @@ export function AgentWorkspaceView({
             ))
           ))}
 
+        {/* Only this agent's own files — never the rest of a shared checkout.
+            When none can be attributed, we say so plainly rather than pass the
+            whole tree off as this agent's work. */}
         {pane !== "edits" &&
           (!ws ? (
             !wsErr && repo && <div className="tree-empty">Loading workspace…</div>
           ) : !patch ? (
             pane && <div className="tree-empty">Loading diff…</div>
-          ) : files.length === 0 ? (
+          ) : mine.length === 0 ? (
             <div className="tree-empty">
-              {pane === "uncommitted"
-                ? "No uncommitted changes in this workspace."
-                : "No differences from the base branch."}
+              No changes by this agent{pane === "uncommitted" ? " yet" : ""}.
+              {!canAttribute && (
+                <div className="aw-note">
+                  It ran on a shared checkout without reporting its edits, so its
+                  changes can't be told apart from the rest of the tree. Run it
+                  in an isolated worktree, or with a CLI that reports edits, to
+                  see them here.
+                </div>
+              )}
             </div>
           ) : (
-            <>
-              {/* On a shared checkout the diff isn't per-agent, so lead with the
-                  files this agent is known to have touched and fold the rest
-                  away. When we can't attribute at all (no journal, no reported
-                  list), everything is just "the diff". */}
-              {(canAttribute ? mine : files).map(renderFile)}
-              {canAttribute && others.length > 0 && (
-                <div className="aw-others">
-                  <button
-                    className="ticket-state-head aw-others-head"
-                    onClick={() => setShowOthers((v) => !v)}
-                    title="Changes in this shared checkout that this agent didn't report making"
-                  >
-                    Other changes in this checkout
-                    <span className="badge">{others.length}</span>
-                    <span className="aw-others-caret">{showOthers ? "▴" : "▾"}</span>
-                  </button>
-                  {showOthers && others.map(renderFile)}
-                </div>
-              )}
-              {canAttribute && mine.length === 0 && others.length > 0 && !showOthers && (
-                <div className="tree-empty">
-                  None of the uncommitted files match what this agent reported —
-                  its changes may already be committed, or it worked elsewhere.
-                </div>
-              )}
-            </>
+            mine.map(renderFile)
           ))}
         {patch?.truncated && pane !== "edits" && (
           <div className="tree-empty">
