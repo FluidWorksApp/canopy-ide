@@ -169,6 +169,28 @@ jobs:
           rm -rf "${PKG}" "ort.${EXT}"
           echo "Staged ONNX Runtime ${ORT_VER} (${A}):"; ls -la src-tauri/onnxruntime/
 
+      # Microsoft ships the macOS ONNX Runtime dylib ad-hoc-signed since v1.24
+      # (1.23 was Developer ID + timestamped). tauri does not re-sign bundle
+      # resources, and an ad-hoc-signed nested binary fails notarisation — so the
+      # whole .app would be rejected. Re-sign it with our Developer ID, hardened
+      # runtime, and a secure timestamp, exactly like every other binary we ship.
+      - name: Re-sign bundled ONNX Runtime (macOS, for notarisation)
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          if [ -z "$APPLE_SIGNING_IDENTITY" ]; then
+            echo "APPLE_SIGNING_IDENTITY not set — leaving ONNX Runtime as-is (unsigned build)."
+            exit 0
+          fi
+          codesign --force --timestamp --options runtime \
+            --sign "$APPLE_SIGNING_IDENTITY" src-tauri/onnxruntime/libonnxruntime.dylib
+          codesign --verify --strict src-tauri/onnxruntime/libonnxruntime.dylib
+          echo "Re-signed ONNX Runtime:"
+          codesign -dvvv src-tauri/onnxruntime/libonnxruntime.dylib 2>&1 \
+            | grep -E "Authority=Developer ID|Timestamp=|flags=.*runtime" || true
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
