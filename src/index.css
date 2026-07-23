@@ -1783,6 +1783,56 @@ body,
   border-radius: 2px;
 }
 
+/* ---- pane-bar section focus ----
+   The pane-bar holds three sibling sections — the main tab strip, the SHELLS
+   rail, and the RUNS rail — and the active tab can live in any of them. Only
+   the section that owns it stays bright; the others recede (dimmed + softly
+   blurred), so an inactive "IDE" tab can't be mistaken for the shell you're
+   actually in and closed by accident. Hover or focus brings a recessed
+   section back so it stays reachable, and clicking a tab there shifts focus,
+   which clears the dim at its source. */
+.pane-section-dim {
+  opacity: 0.4;
+  filter: blur(1.1px) saturate(0.72);
+  transition:
+    opacity 0.18s ease,
+    filter 0.18s ease;
+}
+.pane-section-dim:hover,
+.pane-section-dim:focus-within {
+  opacity: 1;
+  filter: none;
+}
+/* The active rail takes precedence: it lifts onto a raised pill, brightens its
+   label, grows its active chip, and is allowed more room — so a live shell or
+   run reads as the place you're working, not a footnote on the right edge. */
+.run-rail:not(.pane-section-dim) {
+  max-width: 60%;
+  padding: 3px 6px;
+  border-left-color: transparent;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--bg-raised) 62%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--border) 75%, transparent);
+  transition:
+    background 0.18s ease,
+    max-width 0.18s ease;
+}
+.run-rail:not(.pane-section-dim) .run-rail-label {
+  color: var(--text);
+  opacity: 0.85;
+}
+.run-rail:not(.pane-section-dim) .run-chip-active {
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 550;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pane-section-dim,
+  .run-rail:not(.pane-section-dim) {
+    transition: none;
+  }
+}
+
 /* Collapsed rail (more than one run/shell): the label plus a single toggle
    button that opens the full list.
    
