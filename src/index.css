@@ -1803,14 +1803,32 @@ body,
   opacity: 1;
   filter: none;
 }
-/* The active rail wears its label a touch brighter, so its prominence reads
-   even when it holds a single chip. */
+/* The active rail takes precedence: it lifts onto a raised pill, brightens its
+   label, grows its active chip, and is allowed more room — so a live shell or
+   run reads as the place you're working, not a footnote on the right edge. */
+.run-rail:not(.pane-section-dim) {
+  max-width: 60%;
+  padding: 3px 6px;
+  border-left-color: transparent;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--bg-raised) 62%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--border) 75%, transparent);
+  transition:
+    background 0.18s ease,
+    max-width 0.18s ease;
+}
 .run-rail:not(.pane-section-dim) .run-rail-label {
   color: var(--text);
   opacity: 0.85;
 }
+.run-rail:not(.pane-section-dim) .run-chip-active {
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 550;
+}
 @media (prefers-reduced-motion: reduce) {
-  .pane-section-dim {
+  .pane-section-dim,
+  .run-rail:not(.pane-section-dim) {
     transition: none;
   }
 }
