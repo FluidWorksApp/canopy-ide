@@ -24,5 +24,19 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    // Stable, unhashed asset names. `portal/dist/index.html` is committed (so
+    // the crate's include_dir!("../portal/dist") compiles on a fresh checkout),
+    // but the assets are gitignored and rebuilt. With content-hashed names the
+    // committed index.html referenced files that no longer existed after any
+    // rebuild or branch switch — the served portal 404'd its entry JS and
+    // rendered a blank page. Fixed filenames keep the committed index.html in
+    // permanent sync with whatever the build emits.
+    rollupOptions: {
+      output: {
+        entryFileNames: 'assets/index.js',
+        chunkFileNames: 'assets/[name].js',
+        assetFileNames: 'assets/[name][extname]',
+      },
+    },
   },
 })
