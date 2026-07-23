@@ -86,12 +86,14 @@ hex = "0.4"
 # and flate2+tar unpack the .tar.gz model bundles.
 transcribe-rs = { version = "0.3.11", default-features = false, features = ["onnx"] }
 # ONNX Runtime is loaded dynamically on EVERY target from a libonnxruntime
-# shipped in the app bundle (release.yml fetches Microsoft's official build;
-# lib.rs points ORT_DYLIB_PATH at it). One mechanism everywhere sidesteps the two
-# ways the static prebuilt broke the build: Intel macOS has no ort prebuilt at
-# all, and the Linux prebuilt is compiled against a too-new glibc (undefined
-# `__isoc23_strtol` on ubuntu-22.04). load-dynamic never links ONNX at build
-# time, so neither can happen. Exact-pinned to unify with transcribe-rs's ort.
+# shipped in the app bundle (release.yml fetches Microsoft's official v1.24.x
+# build; lib.rs points ORT_DYLIB_PATH at it). load-dynamic sidesteps the static
+# prebuilt's failures — chiefly the Linux prebuilt linking against a too-new
+# glibc (undefined `__isoc23_strtol` on ubuntu-22.04) — by never linking ONNX at
+# build time. The runtime must be >= v1.24: ort rc.12's default api-24 feature
+# demands it, and a lower one deadlocks ort's init (see release.yml). That's why
+# Intel macOS is unsupported — no osx-x86_64 build exists past v1.23.0.
+# Exact-pinned to unify with transcribe-rs's ort.
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic"] }
 cpal = "0.16"
 rubato = "0.16"

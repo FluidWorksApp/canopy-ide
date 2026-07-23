@@ -77,7 +77,6 @@ breaks every published link:
 | Alias | Points at |
 |---|---|
 | `Canopy-macos-arm64.dmg` | macOS Apple Silicon `.dmg` |
-| `Canopy-macos-intel.dmg` | macOS Intel `.dmg` |
 | `Canopy-linux-x86_64.AppImage` | Linux AppImage |
 | `Canopy-linux-x86_64.deb` / `.rpm` | Linux packages |
 | `Canopy-windows-x86_64-setup.exe` | reserved for the Windows installer |
@@ -127,10 +126,10 @@ multi-identity `.p12`s.
   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""`.
 - **The hook helper is a second `[[bin]]` that no tauri command builds.**
   `scripts/prepare-sidecar.mjs` builds it and stages it as a sidecar, and it
-  builds for an explicit `--target`: CI cross-compiles the Intel Mac build on an
-  arm64 runner, so building for the host would put an arm64 helper inside an
-  x86_64 app — failing only on a user's Intel Mac, at runtime, as agent hooks
-  that silently do nothing.
+  builds for an explicit `--target` so the helper's arch always matches the app
+  it ships inside. A host-arch build would put the wrong helper in a
+  cross-compiled app — failing only at runtime, as agent hooks that silently do
+  nothing.
 - **Notarisation returning 403 "a required agreement is missing or has
   expired"** is an account-level problem, not a build one. Sign the pending
   agreement at <https://appstoreconnect.apple.com> → Business/Agreements. It
