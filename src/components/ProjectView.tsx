@@ -293,14 +293,20 @@ function Rail({
   summary,
   open,
   setOpen,
+  dim,
 }: {
   label: string;
   chips: RailChip[];
   summary: React.ReactNode;
   open: boolean;
   setOpen: (v: boolean) => void;
+  /** Recede this rail (dimmed + blurred) because the active tab lives in
+   *  another section. Hovering or clicking still works — it just isn't the
+   *  section you're currently in. */
+  dim?: boolean;
 }) {
   if (chips.length === 0) return null;
+  const dimCls = dim ? "pane-section-dim" : "";
   const chip = (c: RailChip, inMenu: boolean) => (
     <div
       key={c.id}
@@ -329,7 +335,7 @@ function Rail({
   );
   if (chips.length === 1) {
     return (
-      <div className="run-rail">
+      <div className={`run-rail ${dimCls}`}>
         <span className="run-rail-label">{label}</span>
         {chip(chips[0], false)}
       </div>
@@ -337,7 +343,7 @@ function Rail({
   }
   const active = chips.find((c) => c.active);
   return (
-    <div className="run-rail rail-menu-anchor">
+    <div className={`run-rail rail-menu-anchor ${dimCls}`}>
       <span className="run-rail-label">{label}</span>
       <button
         className={`run-chip rail-toggle ${active ? "run-chip-active" : ""}`}
@@ -2073,6 +2079,17 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       onClose: () => closeTab(tab.id),
     };
   });
+  // Which pane-bar section owns the active tab. The other sections recede
+  // (dimmed + softly blurred) so it's unmistakable where you are: closing a
+  // shell no longer means squinting past an equally-bright "IDE" tab and
+  // hitting it by mistake. Clicking a recessed section shifts focus here and
+  // clears the dim.
+  const activeSection: "tabs" | "shells" | "runs" = shellChips.some((c) => c.active)
+    ? "shells"
+    : runChips.some((c) => c.active)
+      ? "runs"
+      : "tabs";
+
   // One summary glyph for the runs dropdown: any live wins, then any failure.
   const runSummary = runTabs.some((t) => !t.exited) ? (
     <LiveDot size={7} className="run-chip-dot" />
@@ -2160,8 +2177,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onClose={tabMenu.close}
         />
       )}
-      <div className="pane-bar">
-        <div className="tabs">
+      <div className={`pane-bar pane-bar-focus-${activeSection}`}>
+        <div className={`tabs ${activeSection !== "tabs" ? "pane-section-dim" : ""}`}>
           {tabGroups.map((group, gi) =>
             group.length === 0 ? null : (
               <div className="tab-group" key={gi}>
@@ -2316,6 +2333,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           summary={<TerminalIcon size={11} className="run-chip-shell-dot" />}
           open={shellMenuOpen}
           setOpen={setShellMenuOpen}
+          dim={activeSection !== "shells"}
         />
         <Rail
           label="RUNS"
@@ -2323,6 +2341,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           summary={runSummary}
           open={runMenuOpen}
           setOpen={setRunMenuOpen}
+          dim={activeSection !== "runs"}
         />
         <div className="pane-actions">
           {/* Jump to any open tab — the strip caps tab width and scrolls, so a
