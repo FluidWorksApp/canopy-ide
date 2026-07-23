@@ -515,6 +515,10 @@ export default function App() {
             setSettingsOpen({});
           } else if (e.payload === "help") {
             setHelpOpen(true);
+          } else if (e.payload === "support") {
+            void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
+              openUrl("https://canopyide.dev/support"),
+            );
           } else if (e.payload === "save-project") {
             void saveProjectAs();
           } else if (e.payload === "open-workspace") {

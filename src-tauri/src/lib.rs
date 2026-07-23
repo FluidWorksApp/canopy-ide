@@ -111,7 +111,11 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         app,
         "Help",
         true,
-        &[&MenuItem::with_id(app, "help", "Canopy Help", true, Some("CmdOrCtrl+Shift+H"))?],
+        &[
+            &MenuItem::with_id(app, "help", "Canopy Help", true, Some("CmdOrCtrl+Shift+H"))?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "support", "Support…", true, None::<&str>)?,
+        ],
     )?;
     Menu::with_items(app, &[&app_menu, &file, &edit, &go, &tabs, &window, &help])
 }
