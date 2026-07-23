@@ -8,7 +8,6 @@ mod portal;
 mod pty;
 mod punch;
 mod tunnel;
-mod qstream;
 mod relay;
 mod wsbridge;
 
@@ -129,6 +128,13 @@ fn js_log(level: String, message: String) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Install the ring crypto provider process-wide so rustls has a default —
+    // the team relay's internet path dials wss:// through a tunnel via
+    // tokio-tungstenite, whose rustls connector builds its config from the
+    // process-default provider and would otherwise panic on first connect.
+    // Idempotent: an Err just means it was already set.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let builder = tauri::Builder::default();
     // Must be first: a second `canopy <dir>` invocation forwards its argv
     // here and exits, instead of starting an app that would fight this one

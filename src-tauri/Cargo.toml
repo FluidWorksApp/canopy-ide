@@ -43,9 +43,10 @@ include_dir = "0.7"
 # A scannable QR of the portal URL so pairing a phone is "scan + type the PIN".
 # Pure-Rust encoder; the SVG is hand-built from the matrix (no render feature).
 qrcode = { version = "0.14", default-features = false }
+# rustls (ring provider) is installed process-wide at startup so tokio-tungstenite's
+# wss:// connector — the team relay's internet transport through a tunnel — has a
+# default crypto provider. No direct rustls types are used beyond that install.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
-quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
-rcgen = { version = "0.13", default-features = false, features = ["ring"] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
