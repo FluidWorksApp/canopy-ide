@@ -62,7 +62,8 @@ if ! xcrun notarytool history --keychain-profile "$NOTARIZE_PROFILE" >/dev/null 
 fi
 
 # Tauri signs the bundle itself (hardened runtime + entitlements.plist) when
-# these are set, so we don't hand-roll codesign over nested binaries.
+# these are set, so we don't hand-roll codesign over most nested binaries — the
+# ONNX Runtime dylib is the one exception (re-signed just below).
 export APPLE_SIGNING_IDENTITY="$SIGNING_IDENTITY"
 export APPLE_TEAM_ID="$TEAM_ID"
 # The key generated with `signer generate --ci` has an empty password, and tauri
@@ -70,6 +71,27 @@ export APPLE_TEAM_ID="$TEAM_ID"
 # non-TTY. Setting it empty is what keeps signing non-interactive.
 export TAURI_SIGNING_PRIVATE_KEY="$(cat "$HOME/.tauri/canopy.key")"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
+
+# ONNX Runtime for dictation. Microsoft ships the macOS dylib ad-hoc-signed
+# since v1.24 (1.23 was Developer ID + timestamped), and tauri does not re-sign
+# bundle resources — an ad-hoc nested binary fails notarisation. Stage the
+# official build (if absent) and re-sign it with our Developer ID + hardened
+# runtime + secure timestamp, mirroring .github/workflows/release.yml.
+ORT_VER=1.24.2
+ORT_DYLIB="src-tauri/onnxruntime/libonnxruntime.dylib"
+if [ ! -f "$ORT_DYLIB" ]; then
+  echo "==> fetching ONNX Runtime $ORT_VER"
+  tmp="$(mktemp -d)"
+  curl -fSL -o "$tmp/ort.tgz" \
+    "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VER}/onnxruntime-osx-arm64-${ORT_VER}.tgz"
+  tar -xzf "$tmp/ort.tgz" -C "$tmp"
+  mkdir -p src-tauri/onnxruntime
+  cp "$tmp/onnxruntime-osx-arm64-${ORT_VER}/lib/libonnxruntime.${ORT_VER}.dylib" "$ORT_DYLIB"
+  rm -rf "$tmp"
+fi
+echo "==> re-signing ONNX Runtime for notarisation"
+codesign --force --timestamp --options runtime --sign "$SIGNING_IDENTITY" "$ORT_DYLIB"
+codesign --verify --strict "$ORT_DYLIB"
 
 for target in "${TARGETS[@]}"; do
   echo "==> building $target"
