@@ -1498,8 +1498,28 @@ pub async fn relay_connect(
             return Err("You are hosting a relay — stop it before joining another.".into());
         }
     }
-    // Bare IP/hostname gets the default port appended.
     let addr = addr.trim().to_string();
+    let name = if name.trim().is_empty() { "guest".to_string() } else { name.trim().to_string() };
+
+    // Two ways to join, by what the host shared. A URL is the host's tunnel
+    // address (an internet session): dial it over a WebSocket to /team/ws — the
+    // same ingress the host exposes on its shared server, so the tunnel carries
+    // the whole relay. Anything else is a bare host:port on the LAN, reached
+    // directly over TCP. (The old public UDP-hole-punch + QUIC path is retired —
+    // "internet" now means the tunnel, so a joiner never opens a UDP socket.)
+    // Either way the SPAKE2 handshake and the relay logic on top are identical.
+    if let Some(url) = team_ws_url(&addr) {
+        let (writer, reader, closer) = crate::wsbridge::connect(&url, Duration::from_secs(12))
+            .map_err(|e| format!("Couldn't reach the host: {e}"))?;
+        let Some((sender, receiver, binding)) = secure::handshake(writer, reader, code.trim(), true) else {
+            closer.close();
+            return Err("Couldn't establish a secure channel — check the link and code, and that the host is sharing.".into());
+        };
+        return run_client(app, inner_arc, sender, receiver, binding, Closer::Ws(closer), name, addr, || {});
+    }
+
+    // LAN: a bare IP/hostname gets the default relay port appended, then a direct
+    // TCP connection — no wall in the way on a local network.
     let full = if addr.contains(':') { addr.clone() } else { format!("{addr}:{DEFAULT_PORT}") };
     let sock_addr = full
         .parse::<std::net::SocketAddr>()
@@ -1514,37 +1534,20 @@ pub async fn relay_connect(
                 ))
         })
         .map_err(|_| format!("Not a valid address: {full}"))?;
-    let name = if name.trim().is_empty() { "guest".to_string() } else { name.trim().to_string() };
-
-    // A LAN address is reached directly over TCP — no wall in the way. A public
-    // address means the internet, i.e. carrier NAT, so take the UDP hole-punch
-    // + QUIC path. Same SPAKE2 handshake and relay logic either way.
-    if is_private_addr(&sock_addr.ip().to_string()) {
-        let stream = TcpStream::connect_timeout(&sock_addr, Duration::from_secs(5))
-            .map_err(|e| format!("Couldn't reach {full}: {e}"))?;
-        let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-        let Some((sender, receiver, binding)) = secure::handshake_tcp(&stream, code.trim(), true) else {
-            return Err("Couldn't establish a secure channel — check the address and that the relay is running.".into());
-        };
-        let closer = Closer::Tcp(stream.try_clone().map_err(|e| e.to_string())?);
-        let block = stream.try_clone().ok();
-        run_client(app, inner_arc, sender, receiver, binding, closer, name, full, move || {
-            if let Some(s) = block {
-                let _ = s.set_read_timeout(None);
-            }
-        })
-    } else {
-        let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("Couldn't open a UDP port: {e}"))?;
-        let (writer, reader, conn) =
-            crate::qstream::connect(sock, sock_addr, true, Duration::from_secs(12))
-                .map_err(|e| format!("Couldn't reach {full}: {e}"))?;
-        let Some((sender, receiver, binding)) = secure::handshake(writer, reader, code.trim(), true) else {
-            conn.close(0u32.into(), b"handshake");
-            return Err("Couldn't establish a secure channel — check the address and that the relay is running.".into());
-        };
-        run_client(app, inner_arc, sender, receiver, binding, Closer::Quic(conn), name, full, || {})
-    }
+    let stream = TcpStream::connect_timeout(&sock_addr, Duration::from_secs(5))
+        .map_err(|e| format!("Couldn't reach {full}: {e}"))?;
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let Some((sender, receiver, binding)) = secure::handshake_tcp(&stream, code.trim(), true) else {
+        return Err("Couldn't establish a secure channel — check the address and that the relay is running.".into());
+    };
+    let closer = Closer::Tcp(stream.try_clone().map_err(|e| e.to_string())?);
+    let block = stream.try_clone().ok();
+    run_client(app, inner_arc, sender, receiver, binding, closer, name, full, move || {
+        if let Some(s) = block {
+            let _ = s.set_read_timeout(None);
+        }
+    })
 }
 
 /// The transport-agnostic half of joining a relay: identity exchange, Join,
@@ -2215,6 +2218,32 @@ fn is_private_addr(host: &str) -> bool {
     }
 }
 
+/// If `s` is an http(s)/ws(s) URL — what a host sharing over the internet hands
+/// out (its tunnel address) — normalise it to the WebSocket team endpoint:
+/// scheme mapped to ws/wss, and the path forced to `/team/ws` regardless of what
+/// the user pasted (so copying the `/remote` portal link still joins the team).
+/// Returns None for a bare host:port, which the caller reaches over TCP instead.
+fn team_ws_url(s: &str) -> Option<String> {
+    let s = s.trim();
+    let (scheme, rest) = if let Some(r) = s.strip_prefix("https://") {
+        ("wss", r)
+    } else if let Some(r) = s.strip_prefix("http://") {
+        ("ws", r)
+    } else if let Some(r) = s.strip_prefix("wss://") {
+        ("wss", r)
+    } else if let Some(r) = s.strip_prefix("ws://") {
+        ("ws", r)
+    } else {
+        return None;
+    };
+    // Keep only the authority (host[:port]); drop any path/query/fragment.
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    if host.is_empty() {
+        return None;
+    }
+    Some(format!("{scheme}://{host}/team/ws"))
+}
+
 /// Public IP for offers made from an internet-facing member; fetched once per
 /// run (it costs up to 8s of curl) and reused.
 fn cached_public_ip() -> Option<String> {
@@ -2660,6 +2689,33 @@ fn receive_over_relay(
 mod tests {
     use super::*;
     use std::net::{TcpListener, TcpStream};
+
+    /// A pasted tunnel link (any scheme, any path the user copied) becomes the
+    /// ws/wss `/team/ws` endpoint; a bare host:port stays None (the TCP path).
+    #[test]
+    fn team_ws_url_normalises_tunnel_links() {
+        assert_eq!(
+            team_ws_url("https://foo.trycloudflare.com"),
+            Some("wss://foo.trycloudflare.com/team/ws".into())
+        );
+        // Copying the /remote portal link still joins the team route.
+        assert_eq!(
+            team_ws_url("https://foo.ngrok.app/remote"),
+            Some("wss://foo.ngrok.app/team/ws".into())
+        );
+        assert_eq!(
+            team_ws_url("http://host.local:6680"),
+            Some("ws://host.local:6680/team/ws".into())
+        );
+        assert_eq!(
+            team_ws_url("ws://1.2.3.4:9000/x?y#z"),
+            Some("ws://1.2.3.4:9000/team/ws".into())
+        );
+        // Bare host:port and plain IPs are LAN TCP targets, not URLs.
+        assert_eq!(team_ws_url("192.168.1.5:6679"), None);
+        assert_eq!(team_ws_url("host.local"), None);
+        assert_eq!(team_ws_url("https://"), None);
+    }
 
     /// The frontend composes these bodies by hand in TypeScript, so the two
     /// definitions are only kept honest by something that parses the exact

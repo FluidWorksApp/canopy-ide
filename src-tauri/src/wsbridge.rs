@@ -1,4 +1,3 @@
-#![allow(dead_code)] // wired into the host route + join dial in the next step
 //! WebSocket transport for the team relay — the pipe that unifies Team sessions
 //! and Canopy Remote onto one ingress.
 //!
