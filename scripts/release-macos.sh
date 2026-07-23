@@ -90,7 +90,9 @@ for target in "${TARGETS[@]}"; do
     mkdir -p src-tauri/onnxruntime
     echo "Dictation is unavailable on Intel macOS (no compatible ONNX Runtime)." \
       > src-tauri/onnxruntime/DICTATION_UNSUPPORTED.txt
-    BUILD_ARGS=(--target "$target" --no-default-features)
+    # `--` forwards --no-default-features to cargo; `tauri build` rejects it as
+    # an unknown flag otherwise.
+    BUILD_ARGS=(--target "$target" -- --no-default-features)
   else
     if [ ! -f "$ORT_DYLIB" ]; then
       echo "==> fetching ONNX Runtime $ORT_VER"

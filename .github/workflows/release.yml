@@ -36,7 +36,9 @@ jobs:
             args: "--target aarch64-apple-darwin"
           - platform: macos-latest
             target: x86_64-apple-darwin
-            args: "--target x86_64-apple-darwin --no-default-features"
+            # `--` hands --no-default-features to cargo; `tauri build` has no such
+            # flag of its own and errors on it otherwise.
+            args: "--target x86_64-apple-darwin -- --no-default-features"
           # 22.04, not latest: the glibc you build against is the *floor* for
           # what users can run. Building on 24.04 would exclude 22.04 users.
           - platform: ubuntu-22.04
