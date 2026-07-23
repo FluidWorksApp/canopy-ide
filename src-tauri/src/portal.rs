@@ -12,12 +12,17 @@
 //!   `PtyManager::write` / `::kill`.
 //!
 //! Off by default. A dedicated numeric PIN (NOT the team join code) gates
-//! `POST /remote/auth`, which mints a short-lived bearer token; the WebSocket
-//! requires that token. Wrong PINs are constant-time-compared and tarpitted.
+//! `POST /remote/auth`, which mints a bearer token; the WebSocket requires that
+//! token. The token has no wall-clock expiry — it stays valid for the whole life
+//! of this enable session, dying only when the PIN owner disables the server or
+//! rotates the PIN. Wrong PINs are constant-time-compared and tarpitted.
 //!
-//! Phase 1 (this module) serves plain HTTP on 6680 — fine on a trusted LAN, and
-//! a Tailscale/Cloudflare tunnel adds real TLS for remote use. Phase 2 will add
-//! a WebTransport path over the relay's own quinn/STUN endpoint (port 6679).
+//! Transport: plain HTTP on 6680 — fine on a trusted LAN, and a
+//! Tailscale/Cloudflare/ngrok tunnel (see tunnel.rs) adds real TLS for remote
+//! use. This same server is the single ingress the team relay also rides
+//! (see the `/team` route and relay.rs): whichever endpoint is active — the LAN
+//! URL or the active tunnel — carries both Remote access and Team sessions,
+//! gated by their own separate PINs.
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State as AxumState};
@@ -28,10 +33,10 @@ use axum::{Json, Router};
 use include_dir::{include_dir, Dir};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tauri::{AppHandle, EventId, Listener, Manager};
 use tokio::sync::{broadcast, mpsc};
 
@@ -43,16 +48,17 @@ use crate::pty::{PtyEvent, PtyManager};
 static PORTAL_ASSETS: Dir = include_dir!("$CARGO_MANIFEST_DIR/../portal/dist");
 
 const DEFAULT_PORT: u16 = 6680;
-/// A bearer token is good for this long before the portal must re-auth with the
-/// PIN. Long enough to leave a phone tab open for a work session.
-const TOKEN_TTL: Duration = Duration::from_secs(12 * 3600);
 /// Deliberate delay on a wrong PIN, mirroring the relay's identity tarpit — a
 /// 6-digit PIN over a throttled endpoint is not brute-forceable in practice.
 const AUTH_TARPIT: Duration = Duration::from_secs(2);
 /// App events we mirror to every connected portal client.
 const FORWARDED_EVENTS: [&str; 3] = ["pty:stats", "agent:event", "pty:exit"];
 
-type Tokens = Arc<Mutex<HashMap<String, Instant>>>;
+/// Live bearer tokens for the *current* enable session. The set is created fresh
+/// in `remote_enable` and dropped on disable/rotate, so a token is valid for
+/// exactly as long as this session lives — no wall-clock expiry. Re-auth is only
+/// ever forced by the PIN owner tearing the session down or rotating the PIN.
+type Tokens = Arc<Mutex<HashSet<String>>>;
 
 /// Managed state: at most one running server. Enabling twice is a no-op that
 /// returns the current status.
@@ -317,10 +323,7 @@ async fn auth_handler(AxumState(p): AxumState<Portal>, Json(body): Json<AuthReq>
         return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "bad pin" }))).into_response();
     }
     let token = gen_token();
-    p.tokens
-        .lock()
-        .unwrap()
-        .insert(token.clone(), Instant::now() + TOKEN_TTL);
+    p.tokens.lock().unwrap().insert(token.clone());
     Json(json!({ "token": token })).into_response()
 }
 
@@ -594,10 +597,7 @@ async fn snapshot_msg(app: &AppHandle, theme: Option<Value>) -> String {
 // ---- helpers --------------------------------------------------------------
 
 fn valid_token(tokens: &Tokens, tok: &str) -> bool {
-    let mut t = tokens.lock().unwrap();
-    let now = Instant::now();
-    t.retain(|_, exp| *exp > now);
-    t.get(tok).map(|exp| *exp > now).unwrap_or(false)
+    tokens.lock().unwrap().contains(tok)
 }
 
 fn gen_pin() -> String {
