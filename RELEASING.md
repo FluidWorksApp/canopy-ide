@@ -77,6 +77,7 @@ breaks every published link:
 | Alias | Points at |
 |---|---|
 | `Canopy-macos-arm64.dmg` | macOS Apple Silicon `.dmg` |
+| `Canopy-macos-intel.dmg` | macOS Intel `.dmg` (no dictation — built `--no-default-features`) |
 | `Canopy-linux-x86_64.AppImage` | Linux AppImage |
 | `Canopy-linux-x86_64.deb` / `.rpm` | Linux packages |
 | `Canopy-windows-x86_64-setup.exe` | reserved for the Windows installer |

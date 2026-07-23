@@ -25,15 +25,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS: arm64 only. Intel (x86_64-apple-darwin) is dropped — ONNX
-          # Runtime ships no osx-x86_64 build past v1.23.0 (Microsoft, PyPI and
-          # conda-forge all stop there), but the ort crate (via transcribe-rs'
-          # default api-24 feature) requires ONNX Runtime >= v1.24. A bundled
-          # 1.23.0 on Intel makes ort's init deadlock, so dictation can't ship
-          # there. Every remaining target bundles 1.24.x, which ort accepts.
+          # macOS: both arches, built on the arm64 runner. arm64 ships the full
+          # app; Intel (x86_64-apple-darwin) ships with dictation compiled out
+          # (--no-default-features) — ONNX Runtime has no osx-x86_64 build past
+          # v1.23.0, below the >= v1.24 the ort crate needs, so the ASR stack
+          # can't run there. The Intel build pulls no ONNX deps and stages no
+          # dylib; the ONNX steps below skip it.
           - platform: macos-latest
             target: aarch64-apple-darwin
             args: "--target aarch64-apple-darwin"
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+            args: "--target x86_64-apple-darwin --no-default-features"
           # 22.04, not latest: the glibc you build against is the *floor* for
           # what users can run. Building on 24.04 would exclude 22.04 users.
           - platform: ubuntu-22.04
@@ -138,6 +141,16 @@ jobs:
         shell: bash
         run: |
           ORT_VER=1.24.2
+          # Intel macOS builds dictation out — no ONNX Runtime to stage. Leave a
+          # marker so the bundle.resources `onnxruntime/*` glob still matches, and
+          # skip the rest.
+          if [ "${{ matrix.target }}" = "x86_64-apple-darwin" ]; then
+            mkdir -p src-tauri/onnxruntime
+            echo "Dictation is unavailable on Intel macOS (no compatible ONNX Runtime)." \
+              > src-tauri/onnxruntime/DICTATION_UNSUPPORTED.txt
+            echo "Intel macOS: dictation disabled — no ONNX Runtime staged."
+            exit 0
+          fi
           case "${{ matrix.target }}" in
             aarch64-apple-darwin)     A=osx-arm64;  EXT=tgz; IN=libonnxruntime.${ORT_VER}.dylib; OUT=libonnxruntime.dylib ;;
             x86_64-unknown-linux-gnu) A=linux-x64;  EXT=tgz; IN=libonnxruntime.so.${ORT_VER};    OUT=libonnxruntime.so ;;
@@ -175,7 +188,7 @@ jobs:
       # whole .app would be rejected. Re-sign it with our Developer ID, hardened
       # runtime, and a secure timestamp, exactly like every other binary we ship.
       - name: Re-sign bundled ONNX Runtime (macOS, for notarisation)
-        if: startsWith(matrix.platform, 'macos')
+        if: matrix.target == 'aarch64-apple-darwin'
         shell: bash
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -261,6 +274,8 @@ jobs:
           case "${{ matrix.target }}" in
             aarch64-apple-darwin)
               cp "$root"/dmg/Canopy_*.dmg "$stage/Canopy-macos-arm64.dmg" ;;
+            x86_64-apple-darwin)
+              cp "$root"/dmg/Canopy_*.dmg "$stage/Canopy-macos-intel.dmg" ;;
             x86_64-unknown-linux-gnu)
               cp "$root"/appimage/*.AppImage "$stage/Canopy-linux-x86_64.AppImage"
               cp "$root"/deb/*.deb          "$stage/Canopy-linux-x86_64.deb"
