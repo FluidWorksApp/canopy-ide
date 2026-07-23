@@ -76,6 +76,38 @@ function FileName({ path, count, countTitle }: { path: string; count?: number; c
   );
 }
 
+// A journaled edit (old→new fragment) rendered as a single unified diff, so it
+// paints with the same DiffView as every other diff in the app. Line numbers
+// are nominal (these are fragments, not whole files); a tight common
+// prefix/suffix keeps the hunk to the part that actually changed.
+//
+// The `---`/`+++` header is REQUIRED, verified in a real browser: the React
+// DiffView renders rows only from real diff hunks, and a hunk with no file
+// header parses to nothing (empty tbody, blank card). Handing it the raw
+// old/new as file *content* with empty hunks does NOT work — the core can
+// diff content but the React component does not — so we author the hunk.
+function editToHunk(path: string, old: string | null, next: string | null): string {
+  const oldLines = old != null ? old.split("\n") : [];
+  const newLines = next != null ? next.split("\n") : [];
+  let p = 0;
+  while (p < oldLines.length && p < newLines.length && oldLines[p] === newLines[p]) p++;
+  let s = 0;
+  while (
+    s < oldLines.length - p &&
+    s < newLines.length - p &&
+    oldLines[oldLines.length - 1 - s] === newLines[newLines.length - 1 - s]
+  )
+    s++;
+  const ctxPre = oldLines.slice(Math.max(0, p - 2), p).map((l) => ` ${l}`);
+  const removed = oldLines.slice(p, oldLines.length - s).map((l) => `-${l}`);
+  const added = newLines.slice(p, newLines.length - s).map((l) => `+${l}`);
+  const ctxPost = oldLines.slice(oldLines.length - s, oldLines.length - s + 2).map((l) => ` ${l}`);
+  const body = [...ctxPre, ...removed, ...added, ...ctxPost].join("\n");
+  const oldCount = ctxPre.length + removed.length + ctxPost.length;
+  const newCount = ctxPre.length + added.length + ctxPost.length;
+  return `--- a/${path}\n+++ b/${path}\n@@ -1,${oldCount} +1,${newCount} @@\n${body}`;
+}
+
 export function AgentWorkspaceView({
   repo,
   agent,
@@ -623,11 +655,9 @@ export function AgentWorkspaceView({
                         all-added diff. */}
                     <DiffView
                       data={{
-                        // No precomputed hunks — the viewer diffs the two
-                        // contents itself (empty hunks = "diff these for me").
-                        hunks: [],
-                        oldFile: { fileName: g.path, content: e.old ?? "" },
-                        newFile: { fileName: g.path, content: e.new ?? "" },
+                        hunks: [editToHunk(g.path, e.old, e.new)],
+                        oldFile: { fileName: g.path },
+                        newFile: { fileName: g.path },
                       }}
                       diffViewMode={split ? DiffModeEnum.Split : DiffModeEnum.Unified}
                       diffViewHighlight
