@@ -5416,6 +5416,95 @@ textarea,
   padding: 0 5px;
 }
 
+/* Review comments on the diff — the inline composer, the saved-comment cards
+   shown under a line, and the send bar above the diff body. */
+.aw-cc {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  margin: 4px 0;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.aw-cc-input {
+  width: 100%;
+  min-height: 52px;
+  resize: vertical;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  box-sizing: border-box;
+}
+.aw-cc-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.aw-cc-actions {
+  display: flex;
+  gap: 6px;
+}
+.aw-extend {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+}
+.aw-comment {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  border-radius: 6px;
+}
+.aw-comment-sel {
+  margin-top: 2px;
+  flex: 0 0 auto;
+}
+.aw-comment-body {
+  flex: 1 1 auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+  color: var(--text);
+}
+.aw-comment-x {
+  flex: 0 0 auto;
+  opacity: 0.6;
+}
+.aw-comment-x:hover {
+  opacity: 1;
+}
+.aw-review-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  background: var(--bg-alt);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.aw-review-count {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.aw-review-all {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
 /* The "everyone else's changes on this shared checkout" fold. */
 .aw-others {
   margin-top: 10px;

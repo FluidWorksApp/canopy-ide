@@ -3,9 +3,10 @@
 // the PR raised from that branch. Same split as BranchView: metadata paints
 // first (one backend join, no patch bytes), each patch loads per pane, and
 // commit rows hand off to the commit tab rather than a second renderer.
-import { useEffect, useRef, useState } from "react";
-import { DiffView, DiffModeEnum } from "@git-diff-view/react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { DiffView, DiffModeEnum, SplitSide } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
+import { createTwoFilesPatch } from "diff";
 import * as ipc from "../ipc";
 import type { Notify } from "../types";
 import { splitPatch } from "./PrView";
@@ -42,12 +43,49 @@ interface AgentWorkspaceViewProps {
   onOpenPr: (repo: string, pr: ipc.PrInfo) => void;
   onOpenTerminal: (cwd: string, label: string) => void;
   onNotice: Notify;
+  /** Deliver a message to the agent that owns this workspace — typed into its
+   *  live PTY, or resumed first if the session has ended. Absent (or a resolved
+   *  `delivered:false`) means the review comments can't be sent, so the compose
+   *  UI stays but "Send" reports why. */
+  onMessageAgent?: (text: string) => Promise<{ delivered: boolean; note: string }>;
   /** When set, the header shows a close button — the overlay is the single
    *  banner. The standalone agent tab omits it (the tab closes itself). */
   onClose?: () => void;
 }
 
+/** A review comment the user attached to a diff line, held as a draft until
+ *  they send some or all of them to the agent. Persisted per session so a
+ *  half-written review survives closing the workspace. */
+interface DraftComment {
+  id: string;
+  /** Which DiffView the comment is anchored in — the pane plus the file, and
+   *  for the journal pane the edit index too, since each edit is its own view
+   *  with line numbers that restart at 1. */
+  diffKey: string;
+  pane: Pane;
+  file: string;
+  side: "old" | "new";
+  line: number;
+  /** The code the comment is about, captured at write time for the message. */
+  code: string;
+  /** True when the line number is a real file line (git panes) rather than a
+   *  fragment-relative one (journal edits) — decides whether we cite `file:line`. */
+  realLine: boolean;
+  body: string;
+  selected: boolean;
+}
+
 type Pane = "edits" | "uncommitted" | "diff";
+
+// The single-file shape we hand DiffView — one file's hunks plus its name on
+// each side, and optionally the full before/after text (which the viewer needs
+// to enable line numbers and the expand-context control). Cached by identity so
+// a re-render doesn't rebuild the diff.
+type DiffViewData = {
+  hunks: string[];
+  oldFile: { fileName: string; content?: string };
+  newFile: { fileName: string; content?: string };
+};
 
 // The reported-editing list is a quick-glance strip, not the authoritative diff
 // below — so it shows the basename (the full path lives in the tooltip and the
@@ -76,11 +114,17 @@ function FileName({ path, count, countTitle }: { path: string; count?: number; c
   );
 }
 
-// A journaled edit (old→new fragment) rendered as a single unified hunk, so it
+// A journaled edit (old→new fragment) rendered as a single unified diff, so it
 // paints with the same DiffView as every other diff in the app. Line numbers
 // are nominal (these are fragments, not whole files); a tight common
 // prefix/suffix keeps the hunk to the part that actually changed.
-function editToHunk(old: string | null, next: string | null): string {
+//
+// The `---`/`+++` header is REQUIRED, verified in a real browser: the React
+// DiffView renders rows only from real diff hunks, and a hunk with no file
+// header parses to nothing (empty tbody, blank card). Handing it the raw
+// old/new as file *content* with empty hunks does NOT work — the core can
+// diff content but the React component does not — so we author the hunk.
+function editToHunk(path: string, old: string | null, next: string | null): string {
   const oldLines = old != null ? old.split("\n") : [];
   const newLines = next != null ? next.split("\n") : [];
   let p = 0;
@@ -99,7 +143,157 @@ function editToHunk(old: string | null, next: string | null): string {
   const body = [...ctxPre, ...removed, ...added, ...ctxPost].join("\n");
   const oldCount = ctxPre.length + removed.length + ctxPost.length;
   const newCount = ctxPre.length + added.length + ctxPost.length;
-  return `@@ -1,${oldCount} +1,${newCount} @@\n${body}`;
+  return `--- a/${path}\n+++ b/${path}\n@@ -1,${oldCount} +1,${newCount} @@\n${body}`;
+}
+
+const untrunc = (s: string | null | undefined) =>
+  (s ?? "").replace(/\n?…\(truncated\)$/, "");
+
+/** First line index (0-based) where `block` appears contiguously in `lines`, or
+ *  -1. Used to place a journal edit at its real position in the current file. */
+function locateBlock(lines: string[], block: string[]): number {
+  if (!block.length) return -1;
+  for (let i = 0; i + block.length <= lines.length; i++) {
+    let ok = true;
+    for (let j = 0; j < block.length; j++) {
+      if (lines[i + j] !== block[j]) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return i;
+  }
+  return -1;
+}
+
+// Turn a file's journal edits into a real before→after pair, so the "This agent"
+// pane reads like a normal file diff — real line numbers, gaps between edits,
+// and the expand-context control — instead of a stack of fragments each numbered
+// from 1. Each edit's `new` text is located in the current file, then the
+// `before` version is reconstructed by swapping every new block back to its old
+// one; jsdiff produces the unified diff, and handing the viewer both full
+// contents is what enables line numbers + expansion. Returns null when any edit
+// can't be placed cleanly (superseded, moved, or overlapping a neighbour), so
+// the caller falls back to fragment rendering — still a true record.
+function buildFileEdit(
+  path: string,
+  content: string,
+  items: ipc.AgentEdit[],
+): { patch: string; before: string } | null {
+  const fileLines = content.split("\n");
+  // Only edits still present in the file are part of its net change — a
+  // superseded edit was overwritten by a later one and would double-count.
+  // Anything we can't place (text no longer matches) or that overlaps a kept
+  // edit is skipped, not fatal: the reconstruction just needs disjoint blocks,
+  // and a partial-but-real diff beats a stack of fragments numbered from 1.
+  const placed: { at: number; oldLines: string[]; newLen: number }[] = [];
+  for (const e of items) {
+    if (!e.present) continue;
+    const nt = untrunc(e.new);
+    if (!nt) continue;
+    const newLines = nt.split("\n");
+    const at = locateBlock(fileLines, newLines);
+    if (at < 0) continue;
+    const ot = untrunc(e.old);
+    placed.push({ at, oldLines: ot === "" ? [] : ot.split("\n"), newLen: newLines.length });
+  }
+  if (!placed.length) return null;
+  placed.sort((a, b) => a.at - b.at);
+  const kept: typeof placed = [];
+  for (const p of placed) {
+    const last = kept[kept.length - 1];
+    if (last && p.at < last.at + last.newLen) continue; // overlaps the previous — skip
+    kept.push(p);
+  }
+  // Reconstruct `before` by swapping each new block back to its old text,
+  // right-to-left so earlier indices stay valid as later blocks change length.
+  const beforeLines = fileLines.slice();
+  for (let i = kept.length - 1; i >= 0; i--) {
+    const p = kept[i];
+    beforeLines.splice(p.at, p.newLen, ...p.oldLines);
+  }
+  const before = beforeLines.join("\n");
+  if (before === content) return null; // nothing placeable resolved to a change
+  const patch = createTwoFilesPatch(`a/${path}`, `b/${path}`, before, content);
+  return { patch, before };
+}
+
+const sideName = (s: number) => (s === SplitSide.old ? "old" : "new");
+
+// The inline composer the diff viewer drops on a line when you click the "+".
+// Deliberately tiny: a textarea, add/cancel, ⌘/Ctrl+Enter to add. It owns only
+// its own draft text; the saved comment lives in the workspace's state.
+function CommentComposer({
+  onAdd,
+  onCancel,
+}: {
+  onAdd: (body: string) => void;
+  onCancel: () => void;
+}) {
+  const [text, setText] = useState("");
+  const ref = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => ref.current?.focus(), []);
+  const commit = () => {
+    const b = text.trim();
+    if (b) onAdd(b);
+    else onCancel();
+  };
+  return (
+    <div className="aw-cc" onClick={(e) => e.stopPropagation()}>
+      <textarea
+        ref={ref}
+        className="aw-cc-input"
+        placeholder="Comment for the agent — ⌘⏎ to add"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            commit();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            onCancel();
+          }
+        }}
+      />
+      <div className="aw-cc-actions">
+        <button className="btn-mini btn-accent" onClick={commit}>
+          Add comment
+        </button>
+        <button className="btn-mini" onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// A saved comment shown inline under its line: the body, a select checkbox (for
+// batch send), and remove. Editing is delete-and-re-add — deliberately cheap.
+function CommentCard({
+  c,
+  onToggle,
+  onRemove,
+}: {
+  c: DraftComment;
+  onToggle: () => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="aw-comment" onClick={(e) => e.stopPropagation()}>
+      <input
+        type="checkbox"
+        className="aw-comment-sel"
+        checked={c.selected}
+        onChange={onToggle}
+        title="Include when sending to the agent"
+      />
+      <div className="aw-comment-body">{c.body}</div>
+      <button className="btn-icon aw-comment-x" title="Remove comment" onClick={onRemove}>
+        ✕
+      </button>
+    </div>
+  );
 }
 
 export function AgentWorkspaceView({
@@ -112,6 +306,7 @@ export function AgentWorkspaceView({
   onOpenPr,
   onOpenTerminal,
   onNotice,
+  onMessageAgent,
   onClose,
 }: AgentWorkspaceViewProps) {
   const [ws, setWs] = useState<ipc.AgentWorkspace | null>(null);
@@ -128,6 +323,39 @@ export function AgentWorkspaceView({
   const [edits, setEdits] = useState<ipc.AgentEdit[]>([]);
   // Manual refresh: the small icon in the header bumps this to re-read all.
   const [tick, setTick] = useState(0);
+
+  // Review comments the user is drafting on the diff, to send to the agent.
+  // Keyed to the session (falling back to agent+cwd) and mirrored to
+  // localStorage, so a half-written review survives closing the workspace.
+  const commentsKey = `aw-comments:${sessionId || `${agent}:${cwd}`}`;
+  const [comments, setComments] = useState<DraftComment[]>([]);
+  const [sending, setSending] = useState(false);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(commentsKey);
+      setComments(raw ? (JSON.parse(raw) as DraftComment[]) : []);
+    } catch {
+      setComments([]);
+    }
+  }, [commentsKey]);
+  useEffect(() => {
+    try {
+      if (comments.length) localStorage.setItem(commentsKey, JSON.stringify(comments));
+      else localStorage.removeItem(commentsKey);
+    } catch {
+      // storage full/blocked — the in-memory drafts still work this session.
+    }
+  }, [comments, commentsKey]);
+  const addComment = (c: Omit<DraftComment, "id" | "selected">) =>
+    setComments((prev) => [
+      ...prev,
+      { ...c, id: `${c.diffKey}:${c.side}:${c.line}:${prev.length}:${c.body.length}`, selected: true },
+    ]);
+  const toggleComment = (id: string) =>
+    setComments((prev) => prev.map((c) => (c.id === id ? { ...c, selected: !c.selected } : c)));
+  const removeComment = (id: string) => setComments((prev) => prev.filter((c) => c.id !== id));
+  const setAllSelected = (v: boolean) =>
+    setComments((prev) => prev.map((c) => ({ ...c, selected: v })));
   // This agent's token/cost usage, read from its own CLI store (Claude, Codex
   // and omp today) — independent of hooks, so it shows even for a hookless
   // codex. Matched by session id when we have one, else the most recent
@@ -164,6 +392,38 @@ export function AgentWorkspaceView({
       live = false;
     };
   }, [repo, sessionId, digest?.updated, tick]);
+
+  // Current contents of the files the agent edited, so the journal pane can show
+  // one real diff per file (real line numbers) instead of numbered-from-1
+  // fragments. Read straight off disk — repo-relative journal paths are joined to
+  // the repo, absolute ones (scratchpad, memory) used as-is.
+  const [fileContents, setFileContents] = useState<Map<string, string>>(new Map());
+  useEffect(() => {
+    let live = true;
+    const paths = [...new Set(edits.filter((e) => e.present).map((e) => e.path))];
+    if (!paths.length) {
+      setFileContents(new Map());
+      return;
+    }
+    const abs = (p: string) => (p.startsWith("/") ? p : repo ? `${repo}/${p}` : p);
+    void Promise.all(
+      paths.map(async (p) => {
+        try {
+          return [p, await ipc.fsReadText(abs(p))] as const;
+        } catch {
+          return [p, null] as const;
+        }
+      }),
+    ).then((pairs) => {
+      if (!live) return;
+      const m = new Map<string, string>();
+      for (const [p, c] of pairs) if (c != null) m.set(p, c);
+      setFileContents(m);
+    });
+    return () => {
+      live = false;
+    };
+  }, [edits, repo]);
 
   // The join: digest re-read fresh + branch/workdir/counts/commits. Refetched
   // on Refresh and whenever the panel hands over a newer digest.
@@ -249,7 +509,10 @@ export function AgentWorkspaceView({
   const cost = usage ? sessionCost(usage) : null;
   const touched = ws?.touched?.length ? ws.touched : (digest?.files ?? []);
   const branchable = !!ws?.branch && !ws.detached && !ws.on_base;
-  const files = patch?.patch ? splitPatch(patch.patch) : [];
+  // Split once per patch, not per render: a fresh array each render would give
+  // every DiffView a new `data` identity, which rebuilds its diff and resets any
+  // open comment composer on the next digest poll.
+  const files = useMemo(() => (patch?.patch ? splitPatch(patch.patch) : []), [patch?.patch]);
 
   // The set of paths this agent is known to have touched — from its own edit
   // journal and its reported-editing list. Matched by basename too, since a
@@ -298,6 +561,141 @@ export function AgentWorkspaceView({
   };
   const [showMoreTouched, setShowMoreTouched] = useState(false);
 
+  // Comment wiring for a single DiffView: the "+" affordance, the inline
+  // composer on a clicked line, and the saved comments shown under their line.
+  // `diffKey` scopes comments to this exact view — for the journal pane that
+  // includes the edit index, since each edit is its own view with line numbers
+  // that restart at 1. Commenting is offered only when we can actually deliver.
+  const commentProps = (diffKey: string, file: string, forPane: Pane, realLine: boolean) => {
+    const oldFile: Record<number, { data: DraftComment[] }> = {};
+    const newFile: Record<number, { data: DraftComment[] }> = {};
+    for (const c of comments) {
+      if (c.diffKey !== diffKey) continue;
+      const bucket = c.side === "old" ? oldFile : newFile;
+      (bucket[c.line] ??= { data: [] }).data.push(c);
+    }
+    return {
+      diffViewAddWidget: !!onMessageAgent,
+      extendData: { oldFile, newFile },
+      renderWidgetLine: ({
+        diffFile,
+        side,
+        lineNumber,
+        onClose,
+      }: {
+        diffFile: {
+          getOldPlainLine: (n: number) => { value?: string } | undefined;
+          getNewPlainLine: (n: number) => { value?: string } | undefined;
+        };
+        side: number;
+        lineNumber: number;
+        onClose: () => void;
+      }) => {
+        const lo =
+          side === SplitSide.old
+            ? diffFile.getOldPlainLine(lineNumber)
+            : diffFile.getNewPlainLine(lineNumber);
+        const code = (lo?.value ?? "").toString();
+        return (
+          <CommentComposer
+            onAdd={(body) => {
+              addComment({
+                diffKey,
+                pane: forPane,
+                file,
+                side: sideName(side) as "old" | "new",
+                line: lineNumber,
+                code,
+                realLine,
+                body,
+              });
+              onClose();
+            }}
+            onCancel={onClose}
+          />
+        );
+      },
+      renderExtendLine: ({ data }: { data?: DraftComment[] }) => {
+        const list = data ?? [];
+        if (!list.length) return null;
+        return (
+          <div className="aw-extend">
+            {list.map((c) => (
+              <CommentCard
+                key={c.id}
+                c={c}
+                onToggle={() => toggleComment(c.id)}
+                onRemove={() => removeComment(c.id)}
+              />
+            ))}
+          </div>
+        );
+      },
+    };
+  };
+
+  // The review, formatted for the agent: numbered, each citing where it lands
+  // (file:line for git panes, file + the code for journal fragments) and quoting
+  // the line so the agent needn't reopen the diff to know what's meant.
+  const formatReview = (list: DraftComment[]) => {
+    const where = ws?.branch ? ` on ${ws.branch}` : "";
+    const out = [`Review comments${where} (${list.length}) from the Canopy workspace:`, ""];
+    list.forEach((c, i) => {
+      out.push(`${i + 1}. ${c.realLine ? `${c.file}:${c.line}` : c.file}`);
+      if (c.code.trim()) out.push(`   \`${c.code.trim()}\``);
+      out.push(`   ${c.body.replace(/\n/g, "\n   ")}`, "");
+    });
+    return out.join("\n").trimEnd();
+  };
+
+  const sendComments = async (which: "selected" | "all") => {
+    const list = which === "all" ? comments : comments.filter((c) => c.selected);
+    if (!list.length || !onMessageAgent || sending) return;
+    setSending(true);
+    try {
+      const res = await onMessageAgent(formatReview(list));
+      if (res.delivered) {
+        const ids = new Set(list.map((c) => c.id));
+        setComments((prev) => prev.filter((c) => !ids.has(c.id)));
+        onNotice(
+          res.note || `Sent ${list.length} comment${list.length === 1 ? "" : "s"} to ${agent}.`,
+          "success",
+        );
+      } else {
+        onNotice(res.note || "Couldn't reach the agent.", "warn");
+      }
+    } catch (e) {
+      onNotice(String(e), "error");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const selectedCount = comments.filter((c) => c.selected).length;
+
+  // A stable `data` object per (view, content): DiffView rebuilds its diff — and
+  // drops any open composer — whenever `data` changes identity, so we hand back
+  // the same object until the hunk actually changes.
+  const dataCache = useRef(new Map<string, { sig: string; data: DiffViewData }>());
+  const dataFor = (
+    key: string,
+    path: string,
+    hunk: string,
+    before?: string,
+    after?: string,
+  ): DiffViewData => {
+    const sig = `${hunk} ${before?.length ?? -1} ${after?.length ?? -1}`;
+    const hit = dataCache.current.get(key);
+    if (hit && hit.sig === sig) return hit.data;
+    const data: DiffViewData = {
+      hunks: [hunk],
+      oldFile: { fileName: path, content: before },
+      newFile: { fileName: path, content: after },
+    };
+    dataCache.current.set(key, { sig, data });
+    return data;
+  };
+
   const renderFile = (f: { path: string; patch: string }) => (
     <div
       key={f.path}
@@ -309,17 +707,13 @@ export function AgentWorkspaceView({
     >
       <FileName path={f.path} />
       <DiffView
-        data={{
-          hunks: [f.patch],
-          oldFile: { fileName: f.path },
-          newFile: { fileName: f.path },
-        }}
+        data={dataFor(`${pane}:${f.path}`, f.path, f.patch)}
         diffViewMode={split ? DiffModeEnum.Split : DiffModeEnum.Unified}
         diffViewHighlight
         diffViewTheme="dark"
         diffViewWrap
-        diffViewAddWidget={false}
         diffViewFontSize={12}
+        {...commentProps(`${pane}:${f.path}`, f.path, pane ?? "diff", true)}
       />
     </div>
   );
@@ -589,6 +983,53 @@ export function AgentWorkspaceView({
         </div>
       )}
 
+      {/* The review tray: appears once there are draft comments. Send the
+          selected ones, or all of them, to the agent in one message — or clear
+          the draft. Hidden entirely when nothing can be delivered. */}
+      {onMessageAgent && comments.length > 0 && (
+        <div className="aw-review-bar">
+          <span className="aw-review-count">
+            {comments.length} comment{comments.length === 1 ? "" : "s"}
+            {selectedCount !== comments.length ? ` · ${selectedCount} selected` : ""}
+          </span>
+          <label className="aw-review-all">
+            <input
+              type="checkbox"
+              checked={selectedCount === comments.length}
+              ref={(el) => {
+                if (el) el.indeterminate = selectedCount > 0 && selectedCount < comments.length;
+              }}
+              onChange={(e) => setAllSelected(e.target.checked)}
+            />
+            All
+          </label>
+          <span className="git-spacer" />
+          <button
+            className="btn-mini btn-accent"
+            disabled={sending || selectedCount === 0}
+            onClick={() => sendComments("selected")}
+          >
+            {sending ? "Sending…" : `Send selected (${selectedCount})`}
+          </button>
+          <button
+            className="btn-mini"
+            disabled={sending}
+            onClick={() => sendComments("all")}
+            title="Send every comment, regardless of selection"
+          >
+            Send all
+          </button>
+          <button
+            className="btn-mini"
+            disabled={sending}
+            onClick={() => setComments([])}
+            title="Discard all draft comments"
+          >
+            Clear
+          </button>
+        </div>
+      )}
+
       <div className="ticket-view-body branch-body">
         {/* Commits are metadata — always listed, no patch cost. */}
         {ws && ws.commits.length > 0 && (
@@ -623,41 +1064,63 @@ export function AgentWorkspaceView({
           (editsByFile.length === 0 ? (
             <div className="tree-empty">No edits recorded for this agent yet.</div>
           ) : (
-            editsByFile.map((g) => (
-              <div key={g.path} className="pr-file">
-                <FileName
-                  path={g.path}
-                  count={g.items.length}
-                  countTitle={`${g.items.length} edit${g.items.length === 1 ? "" : "s"} by this agent`}
-                />
-                {g.items.map((e, i) => (
-                  <div
-                    key={i}
-                    className={`aw-edit ${e.present ? "" : "aw-edit-superseded"}`}
-                    title={
-                      e.present
-                        ? `${e.tool} · still in the file`
-                        : `${e.tool} · superseded by a later change`
-                    }
-                  >
-                    {!e.present && <span className="aw-edit-tag">superseded</span>}
+            editsByFile.map((g) => {
+              // One real diff for the whole file when every edit can be placed in
+              // the current content — real line numbers and gaps between edits,
+              // like a normal file diff. Otherwise fall back to per-edit fragments
+              // (a superseded or moved edit can't be placed, but is still true).
+              const content = fileContents.get(g.path);
+              const merged = content != null ? buildFileEdit(g.path, content, g.items) : null;
+              return (
+                <div key={g.path} className="pr-file">
+                  <FileName
+                    path={g.path}
+                    count={g.items.length}
+                    countTitle={`${g.items.length} edit${g.items.length === 1 ? "" : "s"} by this agent`}
+                  />
+                  {merged && content != null ? (
                     <DiffView
-                      data={{
-                        hunks: [editToHunk(e.old, e.new)],
-                        oldFile: { fileName: g.path },
-                        newFile: { fileName: g.path },
-                      }}
+                      data={dataFor(`edits:${g.path}`, g.path, merged.patch, merged.before, content)}
                       diffViewMode={split ? DiffModeEnum.Split : DiffModeEnum.Unified}
                       diffViewHighlight
                       diffViewTheme="dark"
                       diffViewWrap
-                      diffViewAddWidget={false}
                       diffViewFontSize={12}
+                      {...commentProps(`edits:${g.path}`, g.path, "edits", true)}
                     />
-                  </div>
-                ))}
-              </div>
-            ))
+                  ) : (
+                    g.items.map((e, i) => (
+                      <div
+                        key={i}
+                        className={`aw-edit ${e.present ? "" : "aw-edit-superseded"}`}
+                        title={
+                          e.present
+                            ? `${e.tool} · still in the file`
+                            : `${e.tool} · superseded by a later change`
+                        }
+                      >
+                        {!e.present && <span className="aw-edit-tag">superseded</span>}
+                        {/* A fragment: the edit's own old→new, numbered from 1 —
+                            used only when the edit can't be placed in the file. */}
+                        <DiffView
+                          data={dataFor(
+                            `edits:${g.path}:${i}`,
+                            g.path,
+                            editToHunk(g.path, e.old, e.new),
+                          )}
+                          diffViewMode={split ? DiffModeEnum.Split : DiffModeEnum.Unified}
+                          diffViewHighlight
+                          diffViewTheme="dark"
+                          diffViewWrap
+                          diffViewFontSize={12}
+                          {...commentProps(`edits:${g.path}:${i}`, g.path, "edits", false)}
+                        />
+                      </div>
+                    ))
+                  )}
+                </div>
+              );
+            })
           ))}
 
         {/* Only this agent's own files — never the rest of a shared checkout.
