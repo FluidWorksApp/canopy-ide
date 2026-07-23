@@ -25,15 +25,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS: both arches are built on the arm64 runner. Rust cross-compiles
-          # to Intel fine, and prepare-sidecar.mjs builds the hook helper for the
-          # same --target so an Intel app never ships an arm64 helper.
+          # macOS: arm64 only. Intel (x86_64-apple-darwin) is dropped — ONNX
+          # Runtime ships no osx-x86_64 build past v1.23.0 (Microsoft, PyPI and
+          # conda-forge all stop there), but the ort crate (via transcribe-rs'
+          # default api-24 feature) requires ONNX Runtime >= v1.24. A bundled
+          # 1.23.0 on Intel makes ort's init deadlock, so dictation can't ship
+          # there. Every remaining target bundles 1.24.x, which ort accepts.
           - platform: macos-latest
             target: aarch64-apple-darwin
             args: "--target aarch64-apple-darwin"
-          - platform: macos-latest
-            target: x86_64-apple-darwin
-            args: "--target x86_64-apple-darwin"
           # 22.04, not latest: the glibc you build against is the *floor* for
           # what users can run. Building on 24.04 would exclude 22.04 users.
           - platform: ubuntu-22.04
@@ -129,17 +129,17 @@ jobs:
       # ONNX Runtime is loaded dynamically on EVERY target (ort load-dynamic, see
       # Cargo.toml), so every build ships Microsoft's official runtime as an app
       # resource (bundle.resources: onnxruntime/* -> lib.rs sets ORT_DYLIB_PATH to
-      # it). One mechanism everywhere avoids both static-prebuilt failures: Intel
-      # macOS has no ort prebuilt, and the Linux prebuilt needs a too-new glibc.
-      # v1.23.0 is the last release carrying every desktop arch (incl. osx x64),
-      # and is inside ort rc.12's supported ONNX Runtime range (v1.17-v1.24).
+      # it). One mechanism everywhere avoids both static-prebuilt failures: no ort
+      # prebuilt for some targets, and the Linux prebuilt needs a too-new glibc.
+      # v1.24.2 satisfies ort rc.12, whose default api-24 feature requires ONNX
+      # Runtime >= v1.24 — a lower runtime deadlocks ort's init. Intel macOS is
+      # not built (no osx-x86_64 build exists past v1.23.0; see the build matrix).
       - name: Stage ONNX Runtime (all platforms, for load-dynamic)
         shell: bash
         run: |
-          ORT_VER=1.23.0
+          ORT_VER=1.24.2
           case "${{ matrix.target }}" in
             aarch64-apple-darwin)     A=osx-arm64;  EXT=tgz; IN=libonnxruntime.${ORT_VER}.dylib; OUT=libonnxruntime.dylib ;;
-            x86_64-apple-darwin)      A=osx-x86_64; EXT=tgz; IN=libonnxruntime.${ORT_VER}.dylib; OUT=libonnxruntime.dylib ;;
             x86_64-unknown-linux-gnu) A=linux-x64;  EXT=tgz; IN=libonnxruntime.so.${ORT_VER};    OUT=libonnxruntime.so ;;
             x86_64-pc-windows-msvc)   A=win-x64;    EXT=zip; IN=onnxruntime.dll;                 OUT=onnxruntime.dll ;;
             *) echo "::error::unmapped target ${{ matrix.target }}"; exit 1 ;;
@@ -239,14 +239,13 @@ jobs:
           case "${{ matrix.target }}" in
             aarch64-apple-darwin)
               cp "$root"/dmg/Canopy_*.dmg "$stage/Canopy-macos-arm64.dmg" ;;
-            x86_64-apple-darwin)
-              cp "$root"/dmg/Canopy_*.dmg "$stage/Canopy-macos-intel.dmg" ;;
             x86_64-unknown-linux-gnu)
               cp "$root"/appimage/*.AppImage "$stage/Canopy-linux-x86_64.AppImage"
               cp "$root"/deb/*.deb          "$stage/Canopy-linux-x86_64.deb"
               cp "$root"/rpm/*.rpm          "$stage/Canopy-linux-x86_64.rpm" ;;
             x86_64-pc-windows-msvc)
               cp "$root"/nsis/*-setup.exe   "$stage/Canopy-windows-x86_64-setup.exe" ;;
+            *) echo "::error::unmapped target ${{ matrix.target }} — no stable-name alias"; exit 1 ;;
           esac
           ls -l "$stage"
           # The release is still a draft at this point; gh resolves drafts by

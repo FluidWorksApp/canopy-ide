@@ -30,9 +30,12 @@ cd "$PROJECT_DIR"
 ARCH="${1:-aarch64}"
 case "$ARCH" in
   aarch64) TARGETS=("aarch64-apple-darwin") ;;
-  x86_64)  TARGETS=("x86_64-apple-darwin") ;;
-  both)    TARGETS=("aarch64-apple-darwin" "x86_64-apple-darwin") ;;
-  *) echo "usage: $0 [aarch64|x86_64|both]" >&2; exit 2 ;;
+  x86_64|both)
+    echo "error: Intel Mac (x86_64-apple-darwin) is no longer supported." >&2
+    echo "       ONNX Runtime ships no osx-x86_64 build past v1.23.0, but the" >&2
+    echo "       ort crate requires >= v1.24; a lower runtime deadlocks its init." >&2
+    exit 2 ;;
+  *) echo "usage: $0 [aarch64]" >&2; exit 2 ;;
 esac
 
 # --- preflight: fail here, with a clear reason, rather than 10 minutes in -----

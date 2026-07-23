@@ -97,7 +97,23 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
   const [keysVersion, setKeysVersion] = useState(0);
   const [gh, setGh] = useState<ipc.GhAuth | null>(null);
   const [ghBusy, setGhBusy] = useState(false);
+  // Dictation rides on the bundled ONNX Runtime, absent on unsupported builds
+  // (Intel macOS). Default true so the tab doesn't flicker in on every supported
+  // platform while the check resolves; only hide once we learn it's unavailable.
+  const [dictationOk, setDictationOk] = useState(true);
   const fonts = availableMonoFonts();
+
+  useEffect(() => {
+    void ipc
+      .dictationSupported()
+      .then((ok) => {
+        setDictationOk(ok);
+        // Don't strand the user on a tab that's about to disappear.
+        if (!ok) setTab((t) => (t === "dictation" ? "appearance" : t));
+      })
+      .catch(() => {});
+  }, []);
+  const visibleTabs = TABS.filter((t) => t.id !== "dictation" || dictationOk);
 
   const refreshGh = useCallback(() => {
     setGhBusy(true);
@@ -170,7 +186,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
         <div className="settings-layout">
           <nav className="settings-nav">
             <div className="settings-title">Settings</div>
-            {TABS.map((t) => (
+            {visibleTabs.map((t) => (
               <button
                 key={t.id}
                 className={`settings-nav-item ${tab === t.id ? "settings-nav-active" : ""}`}
@@ -392,7 +408,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
               </>
             )}
 
-            {tab === "dictation" && <DictationSettings />}
+            {tab === "dictation" && dictationOk && <DictationSettings />}
 
             {tab === "guard" && (
               <>
