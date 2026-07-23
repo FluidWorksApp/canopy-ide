@@ -135,7 +135,6 @@ Or grab your platform directly — these links always point at the newest releas
 | Platform | Download | Updates |
 |---|---|---|
 | macOS — Apple Silicon | [`Canopy-macos-arm64.dmg`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-macos-arm64.dmg) | in-app auto-update |
-| macOS — Intel | [`Canopy-macos-intel.dmg`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-macos-intel.dmg) | in-app auto-update |
 | Linux — AppImage | [`Canopy-linux-x86_64.AppImage`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-linux-x86_64.AppImage) | in-app auto-update |
 | Linux — Debian/Ubuntu | [`Canopy-linux-x86_64.deb`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-linux-x86_64.deb) | via your package manager |
 | Linux — Fedora/RHEL | [`Canopy-linux-x86_64.rpm`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-linux-x86_64.rpm) | via your package manager |
