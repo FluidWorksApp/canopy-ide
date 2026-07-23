@@ -46,6 +46,26 @@ const TOUCHED_LIMIT = 6;
 const basename = (p: string) => p.split("/").filter(Boolean).pop() ?? p;
 const parentDir = (p: string) => p.split("/").filter(Boolean).slice(-2, -1)[0] ?? "";
 
+/** A file-card header: the directory dimmed, the filename emphasized, and an
+ *  optional count badge — so a wall of full paths reads as filenames first,
+ *  the folder as context. Shared by the edits pane and the diff panes. */
+function FileName({ path, count, countTitle }: { path: string; count?: number; countTitle?: string }) {
+  const slash = path.lastIndexOf("/");
+  const dir = slash >= 0 ? path.slice(0, slash + 1) : "";
+  const base = slash >= 0 ? path.slice(slash + 1) : path;
+  return (
+    <div className="pr-file-name" title={path}>
+      {dir && <span className="pr-file-dir">{dir}</span>}
+      <span className="pr-file-base">{base}</span>
+      {count != null && (
+        <span className="badge" title={countTitle}>
+          {count}
+        </span>
+      )}
+    </div>
+  );
+}
+
 // A journaled edit (old→new fragment) rendered as a single unified hunk, so it
 // paints with the same DiffView as every other diff in the app. Line numbers
 // are nominal (these are fragments, not whole files); a tight common
@@ -251,7 +271,7 @@ export function AgentWorkspaceView({
         else fileRefs.current.delete(f.path);
       }}
     >
-      <div className="pr-file-name">{f.path}</div>
+      <FileName path={f.path} />
       <DiffView
         data={{
           hunks: [f.patch],
@@ -516,10 +536,11 @@ export function AgentWorkspaceView({
           ) : (
             editsByFile.map((g) => (
               <div key={g.path} className="pr-file">
-                <div className="pr-file-name">
-                  {g.path}
-                  <span className="badge">{g.items.length}</span>
-                </div>
+                <FileName
+                  path={g.path}
+                  count={g.items.length}
+                  countTitle={`${g.items.length} edit${g.items.length === 1 ? "" : "s"} by this agent`}
+                />
                 {g.items.map((e, i) => (
                   <div
                     key={i}

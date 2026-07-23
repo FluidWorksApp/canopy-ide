@@ -4030,6 +4030,40 @@ body,
   overflow: hidden;
 }
 
+/* File-card header: a defined band (not bare text) with the folder dimmed and
+   the filename emphasized, so a list of full paths reads as filenames first.
+   Used by the agent workspace's edits + diff panes. */
+.pr-file-name {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 7px 10px;
+  background: var(--bg-alt);
+  border-bottom: 1px solid var(--border);
+  font-family: ui-monospace, monospace;
+  font-size: 11.5px;
+  line-height: 1.4;
+  min-width: 0;
+}
+.pr-file-dir {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+.pr-file-base {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-weight: 600;
+}
+.pr-file-name .badge {
+  flex: 0 0 auto;
+  margin-left: auto;
+  align-self: center;
+}
+
 .pr-file-head {
   display: flex;
   align-items: center;
