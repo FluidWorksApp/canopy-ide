@@ -32,7 +32,11 @@ export function AgentTerminal({ transport, pty }: { transport: Transport; pty: n
       if (!box) return
       const avail = box.clientWidth - 8
       if (avail <= 0) return
-      const px = Math.max(5, Math.min(14, Math.floor(avail / grid.cols / 0.6)))
+      // Scale the font so the PTY's columns fit the viewport width — but never
+      // below a legible floor. A wide desktop grid used to shrink to an
+      // unreadable 5px to fit; now it holds a readable size and the terminal
+      // scrolls horizontally instead (see .term overflow-x in styles.css).
+      const px = Math.max(9, Math.min(16, Math.floor(avail / grid.cols / 0.6)))
       if (term.options.fontSize !== px) term.options.fontSize = px
       try {
         term.resize(grid.cols, grid.rows)
