@@ -30,12 +30,10 @@ cd "$PROJECT_DIR"
 ARCH="${1:-aarch64}"
 case "$ARCH" in
   aarch64) TARGETS=("aarch64-apple-darwin") ;;
-  x86_64|both)
-    echo "error: Intel Mac (x86_64-apple-darwin) is no longer supported." >&2
-    echo "       ONNX Runtime ships no osx-x86_64 build past v1.23.0, but the" >&2
-    echo "       ort crate requires >= v1.24; a lower runtime deadlocks its init." >&2
-    exit 2 ;;
-  *) echo "usage: $0 [aarch64]" >&2; exit 2 ;;
+  x86_64)  TARGETS=("x86_64-apple-darwin") ;;
+  # arm64 first so its ONNX staging can't leak into the Intel bundle.
+  both)    TARGETS=("aarch64-apple-darwin" "x86_64-apple-darwin") ;;
+  *) echo "usage: $0 [aarch64|x86_64|both]" >&2; exit 2 ;;
 esac
 
 # --- preflight: fail here, with a clear reason, rather than 10 minutes in -----
@@ -72,30 +70,44 @@ export APPLE_TEAM_ID="$TEAM_ID"
 export TAURI_SIGNING_PRIVATE_KEY="$(cat "$HOME/.tauri/canopy.key")"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 
-# ONNX Runtime for dictation. Microsoft ships the macOS dylib ad-hoc-signed
-# since v1.24 (1.23 was Developer ID + timestamped), and tauri does not re-sign
-# bundle resources — an ad-hoc nested binary fails notarisation. Stage the
-# official build (if absent) and re-sign it with our Developer ID + hardened
-# runtime + secure timestamp, mirroring .github/workflows/release.yml.
+# ONNX Runtime for dictation (arm64 only). Microsoft ships the macOS dylib
+# ad-hoc-signed since v1.24 (1.23 was Developer ID + timestamped), and tauri
+# does not re-sign bundle resources — an ad-hoc nested binary fails
+# notarisation. Stage the official build (if absent) and re-sign it with our
+# Developer ID + hardened runtime + secure timestamp, mirroring release.yml.
+# The Intel build compiles dictation out (--no-default-features) and needs none
+# of this.
 ORT_VER=1.24.2
 ORT_DYLIB="src-tauri/onnxruntime/libonnxruntime.dylib"
-if [ ! -f "$ORT_DYLIB" ]; then
-  echo "==> fetching ONNX Runtime $ORT_VER"
-  tmp="$(mktemp -d)"
-  curl -fSL -o "$tmp/ort.tgz" \
-    "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VER}/onnxruntime-osx-arm64-${ORT_VER}.tgz"
-  tar -xzf "$tmp/ort.tgz" -C "$tmp"
-  mkdir -p src-tauri/onnxruntime
-  cp "$tmp/onnxruntime-osx-arm64-${ORT_VER}/lib/libonnxruntime.${ORT_VER}.dylib" "$ORT_DYLIB"
-  rm -rf "$tmp"
-fi
-echo "==> re-signing ONNX Runtime for notarisation"
-codesign --force --timestamp --options runtime --sign "$SIGNING_IDENTITY" "$ORT_DYLIB"
-codesign --verify --strict "$ORT_DYLIB"
 
 for target in "${TARGETS[@]}"; do
   echo "==> building $target"
-  npm run tauri build -- --target "$target"
+  if [ "$target" = "x86_64-apple-darwin" ]; then
+    # Dictation compiled out. Clear any arm64 dylib staged by a prior "both"
+    # leg so it can't land in the Intel bundle, and leave a marker so the
+    # bundle.resources `onnxruntime/*` glob still matches.
+    rm -f src-tauri/onnxruntime/*.dylib
+    mkdir -p src-tauri/onnxruntime
+    echo "Dictation is unavailable on Intel macOS (no compatible ONNX Runtime)." \
+      > src-tauri/onnxruntime/DICTATION_UNSUPPORTED.txt
+    BUILD_ARGS=(--target "$target" --no-default-features)
+  else
+    if [ ! -f "$ORT_DYLIB" ]; then
+      echo "==> fetching ONNX Runtime $ORT_VER"
+      tmp="$(mktemp -d)"
+      curl -fSL -o "$tmp/ort.tgz" \
+        "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VER}/onnxruntime-osx-arm64-${ORT_VER}.tgz"
+      tar -xzf "$tmp/ort.tgz" -C "$tmp"
+      mkdir -p src-tauri/onnxruntime
+      cp "$tmp/onnxruntime-osx-arm64-${ORT_VER}/lib/libonnxruntime.${ORT_VER}.dylib" "$ORT_DYLIB"
+      rm -rf "$tmp"
+    fi
+    echo "==> re-signing ONNX Runtime for notarisation"
+    codesign --force --timestamp --options runtime --sign "$SIGNING_IDENTITY" "$ORT_DYLIB"
+    codesign --verify --strict "$ORT_DYLIB"
+    BUILD_ARGS=(--target "$target")
+  fi
+  npm run tauri build -- "${BUILD_ARGS[@]}"
 
   BUNDLE="src-tauri/target/$target/release/bundle"
   APP="$BUNDLE/macos/Canopy.app"

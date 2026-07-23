@@ -1,5 +1,11 @@
 mod agents;
 mod cli;
+#[cfg(feature = "dictation")]
+mod dictation;
+// Intel macOS builds compile dictation out (no compatible ONNX Runtime); a stub
+// keeps the command surface identical so the rest of this file is unchanged.
+#[cfg(not(feature = "dictation"))]
+#[path = "dictation_stub.rs"]
 mod dictation;
 mod fsx;
 mod git;
@@ -184,6 +190,7 @@ pub fn run() {
             // bundled as an app resource before any dictation touches it. If it
             // isn't there (a dev build without the bundled lib), leave the var
             // unset — ort then falls back to a system search.
+            #[cfg(feature = "dictation")]
             if std::env::var_os("ORT_DYLIB_PATH").is_none() {
                 let lib = if cfg!(target_os = "windows") {
                     "onnxruntime/onnxruntime.dll"

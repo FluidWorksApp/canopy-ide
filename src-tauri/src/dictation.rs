@@ -680,11 +680,10 @@ pub fn dictation_cancel(state: tauri::State<'_, DictationManager>) {
     }
 }
 
-/// Whether this build can run dictation at all. It rides on the bundled ONNX
-/// Runtime, and no osx-x86_64 build exists for the version ort requires, so
-/// Intel macOS is unsupported — the UI hides dictation there rather than
-/// offering a feature that can only fail. Every shipped target returns true.
+/// Whether this build can run dictation. Reaching this compile unit means the
+/// `dictation` feature is on, so the answer is yes; builds without it use the
+/// stub in dictation_stub.rs, which returns false (and the UI hides dictation).
 #[tauri::command]
 pub fn dictation_supported() -> bool {
-    !(cfg!(target_os = "macos") && cfg!(target_arch = "x86_64"))
+    true
 }

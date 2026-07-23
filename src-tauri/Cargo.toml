@@ -23,6 +23,24 @@ path = "src/bin/canopy_hook.rs"
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
 
+[features]
+# Voice dictation pulls the whole local-ASR + ONNX Runtime stack. It's compiled
+# out of any target without a compatible ONNX Runtime — chiefly Intel macOS,
+# whose last available ONNX Runtime is 1.23.0, below the >= v1.24 that ort
+# requires (a lower one deadlocks ort's init). Default-on; the Intel build
+# passes --no-default-features, ships the IDE without dictation, and pulls none
+# of the ASR deps. lib.rs swaps in dictation_stub.rs when this is off.
+default = ["dictation"]
+dictation = [
+    "dep:transcribe-rs",
+    "dep:ort",
+    "dep:cpal",
+    "dep:rubato",
+    "dep:reqwest",
+    "dep:flate2",
+    "dep:tar",
+]
+
 [dependencies]
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "process", "net"] }
 # Canopy Remote: an embedded HTTP + WebSocket server that serves the mobile
@@ -80,26 +98,27 @@ getrandom = "0.2"
 ed25519-dalek = "2"
 hex = "0.4"
 # Voice dictation: local ASR (Parakeet / SenseVoice / Moonshine) via ONNX
-# Runtime — the one stack with prebuilt binaries for every desktop target we
-# ship (macOS/Windows/Linux, x64 + ARM). cpal captures the mic, rubato
-# resamples to the model's 16 kHz, reqwest streams the one-time model download,
-# and flate2+tar unpack the .tar.gz model bundles.
-transcribe-rs = { version = "0.3.11", default-features = false, features = ["onnx"] }
-# ONNX Runtime is loaded dynamically on EVERY target from a libonnxruntime
-# shipped in the app bundle (release.yml fetches Microsoft's official v1.24.x
-# build; lib.rs points ORT_DYLIB_PATH at it). load-dynamic sidesteps the static
-# prebuilt's failures — chiefly the Linux prebuilt linking against a too-new
-# glibc (undefined `__isoc23_strtol` on ubuntu-22.04) — by never linking ONNX at
-# build time. The runtime must be >= v1.24: ort rc.12's default api-24 feature
-# demands it, and a lower one deadlocks ort's init (see release.yml). That's why
-# Intel macOS is unsupported — no osx-x86_64 build exists past v1.23.0.
-# Exact-pinned to unify with transcribe-rs's ort.
-ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic"] }
-cpal = "0.16"
-rubato = "0.16"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
-flate2 = "1"
-tar = "0.4"
+# Runtime. All of `dictation`-feature-gated (optional): cpal captures the mic,
+# rubato resamples to the model's 16 kHz, reqwest streams the one-time model
+# download, and flate2+tar unpack the .tar.gz model bundles. The Intel-macOS
+# build turns the feature off and pulls none of this.
+transcribe-rs = { version = "0.3.11", default-features = false, features = ["onnx"], optional = true }
+# ONNX Runtime is loaded dynamically wherever dictation is enabled, from a
+# libonnxruntime shipped in the app bundle (release.yml fetches Microsoft's
+# official v1.24.x build; lib.rs points ORT_DYLIB_PATH at it). load-dynamic
+# sidesteps the static prebuilt's failures — chiefly the Linux prebuilt linking
+# against a too-new glibc (undefined `__isoc23_strtol` on ubuntu-22.04) — by
+# never linking ONNX at build time. The runtime must be >= v1.24: ort rc.12's
+# default api-24 feature demands it, and a lower one deadlocks ort's init. Intel
+# macOS has no such build (nothing past v1.23.0), so it compiles dictation out
+# entirely rather than ship a broken engine. Exact-pinned to unify with
+# transcribe-rs's ort.
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic"], optional = true }
+cpal = { version = "0.16", optional = true }
+rubato = { version = "0.16", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"], optional = true }
+flate2 = { version = "1", optional = true }
+tar = { version = "0.4", optional = true }
 tauri-plugin-updater = "2.10.1"
 tauri-plugin-process = "2.3.1"
 tauri-plugin-opener = "2"
