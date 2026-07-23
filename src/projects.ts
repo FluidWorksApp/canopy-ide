@@ -523,3 +523,29 @@ export function restoreCommand(agentId: string, sessionId: string): string | nul
   if (!id) return null;
   return AGENT_CLIS.find((c) => c.id === agentId)?.resume?.(id) ?? null;
 }
+
+/** The session id a terminal's command carries when it was launched to resume a
+ *  conversation, or null for a fresh start. Inverted from each CLI's own `resume`
+ *  builder (via a sentinel), so it can never drift from the command that was
+ *  actually spawned. This is a restart-proof session identity: the command names
+ *  the session outright, so it holds even after a relaunch reassigns pty ids and
+ *  before the resumed agent has emitted its first hook event. */
+export function resumeSessionId(command: string | null | undefined): string | null {
+  const cmd = (command ?? "").trim();
+  if (!cmd) return null;
+  const SENTINEL = "__CANOPY_SID__";
+  for (const c of AGENT_CLIS) {
+    const tmpl = c.resume?.(SENTINEL);
+    if (!tmpl) continue;
+    const at = tmpl.indexOf(SENTINEL);
+    if (at < 0) continue;
+    const prefix = tmpl.slice(0, at);
+    const suffix = tmpl.slice(at + SENTINEL.length);
+    if (!cmd.startsWith(prefix) || !cmd.endsWith(suffix)) continue;
+    const id = cmd.slice(prefix.length, cmd.length - suffix.length).trim();
+    // A genuine id is one non-empty token — this rejects a command that merely
+    // shares the prefix (e.g. a bare `claude`) but isn't a resume.
+    if (id && !/\s/.test(id)) return id;
+  }
+  return null;
+}
