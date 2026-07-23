@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -636,9 +636,8 @@ mod identity {
 /// a send still in flight.
 enum Closer {
     Tcp(TcpStream),
-    Quic(quinn::Connection),
-    /// WebSocket peer: aborting the bridge pump drops both channel ends, which
-    /// EOFs the sync reader and closes the underlying socket.
+    /// WebSocket peer (the internet path): aborting the bridge pump drops both
+    /// channel ends, which EOFs the sync reader and closes the underlying socket.
     Ws(crate::wsbridge::WsCloser),
 }
 
@@ -648,7 +647,6 @@ impl Closer {
             Closer::Tcp(s) => {
                 let _ = s.shutdown(Shutdown::Both);
             }
-            Closer::Quic(c) => c.close(0u32.into(), b"bye"),
             Closer::Ws(w) => w.close(),
         }
     }
@@ -978,7 +976,7 @@ pub async fn relay_host_start(
     // takes the UDP + STUN + hole-punch + QUIC path; local network stays TCP,
     // untouched, since a LAN has no wall in the way.
     if visibility == "public" {
-        return host_public(app, inner_arc, name, alive).await;
+        return host_public(app, inner_arc, name, alive);
     }
 
     let want = port.unwrap_or(DEFAULT_PORT);
@@ -1057,41 +1055,34 @@ pub async fn relay_host_start(
     Ok(status)
 }
 
-/// Host over the internet: bind UDP, discover the reachable public address via
-/// STUN (which also opens the NAT mapping), then run a QUIC server on that
-/// socket. quinn multiplexes every joiner over the one socket, so each arrives
-/// as a `QuicPeer` we drive with `serve_peer` exactly like a TCP accept.
+/// Host over the internet. Unlike the LAN path, this opens NO listener of its
+/// own: internet joiners arrive over the shared axum server's `/team/ws` route,
+/// which the active tunnel forwards. So hosting here just registers us as the
+/// host and lets that route admit peers (the old UDP + STUN + hole-punch + QUIC
+/// path is retired). The shareable address is the tunnel URL — the front-end
+/// combines it with the join code — so nothing here needs to discover or hold
+/// open a public address, which also removes the NAT-idle staleness the punch
+/// path suffered.
 ///
-/// Known limit for a first cut: an idle QUIC server sends nothing, so if no
-/// joiner arrives within the NAT's idle window (~30s) the mapping lapses and
-/// the address goes stale. In practice the host shares the address and the
-/// joiner connects promptly; a host-side keepalive to hold the hole open
-/// indefinitely is a follow-up.
-async fn host_public(
+/// It does require the shared server + tunnel to be running (the unified
+/// "internet sharing" switch starts them); until they are, the `/team/ws` route
+/// simply has nothing to forward. A sweep thread pings peers to reap ones that
+/// vanished — the job the TCP accept loop folds in inline.
+fn host_public(
     app: AppHandle,
     inner_arc: Arc<Mutex<Inner>>,
     name: String,
     alive: Arc<AtomicBool>,
 ) -> Result<RelayStatus, String> {
-    let sock = UdpSocket::bind(("0.0.0.0", DEFAULT_PORT))
-        .or_else(|_| UdpSocket::bind("0.0.0.0:0"))
-        .map_err(|e| format!("Couldn't open a UDP port: {e}"))?;
-    let local_port = sock.local_addr().map_err(|e| e.to_string())?.port();
-    // The reachable address teammates dial. STUN reveals it AND, by sending
-    // out first, opens the hole that makes inbound packets arrive.
-    let (public_ip, port) = match crate::punch::discover(&sock) {
-        Ok(a) => (Some(a.ip().to_string()), a.port()),
-        Err(_) => (None, local_port),
-    };
-    let peer_rx = crate::qstream::serve(sock, alive.clone())?;
-
     let host = Host {
         code: new_code(),
-        port,
+        // Internet joiners use the tunnel URL, not a port; DEFAULT_PORT is a
+        // nominal placeholder the public UI doesn't surface.
+        port: DEFAULT_PORT,
         self_id: new_id(),
         name,
         visibility: "public".to_string(),
-        public_ip,
+        public_ip: None,
         peers: HashMap::new(),
         alive: alive.clone(),
     };
@@ -1100,49 +1091,34 @@ async fn host_public(
         inner.host = Some(host);
         status_of(&inner)
     };
-
-    // Pull each connecting peer and hand it to serve_peer, keyed by the code
-    // current at connect time (so New Code stops admitting new joiners).
-    let app2 = app.clone();
-    let accept_inner = inner_arc.clone();
-    let accept_alive = alive.clone();
-    thread::Builder::new()
-        .name("relay-quic-accept".into())
-        .spawn(move || {
-            while accept_alive.load(Ordering::SeqCst) {
-                let Ok(qp) = peer_rx.recv() else { break };
-                let code = match accept_inner.lock().unwrap().host.as_ref() {
-                    Some(h) => h.code.clone(),
-                    None => break,
-                };
-                let app3 = app2.clone();
-                let inner3 = accept_inner.clone();
-                let alive3 = accept_alive.clone();
-                thread::spawn(move || host_conn_quic(app3, inner3, qp, code, alive3));
-            }
-        })
-        .map_err(|e| format!("couldn't spawn accept thread: {e}"))?;
-
+    spawn_ping_sweep(inner_arc.clone(), alive);
     emit_state(&app, &inner_arc.lock().unwrap());
     Ok(status)
 }
 
-/// A joined QUIC peer, host side: run the handshake over its stream halves,
-/// then the shared serve_peer loop. QUIC reads block natively, so the
-/// on_joined hook is a no-op.
-fn host_conn_quic(
-    app: AppHandle,
-    inner: Arc<Mutex<Inner>>,
-    qp: crate::qstream::QuicPeer,
-    code: String,
-    alive: Arc<AtomicBool>,
-) {
-    let crate::qstream::QuicPeer { writer, reader, conn } = qp;
-    let Some((sender, receiver, binding)) = secure::handshake(writer, reader, &code, false) else {
-        conn.close(0u32.into(), b"handshake");
-        return;
-    };
-    serve_peer(app, inner, sender, receiver, binding, alive, Closer::Quic(conn), || {});
+/// Ping every peer on an interval; a ping that can't be written is a peer that's
+/// gone, so close it (its reader thread then removes it). Runs until `alive`
+/// clears. Used by the internet host, which — unlike the TCP accept loop — has
+/// no accept poll to fold the sweep into.
+fn spawn_ping_sweep(inner: Arc<Mutex<Inner>>, alive: Arc<AtomicBool>) {
+    let _ = thread::Builder::new()
+        .name("relay-ping-sweep".into())
+        .spawn(move || {
+            while alive.load(Ordering::SeqCst) {
+                thread::sleep(PING_EVERY);
+                if !alive.load(Ordering::SeqCst) {
+                    return;
+                }
+                let guard = inner.lock().unwrap();
+                if let Some(host) = &guard.host {
+                    for peer in host.peers.values() {
+                        if !peer_send(&peer.sender, &Frame::Ping) {
+                            let _ = peer.shutdown.close();
+                        }
+                    }
+                }
+            }
+        });
 }
 
 /// Whether we're currently hosting a team relay (host set and not stopped) —
