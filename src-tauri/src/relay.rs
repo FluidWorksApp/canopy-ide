@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 /// "CANOPY" on a phone keypad is 226679 — one digit too long for a port, so
 /// the tail of it. Only a default; the host can pass any port.
@@ -639,7 +639,6 @@ enum Closer {
     Quic(quinn::Connection),
     /// WebSocket peer: aborting the bridge pump drops both channel ends, which
     /// EOFs the sync reader and closes the underlying socket.
-    #[allow(dead_code)] // constructed by the /team/ws host route + join dial next
     Ws(crate::wsbridge::WsCloser),
 }
 
@@ -1144,6 +1143,52 @@ fn host_conn_quic(
         return;
     };
     serve_peer(app, inner, sender, receiver, binding, alive, Closer::Quic(conn), || {});
+}
+
+/// Whether we're currently hosting a team relay (host set and not stopped) —
+/// the gate the shared axum server checks before upgrading a `/team/ws` request.
+pub fn is_hosting(app: &AppHandle) -> bool {
+    let state = app.state::<RelayManager>();
+    let guard = state.inner.lock().unwrap();
+    guard
+        .host
+        .as_ref()
+        .map(|h| h.alive.load(Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
+/// Host-side ingress for a team peer arriving over the shared axum server's
+/// `/team/ws` route — the internet path, where the tunnel forwards here instead
+/// of a UDP hole-punch. The WebSocket-vs-TCP-vs-QUIC choice is the only thing
+/// that differs: bridge the socket to the sync stream halves, then run the same
+/// code-keyed SPAKE2 handshake and `serve_peer` loop on a dedicated thread
+/// (like the TCP/QUIC accepts). `server_halves` spawns the async pump, so this
+/// must be awaited on the runtime; it returns as soon as the peer is handed off.
+pub async fn accept_ws_peer(app: AppHandle, ws: axum::extract::ws::WebSocket) {
+    // Snapshot the code + liveness current at connect time, so New Code stops
+    // admitting new joiners just as the TCP/QUIC paths do.
+    let (code, alive, inner) = {
+        let state = app.state::<RelayManager>();
+        let guard = state.inner.lock().unwrap();
+        match guard.host.as_ref() {
+            Some(h) if h.alive.load(Ordering::SeqCst) => {
+                (h.code.clone(), h.alive.clone(), state.inner.clone())
+            }
+            // Not hosting (or stopped): drop the socket, nothing to serve.
+            _ => return,
+        }
+    };
+    let (writer, reader, closer) = crate::wsbridge::server_halves(ws);
+    // The handshake and serve_peer loop are blocking and long-lived; give each
+    // peer its own thread, matching host_conn / host_conn_quic.
+    let _ = thread::Builder::new().name("relay-peer-ws".into()).spawn(move || {
+        match secure::handshake(writer, reader, &code, false) {
+            Some((sender, receiver, binding)) => {
+                serve_peer(app, inner, sender, receiver, binding, alive, Closer::Ws(closer), || {});
+            }
+            None => closer.close(),
+        }
+    });
 }
 
 /// One joined connection, host side: secure handshake, authenticate, register,

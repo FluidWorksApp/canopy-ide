@@ -199,6 +199,11 @@ pub async fn remote_enable(
         .route("/remote/auth", post(auth_handler))
         .route("/remote/ws", get(ws_handler))
         .route("/remote/health", get(|| async { "ok" }))
+        // Team relay ingress on the same server — the internet path, where the
+        // tunnel forwards a joiner's wss:// here. Gated by the team join code
+        // (SPAKE2 over the socket), NOT the portal PIN: two separate credentials
+        // on one endpoint.
+        .route("/team/ws", get(team_ws_handler))
         .fallback(asset_handler)
         .with_state(portal);
 
@@ -341,6 +346,19 @@ async fn ws_handler(
         return (StatusCode::UNAUTHORIZED, "bad token").into_response();
     }
     ws.on_upgrade(move |socket| ws_conn(socket, p))
+}
+
+/// Team relay ingress on the shared server. Unlike `/remote/*`, this carries the
+/// team wire protocol, not the local command surface, and is authenticated by
+/// the team join code via SPAKE2 over the socket — a separate credential from
+/// the portal PIN. We only gate on whether a team is currently being hosted; the
+/// relay does the code verification (and tarpits a wrong one) itself.
+async fn team_ws_handler(ws: WebSocketUpgrade, AxumState(p): AxumState<Portal>) -> Response {
+    if !crate::relay::is_hosting(&p.app) {
+        return (StatusCode::FORBIDDEN, "team hosting is off").into_response();
+    }
+    let app = p.app.clone();
+    ws.on_upgrade(move |socket| crate::relay::accept_ws_peer(app, socket))
 }
 
 /// Serve the SPA: any path under `/remote` maps to a baked asset, with an
