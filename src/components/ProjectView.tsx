@@ -22,6 +22,7 @@ import {
   checkInstalledPrereqs,
   currentPlatform,
   PREREQS,
+  resumeSessionId,
   startCommand,
   updateCommand,
 } from "../projects";
@@ -51,6 +52,7 @@ import {
 import type { AgentEventEntry, OpenFile, Notify, RelayHandle } from "../types";
 import {
   derivePending,
+  eventPtyId,
   eventsForProject,
   pendingForRoots,
   type PendingItem,
@@ -1730,6 +1732,31 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     }
     return [...ids];
   }, [projectEvents]);
+  // The session actually running in each live terminal, keyed by the pty id the
+  // hook stamped on its events *this* launch (`canopy_pty`) — not the digest's
+  // `surface`, which is the pty from whenever the hook last wrote and goes stale
+  // across a restart/restore. This is the authoritative terminal→session bond:
+  // it can never bind a tab to an unrelated session whose recycled pty number
+  // happens to collide. Latest event per pty wins.
+  const liveSessionByPty = useMemo(() => {
+    const latest = new Map<number, { sid: string; ts: number }>();
+    for (const e of projectEvents) {
+      const pty = eventPtyId(e.raw);
+      if (pty == null) continue;
+      let sid: unknown;
+      try {
+        sid = (JSON.parse(e.raw) as { session_id?: unknown }).session_id;
+      } catch {
+        continue;
+      }
+      if (typeof sid !== "string" || !sid) continue;
+      const prev = latest.get(pty);
+      if (!prev || e.ts >= prev.ts) latest.set(pty, { sid, ts: e.ts });
+    }
+    const m = new Map<number, string>();
+    for (const [pty, v] of latest) m.set(pty, v.sid);
+    return m;
+  }, [projectEvents]);
   liveSessionIdsRef.current = liveSessionIds;
   const runningAgents = projectStats.flatMap((s) =>
     s.procs
@@ -2158,9 +2185,33 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           const cwd = stat?.cwd || activeTab.cwd || "";
           const repo =
             components.find((c) => cwd === c.path || cwd.startsWith(c.path + "/"))?.path ?? null;
-          const d = digestBySurface(wsDigests, thisInstance).get(String(activeTab.ptyId));
-          const digest = d && (d.agent ?? "agent") === agent ? d : undefined;
-          return { repo, agent, cwd, sessionId: digest?.session_id, digest, ptyId: activeTab.ptyId as number };
+          // Bind to the session actually running in this terminal by identity,
+          // never by the digest's `surface` (the pty from whenever the hook last
+          // wrote — stale across a restart, which is what stapled a dead session
+          // onto a live tab). In order of reliability:
+          //   1. Live hook events on this pty (`canopy_pty`) name the session
+          //      directly, whatever pty number this launch happened to assign.
+          //   2. A resume command carries the session id outright — restart-proof
+          //      and correct even before the resumed agent's first event fires.
+          //   3. Only a hookless CLI that was never resumed falls back to the
+          //      surface binding, and even then a digest from another launch
+          //      (untagged/other-instance) is rejected rather than shown.
+          const boundSid =
+            liveSessionByPty.get(activeTab.ptyId as number) ??
+            resumeSessionId(activeTab.command);
+          let digest: ipc.SessionDigest | undefined;
+          let sessionId: string | undefined;
+          if (boundSid) {
+            const ld = wsDigests.find((x) => x.session_id === boundSid);
+            digest = ld && (ld.agent ?? "agent") === agent ? ld : undefined;
+            sessionId = boundSid;
+          } else {
+            const d = digestBySurface(wsDigests, thisInstance).get(String(activeTab.ptyId));
+            const belongs = d && (!thisInstance || d.instance === thisInstance);
+            digest = belongs && (d.agent ?? "agent") === agent ? d : undefined;
+            sessionId = digest?.session_id;
+          }
+          return { repo, agent, cwd, sessionId, digest, ptyId: activeTab.ptyId as number };
         })()
       : null;
   // Close the overlay when its agent terminal is no longer front — key on the

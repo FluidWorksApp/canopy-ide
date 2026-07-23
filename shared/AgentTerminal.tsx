@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { Terminal } from '@xterm/xterm'
+import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import type { Transport } from './transport'
 
@@ -9,54 +10,51 @@ import type { Transport } from './transport'
 // unmount. You can also type via the shell's composer + control-key row — both
 // paths write to the same PTY.
 //
-// Sizing is authoritative to the PTY, not the device: we render at the PTY's
-// exact cols/rows and scale the font so those columns fit the viewport width, so
-// a desktop-width TUI (e.g. Claude Code) renders faithfully instead of wrapping.
+// Sizing fits the DEVICE, not the PTY: we hold a fixed, legible font and size
+// the grid to as many columns as the viewport holds, so long lines soft-wrap
+// down the screen instead of running off the right edge. We deliberately do NOT
+// resize the PTY to match — it is shared with the desktop shell, and shrinking
+// it to phone width would reflow that window too. So xterm renders narrower than
+// the PTY's grid; the incoming rows simply wrap at the viewport edge.
 export function AgentTerminal({ transport, pty }: { transport: Transport; pty: number }) {
   const ref = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     const term = new Terminal({
-      fontSize: 12,
+      fontSize: 13,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
       convertEol: false,
       cursorBlink: true,
       theme: { background: 'rgba(0,0,0,0)', foreground: '#c9d1d9' },
       allowTransparency: true,
     })
+    const fit = new FitAddon()
+    term.loadAddon(fit)
     term.open(ref.current!)
 
-    let grid = { cols: 80, rows: 24 }
-    const rescale = () => {
-      const box = ref.current
-      if (!box) return
-      const avail = box.clientWidth - 8
-      if (avail <= 0) return
-      // Scale the font so the PTY's columns fit the viewport width — but never
-      // below a legible floor. A wide desktop grid used to shrink to an
-      // unreadable 5px to fit; now it holds a readable size and the terminal
-      // scrolls horizontally instead (see .term overflow-x in styles.css).
-      const px = Math.max(9, Math.min(16, Math.floor(avail / grid.cols / 0.6)))
-      if (term.options.fontSize !== px) term.options.fontSize = px
+    // Fit the grid to the container at the current font, so text wraps to the
+    // phone's width. Runs on attach, on every container resize, and whenever the
+    // PTY reports a new upstream size (its rows keep arriving; only our wrap
+    // width is local).
+    const refit = () => {
+      if (!ref.current || ref.current.clientWidth <= 0) return
       try {
-        term.resize(grid.cols, grid.rows)
+        fit.fit()
       } catch {
-        /* transient */
+        /* transient during layout */
       }
     }
+    refit()
 
     const detach = transport.attachPty(pty, {
       onReset: () => term.reset(),
-      onSize: (cols, rows) => {
-        grid = { cols: cols || 80, rows: rows || 24 }
-        rescale()
-      },
+      onSize: () => refit(),
       onData: (bytes) => term.write(bytes),
       onGone: () => term.write('\r\n\x1b[2m[session ended]\x1b[0m\r\n'),
     })
     const onData = term.onData((d) => transport.writePty(pty, d))
 
-    const ro = new ResizeObserver(() => rescale())
+    const ro = new ResizeObserver(() => refit())
     if (ref.current) ro.observe(ref.current)
 
     return () => {
