@@ -30,7 +30,6 @@ export type SettingsTab =
   | "editor"
   | "terminal"
   | "dictation"
-  | "guard"
   | "integrations"
   | "remote";
 
@@ -45,7 +44,6 @@ const TABS: { id: SettingsTab; label: string }[] = [
   { id: "editor", label: "Editor" },
   { id: "terminal", label: "Terminal" },
   { id: "dictation", label: "Dictation" },
-  { id: "guard", label: "Process guard" },
   { id: "integrations", label: "Integrations" },
   { id: "remote", label: "Remote access" },
 ];
@@ -183,7 +181,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
           <div className="settings-content">
             {tab === "appearance" && (
               <>
-                <Item name="Skin" desc="Colors for the whole app — applies immediately, terminals and editor included.">
+                <Item name="Skin" desc="Colors for the whole app; applies immediately.">
                   <div className="skin-grid">
                     {THEMES.map((t) => {
                       const p = SKIN_PREVIEWS[t.id];
@@ -209,7 +207,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 </Item>
                 <Item
                   name="Accent color"
-                  desc="Applies on top of whichever skin is selected — including Auto and Daylight. Leave it unset to use the skin's own accent."
+                  desc="Overrides the skin's accent; leave unset to keep it."
                 >
                   <div className="set-inline">
                     <input
@@ -243,7 +241,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
               <>
                 <Item
                   name="Default agent"
-                  desc="Which CLI starts work when you hand it a ticket. You can always pick a different one at the moment you start — this is just what the primary button does."
+                  desc="The CLI the primary Start button launches; you can pick another per ticket."
                 >
                   <div className="skin-grid">
                     {AGENT_CLIS.map((cli) => (
@@ -261,16 +259,8 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   </div>
                 </Item>
                 <Item
-                  name="Opening context"
-                  desc="Every agent is handed the ticket's id, title and URL, and asked to read it, look around the code, and propose a plan before working. Agents whose CLI takes an opening prompt get it as an argument; the rest have it typed in once their interface is up."
-                >
-                  <span className="set-item-desc">
-                    Canopy never commits, pushes or opens a PR on your behalf.
-                  </span>
-                </Item>
-                <Item
                   name="Hibernate idle agents"
-                  desc="Reclaim memory from finished background agents automatically. Hibernating kills the terminal — its scrollback exists nowhere else — so only sessions that are idle or ended (never mid-turn) and beyond the limit below are ever touched, oldest first, and each stays resumable from the Restorable list."
+                  desc="Auto-reclaim memory from idle/ended agents past the limit below; they stay resumable."
                 >
                   <label className="set-inline-check">
                     <input
@@ -283,7 +273,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 </Item>
                 <Item
                   name="Live agents per project"
-                  desc="How many agent terminals to keep before auto-hibernation starts reclaiming the stalest idle ones. Only applies when the option above is on."
+                  desc="Agent terminals to keep before hibernation reclaims the stalest idle ones."
                 >
                   <input
                     type="number"
@@ -375,7 +365,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 </Item>
                 <Item
                   name="Scrollback"
-                  desc="Lines of history each terminal keeps. Applies to newly opened terminals."
+                  desc="Lines of history each terminal keeps; applies to new terminals."
                 >
                   <input
                     type="number"
@@ -393,42 +383,6 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
             )}
 
             {tab === "dictation" && <DictationSettings />}
-
-            {tab === "guard" && (
-              <>
-                <Item
-                  name="CPU warning threshold"
-                  desc="Warn when a terminal's process tree exceeds this much CPU (%)."
-                >
-                  <input
-                    type="number"
-                    min={50}
-                    max={1600}
-                    step={50}
-                    value={s.runawayCpuPercent}
-                    onChange={(e) => {
-                      const v = Number(e.target.value);
-                      if (Number.isFinite(v) && v > 0) patch({ runawayCpuPercent: v });
-                    }}
-                  />
-                </Item>
-                <Item
-                  name="Memory warning threshold"
-                  desc="Warn when a terminal's process tree exceeds this much memory (GB)."
-                >
-                  <input
-                    type="number"
-                    min={1}
-                    max={64}
-                    value={Math.round(s.runawayMemBytes / 1024 ** 3)}
-                    onChange={(e) => {
-                      const v = Number(e.target.value);
-                      if (Number.isFinite(v) && v > 0) patch({ runawayMemBytes: v * 1024 ** 3 });
-                    }}
-                  />
-                </Item>
-              </>
-            )}
 
             {tab === "remote" && <RemoteSettings runInTerminal={runInTerminal} />}
 
@@ -966,7 +920,7 @@ function RemoteSettings({
           </Item>
 
           {scope === "internet" && (
-            <Item name="Public link" desc="Canopy runs one tunnel; the link loads in any browser, no router setup. Team sessions over the internet share this same link.">
+            <Item name="Public link" desc="One tunnel, loads in any browser — shared with internet team sessions.">
               <div style={{ display: "grid", gap: 12, justifyItems: "start", width: "100%" }}>
                 {seg(TUNNELS.map((t) => ({ id: t.id, label: t.name })), provider, changeProvider)}
                 <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
@@ -1132,14 +1086,14 @@ function DictationSettings() {
     <>
       <Item
         name="Shortcut"
-        desc="Press this anywhere — terminal, editor, or any text field — to start dictating; press again to insert the transcription. Esc cancels a recording. Everything runs locally; audio never leaves this machine."
+        desc="Press to start dictating, again to insert; Esc cancels. Runs fully locally."
       >
         <HotkeyCapture value={s.dictationHotkey} onChange={(h) => patch({ dictationHotkey: h })} />
       </Item>
 
       <Item
         name="Model"
-        desc="Choose which local speech model to use. The first is installed on first use; others download on demand. Larger models are more accurate; Moonshine is fastest for English."
+        desc="Local speech model; larger is more accurate, Moonshine fastest for English."
       >
         <div className="dictation-models">
           {models.map((m) => {
