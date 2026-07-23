@@ -637,6 +637,10 @@ mod identity {
 enum Closer {
     Tcp(TcpStream),
     Quic(quinn::Connection),
+    /// WebSocket peer: aborting the bridge pump drops both channel ends, which
+    /// EOFs the sync reader and closes the underlying socket.
+    #[allow(dead_code)] // constructed by the /team/ws host route + join dial next
+    Ws(crate::wsbridge::WsCloser),
 }
 
 impl Closer {
@@ -646,6 +650,7 @@ impl Closer {
                 let _ = s.shutdown(Shutdown::Both);
             }
             Closer::Quic(c) => c.close(0u32.into(), b"bye"),
+            Closer::Ws(w) => w.close(),
         }
     }
 }

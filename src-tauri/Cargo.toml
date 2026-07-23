@@ -31,6 +31,14 @@ tokio = { version = "1", features = ["rt", "sync", "time", "macros", "process", 
 # already runs; include_dir bakes the built portal SPA into the binary so it
 # ships offline with no runtime asset-path resolution.
 axum = { version = "0.7", features = ["ws"] }
+# Team relay over WebSocket: the relay's transport-agnostic crypto rides a
+# WebSocket so a team session travels the SAME axum ingress — and thus the same
+# LAN URL or active tunnel — as Canopy Remote (one endpoint, two PIN-gated
+# routes). tokio-tungstenite is the join-side dial (wss through the tunnel); the
+# host side upgrades axum's own WebSocket. rustls-webpki-roots so public tunnel
+# certs (Cloudflare / ngrok) validate; futures-util drives the sink/stream.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 include_dir = "0.7"
 # A scannable QR of the portal URL so pairing a phone is "scan + type the PIN".
 # Pure-Rust encoder; the SVG is hand-built from the matrix (no render feature).

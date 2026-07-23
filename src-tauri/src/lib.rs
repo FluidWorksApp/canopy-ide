@@ -10,6 +10,7 @@ mod punch;
 mod tunnel;
 mod qstream;
 mod relay;
+mod wsbridge;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager};
