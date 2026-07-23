@@ -22,7 +22,10 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         "Canopy",
         true,
         &[
-            &PredefinedMenuItem::about(app, None, None)?,
+            // Custom About (not PredefinedMenuItem::about): the native panel
+            // can't carry the Terms/Privacy/Support links we show, so this
+            // emits a "menu" event the frontend answers with its own dialog.
+            &MenuItem::with_id(app, "about", "About Canopy", true, None::<&str>)?,
             &MenuItem::with_id(app, "check-updates", "Check for Updates…", true, None::<&str>)?,
             &MenuItem::with_id(app, "install-cli", "Install 'canopy' Command…", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
@@ -114,7 +117,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         &[
             &MenuItem::with_id(app, "help", "Canopy Help", true, Some("CmdOrCtrl+Shift+H"))?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "support", "Support…", true, None::<&str>)?,
+            &MenuItem::with_id(app, "support", "Support Us", true, None::<&str>)?,
         ],
     )?;
     Menu::with_items(app, &[&app_menu, &file, &edit, &go, &tabs, &window, &help])

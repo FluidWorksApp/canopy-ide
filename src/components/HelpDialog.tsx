@@ -110,7 +110,7 @@ export function HelpDialog({ onClose, onReplayIntro }: HelpDialogProps) {
           <p>
             <button
               className="btn btn-accent"
-              onClick={() => void openUrl("https://canopyide.dev/support")}
+              onClick={() => void openUrl("mailto:Sam@CauseConnect.ai")}
             >
               Contact support
             </button>

@@ -21,6 +21,7 @@ import { ProjectDialog } from "./components/ProjectDialog";
 import { ProjectManager } from "./components/ProjectManager";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { HelpDialog } from "./components/HelpDialog";
+import { AboutDialog } from "./components/AboutDialog";
 import { Dictation } from "./components/Dictation";
 import { Onboarding } from "./components/Onboarding";
 import { Welcome } from "./components/Welcome";
@@ -76,6 +77,7 @@ export default function App() {
   const [manager, setManager] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState<null | { tab?: import("./components/SettingsDialog").SettingsTab }>(null);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
   // First-run walkthrough. Seeded once, after the workspace has loaded, so a
   // fresh install lands on the welcome flow while returning users never see it.
   const [onboarding, setOnboarding] = useState(false);
@@ -515,6 +517,8 @@ export default function App() {
             setSettingsOpen({});
           } else if (e.payload === "help") {
             setHelpOpen(true);
+          } else if (e.payload === "about") {
+            setAboutOpen(true);
           } else if (e.payload === "support") {
             void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
               openUrl("https://canopyide.dev/support"),
@@ -1090,6 +1094,7 @@ export default function App() {
           }}
         />
       )}
+      {aboutOpen && <AboutDialog onClose={() => setAboutOpen(false)} />}
       {onboarding && (
         <Onboarding
           onClose={() => {
