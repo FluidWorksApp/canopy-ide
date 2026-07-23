@@ -826,8 +826,19 @@ function RemoteSettings({
 }) {
   const [status, setStatus] = useState<ipc.RemoteStatus | null>(null);
   const [busy, setBusy] = useState(false);
-  const [scope, setScope] = useState<"local" | "internet">("local");
-  const [provider, setProvider] = useState("cloudflare");
+  // Reach + provider are UI selections that outlive this dialog, so they read
+  // from and write back to persisted settings — otherwise reopening Settings
+  // dropped "Internet" back to "This network" even while the tunnel ran on.
+  const [scope, setScope] = useState<"local" | "internet">(() => getSettings().remoteReach);
+  const [provider, setProvider] = useState(() => getSettings().remoteTunnelProvider);
+  const changeScope = (v: "local" | "internet") => {
+    setScope(v);
+    updateSettings({ remoteReach: v });
+  };
+  const changeProvider = (v: string) => {
+    setProvider(v);
+    updateSettings({ remoteTunnelProvider: v });
+  };
   const [tunnel, setTunnel] = useState<ipc.TunnelState>({
     running: false,
     provider: null,
@@ -950,14 +961,14 @@ function RemoteSettings({
                 { id: "internet", label: "Internet" },
               ],
               scope,
-              (v) => setScope(v as "local" | "internet"),
+              (v) => changeScope(v as "local" | "internet"),
             )}
           </Item>
 
           {scope === "internet" && (
             <Item name="Public link" desc="Canopy runs the tunnel; the link loads in any browser, no router setup.">
               <div style={{ display: "grid", gap: 12, justifyItems: "start", width: "100%" }}>
-                {seg(TUNNELS.map((t) => ({ id: t.id, label: t.name })), provider, setProvider)}
+                {seg(TUNNELS.map((t) => ({ id: t.id, label: t.name })), provider, changeProvider)}
                 <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
                   {prov.note ? `${prov.blurb} ${prov.note}` : prov.blurb}
                 </div>
