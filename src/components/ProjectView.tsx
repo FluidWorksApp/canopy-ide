@@ -910,7 +910,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     [onNotice, openPr, openReview, relay],
   );
 
-  // Session digests + this launch's tag, so the "Agent Workspace" drawer can
+  // Session digests + this launch's tag, so the "Agent Workspace" overlay can
   // resolve the agent behind the active terminal the same way AgentsPanel does
   // (by PTY surface id). Polled while an agent terminal is open; idle otherwise.
   const [wsDigests, setWsDigests] = useState<ipc.SessionDigest[]>([]);
@@ -2108,7 +2108,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     });
 
   // The agent behind the active *terminal* tab, if any — the "Agent Workspace"
-  // toggle and its drawer only exist here. Identity is the live process (same
+  // toggle and its overlay only exist here. Identity is the live process (same
   // resolution as the tab icon), so it's right for every agent CLI — not just
   // the hook-reporting ones. The workspace is driven off the terminal's cwd;
   // the hook digest, when there is one, only rides along as enrichment, and
@@ -2125,7 +2125,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           const byCommand = AGENT_CLIS.find((c) => (activeTab.command ?? "").startsWith(c.bin));
           const agent = (byProc ?? byCommand)?.id ?? "agent";
           // The live session cwd — the same source the Agents panel keys off,
-          // so the drawer and a panel-opened tab resolve the same workspace.
+          // so the overlay and a panel-opened tab resolve the same workspace.
           const cwd = stat?.cwd || activeTab.cwd || "";
           const repo =
             components.find((c) => cwd === c.path || cwd.startsWith(c.path + "/"))?.path ?? null;
@@ -2134,13 +2134,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           return { repo, agent, cwd, sessionId: digest?.session_id, digest, ptyId: activeTab.ptyId as number };
         })()
       : null;
-  // Close the drawer when its agent terminal is no longer front — key on the
+  // Close the overlay when its agent terminal is no longer front — key on the
   // terminal (ptyId) so it survives a digestless agent, which has no session id.
   const wsKey = agentTermWs ? String(agentTermWs.ptyId) : null;
   useEffect(() => {
     if (!wsKey) setWsDrawerOpen(false);
   }, [wsKey]);
-  // Esc closes the drawer, matching every other overlay in the app.
+  // Esc closes the overlay, matching every other overlay in the app.
   useEffect(() => {
     if (!wsDrawerOpen) return;
     const onKey = (e: KeyboardEvent) => {
@@ -2441,19 +2441,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 {activeTab.file.view === "preview" ? "Source" : "Preview"}
               </button>
             )}
-          {/* This agent's workspace — files, diffs, commits & PR — slides in
-              over the live terminal. Only on agent terminals; a plain shell has
-              no workspace to show. */}
-          {agentTermWs && (
-            <button
-              className={`btn btn-icon-text ${wsDrawerOpen ? "btn-accent" : ""}`}
-              title="Agent Workspace — files, diffs, commits & PR (Esc to close)"
-              onClick={() => setWsDrawerOpen((v) => !v)}
-            >
-              <AgentIcon id={agentTermWs.agent} size={14} />
-              Agent Workspace
-            </button>
-          )}
+          {/* This agent's workspace opens from a handle on the terminal's right
+              edge (see below), not a toolbar button — so it lives where the eye
+              already is on the live terminal. */}
           {activeTab?.type === "terminal" && (
             <>
               <button
@@ -2960,51 +2950,78 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             )}
           </div>
         )}
-        {/* Agent Workspace drawer — a glassmorphic panel that slides in over
-            the live terminal. An OVERLAY, never a layout panel: the terminal
-            underneath stays mounted (unmounting a Term kills its PTY). Kept in
-            the DOM while an agent terminal is front so it can animate; the
-            heavy AgentWorkspaceView only mounts while open. */}
+        {/* Agent Workspace — a full-screen glassmorphic overlay for the active
+            agent terminal, opened from a handle on the terminal's right edge.
+            An OVERLAY, never a layout panel or a new tab: the terminal
+            underneath stays mounted (unmounting a Term kills its PTY) and shows
+            faintly through the frosted glass. The layer stays in the DOM so it
+            can fade; the heavy AgentWorkspaceView only mounts while open. */}
         {agentTermWs && (
-          <div
-            className={`workspace-drawer-layer ${wsDrawerOpen ? "open" : ""}`}
-            aria-hidden={!wsDrawerOpen}
-          >
-            <div className="workspace-drawer-scrim" onClick={() => setWsDrawerOpen(false)} />
-            <aside className="workspace-drawer" role="dialog" aria-label="Agent workspace">
-              <div className="workspace-drawer-head">
-                <span className="workspace-drawer-title">
-                  <AgentIcon id={agentTermWs.agent} size={14} />
-                  Agent Workspace
-                </span>
-                <button
-                  className="btn-icon"
-                  title="Close (Esc)"
-                  onClick={() => setWsDrawerOpen(false)}
-                >
-                  ✕
-                </button>
-              </div>
-              <div className="workspace-drawer-body">
-                {wsDrawerOpen && (
-                  <AgentWorkspaceView
-                    key={agentTermWs.ptyId}
-                    repo={agentTermWs.repo}
-                    agent={agentTermWs.agent}
-                    cwd={agentTermWs.cwd}
-                    sessionId={agentTermWs.sessionId}
-                    digest={agentTermWs.digest}
-                    ptyId={agentTermWs.ptyId}
-                    onOpenCommit={openCommit}
-                    onOpenPr={openPr}
-                    onJumpToPty={jumpToPty}
-                    onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
-                    onNotice={onNotice}
-                  />
-                )}
-              </div>
-            </aside>
-          </div>
+          <>
+            {!wsDrawerOpen && (
+              <button
+                className="workspace-handle"
+                title="Open agent workspace — files, diffs, commits & PR"
+                aria-label="Open agent workspace"
+                onClick={() => setWsDrawerOpen(true)}
+              >
+                <AgentIcon id={agentTermWs.agent} size={15} />
+                <span className="workspace-handle-label">Workspace</span>
+              </button>
+            )}
+            <div
+              className={`workspace-overlay-layer ${wsDrawerOpen ? "open" : ""}`}
+              aria-hidden={!wsDrawerOpen}
+            >
+              <section
+                className="workspace-overlay"
+                role="dialog"
+                aria-modal="true"
+                aria-label="Agent workspace"
+              >
+                <header className="workspace-overlay-head">
+                  <span className="workspace-overlay-title">
+                    <AgentIcon id={agentTermWs.agent} size={16} />
+                    <span className="workspace-overlay-titletext">
+                      <span className="workspace-overlay-name">Agent Workspace</span>
+                      <span className="workspace-overlay-sub">
+                        {agentTermWs.agent}
+                        {agentTermWs.cwd
+                          ? ` · ${agentTermWs.cwd.split("/").filter(Boolean).pop()}`
+                          : ""}
+                      </span>
+                    </span>
+                  </span>
+                  <button
+                    className="btn-icon"
+                    title="Close (Esc)"
+                    aria-label="Close agent workspace"
+                    onClick={() => setWsDrawerOpen(false)}
+                  >
+                    ✕
+                  </button>
+                </header>
+                <div className="workspace-overlay-body">
+                  {wsDrawerOpen && (
+                    <AgentWorkspaceView
+                      key={agentTermWs.ptyId}
+                      repo={agentTermWs.repo}
+                      agent={agentTermWs.agent}
+                      cwd={agentTermWs.cwd}
+                      sessionId={agentTermWs.sessionId}
+                      digest={agentTermWs.digest}
+                      ptyId={agentTermWs.ptyId}
+                      onOpenCommit={openCommit}
+                      onOpenPr={openPr}
+                      onJumpToPty={jumpToPty}
+                      onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
+                      onNotice={onNotice}
+                    />
+                  )}
+                </div>
+              </section>
+            </div>
+          </>
         )}
       </div>
       <StatusBar
