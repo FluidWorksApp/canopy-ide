@@ -14,12 +14,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 /// "CANOPY" on a phone keypad is 226679 — one digit too long for a port, so
 /// the tail of it. Only a default; the host can pass any port.
@@ -636,7 +636,9 @@ mod identity {
 /// a send still in flight.
 enum Closer {
     Tcp(TcpStream),
-    Quic(quinn::Connection),
+    /// WebSocket peer (the internet path): aborting the bridge pump drops both
+    /// channel ends, which EOFs the sync reader and closes the underlying socket.
+    Ws(crate::wsbridge::WsCloser),
 }
 
 impl Closer {
@@ -645,7 +647,7 @@ impl Closer {
             Closer::Tcp(s) => {
                 let _ = s.shutdown(Shutdown::Both);
             }
-            Closer::Quic(c) => c.close(0u32.into(), b"bye"),
+            Closer::Ws(w) => w.close(),
         }
     }
 }
@@ -974,7 +976,7 @@ pub async fn relay_host_start(
     // takes the UDP + STUN + hole-punch + QUIC path; local network stays TCP,
     // untouched, since a LAN has no wall in the way.
     if visibility == "public" {
-        return host_public(app, inner_arc, name, alive).await;
+        return host_public(app, inner_arc, name, alive);
     }
 
     let want = port.unwrap_or(DEFAULT_PORT);
@@ -1053,41 +1055,34 @@ pub async fn relay_host_start(
     Ok(status)
 }
 
-/// Host over the internet: bind UDP, discover the reachable public address via
-/// STUN (which also opens the NAT mapping), then run a QUIC server on that
-/// socket. quinn multiplexes every joiner over the one socket, so each arrives
-/// as a `QuicPeer` we drive with `serve_peer` exactly like a TCP accept.
+/// Host over the internet. Unlike the LAN path, this opens NO listener of its
+/// own: internet joiners arrive over the shared axum server's `/team/ws` route,
+/// which the active tunnel forwards. So hosting here just registers us as the
+/// host and lets that route admit peers (the old UDP + STUN + hole-punch + QUIC
+/// path is retired). The shareable address is the tunnel URL — the front-end
+/// combines it with the join code — so nothing here needs to discover or hold
+/// open a public address, which also removes the NAT-idle staleness the punch
+/// path suffered.
 ///
-/// Known limit for a first cut: an idle QUIC server sends nothing, so if no
-/// joiner arrives within the NAT's idle window (~30s) the mapping lapses and
-/// the address goes stale. In practice the host shares the address and the
-/// joiner connects promptly; a host-side keepalive to hold the hole open
-/// indefinitely is a follow-up.
-async fn host_public(
+/// It does require the shared server + tunnel to be running (the unified
+/// "internet sharing" switch starts them); until they are, the `/team/ws` route
+/// simply has nothing to forward. A sweep thread pings peers to reap ones that
+/// vanished — the job the TCP accept loop folds in inline.
+fn host_public(
     app: AppHandle,
     inner_arc: Arc<Mutex<Inner>>,
     name: String,
     alive: Arc<AtomicBool>,
 ) -> Result<RelayStatus, String> {
-    let sock = UdpSocket::bind(("0.0.0.0", DEFAULT_PORT))
-        .or_else(|_| UdpSocket::bind("0.0.0.0:0"))
-        .map_err(|e| format!("Couldn't open a UDP port: {e}"))?;
-    let local_port = sock.local_addr().map_err(|e| e.to_string())?.port();
-    // The reachable address teammates dial. STUN reveals it AND, by sending
-    // out first, opens the hole that makes inbound packets arrive.
-    let (public_ip, port) = match crate::punch::discover(&sock) {
-        Ok(a) => (Some(a.ip().to_string()), a.port()),
-        Err(_) => (None, local_port),
-    };
-    let peer_rx = crate::qstream::serve(sock, alive.clone())?;
-
     let host = Host {
         code: new_code(),
-        port,
+        // Internet joiners use the tunnel URL, not a port; DEFAULT_PORT is a
+        // nominal placeholder the public UI doesn't surface.
+        port: DEFAULT_PORT,
         self_id: new_id(),
         name,
         visibility: "public".to_string(),
-        public_ip,
+        public_ip: None,
         peers: HashMap::new(),
         alive: alive.clone(),
     };
@@ -1096,49 +1091,80 @@ async fn host_public(
         inner.host = Some(host);
         status_of(&inner)
     };
-
-    // Pull each connecting peer and hand it to serve_peer, keyed by the code
-    // current at connect time (so New Code stops admitting new joiners).
-    let app2 = app.clone();
-    let accept_inner = inner_arc.clone();
-    let accept_alive = alive.clone();
-    thread::Builder::new()
-        .name("relay-quic-accept".into())
-        .spawn(move || {
-            while accept_alive.load(Ordering::SeqCst) {
-                let Ok(qp) = peer_rx.recv() else { break };
-                let code = match accept_inner.lock().unwrap().host.as_ref() {
-                    Some(h) => h.code.clone(),
-                    None => break,
-                };
-                let app3 = app2.clone();
-                let inner3 = accept_inner.clone();
-                let alive3 = accept_alive.clone();
-                thread::spawn(move || host_conn_quic(app3, inner3, qp, code, alive3));
-            }
-        })
-        .map_err(|e| format!("couldn't spawn accept thread: {e}"))?;
-
+    spawn_ping_sweep(inner_arc.clone(), alive);
     emit_state(&app, &inner_arc.lock().unwrap());
     Ok(status)
 }
 
-/// A joined QUIC peer, host side: run the handshake over its stream halves,
-/// then the shared serve_peer loop. QUIC reads block natively, so the
-/// on_joined hook is a no-op.
-fn host_conn_quic(
-    app: AppHandle,
-    inner: Arc<Mutex<Inner>>,
-    qp: crate::qstream::QuicPeer,
-    code: String,
-    alive: Arc<AtomicBool>,
-) {
-    let crate::qstream::QuicPeer { writer, reader, conn } = qp;
-    let Some((sender, receiver, binding)) = secure::handshake(writer, reader, &code, false) else {
-        conn.close(0u32.into(), b"handshake");
-        return;
+/// Ping every peer on an interval; a ping that can't be written is a peer that's
+/// gone, so close it (its reader thread then removes it). Runs until `alive`
+/// clears. Used by the internet host, which — unlike the TCP accept loop — has
+/// no accept poll to fold the sweep into.
+fn spawn_ping_sweep(inner: Arc<Mutex<Inner>>, alive: Arc<AtomicBool>) {
+    let _ = thread::Builder::new()
+        .name("relay-ping-sweep".into())
+        .spawn(move || {
+            while alive.load(Ordering::SeqCst) {
+                thread::sleep(PING_EVERY);
+                if !alive.load(Ordering::SeqCst) {
+                    return;
+                }
+                let guard = inner.lock().unwrap();
+                if let Some(host) = &guard.host {
+                    for peer in host.peers.values() {
+                        if !peer_send(&peer.sender, &Frame::Ping) {
+                            let _ = peer.shutdown.close();
+                        }
+                    }
+                }
+            }
+        });
+}
+
+/// Whether we're currently hosting a team relay (host set and not stopped) —
+/// the gate the shared axum server checks before upgrading a `/team/ws` request.
+pub fn is_hosting(app: &AppHandle) -> bool {
+    let state = app.state::<RelayManager>();
+    let guard = state.inner.lock().unwrap();
+    guard
+        .host
+        .as_ref()
+        .map(|h| h.alive.load(Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
+/// Host-side ingress for a team peer arriving over the shared axum server's
+/// `/team/ws` route — the internet path, where the tunnel forwards here instead
+/// of a UDP hole-punch. The WebSocket-vs-TCP-vs-QUIC choice is the only thing
+/// that differs: bridge the socket to the sync stream halves, then run the same
+/// code-keyed SPAKE2 handshake and `serve_peer` loop on a dedicated thread
+/// (like the TCP/QUIC accepts). `server_halves` spawns the async pump, so this
+/// must be awaited on the runtime; it returns as soon as the peer is handed off.
+pub async fn accept_ws_peer(app: AppHandle, ws: axum::extract::ws::WebSocket) {
+    // Snapshot the code + liveness current at connect time, so New Code stops
+    // admitting new joiners just as the TCP/QUIC paths do.
+    let (code, alive, inner) = {
+        let state = app.state::<RelayManager>();
+        let guard = state.inner.lock().unwrap();
+        match guard.host.as_ref() {
+            Some(h) if h.alive.load(Ordering::SeqCst) => {
+                (h.code.clone(), h.alive.clone(), state.inner.clone())
+            }
+            // Not hosting (or stopped): drop the socket, nothing to serve.
+            _ => return,
+        }
     };
-    serve_peer(app, inner, sender, receiver, binding, alive, Closer::Quic(conn), || {});
+    let (writer, reader, closer) = crate::wsbridge::server_halves(ws);
+    // The handshake and serve_peer loop are blocking and long-lived; give each
+    // peer its own thread, matching host_conn / host_conn_quic.
+    let _ = thread::Builder::new().name("relay-peer-ws".into()).spawn(move || {
+        match secure::handshake(writer, reader, &code, false) {
+            Some((sender, receiver, binding)) => {
+                serve_peer(app, inner, sender, receiver, binding, alive, Closer::Ws(closer), || {});
+            }
+            None => closer.close(),
+        }
+    });
 }
 
 /// One joined connection, host side: secure handshake, authenticate, register,
@@ -1448,8 +1474,28 @@ pub async fn relay_connect(
             return Err("You are hosting a relay — stop it before joining another.".into());
         }
     }
-    // Bare IP/hostname gets the default port appended.
     let addr = addr.trim().to_string();
+    let name = if name.trim().is_empty() { "guest".to_string() } else { name.trim().to_string() };
+
+    // Two ways to join, by what the host shared. A URL is the host's tunnel
+    // address (an internet session): dial it over a WebSocket to /team/ws — the
+    // same ingress the host exposes on its shared server, so the tunnel carries
+    // the whole relay. Anything else is a bare host:port on the LAN, reached
+    // directly over TCP. (The old public UDP-hole-punch + QUIC path is retired —
+    // "internet" now means the tunnel, so a joiner never opens a UDP socket.)
+    // Either way the SPAKE2 handshake and the relay logic on top are identical.
+    if let Some(url) = team_ws_url(&addr) {
+        let (writer, reader, closer) = crate::wsbridge::connect(&url, Duration::from_secs(12))
+            .map_err(|e| format!("Couldn't reach the host: {e}"))?;
+        let Some((sender, receiver, binding)) = secure::handshake(writer, reader, code.trim(), true) else {
+            closer.close();
+            return Err("Couldn't establish a secure channel — check the link and code, and that the host is sharing.".into());
+        };
+        return run_client(app, inner_arc, sender, receiver, binding, Closer::Ws(closer), name, addr, || {});
+    }
+
+    // LAN: a bare IP/hostname gets the default relay port appended, then a direct
+    // TCP connection — no wall in the way on a local network.
     let full = if addr.contains(':') { addr.clone() } else { format!("{addr}:{DEFAULT_PORT}") };
     let sock_addr = full
         .parse::<std::net::SocketAddr>()
@@ -1464,37 +1510,20 @@ pub async fn relay_connect(
                 ))
         })
         .map_err(|_| format!("Not a valid address: {full}"))?;
-    let name = if name.trim().is_empty() { "guest".to_string() } else { name.trim().to_string() };
-
-    // A LAN address is reached directly over TCP — no wall in the way. A public
-    // address means the internet, i.e. carrier NAT, so take the UDP hole-punch
-    // + QUIC path. Same SPAKE2 handshake and relay logic either way.
-    if is_private_addr(&sock_addr.ip().to_string()) {
-        let stream = TcpStream::connect_timeout(&sock_addr, Duration::from_secs(5))
-            .map_err(|e| format!("Couldn't reach {full}: {e}"))?;
-        let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-        let Some((sender, receiver, binding)) = secure::handshake_tcp(&stream, code.trim(), true) else {
-            return Err("Couldn't establish a secure channel — check the address and that the relay is running.".into());
-        };
-        let closer = Closer::Tcp(stream.try_clone().map_err(|e| e.to_string())?);
-        let block = stream.try_clone().ok();
-        run_client(app, inner_arc, sender, receiver, binding, closer, name, full, move || {
-            if let Some(s) = block {
-                let _ = s.set_read_timeout(None);
-            }
-        })
-    } else {
-        let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("Couldn't open a UDP port: {e}"))?;
-        let (writer, reader, conn) =
-            crate::qstream::connect(sock, sock_addr, true, Duration::from_secs(12))
-                .map_err(|e| format!("Couldn't reach {full}: {e}"))?;
-        let Some((sender, receiver, binding)) = secure::handshake(writer, reader, code.trim(), true) else {
-            conn.close(0u32.into(), b"handshake");
-            return Err("Couldn't establish a secure channel — check the address and that the relay is running.".into());
-        };
-        run_client(app, inner_arc, sender, receiver, binding, Closer::Quic(conn), name, full, || {})
-    }
+    let stream = TcpStream::connect_timeout(&sock_addr, Duration::from_secs(5))
+        .map_err(|e| format!("Couldn't reach {full}: {e}"))?;
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let Some((sender, receiver, binding)) = secure::handshake_tcp(&stream, code.trim(), true) else {
+        return Err("Couldn't establish a secure channel — check the address and that the relay is running.".into());
+    };
+    let closer = Closer::Tcp(stream.try_clone().map_err(|e| e.to_string())?);
+    let block = stream.try_clone().ok();
+    run_client(app, inner_arc, sender, receiver, binding, closer, name, full, move || {
+        if let Some(s) = block {
+            let _ = s.set_read_timeout(None);
+        }
+    })
 }
 
 /// The transport-agnostic half of joining a relay: identity exchange, Join,
@@ -2165,6 +2194,32 @@ fn is_private_addr(host: &str) -> bool {
     }
 }
 
+/// If `s` is an http(s)/ws(s) URL — what a host sharing over the internet hands
+/// out (its tunnel address) — normalise it to the WebSocket team endpoint:
+/// scheme mapped to ws/wss, and the path forced to `/team/ws` regardless of what
+/// the user pasted (so copying the `/remote` portal link still joins the team).
+/// Returns None for a bare host:port, which the caller reaches over TCP instead.
+fn team_ws_url(s: &str) -> Option<String> {
+    let s = s.trim();
+    let (scheme, rest) = if let Some(r) = s.strip_prefix("https://") {
+        ("wss", r)
+    } else if let Some(r) = s.strip_prefix("http://") {
+        ("ws", r)
+    } else if let Some(r) = s.strip_prefix("wss://") {
+        ("wss", r)
+    } else if let Some(r) = s.strip_prefix("ws://") {
+        ("ws", r)
+    } else {
+        return None;
+    };
+    // Keep only the authority (host[:port]); drop any path/query/fragment.
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    if host.is_empty() {
+        return None;
+    }
+    Some(format!("{scheme}://{host}/team/ws"))
+}
+
 /// Public IP for offers made from an internet-facing member; fetched once per
 /// run (it costs up to 8s of curl) and reused.
 fn cached_public_ip() -> Option<String> {
@@ -2610,6 +2665,33 @@ fn receive_over_relay(
 mod tests {
     use super::*;
     use std::net::{TcpListener, TcpStream};
+
+    /// A pasted tunnel link (any scheme, any path the user copied) becomes the
+    /// ws/wss `/team/ws` endpoint; a bare host:port stays None (the TCP path).
+    #[test]
+    fn team_ws_url_normalises_tunnel_links() {
+        assert_eq!(
+            team_ws_url("https://foo.trycloudflare.com"),
+            Some("wss://foo.trycloudflare.com/team/ws".into())
+        );
+        // Copying the /remote portal link still joins the team route.
+        assert_eq!(
+            team_ws_url("https://foo.ngrok.app/remote"),
+            Some("wss://foo.ngrok.app/team/ws".into())
+        );
+        assert_eq!(
+            team_ws_url("http://host.local:6680"),
+            Some("ws://host.local:6680/team/ws".into())
+        );
+        assert_eq!(
+            team_ws_url("ws://1.2.3.4:9000/x?y#z"),
+            Some("ws://1.2.3.4:9000/team/ws".into())
+        );
+        // Bare host:port and plain IPs are LAN TCP targets, not URLs.
+        assert_eq!(team_ws_url("192.168.1.5:6679"), None);
+        assert_eq!(team_ws_url("host.local"), None);
+        assert_eq!(team_ws_url("https://"), None);
+    }
 
     /// The frontend composes these bodies by hand in TypeScript, so the two
     /// definitions are only kept honest by something that parses the exact

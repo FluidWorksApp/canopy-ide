@@ -106,14 +106,25 @@ export function HelpDialog({ onClose, onReplayIntro }: HelpDialogProps) {
             </tbody>
           </table>
 
-          <div className="set-head">Resources</div>
+          <div className="set-head">Support &amp; about</div>
+          <p>
+            <button
+              className="btn btn-accent"
+              onClick={() => void openUrl("mailto:Sam@CauseConnect.ai")}
+            >
+              Contact support
+            </button>
+          </p>
           <p>
             {link("https://canopyide.dev", "canopyide.dev")} ·{" "}
             {link("https://github.com/FluidWorksApp/canopy-ide", "GitHub")} ·{" "}
             {link(
               "https://github.com/FluidWorksApp/canopy-ide/issues/new",
               "Report an issue",
-            )}
+            )}{" "}
+            ·{" "}
+            {link("https://canopyide.dev/privacy", "Privacy")} ·{" "}
+            {link("https://canopyide.dev/terms", "Terms")}
           </p>
         </div>
         <div className="confirm-actions">

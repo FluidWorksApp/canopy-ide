@@ -3141,7 +3141,26 @@ body,
   width: min(520px, 92vw);
   max-width: min(520px, 92vw);
   max-height: 80vh;
+  /* Column layout so the "Canopy Help" heading and the Done button stay put
+     while only the body scrolls — scrolling the whole dialog used to carry the
+     header off the top. */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.help-dialog .side-panel-head {
+  flex: 0 0 auto;
+}
+
+.help-dialog .help-body {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+}
+
+.help-dialog .confirm-actions {
+  flex: 0 0 auto;
 }
 
 /* VS Code-style: nav column + scrolling content pane. */
@@ -3327,6 +3346,47 @@ body,
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+/* ---------- about dialog ---------- */
+
+.confirm.about-dialog {
+  width: min(360px, 90vw);
+  max-width: min(360px, 90vw);
+  text-align: center;
+}
+
+.about-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 0 4px;
+}
+
+.about-name {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.about-version {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.about-links {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.about-links a {
+  color: var(--accent);
+}
+
+.about-dialog .confirm-actions {
+  justify-content: center;
 }
 
 .help-body p {

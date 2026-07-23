@@ -31,13 +31,22 @@ tokio = { version = "1", features = ["rt", "sync", "time", "macros", "process", 
 # already runs; include_dir bakes the built portal SPA into the binary so it
 # ships offline with no runtime asset-path resolution.
 axum = { version = "0.7", features = ["ws"] }
+# Team relay over WebSocket: the relay's transport-agnostic crypto rides a
+# WebSocket so a team session travels the SAME axum ingress — and thus the same
+# LAN URL or active tunnel — as Canopy Remote (one endpoint, two PIN-gated
+# routes). tokio-tungstenite is the join-side dial (wss through the tunnel); the
+# host side upgrades axum's own WebSocket. rustls-webpki-roots so public tunnel
+# certs (Cloudflare / ngrok) validate; futures-util drives the sink/stream.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 include_dir = "0.7"
 # A scannable QR of the portal URL so pairing a phone is "scan + type the PIN".
 # Pure-Rust encoder; the SVG is hand-built from the matrix (no render feature).
 qrcode = { version = "0.14", default-features = false }
+# rustls (ring provider) is installed process-wide at startup so tokio-tungstenite's
+# wss:// connector — the team relay's internet transport through a tunnel — has a
+# default crypto provider. No direct rustls types are used beyond that install.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
-quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
-rcgen = { version = "0.13", default-features = false, features = ["ring"] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"

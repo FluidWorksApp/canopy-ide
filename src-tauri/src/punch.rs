@@ -1,31 +1,15 @@
-#![allow(dead_code)] // wired into the relay in the host/join UDP path (task #7)
-//! Direct peer-to-peer UDP connection with no middleman.
+//! STUN public-address discovery.
 //!
-//! The old relay opened a TCP listener and waited for an inbound connection.
-//! That is the one method a carrier-NAT ("CGNAT") blocks outright: an inbound
-//! TCP SYN to a port nothing has ever sent out from is dropped, so every join
-//! over the internet timed out. This module replaces it with the approach that
-//! actually traverses NAT:
+//! Open a UDP socket and send OUT first (a STUN query); that outbound packet
+//! makes the NAT create a mapping, so the public ip:port the reply reveals is
+//! genuinely reachable — return traffic on that 5-tuple gets forwarded back.
+//! Three independent STUN servers are queried so one being down or lying does
+//! not decide the answer alone.
 //!
-//!   1. Open a UDP socket and send OUT first (a STUN query). That outbound
-//!      packet makes the NAT create a mapping, so the public address it reveals
-//!      is genuinely reachable — return traffic on that 5-tuple gets forwarded
-//!      back. This is measured, not assumed: three independent STUN servers
-//!      report the same public ip:port for one socket, i.e. endpoint-
-//!      independent ("cone") mapping.
-//!   2. Both peers exchange their discovered public address out of band (the
-//!      user shares it — that is the "introduction", and why no lookup server
-//!      is needed) and fire packets AT EACH OTHER on a fixed cadence. Each
-//!      side's outbound opens its own NAT's filter for the other's address, so
-//!      the two streams cross and a direct path is established. Mutual sending
-//!      is what makes this work for restricted-cone filtering too, not only
-//!      full-cone.
-//!   3. Keepalives hold the mapping open (idle CGNAT mappings expire in ~30s).
-//!
-//! What this does NOT beat: symmetric NAT, where the external port is different
-//! per destination so the address you shared is not the one your packets arrive
-//! on. That is physics, not a bug; the caller falls back (or reports failure).
-//! The local machine was measured as cone, so this path is viable for it.
+//! Canopy Remote uses this to offer a port-forward public URL when the portal's
+//! TCP port has been manually forwarded. (The team relay once also hole-punched
+//! a UDP path from here for its internet transport; that path is retired — the
+//! internet path now rides the shared server's tunnel over a WebSocket.)
 
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
@@ -121,45 +105,6 @@ pub fn discover(sock: &UdpSocket) -> io::Result<SocketAddr> {
     Err(io::Error::new(
         io::ErrorKind::TimedOut,
         "no STUN server revealed our public address",
-    ))
-}
-
-/// Fire packets at `peer` on a fixed cadence while watching for one of theirs,
-/// until the direct path is confirmed both ways or the deadline passes.
-///
-/// `probe` is a small opaque marker the caller recognises (so a stray packet
-/// isn't mistaken for the peer). Returns Ok once we have both sent to and
-/// received from `peer` — at which point both NATs' filters are open and the
-/// socket is a working two-way channel the caller can hand to a reliable layer.
-pub fn punch(sock: &UdpSocket, peer: SocketAddr, probe: &[u8], timeout: Duration) -> io::Result<()> {
-    sock.set_read_timeout(Some(Duration::from_millis(250)))?;
-    let deadline = Instant::now() + timeout;
-    let mut last_send = Instant::now() - Duration::from_secs(1);
-    let mut heard = false;
-    let mut buf = [0u8; 512];
-    while Instant::now() < deadline {
-        if last_send.elapsed() >= Duration::from_millis(200) {
-            let _ = sock.send_to(probe, peer);
-            last_send = Instant::now();
-        }
-        match sock.recv_from(&mut buf) {
-            Ok((n, src)) if src == peer && buf[..n].starts_with(probe) => {
-                heard = true;
-                // Answer a few times so the peer also sees us before we return.
-                for _ in 0..3 {
-                    let _ = sock.send_to(probe, peer);
-                }
-                return Ok(());
-            }
-            Ok(_) => {}
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {}
-            Err(e) => return Err(e),
-        }
-    }
-    let _ = heard;
-    Err(io::Error::new(
-        io::ErrorKind::TimedOut,
-        "hole punch failed — the other side's network is likely symmetric NAT",
     ))
 }
 

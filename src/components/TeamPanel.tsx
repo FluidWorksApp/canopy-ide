@@ -1,13 +1,16 @@
-// Team relay side panel: host a relay (your Canopy IS the server — a TCP
-// listener joined with a 7-digit code) or join a teammate's. Peer-to-peer by
-// construction: no external or cloud service anywhere, the relay lives and
-// dies with the hosting Canopy. Hosting is Local (LAN address) or Public
-// (internet — your public IP, which needs the port reachable through the
-// router).
-import { useState } from "react";
+// Team relay side panel: host a relay (your Canopy IS the server, joined with a
+// 7-digit code) or join a teammate's. Hosting is Local or Internet. Local is a
+// direct TCP listener on the LAN. Internet rides the SAME shared endpoint as
+// Canopy Remote — the app's server exposed through one tunnel (Cloudflare /
+// ngrok / Tailscale) — so a teammate joins the tunnel URL over a WebSocket, no
+// router setup. One endpoint, two credentials: the team code here is separate
+// from the Remote PIN. Either way the channel is end-to-end encrypted (SPAKE2 +
+// ChaCha20-Poly1305), so the tunnel provider only ever relays ciphertext.
+import { useEffect, useState } from "react";
 import * as ipc from "../ipc";
 import type { RelayCommandMsg, RelayMember } from "../ipc";
 import { getSettings, updateSettings } from "../settings";
+import { trackerKey } from "../trackers";
 import type { Notify, RelayHandle } from "../types";
 import { LiveDot, PullRequestIcon, TeamIcon } from "./icons";
 
@@ -82,6 +85,34 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
   const [code, setCode] = useState("");
   const [visibility, setVisibility] = useState<"local" | "public">("local");
   const [busy, setBusy] = useState(false);
+  // The shared public endpoint, mirrored from the global tunnel manager (the
+  // very one Canopy Remote drives). When the internet path is chosen, this URL
+  // — not a public IP — is what a teammate joins.
+  const [tunnel, setTunnel] = useState<ipc.TunnelState>({
+    running: false,
+    provider: null,
+    url: null,
+    message: null,
+  });
+  useEffect(() => {
+    void ipc.tunnelStatus().then(setTunnel).catch(() => {});
+    const un = ipc.onTunnelState(setTunnel);
+    return () => void un.then((f) => f());
+  }, []);
+  const tunnelUrl = tunnel.running && tunnel.url ? tunnel.url : null;
+
+  /** Bring up the shared endpoint for an internet team: the app's server (so the
+   *  /team/ws route is served) and a tunnel pointed at it (reused if Remote or a
+   *  prior team already started one). The teammate then joins the tunnel URL. */
+  const ensureInternetEndpoint = async () => {
+    const st = await ipc.remoteEnable(); // idempotent — serves /team/ws + /remote
+    const t = await ipc.tunnelStatus();
+    if (!t.running) {
+      const provider = getSettings().remoteTunnelProvider;
+      const token = provider === "ngrok" ? trackerKey("ngrok") || undefined : undefined;
+      setTunnel(await ipc.tunnelStart(provider, st.port, token));
+    }
+  };
 
   const run = (op: () => Promise<void>, after?: () => void) => {
     setBusy(true);
@@ -139,8 +170,10 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
     );
   };
 
-  const publicAddr = s.public_ip && s.port ? `${s.public_ip}:${s.port}` : null;
+  // Internet hosting shares the tunnel URL (the shared endpoint); local shares
+  // the LAN address. The old public-IP path is gone.
   const localAddr = s.ips[0] && s.port ? `${s.ips[0]}:${s.port}` : null;
+  const shareAddr = s.visibility === "public" ? tunnelUrl : localAddr;
 
   return (
     <div className="team-panel">
@@ -178,7 +211,7 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
             <div className="team-vis-hint">
               {visibility === "local"
                 ? "Teammates on the same network (office, VPN) join via your LAN address. The channel is end-to-end encrypted either way."
-                : "Teammates anywhere join via your public IP. Your router must forward the port to this machine; the code bootstraps an end-to-end-encrypted channel (SPAKE2), and wrong guesses are slowed down."}
+                : "Teammates anywhere join via one public link — the same shared tunnel Canopy Remote uses (Cloudflare / ngrok / Tailscale), no router setup. The code bootstraps an end-to-end-encrypted channel (SPAKE2), so the tunnel only relays ciphertext."}
             </div>
             <button
               className="btn btn-accent team-cta"
@@ -186,6 +219,9 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
               onClick={() =>
                 run(async () => {
                   updateSettings({ relayName: name.trim() });
+                  // Internet hosting rides the shared endpoint: make sure the
+                  // server + tunnel are up before we register as host.
+                  if (visibility === "public") await ensureInternetEndpoint();
                   await relay.hostStart(name.trim(), visibility);
                 })
               }
@@ -193,10 +229,10 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
               {busy ? "Starting…" : "Host a relay"}
             </button>
             <div className="team-sep">or join one</div>
-            <label className="team-label">Host address</label>
+            <label className="team-label">Host address or link</label>
             <input
               className="team-input"
-              placeholder="192.168.1.20 or 203.0.113.7:6679"
+              placeholder="192.168.1.20 (LAN) or https://…trycloudflare.com"
               value={addr}
               onChange={(e) => setAddr(e.target.value)}
             />
@@ -246,12 +282,12 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
           </div>
           <div className="team-addr-line">
             {s.visibility === "public" ? (
-              publicAddr ? (
-                <span className="team-addr" title="Your public address — click to copy" onClick={() => copy(publicAddr, "Address")}>
-                  {publicAddr}
+              tunnelUrl ? (
+                <span className="team-addr" title="Your public link — click to copy" onClick={() => copy(tunnelUrl, "Link")}>
+                  {tunnelUrl}
                 </span>
               ) : (
-                <span>public IP lookup failed — teammates need your public address and port {s.port}</span>
+                <span>{tunnel.message ?? "Bringing up the public link…"}</span>
               )
             ) : localAddr ? (
               <span className="team-addr" title="Your LAN address — click to copy" onClick={() => copy(localAddr, "Address")}>
@@ -327,9 +363,7 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
             <div className="team-empty">
               Nobody else yet
               {s.role === "host" && s.code
-                ? ` — share ${
-                    (s.visibility === "public" ? publicAddr : localAddr) ?? `port ${s.port}`
-                  } and code ${prettyCode(s.code)}.`
+                ? ` — share ${shareAddr ?? `port ${s.port}`} and code ${prettyCode(s.code)}.`
                 : "."}
             </div>
           )}

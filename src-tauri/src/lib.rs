@@ -8,8 +8,8 @@ mod portal;
 mod pty;
 mod punch;
 mod tunnel;
-mod qstream;
 mod relay;
+mod wsbridge;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager};
@@ -22,7 +22,10 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         "Canopy",
         true,
         &[
-            &PredefinedMenuItem::about(app, None, None)?,
+            // Custom About (not PredefinedMenuItem::about): the native panel
+            // can't carry the Terms/Privacy/Support links we show, so this
+            // emits a "menu" event the frontend answers with its own dialog.
+            &MenuItem::with_id(app, "about", "About Canopy", true, None::<&str>)?,
             &MenuItem::with_id(app, "check-updates", "Check for Updates…", true, None::<&str>)?,
             &MenuItem::with_id(app, "install-cli", "Install 'canopy' Command…", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
@@ -111,7 +114,11 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         app,
         "Help",
         true,
-        &[&MenuItem::with_id(app, "help", "Canopy Help", true, Some("CmdOrCtrl+Shift+H"))?],
+        &[
+            &MenuItem::with_id(app, "help", "Canopy Help", true, Some("CmdOrCtrl+Shift+H"))?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "support", "Support Us", true, None::<&str>)?,
+        ],
     )?;
     Menu::with_items(app, &[&app_menu, &file, &edit, &go, &tabs, &window, &help])
 }
@@ -128,6 +135,13 @@ fn js_log(level: String, message: String) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Install the ring crypto provider process-wide so rustls has a default —
+    // the team relay's internet path dials wss:// through a tunnel via
+    // tokio-tungstenite, whose rustls connector builds its config from the
+    // process-default provider and would otherwise panic on first connect.
+    // Idempotent: an Err just means it was already set.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let builder = tauri::Builder::default();
     // Must be first: a second `canopy <dir>` invocation forwards its argv
     // here and exits, instead of starting an app that would fight this one
