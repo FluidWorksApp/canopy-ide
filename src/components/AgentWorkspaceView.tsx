@@ -10,7 +10,17 @@ import * as ipc from "../ipc";
 import type { Notify } from "../types";
 import { splitPatch } from "./PrView";
 import { STATE_META, lastHumanPrompt } from "./AgentsPanel";
-import { AgentIcon, GitBranchIcon } from "./icons";
+import { AgentIcon, GitBranchIcon, RestartIcon } from "./icons";
+import { sessionCost } from "../pricing";
+
+// Compact number formats for the header stats strip — matched to the status
+// tray so the same session reads the same everywhere.
+const fmtTokens = (n: number) =>
+  n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
+const fmtCost = (n: number) => (n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`);
+/** Tokens Canopy sent the model — fresh input plus both cache legs. */
+const sentTokens = (u: ipc.AgentSessionUsage) =>
+  u.input_tokens + u.cache_read_tokens + u.cache_creation_tokens;
 
 interface AgentWorkspaceViewProps {
   /** Repo the agent's cwd resolved to; null renders the digest-only view. */
@@ -25,16 +35,16 @@ interface AgentWorkspaceViewProps {
   sessionId?: string;
   /** The hook digest, when there is one: last prompt, state, reported files. */
   digest?: ipc.SessionDigest;
-  /** Live terminal hosting this session, when there is one. */
-  ptyId?: number;
   onOpenCommit: (
     repo: string,
     commit: { hash: string; short: string; subject: string },
   ) => void;
   onOpenPr: (repo: string, pr: ipc.PrInfo) => void;
-  onJumpToPty?: (ptyId: number) => void;
   onOpenTerminal: (cwd: string, label: string) => void;
   onNotice: Notify;
+  /** When set, the header shows a close button — the overlay is the single
+   *  banner. The standalone agent tab omits it (the tab closes itself). */
+  onClose?: () => void;
 }
 
 type Pane = "edits" | "uncommitted" | "diff";
@@ -98,12 +108,11 @@ export function AgentWorkspaceView({
   cwd,
   sessionId,
   digest,
-  ptyId,
   onOpenCommit,
   onOpenPr,
-  onJumpToPty,
   onOpenTerminal,
   onNotice,
+  onClose,
 }: AgentWorkspaceViewProps) {
   const [ws, setWs] = useState<ipc.AgentWorkspace | null>(null);
   const [wsErr, setWsErr] = useState<string | null>(null);
@@ -113,11 +122,35 @@ export function AgentWorkspaceView({
   const [remote, setRemote] = useState("");
   // undefined = still looking, null = looked and none.
   const [pr, setPr] = useState<ipc.PrInfo | null | undefined>(undefined);
-  const [tick, setTick] = useState(0);
   // The per-agent change journal: what THIS agent changed, attributed at hunk
   // granularity even on a shared checkout. Empty for a hookless/pre-journal
   // session, in which case only the tree view below has anything to show.
   const [edits, setEdits] = useState<ipc.AgentEdit[]>([]);
+  // Manual refresh: the small icon in the header bumps this to re-read all.
+  const [tick, setTick] = useState(0);
+  // This agent's token/cost usage, read from its own CLI store (Claude, Codex
+  // and omp today) — independent of hooks, so it shows even for a hookless
+  // codex. Matched by session id when we have one, else the most recent
+  // session in this cwd.
+  const [usage, setUsage] = useState<ipc.AgentSessionUsage | null>(null);
+  useEffect(() => {
+    let live = true;
+    void ipc
+      .agentUsage()
+      .then((rows) => {
+        if (!live) return;
+        const mine = rows.filter((u) => u.agent === agent && u.supported);
+        const byId = sessionId ? mine.find((u) => u.session_id === sessionId) : undefined;
+        const inCwd = mine
+          .filter((u) => u.cwd && (u.cwd === cwd || cwd.startsWith(u.cwd) || u.cwd.startsWith(cwd)))
+          .sort((a, b) => b.updated - a.updated);
+        setUsage(byId ?? inCwd[0] ?? null);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [agent, cwd, sessionId, digest?.updated, tick]);
 
   useEffect(() => {
     let live = true;
@@ -213,6 +246,7 @@ export function AgentWorkspaceView({
 
   const st = ws?.state ? STATE_META[ws.state] : digest?.state ? STATE_META[digest.state] : undefined;
   const task = lastHumanPrompt(digest?.prompts);
+  const cost = usage ? sessionCost(usage) : null;
   const touched = ws?.touched?.length ? ws.touched : (digest?.files ?? []);
   const branchable = !!ws?.branch && !ws.detached && !ws.on_base;
   const files = patch?.patch ? splitPatch(patch.patch) : [];
@@ -220,16 +254,21 @@ export function AgentWorkspaceView({
   // The set of paths this agent is known to have touched — from its own edit
   // journal and its reported-editing list. Matched by basename too, since a
   // journal path (repo-relative) and a diff path can differ by a worktree
-  // prefix. Used to split the shared-checkout tree diff into "this agent's" and
-  // "everyone else's".
+  // prefix.
   const agentPaths = new Set<string>([...edits.map((e) => e.path), ...touched]);
   const agentBasenames = new Set<string>([...agentPaths].map(basename));
   const isAgentFile = (p: string) => agentPaths.has(p) || agentBasenames.has(basename(p));
-  const mine = files.filter((f) => isAgentFile(f.path));
-  const others = files.filter((f) => !isAgentFile(f.path));
-  // Whether we can attribute at all: with a journal or a reported list we can
-  // separate this agent's work; without either it's an undifferentiated tree.
-  const canAttribute = agentPaths.size > 0;
+  // This workspace shows ONLY this agent's work, never the rest of the tree.
+  // On an isolated worktree every change in the diff is this agent's by
+  // construction; on a shared checkout we can claim only the files it actually
+  // journaled or reported — the others belong to whoever else shares the
+  // checkout and are deliberately not shown here.
+  const isolated = !!ws?.isolated;
+  const mine = isolated ? files : files.filter((f) => isAgentFile(f.path));
+  // Whether we can attribute at all: an isolated worktree, a journal, or a
+  // reported list. Without any of these a shared-checkout diff is an
+  // undifferentiated tree we won't pass off as this agent's.
+  const canAttribute = isolated || agentPaths.size > 0;
 
   // Journal edits grouped by file, newest file last, preserving edit order.
   const editsByFile: { path: string; items: ipc.AgentEdit[] }[] = [];
@@ -258,9 +297,6 @@ export function AgentWorkspaceView({
     window.setTimeout(() => setFlashPath((p) => (p === path ? null : p)), 1100);
   };
   const [showMoreTouched, setShowMoreTouched] = useState(false);
-  // On a shared checkout the tree diff also carries other agents' work; it's
-  // folded away by default so this agent's own files lead.
-  const [showOthers, setShowOthers] = useState(false);
 
   const renderFile = (f: { path: string; patch: string }) => (
     <div
@@ -290,22 +326,22 @@ export function AgentWorkspaceView({
 
   return (
     <div className="ticket-view">
-      <div className="ticket-view-head">
+      {/* One banner for the whole workspace: identity, branch, where it's
+          working, and the window controls — no second header repeating the
+          agent name below it. The dropped chips (±uncommitted, ↑vs base) were
+          whole-checkout/whole-branch counts, not this agent's; the commit list
+          and the scoped diff below carry the real numbers. */}
+      <div className="ticket-view-head aw-banner">
         <div className="ticket-view-title">
           {st && <span className={`agent-state-dot ${st.cls}`} title={st.label} />}
-          <AgentIcon id={agent} size={15} className="ticket-view-mark" />
-          <span>{agent}</span>
+          <AgentIcon id={agent} size={16} className="ticket-view-mark" />
+          <span className="aw-agent">{agent}</span>
           {ws?.branch && (
             <span className="agent-branch" title={ws.detached ? "detached HEAD" : `On branch ${ws.branch}`}>
               <GitBranchIcon size={12} /> {ws.branch}
               {ws.detached ? " (detached)" : ""}
             </span>
           )}
-        </div>
-        {task && <div className="agent-task">{task}</div>}
-        <div className="ticket-view-meta">
-          {ws && ws.dirty > 0 && <span className="loose-dirty">±{ws.dirty} uncommitted</span>}
-          {ws && ws.ahead > 0 && <span className="loose-ahead">↑{ws.ahead} vs base</span>}
           {ws?.merged && <span className="loose-chip">merged</span>}
           {ws?.workdir && (
             <span
@@ -317,23 +353,76 @@ export function AgentWorkspaceView({
             </span>
           )}
           <span className="status-spacer" />
-          {ptyId != null && onJumpToPty && (
-            <button className="btn" onClick={() => onJumpToPty(ptyId)}>
-              Go to terminal
-            </button>
-          )}
-          {ws?.workdir && (
+          {/* Only for an isolated worktree: that directory isn't a tab anywhere
+              else, so a scratch shell pointed at it is the one thing closing
+              this overlay can't give you. On a shared checkout it's the repo
+              dir you already have shells in — no value, so it's omitted. */}
+          {ws?.isolated && ws.workdir && (
             <button
               className="btn"
+              title={`Open a shell in the worktree: ${ws.workdir}`}
               onClick={() => onOpenTerminal(ws.workdir as string, ws.branch ?? agent)}
             >
-              Open terminal here
+              New shell in worktree
             </button>
           )}
-          <button className="btn" onClick={() => setTick((t) => t + 1)}>
-            Refresh
+          <button
+            className="btn-icon aw-refresh"
+            title="Refresh — re-read this agent's changes"
+            aria-label="Refresh"
+            onClick={() => setTick((t) => t + 1)}
+          >
+            <RestartIcon size={14} />
           </button>
+          {onClose && (
+            <button
+              className="btn-icon workspace-overlay-close"
+              title="Close (Esc)"
+              aria-label="Close agent workspace"
+              onClick={onClose}
+            >
+              ✕
+            </button>
+          )}
         </div>
+        {task && <div className="agent-task">{task}</div>}
+        {/* What this agent is costing and doing — read from its own CLI store
+            (works for a hookless codex too); the state chip only appears when a
+            hook reports it. */}
+        {(usage || st) && (
+          <div className="aw-stats">
+            {st && (
+              <span className={`aw-stat-state ${st.cls}`} title={`Session state: ${st.label}`}>
+                {st.label}
+              </span>
+            )}
+            {usage?.model && (
+              <span className="aw-stat aw-stat-model" title="Model">
+                {usage.model}
+              </span>
+            )}
+            {usage && sentTokens(usage) > 0 && (
+              <>
+                <span className="aw-stat" title="Tokens sent (input + cache)">
+                  ↑{fmtTokens(sentTokens(usage))}
+                </span>
+                <span className="aw-stat" title="Tokens received (output)">
+                  ↓{fmtTokens(usage.output_tokens)}
+                </span>
+              </>
+            )}
+            {cost != null && (
+              <span className="aw-stat" title="Cost — estimated unless the CLI reports its own">
+                {fmtCost(cost)}
+              </span>
+            )}
+            {usage && usage.turns > 0 && (
+              <span className="aw-stat" title="Assistant turns">
+                {usage.turns} {usage.turns === 1 ? "turn" : "turns"}
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
       {/* States the git join can't paper over, said plainly instead of
@@ -571,45 +660,28 @@ export function AgentWorkspaceView({
             ))
           ))}
 
+        {/* Only this agent's own files — never the rest of a shared checkout.
+            When none can be attributed, we say so plainly rather than pass the
+            whole tree off as this agent's work. */}
         {pane !== "edits" &&
           (!ws ? (
             !wsErr && repo && <div className="tree-empty">Loading workspace…</div>
           ) : !patch ? (
             pane && <div className="tree-empty">Loading diff…</div>
-          ) : files.length === 0 ? (
+          ) : mine.length === 0 ? (
             <div className="tree-empty">
-              {pane === "uncommitted"
-                ? "No uncommitted changes in this workspace."
-                : "No differences from the base branch."}
+              No changes by this agent{pane === "uncommitted" ? " yet" : ""}.
+              {!canAttribute && (
+                <div className="aw-note">
+                  It ran on a shared checkout without reporting its edits, so its
+                  changes can't be told apart from the rest of the tree. Run it
+                  in an isolated worktree, or with a CLI that reports edits, to
+                  see them here.
+                </div>
+              )}
             </div>
           ) : (
-            <>
-              {/* On a shared checkout the diff isn't per-agent, so lead with the
-                  files this agent is known to have touched and fold the rest
-                  away. When we can't attribute at all (no journal, no reported
-                  list), everything is just "the diff". */}
-              {(canAttribute ? mine : files).map(renderFile)}
-              {canAttribute && others.length > 0 && (
-                <div className="aw-others">
-                  <button
-                    className="ticket-state-head aw-others-head"
-                    onClick={() => setShowOthers((v) => !v)}
-                    title="Changes in this shared checkout that this agent didn't report making"
-                  >
-                    Other changes in this checkout
-                    <span className="badge">{others.length}</span>
-                    <span className="aw-others-caret">{showOthers ? "▴" : "▾"}</span>
-                  </button>
-                  {showOthers && others.map(renderFile)}
-                </div>
-              )}
-              {canAttribute && mine.length === 0 && others.length > 0 && !showOthers && (
-                <div className="tree-empty">
-                  None of the uncommitted files match what this agent reported —
-                  its changes may already be committed, or it worked elsewhere.
-                </div>
-              )}
-            </>
+            mine.map(renderFile)
           ))}
         {patch?.truncated && pane !== "edits" && (
           <div className="tree-empty">
