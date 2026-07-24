@@ -1,3 +1,4 @@
+mod agentid;
 mod agents;
 mod cli;
 mod context;

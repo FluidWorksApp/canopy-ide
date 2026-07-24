@@ -295,6 +295,21 @@ export interface ProcInfo {
   cpu: number;
   mem_bytes: number;
 }
+/** What a terminal is running, resolved from the process the pty has in the
+ *  foreground — evidence, not a verdict. `bin` is the invoked name with any
+ *  language runtime already seen through (`python train.py` is `train.py`, not
+ *  `Python`); `pkg` is the package that ships it (`npm:@anthropic-ai/claude-code`,
+ *  `brew:omp`, `py:aider`), which is what survives a renamed or wrapped binary;
+ *  `path` is the canonical executable, stable enough to key a learned mapping
+ *  on. Turning this into an agent id is agentIdentity.ts's job. */
+export interface AgentHint {
+  bin: string;
+  pkg: string | null;
+  path: string | null;
+  /** The foreground app holds the tty in raw mode — something interactive is
+   *  in control, not a script printing lines. */
+  interactive: boolean;
+}
 export interface SessionStats {
   id: number;
   title: string;
@@ -304,6 +319,8 @@ export interface SessionStats {
   procs: ProcInfo[];
   /** TCP ports anything in this session is listening on, ascending. */
   ports: number[];
+  /** Absent when the terminal is an idle shell. */
+  agent_hint: AgentHint | null;
 }
 export const onPtyStats = (cb: (stats: SessionStats[]) => void): Promise<UnlistenFn> =>
   listen<SessionStats[]>("pty:stats", (event) => cb(event.payload));

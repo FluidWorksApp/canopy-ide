@@ -15,7 +15,6 @@ import { SharedProjectView } from "./SharedProjectView";
 import type { AgentCli, Project } from "../projects";
 import {
   AGENT_CLIS,
-  AGENT_PATTERN,
   SHELL_PATTERN,
   checkCliUpdates,
   checkInstalledClis,
@@ -68,6 +67,7 @@ import { FileView } from "./FileView";
 import { ChangesPanel, type ChangeGroup } from "./ChangesPanel";
 import { useEscape } from "../useEscape";
 import { useTabDrag, applyOrder } from "../tabDrag";
+import { agentIdForCommand, identifyAgent } from "../agentIdentity";
 import { AgentsPanel, digestBySurface } from "./AgentsPanel";
 import { StatusBar } from "./StatusBar";
 import { Palette, type PaletteMode } from "./Palette";
@@ -574,7 +574,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       );
       const mine = all.filter((s) => ids.has(s.id));
       for (const s of mine) {
-        const hasAgent = s.procs.some((p) => AGENT_PATTERN.test(p.name));
+        const hasAgent = !!identifyAgent(s.agent_hint);
         if (hasAgent) {
           agentLife.current.set(s.id, 0);
         } else if (agentLife.current.has(s.id)) {
@@ -582,9 +582,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           // work — a server, a build, any non-shell/non-agent process still
           // running — it's a working shell now, not a spent agent shell:
           // stop tracking it and never auto-close it out from under them.
-          const hasRealWork = s.procs.some(
-            (p) => !SHELL_PATTERN.test(p.name) && !AGENT_PATTERN.test(p.name),
-          );
+          const hasRealWork = s.procs.some((p) => !SHELL_PATTERN.test(p.name));
           if (hasRealWork) {
             agentLife.current.delete(s.id);
           } else {
@@ -596,7 +594,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               );
               // A launched agent tab (command matches) or a run stays put; only
               // an idle plain shell that hosted a now-exited agent gets closed.
-              if (tab && !tab.run && !AGENT_PATTERN.test(tab.command ?? "")) {
+              if (tab && !tab.run && !agentIdForCommand(tab.command)) {
                 closeTabRef.current(tab.id);
               }
             } else {
@@ -1073,12 +1071,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // A terminal running `claude` or `omp` is an agent, not a shell — listing it
   // under "Terminals" was accurate about the mechanism and wrong about the
   // thing. Split by what the command actually starts.
-  const rememberedAgents = remembered.filter((t) =>
-    AGENT_CLIS.some((c) => (t.command ?? "").startsWith(c.bin)),
-  );
-  const rememberedShells = remembered.filter(
-    (t) => !AGENT_CLIS.some((c) => (t.command ?? "").startsWith(c.bin)),
-  );
+  const rememberedAgents = remembered.filter((t) => agentIdForCommand(t.command));
+  const rememberedShells = remembered.filter((t) => !agentIdForCommand(t.command));
   // An agent terminal whose directory already has a restorable session is
   // redundant — that row restores the same work WITH its history, so offering
   // "start it fresh" beside it is just a worse duplicate.
@@ -2097,11 +2091,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     },
     [addTerminal],
   );
-  const runningAgents = projectStats.flatMap((s) =>
-    s.procs
-      .filter((p) => AGENT_PATTERN.test(p.name))
-      .map((p) => ({ name: p.name, cpu: p.cpu })),
-  );
+  const runningAgents = projectStats.flatMap((s) => {
+    const agent = identifyAgent(s.agent_hint);
+    return agent ? [{ name: agent.label, cpu: s.total_cpu }] : [];
+  });
   const changedPaths = new Set(changeGroups.flatMap((g) => g.files.map((f) => f.abs)));
   const changeCount = changeGroups.reduce((n, g) => n + g.files.length, 0);
   // Files teammates are editing live in a project we're sharing — no git
@@ -2146,9 +2139,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         (t): t is TermSubTab => t.type === "terminal",
       );
       const agentPtyIds = new Set(
-        stats
-          .filter((s) => s.procs.some((p) => AGENT_PATTERN.test(p.name)))
-          .map((s) => s.id),
+        stats.filter((s) => identifyAgent(s.agent_hint)).map((s) => s.id),
       );
       const target =
         // The event's own pty stamp is an identity, not a guess — prefer it.
@@ -2399,14 +2390,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // long-running commands are demoted to their own right-hand rails (below);
   // reference docs (files, PRs, tickets) form a quieter group after the agents.
   const agentPtyIds = new Set(
-    projectStats
-      .filter((s) => s.procs.some((p) => AGENT_PATTERN.test(p.name)))
-      .map((s) => s.id),
+    projectStats.filter((s) => identifyAgent(s.agent_hint)).map((s) => s.id),
   );
   const isAgentTab = (t: SubTab): t is TermSubTab =>
     t.type === "terminal" &&
-    (AGENT_PATTERN.test(t.command ?? "") ||
-      (t.ptyId != null && agentPtyIds.has(t.ptyId)));
+    (!!agentIdForCommand(t.command) || (t.ptyId != null && agentPtyIds.has(t.ptyId)));
   // A single dot carries an agent tab's whole state: orange sharp-pulse when it
   // wants attention (unread — set by OSC or the went-quiet heuristic), gray
   // soft-pulse while its work burns CPU, gray steady when idle.
