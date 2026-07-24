@@ -97,7 +97,9 @@ async fn capture(
                     let _ = tx.send(png.ok_or_else(|| "could not encode the snapshot".to_string()));
                 },
             );
-            unsafe { view.takeSnapshotWithConfiguration_completionHandler(Some(&config), &handler) };
+            unsafe {
+                view.takeSnapshotWithConfiguration_completionHandler(Some(&config), &handler)
+            };
         })
         .map_err(|e| format!("cannot reach the webview: {e}"))?;
 
@@ -122,7 +124,9 @@ async fn capture(
     _height: f64,
     _max_width: f64,
 ) -> Result<String, String> {
-    Err("Screenshots of the preview are only available on macOS so far — use \
+    Err(
+        "Screenshots of the preview are only available on macOS so far — use \
          canopy_browser_snapshot for the page's structure and text."
-        .into())
+            .into(),
+    )
 }

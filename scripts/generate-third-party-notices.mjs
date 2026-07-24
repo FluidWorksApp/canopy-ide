@@ -342,9 +342,30 @@ function collectNpm() {
     else byIdentity.set(key, c);
   }
   return [...byIdentity.values()].map((c) => {
-    const copyrights = c.paths.map((p) => copyrightsFor(join(ROOT, p))).find((r) => r.length) ?? [];
+    const dirs = [...c.paths.map((p) => join(ROOT, p)), pnpmDirFor(c.name, c.version)].filter(Boolean);
+    const copyrights = dirs.map(copyrightsFor).find((r) => r.length) ?? [];
     return { ...c, copyrights: copyrights.length ? copyrights : attributionFallback(c.author) };
   });
+}
+
+// package-lock.json describes npm's nested layout; a pnpm install puts the same
+// package somewhere else entirely, so every nested path in the lockfile misses
+// on disk and the package silently loses its attribution. Look in the pnpm store
+// as a last resort — after the lockfile paths, so an npm tree renders identically
+// and `--check` in CI stays stable.
+function pnpmDirFor(name, version) {
+  const store = join(ROOT, "node_modules", ".pnpm");
+  if (!existsSync(store)) return null;
+  // Store dirs are "<name with / as +>@<version>", plus a "_<peer hash>" suffix
+  // when the same version is installed against different peers.
+  const prefix = `${name.replaceAll("/", "+")}@${version}`;
+  let match;
+  try {
+    match = readdirSync(store).find((e) => e === prefix || e.startsWith(`${prefix}_`));
+  } catch {
+    return null;
+  }
+  return match ? join(store, match, "node_modules", name) : null;
 }
 
 // ---------------------------------------------------------------------------
