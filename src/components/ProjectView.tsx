@@ -1177,14 +1177,23 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           return;
         }
         const path = `${repo}-wt-pr-${pr.number}`;
-        await ipc.gitWorktreeAdd(repo, path, pr.branch, false);
+        try {
+          await ipc.gitWorktreeAdd(repo, path, pr.branch, false);
+        } catch {
+          // The branch usually just isn't in this clone yet (a PR you haven't
+          // fetched). Pull refs and retry once — `git worktree add` then DWIMs
+          // a local branch from origin/<branch>. Only a fork PR whose branch
+          // isn't on origin still fails, and that falls through to the hint.
+          await ipc.gitFetch(repo).catch(() => {});
+          await ipc.gitWorktreeAdd(repo, path, pr.branch, false);
+        }
         await ipc.workspaceAdd(path).catch(() => {});
         const id = addTerminal(path, start.command, title, cli.icon);
         if (id) setTimeout(() => seed(id), 2500);
       } catch (err) {
-        // The usual cause is a fork PR whose branch isn't on your remote — the
-        // one case git can't check out on its own. "Checkout" (gh pr checkout)
-        // fetches it first, after which it reuses that worktree.
+        // A fork PR whose branch isn't on your remote — the one case git can't
+        // check out even after a fetch. "Checkout" (gh pr checkout) fetches it
+        // first, after which it reuses that worktree.
         onNotice(
           `Couldn't start ${noun} PR #${pr.number}: ${String(err)}. ` +
             `If it's from a fork, click Checkout first.`,
