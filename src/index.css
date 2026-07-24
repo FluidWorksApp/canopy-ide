@@ -1719,6 +1719,22 @@ body,
   opacity: 0.5;
 }
 
+/* Drag to reorder (project tabs and the strip alike). The tab in hand fades and
+   stops taking pointer hits, both to read as "in flight" and so the strip
+   underneath can be hit-tested for the tab it's passing over. */
+.tab-dragging {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* While a tab is in flight the whole window says so, and nothing the pointer
+   sweeps across starts selecting text. */
+body.dragging-tab,
+body.dragging-tab * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
 /* Agents first-class in the strip: groups render agents | shells | docs, a
    divider between non-empty groups, agent tabs tinted with a live dot, and
    file/PR tabs visibly quieter — workload on the left, reference on the right. */

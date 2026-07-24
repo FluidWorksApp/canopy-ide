@@ -67,6 +67,7 @@ import { FileTree } from "./FileTree";
 import { FileView } from "./FileView";
 import { ChangesPanel, type ChangeGroup } from "./ChangesPanel";
 import { useEscape } from "../useEscape";
+import { useTabDrag, applyOrder } from "../tabDrag";
 import { AgentsPanel, digestBySurface } from "./AgentsPanel";
 import { StatusBar } from "./StatusBar";
 import { Palette, type PaletteMode } from "./Palette";
@@ -2434,6 +2435,23 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     stripTabs.filter(isAgentTab),
     stripTabs.filter((t) => t.type !== "terminal"),
   ];
+  // Drag to reorder, one strip per group: agents stay left of docs however you
+  // shuffle them, and a tab dropped outside its own group simply snaps back.
+  // The order lives in `tabs` itself, so the panes (which are all mounted)
+  // follow along without anything else having to know about the drag.
+  const reorderGroup = useCallback(
+    (ids: string[]) => setTabs((prev) => applyOrder(prev, (t) => t.id, ids)),
+    [],
+  );
+  const agentDrag = useTabDrag(
+    tabGroups[0].map((t) => t.id),
+    reorderGroup,
+  );
+  const docDrag = useTabDrag(
+    tabGroups[1].map((t) => t.id),
+    reorderGroup,
+  );
+  const groupDrags = [agentDrag, docDrag];
   // Shells and runs each get a compact rail; Rail collapses to a dropdown at 2+.
   const shellChips: RailChip[] = shellTabs.map((tab) => ({
     id: tab.id,
@@ -2968,7 +2986,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                   tab.type === "chat" && tab.unread ? "tab-unread" : ""
                 } ${tab.type !== "terminal" ? "tab-doc" : isAgentTab(tab) ? "tab-agent" : ""} ${
                   tab.id === flashTabId ? "tab-flash" : ""
-                }`}
+                } ${tab.id === groupDrags[gi].dragId ? "tab-dragging" : ""}`}
+                {...groupDrags[gi].itemProps(tab.id)}
                 onClick={(e) => {
                   // e.detail is the click count and fires even though app chrome
                   // is user-select:none — unlike dblclick, which WebKit drops on
