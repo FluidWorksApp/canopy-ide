@@ -225,19 +225,22 @@ export function TasksPanel({
             value={draft.brief}
             onChange={(e) => setDraft({ ...draft, brief: e.target.value })}
           />
-          <input
-            className="agent-query-input"
-            placeholder="Context hint shown at run time (optional)"
-            value={draft.placeholder}
-            onChange={(e) => setDraft({ ...draft, placeholder: e.target.value })}
-          />
-          <input
-            className="agent-query-input"
-            placeholder="Icon — one character (optional)"
-            maxLength={2}
-            value={draft.icon}
-            onChange={(e) => setDraft({ ...draft, icon: e.target.value })}
-          />
+          <div className="task-form-row">
+            <input
+              className="agent-query-input task-form-icon"
+              placeholder="◆"
+              title="Icon — one character (optional)"
+              maxLength={2}
+              value={draft.icon}
+              onChange={(e) => setDraft({ ...draft, icon: e.target.value })}
+            />
+            <input
+              className="agent-query-input"
+              placeholder="Context hint shown at run time (optional)"
+              value={draft.placeholder}
+              onChange={(e) => setDraft({ ...draft, placeholder: e.target.value })}
+            />
+          </div>
           <div className="confirm-actions">
             <button className="btn" onClick={() => setDraft(null)}>
               Cancel
