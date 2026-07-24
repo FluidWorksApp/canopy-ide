@@ -14,6 +14,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
 
 #[derive(Default)]
@@ -141,21 +142,6 @@ pub fn tunnel_start(
         return Err(format!("unknown provider {provider}"));
     };
     let resolved = resolve_command(bin);
-    let mut cmd = Command::new(&resolved);
-    cmd.args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for (k, v) in &envs {
-        cmd.env(k, v);
-    }
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Couldn't start {bin}: {e}. Is it installed?"))?;
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    *state.child.lock().unwrap() = Some(child);
-
     let starting = TunnelState {
         running: true,
         provider: Some(provider.clone()),
@@ -163,9 +149,71 @@ pub fn tunnel_start(
         message: Some("Starting…".into()),
     };
     set_and_emit(&app, &state.last, starting.clone());
+    launch(
+        app,
+        state.child.clone(),
+        state.last.clone(),
+        provider,
+        resolved,
+        args,
+        envs,
+        true,
+    );
+    Ok(starting)
+}
 
-    // Shared across both stream readers.
-    let found = Arc::new(AtomicBool::new(false));
+/// Spawn the provider process and scan its output for the public URL and, for
+/// cloudflare, the edge-registration line. Recurses once (with http2) as the
+/// QUIC fallback. Takes cloned `Arc`s rather than `State` so it can move them
+/// into the reader/watchdog threads and call itself.
+#[allow(clippy::too_many_arguments)]
+fn launch(
+    app: AppHandle,
+    child_slot: Arc<Mutex<Option<Child>>>,
+    last: Arc<Mutex<TunnelState>>,
+    provider: String,
+    resolved_bin: String,
+    args: Vec<String>,
+    envs: Vec<(String, String)>,
+    allow_http2_retry: bool,
+) {
+    let mut cmd = Command::new(&resolved_bin);
+    cmd.args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (k, v) in &envs {
+        cmd.env(k, v);
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            set_and_emit(
+                &app,
+                &last,
+                TunnelState {
+                    running: false,
+                    provider: Some(provider.clone()),
+                    url: None,
+                    message: Some(format!("Couldn't start {resolved_bin}: {e}. Is it installed?")),
+                },
+            );
+            return;
+        }
+    };
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    *child_slot.lock().unwrap() = Some(child);
+
+    let is_cf = provider == "cloudflare";
+    // The URL, once seen; the edge-registration, once confirmed. For cloudflare
+    // these are distinct events (the URL prints ~1s before the tunnel registers,
+    // and cloudflared itself warns the link "may take some time to be
+    // reachable") — so we only hand over a *ready* URL after registration, never
+    // the premature one that NXDOMAINs when clicked. Other providers print their
+    // URL only once it's live, so URL == registered for them.
+    let url_slot = Arc::new(Mutex::new(Option::<String>::None));
+    let registered = Arc::new(AtomicBool::new(false));
     let open = Arc::new(AtomicUsize::new(2));
     let tail = Arc::new(Mutex::new(Vec::<String>::new()));
 
@@ -176,9 +224,10 @@ pub fn tunnel_start(
         };
         let app = app.clone();
         let provider = provider.clone();
-        let last = state.last.clone();
-        let child_slot = state.child.clone();
-        let found = found.clone();
+        let last = last.clone();
+        let child_slot = child_slot.clone();
+        let url_slot = url_slot.clone();
+        let registered = registered.clone();
         let open = open.clone();
         let tail = tail.clone();
         thread::spawn(move || {
@@ -192,8 +241,44 @@ pub fn tunnel_start(
                         t.drain(0..overflow);
                     }
                 }
-                if let Some(url) = extract_url(&provider, &line) {
-                    if !found.swap(true, Ordering::SeqCst) {
+                if url_slot.lock().unwrap().is_none() {
+                    if let Some(url) = extract_url(&provider, &line) {
+                        *url_slot.lock().unwrap() = Some(url.clone());
+                        if is_cf {
+                            // Hold it as "connecting" until the edge registers.
+                            set_and_emit(
+                                &app,
+                                &last,
+                                TunnelState {
+                                    running: true,
+                                    provider: Some(provider.clone()),
+                                    url: None,
+                                    message: Some(format!(
+                                        "Link created — connecting to Cloudflare's edge (a few seconds)…\n{url}"
+                                    )),
+                                },
+                            );
+                        } else {
+                            registered.store(true, Ordering::SeqCst);
+                            set_and_emit(
+                                &app,
+                                &last,
+                                TunnelState {
+                                    running: true,
+                                    provider: Some(provider.clone()),
+                                    url: Some(url),
+                                    message: None,
+                                },
+                            );
+                        }
+                    }
+                }
+                // The tunnel is actually up now — publish the URL as ready.
+                if is_cf
+                    && line.contains("Registered tunnel connection")
+                    && !registered.swap(true, Ordering::SeqCst)
+                {
+                    if let Some(url) = url_slot.lock().unwrap().clone() {
                         set_and_emit(
                             &app,
                             &last,
@@ -207,9 +292,9 @@ pub fn tunnel_start(
                     }
                 }
             }
-            // This stream closed (usually the process exiting).
-            if open.fetch_sub(1, Ordering::SeqCst) == 1 && !found.load(Ordering::SeqCst) {
-                // Both streams done and no URL — the provider failed to start.
+            // This stream closed (usually the process exiting). No URL ever ⇒ it
+            // failed to start; surface the tail so the reason is visible.
+            if open.fetch_sub(1, Ordering::SeqCst) == 1 && url_slot.lock().unwrap().is_none() {
                 let msg = {
                     let t = tail.lock().unwrap();
                     let joined = t.join("\n");
@@ -219,7 +304,6 @@ pub fn tunnel_start(
                         joined
                     }
                 };
-                // Reap the dead child.
                 if let Some(mut c) = child_slot.lock().unwrap().take() {
                     let _ = c.wait();
                 }
@@ -239,7 +323,45 @@ pub fn tunnel_start(
     spawn_reader(stdout.map(|s| Box::new(s) as Box<dyn Read + Send>));
     spawn_reader(stderr.map(|s| Box::new(s) as Box<dyn Read + Send>));
 
-    Ok(starting)
+    // QUIC watchdog. Quick tunnels default to QUIC (UDP :7844); a network that
+    // blocks it prints a URL that never registers and NXDOMAINs forever. If
+    // nothing registers within the window, retry once over http2 (TCP :443),
+    // which those networks allow. Only the first attempt gets a watchdog.
+    if is_cf && allow_http2_retry {
+        let app = app.clone();
+        let last = last.clone();
+        let child_slot = child_slot.clone();
+        let registered = registered.clone();
+        let provider = provider.clone();
+        let resolved_bin = resolved_bin.clone();
+        let mut retry_args = args.clone();
+        let retry_envs = envs.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(12));
+            if registered.load(Ordering::SeqCst) {
+                return;
+            }
+            if let Some(mut c) = child_slot.lock().unwrap().take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+            retry_args.push("--protocol".into());
+            retry_args.push("http2".into());
+            set_and_emit(
+                &app,
+                &last,
+                TunnelState {
+                    running: true,
+                    provider: Some(provider.clone()),
+                    url: None,
+                    message: Some(
+                        "Cloudflare's edge didn't answer over QUIC (UDP may be blocked) — retrying over http2…".into(),
+                    ),
+                },
+            );
+            launch(app, child_slot, last, provider, resolved_bin, retry_args, retry_envs, false);
+        });
+    }
 }
 
 #[tauri::command]
