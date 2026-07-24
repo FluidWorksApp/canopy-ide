@@ -335,9 +335,9 @@ async fn claims_post(
                 }
                 let conflict = claims.iter().find(|c| {
                     c.owner != req.owner
-                        && c.paths.iter().any(|held| {
-                            req.paths.iter().any(|want| paths_overlap(held, want))
-                        })
+                        && c.paths
+                            .iter()
+                            .any(|held| req.paths.iter().any(|want| paths_overlap(held, want)))
                 });
                 if let Some(c) = conflict {
                     return (
@@ -360,7 +360,12 @@ async fn claims_post(
                 });
                 format!("Claimed {} path(s).", req.paths.len())
             }
-            other => return (StatusCode::BAD_REQUEST, format!("unknown claim action: {other}")),
+            other => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("unknown claim action: {other}"),
+                )
+            }
         }
     };
     let _ = app.emit("agent:claims", ());
@@ -585,7 +590,8 @@ async fn action(
             let Some(summary) = act.summary.as_deref().filter(|s| !s.trim().is_empty()) else {
                 return (
                     StatusCode::BAD_REQUEST,
-                    "job_done needs a summary — one sentence on what happened or what you need".into(),
+                    "job_done needs a summary — one sentence on what happened or what you need"
+                        .into(),
                 );
             };
             // A sidecar left over from a previous app launch can hold a pty id
@@ -877,10 +883,7 @@ async fn ui_op(
         "diagnostics" | "tickets" | "reviews" => UI_OP_TIMEOUT,
         "references" | "definition" => {
             if op.path.is_none() {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    format!("{} needs a path", op.op),
-                );
+                return (StatusCode::BAD_REQUEST, format!("{} needs a path", op.op));
             }
             if op.symbol.is_none() && op.line.is_none() {
                 return (
@@ -975,18 +978,28 @@ async fn wait(
         return (StatusCode::UNAUTHORIZED, "bad token".into());
     }
     let ptys = app.state::<crate::pty::PtyManager>();
-    let read = |id: u32| ptys.scrollback_tail(id, MAX_OUTPUT_BYTES).map(|b| strip_ansi(&b));
+    let read = |id: u32| {
+        ptys.scrollback_tail(id, MAX_OUTPUT_BYTES)
+            .map(|b| strip_ansi(&b))
+    };
     let Some(initial) = read(p.server) else {
         return (
             StatusCode::NOT_FOUND,
-            format!("no running terminal with id {} — it may have exited", p.server),
+            format!(
+                "no running terminal with id {} — it may have exited",
+                p.server
+            ),
         );
     };
-    let until = p
-        .until
-        .clone()
-        .unwrap_or_else(|| if p.pattern.is_some() { "output".into() } else { "listening".into() });
-    let timeout = std::time::Duration::from_millis(p.timeout_ms.unwrap_or(60_000).clamp(1_000, 600_000));
+    let until = p.until.clone().unwrap_or_else(|| {
+        if p.pattern.is_some() {
+            "output".into()
+        } else {
+            "listening".into()
+        }
+    });
+    let timeout =
+        std::time::Duration::from_millis(p.timeout_ms.unwrap_or(60_000).clamp(1_000, 600_000));
     let idle_for = std::time::Duration::from_millis(p.idle_ms.unwrap_or(2_000).clamp(200, 60_000));
     let needle = p.pattern.as_deref().map(str::to_lowercase);
 
@@ -1449,7 +1462,10 @@ mod tests {
 
     #[test]
     fn tail_lines_returns_the_end_and_survives_short_input() {
-        let text = (1..=10).map(|n| n.to_string()).collect::<Vec<_>>().join("\n");
+        let text = (1..=10)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert_eq!(tail_lines(&text, 3), "8\n9\n10");
         assert_eq!(tail_lines("only", 5), "only");
         assert_eq!(tail_lines("", 5), "");
