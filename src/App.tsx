@@ -15,6 +15,7 @@ import {
 } from "./projects";
 import type { AgentEventEntry, NoticeKind, RelayHandle } from "./types";
 import { derivePending, pendingForRoots } from "./notifications";
+import { useTabDrag } from "./tabDrag";
 import { CollabManager, safeName } from "./collab";
 import { ProjectView } from "./components/ProjectView";
 import { ProjectDialog } from "./components/ProjectDialog";
@@ -924,6 +925,10 @@ export default function App() {
     unread,
   };
 
+  // Project tabs are draggable; their order is the workspace's own, so it
+  // persists with everything else in the workspace file.
+  const tabDrag = useTabDrag(ws.openIds, (openIds) => update({ openIds }));
+
   if (!loaded) return null;
 
   const openProjects = ws.openIds
@@ -947,7 +952,10 @@ export default function App() {
           {openProjects.map((p) => (
             <div
               key={p.id}
-              className={`project-tab ${p.id === ws.activeId ? "project-tab-active" : ""}`}
+              className={`project-tab ${p.id === ws.activeId ? "project-tab-active" : ""} ${
+                p.id === tabDrag.dragId ? "tab-dragging" : ""
+              }`}
+              {...tabDrag.itemProps(p.id)}
               onClick={() => update({ activeId: p.id })}
               title={p.components.map((c) => c.path).join("\n")}
             >
