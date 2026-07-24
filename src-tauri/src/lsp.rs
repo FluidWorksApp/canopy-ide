@@ -5,6 +5,7 @@
 //!
 //! Adding a language = one more `lsp_start` call with a different command.
 
+use crate::winproc::NoConsoleWindow;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
@@ -78,6 +79,7 @@ pub fn lsp_start(
 ) -> Result<u32, String> {
     let resolved = resolve_command(&command);
     let mut child = Command::new(&resolved)
+        .no_console_window()
         .args(&args)
         .current_dir(&root)
         .stdin(Stdio::piped())

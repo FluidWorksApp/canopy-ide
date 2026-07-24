@@ -5,6 +5,7 @@
 //! allowlist). Each root gets a notify watcher; external changes are emitted as
 //! `fs:change` events which drive the tree refresh and the diff-first workflow.
 
+use crate::winproc::NoConsoleWindow;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -214,6 +215,7 @@ fn git_ro(dir: &Path) -> std::process::Command {
     let mut cmd = std::process::Command::new("git");
     cmd.env("GIT_OPTIONAL_LOCKS", "0");
     cmd.arg("-C").arg(dir);
+    cmd.no_console_window();
     cmd
 }
 

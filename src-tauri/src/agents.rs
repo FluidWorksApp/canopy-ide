@@ -6,6 +6,8 @@
 //! the Agents panel (detecting agent CLIs like claude/codex/aider running inside
 //! terminals). Also hosts the file-based agent hook bridge.
 
+#[cfg(windows)]
+use crate::winproc::NoConsoleWindow;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1844,6 +1846,7 @@ pub async fn which_check(commands: Vec<String>) -> HashMap<String, bool> {
         for c in &commands {
             if c.chars().all(|ch| ch.is_alphanumeric() || ch == '-' || ch == '_') {
                 let ok = std::process::Command::new("where")
+                    .no_console_window()
                     .arg(c)
                     .output()
                     .map(|o| o.status.success())

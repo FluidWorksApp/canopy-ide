@@ -5,7 +5,7 @@ import * as ipc from "../ipc";
 import { getSettings } from "../settings";
 import { AGENT_CLIS, AGENT_PATTERN, restoreCommand } from "../projects";
 import { forgetSessions, restorableFrom } from "../restorable";
-import { AgentIcon, MoonIcon, RestartIcon, TerminalIcon, TrashIcon } from "./icons";
+import { AgentIcon, DiffIcon, MoonIcon, RestartIcon, TerminalIcon, TrashIcon } from "./icons";
 import type { PendingItem } from "../notifications";
 
 /** Colour + label for the lifecycle dot on a running-agent row. `working` is
@@ -42,9 +42,9 @@ interface AgentsPanelProps {
    *  that one guesses a tab from a notification's cwd, this one has the pty
    *  id in hand and is exact. */
   onJumpToPty?: (ptyId: number) => void;
-  /** Open an agent's workspace tab: its files, diffs, commits and PR. Every
-   *  running agent goes here, keyed on the live process — the digest, when a
-   *  hook wrote one, is only enrichment; the `term #n` chip still jumps to the
+  /** Open an agent's workspace tab: its files, diffs, commits and PR. Reached
+   *  from the row's workspace chip, keyed on the live process — the digest,
+   *  when a hook wrote one, is only enrichment. The row itself jumps to the
    *  terminal. */
   onOpenAgent?: (p: {
     agent: string;
@@ -393,28 +393,18 @@ export function AgentsPanel({
         className={`agent-row ${runaway ? "agent-runaway" : ""} ${
           onJumpToPty ? "agent-row-jump" : ""
         } ${s.id === activePty ? "agent-row-active" : ""}`}
-        // Any running agent opens its workspace — files, diffs, commits and PR
-        // — keyed on the live process, so a hookless CLI (codex, agy, …) works
-        // just as a Claude does. The `term #n` chip remains the way to the
-        // terminal. Plain shells have no workspace, so they jump instead.
-        onClick={() =>
-          agent && onOpenAgent
-            ? onOpenAgent({
-                agent: agentIdOf(agent.name),
-                cwd: s.cwd,
-                ptyId: s.id,
-                sessionId: digest?.session_id,
-                digest,
-              })
-            : onJumpToPty?.(s.id)
-        }
+        // Clicking a row jumps to the live session — the active thing you're
+        // steering. The workspace (files, diffs, commits, PR) is one chip away
+        // for agent rows; it isn't the row's job to open it. Plain shells only
+        // ever had a terminal to jump to, so they're unchanged.
+        onClick={() => onJumpToPty?.(s.id)}
         // Rows truncate to one line each now; the full detail lives here.
         title={[
           agent?.name ?? s.title,
           s.cwd,
           digest?.branch,
           task,
-          agent && onOpenAgent ? "Click to open this agent's workspace" : undefined,
+          "Click to jump to this terminal",
         ]
           .filter(Boolean)
           .join("\n")}
@@ -465,16 +455,27 @@ export function AgentsPanel({
               ⑃ {digest?.subagents}
             </span>
           )}
-          <button
-            className="agent-session agent-session-icon"
-            title="Go to terminal"
-            onClick={(e) => {
-              e.stopPropagation();
-              onJumpToPty?.(s.id);
-            }}
-          >
-            <TerminalIcon size={12} />
-          </button>
+          {/* The row jumps to the terminal; this chip is the one way to the
+              workspace — files, diffs, commits and PR — keyed on the live
+              process. Only agent rows have a workspace to open. */}
+          {agent && onOpenAgent && (
+            <button
+              className="agent-session agent-session-icon"
+              title="Open this agent's workspace — files, diffs, commits and PR"
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpenAgent({
+                  agent: agentIdOf(agent.name),
+                  cwd: s.cwd,
+                  ptyId: s.id,
+                  sessionId: digest?.session_id,
+                  digest,
+                });
+              }}
+            >
+              <DiffIcon size={12} />
+            </button>
+          )}
           {/* A dev server in here, without opening the tab to find out. */}
           {s.ports?.map((p) => (
             <button

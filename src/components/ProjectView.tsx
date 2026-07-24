@@ -77,6 +77,7 @@ import { ReviewView, type ReviewPayload } from "./ReviewView";
 import { BranchView } from "./BranchView";
 import { AgentWorkspaceView } from "./AgentWorkspaceView";
 import { ticketBranch, ticketContext, ticketWorktree } from "../trackers";
+import { prReviewContext, prWorktree } from "../prs";
 import { forgetSessions, markRestored, restorableFrom, type Restorable } from "../restorable";
 import {
   forgetTerminals,
@@ -88,6 +89,8 @@ import { PrView } from "./PrView";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { TeamPanel } from "./TeamPanel";
 import { ChatView } from "./ChatView";
+import { Coachmark } from "./Coachmark";
+import { shouldShowTip, markTipSeen, type CoachTip } from "../coachmarks";
 
 type SideTab = "files" | "changes" | "git" | "trackers" | "agents" | "team";
 
@@ -339,7 +342,7 @@ function Rail({
   );
   if (chips.length === 1) {
     return (
-      <div className={`run-rail ${dimCls}`}>
+      <div className={`run-rail ${dimCls}`} data-rail={label}>
         <span className="run-rail-label">{label}</span>
         {chip(chips[0], false)}
       </div>
@@ -347,7 +350,7 @@ function Rail({
   }
   const active = chips.find((c) => c.active);
   return (
-    <div className={`run-rail rail-menu-anchor ${dimCls}`}>
+    <div className={`run-rail rail-menu-anchor ${dimCls}`} data-rail={label}>
       <span className="run-rail-label">{label}</span>
       <button
         className={`run-chip rail-toggle ${active ? "run-chip-active" : ""}`}
@@ -1129,6 +1132,61 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       }
     },
     [ticketRepo, addTerminal, onNotice],
+  );
+
+  /** Check out a PR's head branch in a worktree (reusing one already on it)
+   *  and start an agent there to review it. The mirror of startTicketWork —
+   *  same worktree-then-agent shape — but the PR already carries its branch, so
+   *  there's nothing to invent, and the branch already exists upstream, so we
+   *  only ever check it out (create=false, letting git DWIM the remote branch),
+   *  never `-b` a fresh one off HEAD (which would "review" empty changes). */
+  const startPrReview = useCallback(
+    async (repo: string, pr: ipc.PrInfo, agentId?: string) => {
+      const installedClis = AGENT_CLIS.filter((c) => installedRef.current[c.bin]);
+      const preferred = getSettings().defaultAgent;
+      const agent =
+        agentId ||
+        (installedClis.find((c) => c.id === preferred) ?? installedClis[0] ?? AGENT_CLIS[0])?.id;
+      const cli = AGENT_CLIS.find((c) => c.id === agent);
+      const start = startCommand(agent, prReviewContext(pr));
+      if (!cli || !start) {
+        onNotice(`Unknown agent "${agent}".`);
+        return;
+      }
+      const seed = (id: string) => {
+        if (!start.typePrompt) return;
+        const pty = tabsRef.current.find(
+          (t): t is TermSubTab => t.id === id && t.type === "terminal",
+        )?.ptyId;
+        if (pty == null) return;
+        void ipc.ptyWrite(pty, prReviewContext(pr));
+        setTimeout(() => void ipc.ptyWrite(pty, "\r"), 250);
+      };
+      const title = `PR #${pr.number} · ${cli.name}`;
+      try {
+        const worktrees = await ipc.gitWorktrees(repo).catch(() => [] as ipc.WorktreeInfo[]);
+        const existing = prWorktree(pr, worktrees);
+        if (existing) {
+          const id = addTerminal(existing.path, start.command, title, cli.icon);
+          if (id) setTimeout(() => seed(id), 2500);
+          return;
+        }
+        const path = `${repo}-wt-pr-${pr.number}`;
+        await ipc.gitWorktreeAdd(repo, path, pr.branch, false);
+        await ipc.workspaceAdd(path).catch(() => {});
+        const id = addTerminal(path, start.command, title, cli.icon);
+        if (id) setTimeout(() => seed(id), 2500);
+      } catch (err) {
+        // The usual cause is a fork PR whose branch isn't on your remote — the
+        // one case git can't check out on its own. "Checkout" (gh pr checkout)
+        // fetches it first, after which a review reuses that worktree.
+        onNotice(
+          `Couldn't start a review of PR #${pr.number}: ${String(err)}. ` +
+            `If it's from a fork, click Checkout first.`,
+        );
+      }
+    },
+    [addTerminal, onNotice],
   );
 
   /** Open a branch as its own tab — its uncommitted work, its commits, and
@@ -2041,6 +2099,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     if (!cwd) return;
     if (installed[cli.bin]) {
       addTerminal(cwd, cli.bin, cli.name, cli.icon);
+      // Surface the new agent where it lives: the Agents section, expanded so
+      // the just-launched row is actually in view.
+      setSideTab("agents");
+      setCollapsed(false);
     } else {
       // A run tab, so the installer exits when done — and that exit is the
       // signal to re-probe (see onExited below). No timers, no staleness.
@@ -2211,6 +2273,42 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     : runChips.some((c) => c.active)
       ? "runs"
       : "tabs";
+
+  // First-run coach-marks: spotlight each new workspace section the first time
+  // it appears — the SHELLS rail when a terminal opens, RUNS when something
+  // runs, and the agent's tab when one is focused. Each fires once (localStorage
+  // -gated), only on the visible project, and only one shows at a time; the
+  // effect re-picks the next eligible tip after one is dismissed.
+  const [coachTip, setCoachTip] = useState<CoachTip | null>(null);
+  const agentTabOpen = activeTab?.type === "agent";
+  useEffect(() => {
+    if (!visible || coachTip) return;
+    if (shellChips.length && shouldShowTip("shells")) setCoachTip("shells");
+    else if (runChips.length && shouldShowTip("runs")) setCoachTip("runs");
+    else if (agentTabOpen && shouldShowTip("agent")) setCoachTip("agent");
+  }, [visible, coachTip, shellChips.length, runChips.length, agentTabOpen]);
+
+  const dismissCoach = () => {
+    if (coachTip) markTipSeen(coachTip);
+    setCoachTip(null);
+  };
+  const COACH_TIPS: Record<CoachTip, { selector: string; title: string; body: string }> = {
+    shells: {
+      selector: '[data-rail="SHELLS"]',
+      title: "Your shell lives here",
+      body: "Every plain terminal you open shows up in the SHELLS rail — click a chip to jump back to it, ✕ to close it.",
+    },
+    runs: {
+      selector: '[data-rail="RUNS"]',
+      title: "Your runs live here",
+      body: "Run commands and dev servers land in the RUNS rail as live services, each with a status dot. Every server you start shows up here.",
+    },
+    agent: {
+      selector: ".tab.tab-active",
+      title: "Your agent workspace lives here",
+      body: "This tab is the agent's workspace — its terminal, diffs and activity. Reopen it any time from the tab strip.",
+    },
+  };
 
   // One summary glyph for the runs dropdown: any live wins, then any failure.
   const runSummary = runTabs.some((t) => !t.exited) ? (
@@ -2829,6 +2927,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             pr={activeTab.pr}
             onNotice={onNotice}
             relay={relay}
+            agentTargets={agentTargets}
+            installed={installed}
+            onStartReview={(agentId) => void startPrReview(activeTab.repo, activeTab.pr, agentId)}
+            onSendToAgent={(target) => sendTicketToAgent(target, prReviewContext(activeTab.pr))}
           />
         )}
         {activeTab?.type === "review" && (
@@ -3573,6 +3675,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           components={components.map((c) => ({ label: c.label, path: c.path }))}
           onOpen={(p) => void openFile(p)}
           onClose={() => setPalette(null)}
+        />
+      )}
+      {coachTip && visible && (
+        <Coachmark
+          targetSelector={COACH_TIPS[coachTip].selector}
+          title={COACH_TIPS[coachTip].title}
+          body={COACH_TIPS[coachTip].body}
+          onDismiss={dismissCoach}
         />
       )}
     </div>

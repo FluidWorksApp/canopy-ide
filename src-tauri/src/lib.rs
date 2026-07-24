@@ -1,5 +1,6 @@
 mod agents;
 mod cli;
+mod crash;
 #[cfg(feature = "dictation")]
 mod dictation;
 // Intel macOS builds compile dictation out (no compatible ONNX Runtime); a stub
@@ -15,6 +16,7 @@ mod pty;
 mod punch;
 mod tunnel;
 mod relay;
+mod winproc;
 mod wsbridge;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
@@ -148,6 +150,11 @@ pub fn run() {
     // Idempotent: an Err just means it was already set.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    // Park a native panic on disk (opt-in reporting flushes it next launch),
+    // keeping the default hook's stderr/log behaviour. Installed before any
+    // Tauri machinery so a panic during setup is captured too.
+    crash::install_panic_hook();
+
     let builder = tauri::Builder::default();
     // Must be first: a second `canopy <dir>` invocation forwards its argv
     // here and exits, instead of starting an app that would fight this one
@@ -228,6 +235,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             js_log,
+            crash::report_crash,
+            crash::send_crash,
+            crash::take_pending_crash,
             cli::cli_take_pending_open,
             cli::cli_install_shim,
             pty::pty_spawn,

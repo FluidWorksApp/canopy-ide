@@ -36,7 +36,6 @@ dictation = [
     "dep:ort",
     "dep:cpal",
     "dep:rubato",
-    "dep:reqwest",
     "dep:flate2",
     "dep:tar",
 ]
@@ -116,7 +115,10 @@ transcribe-rs = { version = "0.3.11", default-features = false, features = ["onn
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic"], optional = true }
 cpal = { version = "0.16", optional = true }
 rubato = { version = "0.16", optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"], optional = true }
+# Non-optional: dictation streams model downloads through it, and opt-in crash
+# reporting POSTs its payload from the backend (CORS-proof, unlike a webview
+# fetch to an arbitrary collector).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 flate2 = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }
 tauri-plugin-updater = "2.10.1"

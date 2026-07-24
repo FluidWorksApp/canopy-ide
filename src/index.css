@@ -5855,6 +5855,33 @@ textarea,
   word-break: break-word;
   max-width: 720px;
 }
+/* Actions row: recover on the left, the opt-in report offer beside it. */
+.crash-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.crash-report {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: 420px;
+}
+.crash-report-note {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.crash-report-done {
+  font-size: 12px;
+  color: var(--text-dim);
+  align-self: center;
+}
+.crash-report-err {
+  font-size: 12px;
+  color: var(--danger);
+}
 
 /* Per-row forget: stays out of the way until the row is hovered. */
 .resume-forget {
@@ -6332,26 +6359,27 @@ a.btn-mini {
 }
 
 .team-visibility {
-  display: flex;
-  gap: 6px;
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
   margin-top: 2px;
 }
 
 .team-visibility .team-vis-btn {
-  flex: 1;
-  background: var(--bg-alt);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text-dim);
-  padding: 6px 8px;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  padding: 5px 13px;
+  font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
   text-align: center;
 }
 
 .team-visibility .team-vis-btn.team-vis-active {
-  border-color: var(--accent);
-  color: var(--text);
-  background: var(--bg-raised);
+  background: var(--accent);
+  color: var(--on-accent);
 }
 
 .team-vis-hint {
@@ -7142,8 +7170,14 @@ a.btn-mini {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
-  min-height: 190px;
+  gap: 8px;
+  min-height: 236px;
+  justify-content: center;
+}
+
+.onboarding-mock {
+  width: 100%;
+  display: flex;
   justify-content: center;
 }
 
@@ -7155,13 +7189,14 @@ a.btn-mini {
 .onboarding-title {
   font-size: 15px;
   color: var(--accent);
+  margin-top: 2px;
 }
 
 .onboarding-body {
   color: var(--text-dim);
   max-width: 360px;
   margin: 0;
-  line-height: 1.55;
+  line-height: 1.5;
 }
 
 .onboarding-dots {
@@ -7196,4 +7231,506 @@ a.btn-mini {
   justify-content: space-between;
   gap: 8px;
   margin-top: 12px;
+}
+
+/* ---------- onboarding animated mocks ----------
+   A framed mini-screen per slide. One generic cursor animation, driven by
+   per-scene --cx/--cy vars, plus a click ripple and a reveal keyed to the
+   click moment. Everything shares the scene's --dur. */
+
+.ob-scene {
+  --dur: 4.6s;
+  position: relative;
+  width: 100%;
+  max-width: 360px;
+  aspect-ratio: 300 / 132;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.ob-chrome {
+  height: 18px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+}
+.ob-chrome i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--border);
+}
+.ob-chrome i:nth-child(1) { background: #f7768e88; }
+.ob-chrome i:nth-child(2) { background: #e0af6888; }
+.ob-chrome i:nth-child(3) { background: #9ece6a88; }
+.ob-chrome span {
+  margin-left: 6px;
+  font-size: 9px;
+  color: var(--text-dim);
+}
+
+.ob-body {
+  position: absolute;
+  inset: 18px 0 0 0;
+  padding: 9px;
+  text-align: left;
+}
+.ob-col { display: flex; flex-direction: column; gap: 6px; }
+.ob-rowflex { display: flex; gap: 8px; height: 100%; }
+.ob-scene .grow { flex: 1; }
+.ob-scene .muted { color: var(--text-dim); }
+
+.ob-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 5px 7px;
+  font-size: 9.5px;
+  color: var(--text-dim);
+}
+.ob-row.sel { border-color: var(--accent); color: var(--text); }
+.ob-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-dim); flex: none; }
+.ob-dot.ok { background: var(--ok); }
+.ob-dot.warn { background: var(--warn); }
+.ob-dot.run { background: var(--accent); }
+.ob-bar { height: 5px; border-radius: 3px; background: var(--border); }
+.ob-chip {
+  font-size: 9px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.ob-btn {
+  font-size: 9px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.ob-mono {
+  font-family: "SF Mono", ui-monospace, Menlo, monospace;
+  font-size: 9px;
+}
+
+/* cursor: shared keyframes, per-scene start/target via --cx0/--cy0 → --cx1/--cy1 */
+.ob-cursor {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 15px;
+  height: 15px;
+  z-index: 5;
+  transform: translate(var(--cx0), var(--cy0));
+  animation: ob-cursor var(--dur) cubic-bezier(0.5, 0.05, 0.2, 1) infinite;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.5));
+  pointer-events: none;
+}
+.ob-cursor-arrow { fill: #fff; stroke: #1a1b26; stroke-width: 1; }
+@keyframes ob-cursor {
+  0%   { transform: translate(var(--cx0), var(--cy0)) scale(1); }
+  30%  { transform: translate(var(--cx1), var(--cy1)) scale(1); }
+  37%  { transform: translate(var(--cx1), var(--cy1)) scale(0.8); }
+  44%  { transform: translate(var(--cx1), var(--cy1)) scale(1); }
+  82%  { transform: translate(var(--cx1), var(--cy1)) scale(1); }
+  100% { transform: translate(var(--cx0), var(--cy0)) scale(1); }
+}
+
+.ob-click {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 16px;
+  height: 16px;
+  margin: -8px 0 0 -8px;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent);
+  transform: translate(var(--cx1), var(--cy1)) scale(0);
+  opacity: 0;
+  animation: ob-ripple var(--dur) ease-out infinite;
+  pointer-events: none;
+}
+@keyframes ob-ripple {
+  0%, 30% { opacity: 0; transform: translate(var(--cx1), var(--cy1)) scale(0); }
+  36%     { opacity: 0.9; transform: translate(var(--cx1), var(--cy1)) scale(0.4); }
+  50%     { opacity: 0; transform: translate(var(--cx1), var(--cy1)) scale(1.6); }
+  100%    { opacity: 0; transform: translate(var(--cx1), var(--cy1)) scale(1.6); }
+}
+
+/* content that appears the instant of the click */
+.ob-reveal { animation: ob-reveal var(--dur) ease-out infinite; }
+@keyframes ob-reveal {
+  0%, 36%  { opacity: 0; transform: translateY(4px); }
+  46%, 88% { opacity: 1; transform: none; }
+  100%     { opacity: 0; transform: translateY(4px); }
+}
+
+/* a selection that switches at the click */
+.ob-flip-off { animation: ob-flip-off var(--dur) steps(1) infinite; }
+.ob-flip-on { animation: ob-flip-on var(--dur) steps(1) infinite; }
+@keyframes ob-flip-off { 0%, 40% { opacity: 1; } 41%, 100% { opacity: 0; } }
+@keyframes ob-flip-on { 0%, 40% { opacity: 0; } 41%, 100% { opacity: 1; } }
+
+/* a line that types itself in */
+.ob-type {
+  display: inline-block;
+  overflow: hidden;
+  white-space: nowrap;
+  vertical-align: bottom;
+  animation: ob-type var(--dur) steps(18) infinite;
+}
+@keyframes ob-type {
+  0%, 40% { width: 0; }
+  62%     { width: var(--tw, 90px); }
+  88%     { width: var(--tw, 90px); }
+  100%    { width: 0; }
+}
+
+/* a switch that flips later in the loop (transfer % → done) */
+.ob-late-off { animation: ob-late-off var(--dur) steps(1) infinite; }
+.ob-late-on { animation: ob-late-on var(--dur) steps(1) infinite; }
+@keyframes ob-late-off { 0%, 63% { opacity: 1; } 64%, 100% { opacity: 0; } }
+@keyframes ob-late-on { 0%, 63% { opacity: 0; } 64%, 100% { opacity: 1; } }
+
+/* ===== faithful panel parts (labels/layout match the real components) ===== */
+
+/* section heads used across the side panels */
+.ob-head, .ob-subhead, .ob-cmphead {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  margin-bottom: 5px;
+}
+.ob-subhead { text-transform: none; font-size: 9px; margin: 2px 0 3px; }
+.ob-cmphead { color: var(--text-dim); }
+.ob-badge {
+  font-size: 8px;
+  min-width: 12px;
+  text-align: center;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+/* CLI brand chip stand-ins */
+.ob-logo {
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 700;
+  flex: none;
+}
+.ob-lmark { width: 9px; height: 9px; border-radius: 2px; flex: none; display: inline-block; }
+
+/* launcher card grid */
+.ob-cards { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin-bottom: 7px; }
+.ob-card {
+  position: relative;
+  width: 62px;
+  height: 44px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 8px;
+  color: var(--text-dim);
+}
+.ob-card.sel { border-color: var(--accent); color: var(--text); }
+.ob-card-badge {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  font-size: 6.5px;
+  color: var(--warn);
+  border: 1px solid var(--warn);
+  border-radius: 3px;
+  padding: 0 2px;
+}
+.ob-term {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: #0d0d13;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 5px 7px;
+}
+
+/* pending / inbox card (amber-bordered "needs you") */
+.ob-card2 {
+  background: var(--bg-raised);
+  border: 1px solid var(--warn);
+  border-radius: 6px;
+  padding: 6px 7px;
+  font-size: 9.5px;
+  color: var(--text-dim);
+}
+.ob-btn2 {
+  flex: 1;
+  text-align: center;
+  font-size: 9px;
+  padding: 3px 0;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.ob-btn2.ok { border-color: var(--ok); color: var(--ok); }
+
+/* diff */
+.ob-diffbar { display: flex; align-items: center; gap: 6px; }
+.ob-difflabel { color: var(--warn); font-size: 9.5px; }
+.ob-dline { display: flex; align-items: center; gap: 4px; }
+.ob-gut { font-family: ui-monospace, Menlo, monospace; font-size: 7.5px; color: var(--text-dim); opacity: 0.6; width: 10px; }
+.ob-sign { font-family: ui-monospace, Menlo, monospace; font-size: 8px; width: 6px; color: var(--text-dim); }
+.ob-dline.add .ob-sign { color: var(--ok); }
+.ob-dline.del .ob-sign { color: var(--danger); }
+.ob-dline.add .ob-bar { background: #9ece6a33; }
+.ob-dline.del .ob-bar { background: #f7768e33; }
+
+/* project tabs + components sidebar */
+.ob-ptabs { display: flex; align-items: flex-end; gap: 3px; margin-bottom: 6px; }
+.ob-ptab {
+  font-size: 9px;
+  padding: 3px 8px;
+  border-radius: 5px 5px 0 0;
+  color: var(--text-dim);
+  background: var(--bg-raised);
+  border: 1px solid transparent;
+}
+.ob-ptab.sel { color: var(--text); background: var(--bg); border-color: var(--border); border-bottom-color: var(--bg); font-weight: 600; }
+.ob-ptab-add { color: var(--text-dim); font-size: 10px; padding: 0 4px; }
+.ob-cmp { font-size: 9px; letter-spacing: 0.5px; color: var(--accent); padding: 2px 0; }
+.ob-tree { font-size: 8.5px; color: var(--text-dim); padding: 1px 0 1px 12px; font-family: ui-monospace, Menlo, monospace; }
+
+/* git */
+.ob-branchbar { display: flex; align-items: center; gap: 6px; font-size: 9px; color: var(--text-dim); margin-bottom: 5px; }
+.ob-branch { color: var(--text); }
+.ob-gittabs { display: flex; gap: 8px; font-size: 8.5px; color: var(--text-dim); margin-bottom: 5px; }
+.ob-gittabs .sel { color: var(--text); border-bottom: 2px solid var(--accent); padding-bottom: 2px; }
+.ob-gfile { display: flex; align-items: center; gap: 6px; font-size: 9px; color: var(--text); padding: 2px 0; }
+.ob-gcode { font-family: ui-monospace, Menlo, monospace; font-size: 9px; white-space: pre; }
+.ob-gcode.ok { color: var(--ok); }
+
+/* tickets */
+.ob-pills { display: flex; gap: 5px; }
+.ob-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 8.5px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.ob-pill.sel { border-color: var(--accent); color: var(--text); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.ob-trow { display: flex; align-items: center; gap: 6px; font-size: 9.5px; padding: 3px 0; }
+.ob-tid { color: var(--accent); font-family: ui-monospace, Menlo, monospace; font-size: 9px; }
+.ob-ttitle { color: var(--text); overflow: hidden; white-space: nowrap; }
+.ob-mine { color: var(--accent); font-size: 9px; }
+.ob-play { color: var(--text-dim); font-size: 9px; }
+
+/* team code */
+.ob-code {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 19px;
+  letter-spacing: 3px;
+  color: var(--text);
+  text-align: center;
+  margin: 3px 0;
+}
+
+/* runs rail + status bar */
+.ob-runsrail { display: flex; align-items: center; gap: 5px; }
+.ob-runslabel { font-size: 8px; color: var(--text-dim); opacity: 0.6; letter-spacing: 0.5px; }
+.ob-runchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 8.5px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: rgba(158, 206, 106, 0.07);
+  color: var(--text-dim);
+}
+.ob-runchip.sel { color: var(--text); border-color: rgba(158, 206, 106, 0.5); background: rgba(158, 206, 106, 0.16); }
+.ob-statusbar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 8px;
+  color: var(--text-dim);
+  padding: 3px 9px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+
+/* file tabs + rendered sheet */
+.ob-ftabs { display: flex; align-items: flex-end; gap: 3px; margin-bottom: 6px; }
+.ob-ftab {
+  font-size: 8.5px;
+  padding: 3px 7px;
+  border-radius: 5px 5px 0 0;
+  color: var(--text-dim);
+  background: var(--bg-raised);
+  border: 1px solid transparent;
+}
+.ob-ftab.sel { color: var(--text); background: var(--bg); border-color: var(--border); border-bottom-color: var(--bg); }
+.ob-ftab .x { opacity: 0.5; }
+.ob-pane { background: var(--bg); border: 1px solid var(--border); border-radius: 5px; padding: 5px; }
+.ob-sheetrow { display: flex; font-size: 8.5px; color: var(--text); }
+.ob-sheetrow span { flex: 1; padding: 2px 4px; border-bottom: 1px solid var(--border); }
+.ob-sheetrow.head span { color: var(--text-dim); background: var(--bg-raised); }
+
+/* dictation pill */
+.ob-dictpill {
+  position: absolute;
+  left: 50%;
+  bottom: 26px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  font-size: 9px;
+  color: var(--text);
+  background: var(--bg-raised);
+  border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
+  border-radius: 999px;
+  padding: 4px 10px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+.ob-recdot { width: 7px; height: 7px; border-radius: 50%; background: var(--danger); flex: none; animation: ob-recpulse 1.2s ease-in-out infinite; }
+.ob-recdot.ok { background: var(--ok); animation: none; }
+@keyframes ob-recpulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.7); } }
+
+/* remote portal — its own gold palette + phone-ish framing */
+.ob-portal {
+  --accent: #d8a23a;
+  --ok: #46a758;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 9px;
+}
+.ob-deck { display: flex; align-items: center; gap: 6px; color: var(--text); font-weight: 600; }
+.ob-gauges { display: flex; gap: 6px; }
+.ob-gauge {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  font-size: 7.5px;
+  color: var(--text-dim);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 0;
+}
+.ob-gauge b { font-size: 12px; color: var(--text); }
+.ob-seg { display: flex; gap: 4px; font-size: 8px; }
+.ob-seg span { flex: 1; text-align: center; padding: 3px 0; border-radius: 5px; color: var(--text-dim); border: 1px solid var(--border); }
+.ob-seg .sel { color: var(--text); background: var(--bg-raised); border-color: var(--accent); }
+.ob-pcard { display: flex; align-items: center; gap: 6px; font-size: 9px; color: var(--text); background: var(--bg-raised); border: 1px solid var(--border); border-radius: 5px; padding: 4px 7px; }
+.ob-fab { margin-top: auto; align-self: center; font-size: 9px; font-weight: 600; color: var(--on-accent); background: var(--accent); border-radius: 999px; padding: 4px 12px; }
+
+/* file transfer card */
+.ob-xfer { background: var(--bg-alt); border: 1px solid var(--border); border-radius: 8px; padding: 7px 9px; }
+.ob-xhead { display: flex; align-items: center; gap: 6px; font-size: 9.5px; color: var(--text); }
+.ob-xbar { height: 5px; border-radius: 3px; background: var(--bg); margin: 5px 0 4px; overflow: hidden; }
+.ob-fill { height: 100%; width: 0; border-radius: 3px; background: var(--accent); animation: ob-grow var(--dur) ease-out infinite; }
+@keyframes ob-grow {
+  0%, 32%  { width: 0; background: var(--accent); }
+  62%      { width: 100%; background: var(--accent); }
+  66%, 88% { width: 100%; background: var(--ok); }
+  100%     { width: 0; background: var(--accent); }
+}
+.ob-xsub { font-size: 8px; color: var(--text-dim); }
+
+@media (prefers-reduced-motion: reduce) {
+  .ob-cursor, .ob-click { display: none; }
+  .ob-scene * { animation: none !important; }
+  .ob-flip-on, .ob-late-on { display: none; }
+  .ob-type { width: var(--tw, 90px); }
+  .ob-fill { width: 100%; background: var(--ok); }
+  .ob-recdot { opacity: 1; }
+}
+
+/* ---------- first-run coach-marks ----------
+   A dimmed layer with a highlight hole cut around a live element (the big
+   box-shadow spread does the dimming) plus a floating callout. Sits above the
+   app chrome but below palettes/menus. */
+.coach-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 350;
+}
+.coach-hole {
+  position: fixed;
+  border-radius: 8px;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55), 0 0 0 2px var(--accent),
+    0 0 16px 2px color-mix(in srgb, var(--accent) 55%, transparent);
+  pointer-events: none;
+  transition: top 0.15s, left 0.15s, width 0.15s, height 0.15s;
+}
+.coach-pop {
+  position: fixed;
+  background: var(--bg-raised);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 14px 15px 12px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  white-space: normal;
+  animation: coach-pop-in 0.18s ease-out;
+}
+@keyframes coach-pop-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+.coach-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 5px;
+}
+.coach-body {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  margin: 0 0 12px;
+}
+.coach-actions {
+  display: flex;
+  justify-content: flex-end;
 }

@@ -470,12 +470,18 @@ fn append_edit_journal(session_id: &str, agent: &str, event: &serde_json::Value)
 }
 
 fn git_branch(cwd: &str) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
         .arg(cwd)
-        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .output()
-        .ok()?;
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"]);
+    // Don't flash a console window on Windows (this hook runs on every agent
+    // event). CREATE_NO_WINDOW; no-op elsewhere.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let out = cmd.output().ok()?;
     if !out.status.success() {
         return None;
     }
