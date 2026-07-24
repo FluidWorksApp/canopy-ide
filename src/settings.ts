@@ -1,4 +1,6 @@
 // Small persistent settings, stored in localStorage. Keep this flat and cheap.
+import type { CustomMicroTask } from "./microTasks";
+
 export type Theme = "auto" | "default" | "gotham" | "daylight" | "custom";
 
 /** What "auto" means right now: Default when macOS is in dark mode, Daylight
@@ -152,6 +154,9 @@ export interface Settings {
   /** How many agent terminals to keep live per project before auto-hibernation
    *  starts reclaiming the stalest idle ones. */
   maxLiveAgents: number;
+  /** Micro-tasks the user wrote themselves (Tasks panel). App-wide: a task
+   *  like "changelog entry" is about how the user works, not about one repo. */
+  customMicroTasks: CustomMicroTask[];
 
   // ---- Voice dictation ----
   /** Hotkey that toggles dictation (start/insert). */
@@ -197,6 +202,7 @@ const DEFAULTS: Settings = {
   relayAddr: "",
   autoHibernate: false,
   maxLiveAgents: 8,
+  customMicroTasks: [],
   trackerKeys: {},
   theme: "default",
   customAccent: "",

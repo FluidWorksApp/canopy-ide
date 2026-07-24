@@ -268,9 +268,16 @@ struct Action {
     command: Option<String>,
     /// open_preview: the localhost URL to open in the embedded browser.
     url: Option<String>,
-    /// stop_server / restart_server: the terminal id to act on.
+    /// stop_server / restart_server / job_done: the terminal id to act on.
     #[serde(rename = "ptyId")]
     pty_id: Option<u32>,
+    /// job_done: how the micro-task ended (done | blocked) and its one-line
+    /// summary. The artifact URL, if any, rides in `url` above.
+    status: Option<String>,
+    summary: Option<String>,
+    /// job_done: the launching app instance (env CANOPY_INSTANCE), so a pty id
+    /// recycled across an app restart can't close an unrelated tab.
+    instance: Option<String>,
 }
 
 async fn action(
@@ -363,6 +370,49 @@ async fn action(
                 serde_json::json!({ "kind": "restart_server", "route": "", "ptyId": id }),
             );
             format!("Restarting terminal {id}. Call canopy_server_output shortly to watch it come back up.")
+        }
+        "job_done" => {
+            let status = match act.status.as_deref() {
+                Some(s @ ("done" | "blocked")) => s,
+                _ => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "job_done needs status: \"done\" (job complete) or \"blocked\" (you need the user)".into(),
+                    )
+                }
+            };
+            let Some(summary) = act.summary.as_deref().filter(|s| !s.trim().is_empty()) else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "job_done needs a summary — one sentence on what happened or what you need".into(),
+                );
+            };
+            // A sidecar left over from a previous app launch can hold a pty id
+            // that now names someone else's terminal: ack it, act on nothing.
+            let stale = act
+                .instance
+                .as_deref()
+                .is_some_and(|i| i != crate::pty::instance_token());
+            if !stale {
+                // Keyed by terminal like restart_server: route is empty, App
+                // broadcasts, and the ProjectView owning the pty acts.
+                let _ = app.emit(
+                    "agent:action",
+                    serde_json::json!({
+                        "kind": "job_done",
+                        "route": "",
+                        "ptyId": act.pty_id,
+                        "status": status,
+                        "summary": summary,
+                        "url": act.url,
+                        "cwd": act.cwd,
+                    }),
+                );
+            }
+            match status {
+                "done" => "Acknowledged — the user has been told. If this terminal is a Canopy micro-task it now closes: say goodbye in one sentence and start nothing new.".to_string(),
+                _ => "Noted — Canopy told the user what you need. This session stays open; wait for their reply here.".to_string(),
+            }
         }
         other => return (StatusCode::BAD_REQUEST, format!("unknown action: {other}")),
     };

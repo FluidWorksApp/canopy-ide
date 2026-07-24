@@ -98,13 +98,16 @@ export const onPtySpawned = (cb: (e: PtySpawned) => void): Promise<UnlistenFn> =
  *  the rest is action-specific. Handled the same way as pty:spawned — App
  *  routes it to a project and hands it to that ProjectView. */
 export interface AgentAction {
-  kind: "start_server" | "open_preview" | "restart_server";
+  kind: "start_server" | "open_preview" | "restart_server" | "job_done";
   route: string;
   dir?: string;
   name?: string;
   command?: string;
   url?: string;
   ptyId?: number;
+  /** job_done: how the micro-task ended and its one-line summary. */
+  status?: "done" | "blocked";
+  summary?: string;
 }
 export const onAgentAction = (cb: (a: AgentAction) => void): Promise<UnlistenFn> =>
   listen<AgentAction>("agent:action", (event) => cb(event.payload));

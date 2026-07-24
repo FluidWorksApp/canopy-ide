@@ -928,6 +928,15 @@ fn tools_list() -> serde_json::Value {
             "inputSchema": { "type": "object", "properties": {
                 "url": { "type": "string", "description": "Only this preview origin; defaults to all" }
             }, "additionalProperties": false }
+        },
+        {
+            "name": "canopy_job_done",
+            "description": "Report that the job you were given is finished (or stuck) — the user gets the outcome as a notification, wherever they are. In a Canopy micro-task terminal, `done` also closes the terminal. Call it exactly once, as your last act, never mid-work. `blocked` keeps the session open and tells the user what you need.",
+            "inputSchema": { "type": "object", "properties": {
+                "status": { "type": "string", "enum": ["done", "blocked"], "description": "done = the job is complete; blocked = you need something from the user before you can finish" },
+                "summary": { "type": "string", "description": "One sentence: what happened, or what you need" },
+                "url": { "type": "string", "description": "The artifact's URL if the job produced one (e.g. the pull request)" }
+            }, "required": ["status", "summary"], "additionalProperties": false }
         }
     ]})
 }
@@ -991,6 +1000,27 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
                 "kind": "open_preview",
                 "cwd": cwd(),
                 "url": url,
+            }))
+        }
+        "canopy_job_done" => {
+            let status = args
+                .get("status")
+                .and_then(|v| v.as_str())
+                .ok_or("missing required argument: status (done | blocked)")?;
+            let summary = args
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .ok_or("missing required argument: summary (one sentence on how it went)")?;
+            // Identity is the terminal, not the cwd: two micro-tasks can share
+            // a directory, but CANOPY_PTY names exactly this session's tab.
+            ctx_post(serde_json::json!({
+                "kind": "job_done",
+                "cwd": cwd(),
+                "ptyId": std::env::var("CANOPY_PTY").ok().and_then(|v| v.parse::<u64>().ok()),
+                "instance": std::env::var("CANOPY_INSTANCE").ok(),
+                "status": status,
+                "summary": summary,
+                "url": args.get("url").and_then(|v| v.as_str()),
             }))
         }
         "canopy_browser_navigate" => {
