@@ -40,8 +40,12 @@ const MAX_JOURNAL_BYTES: u64 = 4 * 1024 * 1024;
 /// Well under the 10k char cap: the real constraint is context pollution, not
 /// the limit. Injecting a wall of text every turn also breaks the prompt cache.
 const MAX_CONTEXT_CHARS: usize = 4_000;
-/// Peers quiet for longer than this aren't worth injecting.
-const PEER_MAX_AGE_SECS: u64 = 8 * 3600;
+/// Peers quiet for longer than this aren't worth injecting. A live session
+/// refreshes its digest on every hook event, so one silent this long is either
+/// dormant or died without a SessionEnd. Deliberately short: digests live for
+/// hours on disk to make crash restore work, but injecting them all crowds the
+/// truncation budget with dead sessions at the expense of live ones.
+const PEER_MAX_AGE_SECS: u64 = 30 * 60;
 
 fn home() -> String {
     std::env::var("HOME").unwrap_or_default()
@@ -588,6 +592,9 @@ fn peer_context(session_id: &str, cwd: &str) -> Option<String> {
         let updated = d["updated"].as_u64().unwrap_or(0);
         if now.saturating_sub(updated) > PEER_MAX_AGE_SECS {
             continue;
+        }
+        if d["state"].as_str() == Some("ended") {
+            continue; // closed cleanly — that's restore's business, not a peer
         }
 
         let mut block = String::new();

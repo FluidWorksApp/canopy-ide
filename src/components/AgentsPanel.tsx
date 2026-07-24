@@ -230,17 +230,20 @@ export function AgentsPanel({
   const [showShared, setShowShared] = useState(false);
   const settings = getSettings();
 
-  // What the hook would actually inject — mirrors PEER_MAX_AGE_SECS in
-  // canopy_hook.rs, which drops peers quiet for longer than this. The panel
-  // must apply the same cutoff or it claims long-dead sessions are shared:
-  // a digest outlives its terminal (that's what makes restore work), and one
-  // whose terminal died without a Stop event even stays "active" on disk.
+  // What the hook would actually inject — mirrors peer_context in
+  // canopy_hook.rs: no "ended" sessions, and none quiet for longer than
+  // PEER_MAX_AGE_SECS. The panel must apply the same rules or it claims
+  // long-dead sessions are shared: a digest outlives its terminal (that's
+  // what makes restore work), and one whose terminal died without a Stop
+  // event even stays "active" on disk — the age cutoff is what ages those out.
   // `digests` itself stays unfiltered — it is also the crash-restore record.
-  const PEER_MAX_AGE_SECS = 8 * 3600;
+  const PEER_MAX_AGE_SECS = 30 * 60;
   const shared = useMemo(
     () =>
       digests.filter(
-        (d) => Date.now() / 1000 - (d.updated ?? 0) <= PEER_MAX_AGE_SECS,
+        (d) =>
+          d.state !== "ended" &&
+          Date.now() / 1000 - (d.updated ?? 0) <= PEER_MAX_AGE_SECS,
       ),
     [digests],
   );
