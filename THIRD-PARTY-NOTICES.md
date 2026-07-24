@@ -57,9 +57,9 @@ terms govern use of the model:
 - **SenseVoice Small (int8)** — FunASR MODEL_LICENSE (custom) — <https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE>, by FunAudioLLM / Alibaba. <https://huggingface.co/FunAudioLLM/SenseVoiceSmall>
 - **Moonshine Base** — MIT, by Useful Sensors. <https://huggingface.co/UsefulSensors/moonshine>
 
-## Rust crates (669)
+## Rust crates (672)
 
-### MIT — 614
+### MIT — 617
 
 - **adler2 2.0.1** — Copyright (C) Jonas Schievink <jonasschievink@gmail.com>
 - **aead 0.5.2** — Copyright (c) 2019 The RustCrypto Project Developers; Copyright (c) 2019 MobileCoin, LLC
@@ -333,12 +333,15 @@ terms govern use of the model:
 - **objc2-core-image 0.3.2** — no copyright line in the distributed license file
 - **objc2-core-location 0.3.2** — no copyright line in the distributed license file
 - **objc2-core-text 0.3.2** — no copyright line in the distributed license file
+- **objc2-core-video 0.3.2** — no copyright line in the distributed license file
 - **objc2-encode 4.1.0** — Copyright Mads Marquart (per package manifest; the distributed license file carries no copyright line)
 - **objc2-exception-helper 0.1.1** — Copyright Mads Marquart (per package manifest; the distributed license file carries no copyright line)
 - **objc2-foundation 0.3.2** — no copyright line in the distributed license file
 - **objc2-io-surface 0.3.2** — no copyright line in the distributed license file
+- **objc2-javascript-core 0.3.2** — no copyright line in the distributed license file
 - **objc2-osa-kit 0.3.2** — no copyright line in the distributed license file
 - **objc2-quartz-core 0.3.2** — no copyright line in the distributed license file
+- **objc2-security 0.3.2** — no copyright line in the distributed license file
 - **objc2-ui-kit 0.3.2** — no copyright line in the distributed license file
 - **objc2-user-notifications 0.3.2** — no copyright line in the distributed license file
 - **objc2-web-kit 0.3.2** — no copyright line in the distributed license file

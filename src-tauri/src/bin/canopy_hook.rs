@@ -898,7 +898,9 @@ fn watch_resources(
             continue;
         }
         for uri in uris {
-            let Ok(body) = read_resource(&uri) else { continue };
+            let Ok(body) = read_resource(&uri) else {
+                continue;
+            };
             let changed = {
                 let mut subs = subscriptions.lock().unwrap();
                 match subs.get(&uri) {
@@ -1042,7 +1044,11 @@ fn rpc_err(id: serde_json::Value, code: i32, message: &str) -> serde_json::Value
 /// tool whose whole point is pixels.
 enum ToolOutput {
     Text(String),
-    Image { data: String, mime: String, caption: String },
+    Image {
+        data: String,
+        mime: String,
+        caption: String,
+    },
 }
 
 impl ToolOutput {
@@ -1120,15 +1126,21 @@ fn tools_list() -> serde_json::Value {
     // open forever. See the matching note in agentTools.ts.
     let micro = std::env::var("CANOPY_MICRO_TASK").is_ok();
     tools.retain(|t| {
-        t.get("name").and_then(|n| n.as_str()).is_some_and(|n| {
-            !disabled.iter().any(|d| d == n) || (n == "canopy_job_done" && micro)
-        })
+        t.get("name")
+            .and_then(|n| n.as_str())
+            .is_some_and(|n| !disabled.iter().any(|d| d == n) || (n == "canopy_job_done" && micro))
     });
     for tool in &mut tools {
-        let Some(name) = tool.get("name").and_then(|n| n.as_str()).map(str::to_string) else {
+        let Some(name) = tool
+            .get("name")
+            .and_then(|n| n.as_str())
+            .map(str::to_string)
+        else {
             continue;
         };
-        let Some(obj) = tool.as_object_mut() else { continue };
+        let Some(obj) = tool.as_object_mut() else {
+            continue;
+        };
         // Behaviour hints let a host auto-approve the reads (which is most of
         // this surface) instead of prompting for every canopy_project call.
         let read_only = READ_ONLY_TOOLS.contains(&name.as_str());
@@ -1692,7 +1704,10 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                     .to_string(),
                 caption: format!(
                     "{} as rendered right now ({}×{} points).",
-                    value.get("url").and_then(|v| v.as_str()).unwrap_or("The preview"),
+                    value
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("The preview"),
                     value.get("width").and_then(|v| v.as_u64()).unwrap_or(0),
                     value.get("height").and_then(|v| v.as_u64()).unwrap_or(0),
                 ),
