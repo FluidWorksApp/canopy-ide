@@ -252,6 +252,60 @@ impl PtyManager {
 }
 
 impl Session {
+    /// The process the kernel currently has in this pty's foreground.
+    ///
+    /// This is the authoritative answer to "what is this terminal running",
+    /// which no amount of scanning the process tree can reconstruct: children
+    /// an agent spawns (MCP servers, git, ripgrep) share their parent's process
+    /// group, so the leader stays the thing the user actually launched. The
+    /// monitor uses it to pick one candidate to identify instead of hunting for
+    /// an agent-looking name anywhere under the shell.
+    ///
+    /// Equal to the session's own pid when the shell is idle at its prompt.
+    #[cfg(unix)]
+    pub fn foreground_pid(&self) -> Option<u32> {
+        let master = self.master.lock().ok()?;
+        master
+            .process_group_leader()
+            .and_then(|pid| u32::try_from(pid).ok())
+    }
+
+    #[cfg(not(unix))]
+    pub fn foreground_pid(&self) -> Option<u32> {
+        None
+    }
+
+    /// Whether the foreground app has taken the tty out of canonical mode —
+    /// i.e. something full-screen and interactive owns the terminal, rather
+    /// than a command printing lines and exiting.
+    ///
+    /// Read straight off the pty because we own it. It is the one signal that
+    /// separates an unrecognised *agent* from an unrecognised *script* without
+    /// asking the user or sniffing anything private about the process.
+    #[cfg(unix)]
+    pub fn raw_mode(&self) -> bool {
+        let Ok(master) = self.master.lock() else {
+            return false;
+        };
+        let Some(fd) = master.as_raw_fd() else {
+            return false;
+        };
+        // SAFETY: fd is owned by the master pty, which is alive for the
+        // duration of the borrow; tcgetattr only writes the termios out-param.
+        unsafe {
+            let mut termios: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(fd, &mut termios) != 0 {
+                return false;
+            }
+            termios.c_lflag & libc::ICANON == 0
+        }
+    }
+
+    #[cfg(not(unix))]
+    pub fn raw_mode(&self) -> bool {
+        false
+    }
+
     /// Feed a freshly-flushed chunk to remote consumers: append to the bounded
     /// scrollback and fan it out to any subscribers, both under one lock so an
     /// attaching viewer never sees a torn boundary. Best-effort — no subscribers

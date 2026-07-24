@@ -4,7 +4,8 @@
 // listed as restorable in one place and missing in the other is worse than
 // either behaviour on its own.
 import * as ipc from "./ipc";
-import { AGENT_CLIS, restoreCommand } from "./projects";
+import { restoreCommand } from "./projects";
+import { identifyAgent } from "./agentIdentity";
 
 export interface Restorable {
   digest: ipc.SessionDigest;
@@ -78,21 +79,13 @@ interface LiveAgent {
 }
 
 /** Agent CLIs running right now, by registry id and working directory.
- *  Derived from the process trees the monitor already reports, so both the
- *  panel and the launcher see the same thing without either having to
- *  assemble it. */
+ *  Reads the same identity the panel does (agentIdentity.ts), so the two
+ *  surfaces can never disagree about what is already running. */
 function liveAgentsFrom(stats: ipc.SessionStats[]): LiveAgent[] {
-  return stats.flatMap((s) =>
-    s.procs
-      .map((p) => {
-        const first = p.cmd.split(/\s+/)[0] ?? "";
-        return AGENT_CLIS.find(
-          (c) => p.name === c.bin || first === c.bin || first.endsWith(`/${c.bin}`),
-        );
-      })
-      .filter((c): c is (typeof AGENT_CLIS)[number] => !!c)
-      .map((c) => ({ agentId: c.id, cwd: s.cwd })),
-  );
+  return stats.flatMap((s) => {
+    const id = identifyAgent(s.agent_hint)?.id;
+    return id ? [{ agentId: id, cwd: s.cwd }] : [];
+  });
 }
 
 /**

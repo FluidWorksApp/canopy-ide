@@ -1,9 +1,11 @@
-// Agent management: one row per terminal session, named after the agent CLI
-// detected inside its process tree, with CPU/memory for the runaway guard.
+// Agent management: one row per terminal session, named after whatever the pty
+// has in its foreground (see agentIdentity.ts), with CPU/memory for the runaway
+// guard.
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
-import { AGENT_CLIS, AGENT_PATTERN, restoreCommand } from "../projects";
+import { restoreCommand } from "../projects";
+import { identifyAgent, observeForLearning } from "../agentIdentity";
 import { forgetSessions, restorableFrom } from "../restorable";
 import { AgentIcon, DiffIcon, MoonIcon, RestartIcon, TerminalIcon, TrashIcon } from "./icons";
 import type { PendingItem } from "../notifications";
@@ -300,6 +302,10 @@ export function AgentsPanel({
     [digests, stats, liveSessionIds.join(",")],
   );
 
+  // Bumped when the hook stream teaches us a binary (see observeForLearning),
+  // which is the one thing that can change an identity without stats moving.
+  const [learnedTick, setLearnedTick] = useState(0);
+
   const sessions = useMemo(() => {
     // Terminal -> the agent conversation running in it, by the surface id the
     // hook recorded from our spawn env. An exact identity, not a guess: two
@@ -308,18 +314,27 @@ export function AgentsPanel({
     // Newest wins if a terminal has hosted more than one session in its life.
     const bySurface = digestBySurface(digests, thisInstance);
     return stats.map((s) => {
-      const agent = s.procs.find(
-        (p) => AGENT_PATTERN.test(p.name) || AGENT_PATTERN.test(p.cmd.split(" ")[0] ?? ""),
-      );
+      const digest = bySurface.get(String(s.id));
       return {
         session: s,
-        agent,
-        digest: bySurface.get(String(s.id)),
+        // What this terminal is running, from the process the pty has in the
+        // foreground — see agentIdentity.ts. `learnedTick` is in the dep list
+        // because learning a binary changes this answer.
+        agent: identifyAgent(s.agent_hint, digest),
+        digest,
         // Where it's running — the thing that tells two `claude` rows apart.
         dir: (s.cwd || "").split("/").filter(Boolean).pop() ?? "",
       };
     });
-  }, [stats, digests, thisInstance]);
+  }, [stats, digests, thisInstance, learnedTick]);
+
+  // The hook stream names binaries nothing else can identify, so a CLI Canopy
+  // has never heard of is recognised from its second launch onward. Derived,
+  // never asked.
+  useEffect(() => {
+    if (observeForLearning(sessions.map((s) => ({ hint: s.session.agent_hint, digest: s.digest }))))
+      setLearnedTick((n) => n + 1);
+  }, [sessions]);
 
   // An agent session and a plain shell answer different questions — "what is
   // it working on?" vs "what's running in it?" — so they get separate heads.
@@ -380,10 +395,6 @@ export function AgentsPanel({
     }
   }, [agentSessions, settings.autoHibernate, settings.maxLiveAgents, onNotice]);
 
-  /** Registry id for a process name, so the row can wear the CLI's mark. */
-  const agentIdOf = (procName: string) =>
-    AGENT_CLIS.find((c) => procName === c.bin || procName.startsWith(c.bin))?.id ?? "agent";
-
   const sessionRow = ({ session: s, agent, dir, digest }: (typeof sessions)[number]) => {
     const runaway =
       s.total_cpu > settings.runawayCpuPercent ||
@@ -410,7 +421,7 @@ export function AgentsPanel({
         onClick={() => onJumpToPty?.(s.id)}
         // Rows truncate to one line each now; the full detail lives here.
         title={[
-          agent?.name ?? s.title,
+          agent ? `${agent.label} (identified by ${agent.via})` : s.title,
           s.cwd,
           digest?.branch,
           task,
@@ -425,12 +436,15 @@ export function AgentsPanel({
           {st && <span className={`agent-state-dot ${st.cls}`} title={st.label} />}
           {/* The CLI's own mark, not its name in bold — the panel is a column
               of near-identical rows and a glyph reads faster than a word. */}
-          {agent ? (
-            <AgentIcon id={agentIdOf(agent.name)} size={14} className="ap-mark" />
+          {/* No id means we can see the program but cannot name whose it
+              is — it gets the plain terminal glyph rather than a guess at a
+              brand. */}
+          {agent?.id ? (
+            <AgentIcon id={agent.id} size={14} className="ap-mark" />
           ) : (
             <TerminalIcon size={13} className="ap-mark" />
           )}
-          <span className="agent-name">{agent?.name ?? s.title}</span>
+          <span className="agent-name">{agent?.label ?? s.title}</span>
           {/* Kept on the left, right after the name: the hover stats overlay is
               anchored to the row's right edge, so a badge over there gets buried
               the moment you hover the very row you're trying to inspect. */}
@@ -468,14 +482,14 @@ export function AgentsPanel({
           {/* The row jumps to the terminal; this chip is the one way to the
               workspace — files, diffs, commits and PR — keyed on the live
               process. Only agent rows have a workspace to open. */}
-          {agent && onOpenAgent && (
+          {agent?.id && onOpenAgent && (
             <button
               className="agent-session agent-session-icon"
               title="Open this agent's workspace — files, diffs, commits and PR"
               onClick={(e) => {
                 e.stopPropagation();
                 onOpenAgent({
-                  agent: agentIdOf(agent.name),
+                  agent: agent.id ?? "agent",
                   cwd: s.cwd,
                   ptyId: s.id,
                   sessionId: digest?.session_id,
@@ -530,7 +544,7 @@ export function AgentsPanel({
           )}
           <button
             className="btn-icon btn-danger"
-            title={`Kill terminal #${s.id}${agent ? ` and the ${agent.name} running in it` : ""}`}
+            title={`Kill terminal #${s.id}${agent ? ` and the ${agent.label} running in it` : ""}`}
             onClick={(e) => {
               e.stopPropagation();
               void ipc.ptyKill(s.id);
