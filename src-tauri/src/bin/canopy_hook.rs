@@ -812,6 +812,67 @@ fn tools_list() -> serde_json::Value {
             "inputSchema": { "type": "object", "properties": {
                 "ptyId": { "type": "integer", "description": "Terminal id of the run server to restart (from canopy_project or canopy_resources)" }
             }, "required": ["ptyId"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_browser_navigate",
+            "description": "Drive Canopy's embedded preview browser to a page: opens (or reuses) the preview tab and loads the URL, or moves through history. Pass `url` (a local server address — see canopy_project runServers) to load a page, or `action` (back / forward / reload) to move within the current one. Waits for the page and returns its final URL and title. This is the entry point for browser control: after it, canopy_browser_snapshot shows the page and canopy_browser_click / canopy_browser_type interact with it.",
+            "inputSchema": { "type": "object", "properties": {
+                "url": { "type": "string", "description": "A local http://localhost[:port][/path] URL to load — typically runServers[].url from canopy_project" },
+                "action": { "type": "string", "enum": ["back", "forward", "reload"], "description": "History move on the current preview page (instead of url)" }
+            }, "additionalProperties": false }
+        },
+        {
+            "name": "canopy_browser_snapshot",
+            "description": "What's on the previewed page right now: its URL, title, visible text, and every interactive element (links, buttons, inputs, selects, ARIA-role widgets) with a numbered `ref`, its label/value, its CSS selector, and the React component rendering it. Use the refs to address elements in canopy_browser_click and canopy_browser_type — they stay valid until the page re-renders (then just snapshot again). This is the browser-control equivalent of a screenshot: call it after navigating or acting to see the result.",
+            "inputSchema": { "type": "object", "properties": {
+                "url": { "type": "string", "description": "Which preview tab, when several are open (matched by origin); defaults to the active one" },
+                "max": { "type": "integer", "description": "Cap on interactive elements returned (default 150)" }
+            }, "additionalProperties": false }
+        },
+        {
+            "name": "canopy_browser_click",
+            "description": "Click an element on the previewed page — a button, link, tab, checkbox — addressed by `ref` from the latest canopy_browser_snapshot (preferred) or a CSS `selector`. Scrolls it into view and fires a real pointer/mouse event sequence, so React handlers run. Follow with canopy_browser_snapshot to see what changed (a stale ref after a re-render means: snapshot again).",
+            "inputSchema": { "type": "object", "properties": {
+                "ref": { "type": "integer", "description": "Element ref from canopy_browser_snapshot" },
+                "selector": { "type": "string", "description": "CSS selector, when no snapshot ref is at hand" },
+                "url": { "type": "string", "description": "Which preview tab, when several are open" }
+            }, "additionalProperties": false }
+        },
+        {
+            "name": "canopy_browser_type",
+            "description": "Type into an input, textarea, select, or contenteditable on the previewed page, addressed by `ref` (from canopy_browser_snapshot) or CSS `selector`. Replaces the current value by default (`append: true` appends); the value is set the way React expects, so controlled inputs update. For a <select>, `text` picks the option by value or label. `submit: true` presses Enter afterwards — for forms that don't submit on Enter, click their submit button instead.",
+            "inputSchema": { "type": "object", "properties": {
+                "ref": { "type": "integer", "description": "Element ref from canopy_browser_snapshot" },
+                "selector": { "type": "string", "description": "CSS selector, when no snapshot ref is at hand" },
+                "text": { "type": "string", "description": "The text to enter (or the option to pick, for a select)" },
+                "submit": { "type": "boolean", "description": "Press Enter after typing" },
+                "append": { "type": "boolean", "description": "Append to the current value instead of replacing it" },
+                "url": { "type": "string", "description": "Which preview tab, when several are open" }
+            }, "required": ["text"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_browser_eval",
+            "description": "Run a JavaScript expression (or statements) inside the previewed page and return the result, JSON-serialized — window state, computed styles, app store contents, anything the page can see. Promises are awaited. Use it for checks the snapshot can't express (e.g. `getComputedStyle(document.querySelector('.btn')).color`, `window.__APP_STATE__`). Prefer canopy_browser_click / canopy_browser_type for interactions — they fire the full event sequence the app expects.",
+            "inputSchema": { "type": "object", "properties": {
+                "code": { "type": "string", "description": "JavaScript to evaluate in the page" },
+                "url": { "type": "string", "description": "Which preview tab, when several are open" }
+            }, "required": ["code"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_browser_console",
+            "description": "The previewed page's console output — every console.log/info/warn/error/debug, uncaught error, and unhandled promise rejection since the page loaded (captured before the app's own scripts run). The fastest way to see why a page is broken after your change: navigate, then read the console. `clear: true` empties the buffer after reading, so the next call shows only what happened since.",
+            "inputSchema": { "type": "object", "properties": {
+                "lines": { "type": "integer", "description": "Most recent messages to return (default 100)" },
+                "clear": { "type": "boolean", "description": "Clear the buffer after reading" },
+                "url": { "type": "string", "description": "Which preview tab, when several are open" }
+            }, "additionalProperties": false }
+        },
+        {
+            "name": "canopy_browser_network",
+            "description": "The requests the previewed page has made — method, path, status, duration, content type — as seen by Canopy's preview proxy, newest last (WebSocket upgrades included, so HMR connections show too). Use it to spot failing API calls (4xx/5xx), slow endpoints, or a request that never fired. No page instrumentation involved, so it can't be fooled by the page's own error handling.",
+            "inputSchema": { "type": "object", "properties": {
+                "url": { "type": "string", "description": "Only requests for this preview origin; defaults to all open previews" }
+            }, "additionalProperties": false }
         }
     ]})
 }
@@ -877,8 +938,43 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
                 "url": url,
             }))
         }
+        "canopy_browser_navigate" => {
+            if args.get("url").is_none() && args.get("action").is_none() {
+                return Err(
+                    "pass a url (a local server address from canopy_project) or an action \
+                     (back / forward / reload)"
+                        .into(),
+                );
+            }
+            browser_op("navigate", args)
+        }
+        "canopy_browser_snapshot" => browser_op("snapshot", args),
+        "canopy_browser_click" => browser_op("click", args),
+        "canopy_browser_type" => browser_op("type", args),
+        "canopy_browser_eval" => browser_op("eval", args),
+        "canopy_browser_console" => browser_op("console", args),
+        "canopy_browser_network" => browser_op("network", args),
         other => Err(format!("unknown tool: {other}")),
     }
+}
+
+/// POST a browser-control op to the bridge: the tool's arguments ride along
+/// verbatim, plus the op name and our cwd for project routing. Browser ops wait
+/// on a real page round-trip, so they get a longer timeout than plain reads.
+fn browser_op(op: &str, args: &serde_json::Value) -> Result<String, String> {
+    let mut body = args.clone();
+    if !body.is_object() {
+        body = serde_json::json!({});
+    }
+    body["op"] = serde_json::json!(op);
+    body["cwd"] = serde_json::json!(cwd());
+    ctx_request_with_timeout(
+        "POST",
+        "/ctx/browser",
+        Some(body.to_string()),
+        std::time::Duration::from_secs(20),
+    )
+    .map(pretty)
 }
 
 /// The sidecar's working directory — inherited from the agent CLI, so it's the
@@ -911,6 +1007,15 @@ fn ctx_post(body: serde_json::Value) -> Result<String, String> {
 /// responses carry Content-Length (Connection: close makes read-to-end
 /// correct), and the hook binary stays dependency-light.
 fn ctx_request(method: &str, path: &str, body: Option<String>) -> Result<String, String> {
+    ctx_request_with_timeout(method, path, body, std::time::Duration::from_secs(5))
+}
+
+fn ctx_request_with_timeout(
+    method: &str,
+    path: &str,
+    body: Option<String>,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
     let port: u16 = std::env::var("CANOPY_CTX_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -919,7 +1024,6 @@ fn ctx_request(method: &str, path: &str, body: Option<String>) -> Result<String,
              context tools are unavailable here.",
         )?;
     let token = std::env::var("CANOPY_CTX_TOKEN").unwrap_or_default();
-    let timeout = std::time::Duration::from_secs(5);
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout).map_err(|e| {
         format!("Canopy isn't reachable on port {port} ({e}) — is the app still running?")

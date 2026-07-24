@@ -11,11 +11,14 @@ import {
   type PreviewAnnotation,
   type PreviewServer,
 } from "../preview";
+import { registerBrowserTarget } from "../previewAgent";
 import { AgentLaunchButton } from "./AgentLaunchButton";
 import { LiveDot } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
 
 interface PreviewViewProps {
+  /** The owning SubTab's id — how agent browser ops address this view. */
+  tabId: string;
   url: string;
   annotations: PreviewAnnotation[];
   /** Persist navigation / annotation changes onto the tab, so they survive a
@@ -58,6 +61,7 @@ const normalize = (raw: string): string | null => {
 };
 
 export function PreviewView({
+  tabId,
   url,
   annotations,
   onPatch,
@@ -126,6 +130,36 @@ export function PreviewView({
     }
   }, []);
 
+  // ---------- agent browser control ----------
+  // Ops arrive from the MCP bridge via ProjectView (see previewAgent.ts) and
+  // are answered through ipc.browserResult, which releases the agent's held
+  // HTTP request. In-page ops go into the iframe as {canopy:"agent"} messages;
+  // the injected picker answers with {canopy:"agent-result"}. A page that's
+  // still loading swallows postMessages, so unanswered ops are re-posted when
+  // the (new) document announces ready.
+  const pendingOps = useRef(new Map<number, { op: ipc.AgentBrowserOp; timer: number }>());
+  const navWaiters = useRef<{ id: number; timer: number }[]>([]);
+
+  const postAgentOp = useCallback(
+    (op: ipc.AgentBrowserOp) => {
+      post({
+        canopy: "agent",
+        id: op.id,
+        op: op.op,
+        ref: op.ref ?? undefined,
+        selector: op.selector ?? undefined,
+        text: op.text ?? undefined,
+        submit: op.submit ?? undefined,
+        append: op.append ?? undefined,
+        code: op.code ?? undefined,
+        lines: op.lines ?? undefined,
+        clear: op.clear ?? undefined,
+        max: op.max ?? undefined,
+      });
+    },
+    [post],
+  );
+
   // The picker inside the page talks postMessage; accept only messages from
   // our own iframe's window.
   useEffect(() => {
@@ -141,12 +175,30 @@ export function PreviewView({
           canopy: "sync",
           marks: annotationsRef.current.map((a) => ({ n: a.n, selector: a.selector })),
         });
+        // A new document dropped any in-flight agent ops with it.
+        for (const p of pendingOps.current.values()) postAgentOp(p.op);
       }
       if (d.canopy === "ready" || d.canopy === "nav") {
         const real = typeof d.url === "string" ? unproxied(d.url) : null;
         if (real && real !== urlRef.current) {
           onPatch({ url: real });
           if (!draftFocused.current) setDraft(real);
+        }
+        const arrived = navWaiters.current;
+        navWaiters.current = [];
+        for (const w of arrived) {
+          clearTimeout(w.timer);
+          void ipc.browserResult(w.id, true, {
+            url: real ?? urlRef.current,
+            title: typeof d.title === "string" ? d.title : "",
+          });
+        }
+      } else if (d.canopy === "agent-result") {
+        const p = pendingOps.current.get(d.id);
+        if (p) {
+          clearTimeout(p.timer);
+          pendingOps.current.delete(d.id);
+          void ipc.browserResult(d.id, !!d.ok, d.data);
         }
       } else if (d.canopy === "annotation" && d.payload) {
         const next: PreviewAnnotation = {
@@ -160,7 +212,7 @@ export function PreviewView({
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [onPatch, post, unproxied]);
+  }, [onPatch, post, postAgentOp, unproxied]);
 
   const navigate = useCallback(
     (raw: string) => {
@@ -179,6 +231,58 @@ export function PreviewView({
     },
     [onNotice, onPatch],
   );
+
+  // Receive agent ops for this tab; answer everything on unmount so a held
+  // bridge request never waits out its timeout for an answer that can no
+  // longer come.
+  useEffect(() => {
+    const run = (op: ipc.AgentBrowserOp) => {
+      if (op.op === "navigate") {
+        if (op.url) navigate(op.url);
+        else
+          post({
+            canopy: "navigate",
+            delta: op.action === "back" ? -1 : op.action === "forward" ? 1 : 0,
+          });
+        // Answered when the page announces itself (ready/nav above); if it
+        // never does, answer with what we know rather than failing — the
+        // navigation itself was issued.
+        const timer = window.setTimeout(() => {
+          navWaiters.current = navWaiters.current.filter((w) => w.id !== op.id);
+          void ipc.browserResult(op.id, true, {
+            url: urlRef.current,
+            note: "Navigation was issued but the page hasn't finished loading — call canopy_browser_snapshot to check on it.",
+          });
+        }, 10000);
+        navWaiters.current.push({ id: op.id, timer });
+        return;
+      }
+      const timer = window.setTimeout(() => {
+        pendingOps.current.delete(op.id);
+        void ipc.browserResult(
+          op.id,
+          false,
+          "The page didn't answer — it may still be loading, or stuck. Try canopy_browser_navigate (reload) or check the server with canopy_server_output.",
+        );
+      }, 12000);
+      pendingOps.current.set(op.id, { op, timer });
+      postAgentOp(op);
+    };
+    const unregister = registerBrowserTarget(tabId, run);
+    return () => {
+      unregister();
+      for (const [id, p] of pendingOps.current) {
+        clearTimeout(p.timer);
+        void ipc.browserResult(id, false, "The preview tab closed while this operation ran.");
+      }
+      pendingOps.current.clear();
+      for (const w of navWaiters.current) {
+        clearTimeout(w.timer);
+        void ipc.browserResult(w.id, true, { url: urlRef.current });
+      }
+      navWaiters.current = [];
+    };
+  }, [tabId, navigate, post, postAgentOp]);
 
   const togglePicking = () => {
     const on = !picking;
