@@ -114,13 +114,15 @@ export const onAgentAction = (cb: (a: AgentAction) => void): Promise<UnlistenFn>
  *  until the answer comes back via `browserResult`. Routed like AgentAction. */
 export interface AgentBrowserOp {
   id: number;
-  op: "navigate" | "snapshot" | "click" | "type" | "eval" | "console";
+  op: "navigate" | "snapshot" | "click" | "type" | "point" | "eval" | "console";
   route: string;
   url?: string | null;
   action?: string | null;
   ref?: number | null;
   selector?: string | null;
   text?: string | null;
+  /** point: the caption shown on the cursor while it rests on the element. */
+  label?: string | null;
   submit?: boolean | null;
   append?: boolean | null;
   code?: string | null;

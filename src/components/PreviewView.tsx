@@ -149,6 +149,7 @@ export function PreviewView({
         ref: op.ref ?? undefined,
         selector: op.selector ?? undefined,
         text: op.text ?? undefined,
+        label: op.label ?? undefined,
         submit: op.submit ?? undefined,
         append: op.append ?? undefined,
         code: op.code ?? undefined,
