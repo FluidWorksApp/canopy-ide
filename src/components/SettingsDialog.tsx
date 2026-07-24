@@ -747,6 +747,10 @@ const TUNNELS: {
   blurb: string;
   tokenHelp?: string;
   note?: string;
+  /** Whether the public URL stays the same across sessions. Quick tunnels
+   *  (Cloudflare) and a bare ngrok agent hand out a fresh random name every run;
+   *  Tailscale Funnel's name is tied to the machine, so it persists. */
+  fixed: boolean;
   install: Record<"macos" | "windows" | "linux", string>;
 }[] = [
   {
@@ -755,6 +759,7 @@ const TUNNELS: {
     bin: "cloudflared",
     needsToken: false,
     blurb: "No account — an instant https:// link. Recommended.",
+    fixed: false,
     install: {
       macos: "brew install cloudflared",
       windows: "winget install --id Cloudflare.cloudflared -e --source winget",
@@ -768,6 +773,7 @@ const TUNNELS: {
     needsToken: true,
     blurb: "Paste your free authtoken.",
     tokenHelp: "From dashboard.ngrok.com → Your Authtoken.",
+    fixed: false,
     install: {
       macos: "brew install ngrok",
       windows: "winget install --id ngrok.ngrok -e --source winget",
@@ -781,6 +787,7 @@ const TUNNELS: {
     needsToken: false,
     blurb: "Uses Funnel for a public link.",
     note: "Requires Funnel enabled in your tailnet admin (plain Tailscale needs the app on both devices).",
+    fixed: true,
     install: {
       macos: "brew install tailscale",
       windows: "winget install --id tailscale.tailscale -e --source winget",
@@ -941,6 +948,14 @@ function RemoteSettings({
                 {seg(TUNNELS.map((t) => ({ id: t.id, label: t.name })), provider, changeProvider)}
                 <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
                   {prov.note ? `${prov.blurb} ${prov.note}` : prov.blurb}
+                </div>
+                {/* Whether the link survives a restart — the thing people trip
+                    on when they bookmark a quick-tunnel URL and it 404s next
+                    session. */}
+                <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+                  {prov.fixed
+                    ? "🔗 Same link every session — safe to bookmark."
+                    : "↻ A new link each session. For one that stays the same, use Tailscale Funnel."}
                 </div>
 
                 {prov.needsToken && (
