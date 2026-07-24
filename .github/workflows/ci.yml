@@ -72,6 +72,7 @@ jobs:
           triple=$(rustc -vV | grep '^host:' | awk '{print $2}')
           touch "src-tauri/binaries/canopy-hook-${triple}"
 
+
       # Dictation (ONNX Runtime) is compiled OUT here: staging the runtime is
       # release-only machinery, the feature has no logic these unit tests cover,
       # and --no-default-features is the exact configuration the Intel-macOS
