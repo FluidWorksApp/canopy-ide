@@ -198,7 +198,13 @@ export function PreviewView({
         if (p) {
           clearTimeout(p.timer);
           pendingOps.current.delete(d.id);
-          void ipc.browserResult(d.id, !!d.ok, d.data);
+          // The page knows itself by its proxied address; agents must see the
+          // real one, or they'd cite 127.0.0.1:<proxy> as the server's URL.
+          let data = d.data;
+          if (data && typeof data === "object" && typeof data.url === "string") {
+            data = { ...data, url: unproxied(data.url) ?? data.url };
+          }
+          void ipc.browserResult(d.id, !!d.ok, data);
         }
       } else if (d.canopy === "annotation" && d.payload) {
         const next: PreviewAnnotation = {
@@ -232,57 +238,47 @@ export function PreviewView({
     [onNotice, onPatch],
   );
 
-  // Receive agent ops for this tab; answer everything on unmount so a held
-  // bridge request never waits out its timeout for an answer that can no
-  // longer come.
-  useEffect(() => {
-    const run = (op: ipc.AgentBrowserOp) => {
-      if (op.op === "navigate") {
-        if (op.url) navigate(op.url);
-        else
-          post({
-            canopy: "navigate",
-            delta: op.action === "back" ? -1 : op.action === "forward" ? 1 : 0,
-          });
-        // Answered when the page announces itself (ready/nav above); if it
-        // never does, answer with what we know rather than failing — the
-        // navigation itself was issued.
-        const timer = window.setTimeout(() => {
-          navWaiters.current = navWaiters.current.filter((w) => w.id !== op.id);
-          void ipc.browserResult(op.id, true, {
-            url: urlRef.current,
-            note: "Navigation was issued but the page hasn't finished loading — call canopy_browser_snapshot to check on it.",
-          });
-        }, 10000);
-        navWaiters.current.push({ id: op.id, timer });
-        return;
-      }
+  // Receive agent ops for this tab. Every op carries its own timer, which is
+  // what guarantees the bridge always gets an answer — so unmounting flushes
+  // nothing. (It used to: with `onPatch` a fresh arrow each ProjectView render,
+  // this effect re-ran constantly, and the flush answered in-flight ops with a
+  // pre-load URL — or nothing at all if the invoke failed. The timers survive a
+  // remount in refs; a re-render must not look like a closed tab.)
+  const runOpRef = useRef<(op: ipc.AgentBrowserOp) => void>(() => {});
+  runOpRef.current = (op: ipc.AgentBrowserOp) => {
+    if (op.op === "navigate") {
+      if (op.url) navigate(op.url);
+      else
+        post({
+          canopy: "navigate",
+          delta: op.action === "back" ? -1 : op.action === "forward" ? 1 : 0,
+        });
+      // Answered when the page announces itself (ready/nav above); if it never
+      // does, report where we got to rather than failing — the navigation
+      // itself was issued.
       const timer = window.setTimeout(() => {
-        pendingOps.current.delete(op.id);
-        void ipc.browserResult(
-          op.id,
-          false,
-          "The page didn't answer — it may still be loading, or stuck. Try canopy_browser_navigate (reload) or check the server with canopy_server_output.",
-        );
-      }, 12000);
-      pendingOps.current.set(op.id, { op, timer });
-      postAgentOp(op);
-    };
-    const unregister = registerBrowserTarget(tabId, run);
-    return () => {
-      unregister();
-      for (const [id, p] of pendingOps.current) {
-        clearTimeout(p.timer);
-        void ipc.browserResult(id, false, "The preview tab closed while this operation ran.");
-      }
-      pendingOps.current.clear();
-      for (const w of navWaiters.current) {
-        clearTimeout(w.timer);
-        void ipc.browserResult(w.id, true, { url: urlRef.current });
-      }
-      navWaiters.current = [];
-    };
-  }, [tabId, navigate, post, postAgentOp]);
+        navWaiters.current = navWaiters.current.filter((w) => w.id !== op.id);
+        void ipc.browserResult(op.id, true, {
+          url: urlRef.current,
+          note: "Navigation was issued but the page hasn't finished loading — call canopy_browser_snapshot to check on it.",
+        });
+      }, 10000);
+      navWaiters.current.push({ id: op.id, timer });
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      pendingOps.current.delete(op.id);
+      void ipc.browserResult(
+        op.id,
+        false,
+        "The page didn't answer — it may still be loading, or stuck. Try canopy_browser_navigate (reload) or check the server with canopy_server_output.",
+      );
+    }, 12000);
+    pendingOps.current.set(op.id, { op, timer });
+    postAgentOp(op);
+  };
+
+  useEffect(() => registerBrowserTarget(tabId, (op) => runOpRef.current(op)), [tabId]);
 
   const togglePicking = () => {
     const on = !picking;
