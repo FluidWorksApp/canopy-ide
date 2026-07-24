@@ -78,6 +78,7 @@ import {
   type MicroTaskDef,
 } from "../microTasks";
 import { TasksPanel, type RunningMicroTask } from "./TasksPanel";
+import { taskMenuItem } from "../taskMenu";
 import { viewerKindFor } from "./viewers";
 import { ensureLanguageServer } from "../lsp/client";
 import { Term, type TermHandle } from "./Term";
@@ -1540,6 +1541,20 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     [addTerminal, patchTabRaw, onNotice],
   );
 
+  /** Run a brief that was composed on the spot (a diff surface's "ask about
+   *  this" box) as a one-shot task — same lifecycle as a saved one, no entry in
+   *  the registry. The context builder already folded the user's words in. */
+  const runAdhocTask = useCallback(
+    (label: string, brief: string, dir: string) => {
+      startMicroTask(
+        customTaskDef({ id: label.toLowerCase().replace(/\s+/g, "-"), label, icon: "◆", placeholder: "", brief }),
+        { dir },
+        "",
+      );
+    },
+    [startMicroTask],
+  );
+
   /** Micro-task tabs waiting to close: job_done was acknowledged, and we hold
    *  off killing the PTY until the agent's turn actually ends (its Stop hook)
    *  so the tool result and last words land — with a timer as backstop for a
@@ -2558,6 +2573,20 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     setSideTab("tasks");
     setTaskSeed((prev) => ({ brief, nonce: (prev?.nonce ?? 0) + 1 }));
   }, []);
+  /** The "Tasks ▸" submenu for a right-clicked row, wherever it lives: write a
+   *  new task about it, then run one on it. The surfaces stay ignorant of the
+   *  task registry — they ask for the item and splice it into their menu. */
+  const taskMenu = useCallback(
+    (seed: string, runnable?: { label: string; icon?: string; run: () => void }[]) =>
+      taskMenuItem({
+        seed,
+        runnable,
+        onNewTask: seedTaskFrom,
+        onRunSaved: (t) => startMicroTask(customTaskDef(t), { dir: roots[0] ?? "" }, ""),
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [seedTaskFrom, startMicroTask, roots[0]],
+  );
 
   const submitRootCreate = async () => {
     if (!rootCreate) return;
@@ -3025,6 +3054,18 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 text,
               })
             }
+            onRaisePrTask={
+              tab.repo
+                ? (branch, worktree) =>
+                    startMicroTask(raisePrTask, { repo: tab.repo as string, branch, worktree }, "")
+                : undefined
+            }
+            onReviewPrTask={
+              tab.repo
+                ? (pr) => startMicroTask(reviewPrTask, { repo: tab.repo as string, pr }, "")
+                : undefined
+            }
+            onRunSavedTask={(task, dir) => startMicroTask(customTaskDef(task), { dir }, "")}
           />
         );
       case "commit":
@@ -3082,6 +3123,17 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                       agentId,
                       reviewContext(tab.review, path, query),
                       `Review ${tab.review.branch}`,
+                    );
+                  })
+                }
+                onRunTask={(query) =>
+                  void writeReviewPatch(tab.review).then((path) => {
+                    const dir = componentsRef.current[0]?.path;
+                    if (!path || !dir) return;
+                    runAdhocTask(
+                      `Review ${tab.review.branch}`,
+                      reviewContext(tab.review, path, query),
+                      dir,
                     );
                   })
                 }
@@ -3172,6 +3224,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                     tab.file.name,
                   );
                 }}
+                onRunTask={(query) => {
+                  const dir = repoForFile(tab.file.path);
+                  if (!dir) return onNotice("No git repository in this project.");
+                  runAdhocTask(tab.file.name, fileDiffContext(tab.file.path, query), dir);
+                }}
               />
             }
           />
@@ -3225,13 +3282,57 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                   // selection, with the tab's subject prefilled.
                   const taskItem: MenuItem[] =
                     tab.type === "file"
-                      ? [{ label: "New Task…", onClick: () => seedTaskFrom(`In \`${tab.file.path}\`: `) }]
+                      ? [taskMenu(`In \`${tab.file.path}\`: `)]
                       : tab.type === "pr"
-                        ? [{ label: "New Task…", onClick: () => seedTaskFrom(`About PR #${tab.pr.number} "${tab.pr.title}" (${tab.pr.url}): `) }]
+                        ? [
+                            taskMenu(
+                              `About PR #${tab.pr.number} "${tab.pr.title}" (${tab.pr.url}): `,
+                              [
+                                {
+                                  label: `Review PR #${tab.pr.number}`,
+                                  icon: reviewPrTask.icon,
+                                  run: () =>
+                                    startMicroTask(
+                                      reviewPrTask,
+                                      { repo: tab.repo, pr: tab.pr },
+                                      "",
+                                    ),
+                                },
+                              ],
+                            ),
+                          ]
                         : tab.type === "branch"
-                          ? [{ label: "New Task…", onClick: () => seedTaskFrom(`On branch ${tab.branch.branch}: `) }]
+                          ? [
+                              taskMenu(
+                                `On branch ${tab.branch.branch}: `,
+                                tab.branch.merged
+                                  ? undefined
+                                  : [
+                                      {
+                                        label: `Raise PR for ${tab.branch.branch}`,
+                                        icon: raisePrTask.icon,
+                                        run: () =>
+                                          startMicroTask(
+                                            raisePrTask,
+                                            {
+                                              repo: tab.repo,
+                                              branch: tab.branch.branch,
+                                              worktree: tab.branch.worktree,
+                                              unpushed:
+                                                !tab.branch.upstream || tab.branch.ahead > 0,
+                                            },
+                                            "",
+                                          ),
+                                      },
+                                    ],
+                              ),
+                            ]
                           : tab.type === "ticket"
-                            ? [{ label: "New Task…", onClick: () => seedTaskFrom(`About ticket ${tab.ticket.id} "${tab.ticket.title}" (${tab.ticket.url}): `) }]
+                            ? [
+                                taskMenu(
+                                  `About ticket ${tab.ticket.id} "${tab.ticket.title}" (${tab.ticket.url}): `,
+                                ),
+                              ]
                             : [];
                   const items: MenuItem[] =
                     tab.type === "terminal"
@@ -3618,9 +3719,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               onContextMenu={(e) => {
                 const sel = termHandles.current.get(tab.id)?.getSelection().trim();
                 if (!sel) return;
-                termMenu.open(e, [
-                  { label: "New task from selection", onClick: () => seedTaskFrom(sel) },
-                ]);
+                termMenu.open(e, [taskMenu(sel)]);
               }}
             >
               <TermPorts ptyId={tab.ptyId} stats={stats} onPreview={openPreview} />
@@ -3639,8 +3738,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 // sitting at a prompt looking "running" forever — and it's
                 // correct on cmd.exe / PowerShell, not just POSIX. A non-run tab
                 // types its command (e.g. launching an agent CLI).
-                initialCommand={tab.run ? undefined : tab.command}
-                runCommand={tab.run && tab.command ? tab.command : undefined}
+                //
+                // Micro-tasks go the runCommand way too, for a different
+                // reason: their brief is a whole paragraph on one line, and a
+                // command that long typed at a shell that is still starting
+                // loses its Enter to zsh's line editor — the task sat unrun at
+                // a prompt. As an argv it never touches the tty.
+                initialCommand={tab.run || tab.micro ? undefined : tab.command}
+                runCommand={(tab.run || tab.micro) && tab.command ? tab.command : undefined}
                 onSpawned={(ptyId) =>
                   // A freshly spawned pty is alive by definition, so clear any
                   // stale exited/failed state. Restart kills the old pty and
@@ -3983,6 +4088,29 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                         })
                       }
                       onClose={() => setWsDrawerOpen(false)}
+                      onRaisePrTask={
+                        agentTermWs.repo
+                          ? (branch, worktree) =>
+                              startMicroTask(
+                                raisePrTask,
+                                { repo: agentTermWs.repo as string, branch, worktree },
+                                "",
+                              )
+                          : undefined
+                      }
+                      onReviewPrTask={
+                        agentTermWs.repo
+                          ? (pr) =>
+                              startMicroTask(
+                                reviewPrTask,
+                                { repo: agentTermWs.repo as string, pr },
+                                "",
+                              )
+                          : undefined
+                      }
+                      onRunSavedTask={(task, dir) =>
+                        startMicroTask(customTaskDef(task), { dir }, "")
+                      }
                     />
                   )}
                 </div>
@@ -4239,7 +4367,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                     onOpenFile={(p) => void openFile(p)}
                     onNotice={onNotice}
                     hideRootHeader
-                    onNewTask={(p) => seedTaskFrom(`In \`${p}\`: `)}
+                    taskMenuFor={(p) => taskMenu(`In \`${p}\`: `)}
                   />
                 </>
               )}
@@ -4263,8 +4391,29 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onOpenBranch={openBranch}
           onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
           onNotice={onNotice}
-          onRaisePrTask={(repo, branch) => startMicroTask(raisePrTask, { repo, branch }, "")}
-          onReviewPrTask={(repo, pr) => startMicroTask(reviewPrTask, { repo, pr }, "")}
+          branchTaskMenu={(repo, branch, worktree, merged) =>
+            taskMenu(
+              `On branch ${branch}: `,
+              merged
+                ? undefined
+                : [
+                    {
+                      label: `Raise PR for ${branch}`,
+                      icon: raisePrTask.icon,
+                      run: () => startMicroTask(raisePrTask, { repo, branch, worktree }, ""),
+                    },
+                  ],
+            )
+          }
+          prTaskMenu={(repo, pr) =>
+            taskMenu(`About PR #${pr.number} "${pr.title}" (${pr.url}): `, [
+              {
+                label: `Review PR #${pr.number}`,
+                icon: reviewPrTask.icon,
+                run: () => startMicroTask(reviewPrTask, { repo, pr }, ""),
+              },
+            ])
+          }
         />
       ))}
       {sidePane("changes", () => (
@@ -4294,6 +4443,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 const dir = changeGroups[0]?.repo ?? componentsRef.current[0]?.path;
                 if (!dir) return onNotice("No git repository in this project.");
                 startAgentInDir(dir, agentId, sessionChangesContext(changeContextGroups(), query), "Changes");
+              }}
+              onRunTask={(query) => {
+                const dir = changeGroups[0]?.repo ?? componentsRef.current[0]?.path;
+                if (!dir) return onNotice("No git repository in this project.");
+                runAdhocTask("Changes", sessionChangesContext(changeContextGroups(), query), dir);
               }}
             />
           }

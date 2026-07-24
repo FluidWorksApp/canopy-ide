@@ -24,9 +24,9 @@ interface FileTreeProps {
   /** No git overlay, no filesystem watch, no rename/delete/create — for a tree
    *  that isn't the local disk (a teammate's shared project). */
   readOnly?: boolean;
-  /** Open the Tasks panel's create form seeded with this path — "make a
-   *  one-shot agent job about this file/folder". */
-  onNewTask?: (path: string) => void;
+  /** The "Tasks ▸" submenu for a right-clicked path, built by the owner (it
+   *  knows the task registry); omitted where tasks don't apply. */
+  taskMenuFor?: (path: string) => MenuItem;
 }
 
 interface DirState {
@@ -78,7 +78,7 @@ export function FileTree({
   hideRootHeader,
   readDir,
   readOnly,
-  onNewTask,
+  taskMenuFor,
 }: FileTreeProps) {
   const { menu, open, close } = useContextMenu();
   const [prompt, setPrompt] = useState<{
@@ -298,15 +298,7 @@ export function FileTree({
         label: "Reveal in Finder",
         onClick: () => void ipc.fsReveal(path).catch((e) => onNotice?.(String(e))),
       },
-      ...(onNewTask
-        ? [
-            { separator: true, label: "" },
-            {
-              label: "New Task…",
-              onClick: () => onNewTask(path),
-            },
-          ]
-        : []),
+      ...(taskMenuFor ? [{ separator: true, label: "" }, taskMenuFor(path)] : []),
       { separator: true, label: "" },
       {
         // Trash, not unlink: recoverable if it was a misclick, and uncommitted
@@ -322,7 +314,7 @@ export function FileTree({
   const emptyItems = (dir: string): MenuItem[] => [
     { label: "New File…", onClick: () => setPrompt({ kind: "new-file", dir, value: "" }) },
     { label: "New Folder…", onClick: () => setPrompt({ kind: "new-dir", dir, value: "" }) },
-    ...(onNewTask ? [{ label: "New Task…", onClick: () => onNewTask(dir) }] : []),
+    ...(taskMenuFor ? [taskMenuFor(dir)] : []),
     { separator: true, label: "" },
     { label: "Reveal in Finder", onClick: () => void ipc.fsReveal(dir).catch(() => {}) },
     { label: "Refresh", onClick: () => void loadDir(dir) },
