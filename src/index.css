@@ -2916,6 +2916,9 @@ body.dragging-tab * {
 }
 .task-run-form .agent-query-input,
 .task-edit-form .agent-query-input {
+  /* The bar version's flex-basis (160px) is a WIDTH in its row; in these
+   * column forms it becomes a height and every input balloons. */
+  flex: none;
   width: 100%;
   box-sizing: border-box;
 }

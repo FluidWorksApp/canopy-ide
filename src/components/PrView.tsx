@@ -12,6 +12,8 @@ import type { Notify, RelayHandle } from "../types";
 import { AgentLaunchButton } from "./AgentLaunchButton";
 import { TeamIcon } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
+import { reviewPrTask, type MicroTaskDef, type ReviewPrPayload } from "../microTasks";
+import { MicroTaskButton } from "./MicroTaskButton";
 // NB: PR diffs arrive as real patches from `gh pr diff`, so they go straight
 // into the renderer. Working-tree diffs (components/DiffView.tsx) have to build
 // their patch first — see the note there about Monaco's diff not computing.
@@ -34,6 +36,9 @@ interface PrViewProps {
   onStartResolve: (agentId: string) => void;
   /** Hand conflict resolution to an already-running agent. */
   onSendResolve: (target: AgentTarget) => void;
+  /** Launch the one-shot Review PR micro-task (reads via gh, posts a review
+   *  comment, reports, closes itself) — the ephemeral cousin of Review above. */
+  onMicroTask?: (task: MicroTaskDef<ReviewPrPayload>, payload: ReviewPrPayload, query: string) => void;
 }
 
 type Review = "approve" | "request-changes" | "comment";
@@ -116,6 +121,7 @@ export function PrView({
   onSendToAgent,
   onStartResolve,
   onSendResolve,
+  onMicroTask,
 }: PrViewProps) {
   const [patch, setPatch] = useState<string | null>(null);
   const [body, setBody] = useState("");
@@ -353,6 +359,14 @@ export function PrView({
               newAgentLabel={`New agent in ${pr.branch}`}
               onStart={onStartReview}
               onSend={onSendToAgent}
+            />
+          )}
+          {pr.mergeable !== "CONFLICTING" && onMicroTask && (
+            <MicroTaskButton
+              task={reviewPrTask}
+              payload={{ repo, pr }}
+              title="One-shot review: an agent reads the PR via gh, posts its findings as a review comment, and its terminal closes itself"
+              onLaunch={onMicroTask}
             />
           )}
           {pr.draft && pr.state === "OPEN" && (
