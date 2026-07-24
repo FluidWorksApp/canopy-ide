@@ -30,6 +30,10 @@ interface PrViewProps {
   onStartReview: (agentId: string) => void;
   /** Hand the review to an already-running agent. */
   onSendToAgent: (target: AgentTarget) => void;
+  /** Start an agent resolving the PR's merge conflicts (shown when conflicting). */
+  onStartResolve: (agentId: string) => void;
+  /** Hand conflict resolution to an already-running agent. */
+  onSendResolve: (target: AgentTarget) => void;
 }
 
 type Review = "approve" | "request-changes" | "comment";
@@ -110,6 +114,8 @@ export function PrView({
   installed,
   onStartReview,
   onSendToAgent,
+  onStartResolve,
+  onSendResolve,
 }: PrViewProps) {
   const [patch, setPatch] = useState<string | null>(null);
   const [body, setBody] = useState("");
@@ -324,18 +330,31 @@ export function PrView({
           >
             Checkout
           </button>
-          {/* Review with an agent — the same block the ticket tab uses, so
-              handing a PR to a CLI works exactly like handing it a ticket:
-              checks the branch out in a worktree and starts the agent there. */}
-          <AgentLaunchButton
-            variant="mini"
-            label="Review"
-            agentTargets={agentTargets}
-            installed={installed}
-            newAgentLabel={`New agent in ${pr.branch}`}
-            onStart={onStartReview}
-            onSend={onSendToAgent}
-          />
+          {/* Hand the PR to an agent — the same block the ticket tab uses:
+              checks the branch out in a worktree and starts the agent there.
+              When the PR conflicts, the same control instead offers to resolve
+              the conflicts (merge base in, fix markers, commit, push). */}
+          {pr.mergeable === "CONFLICTING" ? (
+            <AgentLaunchButton
+              variant="mini"
+              label="Resolve conflicts"
+              agentTargets={agentTargets}
+              installed={installed}
+              newAgentLabel={`New agent in ${pr.branch}`}
+              onStart={onStartResolve}
+              onSend={onSendResolve}
+            />
+          ) : (
+            <AgentLaunchButton
+              variant="mini"
+              label="Review"
+              agentTargets={agentTargets}
+              installed={installed}
+              newAgentLabel={`New agent in ${pr.branch}`}
+              onStart={onStartReview}
+              onSend={onSendToAgent}
+            />
+          )}
           {pr.draft && pr.state === "OPEN" && (
             <button
               className="btn-mini"

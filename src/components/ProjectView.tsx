@@ -77,7 +77,9 @@ import { ReviewView, type ReviewPayload } from "./ReviewView";
 import { BranchView } from "./BranchView";
 import { AgentWorkspaceView } from "./AgentWorkspaceView";
 import { ticketBranch, ticketContext, ticketWorktree } from "../trackers";
-import { prReviewContext, prWorktree } from "../prs";
+import { prConflictContext, prReviewContext, prWorktree } from "../prs";
+import { fileDiffContext, reviewContext, sessionChangesContext } from "../diffContext";
+import { AgentQueryBar } from "./AgentQueryBar";
 import { forgetSessions, markRestored, restorableFrom, type Restorable } from "../restorable";
 import {
   forgetTerminals,
@@ -1140,53 +1142,72 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
    *  there's nothing to invent, and the branch already exists upstream, so we
    *  only ever check it out (create=false, letting git DWIM the remote branch),
    *  never `-b` a fresh one off HEAD (which would "review" empty changes). */
-  const startPrReview = useCallback(
-    async (repo: string, pr: ipc.PrInfo, agentId?: string) => {
+  // Start an agent on a PR in its own worktree. `mode` only swaps the prompt it
+  // is seeded with (review vs. resolve-the-conflicts) and the error wording —
+  // the worktree checkout/reuse and seeding are identical.
+  const startPrAgent = useCallback(
+    async (mode: "review" | "resolve", repo: string, pr: ipc.PrInfo, agentId?: string) => {
+      const noun = mode === "resolve" ? "conflict resolution on" : "a review of";
       const installedClis = AGENT_CLIS.filter((c) => installedRef.current[c.bin]);
       const preferred = getSettings().defaultAgent;
       const agent =
         agentId ||
         (installedClis.find((c) => c.id === preferred) ?? installedClis[0] ?? AGENT_CLIS[0])?.id;
       const cli = AGENT_CLIS.find((c) => c.id === agent);
-      const start = startCommand(agent, prReviewContext(pr));
-      if (!cli || !start) {
+      if (!cli) {
         onNotice(`Unknown agent "${agent}".`);
         return;
       }
-      const seed = (id: string) => {
-        if (!start.typePrompt) return;
-        const pty = tabsRef.current.find(
-          (t): t is TermSubTab => t.id === id && t.type === "terminal",
-        )?.ptyId;
-        if (pty == null) return;
-        void ipc.ptyWrite(pty, prReviewContext(pr));
-        setTimeout(() => void ipc.ptyWrite(pty, "\r"), 250);
-      };
-      const title = `PR #${pr.number} · ${cli.name}`;
       try {
+        // Reuse a worktree already holding this PR's branch; otherwise make an
+        // ephemeral one — fetching the PR head (fork-safe, and without switching
+        // the main checkout's branch) so it works even for a PR you've never
+        // checked out. Only a worktree WE created is disposable, so only then do
+        // we tell the agent to remove it and skip registering it as a component.
         const worktrees = await ipc.gitWorktrees(repo).catch(() => [] as ipc.WorktreeInfo[]);
         const existing = prWorktree(pr, worktrees);
-        if (existing) {
-          const id = addTerminal(existing.path, start.command, title, cli.icon);
-          if (id) setTimeout(() => seed(id), 2500);
+        const path = existing?.path ?? `${repo}-wt-pr-${pr.number}`;
+        const cleanup = existing ? undefined : { repo, worktree: path };
+        const context =
+          mode === "resolve" ? prConflictContext(pr, cleanup) : prReviewContext(pr, cleanup);
+        const start = startCommand(agent, context);
+        if (!start) {
+          onNotice(`Unknown agent "${agent}".`);
           return;
         }
-        const path = `${repo}-wt-pr-${pr.number}`;
-        await ipc.gitWorktreeAdd(repo, path, pr.branch, false);
-        await ipc.workspaceAdd(path).catch(() => {});
+        if (!existing) {
+          await ipc.gitWorktreeAddPr(repo, path, pr.number, pr.branch);
+        }
+        const title = `PR #${pr.number} · ${cli.name}`;
         const id = addTerminal(path, start.command, title, cli.icon);
-        if (id) setTimeout(() => seed(id), 2500);
+        if (id && start.typePrompt) {
+          setTimeout(() => {
+            const pty = tabsRef.current.find(
+              (t): t is TermSubTab => t.id === id && t.type === "terminal",
+            )?.ptyId;
+            if (pty == null) return;
+            void ipc.ptyWrite(pty, context);
+            setTimeout(() => void ipc.ptyWrite(pty, "\r"), 250);
+          }, 2500);
+        }
       } catch (err) {
-        // The usual cause is a fork PR whose branch isn't on your remote — the
-        // one case git can't check out on its own. "Checkout" (gh pr checkout)
-        // fetches it first, after which a review reuses that worktree.
+        // A private fork you can't fetch is the one case even pull/<n>/head
+        // can't reach; "Checkout" (gh pr checkout) authenticates and fetches it.
         onNotice(
-          `Couldn't start a review of PR #${pr.number}: ${String(err)}. ` +
-            `If it's from a fork, click Checkout first.`,
+          `Couldn't start ${noun} PR #${pr.number}: ${String(err)}. ` +
+            `If it's from a private fork you can't fetch, click Checkout first.`,
         );
       }
     },
     [addTerminal, onNotice],
+  );
+  const startPrReview = useCallback(
+    (repo: string, pr: ipc.PrInfo, agentId?: string) => startPrAgent("review", repo, pr, agentId),
+    [startPrAgent],
+  );
+  const startPrConflictResolve = useCallback(
+    (repo: string, pr: ipc.PrInfo, agentId?: string) => startPrAgent("resolve", repo, pr, agentId),
+    [startPrAgent],
   );
 
   /** Open a branch as its own tab — its uncommitted work, its commits, and
@@ -1325,6 +1346,63 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     setActiveTabId(target.tabId);
     setTimeout(() => termHandles.current.get(target.tabId)?.focus(), 50);
   }, []);
+
+  /** Start a fresh agent CLI in `dir`, seeded with `seed`. The diff surfaces
+   *  (session changes, a file diff, a relay review) work on the working tree
+   *  that's already there, so unlike a PR/ticket there's no worktree to make —
+   *  the agent just opens in the existing checkout. Same resolve-CLI-then-seed
+   *  shape as startTicketWork/startPrAgent. */
+  const startAgentInDir = useCallback(
+    (dir: string, agentId: string | undefined, seed: string, title: string) => {
+      const installedClis = AGENT_CLIS.filter((c) => installedRef.current[c.bin]);
+      const preferred = getSettings().defaultAgent;
+      const agent =
+        agentId ||
+        (installedClis.find((c) => c.id === preferred) ?? installedClis[0] ?? AGENT_CLIS[0])?.id;
+      const cli = AGENT_CLIS.find((c) => c.id === agent);
+      const start = agent ? startCommand(agent, seed) : null;
+      if (!cli || !start) {
+        onNotice(`Unknown agent "${agent}".`);
+        return;
+      }
+      const id = addTerminal(dir, start.command, `${title} · ${cli.name}`, cli.icon);
+      if (id && start.typePrompt) {
+        setTimeout(() => {
+          const pty = tabsRef.current.find(
+            (t): t is TermSubTab => t.id === id && t.type === "terminal",
+          )?.ptyId;
+          if (pty == null) return;
+          void ipc.ptyWrite(pty, seed);
+          setTimeout(() => void ipc.ptyWrite(pty, "\r"), 250);
+        }, 2500);
+      }
+    },
+    [addTerminal, onNotice],
+  );
+
+  /** A relay review's diff isn't in any local checkout, so an agent can't
+   *  `git diff` for it — write the patch into the project (an authorized
+   *  workspace, so the write is in scope) and hand the agent that path. Returns
+   *  the file path, or null if there's nowhere to write it. */
+  const writeReviewPatch = useCallback(
+    async (review: ReviewPayload): Promise<string | null> => {
+      const dir = componentsRef.current[0]?.path;
+      if (!dir) {
+        onNotice("No project directory to stage the review in.");
+        return null;
+      }
+      const safe = (review.branch || "review").replace(/[^A-Za-z0-9._-]+/g, "-");
+      const path = `${dir}/.canopy-review-${safe}.patch`;
+      try {
+        await ipc.fsWriteFile(path, review.patch);
+        return path;
+      } catch (err) {
+        onNotice(`Couldn't stage the review diff: ${String(err)}`, "error");
+        return null;
+      }
+    },
+    [onNotice],
+  );
 
   /** Re-run a run tab's command in place, reusing the tab (and its position in
    *  the rail) rather than spawning a new one. */
@@ -2344,6 +2422,18 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       };
     });
 
+  // The session changeset shaped for the agent context builder: component
+  // label plus each file's repo-relative path.
+  const changeContextGroups = () =>
+    changeGroups.map((g) => ({ component: g.component, paths: g.files.map((f) => f.path) }));
+
+  // Which component checkout an absolute path lives in — the cwd a fresh agent
+  // opened on that file should start in. Falls back to the first component.
+  const repoForFile = (abs: string) =>
+    componentsRef.current.find((c) => abs === c.path || abs.startsWith(`${c.path}/`))?.path ??
+    componentsRef.current[0]?.path ??
+    null;
+
   // The agent behind the active *terminal* tab, if any — the "Agent Workspace"
   // toggle and its overlay only exist here. Identity is the live process (same
   // resolution as the tab icon), so it's right for every agent CLI — not just
@@ -2931,10 +3021,43 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             installed={installed}
             onStartReview={(agentId) => void startPrReview(activeTab.repo, activeTab.pr, agentId)}
             onSendToAgent={(target) => sendTicketToAgent(target, prReviewContext(activeTab.pr))}
+            onStartResolve={(agentId) =>
+              void startPrConflictResolve(activeTab.repo, activeTab.pr, agentId)
+            }
+            onSendResolve={(target) => sendTicketToAgent(target, prConflictContext(activeTab.pr))}
           />
         )}
         {activeTab?.type === "review" && (
-          <ReviewView key={activeTab.id} review={activeTab.review} />
+          <ReviewView
+            key={activeTab.id}
+            review={activeTab.review}
+            agentBar={
+              <AgentQueryBar
+                agentTargets={agentTargets}
+                installed={installed}
+                newAgentLabel="New agent in this project"
+                label="Send to agent"
+                placeholder="Ask an agent to review this…"
+                onSend={(target, query) =>
+                  void writeReviewPatch(activeTab.review).then((path) => {
+                    if (path) sendTicketToAgent(target, reviewContext(activeTab.review, path, query));
+                  })
+                }
+                onStart={(agentId, query) =>
+                  void writeReviewPatch(activeTab.review).then((path) => {
+                    const dir = componentsRef.current[0]?.path;
+                    if (!path || !dir) return;
+                    startAgentInDir(
+                      dir,
+                      agentId,
+                      reviewContext(activeTab.review, path, query),
+                      `Review ${activeTab.review.branch}`,
+                    );
+                  })
+                }
+              />
+            }
+          />
         )}
         {activeTab?.type === "chat" && (
           <ChatView
@@ -2990,6 +3113,30 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             onKeepMine={() => keepMine(activeTab.file.path)}
             onCloseDiff={() =>
               patchFile(activeTab.file.path, { view: "source", diffOriginal: null })
+            }
+            diffAgentBar={
+              <AgentQueryBar
+                agentTargets={agentTargets}
+                installed={installed}
+                newAgentLabel="New agent in this project"
+                placeholder="Ask an agent about this file's changes…"
+                onSend={(target, query) =>
+                  sendTicketToAgent(
+                    target,
+                    fileDiffContext(activeTab.file.path, query),
+                  )
+                }
+                onStart={(agentId, query) => {
+                  const dir = repoForFile(activeTab.file.path);
+                  if (!dir) return onNotice("No git repository in this project.");
+                  startAgentInDir(
+                    dir,
+                    agentId,
+                    fileDiffContext(activeTab.file.path, query),
+                    activeTab.file.name,
+                  );
+                }}
+              />
             }
           />
         )}
@@ -3539,6 +3686,22 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               relay.collab.markOwnerSaved(p);
               void refreshChanges();
             })
+          }
+          agentBar={
+            <AgentQueryBar
+              agentTargets={agentTargets}
+              installed={installed}
+              newAgentLabel="New agent in this project"
+              placeholder="Ask an agent about these changes…"
+              onSend={(target, query) =>
+                sendTicketToAgent(target, sessionChangesContext(changeContextGroups(), query))
+              }
+              onStart={(agentId, query) => {
+                const dir = changeGroups[0]?.repo ?? componentsRef.current[0]?.path;
+                if (!dir) return onNotice("No git repository in this project.");
+                startAgentInDir(dir, agentId, sessionChangesContext(changeContextGroups(), query), "Changes");
+              }}
+            />
           }
         />
       )}

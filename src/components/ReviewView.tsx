@@ -4,6 +4,7 @@
 // checked out (or a repo they don't have at all). Same diff widget as commits
 // and PRs; only the source differs.
 import { useState } from "react";
+import type { ReactNode } from "react";
 import { DiffView, DiffModeEnum } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import { splitPatch } from "./PrView";
@@ -20,7 +21,14 @@ export interface ReviewPayload {
   patch: string;
 }
 
-export function ReviewView({ review }: { review: ReviewPayload }) {
+export function ReviewView({
+  review,
+  agentBar,
+}: {
+  review: ReviewPayload;
+  /** "Ask an agent to review this" control. */
+  agentBar?: ReactNode;
+}) {
   const [split, setSplit] = useState(true);
   const files = review.patch ? splitPatch(review.patch) : [];
   return (
@@ -41,6 +49,7 @@ export function ReviewView({ review }: { review: ReviewPayload }) {
             </button>
           )}
         </div>
+        {agentBar}
       </div>
       <div className="commit-files">
         {files.length === 0 ? (

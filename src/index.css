@@ -2443,6 +2443,52 @@ body,
   color: var(--warn);
 }
 
+/* "Ask an agent about this diff" — shared by the session-changes panel, a
+   working-tree file diff, and a relay review. A text box plus the mini agent
+   dropdown, laid out in one row that wraps the button under on tight widths. */
+.agent-query-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.agent-query-input {
+  flex: 1 1 160px;
+  min-width: 0;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+.agent-query-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* In the file-diff toolbar the bar sits on its own strip under the buttons. */
+.diff-agent-bar {
+  padding: 6px 12px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+/* In the session-changes side panel it's a slim strip under the header. */
+.side-panel .agent-query-bar {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* In a relay review it sits below the meta row of the header. */
+.commit-head .agent-query-bar {
+  margin-top: 8px;
+}
+
 /* ---------- terminal ---------- */
 
 .terminal-pane {

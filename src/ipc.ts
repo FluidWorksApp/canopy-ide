@@ -522,6 +522,8 @@ export const agentEdits = (repo: string | null, sessionId: string) =>
 export const gitWorktrees = (repo: string) => invoke<WorktreeInfo[]>("git_worktrees", { repo });
 export const gitWorktreeAdd = (repo: string, path: string, branch: string, create: boolean) =>
   invoke<string>("git_worktree_add", { repo, path, branch, create });
+export const gitWorktreeAddPr = (repo: string, path: string, number: number, branch: string) =>
+  invoke<string>("git_worktree_add_pr", { repo, path, number, branch });
 export const gitWorktreeRemove = (repo: string, path: string, force: boolean) =>
   invoke<string>("git_worktree_remove", { repo, path, force });
 export const gitWorktreePrune = (repo: string) => invoke<string>("git_worktree_prune", { repo });
