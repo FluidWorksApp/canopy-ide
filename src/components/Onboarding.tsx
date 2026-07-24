@@ -302,7 +302,7 @@ const SLIDES: Slide[] = [
   },
   {
     icon: "🌐",
-    title: "Drive your agents from a browser",
+    title: "Drive your agents from anywhere",
     body: "A remote control-panel for your own agents.",
     mock: (
       <Scene chrome="remote portal" vars={{ "--cx0": "250px", "--cy0": "24px", "--cx1": "150px", "--cy1": "88px" } as React.CSSProperties}>
