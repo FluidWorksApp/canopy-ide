@@ -62,9 +62,7 @@ fn resolve_command(cmd: &str) -> String {
 
 fn which_in_path(cmd: &str) -> bool {
     std::env::var("PATH")
-        .map(|path| {
-            std::env::split_paths(&path).any(|dir| dir.join(cmd).is_file())
-        })
+        .map(|path| std::env::split_paths(&path).any(|dir| dir.join(cmd).is_file()))
         .unwrap_or(false)
 }
 
@@ -164,7 +162,9 @@ pub fn lsp_send(state: State<'_, LspManager>, id: u32, message: String) -> Resul
         .ok_or_else(|| format!("no lsp server {id}"))?;
     let mut stdin = server.stdin.lock().unwrap();
     let framed = format!("Content-Length: {}\r\n\r\n{}", message.len(), message);
-    stdin.write_all(framed.as_bytes()).map_err(|e| e.to_string())
+    stdin
+        .write_all(framed.as_bytes())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

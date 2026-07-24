@@ -197,7 +197,9 @@ fn launch(
                     running: false,
                     provider: Some(provider.clone()),
                     url: None,
-                    message: Some(format!("Couldn't start {resolved_bin}: {e}. Is it installed?")),
+                    message: Some(format!(
+                        "Couldn't start {resolved_bin}: {e}. Is it installed?"
+                    )),
                 },
             );
             return;
@@ -361,7 +363,16 @@ fn launch(
                     ),
                 },
             );
-            launch(app, child_slot, last, provider, resolved_bin, retry_args, retry_envs, false);
+            launch(
+                app,
+                child_slot,
+                last,
+                provider,
+                resolved_bin,
+                retry_args,
+                retry_envs,
+                false,
+            );
         });
     }
 }

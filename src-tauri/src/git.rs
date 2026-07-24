@@ -132,7 +132,10 @@ fn repo_path(state: &State<'_, WorkspaceManager>, path: &str) -> Result<PathBuf,
 }
 
 fn toplevel_of(dir: &Path) -> Option<PathBuf> {
-    let out = git(dir).args(["rev-parse", "--show-toplevel"]).output().ok()?;
+    let out = git(dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -170,8 +173,12 @@ pub async fn git_repos(
 ) -> Result<Vec<RepoInfo>, String> {
     let mut repos: Vec<RepoInfo> = Vec::new();
     for (label, path) in components {
-        let Ok(dir) = check_scope(&state, Path::new(&path)) else { continue };
-        let Some(top) = toplevel_of(&dir) else { continue };
+        let Ok(dir) = check_scope(&state, Path::new(&path)) else {
+            continue;
+        };
+        let Some(top) = toplevel_of(&dir) else {
+            continue;
+        };
         let top_str = top.to_string_lossy().to_string();
         if let Some(existing) = repos.iter_mut().find(|r| r.path == top_str) {
             existing.components.push(label);
@@ -211,7 +218,8 @@ pub async fn git_repo_status(
 
     let (mut ahead, mut behind) = (0, 0);
     if upstream.is_some() {
-        if let Ok(counts) = run(git(&top).args(["rev-list", "--left-right", "--count", "@{upstream}...HEAD"]))
+        if let Ok(counts) =
+            run(git(&top).args(["rev-list", "--left-right", "--count", "@{upstream}...HEAD"]))
         {
             let mut it = counts.split_whitespace();
             behind = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -254,10 +262,7 @@ pub async fn git_repo_status(
 
         // Unmerged: any of these combinations means a conflict, and staging it
         // blindly would silently resolve it — keep it in its own bucket.
-        let conflicted = matches!(
-            (index, tree),
-            ('U', _) | (_, 'U') | ('A', 'A') | ('D', 'D')
-        );
+        let conflicted = matches!((index, tree), ('U', _) | (_, 'U') | ('A', 'A') | ('D', 'D'));
         if conflicted {
             status.conflicted.push(mk(false, false, true));
             continue;
@@ -509,7 +514,13 @@ pub async fn git_fetch(state: State<'_, WorkspaceManager>, repo: String) -> Resu
     let top = repo_path(&state, &repo)?;
     let mut cmd = git(&top);
     cmd.args(["fetch", "--prune"]);
-    run_net(&mut cmd).map(|o| if o.is_empty() { "Already up to date".into() } else { o })
+    run_net(&mut cmd).map(|o| {
+        if o.is_empty() {
+            "Already up to date".into()
+        } else {
+            o
+        }
+    })
 }
 
 #[tauri::command]
@@ -595,7 +606,10 @@ pub async fn git_clone(parent: String, url: String) -> Result<CloneResult, Strin
     let mut cmd = git(&parent);
     cmd.args(["clone", "--progress", "--", &url, &dest_str]);
     run_net(&mut cmd)?;
-    Ok(CloneResult { path: dest_str, name })
+    Ok(CloneResult {
+        path: dest_str,
+        name,
+    })
 }
 
 // ---------- diff & log ----------
@@ -873,7 +887,15 @@ pub async fn gh_pr_body(
 ) -> Result<String, String> {
     let top = repo_path(&state, &repo)?;
     let mut cmd = gh_in(&top);
-    cmd.args(["pr", "view", &number.to_string(), "--json", "body", "--jq", ".body"]);
+    cmd.args([
+        "pr",
+        "view",
+        &number.to_string(),
+        "--json",
+        "body",
+        "--jq",
+        ".body",
+    ]);
     run_net(&mut cmd)
 }
 
@@ -1073,12 +1095,20 @@ fn list_worktrees(top: &Path) -> Result<Vec<WorktreeInfo>, String> {
             }
             "locked" => {
                 if let Some(w) = cur.as_mut() {
-                    w.locked = Some(if value.is_empty() { "locked".into() } else { value });
+                    w.locked = Some(if value.is_empty() {
+                        "locked".into()
+                    } else {
+                        value
+                    });
                 }
             }
             "prunable" => {
                 if let Some(w) = cur.as_mut() {
-                    w.prunable = Some(if value.is_empty() { "prunable".into() } else { value });
+                    w.prunable = Some(if value.is_empty() {
+                        "prunable".into()
+                    } else {
+                        value
+                    });
                 }
             }
             _ => {}
@@ -1158,7 +1188,11 @@ pub async fn git_worktree_prune(
 ) -> Result<String, String> {
     let top = repo_path(&state, &repo)?;
     let out = run(git(&top).args(["worktree", "prune", "-v"]))?;
-    Ok(if out.trim().is_empty() { "Nothing to prune".into() } else { out.trim().to_string() })
+    Ok(if out.trim().is_empty() {
+        "Nothing to prune".into()
+    } else {
+        out.trim().to_string()
+    })
 }
 
 /// A commit's metadata — everything the header needs, and nothing that costs
@@ -1342,8 +1376,6 @@ pub async fn git_commit_patch(
     Ok(result)
 }
 
-
-
 /// Whether the GitHub CLI is installed and who it is signed in as. Powers the
 /// Integrations settings section: "install it", "sign in", "signed in as X,
 /// sign out" are three different states and the UI has to tell them apart.
@@ -1395,7 +1427,12 @@ pub async fn gh_auth() -> Result<GhAuth, String> {
         Ok(o) => (
             false,
             String::new(),
-            String::from_utf8_lossy(&o.stderr).trim().lines().next().unwrap_or("").to_string(),
+            String::from_utf8_lossy(&o.stderr)
+                .trim()
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_string(),
         ),
         Err(e) => (false, String::new(), e.to_string()),
     };
@@ -1425,7 +1462,6 @@ pub async fn gh_auth() -> Result<GhAuth, String> {
         detail,
     })
 }
-
 
 /// The repo's browsable web URL, derived from origin. Empty when there is no
 /// origin or it isn't an http/ssh remote we can rewrite (a local path, say).
@@ -1458,7 +1494,10 @@ pub async fn git_remote_url(
         // file:// or a bare path — nothing to browse.
         return Ok(String::new());
     };
-    Ok(url.trim_end_matches('/').trim_end_matches(".git").to_string())
+    Ok(url
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .to_string())
 }
 
 // ---------- work audit: what did the agents leave behind ----------
@@ -1570,23 +1609,25 @@ pub async fn git_work_audit(
     // git degrades to "no counts" instead of failing the whole listing.
     let mut vs_base: std::collections::HashMap<String, (u32, u32)> = Default::default();
     let ab_fmt = format!("%(refname:short)%1f%(ahead-behind:{base})");
-    let counts_degraded = match run(git(&top).args(["for-each-ref", "--format", &ab_fmt, "refs/heads"]))
-    {
-        Ok(out) => {
-            for line in out.lines() {
-                let mut f = line.split('\x1f');
-                let (Some(name), Some(counts)) = (f.next(), f.next()) else { continue };
-                let mut n = counts.split_whitespace();
-                if let (Some(a), Some(b)) = (n.next(), n.next()) {
-                    if let (Ok(a), Ok(b)) = (a.parse(), b.parse()) {
-                        vs_base.insert(name.to_string(), (a, b));
+    let counts_degraded =
+        match run(git(&top).args(["for-each-ref", "--format", &ab_fmt, "refs/heads"])) {
+            Ok(out) => {
+                for line in out.lines() {
+                    let mut f = line.split('\x1f');
+                    let (Some(name), Some(counts)) = (f.next(), f.next()) else {
+                        continue;
+                    };
+                    let mut n = counts.split_whitespace();
+                    if let (Some(a), Some(b)) = (n.next(), n.next()) {
+                        if let (Ok(a), Ok(b)) = (a.parse(), b.parse()) {
+                            vs_base.insert(name.to_string(), (a, b));
+                        }
                     }
                 }
+                vs_base.is_empty()
             }
-            vs_base.is_empty()
-        }
-        Err(_) => true,
-    };
+            Err(_) => true,
+        };
 
     let merged: std::collections::HashSet<String> =
         run(git(&top).args(["branch", "--merged", &base, "--format", "%(refname:short)"]))
@@ -1627,7 +1668,9 @@ pub async fn git_work_audit(
             vs_base.get(&branch).copied().unwrap_or((0, 0))
         };
         let ts: u64 = f[3].parse().unwrap_or(now);
-        let wt = worktrees.iter().find(|w| w.branch.as_deref() == Some(branch.as_str()));
+        let wt = worktrees
+            .iter()
+            .find(|w| w.branch.as_deref() == Some(branch.as_str()));
         items.push(BranchWork {
             worktree: wt.map(|w| w.path.clone()),
             is_main: wt.map(|w| w.is_main).unwrap_or(false),
@@ -1648,9 +1691,12 @@ pub async fn git_work_audit(
         });
     }
 
-    Ok(WorkAudit { base, counts_degraded, items })
+    Ok(WorkAudit {
+        base,
+        counts_degraded,
+        items,
+    })
 }
-
 
 /// Delete a local branch. `force` uses `-D` (needed for a squash-merged branch
 /// whose remote is gone — git can't see it as merged), else the safe `-d` which
@@ -1668,7 +1714,9 @@ pub async fn git_branch_delete(
     let branch = checked_ref(&branch)?;
     let base = default_base(&top);
     if is_protected_branch(&branch, &base) {
-        return Err(format!("{branch} is a protected branch and can't be deleted here"));
+        return Err(format!(
+            "{branch} is a protected branch and can't be deleted here"
+        ));
     }
     let current = run(git(&top).args(["rev-parse", "--abbrev-ref", "HEAD"]))
         .map(|s| s.trim().to_string())
@@ -1697,7 +1745,9 @@ pub async fn git_branch_delete_remote(
     let branch = checked_ref(&branch)?;
     let base = default_base(&top);
     if is_protected_branch(&branch, &base) {
-        return Err(format!("{branch} is a protected branch and can't be deleted here"));
+        return Err(format!(
+            "{branch} is a protected branch and can't be deleted here"
+        ));
     }
     let mut cmd = git(&top);
     // The push refspec `:branch` (empty source) is git's own way of saying
@@ -1817,7 +1867,11 @@ pub async fn agent_workspace(
     let touched = digest
         .get("files")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|f| f.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|f| f.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     workspace_join(
         &top,
@@ -1852,7 +1906,8 @@ pub async fn agent_workspace_at(
     // from `cwd`, so a missing or malformed id degrades to a bare workspace.
     let valid = |s: &str| {
         !s.is_empty()
-            && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
             && !s.contains("..")
     };
     let (sid, state_s, updated, touched, branch_fallback) = match session_id.as_deref() {
@@ -1867,18 +1922,42 @@ pub async fn agent_workspace_at(
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok());
             let d = digest.as_ref();
-            let dstr = |k: &str| d.and_then(|v| v.get(k)).and_then(|v| v.as_str()).map(str::to_string);
+            let dstr = |k: &str| {
+                d.and_then(|v| v.get(k))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            };
             let touched = d
                 .and_then(|v| v.get("files"))
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|f| f.as_str().map(str::to_string)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|f| f.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default();
             let updated = d.and_then(|v| v.get("updated")).and_then(|v| v.as_u64());
-            (s.to_string(), dstr("state"), updated, touched, dstr("branch"))
+            (
+                s.to_string(),
+                dstr("state"),
+                updated,
+                touched,
+                dstr("branch"),
+            )
         }
         _ => (String::new(), None, None, Vec::new(), None),
     };
-    workspace_join(&top, base, sid, agent, state_s, updated, touched, Some(cwd), branch_fallback)
+    workspace_join(
+        &top,
+        base,
+        sid,
+        agent,
+        state_s,
+        updated,
+        touched,
+        Some(cwd),
+        branch_fallback,
+    )
 }
 
 /// One edit the agent authored, read back from its change journal. `present`
@@ -1928,15 +2007,20 @@ pub async fn agent_edits(
     // journal can't turn this into an arbitrary-read. No repo → no present-check
     // and no relativisation, but the authored edits still show.
     let top = repo.as_deref().and_then(|r| repo_path(&state, r).ok());
-    let canon_top = top.as_deref().map(|t| std::fs::canonicalize(t).unwrap_or_else(|_| t.to_path_buf()));
+    let canon_top = top
+        .as_deref()
+        .map(|t| std::fs::canonicalize(t).unwrap_or_else(|_| t.to_path_buf()));
     // Read each touched file at most once.
-    let mut cache: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+    let mut cache: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
     const MAX_EDITS: usize = 400;
     let lines: Vec<&str> = raw.lines().collect();
     let start = lines.len().saturating_sub(MAX_EDITS);
     let mut out = Vec::new();
     for line in &lines[start..] {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
         let abs = v["path"].as_str().unwrap_or("");
         if abs.is_empty() {
             continue;
@@ -1947,7 +2031,11 @@ pub async fn agent_edits(
         // unresolved (present = false) rather than touched.
         let under_repo = canon_top
             .as_ref()
-            .map(|t| std::fs::canonicalize(abs).map(|a| a.starts_with(t)).unwrap_or(false))
+            .map(|t| {
+                std::fs::canonicalize(abs)
+                    .map(|a| a.starts_with(t))
+                    .unwrap_or(false)
+            })
             .unwrap_or(false);
         let present = if under_repo {
             let content = cache
@@ -1965,7 +2053,13 @@ pub async fn agent_edits(
         };
         let path = canon_top
             .as_ref()
-            .and_then(|t| std::fs::canonicalize(abs).ok().and_then(|a| a.strip_prefix(t).ok().map(|p| p.to_string_lossy().to_string())))
+            .and_then(|t| {
+                std::fs::canonicalize(abs).ok().and_then(|a| {
+                    a.strip_prefix(t)
+                        .ok()
+                        .map(|p| p.to_string_lossy().to_string())
+                })
+            })
             .unwrap_or_else(|| abs.to_string());
         out.push(AgentEdit {
             ts: v["ts"].as_u64().unwrap_or(0),
@@ -2020,7 +2114,10 @@ fn workspace_join(
             cwd_missing = true;
         }
     }
-    let isolated = workdir.as_deref().map(|w| canon(w) != canon(top)).unwrap_or(false);
+    let isolated = workdir
+        .as_deref()
+        .map(|w| canon(w) != canon(top))
+        .unwrap_or(false);
 
     // The live branch beats the snapshot; the snapshot still names the branch
     // after the workdir is gone.
@@ -2125,7 +2222,9 @@ pub async fn git_branch_patch(
                 // exists.
                 let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p));
                 let want = canon(&w);
-                let known = list_worktrees(&top)?.into_iter().any(|x| canon(&x.path) == want);
+                let known = list_worktrees(&top)?
+                    .into_iter()
+                    .any(|x| canon(&x.path) == want);
                 if !known {
                     return Err("not a worktree of this repository".into());
                 }
@@ -2151,10 +2250,8 @@ pub async fn git_branch_patch(
         // to `git diff` as a filename, which failed. Since the error is
         // swallowed below, those files vanished from the patch: the same
         // "nothing here, safe to delete" lie in a new costume.
-        let untracked = run(git(&dir).args([
-            "ls-files", "--others", "--exclude-standard", "-z",
-        ]))
-        .unwrap_or_default();
+        let untracked = run(git(&dir).args(["ls-files", "--others", "--exclude-standard", "-z"]))
+            .unwrap_or_default();
         // `git diff --no-index` exits 1 whenever the files differ — which is
         // always, since we are diffing against /dev/null. run() reports a
         // non-zero exit as an error, so every untracked file was silently
@@ -2188,7 +2285,13 @@ pub async fn git_branch_patch(
 
     let (files, adds, dels) = patch_stats(&patch);
     let truncated = truncate_patch(&mut patch, MAX_PATCH_BYTES);
-    Ok(CommitPatch { patch, files_changed: files, insertions: adds, deletions: dels, truncated })
+    Ok(CommitPatch {
+        patch,
+        files_changed: files,
+        insertions: adds,
+        deletions: dels,
+        truncated,
+    })
 }
 
 // ---------- tickets (issue #15) ----------
@@ -2233,7 +2336,13 @@ pub async fn gh_issue_list(
     let top = repo_path(&state, &repo)?;
     let mut cmd = gh_in(&top);
     cmd.args([
-        "issue", "list", "--state", "all", "--limit", "80", "--json",
+        "issue",
+        "list",
+        "--state",
+        "all",
+        "--limit",
+        "80",
+        "--json",
         "number,title,state,url,assignees,updatedAt,body,labels",
     ]);
     let out = run_net(&mut cmd)?;
@@ -2370,4 +2479,186 @@ pub async fn linear_issues(api_key: String) -> Result<Vec<TicketInfo>, String> {
                 .collect()
         })
         .unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn clone_dir_name_handles_https_scp_and_git_suffix() {
+        assert_eq!(
+            clone_dir_name("https://github.com/owner/repo.git").as_deref(),
+            Some("repo")
+        );
+        assert_eq!(
+            clone_dir_name("https://github.com/owner/repo").as_deref(),
+            Some("repo")
+        );
+        // scp form has no scheme; the split must handle ':' as well as '/'.
+        assert_eq!(
+            clone_dir_name("git@github.com:owner/repo.git").as_deref(),
+            Some("repo")
+        );
+        // A trailing slash must not swallow the name.
+        assert_eq!(
+            clone_dir_name("https://host/owner/repo/").as_deref(),
+            Some("repo")
+        );
+    }
+
+    #[test]
+    fn clone_dir_name_rejects_empty() {
+        assert_eq!(clone_dir_name(""), None);
+        assert_eq!(clone_dir_name("   "), None);
+        assert_eq!(clone_dir_name("/"), None);
+    }
+
+    #[test]
+    fn patch_stats_counts_files_and_hunk_lines_only() {
+        // The diff/index/hunk headers must NOT be counted as additions/deletions
+        // even though several begin with '+'/'-' (+++ / ---).
+        let patch = "\
+diff --git a/one.txt b/one.txt
+index 111..222 100644
+--- a/one.txt
++++ b/one.txt
+@@ -1,2 +1,2 @@
+-old line
++new line
+ context
+diff --git a/two.txt b/two.txt
+index 333..444 100644
+--- a/two.txt
++++ b/two.txt
+@@ -0,0 +1 @@
++added
+";
+        let (files, adds, dels) = patch_stats(patch);
+        assert_eq!(files, 2);
+        assert_eq!(adds, 2); // "+new line" and "+added"
+        assert_eq!(dels, 1); // "-old line"
+    }
+
+    #[test]
+    fn patch_stats_empty_patch_is_zero() {
+        assert_eq!(patch_stats(""), (0, 0, 0));
+    }
+
+    #[test]
+    fn truncate_patch_leaves_short_input_untouched() {
+        let mut p = "short\n".to_string();
+        assert!(!truncate_patch(&mut p, 1000));
+        assert_eq!(p, "short\n");
+    }
+
+    #[test]
+    fn truncate_patch_cuts_on_a_line_boundary() {
+        let mut p = "line1\nline2\nline3\n".to_string();
+        let cut = truncate_patch(&mut p, 8); // lands inside "line2"
+        assert!(cut);
+        assert_eq!(p, "line1\n"); // rolled back to the last newline
+    }
+
+    #[test]
+    fn truncate_patch_never_splits_a_multibyte_char() {
+        // A patch of multi-byte chars with no newline: truncation must land on a
+        // char boundary, never mid-codepoint (which would panic on slice).
+        let mut p = "日本語テキスト".to_string();
+        let cut = truncate_patch(&mut p, 7); // 7 bytes is inside a 3-byte char
+        assert!(cut);
+        assert!(p.is_char_boundary(p.len()));
+        assert!(p.len() <= 7);
+    }
+
+    #[test]
+    fn checked_ref_accepts_a_plain_branch() {
+        assert_eq!(checked_ref("feature/foo").unwrap(), "feature/foo");
+        assert_eq!(checked_ref("  main  ").unwrap(), "main"); // trimmed
+    }
+
+    #[test]
+    fn checked_ref_rejects_injection_shaped_names() {
+        for bad in [
+            "",
+            "-x",
+            "a..b",
+            "a b",
+            "a~1",
+            "a^",
+            "a:b",
+            "--upload-pack=x",
+        ] {
+            assert!(checked_ref(bad).is_err(), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn checked_hash_accepts_only_hex() {
+        assert_eq!(checked_hash("deadBEEF01").unwrap(), "deadBEEF01");
+        // Non-hex revision syntax git would otherwise accept must be rejected.
+        for bad in ["", "xyz", "HEAD", "HEAD@{1}", "abc..def"] {
+            assert!(checked_hash(bad).is_err(), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn is_protected_branch_covers_integration_branches_and_the_base_leaf() {
+        // Always-protected names regardless of base.
+        for name in [
+            "main",
+            "master",
+            "develop",
+            "staging",
+            "production",
+            "trunk",
+        ] {
+            assert!(is_protected_branch(name, "origin/main"));
+        }
+        // The repo's own base, compared on the leaf (base may carry a remote).
+        assert!(is_protected_branch("release", "origin/release"));
+        // A normal feature branch is not protected.
+        assert!(!is_protected_branch("feature/x", "origin/main"));
+    }
+
+    #[test]
+    fn roll_up_checks_empty_is_blank() {
+        assert_eq!(roll_up_checks(&json!([])), (String::new(), String::new()));
+        assert_eq!(roll_up_checks(&json!(null)), (String::new(), String::new()));
+    }
+
+    #[test]
+    fn roll_up_checks_fails_when_any_check_fails() {
+        let rollup = json!([
+            { "state": "SUCCESS" },
+            { "status": "COMPLETED", "conclusion": "FAILURE" },
+        ]);
+        let (state, summary) = roll_up_checks(&rollup);
+        assert_eq!(state, "FAIL");
+        assert_eq!(summary, "1/2 checks passed");
+    }
+
+    #[test]
+    fn roll_up_checks_pending_when_incomplete_but_none_failed() {
+        let rollup = json!([
+            { "state": "SUCCESS" },
+            { "status": "IN_PROGRESS" },
+        ]);
+        let (state, summary) = roll_up_checks(&rollup);
+        assert_eq!(state, "PENDING");
+        assert_eq!(summary, "1/2 checks passed");
+    }
+
+    #[test]
+    fn roll_up_checks_passes_when_all_green() {
+        let rollup = json!([
+            { "state": "SUCCESS" },
+            { "status": "COMPLETED", "conclusion": "NEUTRAL" },
+            { "status": "COMPLETED", "conclusion": "SKIPPED" },
+        ]);
+        let (state, summary) = roll_up_checks(&rollup);
+        assert_eq!(state, "PASS");
+        assert_eq!(summary, "3/3 checks passed");
+    }
 }

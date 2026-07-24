@@ -209,10 +209,7 @@ impl PtyManager {
     /// so the snapshot and the receiver stream join with no gap and no overlap.
     /// The receiver is bounded and lossy — on `Lagged` the caller re-`attach`es
     /// for a fresh snapshot rather than expecting every byte.
-    pub fn attach(
-        &self,
-        id: u32,
-    ) -> Option<(u16, u16, Vec<u8>, broadcast::Receiver<PtyEvent>)> {
+    pub fn attach(&self, id: u32) -> Option<(u16, u16, Vec<u8>, broadcast::Receiver<PtyEvent>)> {
         let session = self.get(id)?;
         let ring = session.scrollback.lock().unwrap();
         let rx = session.subscribers.subscribe();
@@ -228,13 +225,7 @@ impl PtyManager {
     /// one at a time: the grace period is for agents to flush their transcripts,
     /// and serialising it would cost GRACE per terminal on every quit.
     pub fn kill_all(&self) {
-        let sessions: Vec<Arc<Session>> = self
-            .sessions
-            .lock()
-            .unwrap()
-            .values()
-            .cloned()
-            .collect();
+        let sessions: Vec<Arc<Session>> = self.sessions.lock().unwrap().values().cloned().collect();
         for s in &sessions {
             s.request_stop();
         }
@@ -354,7 +345,16 @@ pub fn pty_spawn(
     run_command: Option<String>,
     on_data: Channel<InvokeResponseBody>,
 ) -> Result<SpawnResult, String> {
-    state.spawn(app, cols, rows, cwd, shell, high_water, run_command, Some(on_data))
+    state.spawn(
+        app,
+        cols,
+        rows,
+        cwd,
+        shell,
+        high_water,
+        run_command,
+        Some(on_data),
+    )
 }
 
 impl PtyManager {
@@ -410,193 +410,198 @@ impl PtyManager {
         run_command: Option<String>,
         on_data: Option<Channel<InvokeResponseBody>>,
     ) -> Result<SpawnResult, String> {
-    let state = self;
-    // Clamp for the same reason pty_resize does: a terminal spawned into a
-    // hidden tab measures 0, and a zero-column pty is meaningless. 80x24 is the
-    // conventional fallback, and the frontend corrects it the moment the tab is
-    // shown and the resize round-trips.
-    let cols = if cols == 0 { 80 } else { cols };
-    let rows = if rows == 0 { 24 } else { rows };
+        let state = self;
+        // Clamp for the same reason pty_resize does: a terminal spawned into a
+        // hidden tab measures 0, and a zero-column pty is meaningless. 80x24 is the
+        // conventional fallback, and the frontend corrects it the moment the tab is
+        // shown and the resize round-trips.
+        let cols = if cols == 0 { 80 } else { cols };
+        let rows = if rows == 0 { 24 } else { rows };
 
-    let pty_system = native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| e.to_string())?;
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| e.to_string())?;
 
-    // Allocated before spawn so the child can carry its own session id in env.
-    let id = state.next_id.fetch_add(1, Ordering::SeqCst) + 1;
+        // Allocated before spawn so the child can carry its own session id in env.
+        let id = state.next_id.fetch_add(1, Ordering::SeqCst) + 1;
 
-    let shell = shell.unwrap_or_else(default_shell);
-    let mut cmd = CommandBuilder::new(&shell);
-    match run_command.as_deref() {
-        // A run tab: the shell runs one command and exits with the command's own
-        // status, so a one-shot build/install reports truthfully instead of
-        // sitting at a prompt looking "running" forever. Passed as shell args
-        // (not typed into the shell) so it's correct on cmd.exe / PowerShell /
-        // POSIX alike — no `; exit $?` idiom that only parses in a Bourne shell.
-        Some(command) => {
-            for a in run_args(&shell, command) {
-                cmd.arg(a);
+        let shell = shell.unwrap_or_else(default_shell);
+        let mut cmd = CommandBuilder::new(&shell);
+        match run_command.as_deref() {
+            // A run tab: the shell runs one command and exits with the command's own
+            // status, so a one-shot build/install reports truthfully instead of
+            // sitting at a prompt looking "running" forever. Passed as shell args
+            // (not typed into the shell) so it's correct on cmd.exe / PowerShell /
+            // POSIX alike — no `; exit $?` idiom that only parses in a Bourne shell.
+            Some(command) => {
+                for a in run_args(&shell, command) {
+                    cmd.arg(a);
+                }
+            }
+            // A normal terminal: a login shell so the user's PATH / prompt setup
+            // loads, matching a real terminal.
+            None => {
+                #[cfg(unix)]
+                cmd.args(["-l"]);
             }
         }
-        // A normal terminal: a login shell so the user's PATH / prompt setup
-        // loads, matching a real terminal.
-        None => {
-            #[cfg(unix)]
-            cmd.args(["-l"]);
-        }
-    }
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("COLORTERM", "truecolor");
-    // Agent CLI hooks inherit these and use them to (a) prove the event came
-    // from a terminal we own and (b) name the tab it came from.
-    cmd.env("CANOPY", "1");
-    cmd.env("CANOPY_PTY", id.to_string());
-    // Pty ids reset to 1 every app launch and every instance writes to the same
-    // ~/.canopy/sessions, so the pty id alone can't tell one instance's "term
-    // #5" from another's — which silently binds one agent's digest to another's
-    // terminal in the panel. This tag makes the pairing unambiguous.
-    cmd.env("CANOPY_INSTANCE", instance_token());
-    let cwd = cwd
-        .or_else(|| dirs_home())
-        .unwrap_or_else(|| "/".to_string());
-    cmd.cwd(&cwd);
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        // Agent CLI hooks inherit these and use them to (a) prove the event came
+        // from a terminal we own and (b) name the tab it came from.
+        cmd.env("CANOPY", "1");
+        cmd.env("CANOPY_PTY", id.to_string());
+        // Pty ids reset to 1 every app launch and every instance writes to the same
+        // ~/.canopy/sessions, so the pty id alone can't tell one instance's "term
+        // #5" from another's — which silently binds one agent's digest to another's
+        // terminal in the panel. This tag makes the pairing unambiguous.
+        cmd.env("CANOPY_INSTANCE", instance_token());
+        let cwd = cwd
+            .or_else(|| dirs_home())
+            .unwrap_or_else(|| "/".to_string());
+        cmd.cwd(&cwd);
 
-    let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
-    drop(pair.slave);
+        let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+        drop(pair.slave);
 
-    let mut reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| e.to_string())?;
-    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+        let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
+        let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
 
-    let pid = child.process_id();
-    let killer = child.clone_killer();
+        let pid = child.process_id();
+        let killer = child.clone_killer();
 
-    let session = Arc::new(Session {
-        id,
-        pid,
-        title: Mutex::new(shell.clone()),
-        cwd,
-        writer: Mutex::new(writer),
-        master: Mutex::new(pair.master),
-        killer: Mutex::new(killer),
-        child: Mutex::new(Some(child)),
-        shutdown: AtomicBool::new(false),
-        eof: AtomicBool::new(false),
-        pending: Mutex::new(Vec::new()),
-        outstanding: AtomicUsize::new(0),
-        high_water: high_water.unwrap_or(DEFAULT_HIGH_WATER),
-        scrollback: Mutex::new(VecDeque::new()),
-        size: Mutex::new((cols, rows)),
-        subscribers: broadcast::channel(BROADCAST_CAP).0,
-    });
+        let session = Arc::new(Session {
+            id,
+            pid,
+            title: Mutex::new(shell.clone()),
+            cwd,
+            writer: Mutex::new(writer),
+            master: Mutex::new(pair.master),
+            killer: Mutex::new(killer),
+            child: Mutex::new(Some(child)),
+            shutdown: AtomicBool::new(false),
+            eof: AtomicBool::new(false),
+            pending: Mutex::new(Vec::new()),
+            outstanding: AtomicUsize::new(0),
+            high_water: high_water.unwrap_or(DEFAULT_HIGH_WATER),
+            scrollback: Mutex::new(VecDeque::new()),
+            size: Mutex::new((cols, rows)),
+            subscribers: broadcast::channel(BROADCAST_CAP).0,
+        });
 
-    state.sessions.lock().unwrap().insert(id, session.clone());
+        state.sessions.lock().unwrap().insert(id, session.clone());
 
-    // Reader thread: blocking reads -> pending buffer, with backpressure.
-    {
-        let session = session.clone();
-        thread::Builder::new()
-            .name(format!("pty-reader-{id}"))
-            .spawn(move || {
-                let mut buf = [0u8; READ_BUF_SIZE];
-                loop {
-                    if session.shutdown.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    // Backpressure: stop reading while the WebView is behind. The
-                    // kernel PTY buffer fills and the child blocks — bounded memory.
+        // Reader thread: blocking reads -> pending buffer, with backpressure.
+        {
+            let session = session.clone();
+            thread::Builder::new()
+                .name(format!("pty-reader-{id}"))
+                .spawn(move || {
+                    let mut buf = [0u8; READ_BUF_SIZE];
                     loop {
-                        let queued = session.pending.lock().unwrap().len()
-                            + session.outstanding.load(Ordering::SeqCst);
-                        if queued <= session.high_water
-                            || session.shutdown.load(Ordering::SeqCst)
-                        {
+                        if session.shutdown.load(Ordering::SeqCst) {
                             break;
                         }
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    match reader.read(&mut buf) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            session.pending.lock().unwrap().extend_from_slice(&buf[..n]);
-                        }
-                    }
-                }
-                session.eof.store(true, Ordering::SeqCst);
-            })
-            .expect("spawn pty reader thread");
-    }
-
-    // Flusher thread: coalesce pending bytes into batched IPC messages; on EOF,
-    // drain, reap the child, clean up the session, emit pty:exit.
-    {
-        let session = session.clone();
-        let sessions = state.sessions.clone();
-        thread::Builder::new()
-            .name(format!("pty-flush-{id}"))
-            .spawn(move || {
-                loop {
-                    thread::sleep(FLUSH_INTERVAL);
-                    let chunk = {
-                        let mut pending = session.pending.lock().unwrap();
-                        if pending.is_empty() {
-                            None
-                        } else {
-                            Some(std::mem::take(&mut *pending))
-                        }
-                    };
-                    match chunk {
-                        Some(data) => {
-                            // Mirror to remote subscribers + scrollback (Canopy
-                            // Remote) first, while `data` is still borrowable.
-                            session.record_remote(&data);
-                            // Only the WebView path uses outstanding-bytes
-                            // backpressure; a headless (remote-only) PTY has no
-                            // acker, so skip it or the reader would stall the
-                            // agent after high_water bytes of output.
-                            if let Some(ch) = &on_data {
-                                session.outstanding.fetch_add(data.len(), Ordering::SeqCst);
-                                if ch.send(InvokeResponseBody::Raw(data)).is_err() {
-                                    // WebView side is gone; stop streaming.
-                                    session.terminate();
-                                }
-                            }
-                        }
-                        None => {
-                            if session.eof.load(Ordering::SeqCst)
+                        // Backpressure: stop reading while the WebView is behind. The
+                        // kernel PTY buffer fills and the child blocks — bounded memory.
+                        loop {
+                            let queued = session.pending.lock().unwrap().len()
+                                + session.outstanding.load(Ordering::SeqCst);
+                            if queued <= session.high_water
                                 || session.shutdown.load(Ordering::SeqCst)
                             {
                                 break;
                             }
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        match reader.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => {
+                                session.pending.lock().unwrap().extend_from_slice(&buf[..n]);
+                            }
                         }
                     }
-                }
-                // Reap the child so it never lingers as a zombie.
-                let exit_code = session
-                    .child
-                    .lock()
-                    .unwrap()
-                    .take()
-                    .and_then(|mut c| c.wait().ok())
-                    .map(|status| status.exit_code());
-                sessions.lock().unwrap().remove(&session.id);
-                let _ = app.emit("pty:exit", PtyExit {
-                    id: session.id,
-                    exit_code,
-                });
-            })
-            .expect("spawn pty flusher thread");
-    }
+                    session.eof.store(true, Ordering::SeqCst);
+                })
+                .expect("spawn pty reader thread");
+        }
 
-    Ok(SpawnResult { id, pid, cols, rows })
+        // Flusher thread: coalesce pending bytes into batched IPC messages; on EOF,
+        // drain, reap the child, clean up the session, emit pty:exit.
+        {
+            let session = session.clone();
+            let sessions = state.sessions.clone();
+            thread::Builder::new()
+                .name(format!("pty-flush-{id}"))
+                .spawn(move || {
+                    loop {
+                        thread::sleep(FLUSH_INTERVAL);
+                        let chunk = {
+                            let mut pending = session.pending.lock().unwrap();
+                            if pending.is_empty() {
+                                None
+                            } else {
+                                Some(std::mem::take(&mut *pending))
+                            }
+                        };
+                        match chunk {
+                            Some(data) => {
+                                // Mirror to remote subscribers + scrollback (Canopy
+                                // Remote) first, while `data` is still borrowable.
+                                session.record_remote(&data);
+                                // Only the WebView path uses outstanding-bytes
+                                // backpressure; a headless (remote-only) PTY has no
+                                // acker, so skip it or the reader would stall the
+                                // agent after high_water bytes of output.
+                                if let Some(ch) = &on_data {
+                                    session.outstanding.fetch_add(data.len(), Ordering::SeqCst);
+                                    if ch.send(InvokeResponseBody::Raw(data)).is_err() {
+                                        // WebView side is gone; stop streaming.
+                                        session.terminate();
+                                    }
+                                }
+                            }
+                            None => {
+                                if session.eof.load(Ordering::SeqCst)
+                                    || session.shutdown.load(Ordering::SeqCst)
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    // Reap the child so it never lingers as a zombie.
+                    let exit_code = session
+                        .child
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .and_then(|mut c| c.wait().ok())
+                        .map(|status| status.exit_code());
+                    sessions.lock().unwrap().remove(&session.id);
+                    let _ = app.emit(
+                        "pty:exit",
+                        PtyExit {
+                            id: session.id,
+                            exit_code,
+                        },
+                    );
+                })
+                .expect("spawn pty flusher thread");
+        }
+
+        Ok(SpawnResult {
+            id,
+            pid,
+            cols,
+            rows,
+        })
     }
 }
 
@@ -616,8 +621,9 @@ pub fn pty_attach(
     id: u32,
     on_data: Channel<InvokeResponseBody>,
 ) -> Result<PtyGeometry, String> {
-    let (cols, rows, snapshot, mut rx) =
-        state.attach(id).ok_or_else(|| format!("no pty session {id}"))?;
+    let (cols, rows, snapshot, mut rx) = state
+        .attach(id)
+        .ok_or_else(|| format!("no pty session {id}"))?;
     if !snapshot.is_empty() {
         let _ = on_data.send(InvokeResponseBody::Raw(snapshot));
     }
@@ -625,7 +631,10 @@ pub fn pty_attach(
     thread::spawn(move || loop {
         match rx.blocking_recv() {
             Ok(PtyEvent::Data(bytes)) => {
-                if on_data.send(InvokeResponseBody::Raw(bytes.to_vec())).is_err() {
+                if on_data
+                    .send(InvokeResponseBody::Raw(bytes.to_vec()))
+                    .is_err()
+                {
                     break; // the WebView detached
                 }
             }
@@ -806,7 +815,11 @@ mod tests {
         let app = tauri::test::mock_app();
         let pm = PtyManager::default();
         let id = pm
-            .spawn_headless(app.handle().clone(), Some("/tmp".into()), Some("echo REGRESS_MARKER".into()))
+            .spawn_headless(
+                app.handle().clone(),
+                Some("/tmp".into()),
+                Some("echo REGRESS_MARKER".into()),
+            )
             .expect("spawn");
         let seen = wait_for(&pm, id, "REGRESS_MARKER", Duration::from_secs(8));
         let _ = pm.kill(id);
@@ -819,7 +832,9 @@ mod tests {
     fn write_reaches_the_child() {
         let app = tauri::test::mock_app();
         let pm = PtyManager::default();
-        let id = pm.spawn_headless(app.handle().clone(), Some("/tmp".into()), None).expect("spawn");
+        let id = pm
+            .spawn_headless(app.handle().clone(), Some("/tmp".into()), None)
+            .expect("spawn");
         thread::sleep(Duration::from_millis(400)); // let the shell come up
         pm.write(id, "echo WRITE_MARKER\r").expect("write");
         let seen = wait_for(&pm, id, "WRITE_MARKER", Duration::from_secs(8));
@@ -833,9 +848,16 @@ mod tests {
         let app = tauri::test::mock_app();
         let pm = PtyManager::default();
         let id = pm
-            .spawn_headless(app.handle().clone(), Some("/tmp".into()), Some("echo SNAPSHOT_MARKER".into()))
+            .spawn_headless(
+                app.handle().clone(),
+                Some("/tmp".into()),
+                Some("echo SNAPSHOT_MARKER".into()),
+            )
             .expect("spawn");
-        assert!(wait_for(&pm, id, "SNAPSHOT_MARKER", Duration::from_secs(8)), "no output");
+        assert!(
+            wait_for(&pm, id, "SNAPSHOT_MARKER", Duration::from_secs(8)),
+            "no output"
+        );
         // A brand-new attach (as pty_attach does) must still see it via snapshot.
         let (_c, _r, snap, _rx) = pm.attach(id).expect("attach");
         let _ = pm.kill(id);
@@ -847,7 +869,9 @@ mod tests {
     fn kill_removes_the_session() {
         let app = tauri::test::mock_app();
         let pm = PtyManager::default();
-        let id = pm.spawn_headless(app.handle().clone(), Some("/tmp".into()), None).expect("spawn");
+        let id = pm
+            .spawn_headless(app.handle().clone(), Some("/tmp".into()), None)
+            .expect("spawn");
         assert!(pm.get(id).is_some());
         pm.kill(id).expect("kill");
         let deadline = Instant::now() + Duration::from_secs(8);
