@@ -79,6 +79,7 @@ import { BranchView } from "./BranchView";
 import { AgentWorkspaceView } from "./AgentWorkspaceView";
 import { PreviewView } from "./PreviewView";
 import type { PreviewAnnotation, PreviewServer } from "../preview";
+import { serverForUrl } from "../preview";
 import { ticketBranch, ticketContext, ticketWorktree } from "../trackers";
 import { prConflictContext, prReviewContext, prWorktree } from "../prs";
 import { fileDiffContext, reviewContext, sessionChangesContext } from "../diffContext";
@@ -1608,6 +1609,41 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     };
   }, [visible, project.components, addTerminal]);
 
+  // An agent asked the IDE to do something through the MCP bridge — start a
+  // run command, or open a preview. App routed it here by matching the action's
+  // path to this project; act on it with the same handlers the UI buttons use.
+  useEffect(() => {
+    const onAction = (e: Event) => {
+      const d = (e as CustomEvent).detail as { projectId: string | null; action: ipc.AgentAction };
+      const a = d.action;
+      // restart is keyed by terminal, not project: only the ProjectView that
+      // owns that pty acts, whatever project it belongs to.
+      if (a.kind === "restart_server") {
+        const tab = tabsRef.current.find(
+          (t): t is TermSubTab => t.type === "terminal" && t.ptyId === a.ptyId,
+        );
+        if (tab) restartRun(tab.id);
+        return;
+      }
+      if (d?.projectId !== project.id) return;
+      if (a.kind === "open_preview" && a.url) {
+        openPreview(a.url);
+      } else if (a.kind === "start_server" && a.dir && a.command) {
+        // `command` is the resolved command line, `name` its label — the same
+        // pair the component-commands ▶ uses. Reuse a tab already on it.
+        const existing = tabsRef.current.find(
+          (t): t is TermSubTab =>
+            t.type === "terminal" && Boolean(t.run) && t.cwd === a.dir && t.command === a.command,
+        );
+        if (existing && !existing.exited) setActiveTabId(existing.id);
+        else if (existing) restartRun(existing.id);
+        else addTerminal(a.dir, a.command, a.name || a.command, "▶", true);
+      }
+    };
+    window.addEventListener("canopy:agent-action", onAction);
+    return () => window.removeEventListener("canopy:agent-action", onAction);
+  }, [project.id, openPreview, addTerminal, restartRun]);
+
   const patchTab = useCallback((id: string, patch: Partial<TermSubTab> & Partial<FileSubTab>) => {
     setTabs((prev) => prev.map((t) => (t.id === id ? ({ ...t, ...patch } as SubTab) : t)));
   }, []);
@@ -2546,6 +2582,24 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         title: a.title,
         dir: a.dir,
       })),
+      // Preview annotations, so canopy_annotations can serve the visual
+      // feedback the user marked — element, comment, and serving component.
+      annotations: tabs
+        .filter((t): t is PreviewSubTab => t.type === "preview")
+        .flatMap((t) => {
+          const server = serverForUrl(t.url, previewServers);
+          return t.annotations.map((a) => ({
+            n: a.n,
+            selector: a.selector,
+            component: a.components[0] ?? null,
+            tag: a.tag,
+            text: a.text,
+            comment: a.comment,
+            pageUrl: a.pageUrl || t.url,
+            servingComponent: server?.componentLabel ?? null,
+            servingComponentPath: server?.componentPath ?? null,
+          }));
+        }),
     });
     if (snapshot !== lastContextRef.current) {
       lastContextRef.current = snapshot;

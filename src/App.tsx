@@ -727,6 +727,61 @@ export default function App() {
     return () => un?.();
   }, [notify]);
 
+  // An action an agent requested via the MCP context bridge (canopy_start_server
+  // / canopy_open_preview). Routed exactly like a phone-spawned PTY: find the
+  // project whose component most-specifically contains the action's `route`
+  // path, open it, and hand the action to that ProjectView.
+  useEffect(() => {
+    const norm = (p: string) => p.replace(/\/+$/, "");
+    const projectForCwd = (cwd: string): string | undefined => {
+      const c = norm(cwd);
+      let bestId: string | undefined;
+      let bestLen = -1;
+      for (const p of wsRef.current.projects) {
+        for (const comp of p.components) {
+          const r = norm(comp.path);
+          if (r && (c === r || c.startsWith(r + "/")) && r.length > bestLen) {
+            bestLen = r.length;
+            bestId = p.id;
+          }
+        }
+      }
+      return bestId;
+    };
+    let un: (() => void) | undefined;
+    void ipc
+      .onAgentAction(async (a) => {
+        // Keyed by terminal id, not a path: the project owning that pty is
+        // already open (its server is running), so just broadcast — the owning
+        // ProjectView matches by pty and acts, the rest ignore it.
+        if (a.kind === "restart_server") {
+          window.dispatchEvent(
+            new CustomEvent("canopy:agent-action", { detail: { projectId: null, action: a } }),
+          );
+          return;
+        }
+        const projectId =
+          projectForCwd(a.route) ??
+          // A worktree the agent runs in follows `<repo>-wt-…`; fall back to the
+          // single open project so an action still lands somewhere sensible.
+          (wsRef.current.openIds.length === 1 ? wsRef.current.openIds[0] : undefined);
+        if (!projectId) {
+          notify("An agent asked to act, but its directory isn't in any open project.", "info");
+          return;
+        }
+        await openProjectRef.current(projectId);
+        requestAnimationFrame(() =>
+          window.dispatchEvent(
+            new CustomEvent("canopy:agent-action", { detail: { projectId, action: a } }),
+          ),
+        );
+      })
+      .then((u) => {
+        un = u;
+      });
+    return () => un?.();
+  }, [notify]);
+
   const saveProject = useCallback(
     async (project: Project) => {
       const state = wsRef.current;

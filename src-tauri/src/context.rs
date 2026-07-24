@@ -15,11 +15,11 @@
 
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::routing::get;
-use axum::Router;
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 /// Directories never worth an agent's attention (or token budget) when listing
 /// a component's files.
@@ -88,6 +88,9 @@ pub fn start(app: tauri::AppHandle) {
             .route("/ctx/snapshot", get(snapshot))
             .route("/ctx/server-output/:id", get(server_output))
             .route("/ctx/files", get(files))
+            .route("/ctx/annotations", get(annotations))
+            .route("/ctx/resources", get(resources))
+            .route("/ctx/action", post(action))
             .with_state(app.clone());
         let _ = axum::serve(listener, router).await;
     });
@@ -138,6 +141,271 @@ async fn snapshot(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (S
     (
         StatusCode::OK,
         serde_json::json!({ "projects": projects }).to_string(),
+    )
+}
+
+/// The annotations the user has marked on preview pages, across open projects
+/// — read-only, so an agent can pull the current visual feedback (element +
+/// comment + which component serves it) without waiting for it to be typed in.
+async fn annotations(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let list: Vec<serde_json::Value> = app
+        .state::<ContextBridge>()
+        .snapshots
+        .lock()
+        .unwrap()
+        .values()
+        .filter_map(|p| p.get("annotations").and_then(|a| a.as_array()).cloned())
+        .flatten()
+        .collect();
+    (
+        StatusCode::OK,
+        serde_json::json!({ "annotations": list }).to_string(),
+    )
+}
+
+/// Live CPU/memory for every Canopy terminal, with a per-process breakdown —
+/// the same reading the status tray shows, served so an agent can see what a
+/// build or dev server is costing (and which child process is the hog) without
+/// a shell. Read straight from the monitor's latest tick.
+async fn resources(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let stats = app
+        .state::<crate::agents::StatsCache>()
+        .0
+        .lock()
+        .unwrap()
+        .clone();
+    let terminals: Vec<serde_json::Value> = stats
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "id": s.id,
+                "title": s.title,
+                "cwd": s.cwd,
+                "cpuPercent": (s.total_cpu * 10.0).round() / 10.0,
+                "memBytes": s.total_mem_bytes,
+                "memHuman": human_bytes(s.total_mem_bytes),
+                "ports": s.ports,
+                "processes": s.procs.iter().map(|p| serde_json::json!({
+                    "pid": p.pid,
+                    "name": p.name,
+                    "cmd": p.cmd,
+                    "cpuPercent": (p.cpu * 10.0).round() / 10.0,
+                    "memBytes": p.mem_bytes,
+                    "memHuman": human_bytes(p.mem_bytes),
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        serde_json::json!({ "terminals": terminals }).to_string(),
+    )
+}
+
+fn human_bytes(n: u64) -> String {
+    const U: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut v = n as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < U.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", U[i])
+    }
+}
+
+/// A write the frontend has to perform (start a run command, open a preview
+/// tab, restart a server): validated here against the published snapshots, then
+/// handed to the UI over the app event bus. Kept an event (not a direct call)
+/// because the target project's ProjectView owns the tab/PTY state — the same
+/// path a phone-spawned PTY takes. Stopping is the exception: it's a pure
+/// backend kill, done here directly. Best-effort by nature: the tool acks the
+/// request, and the agent confirms with the read tools (canopy_project /
+/// server output / resources).
+#[derive(serde::Deserialize)]
+struct Action {
+    kind: String,
+    /// The agent's cwd (the sidecar's), for routing to a project when no more
+    /// specific target is given.
+    cwd: Option<String>,
+    /// start_server: the component directory + the run command's name.
+    dir: Option<String>,
+    command: Option<String>,
+    /// open_preview: the localhost URL to open in the embedded browser.
+    url: Option<String>,
+    /// stop_server / restart_server: the terminal id to act on.
+    #[serde(rename = "ptyId")]
+    pty_id: Option<u32>,
+}
+
+async fn action(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+    Json(act): Json<Action>,
+) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let snaps = app.state::<ContextBridge>();
+    let msg = match act.kind.as_str() {
+        "start_server" => {
+            let (Some(dir), Some(command)) = (act.dir.as_deref(), act.command.as_deref()) else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "start_server needs dir and command".into(),
+                );
+            };
+            // Resolve the run command by name against the component's published
+            // commands, so the agent can pass the friendly name and the UI gets
+            // the exact command string to run — and an unknown one is rejected
+            // now, with the valid list, instead of silently doing nothing.
+            match resolve_command(&snaps, dir, command) {
+                Ok(cmdline) => {
+                    let _ = app.emit(
+                        "agent:action",
+                        serde_json::json!({
+                            "kind": "start_server",
+                            "route": dir,
+                            "dir": dir,
+                            "name": command,
+                            "command": cmdline,
+                        }),
+                    );
+                    format!("Starting \"{command}\" in {dir}. Give it a few seconds, then call canopy_project to see it listening and canopy_server_output for its logs.")
+                }
+                Err(e) => return (StatusCode::BAD_REQUEST, e),
+            }
+        }
+        "open_preview" => {
+            let Some(url) = act.url.as_deref() else {
+                return (StatusCode::BAD_REQUEST, "open_preview needs a url".into());
+            };
+            if !is_local_http(url) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("{url} isn't a local http:// URL — the preview only opens servers running on this machine"),
+                );
+            }
+            let route = act.cwd.clone().unwrap_or_default();
+            let _ = app.emit(
+                "agent:action",
+                serde_json::json!({ "kind": "open_preview", "route": route, "url": url }),
+            );
+            format!("Opened a preview of {url} in Canopy.")
+        }
+        "stop_server" => {
+            let Some(id) = act.pty_id else {
+                return (StatusCode::BAD_REQUEST, "stop_server needs ptyId".into());
+            };
+            // A pure backend kill — no UI state to thread, and the pty:exit it
+            // triggers updates the tab on its own. Scoped to real Canopy ptys:
+            // an id that isn't one is refused, not silently ignored.
+            match app.state::<crate::pty::PtyManager>().kill(id) {
+                Ok(()) => format!("Stopped terminal {id}."),
+                Err(_) => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        format!("No running Canopy terminal with id {id} (see canopy_project)"),
+                    )
+                }
+            }
+        }
+        "restart_server" => {
+            let Some(id) = act.pty_id else {
+                return (StatusCode::BAD_REQUEST, "restart_server needs ptyId".into());
+            };
+            if app.state::<crate::pty::PtyManager>().get(id).is_none() {
+                return (
+                    StatusCode::NOT_FOUND,
+                    format!("No running Canopy terminal with id {id} (see canopy_project)"),
+                );
+            }
+            // Restart reuses the tab (and its command), which only the owning
+            // ProjectView can do — route it there. `route` isn't a path here, so
+            // App falls back to the single open project / broadcast by ptyId.
+            let _ = app.emit(
+                "agent:action",
+                serde_json::json!({ "kind": "restart_server", "route": "", "ptyId": id }),
+            );
+            format!("Restarting terminal {id}. Call canopy_server_output shortly to watch it come back up.")
+        }
+        other => return (StatusCode::BAD_REQUEST, format!("unknown action: {other}")),
+    };
+    (StatusCode::OK, msg)
+}
+
+/// Look up a component's run command by name in the published snapshots,
+/// returning its command line. Errs (with the available names) when the
+/// directory isn't a known component or the name isn't one of its commands.
+fn resolve_command(bridge: &ContextBridge, dir: &str, name: &str) -> Result<String, String> {
+    let snaps = bridge.snapshots.lock().unwrap();
+    for project in snaps.values() {
+        let Some(components) = project.get("components").and_then(|c| c.as_array()) else {
+            continue;
+        };
+        for comp in components {
+            if comp.get("path").and_then(|p| p.as_str()) != Some(dir) {
+                continue;
+            }
+            let commands = comp.get("commands").and_then(|c| c.as_array());
+            let names: Vec<&str> = commands
+                .into_iter()
+                .flatten()
+                .filter_map(|c| c.get("name").and_then(|n| n.as_str()))
+                .collect();
+            let found = comp
+                .get("commands")
+                .and_then(|c| c.as_array())
+                .into_iter()
+                .flatten()
+                .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(name))
+                .and_then(|c| c.get("command").and_then(|v| v.as_str()));
+            return match found {
+                Some(cmd) => Ok(cmd.to_string()),
+                None => Err(format!(
+                    "\"{name}\" isn't a run command of {dir}. Configured commands: {}",
+                    if names.is_empty() {
+                        "(none)".into()
+                    } else {
+                        names.join(", ")
+                    }
+                )),
+            };
+        }
+    }
+    Err(format!(
+        "{dir} isn't a component of any open Canopy project (call canopy_project for the list)"
+    ))
+}
+
+/// A URL the embedded preview will accept: http(s) on a loopback host.
+fn is_local_http(url: &str) -> bool {
+    let rest = match url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+    {
+        Some(r) => r,
+        None => return false,
+    };
+    let host = rest.split(['/', ':', '?', '#']).next().unwrap_or("");
+    matches!(
+        host,
+        "localhost" | "127.0.0.1" | "0.0.0.0" | "[::1]" | "::1"
     )
 }
 

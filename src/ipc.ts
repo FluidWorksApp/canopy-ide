@@ -93,6 +93,22 @@ export interface PtySpawned {
 export const onPtySpawned = (cb: (e: PtySpawned) => void): Promise<UnlistenFn> =>
   listen<PtySpawned>("pty:spawned", (event) => cb(event.payload));
 
+/** An action an agent requested through the MCP context bridge (start a run
+ *  command, open a preview). `route` is a path used to pick the target project;
+ *  the rest is action-specific. Handled the same way as pty:spawned — App
+ *  routes it to a project and hands it to that ProjectView. */
+export interface AgentAction {
+  kind: "start_server" | "open_preview" | "restart_server";
+  route: string;
+  dir?: string;
+  name?: string;
+  command?: string;
+  url?: string;
+  ptyId?: number;
+}
+export const onAgentAction = (cb: (a: AgentAction) => void): Promise<UnlistenFn> =>
+  listen<AgentAction>("agent:action", (event) => cb(event.payload));
+
 // ---------- Workspaces / FS ----------
 
 export interface DirEntry {
