@@ -199,6 +199,27 @@ export interface FsChange {
 export const onFsChange = (cb: (e: FsChange) => void): Promise<UnlistenFn> =>
   listen<FsChange>("fs:change", (event) => cb(event.payload));
 
+// ---------- Context bridge (agent-facing MCP context) ----------
+
+/** Publish a project's live context snapshot (components, run servers,
+ *  agents) to the Rust bridge that the `canopy-hook --mcp` sidecar serves to
+ *  agents. Fire-and-forget: stale context must never break the UI. */
+export const contextPublish = (projectId: string, data: string) =>
+  invoke<void>("context_publish", { projectId, data }).catch(() => {});
+export const contextRemove = (projectId: string) =>
+  invoke<void>("context_remove", { projectId }).catch(() => {});
+
+// ---------- Preview proxy ----------
+
+export interface PreviewInfo {
+  port: number;
+  origin: string;
+}
+/** Start (or reuse) the annotating reverse proxy for a target origin. */
+export const previewStart = (target: string) =>
+  invoke<PreviewInfo>("preview_start", { target });
+export const previewStop = (origin: string) => invoke<void>("preview_stop", { origin });
+
 // ---------- LSP ----------
 
 export async function lspStart(

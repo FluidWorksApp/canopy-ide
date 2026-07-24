@@ -57,6 +57,11 @@ axum = { version = "0.7", features = ["ws"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 include_dir = "0.7"
+# Preview proxy: the raw-byte WebSocket tunnel (dev-server HMR through the
+# in-app browser) needs hyper's upgrade types and hyper-util's Tokio IO shim.
+# Both are already in the tree under axum, so this adds names, not weight.
+hyper = { version = "1", default-features = false }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 # A scannable QR of the portal URL so pairing a phone is "scan + type the PIN".
 # Pure-Rust encoder; the SVG is hand-built from the matrix (no render feature).
 qrcode = { version = "0.14", default-features = false }

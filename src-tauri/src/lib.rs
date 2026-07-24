@@ -1,5 +1,6 @@
 mod agents;
 mod cli;
+mod context;
 mod crash;
 #[cfg(feature = "dictation")]
 mod dictation;
@@ -12,6 +13,7 @@ mod fsx;
 mod git;
 mod lsp;
 mod portal;
+mod preview;
 mod pty;
 mod punch;
 mod relay;
@@ -290,6 +292,8 @@ pub fn run() {
         .manage(lsp::LspManager::default())
         .manage(relay::RelayManager::default())
         .manage(portal::RemoteManager::default())
+        .manage(preview::PreviewManager::default())
+        .manage(context::ContextBridge::default())
         .manage(tunnel::TunnelManager::default())
         .manage(dictation::DictationManager::default())
         .manage(cli::pending_from_env())
@@ -331,6 +335,7 @@ pub fn run() {
             }
             agents::start_monitor(app.handle().clone());
             agents::start_hook_bridge(app.handle().clone());
+            context::start(app.handle().clone());
             let menu = build_menu(app.handle())?;
             app.set_menu(menu)?;
             app.on_menu_event(|app, event| {
@@ -442,6 +447,10 @@ pub fn run() {
             relay::relay_send_collab,
             relay::relay_offer_file,
             relay::relay_accept_file,
+            preview::preview_start,
+            preview::preview_stop,
+            context::context_publish,
+            context::context_remove,
             portal::remote_enable,
             portal::remote_disable,
             portal::remote_status,
@@ -471,6 +480,8 @@ pub fn run() {
                 app.state::<relay::RelayManager>().shutdown();
                 // ... and stop the remote-access server.
                 app.state::<portal::RemoteManager>().shutdown();
+                // ... and any preview proxies.
+                app.state::<preview::PreviewManager>().shutdown_all();
                 // ... and any public-link tunnel process.
                 app.state::<tunnel::TunnelManager>().kill_all();
             }

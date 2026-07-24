@@ -43,6 +43,7 @@ import {
   CheckIcon,
   FailIcon,
   LiveDot,
+  GlobeIcon,
   LiveShareIcon,
   PlayIcon,
   RestartIcon,
@@ -76,6 +77,8 @@ import { CommitView } from "./CommitView";
 import { ReviewView, type ReviewPayload } from "./ReviewView";
 import { BranchView } from "./BranchView";
 import { AgentWorkspaceView } from "./AgentWorkspaceView";
+import { PreviewView } from "./PreviewView";
+import type { PreviewAnnotation, PreviewServer } from "../preview";
 import { ticketBranch, ticketContext, ticketWorktree } from "../trackers";
 import { prConflictContext, prReviewContext, prWorktree } from "../prs";
 import { fileDiffContext, reviewContext, sessionChangesContext } from "../diffContext";
@@ -217,9 +220,21 @@ interface SharedProjectSubTab {
   ownerName: string;
 }
 
+/** An embedded browser onto a locally running server, with annotate mode.
+ *  Navigation and collected annotations live on the tab so they survive
+ *  switching away (the view, like every doc tab, unmounts when inactive). */
+interface PreviewSubTab {
+  id: string;
+  type: "preview";
+  /** The previewed page's real URL ("" until the user picks a server). */
+  url: string;
+  annotations: PreviewAnnotation[];
+}
+
 type SubTab =
   | CollabSubTab
   | SharedProjectSubTab
+  | PreviewSubTab
   | TermSubTab
   | FileSubTab
   | PrSubTab
@@ -275,6 +290,19 @@ function tabDisplayLabel(t: SubTab): string {
       return t.review.title;
     case "shared-project":
       return t.name;
+    case "preview":
+      return previewLabel(t.url);
+  }
+}
+
+/** host[/path] for the tab strip; the scheme is noise at that width. */
+function previewLabel(url: string): string {
+  if (!url) return "Preview";
+  try {
+    const u = new URL(url);
+    return `${u.host}${u.pathname === "/" ? "" : u.pathname}`;
+  } catch {
+    return url;
   }
 }
 
@@ -381,7 +409,17 @@ function Rail({
  *  overlay rather than a bar above the grid on purpose: the terminal's size is
  *  what the pty is told, and anything that changes its height risks the
  *  wrap-at-the-wrong-column class of bug. An absolute chip changes nothing. */
-function TermPorts({ ptyId, stats }: { ptyId: number | null | undefined; stats: ipc.SessionStats[] }) {
+function TermPorts({
+  ptyId,
+  stats,
+  onPreview,
+}: {
+  ptyId: number | null | undefined;
+  stats: ipc.SessionStats[];
+  /** Open in the in-app preview tab; plain click. ⌘/ctrl-click still goes to
+   *  the system browser for the times a real browser is the point. */
+  onPreview: (url: string) => void;
+}) {
   if (ptyId == null) return null;
   const ports = stats.find((s) => s.id === ptyId)?.ports ?? [];
   if (ports.length === 0) return null;
@@ -391,12 +429,16 @@ function TermPorts({ ptyId, stats }: { ptyId: number | null | undefined; stats: 
         <button
           key={p}
           className="term-port"
-          title={`Open http://localhost:${p} in your browser`}
-          onClick={() =>
-            void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
-              openUrl(`http://localhost:${p}`),
-            )
-          }
+          title={`Preview http://localhost:${p} in Canopy — ⌘-click for your browser`}
+          onClick={(e) => {
+            if (e.metaKey || e.ctrlKey) {
+              void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
+                openUrl(`http://localhost:${p}`),
+              );
+            } else {
+              onPreview(`http://localhost:${p}`);
+            }
+          }}
         >
           localhost:{p}
         </button>
@@ -698,6 +740,15 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
 
   const patchTabRaw = useCallback((id: string, patch: Partial<SubTab>) => {
     setTabs((prev) => prev.map((t) => (t.id === id ? ({ ...t, ...patch } as SubTab) : t)));
+  }, []);
+
+  /** Open an embedded-browser preview tab. With no URL the tab opens on the
+   *  pick-a-server form; a URL (a run rail's detected server, a reopened tab)
+   *  loads immediately. */
+  const openPreview = useCallback((url = "") => {
+    const id = tabId();
+    setTabs((prev) => [...prev, { id, type: "preview", url, annotations: [] }]);
+    setActiveTabId(id);
   }, []);
 
   /** Open a relay conversation as its own tab — the everyone channel (peer
@@ -2434,6 +2485,76 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     componentsRef.current[0]?.path ??
     null;
 
+  // Every port something in this project's terminals is listening on, tied to
+  // the component whose directory the terminal runs in. This is what makes a
+  // previewed URL traceable to a codebase: the preview tab lists exactly these,
+  // and feedback from a linked page targets that component. RUNS-rail servers
+  // sort first — they're the configured dev servers, a shell's port is a bonus.
+  const previewServers: PreviewServer[] = tabs
+    .filter(
+      (t): t is TermSubTab => t.type === "terminal" && t.ptyId != null && !t.exited,
+    )
+    .flatMap((t) => {
+      const ports = projectStats.find((s) => s.id === t.ptyId)?.ports ?? [];
+      const comp =
+        components.find((c) => t.cwd === c.path || t.cwd.startsWith(`${c.path}/`)) ?? null;
+      return ports.map((p) => ({
+        url: `http://localhost:${p}`,
+        port: p,
+        ptyId: t.ptyId as number,
+        title: t.customTitle ?? t.title,
+        command: t.command,
+        cwd: t.cwd,
+        componentLabel: comp?.label ?? null,
+        componentPath: comp?.path ?? t.cwd,
+        run: !!t.run,
+      }));
+    })
+    .sort((a, b) => Number(b.run) - Number(a.run));
+
+  // Mirror this project's live shape — components, run servers, agents — into
+  // the Rust context bridge, where `canopy-hook --mcp` serves it to agents as
+  // the canopy_* tools. Runs every render, but the stringify diff means a
+  // publish only crosses IPC when something actually changed.
+  const lastContextRef = useRef("");
+  useEffect(() => {
+    const snapshot = JSON.stringify({
+      id: project.id,
+      name: project.name,
+      components: components.map((c) => ({
+        label: c.label,
+        path: c.path,
+        commands: c.commands ?? [],
+      })),
+      runServers: tabs
+        .filter((t): t is TermSubTab => t.type === "terminal" && !!t.run)
+        .map((t) => ({
+          ptyId: t.ptyId,
+          title: t.customTitle ?? t.title,
+          command: t.command ?? "",
+          cwd: t.cwd,
+          component:
+            components.find((c) => t.cwd === c.path || t.cwd.startsWith(`${c.path}/`))?.label ??
+            null,
+          listeningPorts: projectStats.find((s) => s.id === t.ptyId)?.ports ?? [],
+          running: !t.exited && t.ptyId != null,
+          exitCode: t.exitCode ?? null,
+        })),
+      agents: agentTargets.map((a) => ({
+        ptyId: a.ptyId,
+        agent: a.agentId,
+        title: a.title,
+        dir: a.dir,
+      })),
+    });
+    if (snapshot !== lastContextRef.current) {
+      lastContextRef.current = snapshot;
+      void ipc.contextPublish(project.id, snapshot);
+    }
+  });
+  // A closed project's servers die with it; drop its snapshot too.
+  useEffect(() => () => void ipc.contextRemove(project.id), [project.id]);
+
   // The agent behind the active *terminal* tab, if any — the "Agent Workspace"
   // toggle and its overlay only exist here. Identity is the live process (same
   // resolution as the tab icon), so it's right for every agent CLI — not just
@@ -2565,7 +2686,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                                   ? `Review from ${tab.review.from}: ${tab.review.title}`
                                   : tab.type === "shared-project"
                                     ? `${tab.name} — shared live by ${tab.ownerName}`
-                                    : tab.file.path
+                                    : tab.type === "preview"
+                                      ? tab.url || "Preview"
+                                      : tab.file.path
                 }
               >
                 {tab.type === "terminal" ? (
@@ -2591,6 +2714,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                   <PullRequestIcon size={12} className="tab-pr-icon" />
                 ) : tab.type === "shared-project" ? (
                   <LiveShareIcon size={12} className="tab-collab-icon" />
+                ) : tab.type === "preview" ? (
+                  <GlobeIcon size={12} className="tab-preview-icon" />
                 ) : (
                   <>
                     {/* Live-collaborated file: a teammate is editing this one,
@@ -2644,7 +2769,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                                     ? tab.review.title
                                     : tab.type === "shared-project"
                                       ? tab.name
-                                      : `${tab.file.name}${tab.file.dirty ? " •" : ""}`}
+                                      : tab.type === "preview"
+                                        ? previewLabel(tab.url)
+                                        : `${tab.file.name}${tab.file.dirty ? " •" : ""}`}
                   </span>
                 )}
                 <span
@@ -2848,6 +2975,17 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                     <TerminalIcon size={15} className="cli-icon" /> Shell
                   </span>
                 </div>
+                <div
+                  className="cli-item"
+                  onClick={() => {
+                    setCliMenuOpen(false);
+                    openPreview();
+                  }}
+                >
+                  <span>
+                    <GlobeIcon size={15} className="cli-icon" /> Preview
+                  </span>
+                </div>
                 <div className="cli-sep" />
                 {AGENT_CLIS.map((cli) => (
                   <div
@@ -2892,7 +3030,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               className="fill term-host"
               style={{ display: tab.id === activeTabId && visible ? "block" : "none" }}
             >
-              <TermPorts ptyId={tab.ptyId} stats={stats} />
+              <TermPorts ptyId={tab.ptyId} stats={stats} onPreview={openPreview} />
               <Term
                 // epoch remounts the Term (fresh PTY) when a run tab restarts
                 key={`${tab.id}:${tab.epoch ?? 0}`}
@@ -3057,6 +3195,29 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 }
               />
             }
+          />
+        )}
+        {activeTab?.type === "preview" && (
+          <PreviewView
+            key={activeTab.id}
+            url={activeTab.url}
+            annotations={activeTab.annotations}
+            onPatch={(patch) => patchTabRaw(activeTab.id, patch as Partial<SubTab>)}
+            servers={previewServers}
+            agentTargets={agentTargets}
+            installed={installed}
+            onSendToAgent={sendTicketToAgent}
+            onStartNew={(agentId, text, cwd) => {
+              // The serving component's checkout when the page is linked to
+              // one; the first component only as a last resort.
+              const dir = cwd ?? componentsRef.current[0]?.path;
+              if (!dir) {
+                onNotice("No project directory to start the agent in.");
+                return;
+              }
+              startAgentInDir(dir, agentId, text, "Preview feedback");
+            }}
+            onNotice={onNotice}
           />
         )}
         {activeTab?.type === "chat" && (
@@ -3738,6 +3899,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onRespond={respondPermission}
           onJumpToTerminal={jumpToTerminal}
           onJumpToPty={jumpToPty}
+          onPreviewUrl={openPreview}
           onOpenAgent={(p) => void openAgent(p)}
           activePty={activePty}
           roots={roots}
