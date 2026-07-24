@@ -129,7 +129,11 @@ fn script_arg(argv: &[String], cwd: &Path) -> Option<PathBuf> {
     while i < argv.len() {
         let arg = &argv[i];
         if arg.starts_with('-') {
-            i += if VALUE_FLAGS.contains(&arg.as_str()) { 2 } else { 1 };
+            i += if VALUE_FLAGS.contains(&arg.as_str()) {
+                2
+            } else {
+                1
+            };
             continue;
         }
         let path = if Path::new(arg).is_absolute() {
@@ -281,7 +285,8 @@ mod tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("canopy-agentid-{}-{name}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("canopy-agentid-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -308,7 +313,10 @@ mod tests {
             Some(script.clone())
         );
         // Flags that take a value never contribute the value.
-        assert_eq!(script_arg(&argv(&["python3", "-m", "http.server"]), &dir), None);
+        assert_eq!(
+            script_arg(&argv(&["python3", "-m", "http.server"]), &dir),
+            None
+        );
         assert_eq!(
             script_arg(&argv(&["node", "--inspect", "train.py"]), &dir),
             Some(script)
@@ -378,11 +386,7 @@ mod tests {
         let dir = scratch("hint-node");
         let pkg = dir.join("node_modules/@sourcegraph/amp");
         std::fs::create_dir_all(&pkg).unwrap();
-        std::fs::write(
-            pkg.join("package.json"),
-            r#"{"name":"@sourcegraph/amp"}"#,
-        )
-        .unwrap();
+        std::fs::write(pkg.join("package.json"), r#"{"name":"@sourcegraph/amp"}"#).unwrap();
         let cli = pkg.join("cli.js");
         std::fs::write(&cli, "// entry\n").unwrap();
         let mut resolver = Resolver::default();

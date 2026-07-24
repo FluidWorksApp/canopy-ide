@@ -334,7 +334,10 @@ pub fn start_monitor(app: AppHandle) {
                                 .collect();
                             resolver.hint(&argv, p.exe(), std::path::Path::new(&cwd))
                         })
-                        .map(|hint| AgentHint { interactive, ..hint });
+                        .map(|hint| AgentHint {
+                            interactive,
+                            ..hint
+                        });
                     let mut procs: Vec<ProcInfo> = Vec::new();
                     let mut queue = vec![root];
                     while let Some(pid) = queue.pop() {
@@ -2304,8 +2307,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_foreground_program_is_the_candidate() {
-        use super::{candidate_pid, HashMap, Pid, ProcessRefreshKind, ProcessesToUpdate, System,
-                    UpdateKind};
+        use super::{
+            candidate_pid, HashMap, Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind,
+        };
         use portable_pty::{native_pty_system, CommandBuilder, PtySize};
         use std::io::{Read, Write};
         use std::time::{Duration, Instant};
@@ -2336,7 +2340,10 @@ mod tests {
             let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
             for (pid, proc_) in sys.processes() {
                 if let Some(parent) = proc_.parent() {
-                    children.entry(parent.as_u32()).or_default().push(pid.as_u32());
+                    children
+                        .entry(parent.as_u32())
+                        .or_default()
+                        .push(pid.as_u32());
                 }
             }
             children
