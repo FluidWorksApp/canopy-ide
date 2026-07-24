@@ -28,6 +28,10 @@ const PROTECTED = new Set([
 ]);
 
 interface GitPanelProps {
+  /** False while another side tab is in front. The panel stays mounted (so
+   *  your section, commit message draft and scroll survive a switch away) but
+   *  stops polling git — nobody is looking. */
+  visible: boolean;
   components: { label: string; path: string }[];
   /** Open a file's diff in the main area. */
   onOpenDiff: (repo: string, file: ipc.FileChange) => void;
@@ -71,6 +75,7 @@ const absTime = (iso?: string) => {
 };
 
 export function GitPanel({
+  visible,
   components,
   onOpenDiff,
   onOpenPr,
@@ -124,20 +129,19 @@ export function GitPanel({
     ]);
   }, [repo]);
 
+  // Keep status live against edits made by agents in the terminals — while the
+  // panel is actually in front. Coming back re-runs this, so what you see is
+  // never the state from whenever you last looked.
   useEffect(() => {
+    if (!repo || !visible) return;
     void refresh();
-  }, [refresh]);
-
-  // Keep status live against edits made by agents in the terminals.
-  useEffect(() => {
-    if (!repo) return;
     const sub = ipc.onFsChange(() => void refresh());
     const poll = setInterval(() => void refresh(), 5000);
     return () => {
       clearInterval(poll);
       void sub.then((fn) => fn());
     };
-  }, [repo, refresh]);
+  }, [repo, refresh, visible]);
 
   const loadPrs = useCallback(async () => {
     if (!repo || !hasGh) return;

@@ -3733,6 +3733,42 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     </div>
   );
 
+  // ---------- side panels ----------
+  // The rail has the same problem the doc tabs had: a panel unmounted the
+  // moment you picked another icon, so coming back collapsed the file tree you
+  // had expanded, threw away a commit message you had half-typed, and refetched
+  // the ticket list. They stay mounted now, and are display-toggled — but only
+  // from the first time each is opened, so a project never pays for a panel you
+  // never look at (trackers talks to GitHub/Jira on mount).
+  //
+  // `display: contents` rather than block: the panels are flex children of
+  // .sidebar and size themselves with flex, so the wrapper has to disappear
+  // from the layout rather than become a box in it.
+  //
+  // Inactive panels reuse their last element for the same reason doc panes do —
+  // a hidden panel has nothing to say. It still updates itself if its own state
+  // changes (a file watcher firing, a fetch landing); the bailout only skips
+  // re-rendering it from here. What it must NOT do is keep polling while nobody
+  // is looking, so the two panels that poll take a `visible` prop.
+  const [sideSeen, setSideSeen] = useState<SideTab[]>([sideTab]);
+  useEffect(() => {
+    setSideSeen((prev) => (prev.includes(sideTab) ? prev : [...prev, sideTab]));
+  }, [sideTab]);
+  const sidePanes = useRef(new Map<SideTab, { active: boolean; el: ReactNode }>());
+  const sidePane = (key: SideTab, build: () => ReactNode) => {
+    if (!sideSeen.includes(key)) return null;
+    const active = sideTab === key;
+    const cached = sidePanes.current.get(key);
+    // Rebuilt while in front, and once more on the way out — that last build is
+    // what hands a polling panel `visible: false`. After that it sits still.
+    if (cached && !active && !cached.active) {
+      return <div style={{ display: "none" }}>{cached.el}</div>;
+    }
+    const el = build();
+    sidePanes.current.set(key, { active, el });
+    return <div style={{ display: active ? "contents" : "none" }}>{el}</div>;
+  };
+
   const sidePanel = (
     <div className="sidebar">
       {compMenu.menu && (
@@ -3774,7 +3810,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           </div>
         </div>
       )}
-      {sideTab === "files" && (
+      {sidePane("files", () => (
         <div
           className="components-panel"
           // The empty area below the file list still belongs to the last
@@ -3939,9 +3975,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             </div>
           ))}
         </div>
-      )}
-      {sideTab === "git" && (
+      ))}
+      {sidePane("git", () => (
         <GitPanel
+          visible={sideTab === "git" && visible}
           components={project.components.map((c) => ({ label: c.label, path: c.path }))}
           activeWorktree={worktreeEnv?.path ?? null}
           onUseWorktree={(repo, path, branch) => {
@@ -3956,8 +3993,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
           onNotice={onNotice}
         />
-      )}
-      {sideTab === "changes" && (
+      ))}
+      {sidePane("changes", () => (
         <ChangesPanel
           groups={changeGroups}
           loading={changesLoading}
@@ -3988,8 +4025,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             />
           }
         />
-      )}
-      {sideTab === "trackers" && (
+      ))}
+      {sidePane("trackers", () => (
         <TicketsPanel
           components={project.components.map((c) => ({ label: c.label, path: c.path }))}
           agentTargets={agentTargets}
@@ -4003,17 +4040,18 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             );
           }}
         />
-      )}
-      {sideTab === "team" && (
+      ))}
+      {sidePane("team", () => (
         <TeamPanel
           relay={relay}
           onOpenChat={openChat}
           onOpenInboxItem={(item) => void openInboxItem(item)}
           onNotice={onNotice}
         />
-      )}
-      {sideTab === "agents" && (
+      ))}
+      {sidePane("agents", () => (
         <AgentsPanel
+          visible={sideTab === "agents" && visible}
           stats={projectStats}
           hookPath={hookPath}
           pending={pending}
@@ -4034,7 +4072,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           }
           onNotice={onNotice}
         />
-      )}
+      ))}
     </div>
   );
 
