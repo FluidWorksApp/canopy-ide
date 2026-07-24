@@ -15,6 +15,7 @@ mod pty;
 mod punch;
 mod tunnel;
 mod relay;
+mod winproc;
 mod wsbridge;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};

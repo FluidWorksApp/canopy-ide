@@ -8,6 +8,7 @@
 //! Modeled on lsp.rs: spawn the provider CLI, scan its stdout+stderr line by line
 //! for the public URL, publish state, and kill it on demand and on app exit.
 
+use crate::winproc::NoConsoleWindow;
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
@@ -178,6 +179,7 @@ fn launch(
     allow_http2_retry: bool,
 ) {
     let mut cmd = Command::new(&resolved_bin);
+    cmd.no_console_window();
     cmd.args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

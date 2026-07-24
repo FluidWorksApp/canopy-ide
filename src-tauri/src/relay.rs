@@ -10,6 +10,7 @@
 //! are re-stamped with the identity that joined, so a member can't speak as
 //! someone else. Traffic is not encrypted — the panel says so.
 
+use crate::winproc::NoConsoleWindow;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -884,6 +885,7 @@ fn status_of(inner: &Inner) -> RelayStatus {
 fn fetch_public_ip() -> Option<String> {
     for url in ["https://api.ipify.org", "https://ifconfig.me/ip"] {
         let Ok(out) = std::process::Command::new("curl")
+            .no_console_window()
             .args(["-s", "--max-time", "4", url])
             .output()
         else {

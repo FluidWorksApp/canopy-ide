@@ -12,6 +12,7 @@
 //!     would hang the command forever. Failing fast with git's own error is the
 //!     honest outcome.
 
+use crate::winproc::NoConsoleWindow;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -104,6 +105,7 @@ fn git(repo: &Path) -> Command {
     // fair trade for never breaking someone else's write.
     cmd.env("GIT_OPTIONAL_LOCKS", "0");
     cmd.arg("-C").arg(repo);
+    cmd.no_console_window();
     cmd
 }
 
@@ -761,6 +763,7 @@ fn tool_path(tool: &'static str) -> String {
     // installed. -l loads the profile that sets PATH in the first place.
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let resolved = std::process::Command::new(shell)
+        .no_console_window()
         .args(["-lc", &format!("command -v {tool}")])
         .output()
         .ok()
@@ -782,12 +785,14 @@ fn gh_in(repo: &Path) -> Command {
     let mut cmd = Command::new(gh_bin());
     cmd.env("GH_PROMPT_DISABLED", "1");
     cmd.current_dir(repo);
+    cmd.no_console_window();
     cmd
 }
 
 #[tauri::command]
 pub async fn gh_available() -> bool {
     Command::new(gh_bin())
+        .no_console_window()
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -1360,6 +1365,7 @@ pub struct GhAuth {
 pub async fn gh_auth() -> Result<GhAuth, String> {
     let bin = gh_bin();
     let installed = Command::new(&bin)
+        .no_console_window()
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -1378,6 +1384,7 @@ pub async fn gh_auth() -> Result<GhAuth, String> {
     // token even when it has been revoked server-side.
     let mut cmd = Command::new(&bin);
     cmd.env("GH_PROMPT_DISABLED", "1");
+    cmd.no_console_window();
     cmd.args(["api", "user", "--jq", ".login"]);
     let (authenticated, account, detail) = match cmd.output() {
         Ok(o) if o.status.success() => (
@@ -1393,6 +1400,7 @@ pub async fn gh_auth() -> Result<GhAuth, String> {
         Err(e) => (false, String::new(), e.to_string()),
     };
     let host = Command::new(&bin)
+        .no_console_window()
         .args(["auth", "status"])
         .output()
         .ok()
@@ -2295,6 +2303,7 @@ pub async fn linear_issues(api_key: String) -> Result<Vec<TicketInfo>, String> {
     let query = r#"{ viewer { id } issues(first: 100, orderBy: updatedAt, filter: { state: { type: { in: ["triage", "backlog", "unstarted", "started"] } } }) { nodes { identifier title url branchName description priorityLabel state { name type } assignee { id displayName } } } }"#;
     let body = serde_json::json!({ "query": query }).to_string();
     let mut child = std::process::Command::new(tool_path("curl"))
+        .no_console_window()
         .args([
             "-sS",
             "--max-time",
