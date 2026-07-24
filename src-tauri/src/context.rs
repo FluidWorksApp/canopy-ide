@@ -390,6 +390,8 @@ struct BrowserOp {
     text: Option<String>,
     submit: Option<bool>,
     append: Option<bool>,
+    /// point: what to call the thing being pointed at, shown on the cursor.
+    label: Option<String>,
     /// eval
     code: Option<String>,
     /// console
@@ -429,7 +431,7 @@ async fn browser(
                 )
             }
         },
-        "click" | "type" => {
+        "click" | "type" | "point" => {
             if op.r#ref.is_none() && op.selector.is_none() {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -474,6 +476,7 @@ async fn browser(
             "ref": op.r#ref,
             "selector": op.selector,
             "text": op.text,
+            "label": op.label,
             "submit": op.submit,
             "append": op.append,
             "code": op.code,

@@ -876,7 +876,7 @@ fn tools_list() -> serde_json::Value {
         },
         {
             "name": "canopy_browser_click",
-            "description": "Click an element by snapshot ref (preferred) or CSS selector; scrolls it into view and fires a real event sequence.",
+            "description": "Click an element by snapshot ref (preferred) or CSS selector. The on-screen cursor visibly travels to it first, so the user sees the click happen.",
             "inputSchema": { "type": "object", "properties": {
                 "ref": { "type": "integer", "description": "Element ref from canopy_browser_snapshot" },
                 "selector": { "type": "string", "description": "CSS selector, if no ref is at hand" },
@@ -894,6 +894,16 @@ fn tools_list() -> serde_json::Value {
                 "append": { "type": "boolean", "description": "Append instead of replacing" },
                 "url": { "type": "string", "description": "Which preview tab (by origin)" }
             }, "required": ["text"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_browser_point",
+            "description": "Point the on-screen cursor at an element and highlight it, without clicking — for showing the user what you mean ('this is the heading you asked about'). label captions the cursor.",
+            "inputSchema": { "type": "object", "properties": {
+                "ref": { "type": "integer", "description": "Element ref from canopy_browser_snapshot" },
+                "selector": { "type": "string", "description": "CSS selector, if no ref is at hand" },
+                "label": { "type": "string", "description": "Short caption shown on the cursor (default \"look here\")" },
+                "url": { "type": "string", "description": "Which preview tab (by origin)" }
+            }, "additionalProperties": false }
         },
         {
             "name": "canopy_browser_eval",
@@ -996,6 +1006,7 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
         "canopy_browser_snapshot" => browser_op("snapshot", args),
         "canopy_browser_click" => browser_op("click", args),
         "canopy_browser_type" => browser_op("type", args),
+        "canopy_browser_point" => browser_op("point", args),
         "canopy_browser_eval" => browser_op("eval", args),
         "canopy_browser_console" => browser_op("console", args),
         "canopy_browser_network" => browser_op("network", args),

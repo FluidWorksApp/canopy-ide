@@ -264,6 +264,106 @@
 
   var agentRefs = []; // elements handed out as refs by the last snapshot
 
+  // ---------- agent cursor ----------
+  // An agent acting on the page has to be *visible*, or a remote click is
+  // indistinguishable from the page doing something on its own. So the pointer
+  // travels to the target, rests on it, and only then does the action fire —
+  // the user sees what is about to happen, and where.
+
+  var CURSOR_MOVE_MS = 320;
+  var CURSOR_SETTLE_MS = 160; // let a smooth scroll land before aiming
+  var ACCENT = "#4f8ef7";
+  var cursorEl = null;
+  var cursorLabelEl = null;
+  var cursorHideTimer = 0;
+
+  function reducedMotion() {
+    return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  }
+
+  function ensureCursor() {
+    if (cursorEl && cursorEl.isConnected) return;
+    cursorEl = document.createElement("div");
+    cursorEl.style.cssText =
+      "position:fixed;left:0;top:0;z-index:" + (Z + 6) + ";pointer-events:none;opacity:0;" +
+      "transform:translate(-200px,-200px);will-change:transform,opacity;";
+    cursorEl.innerHTML =
+      '<svg width="22" height="26" viewBox="0 0 22 26" style="display:block;' +
+      'filter:drop-shadow(0 2px 3px rgba(0,0,0,.45))">' +
+      '<path d="M2 2 L2 19.5 L6.9 15.1 L10 22.2 L13.2 20.8 L10.1 13.9 L17.2 13.7 Z" fill="' +
+      ACCENT + '" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/></svg>';
+    cursorLabelEl = document.createElement("div");
+    cursorLabelEl.style.cssText =
+      "position:absolute;left:19px;top:21px;background:" + ACCENT + ";color:#fff;" +
+      "font:600 10px/17px -apple-system,system-ui,sans-serif;padding:0 7px;border-radius:9px;" +
+      "white-space:nowrap;max-width:40vw;overflow:hidden;text-overflow:ellipsis;" +
+      "box-shadow:0 1px 4px rgba(0,0,0,.35);";
+    cursorEl.appendChild(cursorLabelEl);
+    // On documentElement, not body: keeps it out of body.innerText, so a
+    // snapshot never reports the cursor's own label as page content.
+    document.documentElement.appendChild(cursorEl);
+  }
+
+  function hideCursorSoon(delay) {
+    clearTimeout(cursorHideTimer);
+    cursorHideTimer = setTimeout(function () {
+      if (cursorEl) cursorEl.style.opacity = "0";
+    }, delay || 1600);
+  }
+
+  /** Outline the element being acted on, so "where" is unambiguous. */
+  function flashBox(el, ms) {
+    var r = el.getBoundingClientRect();
+    var b = document.createElement("div");
+    b.style.cssText =
+      "position:fixed;pointer-events:none;z-index:" + (Z + 4) + ";border-radius:4px;" +
+      "left:" + r.left + "px;top:" + r.top + "px;width:" + r.width + "px;height:" + r.height + "px;" +
+      "border:2px solid " + ACCENT + ";background:rgba(79,142,247,.10);transition:opacity .3s;";
+    document.documentElement.appendChild(b);
+    setTimeout(function () {
+      b.style.opacity = "0";
+      setTimeout(function () { b.remove(); }, 320);
+    }, ms || 700);
+  }
+
+  /** Expanding ring at the click point — the "tap". */
+  function ripple(x, y) {
+    var r = document.createElement("div");
+    r.style.cssText =
+      "position:fixed;left:" + x + "px;top:" + y + "px;z-index:" + (Z + 5) + ";" +
+      "pointer-events:none;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;" +
+      "border:2px solid " + ACCENT + ";background:rgba(79,142,247,.25);" +
+      "transition:transform .45s ease-out,opacity .45s ease-out;";
+    document.documentElement.appendChild(r);
+    requestAnimationFrame(function () {
+      r.style.transform = "scale(2.6)";
+      r.style.opacity = "0";
+    });
+    setTimeout(function () { r.remove(); }, 520);
+  }
+
+  /** Bring the pointer to `el` and resolve with the point it landed on. */
+  function withCursor(el, label) {
+    ensureCursor();
+    var instant = reducedMotion();
+    el.scrollIntoView({ block: "center", inline: "center", behavior: instant ? "auto" : "smooth" });
+    clearTimeout(cursorHideTimer);
+    cursorLabelEl.textContent = label;
+    return new Promise(function (resolve) {
+      setTimeout(function () {
+        var r = el.getBoundingClientRect();
+        var x = Math.round(r.left + r.width / 2);
+        var y = Math.round(r.top + r.height / 2);
+        cursorEl.style.transition = instant
+          ? "opacity .1s"
+          : "transform " + CURSOR_MOVE_MS + "ms cubic-bezier(.22,.61,.36,1),opacity .15s";
+        cursorEl.style.opacity = "1";
+        cursorEl.style.transform = "translate(" + x + "px," + y + "px)";
+        setTimeout(function () { resolve({ x: x, y: y }); }, instant ? 0 : CURSOR_MOVE_MS);
+      }, instant ? 0 : CURSOR_SETTLE_MS);
+    });
+  }
+
   function visible(el) {
     if (!el.getClientRects().length) return false;
     var r = el.getBoundingClientRect();
@@ -343,7 +443,8 @@
   }
 
   function clickTarget(el) {
-    el.scrollIntoView({ block: "center", inline: "center" });
+    // Scrolling into view is the cursor's job now (withCursor), so the pointer
+    // aims at where the element ends up rather than where it started.
     var r = el.getBoundingClientRect();
     var opts = {
       bubbles: true,
@@ -423,16 +524,37 @@
       case "click": {
         var el = resolveTarget(d);
         var brief = { tag: el.localName, text: labelFor(el), selector: cssPath(el) };
-        clickTarget(el);
-        return agentReply(d.id, true, { clicked: brief, url: location.href });
+        return withCursor(el, "click").then(function (p) {
+          flashBox(el, 500);
+          ripple(p.x, p.y);
+          clickTarget(el);
+          hideCursorSoon();
+          agentReply(d.id, true, { clicked: brief, url: location.href });
+        });
       }
       case "type": {
         var t = resolveTarget(d);
-        typeInto(t, d);
-        return agentReply(d.id, true, {
-          typed: String(d.text == null ? "" : d.text).slice(0, 120),
-          into: { tag: t.localName, selector: cssPath(t) },
-          submitted: !!d.submit,
+        return withCursor(t, "type").then(function () {
+          flashBox(t, 900);
+          typeInto(t, d);
+          hideCursorSoon();
+          agentReply(d.id, true, {
+            typed: String(d.text == null ? "" : d.text).slice(0, 120),
+            into: { tag: t.localName, selector: cssPath(t) },
+            submitted: !!d.submit,
+          });
+        });
+      }
+      case "point": {
+        var pt = resolveTarget(d);
+        var label = d.label ? String(d.label).slice(0, 60) : "look here";
+        return withCursor(pt, label).then(function () {
+          flashBox(pt, 1600);
+          hideCursorSoon(2600);
+          agentReply(d.id, true, {
+            pointingAt: { tag: pt.localName, text: labelFor(pt), selector: cssPath(pt) },
+            label: label,
+          });
         });
       }
       case "eval": {
@@ -459,11 +581,17 @@
   }
 
   function onAgentMessage(d) {
+    var fail = function (err) {
+      agentReply(d.id, false, String((err && err.message) || err));
+    };
     var exec = function () {
       try {
-        runAgentOp(d);
+        // Cursor-led ops (click/type/point) and eval resolve asynchronously;
+        // an async failure must answer too, or the agent waits out its timeout.
+        var running = runAgentOp(d);
+        if (running && typeof running.then === "function") running.then(null, fail);
       } catch (err) {
-        agentReply(d.id, false, String((err && err.message) || err));
+        fail(err);
       }
     };
     // The script runs from <head>, so an op can land before the body exists.
