@@ -76,7 +76,11 @@ fn listening_ports(pids: &[u32]) -> HashMap<u32, Vec<u16>> {
     if pids.is_empty() {
         return out;
     }
-    let list = pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",");
+    let list = pids
+        .iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
     let Ok(res) = std::process::Command::new("lsof")
         .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", &list, "-Fpn"])
         .output()
@@ -130,14 +134,7 @@ pub fn start_monitor(app: AppHandle) {
                     let guard = map.lock().unwrap();
                     guard
                         .values()
-                        .map(|s| {
-                            (
-                                s.id,
-                                s.pid,
-                                s.title.lock().unwrap().clone(),
-                                s.cwd.clone(),
-                            )
-                        })
+                        .map(|s| (s.id, s.pid, s.title.lock().unwrap().clone(), s.cwd.clone()))
                         .collect()
                 };
                 // With no terminals there is nothing hot to watch — only the
@@ -253,7 +250,10 @@ pub fn start_monitor(app: AppHandle) {
                 // covers every pid of every session — a call per session would
                 // put the cost back.
                 if tick % PORT_EVERY == 0 {
-                    let all: Vec<u32> = stats.iter().flat_map(|s| s.procs.iter().map(|p| p.pid)).collect();
+                    let all: Vec<u32> = stats
+                        .iter()
+                        .flat_map(|s| s.procs.iter().map(|p| p.pid))
+                        .collect();
                     let by_pid = listening_ports(&all);
                     if !by_pid.is_empty() {
                         for s in stats.iter_mut() {
@@ -290,8 +290,7 @@ pub fn start_monitor(app: AppHandle) {
 /// we tail it and re-emit each line as an `agent:event`. Works with any platform
 /// that can run a shell command as a hook — fully offline, no server.
 pub fn start_hook_bridge(app: AppHandle) {
-    let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
-    else {
+    let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
         return;
     };
     let dir = std::path::PathBuf::from(home).join(".canopy");
@@ -307,7 +306,9 @@ pub fn start_hook_bridge(app: AppHandle) {
             let mut offset = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
             loop {
                 thread::sleep(Duration::from_millis(500));
-                let Ok(meta) = std::fs::metadata(&file) else { continue };
+                let Ok(meta) = std::fs::metadata(&file) else {
+                    continue;
+                };
                 let len = meta.len();
                 if len < offset {
                     offset = 0; // file truncated/rotated
@@ -315,7 +316,9 @@ pub fn start_hook_bridge(app: AppHandle) {
                 if len == offset {
                     continue;
                 }
-                let Ok(mut f) = std::fs::File::open(&file) else { continue };
+                let Ok(mut f) = std::fs::File::open(&file) else {
+                    continue;
+                };
                 if f.seek(SeekFrom::Start(offset)).is_err() {
                     continue;
                 }
@@ -337,7 +340,9 @@ pub fn start_hook_bridge(app: AppHandle) {
 
 #[tauri::command]
 pub async fn hook_bridge_path() -> Option<String> {
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok()?;
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()?;
     Some(
         std::path::PathBuf::from(home)
             .join(".canopy")
@@ -373,7 +378,9 @@ pub async fn setup_agent_hooks(agent: String) -> Result<String, String> {
 /// config file that references any of our MARKERS is one we've hooked.
 #[tauri::command]
 pub async fn agent_hooks_installed(agent: String) -> bool {
-    let Ok(home) = std::env::var("HOME") else { return false };
+    let Ok(home) = std::env::var("HOME") else {
+        return false;
+    };
     // The config file each agent's hooks live in — the same file its
     // `setup_*` writes to, checked for our markers rather than re-derived.
     let config = match agent.as_str() {
@@ -432,7 +439,10 @@ fn install_generated_file(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    if std::fs::read_to_string(&path).map(|s| s == source).unwrap_or(false) {
+    if std::fs::read_to_string(&path)
+        .map(|s| s == source)
+        .unwrap_or(false)
+    {
         return Ok(already_msg.into());
     }
     std::fs::write(&path, source).map_err(|e| e.to_string())?;
@@ -673,7 +683,9 @@ fn setup_agy_hooks(home: &str) -> Result<String, String> {
             helper.display()
         ));
     }
-    let dir = std::path::PathBuf::from(home).join(".gemini").join("antigravity-cli");
+    let dir = std::path::PathBuf::from(home)
+        .join(".gemini")
+        .join("antigravity-cli");
     // No directory means the CLI has never run — nothing to configure yet, and
     // creating it ourselves could fight its first-run setup.
     if !dir.exists() {
@@ -746,7 +758,11 @@ fn setup_agy_hooks(home: &str) -> Result<String, String> {
     }
     Ok(format!(
         "Antigravity hooks installed{} — restart agy sessions to pick them up",
-        if notif { " (+ terminal notifications enabled)" } else { "" }
+        if notif {
+            " (+ terminal notifications enabled)"
+        } else {
+            ""
+        }
     ))
 }
 
@@ -774,10 +790,11 @@ fn helper_path() -> Result<std::path::PathBuf, String> {
 /// startup so a rebuilt helper always replaces the installed one.
 pub fn install_hook_helper() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let src = exe
-        .parent()
-        .ok_or("no exe dir")?
-        .join(if cfg!(windows) { "canopy-hook.exe" } else { "canopy-hook" });
+    let src = exe.parent().ok_or("no exe dir")?.join(if cfg!(windows) {
+        "canopy-hook.exe"
+    } else {
+        "canopy-hook"
+    });
     if !src.exists() {
         return Err(format!("hook helper not built at {}", src.display()));
     }
@@ -824,7 +841,9 @@ pub async fn session_forget(session_id: String) -> Result<(), String> {
         return Err("invalid session id".into());
     }
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
-    let dir = std::path::PathBuf::from(&home).join(".canopy").join("sessions");
+    let dir = std::path::PathBuf::from(&home)
+        .join(".canopy")
+        .join("sessions");
     // The change journal is a sidecar of the digest — forgetting the session
     // must take it too, or a long-lived machine slowly accumulates orphaned
     // edit logs. Best-effort: its absence is fine, and it must not block the
@@ -927,7 +946,6 @@ fn resume_location(digest: &serde_json::Value) -> (String, bool) {
     }
 }
 
-
 /// Sessions read straight from a CLI's own on-disk store, no hook required.
 ///
 /// oh-my-pi writes complete, readable session files
@@ -951,7 +969,9 @@ fn omp_digests(home: &str) -> Vec<serde_json::Value> {
     };
     let mut files: Vec<(u64, std::path::PathBuf)> = Vec::new();
     for dir in dirs.flatten() {
-        let Ok(entries) = std::fs::read_dir(dir.path()) else { continue };
+        let Ok(entries) = std::fs::read_dir(dir.path()) else {
+            continue;
+        };
         for e in entries.flatten() {
             let p = e.path();
             if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
@@ -981,7 +1001,9 @@ fn omp_digests(home: &str) -> Vec<serde_json::Value> {
             // The header records are at the top; never read the whole
             // transcript just to label a row.
             for line in BufReader::new(f).lines().take(8).map_while(Result::ok) {
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
                 match v["type"].as_str() {
                     Some("session") => {
                         id = v["id"].as_str().unwrap_or("").to_string();
@@ -1019,7 +1041,9 @@ fn omp_digests(home: &str) -> Vec<serde_json::Value> {
 #[tauri::command]
 pub async fn session_digests() -> Result<Vec<serde_json::Value>, String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
-    let dir = std::path::PathBuf::from(&home).join(".canopy").join("sessions");
+    let dir = std::path::PathBuf::from(&home)
+        .join(".canopy")
+        .join("sessions");
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Ok(vec![]);
     };
@@ -1051,7 +1075,8 @@ fn setup_claude_hooks(home: &str, bridge: &str) -> Result<String, String> {
     let path = dir.join("settings.json");
     let mut settings: serde_json::Value = if path.exists() {
         let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        serde_json::from_str(&raw).map_err(|e| format!("~/.claude/settings.json is not valid JSON: {e}"))?
+        serde_json::from_str(&raw)
+            .map_err(|e| format!("~/.claude/settings.json is not valid JSON: {e}"))?
     } else {
         serde_json::json!({})
     };
@@ -1114,7 +1139,9 @@ fn setup_claude_hooks(home: &str, bridge: &str) -> Result<String, String> {
         ("PreToolUse", Some("AskUserQuestion")),
     ] {
         let list = hooks.entry(event).or_insert_with(|| serde_json::json!([]));
-        let Some(arr) = list.as_array_mut() else { continue };
+        let Some(arr) = list.as_array_mut() else {
+            continue;
+        };
         let want = make_entry(matcher);
         if arr.iter().any(|e| e == &want) {
             continue; // already exactly what we install
@@ -1193,7 +1220,9 @@ fn setup_codex_hooks(home: &str, bridge: &str) -> Result<String, String> {
         "PermissionRequest",
     ] {
         let list = hooks.entry(event).or_insert_with(|| serde_json::json!([]));
-        let Some(arr) = list.as_array_mut() else { continue };
+        let Some(arr) = list.as_array_mut() else {
+            continue;
+        };
         if arr.iter().any(|e| e == &want) {
             continue;
         }
@@ -1245,9 +1274,8 @@ fn setup_codex_notify(home: &str, bridge: &str) -> Result<String, String> {
     }
 
     // Codex passes the notification JSON as an argument, not stdin.
-    let notify = format!(
-        "notify = [\"/bin/sh\", \"-c\", \"printf '%s\\\\n' \\\"$0\\\" >> {bridge}\"]"
-    );
+    let notify =
+        format!("notify = [\"/bin/sh\", \"-c\", \"printf '%s\\\\n' \\\"$0\\\" >> {bridge}\"]");
 
     // Drop any copy we wrote before (which may have been absorbed into a
     // table), then reinsert before the first table header — the only place a
@@ -1568,7 +1596,9 @@ fn claude_transcript_path(home: &str, session_id: &str) -> Option<std::path::Pat
 /// Claude (and any hook-reporting CLI); omp/codex are filled in from their own
 /// stores below, so only Claude paths are resolved here.
 fn canopy_digest_candidates(home: &str) -> Vec<Candidate> {
-    let dir = std::path::PathBuf::from(home).join(".canopy").join("sessions");
+    let dir = std::path::PathBuf::from(home)
+        .join(".canopy")
+        .join("sessions");
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
@@ -1815,14 +1845,16 @@ pub async fn agent_usage() -> Result<Vec<AgentSessionUsage>, String> {
 /// inherit it). Used by the agent-CLI launcher to offer launch vs. install.
 #[tauri::command]
 pub async fn which_check(commands: Vec<String>) -> HashMap<String, bool> {
-    let mut result: HashMap<String, bool> =
-        commands.iter().map(|c| (c.clone(), false)).collect();
+    let mut result: HashMap<String, bool> = commands.iter().map(|c| (c.clone(), false)).collect();
     #[cfg(unix)]
     {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
         let script = commands
             .iter()
-            .filter(|c| c.chars().all(|ch| ch.is_alphanumeric() || ch == '-' || ch == '_'))
+            .filter(|c| {
+                c.chars()
+                    .all(|ch| ch.is_alphanumeric() || ch == '-' || ch == '_')
+            })
             .map(|c| format!("command -v {c} >/dev/null 2>&1 && echo {c}"))
             .collect::<Vec<_>>()
             .join("; ");
@@ -1844,7 +1876,9 @@ pub async fn which_check(commands: Vec<String>) -> HashMap<String, bool> {
         // name can't smuggle in extra arguments. Without this, every command
         // (CLIs and prerequisites alike) read as "not installed" on Windows.
         for c in &commands {
-            if c.chars().all(|ch| ch.is_alphanumeric() || ch == '-' || ch == '_') {
+            if c.chars()
+                .all(|ch| ch.is_alphanumeric() || ch == '-' || ch == '_')
+            {
                 let ok = std::process::Command::new("where")
                     .no_console_window()
                     .arg(c)
@@ -2009,7 +2043,8 @@ pub async fn cli_versions(queries: Vec<CliVersionQuery>) -> HashMap<String, CliV
                                             .pointer("/formulae/0/versions/stable")
                                             .and_then(|x| x.as_str())
                                             .or_else(|| {
-                                                j.pointer("/casks/0/version").and_then(|x| x.as_str())
+                                                j.pointer("/casks/0/version")
+                                                    .and_then(|x| x.as_str())
                                             })
                                             .and_then(first_version_token);
                                     }
@@ -2087,11 +2122,23 @@ mod tests {
     /// yields its release core.
     #[test]
     fn version_token_matches_real_cli_output() {
-        assert_eq!(first_version_token("2.1.217 (Claude Code)").as_deref(), Some("2.1.217"));
-        assert_eq!(first_version_token("codex-cli 0.98.0").as_deref(), Some("0.98.0"));
-        assert_eq!(first_version_token("aider 0.86.1").as_deref(), Some("0.86.1"));
+        assert_eq!(
+            first_version_token("2.1.217 (Claude Code)").as_deref(),
+            Some("2.1.217")
+        );
+        assert_eq!(
+            first_version_token("codex-cli 0.98.0").as_deref(),
+            Some("0.98.0")
+        );
+        assert_eq!(
+            first_version_token("aider 0.86.1").as_deref(),
+            Some("0.86.1")
+        );
         assert_eq!(first_version_token("v1.2").as_deref(), Some("1.2"));
-        assert_eq!(first_version_token("1.2.3-beta.4").as_deref(), Some("1.2.3"));
+        assert_eq!(
+            first_version_token("1.2.3-beta.4").as_deref(),
+            Some("1.2.3")
+        );
         assert_eq!(first_version_token("opencode"), None);
         assert_eq!(first_version_token(""), None);
         // A lone integer (an exit code, a count) must not read as a version.

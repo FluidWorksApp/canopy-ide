@@ -33,7 +33,10 @@ pub struct FsChange {
     pub kind: String,
 }
 
-pub(crate) fn check_scope(state: &State<'_, WorkspaceManager>, path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn check_scope(
+    state: &State<'_, WorkspaceManager>,
+    path: &Path,
+) -> Result<PathBuf, String> {
     // Canonicalize the deepest existing ancestor so new files still validate.
     let mut existing = path.to_path_buf();
     let mut suffix = PathBuf::new();
@@ -64,7 +67,10 @@ pub(crate) fn check_scope(state: &State<'_, WorkspaceManager>, path: &Path) -> R
     if roots.iter().any(|root| canonical.starts_with(root)) {
         Ok(canonical)
     } else {
-        Err(format!("path outside workspace scope: {}", canonical.display()))
+        Err(format!(
+            "path outside workspace scope: {}",
+            canonical.display()
+        ))
     }
 }
 
@@ -105,11 +111,14 @@ pub async fn workspace_add(
                 .filter(|p| !p.contains("/node_modules/") && !p.contains("/.git/"))
                 .collect();
             if !paths.is_empty() {
-                let _ = app.emit("fs:change", FsChange {
-                    root: emit_root.clone(),
-                    paths,
-                    kind: kind.into(),
-                });
+                let _ = app.emit(
+                    "fs:change",
+                    FsChange {
+                        root: emit_root.clone(),
+                        paths,
+                        kind: kind.into(),
+                    },
+                );
             }
         }
     })
@@ -122,7 +131,10 @@ pub async fn workspace_add(
 }
 
 #[tauri::command]
-pub async fn workspace_remove(state: State<'_, WorkspaceManager>, path: String) -> Result<(), String> {
+pub async fn workspace_remove(
+    state: State<'_, WorkspaceManager>,
+    path: String,
+) -> Result<(), String> {
     let canonical = PathBuf::from(&path)
         .canonicalize()
         .map_err(|e| e.to_string())?;
@@ -164,7 +176,12 @@ pub async fn fs_read_dir(
             }
         })
         .collect();
-    entries.sort_by(|a, b| (b.is_dir, a.name.to_lowercase()).partial_cmp(&(a.is_dir, b.name.to_lowercase())).unwrap().then(std::cmp::Ordering::Equal));
+    entries.sort_by(|a, b| {
+        (b.is_dir, a.name.to_lowercase())
+            .partial_cmp(&(a.is_dir, b.name.to_lowercase()))
+            .unwrap()
+            .then(std::cmp::Ordering::Equal)
+    });
     Ok(entries)
 }
 
@@ -220,12 +237,12 @@ fn git_ro(dir: &Path) -> std::process::Command {
 }
 
 #[tauri::command]
-pub async fn git_status(state: State<'_, WorkspaceManager>, path: String) -> Result<GitStatus, String> {
+pub async fn git_status(
+    state: State<'_, WorkspaceManager>,
+    path: String,
+) -> Result<GitStatus, String> {
     let dir = check_scope(&state, Path::new(&path))?;
-    let top = match git_ro(&dir)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-    {
+    let top = match git_ro(&dir).args(["rev-parse", "--show-toplevel"]).output() {
         Ok(out) if out.status.success() => {
             PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string())
         }
@@ -326,7 +343,6 @@ pub async fn store_save(data: String) -> Result<(), String> {
     std::fs::write(&path, data).map_err(|e| e.to_string())
 }
 
-
 // Workspace/project export + import. These deliberately sit outside the
 // workspace scope check: the path comes from a native save/open dialog the user
 // just drove, which is the consent. They're kept narrow (JSON text only, no
@@ -417,7 +433,9 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>, limit: usize, depth: usize) {
     if out.len() >= limit || depth > 12 {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         if out.len() >= limit {
             return;
@@ -456,7 +474,10 @@ pub async fn fs_list_files(
         let dir = check_scope(&state, Path::new(&root))?;
         walk(&dir, &mut out, limit, 0);
     }
-    Ok(out.iter().map(|p| p.to_string_lossy().to_string()).collect())
+    Ok(out
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect())
 }
 
 #[derive(Serialize, Clone)]
@@ -492,14 +513,21 @@ pub async fn fs_search(
             break;
         }
         // Skip anything too big to be worth scanning inline.
-        if std::fs::metadata(&file).map(|m| m.len() > 2_000_000).unwrap_or(true) {
+        if std::fs::metadata(&file)
+            .map(|m| m.len() > 2_000_000)
+            .unwrap_or(true)
+        {
             continue;
         }
-        let Ok(content) = std::fs::read(&file) else { continue };
+        let Ok(content) = std::fs::read(&file) else {
+            continue;
+        };
         if content.contains(&0) {
             continue; // binary
         }
-        let Ok(text) = String::from_utf8(content) else { continue };
+        let Ok(text) = String::from_utf8(content) else {
+            continue;
+        };
         for (i, line) in text.lines().enumerate() {
             if hits.len() >= limit {
                 break;
@@ -539,7 +567,10 @@ pub async fn fs_stat(
 /// Create an empty file. Fails if it already exists rather than truncating —
 /// "New File" must never silently destroy an existing one.
 #[tauri::command]
-pub async fn fs_create_file(state: State<'_, WorkspaceManager>, path: String) -> Result<String, String> {
+pub async fn fs_create_file(
+    state: State<'_, WorkspaceManager>,
+    path: String,
+) -> Result<String, String> {
     let target = check_scope(&state, Path::new(&path))?;
     if target.exists() {
         return Err(format!("{} already exists", target.display()));
@@ -552,7 +583,10 @@ pub async fn fs_create_file(state: State<'_, WorkspaceManager>, path: String) ->
 }
 
 #[tauri::command]
-pub async fn fs_create_dir(state: State<'_, WorkspaceManager>, path: String) -> Result<String, String> {
+pub async fn fs_create_dir(
+    state: State<'_, WorkspaceManager>,
+    path: String,
+) -> Result<String, String> {
     let target = check_scope(&state, Path::new(&path))?;
     if target.exists() {
         return Err(format!("{} already exists", target.display()));
@@ -615,10 +649,19 @@ pub async fn fs_reveal(state: State<'_, WorkspaceManager>, path: String) -> Resu
 
 /// Duplicate a file or directory next to itself.
 #[tauri::command]
-pub async fn fs_duplicate(state: State<'_, WorkspaceManager>, path: String) -> Result<String, String> {
+pub async fn fs_duplicate(
+    state: State<'_, WorkspaceManager>,
+    path: String,
+) -> Result<String, String> {
     let src = check_scope(&state, Path::new(&path))?;
-    let stem = src.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-    let ext = src.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    let stem = src
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let ext = src
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
     let parent = src.parent().ok_or("no parent dir")?;
     // copy, copy 2, copy 3 … so repeated duplication doesn't collide
     let mut candidate = parent.join(format!("{stem} copy{ext}"));

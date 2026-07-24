@@ -83,7 +83,9 @@ pub fn discover(sock: &UdpSocket) -> io::Result<SocketAddr> {
         let Ok(mut addrs) = std::net::ToSocketAddrs::to_socket_addrs(&(*host, *port)) else {
             continue;
         };
-        let Some(server) = addrs.find(|a| a.is_ipv4()) else { continue };
+        let Some(server) = addrs.find(|a| a.is_ipv4()) else {
+            continue;
+        };
         let (req, tid) = binding_request();
         if sock.send_to(&req, server).is_err() {
             continue;
@@ -136,7 +138,9 @@ mod tests {
         let (_, tid) = ([0u8; 20], [7u8; 12]);
         let want = SocketAddr::from(([203, 0, 113, 9], 51_820));
         let magic = STUN_MAGIC.to_be_bytes();
-        let SocketAddr::V4(v4) = want else { unreachable!() };
+        let SocketAddr::V4(v4) = want else {
+            unreachable!()
+        };
         let ipo = v4.ip().octets();
         let xport = want.port() ^ (STUN_MAGIC >> 16) as u16;
         let mut resp = vec![0u8; 20];
@@ -146,7 +150,12 @@ mod tests {
         resp.extend_from_slice(&8u16.to_be_bytes());
         resp.extend_from_slice(&[0x00, 0x01]);
         resp.extend_from_slice(&xport.to_be_bytes());
-        resp.extend_from_slice(&[ipo[0] ^ magic[0], ipo[1] ^ magic[1], ipo[2] ^ magic[2], ipo[3] ^ magic[3]]);
+        resp.extend_from_slice(&[
+            ipo[0] ^ magic[0],
+            ipo[1] ^ magic[1],
+            ipo[2] ^ magic[2],
+            ipo[3] ^ magic[3],
+        ]);
         assert_eq!(parse_mapped(&resp, &tid), Some(want));
     }
 }

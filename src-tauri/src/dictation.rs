@@ -131,7 +131,9 @@ fn model_dir(id: &str) -> Result<PathBuf, String> {
 /// less (a killed download, a partial extract) is treated as absent and
 /// re-fetched, so there is no half-installed state to load from.
 fn model_ready(id: &str) -> bool {
-    model_dir(id).map(|d| d.join(".complete").exists()).unwrap_or(false)
+    model_dir(id)
+        .map(|d| d.join(".complete").exists())
+        .unwrap_or(false)
 }
 
 /// The tarball may extract its files directly into the model directory or into
@@ -160,7 +162,13 @@ fn resolve_load_dir(base: &Path) -> PathBuf {
     base.to_path_buf()
 }
 
-fn emit_progress(app: &tauri::AppHandle, model: &str, phase: &str, pct: f64, message: Option<&str>) {
+fn emit_progress(
+    app: &tauri::AppHandle,
+    model: &str,
+    phase: &str,
+    pct: f64,
+    message: Option<&str>,
+) {
     let _ = app.emit(
         "dictation:progress",
         serde_json::json!({ "model": model, "phase": phase, "pct": pct, "message": message }),
@@ -184,7 +192,10 @@ async fn download_model(app: tauri::AppHandle, def: &'static ModelDef) -> Result
     if !resp.status().is_success() {
         return Err(format!("download {}: HTTP {}", def.name, resp.status()));
     }
-    let total = resp.content_length().unwrap_or(def.size_mb * 1_000_000).max(1);
+    let total = resp
+        .content_length()
+        .unwrap_or(def.size_mb * 1_000_000)
+        .max(1);
     let mut file = std::fs::File::create(&tmp).map_err(|e| format!("create temp: {e}"))?;
     let mut received: u64 = 0;
     let mut last = -1i64;
@@ -218,16 +229,17 @@ fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<(), String> {
     let f = std::fs::File::open(archive).map_err(|e| format!("open archive: {e}"))?;
     let gz = flate2::read::GzDecoder::new(f);
     let mut tar = tar::Archive::new(gz);
-    tar.unpack(dest).map_err(|e| format!("extract archive: {e}"))?;
+    tar.unpack(dest)
+        .map_err(|e| format!("extract archive: {e}"))?;
     Ok(())
 }
 
 fn load_engine(def: &ModelDef) -> Result<Box<dyn SpeechModel>, String> {
     let dir = resolve_load_dir(&model_dir(def.id)?);
     let engine: Box<dyn SpeechModel> = match def.engine {
-        Engine::Parakeet => Box::new(
-            ParakeetModel::load(&dir, &def.quant).map_err(|e| format!("load model: {e}"))?,
-        ),
+        Engine::Parakeet => {
+            Box::new(ParakeetModel::load(&dir, &def.quant).map_err(|e| format!("load model: {e}"))?)
+        }
         Engine::SenseVoice => Box::new(
             SenseVoiceModel::load(&dir, &def.quant).map_err(|e| format!("load model: {e}"))?,
         ),
@@ -278,8 +290,7 @@ fn start_capture() -> Result<Recording, String> {
                     device.build_input_stream(
                         &config.into(),
                         move |data: &[i16], _: &_| {
-                            let f: Vec<f32> =
-                                data.iter().map(|s| *s as f32 / 32768.0).collect();
+                            let f: Vec<f32> = data.iter().map(|s| *s as f32 / 32768.0).collect();
                             push_mono(&sink, &f, channels, cap);
                         },
                         err_fn,
@@ -291,10 +302,8 @@ fn start_capture() -> Result<Recording, String> {
                     device.build_input_stream(
                         &config.into(),
                         move |data: &[u16], _: &_| {
-                            let f: Vec<f32> = data
-                                .iter()
-                                .map(|s| *s as f32 / 32768.0 - 1.0)
-                                .collect();
+                            let f: Vec<f32> =
+                                data.iter().map(|s| *s as f32 / 32768.0 - 1.0).collect();
                             push_mono(&sink, &f, channels, cap);
                         },
                         err_fn,
@@ -304,7 +313,9 @@ fn start_capture() -> Result<Recording, String> {
                 other => return Err(format!("Unsupported microphone format: {other:?}")),
             }
             .map_err(|e| format!("Could not open microphone: {e}"))?;
-            stream.play().map_err(|e| format!("Could not start microphone: {e}"))?;
+            stream
+                .play()
+                .map_err(|e| format!("Could not start microphone: {e}"))?;
             Ok((stream, rate))
         };
         match open() {
@@ -604,7 +615,11 @@ pub async fn dictation_stop(
                     .to_string(),
             );
         }
-        log::info!("dictation: {} raw frames @{} Hz", raw.len(), rec.sample_rate);
+        log::info!(
+            "dictation: {} raw frames @{} Hz",
+            raw.len(),
+            rec.sample_rate
+        );
         resample(raw, rec.sample_rate)
     })
     .await

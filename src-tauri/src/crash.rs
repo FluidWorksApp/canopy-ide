@@ -74,7 +74,10 @@ async fn post_report(report: &CrashReport) -> Result<(), String> {
     if resp.status().is_success() {
         Ok(())
     } else {
-        Err(format!("collector returned HTTP {}", resp.status().as_u16()))
+        Err(format!(
+            "collector returned HTTP {}",
+            resp.status().as_u16()
+        ))
     }
 }
 

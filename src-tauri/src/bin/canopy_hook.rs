@@ -168,7 +168,9 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 /// (bus consumers, digests) already understands, and tag it with its agent so
 /// nothing downstream mislabels it as claude.
 fn normalize_event(event: &mut serde_json::Value, agent: &str) {
-    let Some(map) = event.as_object_mut() else { return };
+    let Some(map) = event.as_object_mut() else {
+        return;
+    };
     map.insert("agent".into(), serde_json::json!(agent));
     if agent == "agy" {
         // Antigravity's lifecycle names differ from Claude's; keep the
@@ -317,7 +319,11 @@ fn update_digest(
     // Agent identity: claude's payloads carry session_id; others set `agent`.
     let agent = event["agent"]
         .as_str()
-        .unwrap_or(if event["session_id"].is_string() { "claude" } else { "agent" });
+        .unwrap_or(if event["session_id"].is_string() {
+            "claude"
+        } else {
+            "agent"
+        });
     digest["agent"] = serde_json::json!(agent);
     if let Some(b) = git_branch(cwd) {
         digest["branch"] = serde_json::json!(b);
@@ -423,7 +429,10 @@ fn append_edit_journal(session_id: &str, agent: &str, event: &serde_json::Value)
         return;
     }
     let ti = &event["tool_input"];
-    let Some(abs) = ti["file_path"].as_str().or_else(|| ti["notebook_path"].as_str()) else {
+    let Some(abs) = ti["file_path"]
+        .as_str()
+        .or_else(|| ti["notebook_path"].as_str())
+    else {
         return;
     };
     let ts = now_secs();
@@ -461,7 +470,11 @@ fn append_edit_journal(session_id: &str, agent: &str, event: &serde_json::Value)
     if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > MAX_JOURNAL_BYTES {
         return;
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         use std::io::Write;
         for r in records {
             let _ = writeln!(f, "{r}");
@@ -550,8 +563,12 @@ fn peer_context(session_id: &str, cwd: &str) -> Option<String> {
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let Ok(raw) = std::fs::read_to_string(&path) else { continue };
-        let Ok(d) = serde_json::from_str::<serde_json::Value>(&raw) else { continue };
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(d) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
 
         let sid = d["session_id"].as_str().unwrap_or("");
         if sid.is_empty() || sid == session_id {
@@ -574,11 +591,20 @@ fn peer_context(session_id: &str, cwd: &str) -> Option<String> {
         }
         block.push_str(&format!(
             " — {}\n",
-            if d["idle"].as_bool().unwrap_or(false) { "idle" } else { "active" }
+            if d["idle"].as_bool().unwrap_or(false) {
+                "idle"
+            } else {
+                "active"
+            }
         ));
         block.push_str(&format!("- working dir: {peer_cwd}\n"));
         if let Some(prompts) = d["prompts"].as_array() {
-            let recent: Vec<&str> = prompts.iter().rev().take(3).filter_map(|p| p.as_str()).collect();
+            let recent: Vec<&str> = prompts
+                .iter()
+                .rev()
+                .take(3)
+                .filter_map(|p| p.as_str())
+                .collect();
             if !recent.is_empty() {
                 block.push_str("- recent requests:\n");
                 for p in recent.iter().rev() {
@@ -587,7 +613,12 @@ fn peer_context(session_id: &str, cwd: &str) -> Option<String> {
             }
         }
         if let Some(files) = d["files"].as_array() {
-            let touched: Vec<&str> = files.iter().rev().take(8).filter_map(|f| f.as_str()).collect();
+            let touched: Vec<&str> = files
+                .iter()
+                .rev()
+                .take(8)
+                .filter_map(|f| f.as_str())
+                .collect();
             if !touched.is_empty() {
                 block.push_str(&format!("- files edited: {}\n", touched.join(", ")));
             }

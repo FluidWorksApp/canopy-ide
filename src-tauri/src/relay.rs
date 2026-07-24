@@ -192,10 +192,21 @@ enum Frame {
     /// ignores it. Kept so a join is a self-describing frame.
     /// First frame after the handshake, both directions: proves possession of
     /// a long-term identity key, bound to this session so it can't be replayed.
-    Identity { pubkey: String, sig: String },
-    Join { code: String, name: String },
-    Welcome { self_id: String, members: Vec<Member> },
-    Presence { members: Vec<Member> },
+    Identity {
+        pubkey: String,
+        sig: String,
+    },
+    Join {
+        code: String,
+        name: String,
+    },
+    Welcome {
+        self_id: String,
+        members: Vec<Member>,
+    },
+    Presence {
+        members: Vec<Member>,
+    },
     Chat(ChatMsg),
     Command(CommandMsg),
     /// Live collaborative editing. Deliberately its own variant rather than a
@@ -253,7 +264,8 @@ pub(crate) mod secure {
     pub fn derive(key: &[u8], salt: Option<&[u8]>, info: &[u8]) -> [u8; 32] {
         let hk = Hkdf::<Sha256>::new(salt, key);
         let mut okm = [0u8; 32];
-        hk.expand(info, &mut okm).expect("hkdf expand into 32 bytes never fails");
+        hk.expand(info, &mut okm)
+            .expect("hkdf expand into 32 bytes never fails");
         okm
     }
 
@@ -278,7 +290,10 @@ pub(crate) mod secure {
         r.read_exact(&mut lenb)?;
         let len = u32::from_be_bytes(lenb) as usize;
         if len > MAX_FRAME {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "frame too large"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "frame too large",
+            ));
         }
         let mut buf = vec![0u8; len];
         r.read_exact(&mut buf)?;
@@ -327,7 +342,10 @@ pub(crate) mod secure {
         pub fn recv(&mut self) -> Option<Vec<u8>> {
             let ct = read_prefixed(&mut self.reader).ok()?;
             let nonce = nonce_bytes(self.counter);
-            let pt = self.cipher.decrypt(Nonce::from_slice(&nonce), ct.as_ref()).ok()?;
+            let pt = self
+                .cipher
+                .decrypt(Nonce::from_slice(&nonce), ct.as_ref())
+                .ok()?;
             self.counter = self.counter.wrapping_add(1);
             Some(pt)
         }
@@ -426,8 +444,16 @@ pub(crate) mod secure {
             salt.copy_from_slice(&got);
             salt
         };
-        let s2r = derive(token.as_bytes(), Some(&salt), b"canopy-file sender->receiver");
-        let r2s = derive(token.as_bytes(), Some(&salt), b"canopy-file receiver->sender");
+        let s2r = derive(
+            token.as_bytes(),
+            Some(&salt),
+            b"canopy-file sender->receiver",
+        );
+        let r2s = derive(
+            token.as_bytes(),
+            Some(&salt),
+            b"canopy-file receiver->sender",
+        );
         let (send_key, recv_key) = if is_sender { (s2r, r2s) } else { (r2s, s2r) };
         Some(channel(writer, br, send_key, recv_key))
     }
@@ -450,7 +476,11 @@ pub(crate) mod secure {
         handshake(w, r, code, initiator)
     }
 
-    pub fn file_channel_tcp(stream: &TcpStream, token: &str, is_sender: bool) -> Option<(Sender, Receiver)> {
+    pub fn file_channel_tcp(
+        stream: &TcpStream,
+        token: &str,
+        is_sender: bool,
+    ) -> Option<(Sender, Receiver)> {
         let w: BoxWrite = Box::new(stream.try_clone().ok()?);
         let r: BoxRead = Box::new(stream.try_clone().ok()?);
         file_channel(w, r, token, is_sender)
@@ -507,7 +537,10 @@ mod identity {
                 });
             let signing = SigningKey::from_bytes(&seed);
             let pubkey_hex = hex::encode(signing.verifying_key().to_bytes());
-            Local { signing, pubkey_hex }
+            Local {
+                signing,
+                pubkey_hex,
+            }
         })
     }
 
@@ -532,7 +565,11 @@ mod identity {
         initiator: bool,
     ) -> Option<String> {
         let me = local();
-        let (my_role, peer_role) = if initiator { ("initiator", "responder") } else { ("responder", "initiator") };
+        let (my_role, peer_role) = if initiator {
+            ("initiator", "responder")
+        } else {
+            ("responder", "initiator")
+        };
         let sig = me.signing.sign(&signed_msg(binding, my_role));
         let mine = serde_json::to_vec(&super::Frame::Identity {
             pubkey: me.pubkey_hex.clone(),
@@ -562,8 +599,11 @@ mod identity {
         let pk_bytes: [u8; 32] = hex::decode(&pubkey).ok()?.try_into().ok()?;
         let sig_bytes: [u8; 64] = hex::decode(&sig).ok()?.try_into().ok()?;
         let vk = VerifyingKey::from_bytes(&pk_bytes).ok()?;
-        vk.verify(&signed_msg(binding, peer_role), &Signature::from_bytes(&sig_bytes))
-            .ok()?;
+        vk.verify(
+            &signed_msg(binding, peer_role),
+            &Signature::from_bytes(&sig_bytes),
+        )
+        .ok()?;
         Some(pubkey)
     }
 
@@ -581,7 +621,9 @@ mod identity {
     /// a mismatch, so the "changed" warning persists until the user resolves it.
     pub fn trust(name: &str, key_hex: &str) -> String {
         let _g = pin_guard().lock().unwrap();
-        let Some(path) = pin_path() else { return "new".into() };
+        let Some(path) = pin_path() else {
+            return "new".into();
+        };
         let mut map: std::collections::HashMap<String, String> = std::fs::read_to_string(&path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
@@ -616,7 +658,9 @@ mod identity {
     #[allow(dead_code)]
     pub fn read_verdict(name: &str, key_hex: &str) -> String {
         let _g = pin_guard().lock().unwrap();
-        let Some(path) = pin_path() else { return "new".into() };
+        let Some(path) = pin_path() else {
+            return "new".into();
+        };
         let map: std::collections::HashMap<String, String> = std::fs::read_to_string(&path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
@@ -907,7 +951,9 @@ fn emit_state(app: &AppHandle, inner: &Inner) {
 
 /// Presence to every connected peer.
 fn broadcast_presence(host: &Host) {
-    let frame = Frame::Presence { members: host_members(host) };
+    let frame = Frame::Presence {
+        members: host_members(host),
+    };
     for peer in host.peers.values() {
         let _ = peer_send(&peer.sender, &frame);
     }
@@ -966,7 +1012,11 @@ pub async fn relay_host_start(
         }
     }
     let alive = Arc::new(AtomicBool::new(true));
-    let name = if name.trim().is_empty() { "host".to_string() } else { name.trim().to_string() };
+    let name = if name.trim().is_empty() {
+        "host".to_string()
+    } else {
+        name.trim().to_string()
+    };
     let visibility = match visibility.as_deref() {
         Some("public") => "public".to_string(),
         _ => "local".to_string(),
@@ -988,7 +1038,9 @@ pub async fn relay_host_start(
     let listener = match TcpListener::bind(("0.0.0.0", want)) {
         Ok(l) => l,
         Err(e) if port.is_some() => return Err(format!("Couldn't bind port {want}: {e}")),
-        Err(_) => TcpListener::bind(("0.0.0.0", 0)).map_err(|e| format!("Couldn't bind a port: {e}"))?,
+        Err(_) => {
+            TcpListener::bind(("0.0.0.0", 0)).map_err(|e| format!("Couldn't bind a port: {e}"))?
+        }
     };
     let actual = listener.local_addr().map_err(|e| e.to_string())?.port();
     listener
@@ -1159,14 +1211,25 @@ pub async fn accept_ws_peer(app: AppHandle, ws: axum::extract::ws::WebSocket) {
     let (writer, reader, closer) = crate::wsbridge::server_halves(ws);
     // The handshake and serve_peer loop are blocking and long-lived; give each
     // peer its own thread, matching host_conn / host_conn_quic.
-    let _ = thread::Builder::new().name("relay-peer-ws".into()).spawn(move || {
-        match secure::handshake(writer, reader, &code, false) {
-            Some((sender, receiver, binding)) => {
-                serve_peer(app, inner, sender, receiver, binding, alive, Closer::Ws(closer), || {});
-            }
-            None => closer.close(),
-        }
-    });
+    let _ = thread::Builder::new()
+        .name("relay-peer-ws".into())
+        .spawn(
+            move || match secure::handshake(writer, reader, &code, false) {
+                Some((sender, receiver, binding)) => {
+                    serve_peer(
+                        app,
+                        inner,
+                        sender,
+                        receiver,
+                        binding,
+                        alive,
+                        Closer::Ws(closer),
+                        || {},
+                    );
+                }
+                None => closer.close(),
+            },
+        );
 }
 
 /// One joined connection, host side: secure handshake, authenticate, register,
@@ -1195,7 +1258,9 @@ fn host_conn(app: AppHandle, inner: Arc<Mutex<Inner>>, stream: TcpStream, alive:
     // relay's mutex for).
     let code = {
         let guard = inner.lock().unwrap();
-        let Some(host) = guard.host.as_ref() else { return };
+        let Some(host) = guard.host.as_ref() else {
+            return;
+        };
         if !alive.load(Ordering::SeqCst) {
             return;
         }
@@ -1213,11 +1278,20 @@ fn host_conn(app: AppHandle, inner: Arc<Mutex<Inner>>, stream: TcpStream, alive:
     // under the timeout set above, but conversation may then pause for minutes.
     // (QUIC blocks natively, so its caller passes a no-op.)
     let block = stream.try_clone().ok();
-    serve_peer(app, inner, sender, receiver, binding, alive, Closer::Tcp(dup), move || {
-        if let Some(s) = block {
-            let _ = s.set_read_timeout(None);
-        }
-    });
+    serve_peer(
+        app,
+        inner,
+        sender,
+        receiver,
+        binding,
+        alive,
+        Closer::Tcp(dup),
+        move || {
+            if let Some(s) = block {
+                let _ = s.set_read_timeout(None);
+            }
+        },
+    );
 }
 
 /// The transport-agnostic half of hosting one peer: identity exchange, register
@@ -1247,7 +1321,10 @@ fn serve_peer(
         closer.close();
         return;
     };
-    let name = match receiver.recv().and_then(|b| serde_json::from_slice::<Frame>(&b).ok()) {
+    let name = match receiver
+        .recv()
+        .and_then(|b| serde_json::from_slice::<Frame>(&b).ok())
+    {
         Some(Frame::Join { name, .. }) => name,
         _ => {
             closer.close();
@@ -1261,12 +1338,18 @@ fn serve_peer(
     // which therefore skips the newcomer (Welcome already carries the list).
     let (my_id, my_name) = {
         let mut guard = inner.lock().unwrap();
-        let Some(host) = guard.host.as_mut() else { return };
+        let Some(host) = guard.host.as_mut() else {
+            return;
+        };
         if !alive.load(Ordering::SeqCst) {
             return;
         }
         let id = new_id();
-        let name = if name.trim().is_empty() { format!("guest-{}", &id[..4]) } else { name.trim().to_string() };
+        let name = if name.trim().is_empty() {
+            format!("guest-{}", &id[..4])
+        } else {
+            name.trim().to_string()
+        };
         // TOFU verdict for this (name, key) against our pin store.
         let trust = identity::trust(&name, &peer_key);
         host.peers.insert(
@@ -1285,7 +1368,13 @@ fn serve_peer(
             },
         );
         let members = host_members(host);
-        if !peer_send(&sender, &Frame::Welcome { self_id: id.clone(), members: members.clone() }) {
+        if !peer_send(
+            &sender,
+            &Frame::Welcome {
+                self_id: id.clone(),
+                members: members.clone(),
+            },
+        ) {
             host.peers.remove(&id);
             return;
         }
@@ -1303,12 +1392,16 @@ fn serve_peer(
     on_joined();
     loop {
         let Some(bytes) = receiver.recv() else { break };
-        let Ok(frame) = serde_json::from_slice::<Frame>(&bytes) else { continue };
+        let Ok(frame) = serde_json::from_slice::<Frame>(&bytes) else {
+            continue;
+        };
         // Decide everything that needs the lock, then drop it before writing a
         // single byte to a socket.
         let plan: Option<(Vec<Arc<Mutex<secure::Sender>>>, bool, Frame, &str)> = {
             let guard = inner.lock().unwrap();
-            let Some(host) = guard.host.as_ref() else { break };
+            let Some(host) = guard.host.as_ref() else {
+                break;
+            };
             if !alive.load(Ordering::SeqCst) || !host.peers.contains_key(&my_id) {
                 break;
             }
@@ -1360,7 +1453,9 @@ fn serve_peer(
 
 fn remove_peer(app: &AppHandle, inner: &Arc<Mutex<Inner>>, id: &str) {
     let mut guard = inner.lock().unwrap();
-    let Some(host) = guard.host.as_mut() else { return };
+    let Some(host) = guard.host.as_mut() else {
+        return;
+    };
     if let Some(peer) = host.peers.remove(id) {
         let _ = peer.shutdown.close();
         broadcast_presence(host);
@@ -1394,7 +1489,11 @@ fn route_targets(
         ),
         Some(target) if *target == host.self_id => (Vec::new(), true),
         Some(target) => (
-            host.peers.get(target).map(|p| p.sender.clone()).into_iter().collect(),
+            host.peers
+                .get(target)
+                .map(|p| p.sender.clone())
+                .into_iter()
+                .collect(),
             false,
         ),
     }
@@ -1435,7 +1534,10 @@ fn deliver_frame(
 }
 
 #[tauri::command]
-pub async fn relay_host_stop(app: AppHandle, state: State<'_, RelayManager>) -> Result<RelayStatus, String> {
+pub async fn relay_host_stop(
+    app: AppHandle,
+    state: State<'_, RelayManager>,
+) -> Result<RelayStatus, String> {
     let mut inner = state.inner.lock().unwrap();
     stop_host(&mut inner);
     emit_state(&app, &inner);
@@ -1477,7 +1579,11 @@ pub async fn relay_connect(
         }
     }
     let addr = addr.trim().to_string();
-    let name = if name.trim().is_empty() { "guest".to_string() } else { name.trim().to_string() };
+    let name = if name.trim().is_empty() {
+        "guest".to_string()
+    } else {
+        name.trim().to_string()
+    };
 
     // Two ways to join, by what the host shared. A URL is the host's tunnel
     // address (an internet session): dial it over a WebSocket to /team/ws — the
@@ -1489,16 +1595,32 @@ pub async fn relay_connect(
     if let Some(url) = team_ws_url(&addr) {
         let (writer, reader, closer) = crate::wsbridge::connect(&url, Duration::from_secs(12))
             .map_err(|e| format!("Couldn't reach the host: {e}"))?;
-        let Some((sender, receiver, binding)) = secure::handshake(writer, reader, code.trim(), true) else {
+        let Some((sender, receiver, binding)) =
+            secure::handshake(writer, reader, code.trim(), true)
+        else {
             closer.close();
             return Err("Couldn't establish a secure channel — check the link and code, and that the host is sharing.".into());
         };
-        return run_client(app, inner_arc, sender, receiver, binding, Closer::Ws(closer), name, addr, || {});
+        return run_client(
+            app,
+            inner_arc,
+            sender,
+            receiver,
+            binding,
+            Closer::Ws(closer),
+            name,
+            addr,
+            || {},
+        );
     }
 
     // LAN: a bare IP/hostname gets the default relay port appended, then a direct
     // TCP connection — no wall in the way on a local network.
-    let full = if addr.contains(':') { addr.clone() } else { format!("{addr}:{DEFAULT_PORT}") };
+    let full = if addr.contains(':') {
+        addr.clone()
+    } else {
+        format!("{addr}:{DEFAULT_PORT}")
+    };
     let sock_addr = full
         .parse::<std::net::SocketAddr>()
         .or_else(|_| {
@@ -1516,16 +1638,27 @@ pub async fn relay_connect(
         .map_err(|e| format!("Couldn't reach {full}: {e}"))?;
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-    let Some((sender, receiver, binding)) = secure::handshake_tcp(&stream, code.trim(), true) else {
+    let Some((sender, receiver, binding)) = secure::handshake_tcp(&stream, code.trim(), true)
+    else {
         return Err("Couldn't establish a secure channel — check the address and that the relay is running.".into());
     };
     let closer = Closer::Tcp(stream.try_clone().map_err(|e| e.to_string())?);
     let block = stream.try_clone().ok();
-    run_client(app, inner_arc, sender, receiver, binding, closer, name, full, move || {
-        if let Some(s) = block {
-            let _ = s.set_read_timeout(None);
-        }
-    })
+    run_client(
+        app,
+        inner_arc,
+        sender,
+        receiver,
+        binding,
+        closer,
+        name,
+        full,
+        move || {
+            if let Some(s) = block {
+                let _ = s.set_read_timeout(None);
+            }
+        },
+    )
 }
 
 /// The transport-agnostic half of joining a relay: identity exchange, Join,
@@ -1551,16 +1684,27 @@ fn run_client(
         return Err("The relay refused the connection — wrong code, or it isn't reachable.".into());
     };
     let sender = Arc::new(Mutex::new(sender));
-    if !peer_send(&sender, &Frame::Join { code: String::new(), name: name.clone() }) {
+    if !peer_send(
+        &sender,
+        &Frame::Join {
+            code: String::new(),
+            name: name.clone(),
+        },
+    ) {
         closer.close();
         return Err("Couldn't talk to the relay.".into());
     }
     // Welcome is our first encrypted frame back.
-    let (self_id, members) = match receiver.recv().and_then(|b| serde_json::from_slice::<Frame>(&b).ok()) {
+    let (self_id, members) = match receiver
+        .recv()
+        .and_then(|b| serde_json::from_slice::<Frame>(&b).ok())
+    {
         Some(Frame::Welcome { self_id, members }) => (self_id, members),
         _ => {
             closer.close();
-            return Err("The relay refused the connection — wrong code, or it isn't reachable.".into());
+            return Err(
+                "The relay refused the connection — wrong code, or it isn't reachable.".into(),
+            );
         }
     };
     on_welcome();
@@ -1603,7 +1747,9 @@ fn run_client(
                 if !alive.load(Ordering::SeqCst) {
                     return;
                 }
-                let Ok(frame) = serde_json::from_slice::<Frame>(&bytes) else { continue };
+                let Ok(frame) = serde_json::from_slice::<Frame>(&bytes) else {
+                    continue;
+                };
                 match frame {
                     Frame::Presence { members } => {
                         let mut inner = reader_inner.lock().unwrap();
@@ -1652,7 +1798,10 @@ fn run_client(
 }
 
 #[tauri::command]
-pub async fn relay_disconnect(app: AppHandle, state: State<'_, RelayManager>) -> Result<RelayStatus, String> {
+pub async fn relay_disconnect(
+    app: AppHandle,
+    state: State<'_, RelayManager>,
+) -> Result<RelayStatus, String> {
     let mut inner = state.inner.lock().unwrap();
     stop_client(&mut inner);
     emit_state(&app, &inner);
@@ -1784,7 +1933,10 @@ fn deliver(inner: &Inner, to: Option<String>, frame: Frame) -> Result<(), String
                 }
             }
             Some(target) => {
-                let peer = host.peers.get(&target).ok_or("That member is no longer connected.")?;
+                let peer = host
+                    .peers
+                    .get(&target)
+                    .ok_or("That member is no longer connected.")?;
                 if !peer_send(&peer.sender, &frame) {
                     return Err("Couldn't reach that member.".into());
                 }
@@ -1841,14 +1993,18 @@ fn tunnel_seal(key: &[u8; 32], seq: u64, plaintext: &[u8]) -> Option<Vec<u8>> {
     use chacha20poly1305::aead::{Aead, KeyInit};
     use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
-    cipher.encrypt(Nonce::from_slice(&tunnel_nonce(seq)), plaintext).ok()
+    cipher
+        .encrypt(Nonce::from_slice(&tunnel_nonce(seq)), plaintext)
+        .ok()
 }
 
 fn tunnel_open(key: &[u8; 32], seq: u64, ciphertext: &[u8]) -> Option<Vec<u8>> {
     use chacha20poly1305::aead::{Aead, KeyInit};
     use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
-    cipher.decrypt(Nonce::from_slice(&tunnel_nonce(seq)), ciphertext).ok()
+    cipher
+        .decrypt(Nonce::from_slice(&tunnel_nonce(seq)), ciphertext)
+        .ok()
 }
 
 fn b64_encode(bytes: &[u8]) -> String {
@@ -1904,7 +2060,12 @@ fn handle_file_tunnel(app: &AppHandle, inner: &Arc<Mutex<Inner>>, msg: &CommandM
 /// Sender side: the receiver couldn't reach us directly and asked us to stream
 /// over the relay. Serve the same file the offer named, to the member it named.
 fn start_tunnel_send(app: &AppHandle, inner: &Arc<Mutex<Inner>>, msg: &CommandMsg) {
-    let Some(token) = msg.payload.get("token").and_then(|v| v.as_str()).map(str::to_string) else {
+    let Some(token) = msg
+        .payload
+        .get("token")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    else {
         return;
     };
     // Everything the stream needs, resolved under one brief lock; the blocking
@@ -1915,7 +2076,9 @@ fn start_tunnel_send(app: &AppHandle, inner: &Arc<Mutex<Inner>>, msg: &CommandMs
             Ok(v) => v,
             Err(_) => return,
         };
-        let Some(offer) = guard.offers_out.get(&token) else { return };
+        let Some(offer) = guard.offers_out.get(&token) else {
+            return;
+        };
         // Only stream to the member the offer was for — never to whoever's
         // `file-pull` this happened to be.
         if offer.started || offer.to_id != msg.from {
@@ -1943,16 +2106,18 @@ fn start_tunnel_send(app: &AppHandle, inner: &Arc<Mutex<Inner>>, msg: &CommandMs
     let (sender, path, name, size, to_id, id, alive, from, from_name) = plan;
     let app = app.clone();
     let inner = inner.clone();
-    let _ = thread::Builder::new().name("relay-send-file-tunnel".into()).spawn(move || {
-        let done_ok = stream_file_over_relay(
-            &app, &sender, &path, &name, size, &token, &id, &to_id, &alive, &from, &from_name,
-        );
-        // Retire the direct one-shot server too (it's still parked in accept);
-        // its cleanup closure clears `transfers`/`offers_out`.
-        alive.store(false, Ordering::SeqCst);
-        inner.lock().unwrap().offers_out.remove(&token);
-        let _ = done_ok;
-    });
+    let _ = thread::Builder::new()
+        .name("relay-send-file-tunnel".into())
+        .spawn(move || {
+            let done_ok = stream_file_over_relay(
+                &app, &sender, &path, &name, size, &token, &id, &to_id, &alive, &from, &from_name,
+            );
+            // Retire the direct one-shot server too (it's still parked in accept);
+            // its cleanup closure clears `transfers`/`offers_out`.
+            alive.store(false, Ordering::SeqCst);
+            inner.lock().unwrap().offers_out.remove(&token);
+            let _ = done_ok;
+        });
 }
 
 /// Read `path` and push it to `to_id` as sealed `file-data` chunks. Returns
@@ -1972,7 +2137,16 @@ fn stream_file_over_relay(
     from_name: &str,
 ) -> bool {
     let Ok(mut file) = std::fs::File::open(path) else {
-        emit_transfer(app, id, "out", name, size, false, "The file vanished before it was sent.".into(), Some(to_id));
+        emit_transfer(
+            app,
+            id,
+            "out",
+            name,
+            size,
+            false,
+            "The file vanished before it was sent.".into(),
+            Some(to_id),
+        );
         return false;
     };
     let salt = {
@@ -1982,11 +2156,26 @@ fn stream_file_over_relay(
         s
     };
     let key = tunnel_key(token, &salt);
-    let begin = file_command(from, from_name, to_id, "file-begin", serde_json::json!({
-        "token": token, "salt": b64_encode(&salt), "size": size,
-    }));
+    let begin = file_command(
+        from,
+        from_name,
+        to_id,
+        "file-begin",
+        serde_json::json!({
+            "token": token, "salt": b64_encode(&salt), "size": size,
+        }),
+    );
     if !peer_send(sender, &begin) {
-        emit_transfer(app, id, "out", name, size, false, "Lost the relay connection.".into(), Some(to_id));
+        emit_transfer(
+            app,
+            id,
+            "out",
+            name,
+            size,
+            false,
+            "Lost the relay connection.".into(),
+            Some(to_id),
+        );
         return false;
     }
     emit_progress(app, id, "out", name, 0, size);
@@ -2002,16 +2191,42 @@ fn stream_file_over_relay(
             Ok(0) => break,
             Ok(n) => n,
             Err(_) => {
-                emit_transfer(app, id, "out", name, size, false, "Reading the file failed mid-send.".into(), Some(to_id));
+                emit_transfer(
+                    app,
+                    id,
+                    "out",
+                    name,
+                    size,
+                    false,
+                    "Reading the file failed mid-send.".into(),
+                    Some(to_id),
+                );
                 return false;
             }
         };
-        let Some(ct) = tunnel_seal(&key, seq, &buf[..n]) else { return false };
-        let frame = file_command(from, from_name, to_id, "file-data", serde_json::json!({
-            "token": token, "seq": seq, "data": b64_encode(&ct),
-        }));
+        let Some(ct) = tunnel_seal(&key, seq, &buf[..n]) else {
+            return false;
+        };
+        let frame = file_command(
+            from,
+            from_name,
+            to_id,
+            "file-data",
+            serde_json::json!({
+                "token": token, "seq": seq, "data": b64_encode(&ct),
+            }),
+        );
         if !peer_send(sender, &frame) {
-            emit_transfer(app, id, "out", name, size, false, "The relay connection dropped mid-send.".into(), Some(to_id));
+            emit_transfer(
+                app,
+                id,
+                "out",
+                name,
+                size,
+                false,
+                "The relay connection dropped mid-send.".into(),
+                Some(to_id),
+            );
             return false;
         }
         seq += 1;
@@ -2021,22 +2236,46 @@ fn stream_file_over_relay(
             emit_progress(app, id, "out", name, done, size);
         }
     }
-    let end = file_command(from, from_name, to_id, "file-end", serde_json::json!({ "token": token }));
+    let end = file_command(
+        from,
+        from_name,
+        to_id,
+        "file-end",
+        serde_json::json!({ "token": token }),
+    );
     let _ = peer_send(sender, &end);
     emit_progress(app, id, "out", name, size, size);
-    emit_transfer(app, id, "out", name, size, true, name.to_string(), Some(to_id));
+    emit_transfer(
+        app,
+        id,
+        "out",
+        name,
+        size,
+        true,
+        name.to_string(),
+        Some(to_id),
+    );
     true
 }
 
 /// Receiver side: the sender is about to stream. Derive this transfer's key
 /// from the salt it chose.
 fn tunnel_begin(inner: &Arc<Mutex<Inner>>, msg: &CommandMsg) {
-    let Some(token) = msg.payload.get("token").and_then(|v| v.as_str()) else { return };
-    let Some(salt) = msg.payload.get("salt").and_then(|v| v.as_str()).and_then(b64_decode) else {
+    let Some(token) = msg.payload.get("token").and_then(|v| v.as_str()) else {
+        return;
+    };
+    let Some(salt) = msg
+        .payload
+        .get("salt")
+        .and_then(|v| v.as_str())
+        .and_then(b64_decode)
+    else {
         return;
     };
     let mut guard = inner.lock().unwrap();
-    let Some(pipe) = guard.tunnel_pipes.get_mut(token) else { return };
+    let Some(pipe) = guard.tunnel_pipes.get_mut(token) else {
+        return;
+    };
     if pipe.from_id.as_deref() != Some(msg.from.as_str()) {
         return;
     }
@@ -2048,16 +2287,27 @@ fn tunnel_begin(inner: &Arc<Mutex<Inner>>, msg: &CommandMsg) {
 /// and decrypt run here (cheap, off the transfer's disk path); the bounded
 /// channel applies backpressure so a slow disk throttles the network.
 fn tunnel_data(inner: &Arc<Mutex<Inner>>, msg: &CommandMsg) {
-    let Some(token) = msg.payload.get("token").and_then(|v| v.as_str()).map(str::to_string) else {
+    let Some(token) = msg
+        .payload
+        .get("token")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    else {
         return;
     };
     let seq = msg.payload.get("seq").and_then(|v| v.as_u64());
-    let data = msg.payload.get("data").and_then(|v| v.as_str()).map(str::to_string);
+    let data = msg
+        .payload
+        .get("data")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     // Pull what we need out from under the lock; never send on the (possibly
     // full, hence blocking) channel while holding the relay mutex.
     let taken = {
         let mut guard = inner.lock().unwrap();
-        let Some(pipe) = guard.tunnel_pipes.get_mut(&token) else { return };
+        let Some(pipe) = guard.tunnel_pipes.get_mut(&token) else {
+            return;
+        };
         if pipe.from_id.as_deref() != Some(msg.from.as_str()) {
             return;
         }
@@ -2068,12 +2318,12 @@ fn tunnel_data(inner: &Arc<Mutex<Inner>>, msg: &CommandMsg) {
     };
     let (tx, key, expected) = taken;
     let event = match (seq, data) {
-        (Some(seq), Some(data)) if seq == expected => match b64_decode(&data)
-            .and_then(|ct| tunnel_open(&key, seq, &ct))
-        {
-            Some(pt) => TunnelEvent::Data(pt),
-            None => TunnelEvent::Fail,
-        },
+        (Some(seq), Some(data)) if seq == expected => {
+            match b64_decode(&data).and_then(|ct| tunnel_open(&key, seq, &ct)) {
+                Some(pt) => TunnelEvent::Data(pt),
+                None => TunnelEvent::Fail,
+            }
+        }
         _ => TunnelEvent::Fail,
     };
     let _ = tx.send(event);
@@ -2082,7 +2332,9 @@ fn tunnel_data(inner: &Arc<Mutex<Inner>>, msg: &CommandMsg) {
 /// Receiver side: the sender finished. Dropping the pipe closes the channel, so
 /// the transfer thread wakes, finalizes, and verifies the hash.
 fn tunnel_end(inner: &Arc<Mutex<Inner>>, msg: &CommandMsg) {
-    let Some(token) = msg.payload.get("token").and_then(|v| v.as_str()) else { return };
+    let Some(token) = msg.payload.get("token").and_then(|v| v.as_str()) else {
+        return;
+    };
     let mut guard = inner.lock().unwrap();
     if let Some(pipe) = guard.tunnel_pipes.get(token) {
         if pipe.from_id.as_deref() != Some(msg.from.as_str()) {
@@ -2091,7 +2343,6 @@ fn tunnel_end(inner: &Arc<Mutex<Inner>>, msg: &CommandMsg) {
     }
     guard.tunnel_pipes.remove(token);
 }
-
 
 #[derive(Serialize, Clone)]
 pub struct TransferEvent {
@@ -2120,7 +2371,16 @@ struct TransferProgress {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn emit_transfer(app: &AppHandle, id: &str, direction: &str, name: &str, total: u64, ok: bool, detail: String, peer: Option<&str>) {
+fn emit_transfer(
+    app: &AppHandle,
+    id: &str,
+    direction: &str,
+    name: &str,
+    total: u64,
+    ok: bool,
+    detail: String,
+    peer: Option<&str>,
+) {
     let _ = app.emit(
         "relay:transfer",
         TransferEvent {
@@ -2180,9 +2440,7 @@ fn safe_dial_addr(sa: &std::net::SocketAddr) -> bool {
         }
         std::net::IpAddr::V6(v6) => {
             // Reject unspecified, multicast, and link-local (fe80::/10).
-            !(v6.is_unspecified()
-                || v6.is_multicast()
-                || (v6.segments()[0] & 0xffc0) == 0xfe80)
+            !(v6.is_unspecified() || v6.is_multicast() || (v6.segments()[0] & 0xffc0) == 0xfe80)
         }
     }
 }
@@ -2251,8 +2509,8 @@ pub async fn relay_offer_file(
         .unwrap_or_else(|| "file".into());
     let sha256 = sha256_file(std::path::Path::new(&path))?;
 
-    let listener =
-        TcpListener::bind("0.0.0.0:0").map_err(|e| format!("Couldn't open a transfer port: {e}"))?;
+    let listener = TcpListener::bind("0.0.0.0:0")
+        .map_err(|e| format!("Couldn't open a transfer port: {e}"))?;
     let tport = listener.local_addr().map_err(|e| e.to_string())?.port();
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     // Feeds the AEAD keys for the transfer channel — must be CSPRNG.
@@ -2271,19 +2529,28 @@ pub async fn relay_offer_file(
             )
         } else if let Some(client) = &inner.client {
             (
-                client.members.iter().find(|m| m.id == to).map(|m| m.name.clone()),
+                client
+                    .members
+                    .iter()
+                    .find(|m| m.id == to)
+                    .map(|m| m.name.clone()),
                 !is_private_addr(client.addr.split(':').next().unwrap_or("")),
             )
         } else {
             return Err("Not connected to a relay.".into());
         };
-        (to_name.ok_or("That member is no longer connected.")?, facing)
+        (
+            to_name.ok_or("That member is no longer connected.")?,
+            facing,
+        )
     };
 
     // Addresses the receiver tries in order: LAN first (same office = same
     // subnet), then the public address for teammates across the internet.
-    let mut addrs: Vec<String> =
-        local_ips().into_iter().map(|ip| format!("{ip}:{tport}")).collect();
+    let mut addrs: Vec<String> = local_ips()
+        .into_iter()
+        .map(|ip| format!("{ip}:{tport}"))
+        .collect();
     if internet_facing {
         if let Some(ip) = cached_public_ip() {
             addrs.push(format!("{ip}:{tport}"));
@@ -2302,15 +2569,18 @@ pub async fn relay_offer_file(
         inner.transfers.insert(token.clone(), alive.clone());
         // Keep the offer's context so a `file-pull` (the receiver couldn't
         // reach the listener) can stream the same file over the relay instead.
-        inner.offers_out.insert(token.clone(), OfferOut {
-            path: path.clone(),
-            name: name.clone(),
-            size,
-            to_id: to_id.clone(),
-            id: transfer_id.clone(),
-            alive: alive.clone(),
-            started: false,
-        });
+        inner.offers_out.insert(
+            token.clone(),
+            OfferOut {
+                path: path.clone(),
+                name: name.clone(),
+                size,
+                to_id: to_id.clone(),
+                id: transfer_id.clone(),
+                alive: alive.clone(),
+                started: false,
+            },
+        );
         let (from, from_name) = sender_context(&inner)?;
         let msg = CommandMsg {
             id: new_id(),
@@ -2331,7 +2601,18 @@ pub async fn relay_offer_file(
     thread::Builder::new()
         .name("relay-send-file".into())
         .spawn(move || {
-            serve_file(&app, &transfer_id, listener, &path, &name, size, &token, &alive, &to_name, &to_id);
+            serve_file(
+                &app,
+                &transfer_id,
+                listener,
+                &path,
+                &name,
+                size,
+                &token,
+                &alive,
+                &to_name,
+                &to_id,
+            );
             alive.store(false, Ordering::SeqCst);
             let mut inner = inner_arc.lock().unwrap();
             inner.transfers.remove(&token);
@@ -2380,7 +2661,8 @@ fn serve_file(
         // Token-keyed AEAD. The receiver's first frame must decrypt under the
         // token-derived key — only a holder of the offer's token can produce
         // one, so a successful decrypt IS the authentication.
-        let Some((mut sender, mut receiver)) = secure::file_channel_tcp(&stream, token, true) else {
+        let Some((mut sender, mut receiver)) = secure::file_channel_tcp(&stream, token, true)
+        else {
             let _ = stream.shutdown(Shutdown::Both);
             continue;
         };
@@ -2389,7 +2671,16 @@ fn serve_file(
             continue;
         }
         let Ok(mut file) = std::fs::File::open(path) else {
-            emit_transfer(app, id, "out", name, size, false, "The file vanished before it was picked up.".into(), Some(to_id));
+            emit_transfer(
+                app,
+                id,
+                "out",
+                name,
+                size,
+                false,
+                "The file vanished before it was picked up.".into(),
+                Some(to_id),
+            );
             return;
         };
         emit_progress(app, id, "out", name, 0, size);
@@ -2420,7 +2711,16 @@ fn serve_file(
         let _ = stream.shutdown(Shutdown::Both);
         if sent_ok {
             emit_progress(app, id, "out", name, size, size);
-            emit_transfer(app, id, "out", name, size, true, to_name.to_string(), Some(to_id));
+            emit_transfer(
+                app,
+                id,
+                "out",
+                name,
+                size,
+                true,
+                to_name.to_string(),
+                Some(to_id),
+            );
             return;
         }
         // Receiver dropped mid-pull — keep the offer alive for a retry.
@@ -2581,13 +2881,22 @@ fn receive_over_relay(
         };
         // Register the pipe and send the pull under one lock, so the sender's
         // reply can never race ahead of the pipe that receives it.
-        guard.tunnel_pipes.insert(token.to_string(), TunnelPipe {
-            tx,
-            key: None,
-            next_seq: 0,
-            from_id: Some(from_peer.to_string()),
-        });
-        let frame = file_command(&from, &from_name, from_peer, "file-pull", serde_json::json!({ "token": token }));
+        guard.tunnel_pipes.insert(
+            token.to_string(),
+            TunnelPipe {
+                tx,
+                key: None,
+                next_seq: 0,
+                from_id: Some(from_peer.to_string()),
+            },
+        );
+        let frame = file_command(
+            &from,
+            &from_name,
+            from_peer,
+            "file-pull",
+            serde_json::json!({ "token": token }),
+        );
         if let Err(e) = deliver(&guard, Some(from_peer.to_string()), frame) {
             guard.tunnel_pipes.remove(token);
             drop(guard);
@@ -2602,7 +2911,16 @@ fn receive_over_relay(
     let part = format!("{dest}.canopy-part");
     let Ok(mut out) = std::fs::File::create(&part) else {
         clear_pipe();
-        emit_transfer(app, id, "in", name, size, false, format!("Can't write to {dest}."), Some(from_peer));
+        emit_transfer(
+            app,
+            id,
+            "in",
+            name,
+            size,
+            false,
+            format!("Can't write to {dest}."),
+            Some(from_peer),
+        );
         return;
     };
     emit_progress(app, id, "in", name, 0, size);
@@ -2618,7 +2936,16 @@ fn receive_over_relay(
                     drop(out);
                     let _ = std::fs::remove_file(&part);
                     clear_pipe();
-                    emit_transfer(app, id, "in", name, size, false, format!("Writing {dest} failed — disk full?"), Some(from_peer));
+                    emit_transfer(
+                        app,
+                        id,
+                        "in",
+                        name,
+                        size,
+                        false,
+                        format!("Writing {dest} failed — disk full?"),
+                        Some(from_peer),
+                    );
                     return;
                 }
                 got += chunk.len() as u64;
@@ -2640,27 +2967,73 @@ fn receive_over_relay(
     clear_pipe();
     if failed {
         let _ = std::fs::remove_file(&part);
-        emit_transfer(app, id, "in", name, size, false, "The transfer was corrupted in flight — nothing was kept.".into(), Some(from_peer));
+        emit_transfer(
+            app,
+            id,
+            "in",
+            name,
+            size,
+            false,
+            "The transfer was corrupted in flight — nothing was kept.".into(),
+            Some(from_peer),
+        );
         return;
     }
     if got < size {
         let _ = std::fs::remove_file(&part);
-        emit_transfer(app, id, "in", name, size, false, "The connection dropped before the whole file arrived.".into(), Some(from_peer));
+        emit_transfer(
+            app,
+            id,
+            "in",
+            name,
+            size,
+            false,
+            "The connection dropped before the whole file arrived.".into(),
+            Some(from_peer),
+        );
         return;
     }
     let digest = format!("{:x}", hasher.finalize());
     if digest != sha256.to_lowercase() {
         let _ = std::fs::remove_file(&part);
-        emit_transfer(app, id, "in", name, size, false, "Integrity check failed — the received bytes don't match the offer. Nothing was kept.".into(), Some(from_peer));
+        emit_transfer(
+            app,
+            id,
+            "in",
+            name,
+            size,
+            false,
+            "Integrity check failed — the received bytes don't match the offer. Nothing was kept."
+                .into(),
+            Some(from_peer),
+        );
         return;
     }
     if let Err(e) = std::fs::rename(&part, dest) {
         let _ = std::fs::remove_file(&part);
-        emit_transfer(app, id, "in", name, size, false, format!("Couldn't save to {dest}: {e}"), Some(from_peer));
+        emit_transfer(
+            app,
+            id,
+            "in",
+            name,
+            size,
+            false,
+            format!("Couldn't save to {dest}: {e}"),
+            Some(from_peer),
+        );
         return;
     }
     emit_progress(app, id, "in", name, size, size);
-    emit_transfer(app, id, "in", name, size, true, dest.to_string(), Some(from_peer));
+    emit_transfer(
+        app,
+        id,
+        "in",
+        name,
+        size,
+        true,
+        dest.to_string(),
+        Some(from_peer),
+    );
 }
 
 #[cfg(test)]
@@ -2759,7 +3132,10 @@ mod tests {
             doc: "d".into(),
             body: CollabBody::Ops {
                 rev: 1,
-                ops: vec![CollabOp::Retain { n: 2 }, CollabOp::Insert { s: "hi".into() }],
+                ops: vec![
+                    CollabOp::Retain { n: 2 },
+                    CollabOp::Insert { s: "hi".into() },
+                ],
                 author: "f".into(),
                 hash: Some("deadbeef".into()),
             },
@@ -2790,7 +3166,9 @@ mod tests {
             alive: Arc::new(AtomicBool::new(true)),
         };
         assert!(route_targets(&host, "someone", &None).0.is_empty());
-        assert!(route_targets(&host, "someone", &Some("nobody".into())).0.is_empty());
+        assert!(route_targets(&host, "someone", &Some("nobody".into()))
+            .0
+            .is_empty());
     }
 
     /// Accept the way relay_host_start's loop does: a non-blocking listener,
@@ -2817,7 +3195,9 @@ mod tests {
     }
 
     fn client_side(addr: std::net::SocketAddr, code: &str) -> bool {
-        let Ok(stream) = TcpStream::connect(addr) else { return false };
+        let Ok(stream) = TcpStream::connect(addr) else {
+            return false;
+        };
         let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
         let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
         let Some((mut s, mut r, binding)) = secure::handshake_tcp(&stream, code, true) else {
@@ -2854,6 +3234,9 @@ mod tests {
     #[cfg(target_vendor = "apple")]
     fn join_fails_without_clearing_inherited_nonblocking() {
         let (host_ok, _) = run_join(false);
-        assert!(!host_ok, "expected the unfixed accept path to fail on macOS");
+        assert!(
+            !host_ok,
+            "expected the unfixed accept path to fail on macOS"
+        );
     }
 }
