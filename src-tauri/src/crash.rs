@@ -12,10 +12,11 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Collector URL the app ships with — baked in at build time. Empty means
-/// "nothing configured": reporting is then a no-op, so an unconfigured build
-/// never tries to phone home. To change where reports go, edit this and rebuild.
-pub const CRASH_ENDPOINT: &str = "";
+/// Collector URL the app ships with — baked in at build time. Reports POST here
+/// (see the canopyide.dev `POST /api/crash` route, which emails them internally
+/// via Resend). Empty would make reporting a no-op; to change where reports go,
+/// edit this and rebuild.
+pub const CRASH_ENDPOINT: &str = "https://canopyide.dev/api/crash";
 
 /// The minimal crash payload. Built entirely in the backend so the version,
 /// OS and arch are the ones that actually shipped, not whatever the webview
