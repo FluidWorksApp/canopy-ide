@@ -201,9 +201,16 @@ export function AgentsPanel({
     setPicks(({ [item.key]: _drop, ...rest }) => rest);
   };
   // A single single-select question answers on the option click itself; a
-  // multi-select or multi-question form collects picks and submits together.
+  // multi-select (still one page) collects picks and submits together. A
+  // multi-question form is a different beast: answering it means navigating
+  // between pages, and driving that by synthesised keystrokes desyncs and the
+  // CLI records "declined". Until Canopy answers questions over the programmatic
+  // channel (headless `canUseTool`) rather than the TUI, a multi-page form is
+  // answered in the terminal — the panel points there instead of miscounting.
   const instantAnswer = (item: PendingItem) =>
     (item.questions?.length ?? 0) === 1 && !item.questions?.[0]?.multiSelect;
+  const multiPage = (item: PendingItem) => (item.questions?.length ?? 0) > 1;
+  const canAnswerInPanel = (item: PendingItem) => !!onAnswer && !multiPage(item);
   const [digests, setDigests] = useState<ipc.SessionDigest[]>([]);
   // This app launch's tag, so a digest from another instance/run (same reset-to-1
   // PTY id, same shared sessions dir) can't be paired with our terminals.
@@ -567,6 +574,7 @@ export function AgentsPanel({
                             // below. The synthesised keystrokes fill the
                             // terminal form; it stays reachable as the fallback.
                             const chosen = sel.includes(oi);
+                            const inPanel = canAnswerInPanel(item);
                             const mark = q.multiSelect
                               ? chosen
                                 ? "☑"
@@ -577,15 +585,15 @@ export function AgentsPanel({
                             return (
                               <div
                                 key={o.label}
-                                className={`pending-option ${onAnswer ? "pending-option-clickable" : ""} ${
+                                className={`pending-option ${inPanel ? "pending-option-clickable" : ""} ${
                                   chosen ? "pending-option-chosen" : ""
                                 }`}
-                                title={onAnswer ? "Select this option" : "Answer in the terminal"}
+                                title={inPanel ? "Select this option" : "Answer in the terminal"}
                                 onClick={
-                                  onAnswer
+                                  inPanel
                                     ? (e) => {
                                         e.stopPropagation();
-                                        if (instantAnswer(item)) onAnswer(item, [[oi]]);
+                                        if (instantAnswer(item)) onAnswer!(item, [[oi]]);
                                         else choose(item, i, oi, !!q.multiSelect);
                                       }
                                     : undefined
@@ -604,24 +612,40 @@ export function AgentsPanel({
                       </div>
                     );
                   })}
-                  {/* Multi-step forms submit all picks as one keystroke
-                      sequence. A lone single-select answered on click above, so
-                      it shows no button. */}
-                  {onAnswer && !instantAnswer(item) && (
+                  {/* A single-page multi-select submits its picks as one
+                      keystroke sequence (no page navigation to desync). A lone
+                      single-select answered on click above, so it shows no
+                      button. */}
+                  {canAnswerInPanel(item) && !instantAnswer(item) && (
                     <button
                       className="btn btn-accent pending-submit"
                       disabled={!answerable(item)}
                       title={
                         answerable(item)
-                          ? "Send these answers to the terminal"
-                          : "Choose an option for every question first"
+                          ? "Send this answer to the terminal"
+                          : "Choose an option first"
                       }
                       onClick={(e) => {
                         e.stopPropagation();
                         submitAnswers(item);
                       }}
                     >
-                      {(item.questions?.length ?? 0) > 1 ? "Submit answers" : "Submit answer"}
+                      Submit answer
+                    </button>
+                  )}
+                  {/* A multi-question form can't be answered reliably by
+                      synthesised keystrokes (the pages desync into a decline),
+                      so the panel sends you to the terminal to answer it there. */}
+                  {onAnswer && multiPage(item) && (
+                    <button
+                      className="btn pending-submit"
+                      title="Multi-question forms are answered in the terminal"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onJumpToTerminal?.(item);
+                      }}
+                    >
+                      Answer in the terminal ↗
                     </button>
                   )}
                 </>

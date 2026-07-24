@@ -1920,6 +1920,15 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         onNotice("Can't find the terminal this question came from — answer there.");
         return;
       }
+      // Only a single-page form is answered here. Multi-question forms need
+      // page-to-page navigation the synthesised keystrokes can't keep in sync
+      // (the CLI records "declined"), so the panel routes those to the terminal
+      // and never calls this — the guard just makes that invariant explicit.
+      if ((item.questions?.length ?? 0) > 1) {
+        setActiveTabId(target.id);
+        setTimeout(() => termHandles.current.get(target.id)?.focus(), 50);
+        return;
+      }
       const ptyId = target.ptyId;
       let delay = 0;
       const press = (keys: string) => {
@@ -1929,11 +1938,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       };
       for (const chosen of selections) {
         for (const oi of chosen) press(String(oi + 1)); // highlight/toggle option(s)
-        press("\r"); // confirm this question (advances if more follow)
+        press("\r"); // confirm the single-page answer
       }
-      // A multi-question form ends on its Submit tab; the trailing Enter presses
-      // it. A single question's Enter above already submitted, so no extra.
-      if ((item.questions?.length ?? 0) > 1) press("\r");
       onDismissPending(item.key);
       setActiveTabId(target.id);
       setTimeout(() => termHandles.current.get(target.id)?.focus(), 50);
