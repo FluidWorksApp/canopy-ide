@@ -273,6 +273,19 @@ export function AgentsIcon({ size = 18, className }: IconProps) {
 }
 
 
+/** Tasks: a checklist — a ticked row over plain rows. Distinct from Issues
+ *  (a circle) and Agents (a bot) at rail size. */
+export function TasksIcon({ size = 18, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M4 6.5l1.8 1.8L9 5" />
+      <path d="M12 6.5h8" />
+      <path d="M4 12.5h16" />
+      <path d="M4 18.5h16" />
+    </svg>
+  );
+}
+
 /** Statistics: a bar chart. Reads as "totals & breakdowns" at rail size. */
 export function StatsIcon({ size = 18, className }: IconProps) {
   return (

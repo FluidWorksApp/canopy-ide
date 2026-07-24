@@ -104,7 +104,8 @@ export interface AgentAction {
     | "restart_server"
     | "open_file"
     | "show_diff"
-    | "notify";
+    | "notify"
+    | "job_done";
   route: string;
   dir?: string;
   name?: string;
@@ -115,6 +116,9 @@ export interface AgentAction {
   line?: number;
   text?: string;
   level?: "info" | "success" | "warn" | "error";
+  /** job_done: how the micro-task ended and its one-line summary. */
+  status?: "done" | "blocked";
+  summary?: string;
 }
 export const onAgentAction = (cb: (a: AgentAction) => void): Promise<UnlistenFn> =>
   listen<AgentAction>("agent:action", (event) => cb(event.payload));

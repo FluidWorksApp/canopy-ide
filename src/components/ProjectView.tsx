@@ -56,6 +56,7 @@ import {
   PlayIcon,
   RestartIcon,
   StopIcon,
+  TasksIcon,
   TeamIcon,
   TerminalIcon,
 } from "./icons";
@@ -64,9 +65,17 @@ import {
   derivePending,
   eventPtyId,
   eventsForProject,
+  isStopFor,
   pendingForRoots,
   type PendingItem,
 } from "../notifications";
+import {
+  customTaskDef,
+  microTaskProtocol,
+  type CustomMicroTask,
+  type MicroTaskDef,
+} from "../microTasks";
+import { TasksPanel, type RunningMicroTask } from "./TasksPanel";
 import { viewerKindFor } from "./viewers";
 import { ensureLanguageServer } from "../lsp/client";
 import { Term, type TermHandle } from "./Term";
@@ -109,7 +118,7 @@ import { ChatView } from "./ChatView";
 import { Coachmark } from "./Coachmark";
 import { shouldShowTip, markTipSeen, type CoachTip } from "../coachmarks";
 
-type SideTab = "files" | "changes" | "git" | "trackers" | "agents" | "team";
+type SideTab = "files" | "changes" | "git" | "trackers" | "tasks" | "agents" | "team";
 
 interface TermSubTab {
   id: string;
@@ -141,6 +150,9 @@ interface TermSubTab {
    *  whether it is still unread. Cleared when the tab is looked at. */
   notice?: string;
   unread?: boolean;
+  /** An ephemeral micro-task tab: closed and its session forgotten once the
+   *  agent calls canopy_job_done (or the user closes it). Never restored. */
+  micro?: { taskId: string };
 }
 
 interface FileSubTab {
@@ -506,6 +518,7 @@ const RAIL_TABS: {
   { key: "changes", Icon: DiffIcon, title: "Session changes" },
   { key: "git", Icon: GitBranchIcon, title: "Git — branches, commits, worktrees, PRs" },
   { key: "trackers", Icon: IssueIcon, title: "Issues — GitHub, Linear, …" },
+  { key: "tasks", Icon: TasksIcon, title: "Tasks — one-shot agent jobs" },
   { key: "agents", Icon: AgentsIcon, title: "Agents" },
   { key: "team", Icon: TeamIcon, title: "Team — relay, chat, notifications" },
 ];
@@ -1476,6 +1489,105 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     [addTerminal, onNotice],
   );
 
+  /** Launch a micro-task: a one-shot agent seeded with the task's brief plus
+   *  the completion protocol, in a tab marked ephemeral. The CANOPY_MICRO_TASK
+   *  prefix reaches the MCP sidecar through PTY env inheritance and marks the
+   *  session as one whose job_done must always be honored. Prefers claude —
+   *  the only CLI with the MCP registration — over the default agent; others
+   *  still work via the protocol's printed-fallback ending, minus auto-close. */
+  const startMicroTask = useCallback(
+    <P,>(def: MicroTaskDef<P>, payload: P, userQuery: string) => {
+      const installedClis = AGENT_CLIS.filter((c) => installedRef.current[c.bin]);
+      if (installedClis.length === 0) {
+        onNotice("Running a task needs an agent CLI — install one in Settings → Agents.");
+        return;
+      }
+      const preferred = getSettings().defaultAgent;
+      const agent = (
+        installedClis.find((c) => c.id === "claude") ??
+        installedClis.find((c) => c.id === preferred) ??
+        installedClis[0]
+      )?.id;
+      const cli = AGENT_CLIS.find((c) => c.id === agent);
+      const seed = `${def.buildContext(payload, userQuery)} ${microTaskProtocol()}`;
+      const start = agent ? startCommand(agent, seed) : null;
+      if (!cli || !start) {
+        onNotice(`No agent CLI installed to run "${def.label}".`);
+        return;
+      }
+      const dir = def.cwd(payload);
+      const id = addTerminal(
+        dir,
+        `CANOPY_MICRO_TASK=1 ${start.command}`,
+        `${def.label} · ${cli.name}`,
+        def.icon,
+      );
+      if (!id) return;
+      patchTabRaw(id, { micro: { taskId: def.id } } as Partial<SubTab>);
+      if (start.typePrompt) {
+        setTimeout(() => {
+          const pty = tabsRef.current.find(
+            (t): t is TermSubTab => t.id === id && t.type === "terminal",
+          )?.ptyId;
+          if (pty == null) return;
+          void ipc.ptyWrite(pty, seed);
+          setTimeout(() => void ipc.ptyWrite(pty, "\r"), 250);
+        }, 2500);
+      }
+    },
+    [addTerminal, patchTabRaw, onNotice],
+  );
+
+  /** Micro-task tabs waiting to close: job_done was acknowledged, and we hold
+   *  off killing the PTY until the agent's turn actually ends (its Stop hook)
+   *  so the tool result and last words land — with a timer as backstop for a
+   *  broken hook. Keyed by pty id; sid is captured at job_done time because the
+   *  event stream goes quiet once the PTY dies. */
+  const microFinish = useRef(new Map<number, { sid?: string; since: number; timer: number }>());
+
+  const reapMicroTask = useCallback((ptyId: number) => {
+    const entry = microFinish.current.get(ptyId);
+    if (!entry) return;
+    microFinish.current.delete(ptyId);
+    window.clearTimeout(entry.timer);
+    const sid = entry.sid ?? liveSessionByPtyRef.current.get(ptyId);
+    // Grace-kill (SIGTERM + 2.5s) lets claude flush its transcript and run its
+    // last hooks; pty:exit then auto-closes the tab like any spent terminal.
+    void ipc.ptyKill(ptyId).finally(() => {
+      // The SessionEnd hook rewrites the digest as the CLI dies — forget after
+      // that final write, or the delete would race it and the session would
+      // resurface in restorables.
+      if (sid) setTimeout(() => void ipc.sessionForget(sid).catch(() => {}), 500);
+    });
+  }, []);
+
+  const finishMicroTask = useCallback(
+    (tab: TermSubTab) => {
+      if (tab.ptyId == null) return;
+      const ptyId = tab.ptyId;
+      if (microFinish.current.has(ptyId)) return;
+      const timer = window.setTimeout(() => reapMicroTask(ptyId), 10_000);
+      microFinish.current.set(ptyId, {
+        sid: liveSessionByPtyRef.current.get(ptyId),
+        since: Date.now(),
+        timer,
+      });
+    },
+    [reapMicroTask],
+  );
+
+  // The wait-for-Stop half of the micro-task close: once the turn that called
+  // job_done ends, reap. `ts >= since` skips Stop events from earlier turns of
+  // the same session (a blocked task the user replied to, then finished).
+  useEffect(() => {
+    if (microFinish.current.size === 0) return;
+    for (const [ptyId, entry] of microFinish.current) {
+      if (events.some((e) => e.ts >= entry.since && isStopFor(e.raw, ptyId))) {
+        reapMicroTask(ptyId);
+      }
+    }
+  }, [events, reapMicroTask]);
+
   /** A relay review's diff isn't in any local checkout, so an agent can't
    *  `git diff` for it — write the patch into the project (an authorized
    *  workspace, so the write is in scope) and hand the agent that path. Returns
@@ -1669,6 +1781,20 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         if (tab) restartRun(tab.id);
         return;
       }
+      // A micro-task reported in (App already surfaced the notice). Done →
+      // wait out the turn, then kill + close + forget. Blocked → bring the tab
+      // forward so the user can answer. Only ever closes tabs marked micro: a
+      // normal session that somehow calls the tool gets the notice and nothing
+      // else.
+      if (a.kind === "job_done") {
+        const tab = tabsRef.current.find(
+          (t): t is TermSubTab => t.type === "terminal" && a.ptyId != null && t.ptyId === a.ptyId,
+        );
+        if (!tab || !tab.micro) return;
+        if (a.status === "blocked") setActiveTabId(tab.id);
+        else finishMicroTask(tab);
+        return;
+      }
       if (d?.projectId !== project.id) return;
       if (a.kind === "open_preview" && a.url) {
         openPreview(a.url);
@@ -1700,7 +1826,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     };
     window.addEventListener("canopy:agent-action", onAction);
     return () => window.removeEventListener("canopy:agent-action", onAction);
-  }, [project.id, openPreview, addTerminal, restartRun]);
+  }, [project.id, openPreview, addTerminal, restartRun, finishMicroTask]);
 
   // A browser-control op (canopy_browser_*): pick the preview tab it targets —
   // by origin when it names a URL, else the active/first preview tab, creating
@@ -1764,6 +1890,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     termHandles.current.delete(id);
     setTabs((prev) => {
       const closing = prev.find((t) => t.id === id);
+      if (closing?.type === "terminal" && closing.micro && closing.ptyId != null) {
+        // A micro-task session never reaches restorables, however it ends —
+        // that includes the user closing the tab mid-run. Forget after the
+        // unmount-kill's grace window so the delete lands on the CLI's final
+        // digest write instead of racing it.
+        const sid = liveSessionByPtyRef.current.get(closing.ptyId);
+        if (sid) setTimeout(() => void ipc.sessionForget(sid).catch(() => {}), 4000);
+      }
       if (closing?.type === "file") {
         // Closing the tab disposes the model the OwnerSession is subscribed
         // to, so the share has to end first — otherwise it sits there holding
@@ -2472,6 +2606,16 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     }
     return t.ptyId != null && busyPtyIds.has(t.ptyId) ? "working" : "idle";
   };
+  // Micro-task tabs, for the Tasks panel's Running list. Same state resolution
+  // as the tab dots so the two never disagree.
+  const runningMicro: RunningMicroTask[] = tabs
+    .filter((t): t is TermSubTab => t.type === "terminal" && Boolean(t.micro))
+    .map((t) => ({
+      tabId: t.id,
+      title: t.customTitle || t.title,
+      state: tabState(t),
+      icon: t.icon,
+    }));
   const stripTabs = tabs.filter((t) => t.type !== "terminal" || !t.run);
   const shellTabs = stripTabs.filter(
     (t): t is TermSubTab => t.type === "terminal" && !isAgentTab(t),
@@ -2845,6 +2989,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             onOpenCommit={openCommit}
             onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
             onNotice={onNotice}
+            onMicroTask={startMicroTask}
           />
         );
       case "agent":
@@ -4125,6 +4270,17 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onNotice={onNotice}
         />
       ))}
+      {sidePane("tasks", () => (
+        <TasksPanel
+          components={components.map((c) => ({ label: c.label, path: c.path }))}
+          running={runningMicro}
+          onFocus={setActiveTabId}
+          onStop={closeTab}
+          onRunCustom={(task: CustomMicroTask, dir: string, query: string) =>
+            startMicroTask(customTaskDef(task), { dir }, query)
+          }
+        />
+      ))}
       {sidePane("agents", () => (
         <AgentsPanel
           visible={sideTab === "agents" && visible}
@@ -4175,6 +4331,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               <t.Icon size={18} />
               {t.key === "changes" && changeCount + collabEditedCount > 0 && (
                 <span className="rail-badge">{Math.min(changeCount + collabEditedCount, 99)}</span>
+              )}
+              {t.key === "tasks" && runningMicro.length > 0 && (
+                <span className="rail-badge">{runningMicro.length}</span>
               )}
               {t.key === "agents" && pending.length > 0 && (
                 <span

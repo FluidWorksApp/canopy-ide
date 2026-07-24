@@ -6,6 +6,11 @@
 // what the user reads has to fit in a row. Names must match — they're the key
 // the sidecar filters on — so add a tool in both places or it can't be turned
 // off.
+//
+// canopy_job_done is on by default like everything else, and disabling it here
+// only reaches ordinary sessions: inside a micro-task terminal the sidecar
+// ignores the disable list for it (env CANOPY_MICRO_TASK), because a stripped
+// completion tool would strand the ephemeral tab open forever.
 export interface AgentToolGroup {
   id: string;
   label: string;
@@ -72,6 +77,7 @@ export const AGENT_TOOL_GROUPS: AgentToolGroup[] = [
       { name: "canopy_open_file", label: "Open file", note: "Put a file in front of you" },
       { name: "canopy_show_diff", label: "Show diff", note: "Show a file's change vs HEAD" },
       { name: "canopy_notify", label: "Notify", note: "A notice in the window" },
+      { name: "canopy_job_done", label: "Job done", note: "Report a task's outcome" },
       { name: "canopy_ask_user", label: "Ask", note: "A question that blocks until you answer" },
     ],
   },

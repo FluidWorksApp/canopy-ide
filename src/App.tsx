@@ -791,6 +791,20 @@ export default function App() {
           );
           return;
         }
+        // A micro-task reporting in. Surface the outcome here — the user has
+        // likely tabbed away, which is the whole point of a fire-and-forget
+        // task — then broadcast by pty like restart_server so the owning
+        // ProjectView can close (done) or focus (blocked) the tab.
+        if (a.kind === "job_done") {
+          const ok = a.status === "done";
+          const summary = a.summary ?? "A micro-task finished.";
+          notify(`${ok ? "Task done" : "Task blocked"}: ${summary}${a.url ? ` — ${a.url}` : ""}`, ok ? "success" : "warn");
+          void nativeNotify("Canopy — Task", summary);
+          window.dispatchEvent(
+            new CustomEvent("canopy:agent-action", { detail: { projectId: null, action: a } }),
+          );
+          return;
+        }
         // An agent reaching for the user (canopy_notify) — often one running in
         // a terminal nobody is watching. It belongs to no project in
         // particular, so it lands as a notice here rather than being routed.
@@ -823,7 +837,7 @@ export default function App() {
         un = u;
       });
     return () => un?.();
-  }, [notify]);
+  }, [notify, nativeNotify]);
 
   // A browser-control op (canopy_browser_*). Routed like agent:action, but
   // request/response: an op that can't reach a project must answer the bridge
