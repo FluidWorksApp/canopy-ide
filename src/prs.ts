@@ -14,22 +14,35 @@ export function prWorktree(
   );
 }
 
+/** When an agent runs in a throwaway worktree we created for it, tell it to
+ *  tear that worktree down as its last step. `git -C <repo>` runs from the main
+ *  checkout, so removal works even though the agent's own cwd is the worktree. */
+function cleanupLine(repo: string, worktree: string): string {
+  return (
+    ` This worktree was created just for this task — when you're finished, remove it as your last step: ` +
+    `\`git -C "${repo}" worktree remove --force "${worktree}"\`.`
+  );
+}
+
 /** What a review agent is told: the PR, that its branch is checked out here,
- *  and to read the diff and report — not to push changes. */
-export function prReviewContext(pr: ipc.PrInfo): string {
+ *  and to read the diff and report — not to push changes. When `wt` is given
+ *  the agent is in a throwaway worktree and is asked to clean it up when done. */
+export function prReviewContext(pr: ipc.PrInfo, wt?: { repo: string; worktree: string }): string {
   return (
     `Review pull request #${pr.number}: "${pr.title}" (${pr.url}). ` +
     `It proposes merging ${pr.branch} into ${pr.base}, and this worktree has ${pr.branch} checked out. ` +
     `Read the diff (e.g. \`gh pr diff ${pr.number}\` or \`git diff ${pr.base}...HEAD\`) and the ` +
     `surrounding code, then give a thorough review — correctness, edge cases, tests, and risks — ` +
-    `and summarize your findings. Don't commit or push; the review is for the human to act on.`
+    `and summarize your findings. Don't commit or push; the review is for the human to act on.` +
+    (wt ? cleanupLine(wt.repo, wt.worktree) : "")
   );
 }
 
 /** What a conflict-resolution agent is told: the PR conflicts with its base,
  *  its branch is checked out here, and to merge the base in, resolve every
- *  conflict preserving both sides' intent, verify, and push so the PR updates. */
-export function prConflictContext(pr: ipc.PrInfo): string {
+ *  conflict preserving both sides' intent, verify, and push so the PR updates.
+ *  When `wt` is given it also tears the throwaway worktree down at the end. */
+export function prConflictContext(pr: ipc.PrInfo, wt?: { repo: string; worktree: string }): string {
   return (
     `Pull request #${pr.number}: "${pr.title}" (${pr.url}) has merge conflicts with its base. ` +
     `It merges ${pr.branch} into ${pr.base}, and this worktree has ${pr.branch} checked out. ` +
@@ -37,6 +50,7 @@ export function prConflictContext(pr: ipc.PrInfo): string {
     `resolve every conflict by editing the files and removing the conflict markers — preserving the ` +
     `intent of BOTH sides, not just picking one. Once nothing conflicts, stage and commit the merge, ` +
     `run the build and tests if the project has them, and when everything is green push the branch ` +
-    `(\`git push\`) so the PR stops showing conflicts. Summarize any non-obvious resolution choices for the human.`
+    `(\`git push\`) so the PR stops showing conflicts. Summarize any non-obvious resolution choices for the human.` +
+    (wt ? cleanupLine(wt.repo, wt.worktree) : "")
   );
 }

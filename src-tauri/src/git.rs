@@ -1130,6 +1130,37 @@ pub async fn git_worktree_add(
     Ok(format!("Worktree created at {path}"))
 }
 
+/// Fetch a PR's head and check it out in a fresh worktree, without touching the
+/// main checkout's current branch. `pull/<n>/head` is exposed for every PR —
+/// fork or not — so this reaches branches a plain `fetch` (origin's own branches
+/// only) can't. `-B` (re)points the PR's branch at the fetched head and checks
+/// it out in the worktree; the main checkout is never switched.
+#[tauri::command]
+pub async fn git_worktree_add_pr(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    path: String,
+    number: u32,
+    branch: String,
+) -> Result<String, String> {
+    let top = repo_path(&state, &repo)?;
+    if branch.trim().is_empty() {
+        return Err("branch name is required".into());
+    }
+    let mut fetch = git(&top);
+    fetch.args(["fetch", "origin", &format!("pull/{number}/head")]);
+    run_net(&mut fetch)?;
+    let mut add = git(&top);
+    add.arg("worktree")
+        .arg("add")
+        .arg("-B")
+        .arg(branch.trim())
+        .arg(&path)
+        .arg("FETCH_HEAD");
+    run(&mut add)?;
+    Ok(format!("Worktree created at {path}"))
+}
+
 /// Remove a worktree. Destructive when it holds uncommitted work, so `force` is
 /// only ever passed after the UI has confirmed with the dirty count in hand.
 #[tauri::command]

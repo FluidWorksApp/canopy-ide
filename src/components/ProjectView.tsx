@@ -1145,7 +1145,6 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // the worktree checkout/reuse and seeding are identical.
   const startPrAgent = useCallback(
     async (mode: "review" | "resolve", repo: string, pr: ipc.PrInfo, agentId?: string) => {
-      const context = mode === "resolve" ? prConflictContext(pr) : prReviewContext(pr);
       const noun = mode === "resolve" ? "conflict resolution on" : "a review of";
       const installedClis = AGENT_CLIS.filter((c) => installedRef.current[c.bin]);
       const preferred = getSettings().defaultAgent;
@@ -1153,50 +1152,48 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         agentId ||
         (installedClis.find((c) => c.id === preferred) ?? installedClis[0] ?? AGENT_CLIS[0])?.id;
       const cli = AGENT_CLIS.find((c) => c.id === agent);
-      const start = startCommand(agent, context);
-      if (!cli || !start) {
+      if (!cli) {
         onNotice(`Unknown agent "${agent}".`);
         return;
       }
-      const seed = (id: string) => {
-        if (!start.typePrompt) return;
-        const pty = tabsRef.current.find(
-          (t): t is TermSubTab => t.id === id && t.type === "terminal",
-        )?.ptyId;
-        if (pty == null) return;
-        void ipc.ptyWrite(pty, context);
-        setTimeout(() => void ipc.ptyWrite(pty, "\r"), 250);
-      };
-      const title = `PR #${pr.number} · ${cli.name}`;
       try {
+        // Reuse a worktree already holding this PR's branch; otherwise make an
+        // ephemeral one — fetching the PR head (fork-safe, and without switching
+        // the main checkout's branch) so it works even for a PR you've never
+        // checked out. Only a worktree WE created is disposable, so only then do
+        // we tell the agent to remove it and skip registering it as a component.
         const worktrees = await ipc.gitWorktrees(repo).catch(() => [] as ipc.WorktreeInfo[]);
         const existing = prWorktree(pr, worktrees);
-        if (existing) {
-          const id = addTerminal(existing.path, start.command, title, cli.icon);
-          if (id) setTimeout(() => seed(id), 2500);
+        const path = existing?.path ?? `${repo}-wt-pr-${pr.number}`;
+        const cleanup = existing ? undefined : { repo, worktree: path };
+        const context =
+          mode === "resolve" ? prConflictContext(pr, cleanup) : prReviewContext(pr, cleanup);
+        const start = startCommand(agent, context);
+        if (!start) {
+          onNotice(`Unknown agent "${agent}".`);
           return;
         }
-        const path = `${repo}-wt-pr-${pr.number}`;
-        try {
-          await ipc.gitWorktreeAdd(repo, path, pr.branch, false);
-        } catch {
-          // The branch usually just isn't in this clone yet (a PR you haven't
-          // fetched). Pull refs and retry once — `git worktree add` then DWIMs
-          // a local branch from origin/<branch>. Only a fork PR whose branch
-          // isn't on origin still fails, and that falls through to the hint.
-          await ipc.gitFetch(repo).catch(() => {});
-          await ipc.gitWorktreeAdd(repo, path, pr.branch, false);
+        if (!existing) {
+          await ipc.gitWorktreeAddPr(repo, path, pr.number, pr.branch);
         }
-        await ipc.workspaceAdd(path).catch(() => {});
+        const title = `PR #${pr.number} · ${cli.name}`;
         const id = addTerminal(path, start.command, title, cli.icon);
-        if (id) setTimeout(() => seed(id), 2500);
+        if (id && start.typePrompt) {
+          setTimeout(() => {
+            const pty = tabsRef.current.find(
+              (t): t is TermSubTab => t.id === id && t.type === "terminal",
+            )?.ptyId;
+            if (pty == null) return;
+            void ipc.ptyWrite(pty, context);
+            setTimeout(() => void ipc.ptyWrite(pty, "\r"), 250);
+          }, 2500);
+        }
       } catch (err) {
-        // A fork PR whose branch isn't on your remote — the one case git can't
-        // check out even after a fetch. "Checkout" (gh pr checkout) fetches it
-        // first, after which it reuses that worktree.
+        // A private fork you can't fetch is the one case even pull/<n>/head
+        // can't reach; "Checkout" (gh pr checkout) authenticates and fetches it.
         onNotice(
           `Couldn't start ${noun} PR #${pr.number}: ${String(err)}. ` +
-            `If it's from a fork, click Checkout first.`,
+            `If it's from a private fork you can't fetch, click Checkout first.`,
         );
       }
     },
