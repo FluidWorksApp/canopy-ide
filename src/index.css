@@ -7969,15 +7969,6 @@ a.btn-mini {
   max-width: 420px;
   text-align: center;
 }
-.preview-empty-form {
-  display: flex;
-  gap: 6px;
-  width: min(420px, 80%);
-}
-.preview-empty-chips {
-  display: flex;
-  gap: 6px;
-}
 .preview-server-list {
   display: flex;
   flex-direction: column;
@@ -8027,6 +8018,38 @@ a.btn-mini {
   text-overflow: ellipsis;
   max-width: 140px;
 }
-.preview-empty-none {
+.preview-setup {
+  width: min(480px, 82%);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 18px;
+  text-align: left;
+}
+.preview-setup-lead {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.preview-setup-note {
+  color: var(--text-dim);
   font-size: 12px;
+  line-height: 1.5;
+  margin-bottom: 10px;
+}
+.preview-setup-steps {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.preview-setup-steps code {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
 }

@@ -217,6 +217,10 @@ export function PreviewView({
     );
 
   // ---------- empty tab: pick one of the project's own servers ----------
+  // No manual URL entry on purpose: the preview only opens servers Canopy can
+  // trace back to a component, so every annotation knows which codebase to
+  // change. A URL typed by hand would be an untethered page with no component
+  // link — exactly what this feature exists to avoid.
   if (!origin) {
     return (
       <div className="preview-empty">
@@ -244,28 +248,30 @@ export function PreviewView({
             ))}
           </div>
         ) : (
-          <p className="preview-empty-hint preview-empty-none">
-            Nothing is listening yet — start a run command (＋ ▾ on a component, or the RUNS rail)
-            and its server will be listed here.
-          </p>
+          <div className="preview-setup">
+            <p className="preview-setup-lead">No servers are running in this project yet.</p>
+            <p className="preview-setup-note">
+              The preview lists the dev servers Canopy detects in your project's terminals, each
+              linked to the component it runs in — that link is what tells an agent which codebase
+              your feedback is about. To get one here:
+            </p>
+            <ol className="preview-setup-steps">
+              <li>
+                Add a run command to a component in <strong>project settings</strong> (each
+                component has a “Run commands” list — for example a <code>dev</code> command like{" "}
+                <code>npm run dev</code>).
+              </li>
+              <li>
+                Start it — from the component's <strong>▶</strong> in the Components panel, or the{" "}
+                <strong>＋ ▾</strong> launcher. It runs in the <strong>RUNS</strong> rail.
+              </li>
+              <li>
+                Once it's listening, its <code>localhost</code> address appears here, tagged with
+                its component. Pick it to start previewing.
+              </li>
+            </ol>
+          </div>
         )}
-        <form
-          className="preview-empty-form"
-          onSubmit={(e) => {
-            e.preventDefault();
-            navigate(draft);
-          }}
-        >
-          <input
-            className="preview-url-input"
-            placeholder="or any http://localhost URL…"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-          />
-          <button className="btn" type="submit">
-            Open
-          </button>
-        </form>
       </div>
     );
   }
