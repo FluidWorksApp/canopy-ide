@@ -33,6 +33,28 @@ jobs:
       - run: npm run lint
       - run: npm run test
 
+  # THIRD-PARTY-NOTICES.md is what discharges the attribution conditions of the
+  # MIT/BSD/ISC/Apache dependencies Canopy redistributes, so letting it go stale
+  # is a compliance bug rather than a docs nit. Regenerating and diffing catches
+  # a dependency that arrived without its notice.
+  #
+  # Needs both toolchains — the generator reads `cargo metadata` and node_modules
+  # — but compiles nothing, so it skips the webkit/ALSA system packages the rust
+  # job installs. `cargo metadata` reports every platform's dependencies
+  # regardless of host, so a file generated on macOS still matches here.
+  licenses:
+    name: Third-party notices (up to date)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run licenses:check
+
   rust:
     name: Rust (cargo test)
     runs-on: ubuntu-22.04
