@@ -711,15 +711,20 @@ export default function App() {
           return;
         }
         await openProjectRef.current(projectId);
-        // One frame so a not-yet-open project's ProjectView mounts and registers
+        // A beat so a not-yet-open project's ProjectView mounts and registers
         // its listener before the event fires; attachTerminal is idempotent by
-        // pty id, so a redundant dispatch just re-focuses the tab.
-        requestAnimationFrame(() =>
-          window.dispatchEvent(
-            new CustomEvent("canopy:attach-terminal", {
-              detail: { projectId, ptyId: e.id, cwd: e.cwd, title: e.title },
-            }),
-          ),
+        // pty id, so a redundant dispatch just re-focuses the tab. A timer, not
+        // requestAnimationFrame: rAF stops firing while the window is occluded,
+        // and these flows start from an agent/phone precisely when the user is
+        // looking elsewhere. React commits (and timers) run fine unpainted.
+        window.setTimeout(
+          () =>
+            window.dispatchEvent(
+              new CustomEvent("canopy:attach-terminal", {
+                detail: { projectId, ptyId: e.id, cwd: e.cwd, title: e.title },
+              }),
+            ),
+          80,
         );
       })
       .then((u) => {
@@ -771,10 +776,13 @@ export default function App() {
           return;
         }
         await openProjectRef.current(projectId);
-        requestAnimationFrame(() =>
-          window.dispatchEvent(
-            new CustomEvent("canopy:agent-action", { detail: { projectId, action: a } }),
-          ),
+        // Timer, not rAF — see the attach-terminal dispatch above.
+        window.setTimeout(
+          () =>
+            window.dispatchEvent(
+              new CustomEvent("canopy:agent-action", { detail: { projectId, action: a } }),
+            ),
+          80,
         );
       })
       .then((u) => {
@@ -818,10 +826,16 @@ export default function App() {
           return;
         }
         await openProjectRef.current(projectId);
-        requestAnimationFrame(() =>
-          window.dispatchEvent(
-            new CustomEvent("canopy:agent-browser", { detail: { projectId, op } }),
-          ),
+        // Timer, not rAF: rAF starves while the window is occluded, which held
+        // the agent's request open until the bridge's timeout even though the
+        // op would have run fine — the whole preview pipeline (React commits,
+        // iframe loads, postMessage) works without paints.
+        window.setTimeout(
+          () =>
+            window.dispatchEvent(
+              new CustomEvent("canopy:agent-browser", { detail: { projectId, op } }),
+            ),
+          80,
         );
       })
       .then((u) => {
