@@ -77,7 +77,7 @@ import { ReviewView, type ReviewPayload } from "./ReviewView";
 import { BranchView } from "./BranchView";
 import { AgentWorkspaceView } from "./AgentWorkspaceView";
 import { ticketBranch, ticketContext, ticketWorktree } from "../trackers";
-import { prReviewContext, prWorktree } from "../prs";
+import { prConflictContext, prReviewContext, prWorktree } from "../prs";
 import { forgetSessions, markRestored, restorableFrom, type Restorable } from "../restorable";
 import {
   forgetTerminals,
@@ -1140,15 +1140,20 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
    *  there's nothing to invent, and the branch already exists upstream, so we
    *  only ever check it out (create=false, letting git DWIM the remote branch),
    *  never `-b` a fresh one off HEAD (which would "review" empty changes). */
-  const startPrReview = useCallback(
-    async (repo: string, pr: ipc.PrInfo, agentId?: string) => {
+  // Start an agent on a PR in its own worktree. `mode` only swaps the prompt it
+  // is seeded with (review vs. resolve-the-conflicts) and the error wording —
+  // the worktree checkout/reuse and seeding are identical.
+  const startPrAgent = useCallback(
+    async (mode: "review" | "resolve", repo: string, pr: ipc.PrInfo, agentId?: string) => {
+      const context = mode === "resolve" ? prConflictContext(pr) : prReviewContext(pr);
+      const noun = mode === "resolve" ? "conflict resolution on" : "a review of";
       const installedClis = AGENT_CLIS.filter((c) => installedRef.current[c.bin]);
       const preferred = getSettings().defaultAgent;
       const agent =
         agentId ||
         (installedClis.find((c) => c.id === preferred) ?? installedClis[0] ?? AGENT_CLIS[0])?.id;
       const cli = AGENT_CLIS.find((c) => c.id === agent);
-      const start = startCommand(agent, prReviewContext(pr));
+      const start = startCommand(agent, context);
       if (!cli || !start) {
         onNotice(`Unknown agent "${agent}".`);
         return;
@@ -1159,7 +1164,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           (t): t is TermSubTab => t.id === id && t.type === "terminal",
         )?.ptyId;
         if (pty == null) return;
-        void ipc.ptyWrite(pty, prReviewContext(pr));
+        void ipc.ptyWrite(pty, context);
         setTimeout(() => void ipc.ptyWrite(pty, "\r"), 250);
       };
       const title = `PR #${pr.number} · ${cli.name}`;
@@ -1179,14 +1184,22 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       } catch (err) {
         // The usual cause is a fork PR whose branch isn't on your remote — the
         // one case git can't check out on its own. "Checkout" (gh pr checkout)
-        // fetches it first, after which a review reuses that worktree.
+        // fetches it first, after which it reuses that worktree.
         onNotice(
-          `Couldn't start a review of PR #${pr.number}: ${String(err)}. ` +
+          `Couldn't start ${noun} PR #${pr.number}: ${String(err)}. ` +
             `If it's from a fork, click Checkout first.`,
         );
       }
     },
     [addTerminal, onNotice],
+  );
+  const startPrReview = useCallback(
+    (repo: string, pr: ipc.PrInfo, agentId?: string) => startPrAgent("review", repo, pr, agentId),
+    [startPrAgent],
+  );
+  const startPrConflictResolve = useCallback(
+    (repo: string, pr: ipc.PrInfo, agentId?: string) => startPrAgent("resolve", repo, pr, agentId),
+    [startPrAgent],
   );
 
   /** Open a branch as its own tab — its uncommitted work, its commits, and
@@ -2931,6 +2944,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             installed={installed}
             onStartReview={(agentId) => void startPrReview(activeTab.repo, activeTab.pr, agentId)}
             onSendToAgent={(target) => sendTicketToAgent(target, prReviewContext(activeTab.pr))}
+            onStartResolve={(agentId) =>
+              void startPrConflictResolve(activeTab.repo, activeTab.pr, agentId)
+            }
+            onSendResolve={(target) => sendTicketToAgent(target, prConflictContext(activeTab.pr))}
           />
         )}
         {activeTab?.type === "review" && (
