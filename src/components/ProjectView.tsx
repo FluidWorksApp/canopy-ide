@@ -2693,13 +2693,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 cwd={tab.cwd}
                 active={tab.id === activeTabId && visible}
                 attachId={tab.attachId}
-                // A run tab's shell exits with its command's status, so the
-                // exit code below is the command's own — that's what makes
+                // A run tab hands its command to the shell to run-and-exit
+                // (runCommand) so the pty's exit code is the command's own —
                 // one-shot runs (build, install) report truthfully instead of
-                // sitting at a prompt looking "running" forever.
-                initialCommand={
-                  tab.run && tab.command ? `${tab.command}; exit $?` : tab.command
-                }
+                // sitting at a prompt looking "running" forever — and it's
+                // correct on cmd.exe / PowerShell, not just POSIX. A non-run tab
+                // types its command (e.g. launching an agent CLI).
+                initialCommand={tab.run ? undefined : tab.command}
+                runCommand={tab.run && tab.command ? tab.command : undefined}
                 onSpawned={(ptyId) =>
                   // A freshly spawned pty is alive by definition, so clear any
                   // stale exited/failed state. Restart kills the old pty and
