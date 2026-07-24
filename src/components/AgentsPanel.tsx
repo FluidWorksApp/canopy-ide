@@ -24,6 +24,10 @@ export const STATE_META: Record<string, { cls: string; label: string }> = {
 const KEYSTROKE_APPROVAL_AGENTS = new Set(["claude", "codex"]);
 
 interface AgentsPanelProps {
+  /** False while another side tab is in front. The panel stays mounted (so
+   *  its scroll and expanded rows survive a switch away) but stops polling
+   *  session digests — nobody is looking. */
+  visible: boolean;
   stats: ipc.SessionStats[];
   hookPath: string | null;
   pending?: PendingItem[];
@@ -147,6 +151,7 @@ function Section({
 }
 
 export function AgentsPanel({
+  visible,
   stats,
   hookPath,
   pending = [],
@@ -244,6 +249,7 @@ export function AgentsPanel({
   // record that "Restore sessions" reads. Sharing is about what agents see of
   // each other; restore is about what the *user* lost when the IDE died.
   useEffect(() => {
+    if (!visible) return;
     const load = () =>
       void ipc
         .sessionDigests()
@@ -258,7 +264,7 @@ export function AgentsPanel({
     load();
     const t = setInterval(load, 4000);
     return () => clearInterval(t);
-  }, [roots.join("\n")]);
+  }, [roots.join("\n"), visible]);
 
   const autoSetup = async (agent: string) => {
     try {
