@@ -2041,6 +2041,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     if (!cwd) return;
     if (installed[cli.bin]) {
       addTerminal(cwd, cli.bin, cli.name, cli.icon);
+      // Surface the new agent where it lives: the Agents section, expanded so
+      // the just-launched row is actually in view.
+      setSideTab("agents");
+      setCollapsed(false);
     } else {
       // A run tab, so the installer exits when done — and that exit is the
       // signal to re-probe (see onExited below). No timers, no staleness.

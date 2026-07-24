@@ -5855,6 +5855,33 @@ textarea,
   word-break: break-word;
   max-width: 720px;
 }
+/* Actions row: recover on the left, the opt-in report offer beside it. */
+.crash-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.crash-report {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: 420px;
+}
+.crash-report-note {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.crash-report-done {
+  font-size: 12px;
+  color: var(--text-dim);
+  align-self: center;
+}
+.crash-report-err {
+  font-size: 12px;
+  color: var(--danger);
+}
 
 /* Per-row forget: stays out of the way until the row is hovered. */
 .resume-forget {

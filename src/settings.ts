@@ -173,6 +173,13 @@ export interface Settings {
    *  in SettingsDialog.tsx). Persisted alongside remoteReach so reopening
    *  Settings restores the whole choice, not just the running link. */
   remoteTunnelProvider: string;
+
+  // ---- Crash reporting ----
+  /** Opt-in, default off: when a panel crashes (or a native panic is found on
+   *  the next launch), offer to send an anonymous report — message + stack,
+   *  app version, OS/arch — to the collector baked into the build. Nothing
+   *  leaves the machine unless this is on. */
+  crashReporting: boolean;
 }
 
 // NB: stored settings override these (see getSettings), so flipping a default
@@ -205,6 +212,7 @@ const DEFAULTS: Settings = {
   dictationLanguage: "",
   remoteReach: "local",
   remoteTunnelProvider: "cloudflare",
+  crashReporting: false,
 };
 
 const KEY = "canopy.settings";

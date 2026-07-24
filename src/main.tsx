@@ -60,6 +60,9 @@ jsLog("info", "webview booting");
 // Reap PTY sessions orphaned by a previous page of this webview (reloads
 // destroy JS state without running React cleanup).
 void invoke("pty_kill_all").catch(() => {});
+// A native panic from a previous run parks a report on disk; flush it now if
+// the user is opted in (the backend clears it either way, so it's offered once).
+void import("./crash").then(({ flushPendingCrash }) => flushPendingCrash());
 
 // Wait for the monaco-vscode-api services barrier before mounting — editor and
 // model calls queue behind it. If it fails we still mount: the terminal (the
