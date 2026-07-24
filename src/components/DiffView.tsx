@@ -8,6 +8,7 @@
 // the two contents into a unified patch (jsdiff) and render it with the same
 // component the PR view uses, so every diff in the app looks and behaves alike.
 import { useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { DiffView as GitDiffView, DiffModeEnum } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import { createPatch } from "diff";
@@ -24,9 +25,11 @@ interface DiffViewProps {
   original: string;
   modified: string;
   actions: DiffAction[];
+  /** "Ask an agent about this diff" control, rendered under the toolbar. */
+  agentBar?: ReactNode;
 }
 
-export function DiffView({ path, title, original, modified, actions }: DiffViewProps) {
+export function DiffView({ path, title, original, modified, actions, agentBar }: DiffViewProps) {
   const [split, setSplit] = useState(true);
   const name = path.split("/").pop() ?? path;
 
@@ -54,6 +57,7 @@ export function DiffView({ path, title, original, modified, actions }: DiffViewP
           </button>
         ))}
       </div>
+      {agentBar && <div className="diff-agent-bar">{agentBar}</div>}
       <div className="diff-body">
         {unchanged ? (
           <div className="diff-empty">No changes against HEAD.</div>

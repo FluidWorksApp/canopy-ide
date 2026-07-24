@@ -78,6 +78,8 @@ import { BranchView } from "./BranchView";
 import { AgentWorkspaceView } from "./AgentWorkspaceView";
 import { ticketBranch, ticketContext, ticketWorktree } from "../trackers";
 import { prConflictContext, prReviewContext, prWorktree } from "../prs";
+import { fileDiffContext, reviewContext, sessionChangesContext } from "../diffContext";
+import { AgentQueryBar } from "./AgentQueryBar";
 import { forgetSessions, markRestored, restorableFrom, type Restorable } from "../restorable";
 import {
   forgetTerminals,
@@ -1345,6 +1347,63 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     setTimeout(() => termHandles.current.get(target.tabId)?.focus(), 50);
   }, []);
 
+  /** Start a fresh agent CLI in `dir`, seeded with `seed`. The diff surfaces
+   *  (session changes, a file diff, a relay review) work on the working tree
+   *  that's already there, so unlike a PR/ticket there's no worktree to make —
+   *  the agent just opens in the existing checkout. Same resolve-CLI-then-seed
+   *  shape as startTicketWork/startPrAgent. */
+  const startAgentInDir = useCallback(
+    (dir: string, agentId: string | undefined, seed: string, title: string) => {
+      const installedClis = AGENT_CLIS.filter((c) => installedRef.current[c.bin]);
+      const preferred = getSettings().defaultAgent;
+      const agent =
+        agentId ||
+        (installedClis.find((c) => c.id === preferred) ?? installedClis[0] ?? AGENT_CLIS[0])?.id;
+      const cli = AGENT_CLIS.find((c) => c.id === agent);
+      const start = agent ? startCommand(agent, seed) : null;
+      if (!cli || !start) {
+        onNotice(`Unknown agent "${agent}".`);
+        return;
+      }
+      const id = addTerminal(dir, start.command, `${title} · ${cli.name}`, cli.icon);
+      if (id && start.typePrompt) {
+        setTimeout(() => {
+          const pty = tabsRef.current.find(
+            (t): t is TermSubTab => t.id === id && t.type === "terminal",
+          )?.ptyId;
+          if (pty == null) return;
+          void ipc.ptyWrite(pty, seed);
+          setTimeout(() => void ipc.ptyWrite(pty, "\r"), 250);
+        }, 2500);
+      }
+    },
+    [addTerminal, onNotice],
+  );
+
+  /** A relay review's diff isn't in any local checkout, so an agent can't
+   *  `git diff` for it — write the patch into the project (an authorized
+   *  workspace, so the write is in scope) and hand the agent that path. Returns
+   *  the file path, or null if there's nowhere to write it. */
+  const writeReviewPatch = useCallback(
+    async (review: ReviewPayload): Promise<string | null> => {
+      const dir = componentsRef.current[0]?.path;
+      if (!dir) {
+        onNotice("No project directory to stage the review in.");
+        return null;
+      }
+      const safe = (review.branch || "review").replace(/[^A-Za-z0-9._-]+/g, "-");
+      const path = `${dir}/.canopy-review-${safe}.patch`;
+      try {
+        await ipc.fsWriteFile(path, review.patch);
+        return path;
+      } catch (err) {
+        onNotice(`Couldn't stage the review diff: ${String(err)}`, "error");
+        return null;
+      }
+    },
+    [onNotice],
+  );
+
   /** Re-run a run tab's command in place, reusing the tab (and its position in
    *  the rail) rather than spawning a new one. */
   const restartRun = useCallback(
@@ -2363,6 +2422,18 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       };
     });
 
+  // The session changeset shaped for the agent context builder: component
+  // label plus each file's repo-relative path.
+  const changeContextGroups = () =>
+    changeGroups.map((g) => ({ component: g.component, paths: g.files.map((f) => f.path) }));
+
+  // Which component checkout an absolute path lives in — the cwd a fresh agent
+  // opened on that file should start in. Falls back to the first component.
+  const repoForFile = (abs: string) =>
+    componentsRef.current.find((c) => abs === c.path || abs.startsWith(`${c.path}/`))?.path ??
+    componentsRef.current[0]?.path ??
+    null;
+
   // The agent behind the active *terminal* tab, if any — the "Agent Workspace"
   // toggle and its overlay only exist here. Identity is the live process (same
   // resolution as the tab icon), so it's right for every agent CLI — not just
@@ -2957,7 +3028,36 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           />
         )}
         {activeTab?.type === "review" && (
-          <ReviewView key={activeTab.id} review={activeTab.review} />
+          <ReviewView
+            key={activeTab.id}
+            review={activeTab.review}
+            agentBar={
+              <AgentQueryBar
+                agentTargets={agentTargets}
+                installed={installed}
+                newAgentLabel="New agent in this project"
+                label="Send to agent"
+                placeholder="Ask an agent to review this…"
+                onSend={(target, query) =>
+                  void writeReviewPatch(activeTab.review).then((path) => {
+                    if (path) sendTicketToAgent(target, reviewContext(activeTab.review, path, query));
+                  })
+                }
+                onStart={(agentId, query) =>
+                  void writeReviewPatch(activeTab.review).then((path) => {
+                    const dir = componentsRef.current[0]?.path;
+                    if (!path || !dir) return;
+                    startAgentInDir(
+                      dir,
+                      agentId,
+                      reviewContext(activeTab.review, path, query),
+                      `Review ${activeTab.review.branch}`,
+                    );
+                  })
+                }
+              />
+            }
+          />
         )}
         {activeTab?.type === "chat" && (
           <ChatView
@@ -3013,6 +3113,30 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             onKeepMine={() => keepMine(activeTab.file.path)}
             onCloseDiff={() =>
               patchFile(activeTab.file.path, { view: "source", diffOriginal: null })
+            }
+            diffAgentBar={
+              <AgentQueryBar
+                agentTargets={agentTargets}
+                installed={installed}
+                newAgentLabel="New agent in this project"
+                placeholder="Ask an agent about this file's changes…"
+                onSend={(target, query) =>
+                  sendTicketToAgent(
+                    target,
+                    fileDiffContext(activeTab.file.path, query),
+                  )
+                }
+                onStart={(agentId, query) => {
+                  const dir = repoForFile(activeTab.file.path);
+                  if (!dir) return onNotice("No git repository in this project.");
+                  startAgentInDir(
+                    dir,
+                    agentId,
+                    fileDiffContext(activeTab.file.path, query),
+                    activeTab.file.name,
+                  );
+                }}
+              />
             }
           />
         )}
@@ -3562,6 +3686,22 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               relay.collab.markOwnerSaved(p);
               void refreshChanges();
             })
+          }
+          agentBar={
+            <AgentQueryBar
+              agentTargets={agentTargets}
+              installed={installed}
+              newAgentLabel="New agent in this project"
+              placeholder="Ask an agent about these changes…"
+              onSend={(target, query) =>
+                sendTicketToAgent(target, sessionChangesContext(changeContextGroups(), query))
+              }
+              onStart={(agentId, query) => {
+                const dir = changeGroups[0]?.repo ?? componentsRef.current[0]?.path;
+                if (!dir) return onNotice("No git repository in this project.");
+                startAgentInDir(dir, agentId, sessionChangesContext(changeContextGroups(), query), "Changes");
+              }}
+            />
           }
         />
       )}
