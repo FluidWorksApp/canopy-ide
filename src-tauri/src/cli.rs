@@ -107,7 +107,9 @@ pub fn cli_install_shim() -> Result<String, String> {
     #[cfg(target_os = "linux")]
     {
         let Some(appimage) = std::env::var_os("APPIMAGE") else {
-            return Ok("`canopy` is already on your PATH (installed by your package manager).".into());
+            return Ok(
+                "`canopy` is already on your PATH (installed by your package manager).".into(),
+            );
         };
         let home = std::env::var_os("HOME").ok_or("HOME not set")?;
         let bin = Path::new(&home).join(".local/bin");
@@ -150,7 +152,10 @@ mod tests {
             tmp.to_string_lossy().into_owned(),
         ];
         let got = dir_from_args(args, Path::new("/"));
-        assert_eq!(got, Some(tmp.canonicalize().unwrap().to_string_lossy().into_owned()));
+        assert_eq!(
+            got,
+            Some(tmp.canonicalize().unwrap().to_string_lossy().into_owned())
+        );
     }
 
     #[test]
@@ -158,11 +163,11 @@ mod tests {
         let tmp = std::env::temp_dir().canonicalize().unwrap();
         let child = tmp.join("canopy-cli-test-dir");
         std::fs::create_dir_all(&child).unwrap();
-        let got = dir_from_args(
-            vec!["canopy".into(), "canopy-cli-test-dir".into()],
-            &tmp,
+        let got = dir_from_args(vec!["canopy".into(), "canopy-cli-test-dir".into()], &tmp);
+        assert_eq!(
+            got,
+            Some(child.canonicalize().unwrap().to_string_lossy().into_owned())
         );
-        assert_eq!(got, Some(child.canonicalize().unwrap().to_string_lossy().into_owned()));
         let _ = std::fs::remove_dir(&child);
     }
 

@@ -1,0 +1,94 @@
+# Runs the test suites and static checks on every pull request and on pushes to
+# main. Separate from release.yml (which only fires on a tag): this is the
+# red-green gate contributors see before merge, and it never builds installers
+# or touches signing secrets.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel an in-flight run when a new commit is pushed to the same PR/branch —
+# the older result is already stale.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: Frontend (typecheck · lint · test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run test
+
+  rust:
+    name: Rust (cargo test)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # The lib links against the system webview and ALSA even for a test build
+      # (tauri + cpal are non-optional deps of the crate graph), so the same
+      # floor of system packages release.yml installs is needed here.
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libasound2-dev \
+            patchelf \
+            build-essential \
+            curl wget file libssl-dev libgtk-3-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      # tauri-build checks that externalBin paths exist before it emits metadata,
+      # even for `cargo test`. The real binary is built by prepare-sidecar.mjs
+      # (release-only). A zero-byte placeholder satisfies the existence check
+      # without needing the full sidecar build in CI.
+      - name: Stub hook sidecar for CI
+        run: |
+          mkdir -p src-tauri/binaries
+          triple=$(rustc -vV | grep '^host:' | awk '{print $2}')
+          touch "src-tauri/binaries/canopy-hook-${triple}"
+
+
+      # Dictation (ONNX Runtime) is compiled OUT here: staging the runtime is
+      # release-only machinery, the feature has no logic these unit tests cover,
+      # and --no-default-features is the exact configuration the Intel-macOS
+      # release already ships and builds green. Tests exercise the pure git/relay/
+      # cli/pty logic, none of which is behind the dictation feature.
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --no-default-features
+
+      - name: cargo fmt --check
+        working-directory: src-tauri
+        run: cargo fmt --all --check
+
+      # Warnings only for now — turning them into errors (-D warnings) is a
+      # follow-up once the existing tree is clippy-clean, so a first CI run
+      # isn't blocked on pre-existing lints unrelated to a given PR.
+      - name: cargo clippy
+        working-directory: src-tauri
+        run: cargo clippy --no-default-features --all-targets || true

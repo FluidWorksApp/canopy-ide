@@ -87,7 +87,10 @@ pub async fn preview_start(
     {
         let guard = state.proxies.lock().unwrap();
         if let Some(p) = guard.get(&origin) {
-            return Ok(PreviewInfo { port: p.port, origin });
+            return Ok(PreviewInfo {
+                port: p.port,
+                origin,
+            });
         }
     }
 
@@ -95,7 +98,11 @@ pub async fn preview_start(
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| e.to_string())?;
-    let ctx = Arc::new(ProxyCtx { origin: origin.clone(), authority, client });
+    let ctx = Arc::new(ProxyCtx {
+        origin: origin.clone(),
+        authority,
+        client,
+    });
 
     let router = Router::new().fallback(proxy_handler).with_state(ctx);
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -121,9 +128,18 @@ pub async fn preview_start(
     // Two tabs racing to start the same origin: keep the first, drop ours.
     if let Some(existing) = guard.get(&origin) {
         let _ = sd_tx.send(true);
-        return Ok(PreviewInfo { port: existing.port, origin });
+        return Ok(PreviewInfo {
+            port: existing.port,
+            origin,
+        });
     }
-    guard.insert(origin.clone(), RunningProxy { port, shutdown: sd_tx });
+    guard.insert(
+        origin.clone(),
+        RunningProxy {
+            port,
+            shutdown: sd_tx,
+        },
+    );
     Ok(PreviewInfo { port, origin })
 }
 
@@ -164,7 +180,10 @@ async fn proxy_handler(State(ctx): State<Arc<ProxyCtx>>, req: Request) -> Respon
     }
     if is_upgrade(req.headers()) {
         return tunnel_upgrade(ctx, req).await.unwrap_or_else(|e| {
-            plain(StatusCode::BAD_GATEWAY, format!("Canopy preview: websocket tunnel failed: {e}"))
+            plain(
+                StatusCode::BAD_GATEWAY,
+                format!("Canopy preview: websocket tunnel failed: {e}"),
+            )
         });
     }
     forward_http(ctx, req).await.unwrap_or_else(|e| {
@@ -344,7 +363,9 @@ async fn tunnel_upgrade(ctx: Arc<ProxyCtx>, mut req: Request) -> Result<Response
     }
 
     tokio::spawn(async move {
-        let Ok(upgraded) = on_upgrade.await else { return };
+        let Ok(upgraded) = on_upgrade.await else {
+            return;
+        };
         let mut client = hyper_util::rt::TokioIo::new(upgraded);
         let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
     });
@@ -375,7 +396,9 @@ mod tests {
     fn inject_prefers_head_then_body_then_appends() {
         let head = inject_picker(b"<html><head><title>t</title></head><body></body></html>");
         let head = String::from_utf8(head).unwrap();
-        assert!(head.contains(&format!(r#"<script src="{PICKER_PATH}" defer></script></head>"#)));
+        assert!(head.contains(&format!(
+            r#"<script src="{PICKER_PATH}" defer></script></head>"#
+        )));
 
         let body = inject_picker(b"<html><body>hi</body></html>");
         let body = String::from_utf8(body).unwrap();
@@ -401,7 +424,9 @@ mod tests {
     async fn proxies_and_injects_against_live_upstream() {
         use axum::routing::get;
 
-        let upstream = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
         let upstream_port = upstream.local_addr().unwrap().port();
         let app = Router::new()
             .route(
@@ -423,7 +448,9 @@ mod tests {
             authority: format!("127.0.0.1:{upstream_port}"),
             client: reqwest::Client::new(),
         });
-        let proxy = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let proxy = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
         let proxy_port = proxy.local_addr().unwrap().port();
         let router = Router::new().fallback(proxy_handler).with_state(ctx);
         tokio::spawn(async move { axum::serve(proxy, router).await.unwrap() });
@@ -440,7 +467,11 @@ mod tests {
         let data = client.get(format!("{base}/data")).send().await.unwrap();
         assert_eq!(data.text().await.unwrap(), r#"{"ok":true}"#);
 
-        let picker = client.get(format!("{base}{PICKER_PATH}")).send().await.unwrap();
+        let picker = client
+            .get(format!("{base}{PICKER_PATH}"))
+            .send()
+            .await
+            .unwrap();
         assert!(picker.text().await.unwrap().contains("__canopyPicker"));
 
         let missing = client.get(format!("{base}/nope")).send().await.unwrap();

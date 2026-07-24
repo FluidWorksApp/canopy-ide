@@ -229,7 +229,9 @@ fn walk(root: &std::path::Path, max: usize) -> (Vec<String>, bool) {
     let mut out = Vec::new();
     let mut queue = std::collections::VecDeque::from([root.to_path_buf()]);
     while let Some(dir) = queue.pop_front() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         let mut entries: Vec<_> = entries.flatten().collect();
         entries.sort_by_key(|e| e.file_name());
         for entry in entries {

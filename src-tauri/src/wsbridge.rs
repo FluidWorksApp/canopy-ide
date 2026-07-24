@@ -100,7 +100,11 @@ fn halves(
     abort: tokio::task::AbortHandle,
 ) -> (BoxWrite, BoxRead, WsCloser) {
     let writer: BoxWrite = Box::new(ChanWrite(out_tx));
-    let reader: BoxRead = Box::new(ChanRead { rx: in_rx, left: Vec::new(), pos: 0 });
+    let reader: BoxRead = Box::new(ChanRead {
+        rx: in_rx,
+        left: Vec::new(),
+        pos: 0,
+    });
     (writer, reader, WsCloser { abort })
 }
 
@@ -157,13 +161,15 @@ pub fn server_halves(ws: axum::extract::ws::WebSocket) -> (BoxWrite, BoxRead, Ws
 /// usable straight from the relay's blocking `run_client`.
 pub fn connect(url: &str, timeout: Duration) -> Result<(BoxWrite, BoxRead, WsCloser), String> {
     let url = url.to_string();
-    let (ready_tx, ready_rx) =
-        std_mpsc::channel::<Result<(BoxWrite, BoxRead, WsCloser), String>>();
+    let (ready_tx, ready_rx) = std_mpsc::channel::<Result<(BoxWrite, BoxRead, WsCloser), String>>();
 
     std::thread::Builder::new()
         .name("relay-ws".into())
         .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
                 Ok(rt) => rt,
                 Err(e) => {
                     let _ = ready_tx.send(Err(format!("runtime: {e}")));
