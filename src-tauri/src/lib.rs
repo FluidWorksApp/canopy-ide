@@ -14,8 +14,8 @@ mod lsp;
 mod portal;
 mod pty;
 mod punch;
-mod tunnel;
 mod relay;
+mod tunnel;
 mod winproc;
 mod wsbridge;
 
@@ -34,8 +34,20 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             // can't carry the Terms/Privacy/Support links we show, so this
             // emits a "menu" event the frontend answers with its own dialog.
             &MenuItem::with_id(app, "about", "About Canopy", true, None::<&str>)?,
-            &MenuItem::with_id(app, "check-updates", "Check for Updates…", true, None::<&str>)?,
-            &MenuItem::with_id(app, "install-cli", "Install 'canopy' Command…", true, None::<&str>)?,
+            &MenuItem::with_id(
+                app,
+                "check-updates",
+                "Check for Updates…",
+                true,
+                None::<&str>,
+            )?,
+            &MenuItem::with_id(
+                app,
+                "install-cli",
+                "Install 'canopy' Command…",
+                true,
+                None::<&str>,
+            )?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?,
             &PredefinedMenuItem::separator(app)?,
@@ -63,21 +75,69 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         "Tabs",
         true,
         &[
-            &MenuItem::with_id(app, "new-terminal", "New Terminal", true, Some("CmdOrCtrl+T"))?,
+            &MenuItem::with_id(
+                app,
+                "new-terminal",
+                "New Terminal",
+                true,
+                Some("CmdOrCtrl+T"),
+            )?,
             &MenuItem::with_id(app, "close-tab", "Close Tab", true, Some("CmdOrCtrl+W"))?,
             &PredefinedMenuItem::separator(app)?,
             // Tabs and projects share one mental model: Ctrl+Cmd moves between
             // tabs, Cmd+Alt between projects. Cmd+1..9 used to jump to a tab by
             // position — nine menu rows for something nobody counts to.
-            &MenuItem::with_id(app, "next-tab", "Next Tab", true, Some("Control+CmdOrCtrl+Right"))?,
-            &MenuItem::with_id(app, "prev-tab", "Previous Tab", true, Some("Control+CmdOrCtrl+Left"))?,
+            &MenuItem::with_id(
+                app,
+                "next-tab",
+                "Next Tab",
+                true,
+                Some("Control+CmdOrCtrl+Right"),
+            )?,
+            &MenuItem::with_id(
+                app,
+                "prev-tab",
+                "Previous Tab",
+                true,
+                Some("Control+CmdOrCtrl+Left"),
+            )?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "close-project", "Close Project", true, Some("CmdOrCtrl+Shift+W"))?,
-            &MenuItem::with_id(app, "next-project", "Next Project", true, Some("CmdOrCtrl+Alt+Right"))?,
-            &MenuItem::with_id(app, "prev-project", "Previous Project", true, Some("CmdOrCtrl+Alt+Left"))?,
+            &MenuItem::with_id(
+                app,
+                "close-project",
+                "Close Project",
+                true,
+                Some("CmdOrCtrl+Shift+W"),
+            )?,
+            &MenuItem::with_id(
+                app,
+                "next-project",
+                "Next Project",
+                true,
+                Some("CmdOrCtrl+Alt+Right"),
+            )?,
+            &MenuItem::with_id(
+                app,
+                "prev-project",
+                "Previous Project",
+                true,
+                Some("CmdOrCtrl+Alt+Left"),
+            )?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "toggle-sidebar", "Toggle Sidebar", true, Some("CmdOrCtrl+B"))?,
-            &MenuItem::with_id(app, "toggle-zen", "Focus Mode", true, Some("CmdOrCtrl+Shift+Enter"))?,
+            &MenuItem::with_id(
+                app,
+                "toggle-sidebar",
+                "Toggle Sidebar",
+                true,
+                Some("CmdOrCtrl+B"),
+            )?,
+            &MenuItem::with_id(
+                app,
+                "toggle-zen",
+                "Focus Mode",
+                true,
+                Some("CmdOrCtrl+Shift+Enter"),
+            )?,
         ],
     )?;
     // Projects and the workspace auto-persist to ~/.canopy/projects.json;
@@ -88,13 +148,43 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         "File",
         true,
         &[
-            &MenuItem::with_id(app, "new-project", "New Project…", true, Some("CmdOrCtrl+N"))?,
-            &MenuItem::with_id(app, "open-project", "Open Project…", true, Some("CmdOrCtrl+O"))?,
-            &MenuItem::with_id(app, "manage-projects", "Manage Projects…", true, Some("CmdOrCtrl+Shift+M"))?,
+            &MenuItem::with_id(
+                app,
+                "new-project",
+                "New Project…",
+                true,
+                Some("CmdOrCtrl+N"),
+            )?,
+            &MenuItem::with_id(
+                app,
+                "open-project",
+                "Open Project…",
+                true,
+                Some("CmdOrCtrl+O"),
+            )?,
+            &MenuItem::with_id(
+                app,
+                "manage-projects",
+                "Manage Projects…",
+                true,
+                Some("CmdOrCtrl+Shift+M"),
+            )?,
             &MenuItem::with_id(app, "save-project", "Save Project As…", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "open-workspace", "Open Workspace…", true, Some("CmdOrCtrl+Shift+O"))?,
-            &MenuItem::with_id(app, "save-workspace", "Save Workspace As…", true, Some("CmdOrCtrl+Shift+S"))?,
+            &MenuItem::with_id(
+                app,
+                "open-workspace",
+                "Open Workspace…",
+                true,
+                Some("CmdOrCtrl+Shift+O"),
+            )?,
+            &MenuItem::with_id(
+                app,
+                "save-workspace",
+                "Save Workspace As…",
+                true,
+                Some("CmdOrCtrl+Shift+S"),
+            )?,
         ],
     )?;
     // VS Code-standard navigation accelerators. Tauri has no chord support, so
@@ -104,8 +194,20 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         "Go",
         true,
         &[
-            &MenuItem::with_id(app, "quick-open", "Quick Open File…", true, Some("CmdOrCtrl+P"))?,
-            &MenuItem::with_id(app, "find-in-files", "Find in Files…", true, Some("CmdOrCtrl+Shift+F"))?,
+            &MenuItem::with_id(
+                app,
+                "quick-open",
+                "Quick Open File…",
+                true,
+                Some("CmdOrCtrl+P"),
+            )?,
+            &MenuItem::with_id(
+                app,
+                "find-in-files",
+                "Find in Files…",
+                true,
+                Some("CmdOrCtrl+Shift+F"),
+            )?,
         ],
     )?;
     let window = Submenu::with_items(
@@ -206,7 +308,10 @@ pub fn run() {
                 } else {
                     "onnxruntime/libonnxruntime.so"
                 };
-                if let Ok(p) = app.path().resolve(lib, tauri::path::BaseDirectory::Resource) {
+                if let Ok(p) = app
+                    .path()
+                    .resolve(lib, tauri::path::BaseDirectory::Resource)
+                {
                     if p.exists() {
                         std::env::set_var("ORT_DYLIB_PATH", &p);
                     }

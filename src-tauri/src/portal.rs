@@ -254,7 +254,13 @@ pub async fn remote_enable(
         }
         return Ok(RemoteStatus::from(existing));
     }
-    let running = Running { addr, pin, public_ip, shutdown: sd_tx, listeners };
+    let running = Running {
+        addr,
+        pin,
+        public_ip,
+        shutdown: sd_tx,
+        listeners,
+    };
     let status = RemoteStatus::from(&running);
     *guard = Some(running);
     Ok(status)
@@ -325,7 +331,11 @@ struct AuthReq {
 async fn auth_handler(AxumState(p): AxumState<Portal>, Json(body): Json<AuthReq>) -> Response {
     if !ct_eq(body.pin.as_bytes(), p.pin.as_bytes()) {
         tokio::time::sleep(AUTH_TARPIT).await;
-        return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "bad pin" }))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "bad pin" })),
+        )
+            .into_response();
     }
     let token = gen_token();
     p.tokens.lock().unwrap().insert(token.clone());
@@ -418,7 +428,11 @@ async fn ws_conn(mut socket: WebSocket, p: Portal) {
 
     // Initial snapshot.
     let theme0 = p.theme.lock().unwrap().clone();
-    if out_tx.send(snapshot_msg(&p.app, theme0).await).await.is_err() {
+    if out_tx
+        .send(snapshot_msg(&p.app, theme0).await)
+        .await
+        .is_err()
+    {
         return;
     }
 
@@ -516,7 +530,10 @@ fn handle_client_msg(
             let app = p.app.clone();
             let out = out.clone();
             tokio::spawn(async move {
-                let msg = match app.state::<PtyManager>().spawn_headless(app.clone(), cwd, command) {
+                let msg = match app
+                    .state::<PtyManager>()
+                    .spawn_headless(app.clone(), cwd, command)
+                {
                     Ok(id) => json!({ "t": "spawned", "pty": id }),
                     Err(e) => json!({ "t": "spawn-error", "message": e }),
                 };
@@ -542,11 +559,17 @@ async fn stream_pty(app: AppHandle, id: u32, out: mpsc::Sender<String>) {
     loop {
         let attached = app.state::<PtyManager>().attach(id);
         let Some((cols, rows, snapshot, mut rx)) = attached else {
-            let _ = out.send(json!({ "t": "pty-gone", "pty": id }).to_string()).await;
+            let _ = out
+                .send(json!({ "t": "pty-gone", "pty": id }).to_string())
+                .await;
             return;
         };
         // Tell the client to clear, size to the PTY's grid, then re-seed.
-        if out.send(json!({ "t": "pty-reset", "pty": id }).to_string()).await.is_err() {
+        if out
+            .send(json!({ "t": "pty-reset", "pty": id }).to_string())
+            .await
+            .is_err()
+        {
             return;
         }
         if out
@@ -556,9 +579,7 @@ async fn stream_pty(app: AppHandle, id: u32, out: mpsc::Sender<String>) {
         {
             return;
         }
-        if !snapshot.is_empty()
-            && out.send(pty_chunk(id, &snapshot)).await.is_err()
-        {
+        if !snapshot.is_empty() && out.send(pty_chunk(id, &snapshot)).await.is_err() {
             return;
         }
         loop {
@@ -577,7 +598,9 @@ async fn stream_pty(app: AppHandle, id: u32, out: mpsc::Sender<String>) {
                 // Fell behind — break to the outer loop for a fresh snapshot.
                 Err(broadcast::error::RecvError::Lagged(_)) => break,
                 Err(broadcast::error::RecvError::Closed) => {
-                    let _ = out.send(json!({ "t": "pty-gone", "pty": id }).to_string()).await;
+                    let _ = out
+                        .send(json!({ "t": "pty-gone", "pty": id }).to_string())
+                        .await;
                     return;
                 }
             }
@@ -595,7 +618,9 @@ fn pty_chunk(id: u32, bytes: &[u8]) -> String {
 /// them. `ptys` is the authoritative live set (from PtyManager) so the client
 /// knows which agents are attachable without waiting on the pty:stats event.
 async fn snapshot_msg(app: &AppHandle, theme: Option<Value>) -> String {
-    let projects = crate::fsx::store_load().await.unwrap_or_else(|_| "null".into());
+    let projects = crate::fsx::store_load()
+        .await
+        .unwrap_or_else(|_| "null".into());
     let projects: Value = serde_json::from_str(&projects).unwrap_or(Value::Null);
     let sessions = crate::agents::session_digests().await.unwrap_or_default();
     let usage = crate::agents::agent_usage().await.unwrap_or_default();
@@ -672,7 +697,9 @@ fn qr_svg_of(data: &str) -> Option<String> {
         if *c == qrcode::Color::Dark {
             let x = i % w + quiet;
             let y = i / w + quiet;
-            rects.push_str(&format!("<rect x=\"{x}\" y=\"{y}\" width=\"1\" height=\"1\"/>"));
+            rects.push_str(&format!(
+                "<rect x=\"{x}\" y=\"{y}\" width=\"1\" height=\"1\"/>"
+            ));
         }
     }
     Some(format!(
@@ -737,7 +764,10 @@ mod tests {
     #[test]
     fn content_type_maps_common_extensions() {
         assert_eq!(content_type("index.html"), "text/html; charset=utf-8");
-        assert_eq!(content_type("assets/app.js"), "text/javascript; charset=utf-8");
+        assert_eq!(
+            content_type("assets/app.js"),
+            "text/javascript; charset=utf-8"
+        );
         assert_eq!(content_type("a.css"), "text/css; charset=utf-8");
         assert_eq!(content_type("logo.svg"), "image/svg+xml");
         assert_eq!(content_type("noext"), "application/octet-stream");
