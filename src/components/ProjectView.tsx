@@ -2135,8 +2135,20 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const busyPtyIds = new Set(
     projectStats.filter((s) => s.total_cpu > 10).map((s) => s.id),
   );
-  const tabStatus = (t: TermSubTab): "attention" | "working" | "idle" =>
-    t.unread ? "attention" : t.ptyId != null && busyPtyIds.has(t.ptyId) ? "working" : "idle";
+  // The tab dot's state. For an agent tab we use the authoritative session state
+  // — resolved through the live pty→session→digest binding the workspace uses —
+  // so the titlebar and the Agents panel never disagree, and `waiting` (blocked
+  // on you) and `ended` are shown as themselves rather than guessed. A plain
+  // shell, or an agent whose session we can't resolve yet, falls back to the CPU
+  // heuristic. `unread` (unseen activity) is layered on separately as a ring.
+  const tabState = (t: TermSubTab): "working" | "waiting" | "idle" | "ended" => {
+    if (isAgentTab(t) && t.ptyId != null) {
+      const sid = liveSessionByPty.get(t.ptyId);
+      const st = sid ? wsDigests.find((d) => d.session_id === sid)?.state : undefined;
+      if (st === "working" || st === "waiting" || st === "idle" || st === "ended") return st;
+    }
+    return t.ptyId != null && busyPtyIds.has(t.ptyId) ? "working" : "idle";
+  };
   const stripTabs = tabs.filter((t) => t.type !== "terminal" || !t.run);
   const shellTabs = stripTabs.filter(
     (t): t is TermSubTab => t.type === "terminal" && !isAgentTab(t),
@@ -2369,7 +2381,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 }
               >
                 {tab.type === "terminal" ? (
-                  <span className={`tab-status tab-status-${tabStatus(tab)}`} aria-hidden />
+                  <span
+                    className={`tab-status tab-status-${tabState(tab)} ${tab.unread ? "tab-status-unread" : ""}`}
+                    aria-hidden
+                  />
                 ) : tab.type === "pr" ? (
                   <PullRequestIcon size={12} className="tab-pr-icon" />
                 ) : tab.type === "ticket" ? (

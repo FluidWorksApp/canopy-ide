@@ -438,12 +438,18 @@ body,
 /* One status dot per agent tab, replacing the per-agent glyph. Gray steady =
    idle, green soft-pulse = working (burning CPU), orange sharp-pulse = wants
    attention. One signal, read at a glance across a row of tabs. */
+/* The tab's agent-state dot mirrors the authoritative session state (the same
+   states the Agents panel shows), so the titlebar and the panel never disagree:
+   working (green, breathing), waiting-on-you (amber, insistent), idle (solid
+   grey), ended (hollow grey). `unread` is an additive ring — unseen activity —
+   not a state of its own. */
 .tab-status {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   flex: 0 0 auto;
   background: var(--text-dim);
+  box-sizing: border-box;
 }
 
 .tab-status-working {
@@ -451,9 +457,24 @@ body,
   animation: tab-status-soft 1.5s ease-in-out infinite;
 }
 
-.tab-status-attention {
+.tab-status-waiting {
   background: var(--warn);
   animation: tab-status-sharp 0.85s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+/* Ended: the session is gone, distinct from a live-but-idle agent — hollow, so
+   a dead tab doesn't read as "quietly working". */
+.tab-status-ended {
+  background: transparent;
+  border: 1.5px solid var(--text-dim);
+  opacity: 0.7;
+}
+
+/* Unseen activity on a tab you're not looking at — a ring on top of whatever
+   state the dot already shows. */
+.tab-status-unread {
+  outline: 1.5px solid color-mix(in srgb, var(--warn) 60%, transparent);
+  outline-offset: 1.5px;
 }
 
 @keyframes tab-status-soft {
@@ -483,7 +504,7 @@ body,
 
 @media (prefers-reduced-motion: reduce) {
   .tab-status-working,
-  .tab-status-attention {
+  .tab-status-waiting {
     animation: none;
   }
 }
