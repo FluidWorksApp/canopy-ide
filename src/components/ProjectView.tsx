@@ -4,7 +4,7 @@
 // right-hand rails (single chip, or a dropdown once there's more than one).
 // Terminals stay mounted so TUIs keep running. Bottom status tray shows git
 // branch, agents, model, tokens, cost.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
@@ -246,6 +246,10 @@ type SubTab =
   | ReviewSubTab
   | AgentSubTab
   | ChatSubTab;
+
+/** Every tab that isn't a terminal — the "document" tabs, rendered together
+ *  below the terminals and display-toggled the same way. */
+type DocSubTab = Exclude<SubTab, TermSubTab>;
 
 const decoder = new TextDecoder();
 
@@ -2727,6 +2731,220 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     return () => window.removeEventListener("keydown", onKey);
   }, [wsDrawerOpen]);
 
+  // ---------- document tabs ----------
+  // Doc tabs used to render only while active, so switching away and back
+  // rebuilt the view from scratch: scroll jumped to the top, loaded data was
+  // refetched, and a preview reloaded its page (losing whatever you had it in
+  // the middle of). They now stay mounted and are display-toggled, exactly
+  // like the terminals above.
+  //
+  // The catch is that ProjectView re-renders often (pty stats tick every 2s),
+  // and re-rendering ten mounted views on each tick — PR diffs, editors —
+  // would be real work for nothing. So an inactive pane whose own tab data
+  // hasn't changed is handed back the SAME element it last rendered: React
+  // compares element identity and skips that subtree entirely. A pane is
+  // rebuilt when it's in front (so it always sees current props) or when its
+  // tab changed underneath it.
+  const docTabs = tabs.filter((t): t is DocSubTab => t.type !== "terminal");
+  const panes = useRef(new Map<string, { tab: DocSubTab; el: ReactNode }>());
+  useEffect(() => {
+    const live = new Set(tabs.map((t) => t.id));
+    for (const id of [...panes.current.keys()]) if (!live.has(id)) panes.current.delete(id);
+  }, [tabs]);
+  const paneFor = (tab: DocSubTab): ReactNode => {
+    const cached = panes.current.get(tab.id);
+    if (cached && cached.tab === tab && tab.id !== activeTabId) return cached.el;
+    const el = docTabView(tab);
+    panes.current.set(tab.id, { tab, el });
+    return el;
+  };
+
+  function docTabView(tab: DocSubTab): ReactNode {
+    switch (tab.type) {
+      case "branch":
+        return (
+          <BranchView
+            relay={relay}
+            repo={tab.repo}
+            branch={tab.branch}
+            onOpenCommit={openCommit}
+            onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
+            onNotice={onNotice}
+          />
+        );
+      case "agent":
+        return (
+          <AgentWorkspaceView
+            repo={tab.repo}
+            agent={tab.agent}
+            cwd={tab.cwd}
+            sessionId={tab.sessionId}
+            digest={tab.digest}
+            onOpenCommit={openCommit}
+            onOpenPr={openPr}
+            onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
+            onNotice={onNotice}
+            onMessageAgent={(text) =>
+              messageAgent({
+                sessionId: tab.sessionId,
+                agentId: tab.agent,
+                cwd: tab.cwd,
+                text,
+              })
+            }
+          />
+        );
+      case "commit":
+        return <CommitView repo={tab.repo} hash={tab.hash} onNotice={onNotice} />;
+      case "ticket":
+        return (
+          <TicketView
+            ticket={tab.ticket}
+            source={tab.source}
+            worktree={ticketWorktree(tab.ticket, ticketWorktrees)}
+            agentTargets={agentTargets}
+            installed={installed}
+            onStartNew={(agentId) => void startTicketWork(tab.ticket, agentId)}
+            onSendToAgent={(target) => sendTicketToAgent(target, ticketContext(tab.ticket))}
+          />
+        );
+      case "pr":
+        return (
+          <PrView
+            repo={tab.repo}
+            pr={tab.pr}
+            onNotice={onNotice}
+            relay={relay}
+            agentTargets={agentTargets}
+            installed={installed}
+            onStartReview={(agentId) => void startPrReview(tab.repo, tab.pr, agentId)}
+            onSendToAgent={(target) => sendTicketToAgent(target, prReviewContext(tab.pr))}
+            onStartResolve={(agentId) => void startPrConflictResolve(tab.repo, tab.pr, agentId)}
+            onSendResolve={(target) => sendTicketToAgent(target, prConflictContext(tab.pr))}
+          />
+        );
+      case "review":
+        return (
+          <ReviewView
+            review={tab.review}
+            agentBar={
+              <AgentQueryBar
+                agentTargets={agentTargets}
+                installed={installed}
+                newAgentLabel="New agent in this project"
+                label="Send to agent"
+                placeholder="Ask an agent to review this…"
+                onSend={(target, query) =>
+                  void writeReviewPatch(tab.review).then((path) => {
+                    if (path) sendTicketToAgent(target, reviewContext(tab.review, path, query));
+                  })
+                }
+                onStart={(agentId, query) =>
+                  void writeReviewPatch(tab.review).then((path) => {
+                    const dir = componentsRef.current[0]?.path;
+                    if (!path || !dir) return;
+                    startAgentInDir(
+                      dir,
+                      agentId,
+                      reviewContext(tab.review, path, query),
+                      `Review ${tab.review.branch}`,
+                    );
+                  })
+                }
+              />
+            }
+          />
+        );
+      case "preview":
+        return (
+          <PreviewView
+            tabId={tab.id}
+            url={tab.url}
+            annotations={tab.annotations}
+            onPatch={(patch) => patchTabRaw(tab.id, patch as Partial<SubTab>)}
+            servers={previewServers}
+            agentTargets={agentTargets}
+            installed={installed}
+            onSendToAgent={sendTicketToAgent}
+            onStartNew={(agentId, text, cwd) => {
+              // The serving component's checkout when the page is linked to
+              // one; the first component only as a last resort.
+              const dir = cwd ?? componentsRef.current[0]?.path;
+              if (!dir) {
+                onNotice("No project directory to start the agent in.");
+                return;
+              }
+              startAgentInDir(dir, agentId, text, "Preview feedback");
+            }}
+            onNotice={onNotice}
+          />
+        );
+      case "chat":
+        return <ChatView peer={tab.peer} title={tab.name} relay={relay} onNotice={onNotice} />;
+      case "collab": {
+        const session = relay.collab.get(tab.doc);
+        return session instanceof GuestSession ? (
+          <CollabView session={session} ownerName={tab.ownerName} onNotice={onNotice} />
+        ) : (
+          <div className="editor-empty">
+            <h2>{tab.name}</h2>
+            <p>This live session has ended.</p>
+          </div>
+        );
+      }
+      case "shared-project":
+        return (
+          <SharedProjectView
+            name={tab.name}
+            ownerName={tab.ownerName}
+            paths={relay.collab.joinedProjects.get(tab.doc)?.paths ?? []}
+            onOpen={(relPath) => relay.collab.openProjectFile(tab.doc, relPath)}
+          />
+        );
+      case "file":
+        return (
+          <FileView
+            file={tab.file}
+            onCursor={
+              // Only a shared file broadcasts a caret; every other tab passes
+              // undefined and the subscription in MonacoEditor short-circuits.
+              sharedDocFor(tab.file.path)
+                ? (anchor, head) => sendOwnerCursor(tab.file.path, anchor, head)
+                : undefined
+            }
+            onSave={() => void saveFile(tab.file.path)}
+            onDirty={(dirty) => {
+              if (tab.file.dirty !== dirty) patchFile(tab.file.path, { dirty });
+            }}
+            onAcceptExternal={() => acceptExternal(tab.file.path)}
+            onKeepMine={() => keepMine(tab.file.path)}
+            onCloseDiff={() => patchFile(tab.file.path, { view: "source", diffOriginal: null })}
+            diffAgentBar={
+              <AgentQueryBar
+                agentTargets={agentTargets}
+                installed={installed}
+                newAgentLabel="New agent in this project"
+                placeholder="Ask an agent about this file's changes…"
+                onSend={(target, query) =>
+                  sendTicketToAgent(target, fileDiffContext(tab.file.path, query))
+                }
+                onStart={(agentId, query) => {
+                  const dir = repoForFile(tab.file.path);
+                  if (!dir) return onNotice("No git repository in this project.");
+                  startAgentInDir(
+                    dir,
+                    agentId,
+                    fileDiffContext(tab.file.path, query),
+                    tab.file.name,
+                  );
+                }}
+              />
+            }
+          />
+        );
+    }
+  }
+
   const mainArea = (
     <div className="project-main">
       {tabMenu.menu && (
@@ -3192,222 +3410,21 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               />
             </div>
           ))}
-        {/* A non-terminal view throwing (a PR diff, an editor, a ticket) must
-            not take the app — or the running terminals beside it — down. Keyed
-            by tab so switching away from a crashed view clears the fallback.
-            Terminals stay outside: they're display-toggled, not unmounted, and
-            catching here would kill their PTYs. */}
-        <ErrorBoundary key={activeTab?.id ?? "none"} label="this tab">
-        {activeTab?.type === "branch" && (
-          <BranchView
-            relay={relay}
-            key={activeTab.id}
-            repo={activeTab.repo}
-            branch={activeTab.branch}
-            onOpenCommit={openCommit}
-            onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
-            onNotice={onNotice}
-          />
-        )}
-        {activeTab?.type === "agent" && (
-          <AgentWorkspaceView
-            key={activeTab.id}
-            repo={activeTab.repo}
-            agent={activeTab.agent}
-            cwd={activeTab.cwd}
-            sessionId={activeTab.sessionId}
-            digest={activeTab.digest}
-            onOpenCommit={openCommit}
-            onOpenPr={openPr}
-            onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
-            onNotice={onNotice}
-            onMessageAgent={(text) =>
-              messageAgent({
-                sessionId: activeTab.sessionId,
-                agentId: activeTab.agent,
-                cwd: activeTab.cwd,
-                text,
-              })
-            }
-          />
-        )}
-        {activeTab?.type === "commit" && (
-          <CommitView
-            key={activeTab.id}
-            repo={activeTab.repo}
-            hash={activeTab.hash}
-            onNotice={onNotice}
-          />
-        )}
-        {activeTab?.type === "ticket" && (
-          <TicketView
-            key={activeTab.id}
-            ticket={activeTab.ticket}
-            source={activeTab.source}
-            worktree={ticketWorktree(activeTab.ticket, ticketWorktrees)}
-            agentTargets={agentTargets}
-          installed={installed}
-            onStartNew={(agentId) => void startTicketWork(activeTab.ticket, agentId)}
-            onSendToAgent={(target) =>
-              sendTicketToAgent(target, ticketContext(activeTab.ticket))
-            }
-          />
-        )}
-        {activeTab?.type === "pr" && (
-          <PrView
-            key={activeTab.id}
-            repo={activeTab.repo}
-            pr={activeTab.pr}
-            onNotice={onNotice}
-            relay={relay}
-            agentTargets={agentTargets}
-            installed={installed}
-            onStartReview={(agentId) => void startPrReview(activeTab.repo, activeTab.pr, agentId)}
-            onSendToAgent={(target) => sendTicketToAgent(target, prReviewContext(activeTab.pr))}
-            onStartResolve={(agentId) =>
-              void startPrConflictResolve(activeTab.repo, activeTab.pr, agentId)
-            }
-            onSendResolve={(target) => sendTicketToAgent(target, prConflictContext(activeTab.pr))}
-          />
-        )}
-        {activeTab?.type === "review" && (
-          <ReviewView
-            key={activeTab.id}
-            review={activeTab.review}
-            agentBar={
-              <AgentQueryBar
-                agentTargets={agentTargets}
-                installed={installed}
-                newAgentLabel="New agent in this project"
-                label="Send to agent"
-                placeholder="Ask an agent to review this…"
-                onSend={(target, query) =>
-                  void writeReviewPatch(activeTab.review).then((path) => {
-                    if (path) sendTicketToAgent(target, reviewContext(activeTab.review, path, query));
-                  })
-                }
-                onStart={(agentId, query) =>
-                  void writeReviewPatch(activeTab.review).then((path) => {
-                    const dir = componentsRef.current[0]?.path;
-                    if (!path || !dir) return;
-                    startAgentInDir(
-                      dir,
-                      agentId,
-                      reviewContext(activeTab.review, path, query),
-                      `Review ${activeTab.review.branch}`,
-                    );
-                  })
-                }
-              />
-            }
-          />
-        )}
-        {activeTab?.type === "preview" && (
-          <PreviewView
-            key={activeTab.id}
-            tabId={activeTab.id}
-            url={activeTab.url}
-            annotations={activeTab.annotations}
-            onPatch={(patch) => patchTabRaw(activeTab.id, patch as Partial<SubTab>)}
-            servers={previewServers}
-            agentTargets={agentTargets}
-            installed={installed}
-            onSendToAgent={sendTicketToAgent}
-            onStartNew={(agentId, text, cwd) => {
-              // The serving component's checkout when the page is linked to
-              // one; the first component only as a last resort.
-              const dir = cwd ?? componentsRef.current[0]?.path;
-              if (!dir) {
-                onNotice("No project directory to start the agent in.");
-                return;
-              }
-              startAgentInDir(dir, agentId, text, "Preview feedback");
-            }}
-            onNotice={onNotice}
-          />
-        )}
-        {activeTab?.type === "chat" && (
-          <ChatView
-            key={activeTab.id}
-            peer={activeTab.peer}
-            title={activeTab.name}
-            relay={relay}
-            onNotice={onNotice}
-          />
-        )}
-        {activeTab?.type === "collab" &&
-          (() => {
-            const session = relay.collab.get(activeTab.doc);
-            return session instanceof GuestSession ? (
-              <CollabView
-                key={activeTab.id}
-                session={session}
-                ownerName={activeTab.ownerName}
-                onNotice={onNotice}
-              />
-            ) : (
-              <div className="editor-empty">
-                <h2>{activeTab.name}</h2>
-                <p>This live session has ended.</p>
-              </div>
-            );
-          })()}
-        {activeTab?.type === "shared-project" && (
-          <SharedProjectView
-            key={activeTab.id}
-            name={activeTab.name}
-            ownerName={activeTab.ownerName}
-            paths={relay.collab.joinedProjects.get(activeTab.doc)?.paths ?? []}
-            onOpen={(relPath) => relay.collab.openProjectFile(activeTab.doc, relPath)}
-          />
-        )}
-        {activeTab?.type === "file" && (
-          <FileView
-            key={activeTab.id}
-            file={activeTab.file}
-            onCursor={
-              // Only a shared file broadcasts a caret; every other tab passes
-              // undefined and the subscription in MonacoEditor short-circuits.
-              sharedDocFor(activeTab.file.path)
-                ? (anchor, head) => sendOwnerCursor(activeTab.file.path, anchor, head)
-                : undefined
-            }
-            onSave={() => void saveFile(activeTab.file.path)}
-            onDirty={(dirty) => {
-              if (activeTab.file.dirty !== dirty) patchFile(activeTab.file.path, { dirty });
-            }}
-            onAcceptExternal={() => acceptExternal(activeTab.file.path)}
-            onKeepMine={() => keepMine(activeTab.file.path)}
-            onCloseDiff={() =>
-              patchFile(activeTab.file.path, { view: "source", diffOriginal: null })
-            }
-            diffAgentBar={
-              <AgentQueryBar
-                agentTargets={agentTargets}
-                installed={installed}
-                newAgentLabel="New agent in this project"
-                placeholder="Ask an agent about this file's changes…"
-                onSend={(target, query) =>
-                  sendTicketToAgent(
-                    target,
-                    fileDiffContext(activeTab.file.path, query),
-                  )
-                }
-                onStart={(agentId, query) => {
-                  const dir = repoForFile(activeTab.file.path);
-                  if (!dir) return onNotice("No git repository in this project.");
-                  startAgentInDir(
-                    dir,
-                    agentId,
-                    fileDiffContext(activeTab.file.path, query),
-                    activeTab.file.name,
-                  );
-                }}
-              />
-            }
-          />
-        )}
-        </ErrorBoundary>
+        {/* Doc tabs, mounted for as long as they're open and shown by display
+            like the terminals above — see docTabView. Each pane carries its own
+            boundary: a view throwing (a PR diff, an editor, a ticket) must not
+            take the app — or the running terminals beside it — down, and only
+            the offending tab shows the fallback ("Reload this panel" clears it).
+            Terminals stay outside: catching around them would kill their PTYs. */}
+        {docTabs.map((tab) => (
+          <div
+            key={tab.id}
+            className="fill doc-host"
+            style={{ display: tab.id === activeTabId && visible ? "block" : "none" }}
+          >
+            <ErrorBoundary label="this tab">{paneFor(tab)}</ErrorBoundary>
+          </div>
+        ))}
         {tabs.length === 0 && (
           <div className="editor-empty">
             <h2>{project.name}</h2>
