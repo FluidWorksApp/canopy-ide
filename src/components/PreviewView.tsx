@@ -267,6 +267,33 @@ export function PreviewView({
       navWaiters.current.push({ id: op.id, timer });
       return;
     }
+    if (op.op === "screenshot") {
+      // Pixels, not structure: the DOM snapshot can say a button exists, not
+      // that it's sitting on top of the heading. Captured through the webview's
+      // own snapshot API, cropped to this iframe's rect.
+      const rect = iframeRef.current?.getBoundingClientRect();
+      if (!rect || rect.width < 1 || rect.height < 1) {
+        void ipc.browserResult(
+          op.id,
+          false,
+          "The preview isn't visible on screen right now, so there's nothing to capture.",
+        );
+        return;
+      }
+      void ipc
+        .webviewSnapshot(rect.x, rect.y, rect.width, rect.height, op.max ?? undefined)
+        .then((image) =>
+          ipc.browserResult(op.id, true, {
+            image,
+            mimeType: "image/png",
+            url: urlRef.current,
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+          }),
+        )
+        .catch((err) => ipc.browserResult(op.id, false, String(err)));
+      return;
+    }
     const timer = window.setTimeout(() => {
       pendingOps.current.delete(op.id);
       void ipc.browserResult(

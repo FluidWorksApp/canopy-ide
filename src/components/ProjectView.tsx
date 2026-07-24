@@ -4,18 +4,26 @@
 // right-hand rails (single chip, or a dropdown once there's more than one).
 // Terminals stay mounted so TUIs keep running. Bottom status tray shows git
 // branch, agents, model, tokens, cost.
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
 import { modelFor, monaco, languageForPath } from "../monaco-setup";
+import { getCaret, subscribeCaret } from "../editorState";
 import { GuestSession, OwnerSession } from "../collab";
 import { CollabView } from "./CollabView";
 import { SharedProjectView } from "./SharedProjectView";
 import type { AgentCli, Project } from "../projects";
 import {
   AGENT_CLIS,
-  AGENT_PATTERN,
   SHELL_PATTERN,
   checkCliUpdates,
   checkInstalledClis,
@@ -77,6 +85,7 @@ import { FileView } from "./FileView";
 import { ChangesPanel, type ChangeGroup } from "./ChangesPanel";
 import { useEscape } from "../useEscape";
 import { useTabDrag, applyOrder } from "../tabDrag";
+import { agentIdForCommand, identifyAgent } from "../agentIdentity";
 import { AgentsPanel, digestBySurface } from "./AgentsPanel";
 import { StatusBar } from "./StatusBar";
 import { Palette, type PaletteMode } from "./Palette";
@@ -263,6 +272,37 @@ type SubTab =
 /** Every tab that isn't a terminal — the "document" tabs, rendered together
  *  below the terminals and display-toggled the same way. */
 type DocSubTab = Exclude<SubTab, TermSubTab>;
+
+/** One tab as canopy_editor_state describes it: enough for an agent to know
+ *  what the user has in front of them, without shipping the tab's contents. */
+function describeTab(tab: SubTab | undefined) {
+  if (!tab) return null;
+  switch (tab.type) {
+    case "file":
+      return { kind: "file", path: tab.file.path, view: tab.file.view, dirty: tab.file.dirty };
+    case "terminal":
+      return {
+        kind: tab.run ? "run" : "terminal",
+        label: tab.customTitle ?? tab.title,
+        cwd: tab.cwd,
+        ptyId: tab.ptyId,
+      };
+    case "preview":
+      return { kind: "preview", url: tab.url || null };
+    case "ticket":
+      return { kind: "ticket", label: tab.ticket.title };
+    case "pr":
+      return { kind: "pr", label: `#${tab.pr.number} ${tab.pr.title}` };
+    case "commit":
+      return { kind: "commit", label: `${tab.short} ${tab.subject}` };
+    case "branch":
+      return { kind: "branch", label: tab.branch.branch };
+    case "agent":
+      return { kind: "agent", label: tab.agent, cwd: tab.cwd, ptyId: tab.ptyId ?? null };
+    default:
+      return { kind: tab.type };
+  }
+}
 
 const decoder = new TextDecoder();
 
@@ -504,6 +544,9 @@ interface ProjectViewProps {
 
 export function ProjectView({ project, visible, zen, events, hookPath, allProjects, dismissedPending, onDismissPending, onEdit, onNotice, onShareContext, relay }: ProjectViewProps) {
   const [sideTab, setSideTab] = useState<SideTab>("files");
+  // Monaco's caret, for the context snapshot. Subscribed rather than passed
+  // down: the editor sits several components below, and this is read-only.
+  const caret = useSyncExternalStore(subscribeCaret, getCaret);
   const [collapsed, setCollapsed] = useState(false);
   const [tabs, setTabs] = useState<SubTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
@@ -587,7 +630,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       );
       const mine = all.filter((s) => ids.has(s.id));
       for (const s of mine) {
-        const hasAgent = s.procs.some((p) => AGENT_PATTERN.test(p.name));
+        const hasAgent = !!identifyAgent(s.agent_hint);
         if (hasAgent) {
           agentLife.current.set(s.id, 0);
         } else if (agentLife.current.has(s.id)) {
@@ -595,9 +638,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           // work — a server, a build, any non-shell/non-agent process still
           // running — it's a working shell now, not a spent agent shell:
           // stop tracking it and never auto-close it out from under them.
-          const hasRealWork = s.procs.some(
-            (p) => !SHELL_PATTERN.test(p.name) && !AGENT_PATTERN.test(p.name),
-          );
+          const hasRealWork = s.procs.some((p) => !SHELL_PATTERN.test(p.name));
           if (hasRealWork) {
             agentLife.current.delete(s.id);
           } else {
@@ -609,7 +650,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               );
               // A launched agent tab (command matches) or a run stays put; only
               // an idle plain shell that hosted a now-exited agent gets closed.
-              if (tab && !tab.run && !AGENT_PATTERN.test(tab.command ?? "")) {
+              if (tab && !tab.run && !agentIdForCommand(tab.command)) {
                 closeTabRef.current(tab.id);
               }
             } else {
@@ -1086,12 +1127,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // A terminal running `claude` or `omp` is an agent, not a shell — listing it
   // under "Terminals" was accurate about the mechanism and wrong about the
   // thing. Split by what the command actually starts.
-  const rememberedAgents = remembered.filter((t) =>
-    AGENT_CLIS.some((c) => (t.command ?? "").startsWith(c.bin)),
-  );
-  const rememberedShells = remembered.filter(
-    (t) => !AGENT_CLIS.some((c) => (t.command ?? "").startsWith(c.bin)),
-  );
+  const rememberedAgents = remembered.filter((t) => agentIdForCommand(t.command));
+  const rememberedShells = remembered.filter((t) => !agentIdForCommand(t.command));
   // An agent terminal whose directory already has a restorable session is
   // redundant — that row restores the same work WITH its history, so offering
   // "start it fresh" beside it is just a worse duplicate.
@@ -1771,6 +1808,20 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         if (existing && !existing.exited) setActiveTabId(existing.id);
         else if (existing) restartRun(existing.id);
         else addTerminal(a.dir, a.command, a.name || a.command, "▶", true);
+      } else if ((a.kind === "open_file" || a.kind === "show_diff") && a.path) {
+        // "Look at line 340" — put the file in front of the user and land on
+        // the line. The reveal is an event because the tab may already be open,
+        // and because opening is async either way.
+        const path = a.path;
+        const line = a.line;
+        void openFileRef.current(path, { diff: a.kind === "show_diff" }).then(() => {
+          if (line)
+            requestAnimationFrame(() =>
+              window.dispatchEvent(
+                new CustomEvent("canopy:reveal-line", { detail: { path, line } }),
+              ),
+            );
+        });
       }
     };
     window.addEventListener("canopy:agent-action", onAction);
@@ -2231,11 +2282,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     },
     [addTerminal],
   );
-  const runningAgents = projectStats.flatMap((s) =>
-    s.procs
-      .filter((p) => AGENT_PATTERN.test(p.name))
-      .map((p) => ({ name: p.name, cpu: p.cpu })),
-  );
+  const runningAgents = projectStats.flatMap((s) => {
+    const agent = identifyAgent(s.agent_hint);
+    return agent ? [{ name: agent.label, cpu: s.total_cpu }] : [];
+  });
   const changedPaths = new Set(changeGroups.flatMap((g) => g.files.map((f) => f.abs)));
   const changeCount = changeGroups.reduce((n, g) => n + g.files.length, 0);
   // Files teammates are editing live in a project we're sharing — no git
@@ -2280,9 +2330,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         (t): t is TermSubTab => t.type === "terminal",
       );
       const agentPtyIds = new Set(
-        stats
-          .filter((s) => s.procs.some((p) => AGENT_PATTERN.test(p.name)))
-          .map((s) => s.id),
+        stats.filter((s) => identifyAgent(s.agent_hint)).map((s) => s.id),
       );
       const target =
         // The event's own pty stamp is an identity, not a guess — prefer it.
@@ -2533,14 +2581,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // long-running commands are demoted to their own right-hand rails (below);
   // reference docs (files, PRs, tickets) form a quieter group after the agents.
   const agentPtyIds = new Set(
-    projectStats
-      .filter((s) => s.procs.some((p) => AGENT_PATTERN.test(p.name)))
-      .map((s) => s.id),
+    projectStats.filter((s) => identifyAgent(s.agent_hint)).map((s) => s.id),
   );
   const isAgentTab = (t: SubTab): t is TermSubTab =>
     t.type === "terminal" &&
-    (AGENT_PATTERN.test(t.command ?? "") ||
-      (t.ptyId != null && agentPtyIds.has(t.ptyId)));
+    (!!agentIdForCommand(t.command) || (t.ptyId != null && agentPtyIds.has(t.ptyId)));
   // A single dot carries an agent tab's whole state: orange sharp-pulse when it
   // wants attention (unread — set by OSC or the went-quiet heuristic), gray
   // soft-pulse while its work burns CPU, gray steady when idle.
@@ -2817,6 +2862,18 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       previews: tabs
         .filter((t): t is PreviewSubTab => t.type === "preview")
         .map((t) => ({ url: t.url || null, annotations: t.annotations.length })),
+      // What the user is looking at (canopy_editor_state) — the tab in front of
+      // them, the caret, the selection. Deixis: "fix this" has a referent, and
+      // this is it.
+      editor: {
+        focused: visible,
+        activeTab: describeTab(tabs.find((t) => t.id === activeTabId)),
+        openTabs: tabs.map(describeTab).filter(Boolean),
+        caret:
+          caret && tabs.some((t) => t.type === "file" && t.file.path === caret.path)
+            ? caret
+            : null,
+      },
     });
     if (snapshot !== lastContextRef.current) {
       lastContextRef.current = snapshot;

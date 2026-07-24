@@ -157,6 +157,12 @@ export interface Settings {
   /** Micro-tasks the user wrote themselves (Tasks panel). App-wide: a task
    *  like "changelog entry" is about how the user works, not about one repo. */
   customMicroTasks: CustomMicroTask[];
+  /** canopy_* MCP tools the user switched off (Settings → Agents). Stored as
+   *  the exceptions, not the whole set, so a tool added in a later version is
+   *  on by default rather than invisible to everyone who ever opened this
+   *  screen. Published to the bridge, where the sidecar filters its tool list —
+   *  a disabled tool costs the agent no context at all. */
+  disabledTools: string[];
 
   // ---- Voice dictation ----
   /** Hotkey that toggles dictation (start/insert). */
@@ -203,6 +209,7 @@ const DEFAULTS: Settings = {
   autoHibernate: false,
   maxLiveAgents: 8,
   customMicroTasks: [],
+  disabledTools: [],
   trackerKeys: {},
   theme: "default",
   customAccent: "",

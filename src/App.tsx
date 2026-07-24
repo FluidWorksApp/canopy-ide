@@ -15,6 +15,8 @@ import {
 } from "./projects";
 import type { AgentEventEntry, NoticeKind, RelayHandle } from "./types";
 import { derivePending, pendingForRoots } from "./notifications";
+import { runUiOp } from "./agentOps";
+import { getSettings, THEME_CHANGE_EVENT } from "./settings";
 import { useTabDrag } from "./tabDrag";
 import { CollabManager, safeName } from "./collab";
 import { ProjectView } from "./components/ProjectView";
@@ -22,6 +24,7 @@ import { ProjectDialog } from "./components/ProjectDialog";
 import { ProjectManager } from "./components/ProjectManager";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { HelpDialog } from "./components/HelpDialog";
+import { AskDialog } from "./components/AskDialog";
 import { AboutDialog } from "./components/AboutDialog";
 import { Dictation } from "./components/Dictation";
 import { Onboarding } from "./components/Onboarding";
@@ -125,6 +128,18 @@ export default function App() {
   const [relayChat, setRelayChat] = useState<ipc.RelayChatMsg[]>([]);
   const [relayInbox, setRelayInbox] = useState<ipc.RelayCommandMsg[]>([]);
   const [relayTransfers, setRelayTransfers] = useState<import("./types").RelayTransfer[]>([]);
+  // The agent-facing ops read the inbox from an event handler that outlives any
+  // one render, so they read it through a ref.
+  const relayInboxRef = useRef(relayInbox);
+  relayInboxRef.current = relayInbox;
+  /** A question an agent put to the user (canopy_ask_user), held until they
+   *  answer — the agent's tool call is parked on the other end of `resolve`. */
+  const [ask, setAsk] = useState<{
+    id: number;
+    question: string;
+    options: string[];
+    resolve: (answer: string) => void;
+  } | null>(null);
   const relayIntentional = useRef(false);
   const prevRelayRole = useRef(relayStatus.role);
   useEffect(() => {
@@ -582,6 +597,16 @@ export default function App() {
     if (loaded && shouldOnboard()) setOnboarding(true);
   }, [loaded]);
 
+  // Keep the bridge's copy of the tool switches (Settings → Agents) current.
+  // Republished on every settings write, because the sidecar reads it when an
+  // agent asks for its tool list — which can be at any moment.
+  useEffect(() => {
+    const publish = () => void ipc.contextTools(getSettings().disabledTools);
+    publish();
+    window.addEventListener(THEME_CHANGE_EVENT, publish);
+    return () => window.removeEventListener(THEME_CHANGE_EVENT, publish);
+  }, []);
+
   // `canopy <dir>` delivery. Cold start: the arg waited in Rust state while
   // the webview booted — collect it once the workspace is loaded (opening a
   // project before load would be clobbered by setWs). Warm: a second CLI
@@ -780,6 +805,15 @@ export default function App() {
           );
           return;
         }
+        // An agent reaching for the user (canopy_notify) — often one running in
+        // a terminal nobody is watching. It belongs to no project in
+        // particular, so it lands as a notice here rather than being routed.
+        if (a.kind === "notify") {
+          notify(a.text ?? "", (a.level ?? "info") as NoticeKind);
+          if (a.level === "error" || a.level === "warn")
+            void nativeNotify("Canopy — Agent", a.text ?? "");
+          return;
+        }
         const projectId =
           projectForCwd(a.route) ??
           // A worktree the agent runs in follows `<repo>-wt-…`; fall back to the
@@ -851,6 +885,64 @@ export default function App() {
             ),
           80,
         );
+      })
+      .then((u) => {
+        un = u;
+      });
+    return () => un?.();
+  }, []);
+
+  // The ops only this window can answer (canopy_diagnostics, canopy_references,
+  // canopy_definition, canopy_tickets, canopy_reviews, canopy_ask_user). Unlike
+  // the browser ops these need no tab, so they're answered here: find the
+  // project the agent is working in, hand it the roots and repos, answer.
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    void ipc
+      .onAgentUi(async (op) => {
+        const norm = (p: string) => p.replace(/\/+$/, "");
+        const project =
+          wsRef.current.projects.find((p) =>
+            p.components.some((c) => {
+              const r = norm(c.path);
+              const cwd = norm(op.route);
+              return r && (cwd === r || cwd.startsWith(r + "/"));
+            }),
+          ) ??
+          (wsRef.current.openIds.length === 1
+            ? wsRef.current.projects.find((p) => p.id === wsRef.current.openIds[0])
+            : undefined);
+        const roots = project?.components.map((c) => c.path) ?? [];
+        // An "ask" needs no project — a background agent with a question is
+        // exactly the case where its cwd may be a worktree we don't track.
+        if (!roots.length && op.op !== "ask") {
+          void ipc.browserResult(
+            op.id,
+            false,
+            "This session's directory isn't inside any open Canopy project, so the IDE has nothing to answer with.",
+          );
+          return;
+        }
+        try {
+          const repos = project
+            ? await ipc
+                .gitRepos(project.components.map((c) => [c.label, c.path] as [string, string]))
+                .then((rs) => [...new Set(rs.map((r) => r.path))])
+                .catch(() => [])
+            : [];
+          const data = await runUiOp(op, {
+            roots,
+            repos,
+            inbox: relayInboxRef.current,
+            ask: (question, options) =>
+              new Promise<string>((resolve) => {
+                setAsk({ id: op.id, question, options, resolve });
+              }),
+          });
+          void ipc.browserResult(op.id, true, data);
+        } catch (err) {
+          void ipc.browserResult(op.id, false, String(err instanceof Error ? err.message : err));
+        }
       })
       .then((u) => {
         un = u;
@@ -1207,6 +1299,17 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {ask && (
+        <AskDialog
+          question={ask.question}
+          options={ask.options}
+          onAnswer={(answer) => {
+            ask.resolve(answer);
+            setAsk(null);
+          }}
+        />
       )}
 
       {dialog && (
