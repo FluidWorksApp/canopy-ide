@@ -17,6 +17,7 @@ mod preview;
 mod pty;
 mod punch;
 mod relay;
+mod snapshot;
 mod tunnel;
 mod winproc;
 mod wsbridge;
@@ -452,7 +453,11 @@ pub fn run() {
             preview::preview_stop,
             context::context_publish,
             context::context_remove,
+            context::context_tools,
+            context::context_claims,
+            context::context_release_claim,
             context::browser_result,
+            snapshot::webview_snapshot,
             portal::remote_enable,
             portal::remote_disable,
             portal::remote_status,

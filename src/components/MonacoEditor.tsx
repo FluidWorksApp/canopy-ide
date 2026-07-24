@@ -4,6 +4,7 @@
 import { useEffect, useRef } from "react";
 import { monaco } from "../monaco-setup";
 import { getSettings, THEME_CHANGE_EVENT } from "../settings";
+import { setCaret, truncateSelection } from "../editorState";
 
 interface MonacoEditorProps {
   model: monaco.editor.ITextModel;
@@ -61,10 +62,25 @@ export function MonacoEditor({ model, onSave, onDirty, onCursor }: MonacoEditorP
     // dead callback rather than the subscription being torn down and rebuilt
     // every time the parent re-renders.
     const cursorSub = editor.onDidChangeCursorSelection((e) => {
-      const cb = cursorRef.current;
-      if (!cb) return;
       const m = editor.getModel();
       if (!m) return;
+      // Same event feeds the agent tools: where the caret is, and what is
+      // highlighted, is the context behind every "fix this".
+      const head = e.selection.getPosition();
+      setCaret({
+        path: m.uri.path,
+        line: head.lineNumber,
+        column: head.column,
+        ...(e.selection.isEmpty()
+          ? {}
+          : {
+              selection: truncateSelection(m.getValueInRange(e.selection)),
+              selectionStartLine: e.selection.startLineNumber,
+              selectionEndLine: e.selection.endLineNumber,
+            }),
+      });
+      const cb = cursorRef.current;
+      if (!cb) return;
       cb(
         m.getOffsetAt(e.selection.getStartPosition()),
         m.getOffsetAt(e.selection.getEndPosition()),
@@ -82,8 +98,25 @@ export function MonacoEditor({ model, onSave, onDirty, onCursor }: MonacoEditorP
     const editor = editorRef.current;
     if (!editor) return;
     editor.setModel(model);
+    const pos = editor.getPosition();
+    setCaret({ path: model.uri.path, line: pos?.lineNumber ?? 1, column: pos?.column ?? 1 });
     const sub = model.onDidChangeContent(() => dirtyRef.current(true));
-    return () => sub.dispose();
+    // An agent that says "look at line 340" (canopy_open_file) reaches the
+    // editor here: the tab may already have been open, so this can't ride on
+    // the open path alone.
+    const reveal = (e: Event) => {
+      const d = (e as CustomEvent).detail as { path?: string; line?: number };
+      if (!d?.path || !d.line || model.uri.path !== d.path) return;
+      const line = Math.max(1, Math.min(d.line, model.getLineCount()));
+      editor.revealLineInCenter(line);
+      editor.setPosition({ lineNumber: line, column: 1 });
+      editor.focus();
+    };
+    window.addEventListener("canopy:reveal-line", reveal);
+    return () => {
+      window.removeEventListener("canopy:reveal-line", reveal);
+      sub.dispose();
+    };
   }, [model]);
 
   return <div className="fill" ref={containerRef} />;

@@ -23,6 +23,7 @@ import * as ipc from "../ipc";
 import { availableMonoFonts, fontLabel, fontStack } from "../fonts";
 import { AgentIcon, TrackerIcon } from "./icons";
 import { AGENT_CLIS, currentPlatform } from "../projects";
+import { AGENT_TOOL_GROUPS, ALL_AGENT_TOOLS } from "../agentTools";
 
 export type SettingsTab =
   | "appearance"
@@ -261,19 +262,92 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   name="Default agent"
                   desc="The CLI the primary Start button launches; you can pick another per ticket."
                 >
-                  <div className="skin-grid">
+                  {/* Chips, not cards: picking a CLI is a one-line choice, and
+                      the card grid took half the page to say it. */}
+                  <div className="agent-chips">
                     {AGENT_CLIS.map((cli) => (
                       <button
                         key={cli.id}
-                        className={`skin-card ${s.defaultAgent === cli.id ? "skin-card-active" : ""}`}
+                        className={`agent-chip ${s.defaultAgent === cli.id ? "agent-chip-active" : ""}`}
                         onClick={() => patch({ defaultAgent: cli.id })}
                       >
-                        <span className="agent-card-mark">
-                          <AgentIcon id={cli.id} size={22} />
-                        </span>
-                        <span className="skin-name">{cli.name}</span>
+                        <AgentIcon id={cli.id} size={16} />
+                        <span>{cli.name}</span>
                       </button>
                     ))}
+                  </div>
+                </Item>
+                <Item
+                  name="Tools available"
+                  desc="What an agent running in a Canopy terminal can do through the built-in MCP server. Switching one off removes it from the agent's tool list entirely — it costs no context and can't be called."
+                >
+                  <div className="tool-groups">
+                    <div className="tool-bulk">
+                      <span className="tool-count">
+                        {ALL_AGENT_TOOLS.length - s.disabledTools.length} of{" "}
+                        {ALL_AGENT_TOOLS.length} on
+                      </span>
+                      <button className="btn btn-small" onClick={() => patch({ disabledTools: [] })}>
+                        Enable all
+                      </button>
+                      <button
+                        className="btn btn-small"
+                        onClick={() => patch({ disabledTools: [...ALL_AGENT_TOOLS] })}
+                      >
+                        Disable all
+                      </button>
+                    </div>
+                    {AGENT_TOOL_GROUPS.map((group) => {
+                      const off = group.tools.filter((t) => s.disabledTools.includes(t.name));
+                      const allOff = off.length === group.tools.length;
+                      return (
+                        <div key={group.id} className="tool-group">
+                          <div className="tool-group-head">
+                            <label className="set-inline-check">
+                              <input
+                                type="checkbox"
+                                checked={!allOff}
+                                ref={(el) => {
+                                  if (el) el.indeterminate = off.length > 0 && !allOff;
+                                }}
+                                onChange={() => {
+                                  const names = group.tools.map((t) => t.name);
+                                  patch({
+                                    disabledTools: allOff
+                                      ? s.disabledTools.filter((n) => !names.includes(n))
+                                      : [...new Set([...s.disabledTools, ...names])],
+                                  });
+                                }}
+                              />
+                              <span className="tool-group-name">{group.label}</span>
+                            </label>
+                            <span className="tool-group-blurb">{group.blurb}</span>
+                          </div>
+                          <div className="tool-list">
+                            {group.tools.map((tool) => {
+                              const on = !s.disabledTools.includes(tool.name);
+                              return (
+                                <label key={tool.name} className="tool-row" title={tool.name}>
+                                  <input
+                                    type="checkbox"
+                                    checked={on}
+                                    onChange={() =>
+                                      patch({
+                                        disabledTools: on
+                                          ? [...s.disabledTools, tool.name]
+                                          : s.disabledTools.filter((n) => n !== tool.name),
+                                      })
+                                    }
+                                  />
+                                  <span className="tool-name">{tool.label}</span>
+                                  <span className="tool-note">{tool.note}</span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </Item>
                 <Item
