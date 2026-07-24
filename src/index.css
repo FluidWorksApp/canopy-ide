@@ -7377,11 +7377,27 @@ a.btn-mini {
   100%     { opacity: 0; transform: translateY(4px); }
 }
 
-/* a selection that switches at the click */
+/* a selection that switches at the click. Both variants share one slot so the
+   hidden one reserves no width — otherwise the row visibly shifts on the flip. */
+.ob-swap { display: inline-grid; }
+.ob-swap > * { grid-area: 1 / 1; }
 .ob-flip-off { animation: ob-flip-off var(--dur) steps(1) infinite; }
 .ob-flip-on { animation: ob-flip-on var(--dur) steps(1) infinite; }
 @keyframes ob-flip-off { 0%, 40% { opacity: 1; } 41%, 100% { opacity: 0; } }
 @keyframes ob-flip-on { 0%, 40% { opacity: 0; } 41%, 100% { opacity: 1; } }
+
+/* Active-tab swap: the highlight moves between two real tabs (no duplicate tab
+   reserving width). tabon = inactive→active at the click, taboff = the reverse. */
+.ob-tabon { animation: ob-tab-on var(--dur) steps(1) infinite; }
+.ob-taboff { animation: ob-tab-off var(--dur) steps(1) infinite; }
+@keyframes ob-tab-on {
+  0%, 40% { color: var(--text-dim); background: var(--bg-raised); border-color: transparent; font-weight: 400; }
+  41%, 100% { color: var(--text); background: var(--bg); border-color: var(--border); font-weight: 600; }
+}
+@keyframes ob-tab-off {
+  0%, 40% { color: var(--text); background: var(--bg); border-color: var(--border); font-weight: 600; }
+  41%, 100% { color: var(--text-dim); background: var(--bg-raised); border-color: transparent; font-weight: 400; }
+}
 
 /* a line that types itself in */
 .ob-type {
