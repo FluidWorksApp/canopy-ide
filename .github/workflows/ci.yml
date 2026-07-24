@@ -62,6 +62,15 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
 
+      # tauri-build checks that externalBin paths exist before it emits metadata,
+      # even for `cargo test`. The real binary is built by prepare-sidecar.mjs
+      # (release-only). A zero-byte placeholder satisfies the existence check
+      # without needing the full sidecar build in CI.
+      - name: Stub hook sidecar for CI
+        run: |
+          mkdir -p src-tauri/binaries
+          touch src-tauri/binaries/canopy-hook-x86_64-unknown-linux-gnu
+
       # Dictation (ONNX Runtime) is compiled OUT here: staging the runtime is
       # release-only machinery, the feature has no logic these unit tests cover,
       # and --no-default-features is the exact configuration the Intel-macOS
