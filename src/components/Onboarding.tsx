@@ -176,8 +176,9 @@ const SLIDES: Slide[] = [
     mock: (
       <Scene vars={{ "--cx0": "60px", "--cy0": "22px", "--cx1": "168px", "--cy1": "12px" } as React.CSSProperties}>
         <div className="ob-ptabs">
-          <span className="ob-ptab sel">canopy</span><span className="ob-ptab ob-flip-off">banana-app</span>
-          <span className="ob-ptab sel ob-flip-on">banana-app</span><span className="ob-ptab-add">＋</span>
+          <span className="ob-ptab ob-taboff">canopy</span>
+          <span className="ob-ptab ob-tabon">banana-app</span>
+          <span className="ob-ptab-add">＋</span>
         </div>
         <div className="ob-cmphead">COMPONENTS</div>
         <div className="ob-cmp">▾ FRONTEND</div>
@@ -268,12 +269,11 @@ const SLIDES: Slide[] = [
     title: "Open anything, install nothing",
     body: "Markdown, CSV, PDF, notebooks — rendered native.",
     mock: (
-      <Scene vars={{ "--cx0": "240px", "--cy0": "14px", "--cx1": "118px", "--cy1": "12px" } as React.CSSProperties}>
+      <Scene vars={{ "--cx0": "240px", "--cy0": "14px", "--cx1": "196px", "--cy1": "12px" } as React.CSSProperties}>
         <div className="ob-ftabs">
-          <span className="ob-ftab">📝 report.md</span>
-          <span className="ob-ftab ob-flip-off">📄 spec.pdf</span>
-          <span className="ob-ftab sel ob-flip-on">▦ data.csv</span>
-          <span className="ob-ftab sel ob-flip-off">📝 report.md<span className="x"> ✕</span></span>
+          <span className="ob-ftab ob-taboff">📝 report.md</span>
+          <span className="ob-ftab">📄 spec.pdf</span>
+          <span className="ob-ftab ob-tabon">▦ data.csv</span>
         </div>
         <div className="ob-pane ob-reveal">
           <div className="ob-sheetrow head"><span>A</span><span>B</span><span>C</span></div>
@@ -285,8 +285,8 @@ const SLIDES: Slide[] = [
   },
   {
     icon: "🎙️",
-    title: "Talk into any field",
-    body: "Local speech-to-text, one shortcut. Offline.",
+    title: "Dictate, don't type",
+    body: "Speak prompts to your agents — far faster than typing. Local, offline.",
     mock: (
       <Scene chrome="dictation" vars={{ "--cx0": "60px", "--cy0": "24px", "--cx1": "40px", "--cy1": "44px" } as React.CSSProperties}>
         <div className="ob-row" style={{ alignItems: "flex-start", minHeight: 34 }}>
@@ -331,8 +331,10 @@ const SLIDES: Slide[] = [
           <div className="ob-xhead">
             <span style={{ color: "var(--accent)", fontWeight: 700 }}>↑</span>
             <span className="grow">build.zip</span>
-            <span className="ob-late-off ob-mono muted">63%</span>
-            <span className="ob-late-on ob-mono" style={{ color: "var(--ok)" }}>done</span>
+            <span className="ob-swap">
+              <span className="ob-late-off ob-mono muted">63%</span>
+              <span className="ob-late-on ob-mono" style={{ color: "var(--ok)" }}>done</span>
+            </span>
           </div>
           <div className="ob-xbar"><div className="ob-fill" /></div>
           <div className="ob-xsub">2.1 MB / 3.4 MB → ada</div>
