@@ -225,22 +225,13 @@ export function TasksPanel({
             value={draft.brief}
             onChange={(e) => setDraft({ ...draft, brief: e.target.value })}
           />
-          <div className="task-form-row">
-            <input
-              className="agent-query-input task-form-icon"
-              placeholder="◆"
-              title="Icon — one character (optional)"
-              maxLength={2}
-              value={draft.icon}
-              onChange={(e) => setDraft({ ...draft, icon: e.target.value })}
-            />
-            <input
-              className="agent-query-input"
-              placeholder="Context hint shown at run time (optional)"
-              value={draft.placeholder}
-              onChange={(e) => setDraft({ ...draft, placeholder: e.target.value })}
-            />
-          </div>
+          <input
+            className="agent-query-input"
+            placeholder="Run-time hint, e.g. “Anything to add…” (optional)"
+            title="Placeholder shown in the context box when you run this task"
+            value={draft.placeholder}
+            onChange={(e) => setDraft({ ...draft, placeholder: e.target.value })}
+          />
           <div className="confirm-actions">
             <button className="btn" onClick={() => setDraft(null)}>
               Cancel
@@ -273,10 +264,13 @@ export function TasksPanel({
       {MICRO_TASKS.map((t) => (
         <div className="task-row" key={t.id}>
           <span className="task-icon">{t.icon}</span>
-          <span className="task-label task-label-dim" title="Runs from its own surface">
+          <span
+            className="task-label task-label-dim"
+            title={`Runs from its own surface — ${t.surfaceNote ?? "see its tab"}, which supplies what it works on`}
+          >
             {t.label}
           </span>
-          <span className="task-note">on a branch tab</span>
+          {t.surfaceNote && <span className="task-note">{t.surfaceNote}</span>}
         </div>
       ))}
     </div>

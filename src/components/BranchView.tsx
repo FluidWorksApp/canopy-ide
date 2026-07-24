@@ -183,7 +183,12 @@ export function BranchView({
           {!branch.merged && onMicroTask && (
             <MicroTaskButton
               task={raisePrTask}
-              payload={{ repo, branch }}
+              payload={{
+                repo,
+                branch: branch.branch,
+                worktree: branch.worktree,
+                unpushed: !branch.upstream || branch.ahead > 0,
+              }}
               title="Have an agent push this branch and open the pull request"
               onLaunch={onMicroTask}
             />

@@ -72,6 +72,8 @@ import {
 import {
   customTaskDef,
   microTaskProtocol,
+  raisePrTask,
+  reviewPrTask,
   type CustomMicroTask,
   type MicroTaskDef,
 } from "../microTasks";
@@ -2547,9 +2549,15 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const tabMenu = useContextMenu();
   const termMenu = useContextMenu();
   /** Prefill for the Tasks panel's create form — set when the user makes a
-   *  task out of selected terminal text. The nonce re-opens the form even for
-   *  the same selection twice. */
+   *  task out of something they're looking at (selected terminal text, a file
+   *  in the tree, a tab). The nonce re-opens the form even for the same seed
+   *  twice. */
   const [taskSeed, setTaskSeed] = useState<{ brief: string; nonce: number } | null>(null);
+  const seedTaskFrom = useCallback((brief: string) => {
+    setCollapsed(false);
+    setSideTab("tasks");
+    setTaskSeed((prev) => ({ brief, nonce: (prev?.nonce ?? 0) + 1 }));
+  }, []);
 
   const submitRootCreate = async () => {
     if (!rootCreate) return;
@@ -3046,6 +3054,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             onSendToAgent={(target) => sendTicketToAgent(target, prReviewContext(tab.pr))}
             onStartResolve={(agentId) => void startPrConflictResolve(tab.repo, tab.pr, agentId)}
             onSendResolve={(target) => sendTicketToAgent(target, prConflictContext(tab.pr))}
+            onMicroTask={startMicroTask}
           />
         );
       case "review":
@@ -3211,13 +3220,29 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                   else setActiveTabId(tab.id);
                 }}
                 onContextMenu={(e) => {
+                  // Every tab kind that names a concrete thing can seed a
+                  // task about it — the same create-form flow as a terminal
+                  // selection, with the tab's subject prefilled.
+                  const taskItem: MenuItem[] =
+                    tab.type === "file"
+                      ? [{ label: "New Task…", onClick: () => seedTaskFrom(`In \`${tab.file.path}\`: `) }]
+                      : tab.type === "pr"
+                        ? [{ label: "New Task…", onClick: () => seedTaskFrom(`About PR #${tab.pr.number} "${tab.pr.title}" (${tab.pr.url}): `) }]
+                        : tab.type === "branch"
+                          ? [{ label: "New Task…", onClick: () => seedTaskFrom(`On branch ${tab.branch.branch}: `) }]
+                          : tab.type === "ticket"
+                            ? [{ label: "New Task…", onClick: () => seedTaskFrom(`About ticket ${tab.ticket.id} "${tab.ticket.title}" (${tab.ticket.url}): `) }]
+                            : [];
                   const items: MenuItem[] =
                     tab.type === "terminal"
                       ? [
                           { label: "Rename", onClick: () => startRename(tab) },
                           { label: "Close", danger: true, onClick: () => closeTab(tab.id) },
                         ]
-                      : [{ label: "Close", danger: true, onClick: () => closeTab(tab.id) }];
+                      : [
+                          ...taskItem,
+                          { label: "Close", danger: true, onClick: () => closeTab(tab.id) },
+                        ];
                   tabMenu.open(e, items);
                 }}
                 title={
@@ -3594,14 +3619,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 const sel = termHandles.current.get(tab.id)?.getSelection().trim();
                 if (!sel) return;
                 termMenu.open(e, [
-                  {
-                    label: "New task from selection",
-                    onClick: () => {
-                      setCollapsed(false);
-                      setSideTab("tasks");
-                      setTaskSeed((prev) => ({ brief: sel, nonce: (prev?.nonce ?? 0) + 1 }));
-                    },
-                  },
+                  { label: "New task from selection", onClick: () => seedTaskFrom(sel) },
                 ]);
               }}
             >
@@ -4221,6 +4239,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                     onOpenFile={(p) => void openFile(p)}
                     onNotice={onNotice}
                     hideRootHeader
+                    onNewTask={(p) => seedTaskFrom(`In \`${p}\`: `)}
                   />
                 </>
               )}
@@ -4244,6 +4263,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onOpenBranch={openBranch}
           onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
           onNotice={onNotice}
+          onRaisePrTask={(repo, branch) => startMicroTask(raisePrTask, { repo, branch }, "")}
+          onReviewPrTask={(repo, pr) => startMicroTask(reviewPrTask, { repo, pr }, "")}
         />
       ))}
       {sidePane("changes", () => (

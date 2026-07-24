@@ -2922,19 +2922,6 @@ body.dragging-tab * {
   width: 100%;
   box-sizing: border-box;
 }
-.task-form-row {
-  display: flex;
-  gap: 6px;
-}
-.task-form-row .agent-query-input {
-  flex: 1;
-  width: auto;
-}
-.task-form-icon {
-  flex: none;
-  width: 52px;
-  text-align: center;
-}
 .task-run-dir {
   font: inherit;
   font-size: 12px;

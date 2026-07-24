@@ -17,6 +17,9 @@ export interface MicroTaskDef<P> {
   /** The job brief — a single line (PTY prompt contract, see preview.ts). The
    *  completion protocol is appended by the launcher, not here. */
   buildContext(payload: P, userQuery: string): string;
+  /** For the Tasks panel's built-in list: where this task's button lives.
+   *  Built-ins run from their surface, which is what supplies the payload. */
+  surfaceNote?: string;
   // Future seam: isolation?: "worktree" — create a throwaway worktree first,
   // startPrAgent-style, for tasks that mutate files. Raise PR doesn't.
 }
@@ -39,9 +42,14 @@ export function microTaskProtocol(): string {
   );
 }
 
+/** Kept lean on purpose: the Git panel's branch rows only know a branch by
+ *  name, while a branch tab has the full BranchWork — both can launch this.
+ *  `unpushed` undefined = the launcher didn't know; the agent checks. */
 export interface RaisePrPayload {
   repo: string;
-  branch: ipc.BranchWork;
+  branch: string;
+  worktree?: string | null;
+  unpushed?: boolean;
 }
 
 export const raisePrTask: MicroTaskDef<RaisePrPayload> = {
@@ -49,14 +57,19 @@ export const raisePrTask: MicroTaskDef<RaisePrPayload> = {
   label: "Raise PR",
   icon: "⇈",
   placeholder: "Anything the PR should mention…",
-  cwd: (p) => p.branch.worktree ?? p.repo,
+  surfaceNote: "on a branch tab",
+  cwd: (p) => p.worktree ?? p.repo,
   buildContext(p, userQuery) {
-    const b = p.branch;
-    const unpushed = !b.upstream || b.ahead > 0;
+    const push =
+      p.unpushed === false
+        ? ""
+        : p.unpushed
+          ? `Push it first (\`git push -u origin ${p.branch}\`). `
+          : `If it has no upstream or unpushed commits, push it first (\`git push -u origin ${p.branch}\`). `;
     const query = oneLine(userQuery);
     return oneLine(
-      `Open a pull request for the branch ${b.branch}, which is checked out here. ` +
-        (unpushed ? `Push it first (\`git push -u origin ${b.branch}\`). ` : "") +
+      `Open a pull request for the branch ${p.branch}. ` +
+        push +
         `Then create the PR with \`gh pr create\`, with a clear title and a body that ` +
         `summarizes what the branch's commits actually change (read \`git log\` and the diff ` +
         `against the base branch). Do not commit anything and do not change any files — ` +
@@ -66,10 +79,44 @@ export const raisePrTask: MicroTaskDef<RaisePrPayload> = {
   },
 };
 
+export interface ReviewPrPayload {
+  repo: string;
+  pr: ipc.PrInfo;
+}
+
+/** Review a PR without checking anything out: read it via gh, post the review
+ *  as a PR comment (the durable artifact), report the verdict via job_done.
+ *  Deliberately never approves or requests changes — that stays human. */
+export const reviewPrTask: MicroTaskDef<ReviewPrPayload> = {
+  id: "review-pr",
+  label: "Review PR",
+  icon: "⌕",
+  placeholder: "Anything to focus the review on…",
+  surfaceNote: "on a PR tab",
+  cwd: (p) => p.repo,
+  buildContext(p, userQuery) {
+    const n = p.pr.number;
+    const query = oneLine(userQuery);
+    return oneLine(
+      `Review pull request #${n}: "${p.pr.title}" (${p.pr.url}). ` +
+        `Read it without checking anything out: \`gh pr view ${n}\`, \`gh pr diff ${n}\`, and ` +
+        `the surrounding code in this checkout as needed. Give a thorough review — correctness, ` +
+        `edge cases, tests, and risks — then post it on the PR as a review comment ` +
+        `(\`gh pr review ${n} --comment --body "..."\`). Do not approve or request changes, and ` +
+        `do not commit, push, or check anything out — the posted comment is for the human to act ` +
+        `on. Pass the PR's URL to canopy_job_done and make the summary your one-line verdict.` +
+        (query ? ` The user adds: "${query}".` : ""),
+    );
+  },
+};
+
 /** Every built-in micro-task a CTA can launch. These are surface-bound: their
- *  payload comes from where the button lives (a branch tab), which is why the
- *  Tasks panel lists them read-only — run them from their surface. */
-export const MICRO_TASKS: MicroTaskDef<never>[] = [raisePrTask as MicroTaskDef<never>];
+ *  payload comes from where the button lives (see each task's surfaceNote),
+ *  which is why the Tasks panel lists them read-only — run them from there. */
+export const MICRO_TASKS: MicroTaskDef<never>[] = [
+  raisePrTask as MicroTaskDef<never>,
+  reviewPrTask as MicroTaskDef<never>,
+];
 
 /** A task the user wrote themselves (Tasks panel → New task). Stored in
  *  settings; unlike built-ins it has no surface payload — it runs in a project

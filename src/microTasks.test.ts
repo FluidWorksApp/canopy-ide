@@ -4,34 +4,18 @@ import {
   microTaskProtocol,
   oneLine,
   raisePrTask,
+  reviewPrTask,
   type RaisePrPayload,
 } from "./microTasks";
 import { isStopFor } from "./notifications";
 import type * as ipc from "./ipc";
 
-const branch = (over: Partial<ipc.BranchWork> = {}): ipc.BranchWork => ({
+const payload = (over: Partial<RaisePrPayload> = {}): RaisePrPayload => ({
+  repo: "/repo",
   branch: "feat/micro-tasks",
   worktree: null,
-  is_main: false,
-  prunable: false,
-  current: true,
-  dirty: 0,
-  ahead: 3,
-  behind: 0,
-  upstream: "origin/feat/micro-tasks",
-  upstream_gone: false,
-  merged: false,
-  protected: false,
-  last_commit: "abc123",
-  age_days: 1,
-  subject: "Add micro tasks",
-  author: "sam",
+  unpushed: true,
   ...over,
-});
-
-const payload = (over: Partial<ipc.BranchWork> = {}): RaisePrPayload => ({
-  repo: "/repo",
-  branch: branch(over),
 });
 
 describe("raisePrTask.buildContext", () => {
@@ -41,12 +25,16 @@ describe("raisePrTask.buildContext", () => {
     expect(ctx).toContain('The user adds: "first line second line third"');
   });
 
-  it("asks for a push when the branch is ahead or has no upstream", () => {
-    expect(raisePrTask.buildContext(payload({ ahead: 2 }), "")).toContain("git push -u origin");
-    expect(raisePrTask.buildContext(payload({ upstream: null, ahead: 0 }), "")).toContain(
-      "git push -u origin",
+  it("asks for a push when unpushed, conditionally when unknown, never when pushed", () => {
+    expect(raisePrTask.buildContext(payload({ unpushed: true }), "")).toContain(
+      "Push it first",
     );
-    expect(raisePrTask.buildContext(payload({ ahead: 0 }), "")).not.toContain("git push");
+    expect(raisePrTask.buildContext(payload({ unpushed: undefined }), "")).toContain(
+      "If it has no upstream or unpushed commits",
+    );
+    expect(raisePrTask.buildContext(payload({ unpushed: false }), "")).not.toContain(
+      "git push",
+    );
   });
 
   it("always creates the PR via gh and forbids new commits", () => {
@@ -64,6 +52,22 @@ describe("raisePrTask.buildContext", () => {
   it("runs in the worktree when the branch has one, else the repo", () => {
     expect(raisePrTask.cwd(payload())).toBe("/repo");
     expect(raisePrTask.cwd(payload({ worktree: "/repo-wt-x" }))).toBe("/repo-wt-x");
+  });
+});
+
+describe("reviewPrTask.buildContext", () => {
+  const pr = { number: 42, title: "Fix the flux", url: "https://x/pr/42" } as ipc.PrInfo;
+
+  it("reads via gh, posts a comment, never approves or checks out", () => {
+    const ctx = reviewPrTask.buildContext({ repo: "/repo", pr }, "focus on the parser");
+    expect(ctx).not.toMatch(/[\r\n]/);
+    expect(ctx).toContain("gh pr view 42");
+    expect(ctx).toContain("gh pr diff 42");
+    expect(ctx).toContain("gh pr review 42 --comment");
+    expect(ctx).toContain("Do not approve");
+    expect(ctx).toContain("canopy_job_done");
+    expect(ctx).toContain('The user adds: "focus on the parser"');
+    expect(reviewPrTask.cwd({ repo: "/repo", pr })).toBe("/repo");
   });
 });
 
