@@ -2371,3 +2371,157 @@ pub async fn linear_issues(api_key: String) -> Result<Vec<TicketInfo>, String> {
         })
         .unwrap_or_default())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn clone_dir_name_handles_https_scp_and_git_suffix() {
+        assert_eq!(clone_dir_name("https://github.com/owner/repo.git").as_deref(), Some("repo"));
+        assert_eq!(clone_dir_name("https://github.com/owner/repo").as_deref(), Some("repo"));
+        // scp form has no scheme; the split must handle ':' as well as '/'.
+        assert_eq!(clone_dir_name("git@github.com:owner/repo.git").as_deref(), Some("repo"));
+        // A trailing slash must not swallow the name.
+        assert_eq!(clone_dir_name("https://host/owner/repo/").as_deref(), Some("repo"));
+    }
+
+    #[test]
+    fn clone_dir_name_rejects_empty() {
+        assert_eq!(clone_dir_name(""), None);
+        assert_eq!(clone_dir_name("   "), None);
+        assert_eq!(clone_dir_name("/"), None);
+    }
+
+    #[test]
+    fn patch_stats_counts_files_and_hunk_lines_only() {
+        // The diff/index/hunk headers must NOT be counted as additions/deletions
+        // even though several begin with '+'/'-' (+++ / ---).
+        let patch = "\
+diff --git a/one.txt b/one.txt
+index 111..222 100644
+--- a/one.txt
++++ b/one.txt
+@@ -1,2 +1,2 @@
+-old line
++new line
+ context
+diff --git a/two.txt b/two.txt
+index 333..444 100644
+--- a/two.txt
++++ b/two.txt
+@@ -0,0 +1 @@
++added
+";
+        let (files, adds, dels) = patch_stats(patch);
+        assert_eq!(files, 2);
+        assert_eq!(adds, 2); // "+new line" and "+added"
+        assert_eq!(dels, 1); // "-old line"
+    }
+
+    #[test]
+    fn patch_stats_empty_patch_is_zero() {
+        assert_eq!(patch_stats(""), (0, 0, 0));
+    }
+
+    #[test]
+    fn truncate_patch_leaves_short_input_untouched() {
+        let mut p = "short\n".to_string();
+        assert!(!truncate_patch(&mut p, 1000));
+        assert_eq!(p, "short\n");
+    }
+
+    #[test]
+    fn truncate_patch_cuts_on_a_line_boundary() {
+        let mut p = "line1\nline2\nline3\n".to_string();
+        let cut = truncate_patch(&mut p, 8); // lands inside "line2"
+        assert!(cut);
+        assert_eq!(p, "line1\n"); // rolled back to the last newline
+    }
+
+    #[test]
+    fn truncate_patch_never_splits_a_multibyte_char() {
+        // A patch of multi-byte chars with no newline: truncation must land on a
+        // char boundary, never mid-codepoint (which would panic on slice).
+        let mut p = "日本語テキスト".to_string();
+        let cut = truncate_patch(&mut p, 7); // 7 bytes is inside a 3-byte char
+        assert!(cut);
+        assert!(p.is_char_boundary(p.len()));
+        assert!(p.len() <= 7);
+    }
+
+    #[test]
+    fn checked_ref_accepts_a_plain_branch() {
+        assert_eq!(checked_ref("feature/foo").unwrap(), "feature/foo");
+        assert_eq!(checked_ref("  main  ").unwrap(), "main"); // trimmed
+    }
+
+    #[test]
+    fn checked_ref_rejects_injection_shaped_names() {
+        for bad in ["", "-x", "a..b", "a b", "a~1", "a^", "a:b", "--upload-pack=x"] {
+            assert!(checked_ref(bad).is_err(), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn checked_hash_accepts_only_hex() {
+        assert_eq!(checked_hash("deadBEEF01").unwrap(), "deadBEEF01");
+        // Non-hex revision syntax git would otherwise accept must be rejected.
+        for bad in ["", "xyz", "HEAD", "HEAD@{1}", "abc..def"] {
+            assert!(checked_hash(bad).is_err(), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn is_protected_branch_covers_integration_branches_and_the_base_leaf() {
+        // Always-protected names regardless of base.
+        for name in ["main", "master", "develop", "staging", "production", "trunk"] {
+            assert!(is_protected_branch(name, "origin/main"));
+        }
+        // The repo's own base, compared on the leaf (base may carry a remote).
+        assert!(is_protected_branch("release", "origin/release"));
+        // A normal feature branch is not protected.
+        assert!(!is_protected_branch("feature/x", "origin/main"));
+    }
+
+    #[test]
+    fn roll_up_checks_empty_is_blank() {
+        assert_eq!(roll_up_checks(&json!([])), (String::new(), String::new()));
+        assert_eq!(roll_up_checks(&json!(null)), (String::new(), String::new()));
+    }
+
+    #[test]
+    fn roll_up_checks_fails_when_any_check_fails() {
+        let rollup = json!([
+            { "state": "SUCCESS" },
+            { "status": "COMPLETED", "conclusion": "FAILURE" },
+        ]);
+        let (state, summary) = roll_up_checks(&rollup);
+        assert_eq!(state, "FAIL");
+        assert_eq!(summary, "1/2 checks passed");
+    }
+
+    #[test]
+    fn roll_up_checks_pending_when_incomplete_but_none_failed() {
+        let rollup = json!([
+            { "state": "SUCCESS" },
+            { "status": "IN_PROGRESS" },
+        ]);
+        let (state, summary) = roll_up_checks(&rollup);
+        assert_eq!(state, "PENDING");
+        assert_eq!(summary, "1/2 checks passed");
+    }
+
+    #[test]
+    fn roll_up_checks_passes_when_all_green() {
+        let rollup = json!([
+            { "state": "SUCCESS" },
+            { "status": "COMPLETED", "conclusion": "NEUTRAL" },
+            { "status": "COMPLETED", "conclusion": "SKIPPED" },
+        ]);
+        let (state, summary) = roll_up_checks(&rollup);
+        assert_eq!(state, "PASS");
+        assert_eq!(summary, "3/3 checks passed");
+    }
+}

@@ -27,12 +27,45 @@ All of these should pass:
 npm run typecheck    # tsc -b — the root tsconfig is solution-style, so this is
                      # the real type check (plain `tsc --noEmit` checks nothing)
 npm run lint         # oxlint
+npm run test         # vitest — frontend unit + component tests
 npm run build        # tsc -b && vite build
-cargo build --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
 ```
+
+CI (`.github/workflows/ci.yml`) runs the same checks on every pull request, so a
+green local run is a green PR. `--no-default-features` compiles dictation (the
+ONNX stack) out — the tests don't touch it and it keeps the build fast, matching
+what CI runs.
 
 Keep pull requests focused — one logical change per PR is easiest to review.
 Explain the *why* in the description; link any related issue.
+
+## Tests are test-first
+
+Canopy is written test-first, and new behaviour should arrive with a test.
+
+- **Write the failing test first**, watch it fail, then make it pass, then
+  refactor. A test you've never seen fail is a test that might assert nothing.
+- **Put logic in a framework-free module and test it directly.** `src/collab-ot.ts`
+  is the model: the operational-transform core lives apart from Monaco/DOM/relay
+  precisely so it can be exercised in isolation — a wrong transform diverges two
+  buffers *silently*, so it is fuzzed (`scripts/collab-fuzz.mjs`) and unit-tested
+  (`src/collab-ot.test.ts`) rather than eyeballed. Prefer this shape over reaching
+  into a 1,000-line component for the one pure function you actually changed.
+- **Where tests live.** Frontend: a `*.test.ts` / `*.test.tsx` next to the file
+  under test (Vitest + Testing Library; jsdom and the Tauri IPC boundary are
+  mocked in `src/test/setup.ts` — use `mockCommands({...})` for a command a test
+  needs). Rust: a `#[cfg(test)] mod tests` at the bottom of the module, same as
+  `git.rs`, `relay.rs` and `cli.rs` already do.
+- **Test behaviour, not implementation** — what a user or caller observes, so the
+  test survives a refactor.
+
+Run one file while iterating:
+
+```sh
+npm run test:watch -- src/collab-ot.test.ts     # frontend, re-runs on save
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features git::tests
+```
 
 ## Where things live
 

@@ -12,6 +12,8 @@
 
 - [ ] `npm run typecheck` passes
 - [ ] `npm run lint` passes
+- [ ] `npm run test` passes
 - [ ] `npm run build` passes
-- [ ] `cargo build --manifest-path src-tauri/Cargo.toml` passes
+- [ ] `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features` passes
+- [ ] New behaviour has a test (or I've said below why it doesn't need one)
 - [ ] I kept the change focused and explained the *why* above
