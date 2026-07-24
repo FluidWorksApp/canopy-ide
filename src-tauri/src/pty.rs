@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::broadcast;
 
 const FLUSH_INTERVAL: Duration = Duration::from_millis(10);
@@ -220,6 +220,15 @@ impl PtyManager {
         drop(ring);
         let (cols, rows) = *session.size.lock().unwrap();
         Some((cols, rows, snapshot, rx))
+    }
+
+    /// The last `max` bytes of a session's scrollback ring, for the context
+    /// bridge's server-output tool. None if the session is gone.
+    pub fn scrollback_tail(&self, id: u32, max: usize) -> Option<Vec<u8>> {
+        let session = self.get(id)?;
+        let ring = session.scrollback.lock().unwrap();
+        let skip = ring.len().saturating_sub(max);
+        Some(ring.iter().skip(skip).copied().collect())
     }
 
     /// Stop every session; called on app exit so no child processes outlive us.
@@ -462,6 +471,15 @@ impl PtyManager {
     // #5" from another's — which silently binds one agent's digest to another's
     // terminal in the panel. This tag makes the pairing unambiguous.
     cmd.env("CANOPY_INSTANCE", instance_token());
+    // Where the context bridge answers (see context.rs): `canopy-hook --mcp`,
+    // spawned by an agent CLI in this terminal, inherits these and gains the
+    // Canopy context tools. try_state: tests' mock app doesn't manage it.
+    if let Some(ctx) = app.try_state::<crate::context::ContextBridge>() {
+        if let Some((port, token)) = ctx.env() {
+            cmd.env("CANOPY_CTX_PORT", port.to_string());
+            cmd.env("CANOPY_CTX_TOKEN", token);
+        }
+    }
     let cwd = cwd
         .or_else(|| dirs_home())
         .unwrap_or_else(|| "/".to_string());

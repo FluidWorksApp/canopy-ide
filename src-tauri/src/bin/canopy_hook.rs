@@ -55,6 +55,13 @@ fn now_secs() -> u64 {
 }
 
 fn main() {
+    // Third job, distinct transport: `canopy-hook --mcp` speaks MCP over stdio
+    // (registered in the CLI's user-scope MCP config by agents.rs) and serves
+    // the IDE-context tools. Everything else is the hook contract below.
+    if std::env::args().any(|a| a == "--mcp") {
+        mcp_main();
+        return;
+    }
     // Any failure exits 0 with no stdout: a hook must never break the session
     // it's attached to.
     if let Err(_e) = real_main() {
@@ -625,4 +632,196 @@ fn truncate(s: &str, max: usize) -> String {
     }
     let cut: String = cleaned.chars().take(max).collect();
     format!("{cut}…")
+}
+
+// ---- MCP mode (`canopy-hook --mcp`) ---------------------------------------
+//
+// A minimal MCP stdio server: one JSON-RPC message per line in, one per line
+// out. Tools proxy to the desktop app's context bridge (context.rs) over
+// loopback HTTP, addressed by the CANOPY_CTX_PORT/CANOPY_CTX_TOKEN env only
+// Canopy's own PTYs export. The registration is user-global, so the server
+// must start cleanly in ANY terminal — outside Canopy the tools simply answer
+// that no IDE is around, instead of the process refusing to run (which the
+// agent CLI would surface as a broken MCP server).
+
+fn mcp_main() {
+    use std::io::{BufRead, Write};
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    for line in stdin.lock().lines() {
+        let Ok(line) = line else { break };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        // Notifications (no id) expect no reply.
+        let Some(id) = msg.get("id").cloned() else { continue };
+        let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        let reply = match method {
+            "initialize" => {
+                // Echo the client's protocol version: these tools are simple
+                // enough to be valid under every revision so far.
+                let proto = msg
+                    .pointer("/params/protocolVersion")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("2024-11-05");
+                rpc_ok(
+                    id,
+                    serde_json::json!({
+                        "protocolVersion": proto,
+                        "capabilities": { "tools": {} },
+                        "serverInfo": { "name": "canopy", "version": env!("CARGO_PKG_VERSION") },
+                    }),
+                )
+            }
+            "ping" => rpc_ok(id, serde_json::json!({})),
+            "tools/list" => rpc_ok(id, tools_list()),
+            "tools/call" => {
+                let name = msg
+                    .pointer("/params/name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let args = msg
+                    .pointer("/params/arguments")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                match call_tool(name, &args) {
+                    Ok(text) => rpc_ok(
+                        id,
+                        serde_json::json!({ "content": [{ "type": "text", "text": text }] }),
+                    ),
+                    // Tool failures are results with isError, not protocol
+                    // errors — the agent reads them and adapts.
+                    Err(text) => rpc_ok(
+                        id,
+                        serde_json::json!({
+                            "content": [{ "type": "text", "text": text }],
+                            "isError": true,
+                        }),
+                    ),
+                }
+            }
+            _ => serde_json::json!({
+                "jsonrpc": "2.0", "id": id,
+                "error": { "code": -32601, "message": format!("method not found: {method}") },
+            }),
+        };
+        let mut out = stdout.lock();
+        let _ = writeln!(out, "{reply}");
+        let _ = out.flush();
+    }
+}
+
+fn rpc_ok(id: serde_json::Value, result: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })
+}
+
+fn tools_list() -> serde_json::Value {
+    serde_json::json!({ "tools": [
+        {
+            "name": "canopy_project",
+            "description": "Live context from the Canopy IDE this session is running inside: every open project with its components (labeled directories and absolute paths), their configured run commands, the dev servers / run terminals currently running (with terminal ids and exit state), and other active agents. Call this first to orient instead of exploring the filesystem blind.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
+        {
+            "name": "canopy_component_files",
+            "description": "List the files inside one of the project's component directories (paths come from canopy_project), skipping dependency and build directories (node_modules, target, dist, ...). Breadth-first and capped, so shallow structure survives truncation.",
+            "inputSchema": { "type": "object", "properties": {
+                "dir": { "type": "string", "description": "Absolute path of a component, or a subdirectory of one, from canopy_project" },
+                "max": { "type": "integer", "description": "Maximum number of files to return (default 500)" }
+            }, "required": ["dir"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_server_output",
+            "description": "The recent terminal output of a dev server, build, or agent running in Canopy — compile errors, request logs, stack traces — without restarting anything. `server` is a terminal id from canopy_project's runServers or agents.",
+            "inputSchema": { "type": "object", "properties": {
+                "server": { "type": "integer", "description": "Terminal id (ptyId) from canopy_project" },
+                "lines": { "type": "integer", "description": "Trailing lines to return (default 200)" }
+            }, "required": ["server"], "additionalProperties": false }
+        }
+    ]})
+}
+
+fn call_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
+    match name {
+        "canopy_project" => ctx_get("/ctx/snapshot".into()).map(pretty),
+        "canopy_component_files" => {
+            let dir = args
+                .get("dir")
+                .and_then(|v| v.as_str())
+                .ok_or("missing required argument: dir")?;
+            let max = args.get("max").and_then(|v| v.as_u64()).unwrap_or(500);
+            ctx_get(format!("/ctx/files?dir={}&max={max}", urlencode(dir))).map(pretty)
+        }
+        "canopy_server_output" => {
+            let server = args
+                .get("server")
+                .and_then(|v| v.as_u64())
+                .ok_or("missing required argument: server (a terminal id from canopy_project)")?;
+            let lines = args.get("lines").and_then(|v| v.as_u64()).unwrap_or(200);
+            ctx_get(format!("/ctx/server-output/{server}?lines={lines}"))
+        }
+        other => Err(format!("unknown tool: {other}")),
+    }
+}
+
+/// Re-indent JSON bodies for the model; non-JSON comes back as-is.
+fn pretty(body: String) -> String {
+    serde_json::from_str::<serde_json::Value>(&body)
+        .and_then(|v| serde_json::to_string_pretty(&v))
+        .unwrap_or(body)
+}
+
+/// GET from the app's context bridge. Plain std TCP: it's loopback, the
+/// responses carry Content-Length (Connection: close makes read-to-end
+/// correct), and the hook binary stays dependency-light.
+fn ctx_get(path: String) -> Result<String, String> {
+    let port: u16 = std::env::var("CANOPY_CTX_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .ok_or(
+            "This session isn't running inside a Canopy terminal, so the Canopy \
+             context tools are unavailable here.",
+        )?;
+    let token = std::env::var("CANOPY_CTX_TOKEN").unwrap_or_default();
+    let timeout = std::time::Duration::from_secs(5);
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout)
+        .map_err(|e| format!("Canopy isn't reachable on port {port} ({e}) — is the app still running?"))?;
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+    let req = format!(
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+    );
+    std::io::Write::write_all(&mut stream, req.as_bytes()).map_err(|e| e.to_string())?;
+    let mut raw = Vec::new();
+    std::io::Read::read_to_end(&mut stream, &mut raw).map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&raw);
+    let (head, body) = text
+        .split_once("\r\n\r\n")
+        .ok_or("malformed response from Canopy")?;
+    let status = head
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .unwrap_or("");
+    if status == "200" {
+        Ok(body.to_string())
+    } else {
+        Err(format!("Canopy answered {status}: {body}"))
+    }
+}
+
+/// Percent-encode a query value (RFC 3986 unreserved characters pass through).
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }

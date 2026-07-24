@@ -355,7 +355,13 @@ pub async fn setup_agent_hooks(agent: String) -> Result<String, String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
     let bridge = format!("{home}/.canopy/agent-events.jsonl");
     match agent.as_str() {
-        "claude" => setup_claude_hooks(&home, &bridge),
+        // Hooks stream events out; the MCP registration lets the agent ask the
+        // IDE for context (components, running servers, their output) back.
+        "claude" => {
+            let hooks = setup_claude_hooks(&home, &bridge)?;
+            let mcp = setup_claude_mcp(&home)?;
+            Ok(format!("{hooks}; {mcp}"))
+        }
         "codex" => setup_codex_hooks(&home, &bridge),
         "agy" => setup_agy_hooks(&home),
         "aider" => setup_aider_hooks(&home),
@@ -1141,6 +1147,49 @@ fn setup_claude_hooks(home: &str, bridge: &str) -> Result<String, String> {
     Ok(format!(
         "Claude Code hooks installed ({changed} events) — restart claude sessions to pick them up"
     ))
+}
+
+/// Register `canopy-hook --mcp` as a user-scope MCP server in ~/.claude.json,
+/// giving every claude session the Canopy context tools (canopy_project,
+/// canopy_component_files, canopy_server_output). Like the hooks, the
+/// registration is global but self-gating: the tools only reach a live bridge
+/// through CANOPY_CTX_PORT/TOKEN, which only Canopy's own PTYs export — in a
+/// foreign terminal they answer with a polite "not inside Canopy".
+fn setup_claude_mcp(home: &str) -> Result<String, String> {
+    let helper = helper_path()?;
+    if !helper.exists() {
+        return Err(format!(
+            "hook helper missing at {} — MCP server not registered",
+            helper.display()
+        ));
+    }
+    let path = std::path::PathBuf::from(home).join(".claude.json");
+    let mut cfg: serde_json::Value = if path.exists() {
+        let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        serde_json::from_str(&raw).map_err(|e| format!("~/.claude.json is not valid JSON: {e}"))?
+    } else {
+        serde_json::json!({})
+    };
+    let obj = cfg.as_object_mut().ok_or("~/.claude.json is not an object")?;
+    let servers = obj
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+    let servers = servers.as_object_mut().ok_or("mcpServers is not an object")?;
+    let want = serde_json::json!({
+        "type": "stdio",
+        "command": helper.to_string_lossy(),
+        "args": ["--mcp"],
+    });
+    if servers.get("canopy") == Some(&want) {
+        return Ok("Canopy MCP server already registered".into());
+    }
+    servers.insert("canopy".into(), want);
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok("Canopy MCP server registered — new claude sessions get canopy_* context tools".into())
 }
 
 fn setup_codex_hooks(home: &str, bridge: &str) -> Result<String, String> {

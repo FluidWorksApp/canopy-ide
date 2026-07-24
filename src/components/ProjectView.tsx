@@ -43,6 +43,7 @@ import {
   CheckIcon,
   FailIcon,
   LiveDot,
+  GlobeIcon,
   LiveShareIcon,
   PlayIcon,
   RestartIcon,
@@ -76,6 +77,8 @@ import { CommitView } from "./CommitView";
 import { ReviewView, type ReviewPayload } from "./ReviewView";
 import { BranchView } from "./BranchView";
 import { AgentWorkspaceView } from "./AgentWorkspaceView";
+import { PreviewView } from "./PreviewView";
+import type { PreviewAnnotation } from "../preview";
 import { ticketBranch, ticketContext, ticketWorktree } from "../trackers";
 import { prConflictContext, prReviewContext, prWorktree } from "../prs";
 import { fileDiffContext, reviewContext, sessionChangesContext } from "../diffContext";
@@ -217,9 +220,21 @@ interface SharedProjectSubTab {
   ownerName: string;
 }
 
+/** An embedded browser onto a locally running server, with annotate mode.
+ *  Navigation and collected annotations live on the tab so they survive
+ *  switching away (the view, like every doc tab, unmounts when inactive). */
+interface PreviewSubTab {
+  id: string;
+  type: "preview";
+  /** The previewed page's real URL ("" until the user picks a server). */
+  url: string;
+  annotations: PreviewAnnotation[];
+}
+
 type SubTab =
   | CollabSubTab
   | SharedProjectSubTab
+  | PreviewSubTab
   | TermSubTab
   | FileSubTab
   | PrSubTab
@@ -275,6 +290,19 @@ function tabDisplayLabel(t: SubTab): string {
       return t.review.title;
     case "shared-project":
       return t.name;
+    case "preview":
+      return previewLabel(t.url);
+  }
+}
+
+/** host[/path] for the tab strip; the scheme is noise at that width. */
+function previewLabel(url: string): string {
+  if (!url) return "Preview";
+  try {
+    const u = new URL(url);
+    return `${u.host}${u.pathname === "/" ? "" : u.pathname}`;
+  } catch {
+    return url;
   }
 }
 
@@ -698,6 +726,15 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
 
   const patchTabRaw = useCallback((id: string, patch: Partial<SubTab>) => {
     setTabs((prev) => prev.map((t) => (t.id === id ? ({ ...t, ...patch } as SubTab) : t)));
+  }, []);
+
+  /** Open an embedded-browser preview tab. With no URL the tab opens on the
+   *  pick-a-server form; a URL (a run rail's detected server, a reopened tab)
+   *  loads immediately. */
+  const openPreview = useCallback((url = "") => {
+    const id = tabId();
+    setTabs((prev) => [...prev, { id, type: "preview", url, annotations: [] }]);
+    setActiveTabId(id);
   }, []);
 
   /** Open a relay conversation as its own tab — the everyone channel (peer
@@ -2434,6 +2471,45 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     componentsRef.current[0]?.path ??
     null;
 
+  // Mirror this project's live shape — components, run servers, agents — into
+  // the Rust context bridge, where `canopy-hook --mcp` serves it to agents as
+  // the canopy_* tools. Runs every render, but the stringify diff means a
+  // publish only crosses IPC when something actually changed.
+  const lastContextRef = useRef("");
+  useEffect(() => {
+    const snapshot = JSON.stringify({
+      id: project.id,
+      name: project.name,
+      components: components.map((c) => ({
+        label: c.label,
+        path: c.path,
+        commands: c.commands ?? [],
+      })),
+      runServers: tabs
+        .filter((t): t is TermSubTab => t.type === "terminal" && !!t.run)
+        .map((t) => ({
+          ptyId: t.ptyId,
+          title: t.customTitle ?? t.title,
+          command: t.command ?? "",
+          cwd: t.cwd,
+          running: !t.exited && t.ptyId != null,
+          exitCode: t.exitCode ?? null,
+        })),
+      agents: agentTargets.map((a) => ({
+        ptyId: a.ptyId,
+        agent: a.agentId,
+        title: a.title,
+        dir: a.dir,
+      })),
+    });
+    if (snapshot !== lastContextRef.current) {
+      lastContextRef.current = snapshot;
+      void ipc.contextPublish(project.id, snapshot);
+    }
+  });
+  // A closed project's servers die with it; drop its snapshot too.
+  useEffect(() => () => void ipc.contextRemove(project.id), [project.id]);
+
   // The agent behind the active *terminal* tab, if any — the "Agent Workspace"
   // toggle and its overlay only exist here. Identity is the live process (same
   // resolution as the tab icon), so it's right for every agent CLI — not just
@@ -2565,7 +2641,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                                   ? `Review from ${tab.review.from}: ${tab.review.title}`
                                   : tab.type === "shared-project"
                                     ? `${tab.name} — shared live by ${tab.ownerName}`
-                                    : tab.file.path
+                                    : tab.type === "preview"
+                                      ? tab.url || "Preview"
+                                      : tab.file.path
                 }
               >
                 {tab.type === "terminal" ? (
@@ -2591,6 +2669,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                   <PullRequestIcon size={12} className="tab-pr-icon" />
                 ) : tab.type === "shared-project" ? (
                   <LiveShareIcon size={12} className="tab-collab-icon" />
+                ) : tab.type === "preview" ? (
+                  <GlobeIcon size={12} className="tab-preview-icon" />
                 ) : (
                   <>
                     {/* Live-collaborated file: a teammate is editing this one,
@@ -2644,7 +2724,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                                     ? tab.review.title
                                     : tab.type === "shared-project"
                                       ? tab.name
-                                      : `${tab.file.name}${tab.file.dirty ? " •" : ""}`}
+                                      : tab.type === "preview"
+                                        ? previewLabel(tab.url)
+                                        : `${tab.file.name}${tab.file.dirty ? " •" : ""}`}
                   </span>
                 )}
                 <span
@@ -2846,6 +2928,17 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 >
                   <span>
                     <TerminalIcon size={15} className="cli-icon" /> Shell
+                  </span>
+                </div>
+                <div
+                  className="cli-item"
+                  onClick={() => {
+                    setCliMenuOpen(false);
+                    openPreview();
+                  }}
+                >
+                  <span>
+                    <GlobeIcon size={15} className="cli-icon" /> Preview
                   </span>
                 </div>
                 <div className="cli-sep" />
@@ -3057,6 +3150,26 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 }
               />
             }
+          />
+        )}
+        {activeTab?.type === "preview" && (
+          <PreviewView
+            key={activeTab.id}
+            url={activeTab.url}
+            annotations={activeTab.annotations}
+            onPatch={(patch) => patchTabRaw(activeTab.id, patch as Partial<SubTab>)}
+            agentTargets={agentTargets}
+            installed={installed}
+            onSendToAgent={sendTicketToAgent}
+            onStartNew={(agentId, text) => {
+              const dir = componentsRef.current[0]?.path;
+              if (!dir) {
+                onNotice("No project directory to start the agent in.");
+                return;
+              }
+              startAgentInDir(dir, agentId, text, "Preview feedback");
+            }}
+            onNotice={onNotice}
           />
         )}
         {activeTab?.type === "chat" && (
