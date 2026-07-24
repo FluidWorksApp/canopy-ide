@@ -25,7 +25,7 @@
 //! across independent processes; one file per session means concurrent sessions
 //! never write the same path, so there is nothing to clobber.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 
 const MAX_PROMPTS: usize = 6;
@@ -705,6 +705,18 @@ results stay inspectable:
 - Read a running server's logs -> canopy_server_output (don't re-run the command)
 - The user's marked-up feedback on a page -> canopy_annotations
 
+- \"this\", \"here\", \"the other one\" in the user's request -> canopy_editor_state \
+  (the file they have open, their caret and selection) before guessing
+- Check your own edit compiles -> canopy_diagnostics (the warm language server, \
+  not a full `tsc --noEmit`); before changing a shared signature -> \
+  canopy_references
+- Wait for a server to come up, a build to finish -> canopy_wait_for (don't poll \
+  canopy_server_output in a loop)
+- How something LOOKS -> canopy_screenshot (the DOM snapshot can't see overlap \
+  or contrast)
+- Working in a checkout that other agents share -> canopy_agents first, \
+  canopy_claim on the files you're taking
+
 Call canopy_project first for component paths, configured run commands, \
 terminal ids, and the ports servers are listening on. Fall back to the shell \
 only for work these tools don't cover.";
@@ -717,9 +729,13 @@ fn in_canopy() -> bool {
 }
 
 fn mcp_main() {
-    use std::io::{BufRead, Write};
+    use std::io::BufRead;
     let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
+    // Notifications (resource updates) are written from a watcher thread, so
+    // stdout is shared: one message per write, never interleaved.
+    let out = std::sync::Arc::new(std::sync::Mutex::new(std::io::stdout()));
+    let subscriptions: Subscriptions = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         if line.trim().is_empty() {
@@ -743,7 +759,14 @@ fn mcp_main() {
                     .unwrap_or("2024-11-05");
                 let mut result = serde_json::json!({
                     "protocolVersion": proto,
-                    "capabilities": { "tools": {} },
+                    "capabilities": {
+                        "tools": {},
+                        // The annotations a user marks, and the file they are
+                        // looking at, change while the agent works —
+                        // subscribing beats re-polling a tool for them.
+                        "resources": { "subscribe": true, "listChanged": false },
+                        "prompts": {},
+                    },
                     "serverInfo": { "name": "canopy", "version": env!("CARGO_PKG_VERSION") },
                 });
                 // The client injects this into the agent's system prompt. It is
@@ -759,6 +782,62 @@ fn mcp_main() {
             }
             "ping" => rpc_ok(id, serde_json::json!({})),
             "tools/list" => rpc_ok(id, tools_list()),
+            "resources/list" => rpc_ok(id, resources_list()),
+            "resources/templates/list" => {
+                rpc_ok(id, serde_json::json!({ "resourceTemplates": [] }))
+            }
+            "resources/read" => {
+                let uri = msg
+                    .pointer("/params/uri")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                match read_resource(uri) {
+                    Ok(text) => rpc_ok(
+                        id,
+                        serde_json::json!({ "contents": [
+                            { "uri": uri, "mimeType": "application/json", "text": text }
+                        ]}),
+                    ),
+                    Err(e) => rpc_err(id, -32002, &e),
+                }
+            }
+            "resources/subscribe" => {
+                let uri = msg
+                    .pointer("/params/uri")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if RESOURCES.iter().any(|(u, _, _)| *u == uri) {
+                    let first = subscriptions.lock().unwrap().is_empty();
+                    subscriptions
+                        .lock()
+                        .unwrap()
+                        .insert(uri.clone(), read_resource(&uri).unwrap_or_default());
+                    if first {
+                        watch_resources(out.clone(), subscriptions.clone());
+                    }
+                    rpc_ok(id, serde_json::json!({}))
+                } else {
+                    rpc_err(id, -32002, &format!("unknown resource: {uri}"))
+                }
+            }
+            "resources/unsubscribe" => {
+                if let Some(uri) = msg.pointer("/params/uri").and_then(|v| v.as_str()) {
+                    subscriptions.lock().unwrap().remove(uri);
+                }
+                rpc_ok(id, serde_json::json!({}))
+            }
+            "prompts/list" => rpc_ok(id, prompts_list()),
+            "prompts/get" => {
+                let name = msg
+                    .pointer("/params/name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                match prompt_get(name) {
+                    Ok(result) => rpc_ok(id, result),
+                    Err(e) => rpc_err(id, -32602, &e),
+                }
+            }
             "tools/call" => {
                 let name = msg
                     .pointer("/params/name")
@@ -769,10 +848,7 @@ fn mcp_main() {
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({}));
                 match call_tool(name, &args) {
-                    Ok(text) => rpc_ok(
-                        id,
-                        serde_json::json!({ "content": [{ "type": "text", "text": text }] }),
-                    ),
+                    Ok(output) => rpc_ok(id, output.into_result(name)),
                     // Tool failures are results with isError, not protocol
                     // errors — the agent reads them and adapts.
                     Err(text) => rpc_ok(
@@ -789,22 +865,357 @@ fn mcp_main() {
                 "error": { "code": -32601, "message": format!("method not found: {method}") },
             }),
         };
-        let mut out = stdout.lock();
-        let _ = writeln!(out, "{reply}");
-        let _ = out.flush();
+        write_message(&out, &reply);
     }
+}
+
+type Subscriptions = std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>;
+
+fn write_message(out: &std::sync::Arc<std::sync::Mutex<std::io::Stdout>>, msg: &serde_json::Value) {
+    use std::io::Write;
+    let mut lock = out.lock().unwrap();
+    let _ = writeln!(lock, "{msg}");
+    let _ = lock.flush();
+}
+
+/// Re-read subscribed resources and tell the client when one changed. Polling
+/// rather than a push from the app: the sidecar is a short-lived child with one
+/// pipe to the agent, and a 2s poll of a loopback endpoint costs nothing next to
+/// the round-trip an agent would otherwise spend re-calling a tool.
+fn watch_resources(
+    out: std::sync::Arc<std::sync::Mutex<std::io::Stdout>>,
+    subscriptions: Subscriptions,
+) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let uris: Vec<String> = subscriptions
+            .lock()
+            .unwrap()
+            .keys()
+            .map(String::from)
+            .collect();
+        if uris.is_empty() {
+            continue;
+        }
+        for uri in uris {
+            let Ok(body) = read_resource(&uri) else { continue };
+            let changed = {
+                let mut subs = subscriptions.lock().unwrap();
+                match subs.get(&uri) {
+                    Some(prev) if *prev == body => false,
+                    // Unsubscribed while we were reading.
+                    None => false,
+                    _ => {
+                        subs.insert(uri.clone(), body);
+                        true
+                    }
+                }
+            };
+            if changed {
+                write_message(
+                    &out,
+                    &serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/resources/updated",
+                        "params": { "uri": uri },
+                    }),
+                );
+            }
+        }
+    });
+}
+
+/// (uri, name, description) for everything readable as a resource. Same data
+/// the read-only tools serve — a client that prefers attaching context to
+/// calling a tool can, and either way the agent isn't polling.
+const RESOURCES: &[(&str, &str, &str)] = &[
+    (
+        "canopy://project",
+        "Project context",
+        "Open projects, their components, run servers and agents — the canopy_project snapshot.",
+    ),
+    (
+        "canopy://editor",
+        "Editor state",
+        "The file the user is looking at, their caret and selection, and the open tabs.",
+    ),
+    (
+        "canopy://annotations",
+        "Preview annotations",
+        "Elements the user marked on preview pages, with their comments.",
+    ),
+    (
+        "canopy://claims",
+        "File claims",
+        "Advisory claims other agents have taken over files in this checkout.",
+    ),
+];
+
+fn resources_list() -> serde_json::Value {
+    serde_json::json!({
+        "resources": RESOURCES.iter().map(|(uri, name, description)| serde_json::json!({
+            "uri": uri,
+            "name": name,
+            "description": description,
+            "mimeType": "application/json",
+        })).collect::<Vec<_>>()
+    })
+}
+
+fn read_resource(uri: &str) -> Result<String, String> {
+    match uri {
+        "canopy://project" => ctx_get("/ctx/snapshot".into()),
+        "canopy://editor" => ctx_get("/ctx/editor".into()),
+        "canopy://annotations" => ctx_get("/ctx/annotations".into()),
+        "canopy://claims" => ctx_get("/ctx/claims".into()),
+        other => Err(format!("unknown resource: {other}")),
+    }
+}
+
+/// Workflows the IDE knows the shape of, offered as slash commands in the agent
+/// CLIs. Each one is a prompt the user would otherwise have to write out.
+const PROMPTS: &[(&str, &str, &str)] = &[
+    (
+        "act-on-annotations",
+        "Act on the feedback marked in Canopy's preview",
+        "Call canopy_annotations to read every element the user marked on the preview and the \
+         comment they left on it. Work through them in order: for each one, find the component \
+         that renders it (the annotation names it), make the change, and say which annotation \
+         you addressed. When you're done, take a canopy_screenshot so the user can see the \
+         result, and leave anything you couldn't do listed explicitly.",
+    ),
+    (
+        "verify-in-preview",
+        "Check the change actually works in the running app",
+        "Verify the current change end to end without asking the user to click anything: call \
+         canopy_project to find the dev server (start it with canopy_start_server if it isn't \
+         running, then canopy_wait_for until it's listening), navigate the preview to the page \
+         your change affects, interact with it using canopy_browser_click / canopy_browser_type, \
+         then check canopy_browser_console for errors and canopy_screenshot for how it looks. \
+         Report what you saw, not what you expect.",
+    ),
+    (
+        "check-my-work",
+        "Type-check and review what's changed, using the IDE's language server",
+        "Review the work in progress: run canopy_diagnostics on each file you changed (the \
+         warm language server answers in milliseconds — don't shell out to a full typecheck), \
+         use canopy_references before changing any shared signature, and fix what you find. \
+         Finish with a short summary of what was wrong and what you fixed.",
+    ),
+];
+
+fn prompts_list() -> serde_json::Value {
+    serde_json::json!({
+        "prompts": PROMPTS.iter().map(|(name, description, _)| serde_json::json!({
+            "name": name,
+            "description": description,
+        })).collect::<Vec<_>>()
+    })
+}
+
+fn prompt_get(name: &str) -> Result<serde_json::Value, String> {
+    let (_, description, text) = PROMPTS
+        .iter()
+        .find(|(n, _, _)| *n == name)
+        .ok_or_else(|| format!("unknown prompt: {name}"))?;
+    Ok(serde_json::json!({
+        "description": description,
+        "messages": [{
+            "role": "user",
+            "content": { "type": "text", "text": text },
+        }],
+    }))
 }
 
 fn rpc_ok(id: serde_json::Value, result: serde_json::Value) -> serde_json::Value {
     serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
 
+fn rpc_err(id: serde_json::Value, code: i32, message: &str) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0", "id": id,
+        "error": { "code": code, "message": message },
+    })
+}
+
+/// What a tool answers with. Text for almost everything; a picture for the one
+/// tool whose whole point is pixels.
+enum ToolOutput {
+    Text(String),
+    Image { data: String, mime: String, caption: String },
+}
+
+impl ToolOutput {
+    /// The MCP result. A tool that declares an outputSchema must also return
+    /// `structuredContent`, so the JSON bodies ride along parsed as well as
+    /// pretty-printed — clients that parse get the object, clients that read
+    /// get the text.
+    fn into_result(self, tool: &str) -> serde_json::Value {
+        match self {
+            ToolOutput::Image {
+                data,
+                mime,
+                caption,
+            } => serde_json::json!({ "content": [
+                { "type": "image", "data": data, "mimeType": mime },
+                { "type": "text", "text": caption },
+            ]}),
+            ToolOutput::Text(body) => {
+                let structured = STRUCTURED_TOOLS
+                    .contains(&tool)
+                    .then(|| serde_json::from_str::<serde_json::Value>(&body).ok())
+                    .flatten()
+                    .filter(|v| v.is_object());
+                match structured {
+                    Some(value) => serde_json::json!({
+                        "content": [{ "type": "text", "text": pretty(body) }],
+                        "structuredContent": value,
+                    }),
+                    None => serde_json::json!({
+                        "content": [{ "type": "text", "text": pretty(body) }],
+                    }),
+                }
+            }
+        }
+    }
+}
+
+/// Tools whose body is always a JSON object, and which therefore declare an
+/// outputSchema. Keep in step with the schemas in tools_list().
+const STRUCTURED_TOOLS: &[&str] = &[
+    "canopy_project",
+    "canopy_editor_state",
+    "canopy_component_files",
+    "canopy_annotations",
+    "canopy_resources",
+    "canopy_diagnostics",
+    "canopy_references",
+    "canopy_definition",
+    "canopy_tickets",
+    "canopy_reviews",
+    "canopy_agents",
+];
+
+/// The tools this session gets: everything below, minus whatever the user
+/// switched off in Settings → Agents. A disabled tool is filtered here rather
+/// than refused on call, so it costs the agent no context at all. The bridge
+/// being unreachable means "not inside Canopy" — offer everything and let the
+/// individual calls explain themselves.
 fn tools_list() -> serde_json::Value {
+    let disabled: Vec<String> = ctx_get("/ctx/tools".into())
+        .ok()
+        .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+        .and_then(|v| v.get("disabled").cloned())
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+
+    let mut tools = match tool_defs() {
+        serde_json::Value::Array(list) => list,
+        _ => Vec::new(),
+    };
+    tools.retain(|t| {
+        t.get("name")
+            .and_then(|n| n.as_str())
+            .is_some_and(|n| !disabled.iter().any(|d| d == n))
+    });
+    for tool in &mut tools {
+        let Some(name) = tool.get("name").and_then(|n| n.as_str()).map(str::to_string) else {
+            continue;
+        };
+        let Some(obj) = tool.as_object_mut() else { continue };
+        // Behaviour hints let a host auto-approve the reads (which is most of
+        // this surface) instead of prompting for every canopy_project call.
+        let read_only = READ_ONLY_TOOLS.contains(&name.as_str());
+        obj.insert(
+            "annotations".into(),
+            serde_json::json!({
+                "readOnlyHint": read_only,
+                "destructiveHint": DESTRUCTIVE_TOOLS.contains(&name.as_str()),
+                "idempotentHint": read_only,
+                "openWorldHint": false,
+            }),
+        );
+        if let Some(schema) = output_schema(&name) {
+            obj.insert("outputSchema".into(), schema);
+        }
+    }
+    serde_json::json!({ "tools": tools })
+}
+
+/// Tools that only look. Everything else changes something the user can see.
+const READ_ONLY_TOOLS: &[&str] = &[
+    "canopy_project",
+    "canopy_component_files",
+    "canopy_server_output",
+    "canopy_annotations",
+    "canopy_resources",
+    "canopy_editor_state",
+    "canopy_diagnostics",
+    "canopy_references",
+    "canopy_definition",
+    "canopy_tickets",
+    "canopy_reviews",
+    "canopy_agents",
+    "canopy_wait_for",
+    "canopy_screenshot",
+    "canopy_browser_snapshot",
+    "canopy_browser_console",
+    "canopy_browser_network",
+];
+
+/// Tools that can take something away from someone: a killed process, another
+/// agent's terminal typed into.
+const DESTRUCTIVE_TOOLS: &[&str] = &[
+    "canopy_stop_server",
+    "canopy_restart_server",
+    "canopy_message_agent",
+];
+
+/// Loose but real: names the fields an agent should expect, without pinning a
+/// shape that would make a future addition a protocol violation.
+fn output_schema(name: &str) -> Option<serde_json::Value> {
+    let properties = match name {
+        "canopy_project" => serde_json::json!({ "projects": { "type": "array" } }),
+        "canopy_editor_state" => serde_json::json!({ "projects": { "type": "array" } }),
+        "canopy_component_files" => serde_json::json!({
+            "files": { "type": "array", "items": { "type": "string" } },
+            "truncated": { "type": "boolean" }
+        }),
+        "canopy_annotations" => serde_json::json!({ "annotations": { "type": "array" } }),
+        "canopy_resources" => serde_json::json!({ "terminals": { "type": "array" } }),
+        "canopy_diagnostics" => serde_json::json!({
+            "path": { "type": "string" },
+            "problems": { "type": "array" },
+            "files": { "type": "array" }
+        }),
+        "canopy_references" | "canopy_definition" => serde_json::json!({
+            "count": { "type": "integer" },
+            "locations": { "type": "array" }
+        }),
+        "canopy_tickets" => serde_json::json!({ "tickets": { "type": "array" } }),
+        "canopy_reviews" => serde_json::json!({
+            "relayRequests": { "type": "array" },
+            "pullRequests": { "type": "array" }
+        }),
+        "canopy_agents" => serde_json::json!({
+            "agents": { "type": "array" },
+            "claims": { "type": "array" }
+        }),
+        _ => return None,
+    };
+    Some(serde_json::json!({
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": true,
+    }))
+}
+
+fn tool_defs() -> serde_json::Value {
     // Descriptions stay terse on purpose: every one of these is re-sent in the
     // agent's context on each session. Which tool to reach for is established
     // once, in INSTRUCTIONS above; these only need to say what the tool does
     // and how to call it correctly.
-    serde_json::json!({ "tools": [
+    serde_json::json!([
         {
             "name": "canopy_project",
             "description": "The IDE's live project map: components (labels + absolute paths), their configured run commands, running servers (terminal id, listening ports, exit state), open previews, and other agents. Call first to orient.",
@@ -935,20 +1346,140 @@ fn tools_list() -> serde_json::Value {
             "inputSchema": { "type": "object", "properties": {
                 "url": { "type": "string", "description": "Only this preview origin; defaults to all" }
             }, "additionalProperties": false }
+        },
+        {
+            "name": "canopy_screenshot",
+            "description": "A picture of the previewed page as rendered, returned as an image. Use it whenever the question is how something LOOKS — overlap, contrast, spacing, cut-off text — which the DOM snapshot cannot see.",
+            "inputSchema": { "type": "object", "properties": {
+                "max": { "type": "integer", "description": "Widest the image should be, in pixels (default 1200)" },
+                "url": { "type": "string", "description": "Which preview tab, when several are open" }
+            }, "additionalProperties": false }
+        },
+        {
+            "name": "canopy_editor_state",
+            "description": "What the user is looking at: focused project, active tab, the file open in the editor, the caret, the selection, and every open tab. Call it when the request says \"this\" or \"here\" instead of guessing which file was meant.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
+        {
+            "name": "canopy_diagnostics",
+            "description": "Errors and warnings from the language server Canopy keeps warm for this workspace — the same squiggles the user sees, in milliseconds rather than a full project typecheck. Call it on each file you edited. No path = every file Canopy has open.",
+            "inputSchema": { "type": "object", "properties": {
+                "path": { "type": "string", "description": "Absolute path of a file to check (omit for every open file)" }
+            }, "additionalProperties": false }
+        },
+        {
+            "name": "canopy_references",
+            "description": "Every real reference to a symbol, from the language server: type-aware, so it catches what a grep misses and skips strings and comments. Use before changing a shared signature. Address by `symbol` (first occurrence in the file) or exact line/column.",
+            "inputSchema": { "type": "object", "properties": {
+                "path": { "type": "string", "description": "Absolute path of the file the symbol is defined or used in" },
+                "symbol": { "type": "string", "description": "The name to look up — its first occurrence in the file is used" },
+                "line": { "type": "integer", "description": "1-based line, instead of a symbol name" },
+                "column": { "type": "integer", "description": "1-based column, with line" }
+            }, "required": ["path"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_definition",
+            "description": "Where a symbol is actually defined, from the language server — follows re-exports, aliases and package types a text search can't. Same addressing as canopy_references.",
+            "inputSchema": { "type": "object", "properties": {
+                "path": { "type": "string", "description": "Absolute path of the file the symbol is used in" },
+                "symbol": { "type": "string", "description": "The name to look up — its first occurrence in the file is used" },
+                "line": { "type": "integer", "description": "1-based line, instead of a symbol name" },
+                "column": { "type": "integer", "description": "1-based column, with line" }
+            }, "required": ["path"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_wait_for",
+            "description": "Block until a terminal is worth looking at, instead of polling canopy_server_output. `until`: listening (default, binds a port), output (next output, or a line containing `pattern`), idle (output goes quiet — how you wait out a build). Only new output counts.",
+            "inputSchema": { "type": "object", "properties": {
+                "server": { "type": "integer", "description": "Terminal id (ptyId) from canopy_project" },
+                "until": { "type": "string", "enum": ["listening", "output", "idle"], "description": "What to wait for (default: listening, or output when a pattern is given)" },
+                "pattern": { "type": "string", "description": "Case-insensitive substring to wait for in new output" },
+                "timeoutMs": { "type": "integer", "description": "Give up after this long (default 60000, max 600000)" },
+                "idleMs": { "type": "integer", "description": "For until=idle: how long the output must stay quiet (default 2000)" }
+            }, "required": ["server"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_open_file",
+            "description": "Put a file in front of the user in Canopy, optionally landing on a line. Use it when you're about to talk about specific code. Opens or focuses the tab and scrolls; edits nothing.",
+            "inputSchema": { "type": "object", "properties": {
+                "path": { "type": "string", "description": "Absolute path of the file to show" },
+                "line": { "type": "integer", "description": "1-based line to scroll to and put the caret on" }
+            }, "required": ["path"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_show_diff",
+            "description": "Show a file in Canopy as a diff against git HEAD — show the change rather than describing it.",
+            "inputSchema": { "type": "object", "properties": {
+                "path": { "type": "string", "description": "Absolute path of the changed file" }
+            }, "required": ["path"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_notify",
+            "description": "Tell the user something in Canopy's UI (system notification too, for warn/error). How a background agent reaches someone not watching its terminal. Don't narrate with it; it interrupts.",
+            "inputSchema": { "type": "object", "properties": {
+                "text": { "type": "string", "description": "What to tell them — one sentence" },
+                "level": { "type": "string", "enum": ["info", "success", "warn", "error"], "description": "How loudly (default info)" }
+            }, "required": ["text"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_ask_user",
+            "description": "Ask the user a question in Canopy and block until they answer. For a decision you genuinely can't make — a fork in the design, a destructive step — not for confirmation you could infer. `options` render as buttons; they can also type freely or skip.",
+            "inputSchema": { "type": "object", "properties": {
+                "question": { "type": "string", "description": "The question, phrased so it can be answered in one line" },
+                "options": { "type": "array", "items": { "type": "string" }, "description": "Answers to offer as buttons" },
+                "timeoutMs": { "type": "integer", "description": "How long to wait (default 120000, max 600000)" }
+            }, "required": ["question"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_agents",
+            "description": "The other agent sessions in this project: working directory, branch, what they were last asked to do, files they've edited, active or idle, and terminal ids. Several agents routinely share one checkout — read this before you start. Also lists held file claims.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
+        {
+            "name": "canopy_claim",
+            "description": "Claim the files you're about to work on so other agents in this checkout see it, and are told (with your note) if they try to take the same ones. Advisory: it doesn't block writes, it stops the collision being invisible. `action: release` when done. A directory claim covers what's under it.",
+            "inputSchema": { "type": "object", "properties": {
+                "paths": { "type": "array", "items": { "type": "string" }, "description": "Absolute file or directory paths you're taking" },
+                "note": { "type": "string", "description": "What you're doing to them — the other agent reads this" },
+                "action": { "type": "string", "enum": ["claim", "release"], "description": "Default claim; release drops everything you hold" }
+            }, "additionalProperties": false }
+        },
+        {
+            "name": "canopy_message_agent",
+            "description": "Send a message to another agent session by typing it into its terminal. Hand off work, warn about a shared file, ask what it's doing; ids come from canopy_agents. It replies in its own session — read that with canopy_server_output. Interrupts it, so make it worth the interruption.",
+            "inputSchema": { "type": "object", "properties": {
+                "ptyId": { "type": "integer", "description": "Terminal id of the agent to message (from canopy_agents)" },
+                "text": { "type": "string", "description": "What to say — one line, sent as if typed" }
+            }, "required": ["ptyId", "text"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_tickets",
+            "description": "Issues from every tracker connected in Canopy (GitHub, Linear, …), merged: title, state, assignee, priority, branch, body. Linear is reachable no other way from here — its key lives in Canopy's settings. Read the ticket before implementing it.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
+        {
+            "name": "canopy_reviews",
+            "description": "What's waiting on a review: requests teammates sent over Canopy's team relay (which exist nowhere else), and the open pull requests for this project's repos with their review state.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         }
-    ]})
+    ])
 }
 
-fn call_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
+fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String> {
+    let text = |r: Result<String, String>| r.map(ToolOutput::Text);
     match name {
-        "canopy_project" => ctx_get("/ctx/snapshot".into()).map(pretty),
+        "canopy_project" => text(ctx_get("/ctx/snapshot".into())),
+        "canopy_editor_state" => text(ctx_get("/ctx/editor".into())),
         "canopy_component_files" => {
             let dir = args
                 .get("dir")
                 .and_then(|v| v.as_str())
                 .ok_or("missing required argument: dir")?;
             let max = args.get("max").and_then(|v| v.as_u64()).unwrap_or(500);
-            ctx_get(format!("/ctx/files?dir={}&max={max}", urlencode(dir))).map(pretty)
+            text(ctx_get(format!(
+                "/ctx/files?dir={}&max={max}",
+                urlencode(dir)
+            )))
         }
         "canopy_server_output" => {
             let server = args
@@ -956,23 +1487,29 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
                 .and_then(|v| v.as_u64())
                 .ok_or("missing required argument: server (a terminal id from canopy_project)")?;
             let lines = args.get("lines").and_then(|v| v.as_u64()).unwrap_or(200);
-            ctx_get(format!("/ctx/server-output/{server}?lines={lines}"))
+            text(ctx_get(format!(
+                "/ctx/server-output/{server}?lines={lines}"
+            )))
         }
-        "canopy_annotations" => ctx_get("/ctx/annotations".into()).map(pretty),
-        "canopy_resources" => ctx_get("/ctx/resources".into()).map(pretty),
+        "canopy_annotations" => text(ctx_get("/ctx/annotations".into())),
+        "canopy_resources" => text(ctx_get("/ctx/resources".into())),
         "canopy_stop_server" => {
             let pty = args
                 .get("ptyId")
                 .and_then(|v| v.as_u64())
                 .ok_or("missing required argument: ptyId (a terminal id from canopy_project)")?;
-            ctx_post(serde_json::json!({ "kind": "stop_server", "cwd": cwd(), "ptyId": pty }))
+            text(ctx_post(
+                serde_json::json!({ "kind": "stop_server", "cwd": cwd(), "ptyId": pty }),
+            ))
         }
         "canopy_restart_server" => {
             let pty = args
                 .get("ptyId")
                 .and_then(|v| v.as_u64())
                 .ok_or("missing required argument: ptyId (a terminal id from canopy_project)")?;
-            ctx_post(serde_json::json!({ "kind": "restart_server", "cwd": cwd(), "ptyId": pty }))
+            text(ctx_post(
+                serde_json::json!({ "kind": "restart_server", "cwd": cwd(), "ptyId": pty }),
+            ))
         }
         "canopy_start_server" => {
             let dir = args
@@ -982,23 +1519,169 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
             let command = args.get("command").and_then(|v| v.as_str()).ok_or(
                 "missing required argument: command (a run command name from canopy_project)",
             )?;
-            ctx_post(serde_json::json!({
+            text(ctx_post(serde_json::json!({
                 "kind": "start_server",
                 "cwd": cwd(),
                 "dir": dir,
                 "command": command,
-            }))
+            })))
         }
         "canopy_open_preview" => {
             let url = args
                 .get("url")
                 .and_then(|v| v.as_str())
                 .ok_or("missing required argument: url")?;
-            ctx_post(serde_json::json!({
+            text(ctx_post(serde_json::json!({
                 "kind": "open_preview",
                 "cwd": cwd(),
                 "url": url,
-            }))
+            })))
+        }
+        "canopy_open_file" | "canopy_show_diff" => {
+            let path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or("missing required argument: path")?;
+            text(ctx_post(serde_json::json!({
+                "kind": if name == "canopy_show_diff" { "show_diff" } else { "open_file" },
+                "cwd": cwd(),
+                "path": path,
+                "line": args.get("line").and_then(|v| v.as_u64()),
+            })))
+        }
+        "canopy_notify" => {
+            let body = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .ok_or("missing required argument: text")?;
+            text(ctx_post(serde_json::json!({
+                "kind": "notify",
+                "cwd": cwd(),
+                "text": body,
+                "level": args.get("level").and_then(|v| v.as_str()).unwrap_or("info"),
+            })))
+        }
+        "canopy_message_agent" => {
+            let pty = args
+                .get("ptyId")
+                .and_then(|v| v.as_u64())
+                .ok_or("missing required argument: ptyId (a terminal id from canopy_agents)")?;
+            let body = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .ok_or("missing required argument: text")?;
+            text(ctx_post(serde_json::json!({
+                "kind": "message_agent",
+                "cwd": cwd(),
+                "ptyId": pty,
+                "text": body,
+            })))
+        }
+        "canopy_diagnostics" => text(ui_op("diagnostics", args, 25)),
+        "canopy_references" => text(ui_op("references", args, 25)),
+        "canopy_definition" => text(ui_op("definition", args, 25)),
+        "canopy_tickets" => text(ui_op("tickets", args, 25)),
+        "canopy_reviews" => text(ui_op("reviews", args, 25)),
+        "canopy_ask_user" => {
+            if args
+                .get("question")
+                .and_then(|v| v.as_str())
+                .map_or(true, str::is_empty)
+            {
+                return Err("missing required argument: question".into());
+            }
+            // The user is the slow part; hold the socket open past their think
+            // time rather than timing out under them.
+            let ms = args
+                .get("timeoutMs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(120_000)
+                .clamp(5_000, 600_000);
+            text(ui_op("ask", args, ms / 1000 + 5))
+        }
+        "canopy_wait_for" => {
+            let server = args
+                .get("server")
+                .and_then(|v| v.as_u64())
+                .ok_or("missing required argument: server (a terminal id from canopy_project)")?;
+            let ms = args
+                .get("timeoutMs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(60_000)
+                .clamp(1_000, 600_000);
+            let mut query = format!("/ctx/wait?server={server}&timeoutMs={ms}");
+            if let Some(p) = args.get("pattern").and_then(|v| v.as_str()) {
+                query.push_str(&format!("&pattern={}", urlencode(p)));
+            }
+            if let Some(u) = args.get("until").and_then(|v| v.as_str()) {
+                query.push_str(&format!("&until={}", urlencode(u)));
+            }
+            if let Some(i) = args.get("idleMs").and_then(|v| v.as_u64()) {
+                query.push_str(&format!("&idleMs={i}"));
+            }
+            // Outlive the wait itself, so the answer arrives instead of the
+            // socket closing under it.
+            text(ctx_request_with_timeout(
+                "GET",
+                &query,
+                None,
+                std::time::Duration::from_millis(ms + 10_000),
+            ))
+        }
+        "canopy_agents" => text(agents_json()),
+        "canopy_claim" => {
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("claim");
+            let paths: Vec<String> = args
+                .get("paths")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|p| p.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if action == "claim" && paths.is_empty() {
+                return Err("claim needs paths — the files you're about to work on".into());
+            }
+            text(ctx_request(
+                "POST",
+                "/ctx/claims",
+                Some(
+                    serde_json::json!({
+                        "action": action,
+                        "paths": paths,
+                        "owner": claim_owner(),
+                        "note": args.get("note").and_then(|v| v.as_str()),
+                    })
+                    .to_string(),
+                ),
+            ))
+        }
+        "canopy_screenshot" => {
+            let body = browser_op("screenshot", args)?;
+            let value: serde_json::Value = serde_json::from_str(&body)
+                .map_err(|_| "the preview returned something that isn't an image".to_string())?;
+            let data = value
+                .get("image")
+                .and_then(|v| v.as_str())
+                .ok_or("the preview returned no image")?;
+            Ok(ToolOutput::Image {
+                data: data.to_string(),
+                mime: value
+                    .get("mimeType")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("image/png")
+                    .to_string(),
+                caption: format!(
+                    "{} as rendered right now ({}×{} points).",
+                    value.get("url").and_then(|v| v.as_str()).unwrap_or("The preview"),
+                    value.get("width").and_then(|v| v.as_u64()).unwrap_or(0),
+                    value.get("height").and_then(|v| v.as_u64()).unwrap_or(0),
+                ),
+            })
         }
         "canopy_browser_navigate" => {
             if args.get("url").is_none() && args.get("action").is_none() {
@@ -1008,17 +1691,126 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
                         .into(),
                 );
             }
-            browser_op("navigate", args)
+            text(browser_op("navigate", args))
         }
-        "canopy_browser_snapshot" => browser_op("snapshot", args),
-        "canopy_browser_click" => browser_op("click", args),
-        "canopy_browser_type" => browser_op("type", args),
-        "canopy_browser_point" => browser_op("point", args),
-        "canopy_browser_eval" => browser_op("eval", args),
-        "canopy_browser_console" => browser_op("console", args),
-        "canopy_browser_network" => browser_op("network", args),
+        "canopy_browser_snapshot" => text(browser_op("snapshot", args)),
+        "canopy_browser_click" => text(browser_op("click", args)),
+        "canopy_browser_type" => text(browser_op("type", args)),
+        "canopy_browser_point" => text(browser_op("point", args)),
+        "canopy_browser_eval" => text(browser_op("eval", args)),
+        "canopy_browser_console" => text(browser_op("console", args)),
+        "canopy_browser_network" => text(browser_op("network", args)),
         other => Err(format!("unknown tool: {other}")),
     }
+}
+
+/// POST an op only the running UI can answer. Same shape as browser_op, but the
+/// timeout is per-op: a language-server question is quick, a question put to a
+/// human is not.
+fn ui_op(op: &str, args: &serde_json::Value, timeout_secs: u64) -> Result<String, String> {
+    let mut body = args.clone();
+    if !body.is_object() {
+        body = serde_json::json!({});
+    }
+    body["op"] = serde_json::json!(op);
+    body["cwd"] = serde_json::json!(cwd());
+    ctx_request_with_timeout(
+        "POST",
+        "/ctx/ui",
+        Some(body.to_string()),
+        std::time::Duration::from_secs(timeout_secs),
+    )
+}
+
+/// How this session identifies itself when claiming files: the agent's own
+/// working directory, which is what makes a claim readable to the agent next to
+/// it ("the session in canopy-wt-auth has src/auth").
+fn claim_owner() -> String {
+    let cwd = cwd();
+    let name = cwd.rsplit('/').next().unwrap_or("agent").to_string();
+    format!("{name} ({cwd})")
+}
+
+/// The other agent sessions in this project, merged from two sources that each
+/// know half of it: the session digests the hooks write (what it's working on)
+/// and the app's live snapshot (which terminal it's in, so it can be messaged).
+fn agents_json() -> Result<String, String> {
+    let cwd = cwd();
+    let scopes = scopes();
+    let roots = scopes
+        .into_iter()
+        .find(|(_, roots)| roots.iter().any(|r| under(&cwd, r)))
+        .map(|(_, roots)| roots)
+        .unwrap_or_default();
+
+    // ptyId by working directory, so an agent found in a digest can be messaged.
+    let mut ptys: HashMap<String, serde_json::Value> = HashMap::new();
+    if let Ok(body) = ctx_get("/ctx/snapshot".into()) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+            for project in v["projects"].as_array().into_iter().flatten() {
+                for agent in project["agents"].as_array().into_iter().flatten() {
+                    if let Some(dir) = agent["dir"].as_str() {
+                        ptys.insert(dir.to_string(), agent.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    let dir = format!("{}/.canopy/sessions", home());
+    let now = now_secs();
+    let mut agents: Vec<serde_json::Value> = Vec::new();
+    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(d) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let peer_cwd = d["cwd"].as_str().unwrap_or("");
+        // Same scoping as the peer context the hook injects: this project only,
+        // and nothing stale enough to be misleading.
+        if peer_cwd == cwd || !roots.iter().any(|r| under(peer_cwd, r)) {
+            continue;
+        }
+        let updated = d["updated"].as_u64().unwrap_or(0);
+        if now.saturating_sub(updated) > PEER_MAX_AGE_SECS {
+            continue;
+        }
+        let live = ptys.get(peer_cwd);
+        agents.push(serde_json::json!({
+            "cwd": peer_cwd,
+            "agent": live.and_then(|a| a["agent"].as_str()).or(d["agent"].as_str()),
+            "branch": d["branch"],
+            "state": if d["idle"].as_bool().unwrap_or(false) { "idle" } else { "active" },
+            "secondsSinceUpdate": now.saturating_sub(updated),
+            "ptyId": live.map(|a| a["ptyId"].clone()),
+            "recentRequests": d["prompts"].as_array().map(|p| {
+                p.iter().rev().take(3).cloned().collect::<Vec<_>>()
+            }),
+            "filesEdited": d["files"].as_array().map(|f| {
+                f.iter().rev().take(10).cloned().collect::<Vec<_>>()
+            }),
+        }));
+    }
+
+    let claims = ctx_get("/ctx/claims".into())
+        .ok()
+        .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok())
+        .and_then(|v| v.get("claims").cloned())
+        .unwrap_or_else(|| serde_json::json!([]));
+
+    Ok(serde_json::json!({
+        "agents": agents,
+        "claims": claims,
+        "note": "Sessions in this project other than your own. Their state is as of their last \
+                 hook event, not this instant.",
+    })
+    .to_string())
 }
 
 /// POST a browser-control op to the bridge: the tool's arguments ride along

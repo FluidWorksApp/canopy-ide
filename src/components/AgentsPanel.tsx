@@ -271,6 +271,19 @@ export function AgentsPanel({
     return () => clearInterval(t);
   }, [roots.join("\n"), visible]);
 
+  // Claims other agents hold in this checkout, refreshed when one changes.
+  const [claims, setClaims] = useState<ipc.AgentClaim[]>([]);
+  useEffect(() => {
+    if (!visible) return;
+    const load = () => void ipc.contextClaims().then(setClaims).catch(() => {});
+    load();
+    let un: (() => void) | undefined;
+    void ipc.onAgentClaims(load).then((u) => {
+      un = u;
+    });
+    return () => un?.();
+  }, [visible]);
+
   const autoSetup = async (agent: string) => {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
@@ -896,6 +909,35 @@ export function AgentsPanel({
       {termSessions.length > 0 && (
         <Section title="Terminals" count={termSessions.length}>
           {termSessions.map(sessionRow)}
+        </Section>
+      )}
+
+      {/* Files an agent has claimed (canopy_claim). Advisory, so it only works
+          if it is visible — and if a dead session's claim can be dropped. */}
+      {claims.length > 0 && (
+        <Section title="Claimed files" count={claims.length} tone="quiet">
+          <div className="claim-list">
+            {claims.map((claim) => (
+              <div key={claim.owner} className="claim-row">
+                <span className="claim-owner" title={claim.owner}>
+                  {claim.owner.split(" (")[0]}
+                </span>
+                <span className="claim-paths" title={claim.paths.join("\n")}>
+                  {claim.note ? `${claim.note} — ` : ""}
+                  {claim.paths.map((p) => p.split("/").pop()).join(", ")}
+                </span>
+                <button
+                  className="btn btn-small"
+                  title="Drop this claim — for an agent that died holding it"
+                  onClick={() => {
+                    void ipc.contextReleaseClaim(claim.owner).catch(() => {});
+                  }}
+                >
+                  Release
+                </button>
+              </div>
+            ))}
+          </div>
         </Section>
       )}
 

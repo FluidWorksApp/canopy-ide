@@ -44,10 +44,29 @@ pub struct ContextBridge {
     snapshots: Mutex<HashMap<String, serde_json::Value>>,
     port: OnceLock<u16>,
     token: String,
-    /// Browser-control ops in flight: the HTTP handler parks a sender here and
-    /// waits; the frontend answers through the `browser_result` command.
+    /// Browser-control and UI ops in flight: the HTTP handler parks a sender
+    /// here and waits; the frontend answers through the `browser_result`
+    /// command (one ticket space for every request/response op, browser or not).
     pending: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<(bool, serde_json::Value)>>>,
     next_op: AtomicU64,
+    /// Advisory file claims, newest last. Several agents routinely share one
+    /// checkout; a claim is how one says "I'm editing these" loudly enough for
+    /// the others (and the Agents panel) to see it. Advisory on purpose —
+    /// nothing here blocks a write, it just stops the collision being invisible.
+    claims: Mutex<Vec<Claim>>,
+    /// Tools the user switched off in Settings → Agents. `None` until the
+    /// frontend publishes, which is the same as "everything is on".
+    disabled_tools: Mutex<Option<Vec<String>>>,
+}
+
+/// One agent's advisory claim over a set of paths.
+#[derive(Clone, serde::Serialize)]
+pub struct Claim {
+    pub paths: Vec<String>,
+    /// Who holds it — the agent's cwd plus whatever name it gave itself.
+    pub owner: String,
+    pub note: Option<String>,
+    pub at_ms: u64,
 }
 
 impl Default for ContextBridge {
@@ -60,6 +79,8 @@ impl Default for ContextBridge {
             token: hex::encode(bytes),
             pending: Mutex::new(HashMap::new()),
             next_op: AtomicU64::new(1),
+            claims: Mutex::new(Vec::new()),
+            disabled_tools: Mutex::new(None),
         }
     }
 }
@@ -100,6 +121,11 @@ pub fn start(app: tauri::AppHandle) {
             .route("/ctx/action", post(action))
             .route("/ctx/browser", post(browser))
             .route("/ctx/network", get(network))
+            .route("/ctx/editor", get(editor))
+            .route("/ctx/ui", post(ui_op))
+            .route("/ctx/wait", get(wait))
+            .route("/ctx/claims", get(claims_list).post(claims_post))
+            .route("/ctx/tools", get(tools))
             .with_state(app.clone());
         let _ = axum::serve(listener, router).await;
     });
@@ -122,6 +148,29 @@ pub fn context_publish(
 #[tauri::command]
 pub fn context_remove(state: tauri::State<'_, ContextBridge>, project_id: String) {
     state.snapshots.lock().unwrap().remove(&project_id);
+}
+
+/// Which canopy_* tools the user switched off (Settings → Agents). Published on
+/// change and at startup; the sidecar filters its `tools/list` against this, so
+/// a disabled tool never even reaches the agent's context window.
+#[tauri::command]
+pub fn context_tools(state: tauri::State<'_, ContextBridge>, disabled: Vec<String>) {
+    *state.disabled_tools.lock().unwrap() = Some(disabled);
+}
+
+/// Every advisory claim currently held, for the Agents panel.
+#[tauri::command]
+pub fn context_claims(state: tauri::State<'_, ContextBridge>) -> Vec<Claim> {
+    state.claims.lock().unwrap().clone()
+}
+
+/// Drop a claim from the UI — the escape hatch for an agent that died holding
+/// one, so a stale claim is never permanent.
+#[tauri::command]
+pub fn context_release_claim(app: tauri::AppHandle, owner: String) {
+    let bridge = app.state::<ContextBridge>();
+    bridge.claims.lock().unwrap().retain(|c| c.owner != owner);
+    let _ = app.emit("agent:claims", ());
 }
 
 /// The frontend's answer to a browser-control op: `data` is a JSON document
@@ -187,6 +236,149 @@ async fn annotations(
         StatusCode::OK,
         serde_json::json!({ "annotations": list }).to_string(),
     )
+}
+
+/// What the user is looking at right now: the focused project, its open tabs,
+/// the file in front of them, and where the caret sits. The context an agent is
+/// otherwise missing when the ask is "fix this" or "make it match the other
+/// one" — the IDE is the only thing that knows what "this" is.
+async fn editor(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let states: Vec<serde_json::Value> = app
+        .state::<ContextBridge>()
+        .snapshots
+        .lock()
+        .unwrap()
+        .values()
+        .filter_map(|p| {
+            let e = p.get("editor")?.clone();
+            let mut obj = e.as_object()?.clone();
+            obj.insert("project".into(), p.get("name").cloned().unwrap_or_default());
+            Some(serde_json::Value::Object(obj))
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        serde_json::json!({ "projects": states }).to_string(),
+    )
+}
+
+/// The tool switches from Settings → Agents. Answered even when nothing has
+/// been published (nothing disabled), so the sidecar can treat any error as
+/// "everything is on" rather than hiding tools on a hiccup.
+async fn tools(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let disabled = app
+        .state::<ContextBridge>()
+        .disabled_tools
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_default();
+    (
+        StatusCode::OK,
+        serde_json::json!({ "disabled": disabled }).to_string(),
+    )
+}
+
+async fn claims_list(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let claims = app.state::<ContextBridge>().claims.lock().unwrap().clone();
+    (
+        StatusCode::OK,
+        serde_json::json!({ "claims": claims }).to_string(),
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct ClaimReq {
+    /// claim | release
+    action: String,
+    #[serde(default)]
+    paths: Vec<String>,
+    owner: String,
+    note: Option<String>,
+}
+
+/// Take or drop an advisory claim. A claim that overlaps someone else's is
+/// refused with the holder's name: the point is to surface the collision at the
+/// moment it would happen, while the agent can still pick different work.
+async fn claims_post(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+    Json(req): Json<ClaimReq>,
+) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let bridge = app.state::<ContextBridge>();
+    let msg = {
+        let mut claims = bridge.claims.lock().unwrap();
+        match req.action.as_str() {
+            "release" => {
+                let before = claims.len();
+                claims.retain(|c| c.owner != req.owner);
+                format!("Released {} claim(s).", before - claims.len())
+            }
+            "claim" => {
+                if req.paths.is_empty() {
+                    return (StatusCode::BAD_REQUEST, "claim needs paths".into());
+                }
+                let conflict = claims.iter().find(|c| {
+                    c.owner != req.owner
+                        && c.paths.iter().any(|held| {
+                            req.paths.iter().any(|want| paths_overlap(held, want))
+                        })
+                });
+                if let Some(c) = conflict {
+                    return (
+                        StatusCode::CONFLICT,
+                        format!(
+                            "{} already claimed {} ({}). Pick different files, or ask that agent \
+                             to release them.",
+                            c.owner,
+                            c.paths.join(", "),
+                            c.note.clone().unwrap_or_else(|| "no note".into())
+                        ),
+                    );
+                }
+                claims.retain(|c| c.owner != req.owner);
+                claims.push(Claim {
+                    paths: req.paths.clone(),
+                    owner: req.owner.clone(),
+                    note: req.note.clone(),
+                    at_ms: now_ms(),
+                });
+                format!("Claimed {} path(s).", req.paths.len())
+            }
+            other => return (StatusCode::BAD_REQUEST, format!("unknown claim action: {other}")),
+        }
+    };
+    let _ = app.emit("agent:claims", ());
+    (StatusCode::OK, msg)
+}
+
+/// Same file, or one inside the other's directory — a claim on a directory
+/// covers what's under it.
+fn paths_overlap(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim_end_matches('/'), b.trim_end_matches('/'));
+    a == b || a.starts_with(&format!("{b}/")) || b.starts_with(&format!("{a}/"))
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Live CPU/memory for every Canopy terminal, with a per-process breakdown —
@@ -268,9 +460,17 @@ struct Action {
     command: Option<String>,
     /// open_preview: the localhost URL to open in the embedded browser.
     url: Option<String>,
-    /// stop_server / restart_server: the terminal id to act on.
+    /// stop_server / restart_server / message_agent: the terminal id to act on.
     #[serde(rename = "ptyId")]
     pty_id: Option<u32>,
+    /// open_file / show_diff: the file to put in front of the user, and where
+    /// in it to land.
+    path: Option<String>,
+    line: Option<u32>,
+    /// notify / message_agent: what to say.
+    text: Option<String>,
+    /// notify: info | success | warn | error.
+    level: Option<String>,
 }
 
 async fn action(
@@ -364,6 +564,81 @@ async fn action(
             );
             format!("Restarting terminal {id}. Call canopy_server_output shortly to watch it come back up.")
         }
+        "open_file" | "show_diff" => {
+            let Some(path) = act.path.as_deref() else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("{} needs a path", act.kind),
+                );
+            };
+            if !std::path::Path::new(path).is_file() {
+                return (
+                    StatusCode::NOT_FOUND,
+                    format!("{path} isn't a file on this machine"),
+                );
+            }
+            // The file's own directory routes it: an agent naming a path in a
+            // project other than its cwd's still lands in the right window.
+            let route = std::path::Path::new(path)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| act.cwd.clone().unwrap_or_default());
+            let _ = app.emit(
+                "agent:action",
+                serde_json::json!({
+                    "kind": act.kind,
+                    "route": route,
+                    "path": path,
+                    "line": act.line,
+                }),
+            );
+            match (act.kind.as_str(), act.line) {
+                ("show_diff", _) => format!("Showing {path} as a diff against git HEAD in Canopy."),
+                (_, Some(l)) => format!("Opened {path} at line {l} in Canopy."),
+                _ => format!("Opened {path} in Canopy."),
+            }
+        }
+        "notify" => {
+            let Some(text) = act.text.as_deref() else {
+                return (StatusCode::BAD_REQUEST, "notify needs text".into());
+            };
+            let _ = app.emit(
+                "agent:action",
+                serde_json::json!({
+                    "kind": "notify",
+                    "route": act.cwd.clone().unwrap_or_default(),
+                    "text": text,
+                    "level": act.level.as_deref().unwrap_or("info"),
+                }),
+            );
+            "Told the user.".to_string()
+        }
+        "message_agent" => {
+            let (Some(id), Some(text)) = (act.pty_id, act.text.as_deref()) else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "message_agent needs ptyId and text".into(),
+                );
+            };
+            // Straight into the other agent's stdin, exactly as if the user had
+            // typed it — that IS the interface every agent CLI exposes. Newline
+            // separate from the text so a multi-line message submits once.
+            let manager = app.state::<crate::pty::PtyManager>();
+            if manager.get(id).is_none() {
+                return (
+                    StatusCode::NOT_FOUND,
+                    format!("No running Canopy terminal with id {id} (see canopy_agents)"),
+                );
+            }
+            let body = text.replace(['\r', '\n'], " ");
+            match manager.write(id, &format!("{body}\r")) {
+                Ok(()) => format!(
+                    "Sent to terminal {id}. It answers in its own session — read its reply with \
+                     canopy_server_output({id})."
+                ),
+                Err(e) => return (StatusCode::BAD_REQUEST, e),
+            }
+        }
         other => return (StatusCode::BAD_REQUEST, format!("unknown action: {other}")),
     };
     (StatusCode::OK, msg)
@@ -450,7 +725,7 @@ async fn browser(
                 return (StatusCode::BAD_REQUEST, "eval needs code".into());
             }
         }
-        "snapshot" | "console" => {}
+        "snapshot" | "console" | "screenshot" => {}
         "network" => return network_response(&app, op.url.as_deref()),
         other => {
             return (
@@ -509,6 +784,283 @@ async fn browser(
             )
         }
     }
+}
+
+/// The request/response ops that need something only the running UI can answer:
+/// the language server it keeps warm (diagnostics, references, definition), the
+/// trackers it holds keys for (tickets, reviews), a question put to the user, a
+/// picture of the previewed page. Same ticket/oneshot machinery as the browser
+/// ops — the frontend answers through `browser_result` — but with a per-op
+/// deadline, because "ask the user" and "read a marker" are not the same wait.
+#[derive(serde::Deserialize)]
+struct UiOp {
+    op: String,
+    cwd: Option<String>,
+    /// diagnostics / references / definition: where to look.
+    path: Option<String>,
+    line: Option<u32>,
+    column: Option<u32>,
+    symbol: Option<String>,
+    /// ask: the question, its options, and how long the agent will hold.
+    question: Option<String>,
+    #[serde(default)]
+    options: Vec<String>,
+    #[serde(rename = "timeoutMs")]
+    timeout_ms: Option<u64>,
+}
+
+const UI_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// A question waits on a human, so it gets minutes — bounded so a forgotten
+/// dialog can't pin an agent forever.
+const MAX_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+async fn ui_op(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+    Json(op): Json<UiOp>,
+) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let deadline = match op.op.as_str() {
+        "diagnostics" | "tickets" | "reviews" => UI_OP_TIMEOUT,
+        "references" | "definition" => {
+            if op.path.is_none() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("{} needs a path", op.op),
+                );
+            }
+            if op.symbol.is_none() && op.line.is_none() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("{} needs a symbol, or a line and column", op.op),
+                );
+            }
+            UI_OP_TIMEOUT
+        }
+        "ask" => {
+            if op.question.as_deref().map_or(true, |q| q.trim().is_empty()) {
+                return (StatusCode::BAD_REQUEST, "ask needs a question".into());
+            }
+            op.timeout_ms
+                .map(std::time::Duration::from_millis)
+                .unwrap_or(std::time::Duration::from_secs(120))
+                .min(MAX_ASK_TIMEOUT)
+        }
+        other => return (StatusCode::BAD_REQUEST, format!("unknown ui op: {other}")),
+    };
+
+    let bridge = app.state::<ContextBridge>();
+    let id = bridge.next_op.fetch_add(1, Ordering::Relaxed);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    bridge.pending.lock().unwrap().insert(id, tx);
+
+    let _ = app.emit(
+        "agent:ui",
+        serde_json::json!({
+            "id": id,
+            "op": op.op,
+            "route": op.cwd.clone().unwrap_or_default(),
+            "path": op.path,
+            "line": op.line,
+            "column": op.column,
+            "symbol": op.symbol,
+            "question": op.question,
+            "options": op.options,
+        }),
+    );
+
+    match tokio::time::timeout(deadline, rx).await {
+        Ok(Ok((true, data))) => (StatusCode::OK, body_text(data)),
+        Ok(Ok((false, data))) => (StatusCode::BAD_REQUEST, body_text(data)),
+        Ok(Err(_)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Canopy dropped this request".into(),
+        ),
+        Err(_) => {
+            app.state::<ContextBridge>()
+                .pending
+                .lock()
+                .unwrap()
+                .remove(&id);
+            let why = if op.op == "ask" {
+                "The user didn't answer in time — carry on without them, or ask again."
+            } else {
+                "Canopy didn't answer in time. The window may be busy, or the language server \
+                 may still be warming up — try again."
+            };
+            (StatusCode::GATEWAY_TIMEOUT, why.into())
+        }
+    }
+}
+
+/// Block until a terminal does something worth waking up for: prints a matching
+/// line, starts listening on a port, or goes quiet. The alternative is the agent
+/// polling canopy_server_output in a loop, which costs a turn and a few hundred
+/// tokens per look — the supervisor can just wait.
+#[derive(serde::Deserialize)]
+struct WaitParams {
+    server: u32,
+    /// Substring to wait for in new output (case-insensitive).
+    pattern: Option<String>,
+    /// listening | idle | output (default: pattern when given, else listening).
+    until: Option<String>,
+    #[serde(rename = "timeoutMs")]
+    timeout_ms: Option<u64>,
+    /// idle: how long the output must stay quiet to count.
+    #[serde(rename = "idleMs")]
+    idle_ms: Option<u64>,
+}
+
+const WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+async fn wait(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+    Query(p): Query<WaitParams>,
+) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let ptys = app.state::<crate::pty::PtyManager>();
+    let read = |id: u32| ptys.scrollback_tail(id, MAX_OUTPUT_BYTES).map(|b| strip_ansi(&b));
+    let Some(initial) = read(p.server) else {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("no running terminal with id {} — it may have exited", p.server),
+        );
+    };
+    let until = p
+        .until
+        .clone()
+        .unwrap_or_else(|| if p.pattern.is_some() { "output".into() } else { "listening".into() });
+    let timeout = std::time::Duration::from_millis(p.timeout_ms.unwrap_or(60_000).clamp(1_000, 600_000));
+    let idle_for = std::time::Duration::from_millis(p.idle_ms.unwrap_or(2_000).clamp(200, 60_000));
+    let needle = p.pattern.as_deref().map(str::to_lowercase);
+
+    // Everything is measured against what was already on screen when the call
+    // arrived, so a pattern that matched an hour ago doesn't return instantly.
+    let mut base = initial.chars().count();
+    let mut last_len = base;
+    let mut last_change = std::time::Instant::now();
+    let started = std::time::Instant::now();
+
+    loop {
+        let Some(text) = read(p.server) else {
+            return (
+                StatusCode::OK,
+                format!("Terminal {} exited while waiting.", p.server),
+            );
+        };
+        let len = text.chars().count();
+        // Scrollback rolls; when it does, the old offset points past the start.
+        if len < base {
+            base = 0;
+        }
+        if len != last_len {
+            last_len = len;
+            last_change = std::time::Instant::now();
+        }
+        let fresh: String = text.chars().skip(base).collect();
+
+        match until.as_str() {
+            "output" => {
+                if let Some(n) = &needle {
+                    if let Some(line) = fresh
+                        .lines()
+                        .find(|l| l.to_lowercase().contains(n.as_str()))
+                    {
+                        return (
+                            StatusCode::OK,
+                            format!(
+                                "Matched after {:.1}s:\n{line}\n\n--- new output ---\n{}",
+                                started.elapsed().as_secs_f32(),
+                                tail_lines(&fresh, 40)
+                            ),
+                        );
+                    }
+                } else if !fresh.trim().is_empty() {
+                    return (
+                        StatusCode::OK,
+                        format!(
+                            "New output after {:.1}s:\n{}",
+                            started.elapsed().as_secs_f32(),
+                            tail_lines(&fresh, 40)
+                        ),
+                    );
+                }
+            }
+            "listening" => {
+                let ports: Vec<u16> = app
+                    .state::<crate::agents::StatsCache>()
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|s| s.id == p.server)
+                    .map(|s| s.ports.clone())
+                    .unwrap_or_default();
+                if !ports.is_empty() {
+                    return (
+                        StatusCode::OK,
+                        format!(
+                            "Terminal {} is listening on {} after {:.1}s. Open it with \
+                             canopy_browser_navigate (http://localhost:{}).",
+                            p.server,
+                            ports
+                                .iter()
+                                .map(|x| x.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            started.elapsed().as_secs_f32(),
+                            ports[0]
+                        ),
+                    );
+                }
+            }
+            "idle" => {
+                if last_change.elapsed() >= idle_for {
+                    return (
+                        StatusCode::OK,
+                        format!(
+                            "Quiet for {:.1}s (waited {:.1}s). Last output:\n{}",
+                            last_change.elapsed().as_secs_f32(),
+                            started.elapsed().as_secs_f32(),
+                            tail_lines(&text, 40)
+                        ),
+                    );
+                }
+            }
+            other => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("unknown wait target: {other} (use output | listening | idle)"),
+                )
+            }
+        }
+
+        if started.elapsed() >= timeout {
+            return (
+                StatusCode::OK,
+                format!(
+                    "Gave up after {:.0}s waiting for {until}{}. Last output:\n{}",
+                    timeout.as_secs_f32(),
+                    needle
+                        .as_ref()
+                        .map(|n| format!(" matching \"{n}\""))
+                        .unwrap_or_default(),
+                    tail_lines(&text, 40)
+                ),
+            );
+        }
+        tokio::time::sleep(WAIT_POLL).await;
+    }
+}
+
+fn tail_lines(text: &str, n: usize) -> String {
+    let all: Vec<&str> = text.lines().collect();
+    all[all.len().saturating_sub(n)..].join("\n")
 }
 
 /// A result payload as an HTTP body: strings verbatim, JSON otherwise.
@@ -829,5 +1381,26 @@ mod tests {
         assert!(truncated);
         assert_eq!(files.len(), 1);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn claims_collide_on_containment_not_just_equality() {
+        assert!(paths_overlap("/w/src/auth.ts", "/w/src/auth.ts"));
+        // A directory claim covers what's under it, in both directions —
+        // otherwise claiming a folder would silently permit claiming its files.
+        assert!(paths_overlap("/w/src", "/w/src/auth.ts"));
+        assert!(paths_overlap("/w/src/auth.ts", "/w/src"));
+        assert!(paths_overlap("/w/src/", "/w/src"));
+        // Neighbours with a shared prefix are not the same directory.
+        assert!(!paths_overlap("/w/src", "/w/srcs/a.ts"));
+        assert!(!paths_overlap("/w/src/a.ts", "/w/src/b.ts"));
+    }
+
+    #[test]
+    fn tail_lines_returns_the_end_and_survives_short_input() {
+        let text = (1..=10).map(|n| n.to_string()).collect::<Vec<_>>().join("\n");
+        assert_eq!(tail_lines(&text, 3), "8\n9\n10");
+        assert_eq!(tail_lines("only", 5), "only");
+        assert_eq!(tail_lines("", 5), "");
     }
 }

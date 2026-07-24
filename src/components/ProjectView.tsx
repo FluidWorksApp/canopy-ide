@@ -4,11 +4,20 @@
 // right-hand rails (single chip, or a dropdown once there's more than one).
 // Terminals stay mounted so TUIs keep running. Bottom status tray shows git
 // branch, agents, model, tokens, cost.
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
 import { modelFor, monaco, languageForPath } from "../monaco-setup";
+import { getCaret, subscribeCaret } from "../editorState";
 import { GuestSession, OwnerSession } from "../collab";
 import { CollabView } from "./CollabView";
 import { SharedProjectView } from "./SharedProjectView";
@@ -252,6 +261,37 @@ type SubTab =
  *  below the terminals and display-toggled the same way. */
 type DocSubTab = Exclude<SubTab, TermSubTab>;
 
+/** One tab as canopy_editor_state describes it: enough for an agent to know
+ *  what the user has in front of them, without shipping the tab's contents. */
+function describeTab(tab: SubTab | undefined) {
+  if (!tab) return null;
+  switch (tab.type) {
+    case "file":
+      return { kind: "file", path: tab.file.path, view: tab.file.view, dirty: tab.file.dirty };
+    case "terminal":
+      return {
+        kind: tab.run ? "run" : "terminal",
+        label: tab.customTitle ?? tab.title,
+        cwd: tab.cwd,
+        ptyId: tab.ptyId,
+      };
+    case "preview":
+      return { kind: "preview", url: tab.url || null };
+    case "ticket":
+      return { kind: "ticket", label: tab.ticket.title };
+    case "pr":
+      return { kind: "pr", label: `#${tab.pr.number} ${tab.pr.title}` };
+    case "commit":
+      return { kind: "commit", label: `${tab.short} ${tab.subject}` };
+    case "branch":
+      return { kind: "branch", label: tab.branch.branch };
+    case "agent":
+      return { kind: "agent", label: tab.agent, cwd: tab.cwd, ptyId: tab.ptyId ?? null };
+    default:
+      return { kind: tab.type };
+  }
+}
+
 const decoder = new TextDecoder();
 
 /** Compact relative age for a unix-seconds timestamp. */
@@ -491,6 +531,9 @@ interface ProjectViewProps {
 
 export function ProjectView({ project, visible, zen, events, hookPath, allProjects, dismissedPending, onDismissPending, onEdit, onNotice, onShareContext, relay }: ProjectViewProps) {
   const [sideTab, setSideTab] = useState<SideTab>("files");
+  // Monaco's caret, for the context snapshot. Subscribed rather than passed
+  // down: the editor sits several components below, and this is read-only.
+  const caret = useSyncExternalStore(subscribeCaret, getCaret);
   const [collapsed, setCollapsed] = useState(false);
   const [tabs, setTabs] = useState<SubTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
@@ -1639,6 +1682,20 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         if (existing && !existing.exited) setActiveTabId(existing.id);
         else if (existing) restartRun(existing.id);
         else addTerminal(a.dir, a.command, a.name || a.command, "▶", true);
+      } else if ((a.kind === "open_file" || a.kind === "show_diff") && a.path) {
+        // "Look at line 340" — put the file in front of the user and land on
+        // the line. The reveal is an event because the tab may already be open,
+        // and because opening is async either way.
+        const path = a.path;
+        const line = a.line;
+        void openFileRef.current(path, { diff: a.kind === "show_diff" }).then(() => {
+          if (line)
+            requestAnimationFrame(() =>
+              window.dispatchEvent(
+                new CustomEvent("canopy:reveal-line", { detail: { path, line } }),
+              ),
+            );
+        });
       }
     };
     window.addEventListener("canopy:agent-action", onAction);
@@ -2661,6 +2718,18 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       previews: tabs
         .filter((t): t is PreviewSubTab => t.type === "preview")
         .map((t) => ({ url: t.url || null, annotations: t.annotations.length })),
+      // What the user is looking at (canopy_editor_state) — the tab in front of
+      // them, the caret, the selection. Deixis: "fix this" has a referent, and
+      // this is it.
+      editor: {
+        focused: visible,
+        activeTab: describeTab(tabs.find((t) => t.id === activeTabId)),
+        openTabs: tabs.map(describeTab).filter(Boolean),
+        caret:
+          caret && tabs.some((t) => t.type === "file" && t.file.path === caret.path)
+            ? caret
+            : null,
+      },
     });
     if (snapshot !== lastContextRef.current) {
       lastContextRef.current = snapshot;

@@ -98,13 +98,23 @@ export const onPtySpawned = (cb: (e: PtySpawned) => void): Promise<UnlistenFn> =
  *  the rest is action-specific. Handled the same way as pty:spawned — App
  *  routes it to a project and hands it to that ProjectView. */
 export interface AgentAction {
-  kind: "start_server" | "open_preview" | "restart_server";
+  kind:
+    | "start_server"
+    | "open_preview"
+    | "restart_server"
+    | "open_file"
+    | "show_diff"
+    | "notify";
   route: string;
   dir?: string;
   name?: string;
   command?: string;
   url?: string;
   ptyId?: number;
+  path?: string;
+  line?: number;
+  text?: string;
+  level?: "info" | "success" | "warn" | "error";
 }
 export const onAgentAction = (cb: (a: AgentAction) => void): Promise<UnlistenFn> =>
   listen<AgentAction>("agent:action", (event) => cb(event.payload));
@@ -114,7 +124,7 @@ export const onAgentAction = (cb: (a: AgentAction) => void): Promise<UnlistenFn>
  *  until the answer comes back via `browserResult`. Routed like AgentAction. */
 export interface AgentBrowserOp {
   id: number;
-  op: "navigate" | "snapshot" | "click" | "type" | "point" | "eval" | "console";
+  op: "navigate" | "snapshot" | "click" | "type" | "point" | "eval" | "console" | "screenshot";
   route: string;
   url?: string | null;
   action?: string | null;
@@ -139,6 +149,51 @@ export const browserResult = (id: number, ok: boolean, data: unknown) =>
   invoke<void>("browser_result", { id, ok, data: JSON.stringify(data ?? null) }).catch((err) =>
     console.warn("browser_result failed", id, err),
   );
+
+/** An op only the running UI can answer: a language-server question, the
+ *  trackers it holds keys for, a question for the user. Same ticketing as
+ *  AgentBrowserOp — answer with `browserResult`. */
+export interface AgentUiOp {
+  id: number;
+  op: "diagnostics" | "references" | "definition" | "tickets" | "reviews" | "ask";
+  route: string;
+  path?: string | null;
+  line?: number | null;
+  column?: number | null;
+  symbol?: string | null;
+  question?: string | null;
+  options?: string[];
+}
+export const onAgentUi = (cb: (op: AgentUiOp) => void): Promise<UnlistenFn> =>
+  listen<AgentUiOp>("agent:ui", (event) => cb(event.payload));
+
+/** Which canopy_* tools are switched off (Settings → Agents), pushed to the
+ *  bridge so the sidecar can hide them from the agent entirely. */
+export const contextTools = (disabled: string[]) =>
+  invoke<void>("context_tools", { disabled }).catch(() => {});
+
+/** Advisory file claims agents have taken, for the Agents panel. */
+export interface AgentClaim {
+  paths: string[];
+  owner: string;
+  note: string | null;
+  at_ms: number;
+}
+export const contextClaims = () => invoke<AgentClaim[]>("context_claims");
+export const contextReleaseClaim = (owner: string) =>
+  invoke<void>("context_release_claim", { owner });
+export const onAgentClaims = (cb: () => void): Promise<UnlistenFn> =>
+  listen("agent:claims", () => cb());
+
+/** PNG (base64) of a rectangle of this window, via the webview's own snapshot
+ *  API — used to hand an agent a picture of the preview. */
+export const webviewSnapshot = (
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  maxWidth?: number,
+) => invoke<string>("webview_snapshot", { x, y, width, height, maxWidth });
 
 // ---------- Workspaces / FS ----------
 

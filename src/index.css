@@ -8085,3 +8085,176 @@ a.btn-mini {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
 }
+
+/* ---- Settings → Agents ---------------------------------------------------
+   The CLI picker was a card grid that spent half the page on seven names.
+   Chips say the same thing in two rows and leave room for the tool switches
+   underneath, which are the part you actually come here to change. */
+.agent-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.agent-chip {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.agent-chip:hover {
+  border-color: var(--text-dim);
+}
+
+.agent-chip-active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.tool-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tool-bulk {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tool-count {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-right: auto;
+}
+
+.tool-group {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--bg-raised);
+}
+
+.tool-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tool-group-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tool-group-blurb {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.tool-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 2px 14px;
+  margin-top: 6px;
+}
+
+.tool-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 0;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.tool-name {
+  font-size: 12px;
+}
+
+.tool-note {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- An agent's question (canopy_ask_user) ------------------------------- */
+.ask-dialog {
+  max-width: 460px;
+  text-align: left;
+}
+
+.ask-from {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+
+.ask-question {
+  font-size: 14px;
+  line-height: 1.5;
+  margin-bottom: 10px;
+}
+
+.ask-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.ask-form {
+  display: flex;
+  gap: 6px;
+}
+
+.ask-form input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---- Advisory file claims, in the Agents panel --------------------------- */
+.claim-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--border);
+}
+
+.claim-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.claim-owner {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40%;
+}
+
+.claim-paths {
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
