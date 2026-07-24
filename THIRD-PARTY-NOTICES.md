@@ -914,7 +914,7 @@ terms govern use of the model:
 - **lodash-es 4.18.1** — Copyright OpenJS Foundation and other contributors <https://openjsf.org/>
 - **lowlight 3.3.0** — Copyright (c) Titus Wormer <tituswormer@gmail.com>
 - **marked 14.0.0** — Copyright (c) 2018+, MarkedJS (https://github.com/markedjs/); Copyright (c) 2011-2018, Christopher Jeffrey (https://github.com/chjj/); Copyright © 2004, John Gruber
-- **marked 16.4.2** — no copyright line in the distributed license file
+- **marked 16.4.2** — Copyright (c) 2018+, MarkedJS (https://github.com/markedjs/); Copyright (c) 2011-2018, Christopher Jeffrey (https://github.com/chjj/); Copyright © 2004, John Gruber
 - **marked 18.0.6** — Copyright (c) 2018+, MarkedJS (https://github.com/markedjs/); Copyright (c) 2011-2018, Christopher Jeffrey (https://github.com/chjj/); Copyright © 2004, John Gruber
 - **material-icon-theme 5.36.1** — Copyright (c) 2025 Material Extensions
 - **mermaid 11.16.0** — Copyright (c) 2014 - 2022 Knut Sveidqvist

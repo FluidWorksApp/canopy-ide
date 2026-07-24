@@ -318,17 +318,33 @@ function collectNpm() {
       if (Array.isArray(declared)) declared = declared.map((l) => l.type ?? l).join(" OR ");
       if (declared && typeof declared === "object") declared = declared.type;
     }
-    const copyrights = copyrightsFor(join(ROOT, path));
     out.push({
       name,
       version: entry.version ?? "?",
       license: normaliseLicense(name, declared),
       declared: declared ?? null,
-      copyrights: copyrights.length ? copyrights : attributionFallback(manifest.author ?? manifest.contributors),
+      paths: [path],
+      author: manifest.author ?? manifest.contributors,
       repository: null,
     });
   }
-  return out;
+
+  // npm may install one package at several paths, and which paths exist depends
+  // on how it chose to hoist — a locally-deduped tree and a fresh `npm ci` do
+  // not agree. Merge by identity and read the attribution from whichever copy is
+  // actually on disk, so the notices describe the package rather than the
+  // install layout.
+  const byIdentity = new Map();
+  for (const c of out) {
+    const key = `${c.name}@${c.version}`;
+    const existing = byIdentity.get(key);
+    if (existing) existing.paths.push(...c.paths);
+    else byIdentity.set(key, c);
+  }
+  return [...byIdentity.values()].map((c) => {
+    const copyrights = c.paths.map((p) => copyrightsFor(join(ROOT, p))).find((r) => r.length) ?? [];
+    return { ...c, copyrights: copyrights.length ? copyrights : attributionFallback(c.author) };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -375,6 +391,37 @@ function licenseTexts(licenses) {
     lines.push(`### ${id}`, "", "```", readFileSync(join(TEXTS_DIR, file), "utf8").trimEnd(), "```", "");
   }
   return { text: lines.join("\n"), missing };
+}
+
+// A bare "out of date" is useless in CI, where the machine that noticed the
+// drift is not the machine that can re-run the generator. Name the components
+// that moved, and fall back to the first differing line for prose changes.
+function reportDrift(current, expected) {
+  const componentLines = (text) => new Set(text.split("\n").filter((l) => l.startsWith("- **")));
+  const committed = componentLines(current);
+  const generated = componentLines(expected);
+  const missing = [...generated].filter((l) => !committed.has(l));
+  const stale = [...committed].filter((l) => !generated.has(l));
+
+  const show = (label, lines) => {
+    if (!lines.length) return;
+    console.error(`${label} (${lines.length}):`);
+    for (const l of lines.slice(0, 25)) console.error(`  ${l.replace(/^- /, "")}`);
+    if (lines.length > 25) console.error(`  ...and ${lines.length - 25} more`);
+    console.error("");
+  };
+  show("In the regenerated file but not the committed one", missing);
+  show("In the committed file but not the regenerated one", stale);
+
+  if (!missing.length && !stale.length) {
+    const a = current.split("\n");
+    const b = expected.split("\n");
+    let i = 0;
+    while (i < a.length && i < b.length && a[i] === b[i]) i++;
+    console.error(`No component changed; first textual difference is at line ${i + 1}:`);
+    console.error(`  committed: ${JSON.stringify(a[i] ?? "<end of file>")}`);
+    console.error(`  generated: ${JSON.stringify(b[i] ?? "<end of file>")}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -456,7 +503,8 @@ ${texts}`;
   if (process.argv.includes("--check")) {
     const current = existsSync(OUT) ? readFileSync(OUT, "utf8") : "";
     if (current !== body) {
-      console.error("THIRD-PARTY-NOTICES.md is out of date — run: node scripts/generate-third-party-notices.mjs");
+      console.error("THIRD-PARTY-NOTICES.md is out of date — run: node scripts/generate-third-party-notices.mjs\n");
+      reportDrift(current, body);
       process.exitCode = 1;
       return;
     }
