@@ -426,10 +426,12 @@ select {
   background: var(--bg-alt);
   border: 1px solid var(--border);
   border-radius: 12px;
-  /* The grid fits the device width (AgentTerminal.tsx), so lines soft-wrap down
-   * the screen — no horizontal pan. xterm owns its own vertical scroll. */
-  overflow-x: hidden;
+  /* A wide desktop grid renders at a legible font (AgentTerminal.tsx) rather
+   * than shrinking to fit, so it may be wider than the phone — let it pan
+   * horizontally instead of clipping. xterm owns its own vertical scroll. */
+  overflow-x: auto;
   overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
   padding: 10px;
 }
 .keys {
