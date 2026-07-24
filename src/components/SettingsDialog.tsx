@@ -31,7 +31,8 @@ export type SettingsTab =
   | "terminal"
   | "dictation"
   | "integrations"
-  | "remote";
+  | "remote"
+  | "privacy";
 
 interface SettingsDialogProps {
   onClose: () => void;
@@ -46,6 +47,7 @@ const TABS: { id: SettingsTab; label: string }[] = [
   { id: "dictation", label: "Dictation" },
   { id: "integrations", label: "Integrations" },
   { id: "remote", label: "Remote access" },
+  { id: "privacy", label: "Privacy" },
 ];
 
 const CURSOR_OPTIONS: { id: CursorStyle; label: string }[] = [
@@ -401,6 +403,24 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
             {tab === "dictation" && dictationOk && <DictationSettings />}
 
             {tab === "remote" && <RemoteSettings runInTerminal={runInTerminal} />}
+
+            {tab === "privacy" && (
+              <>
+                <Item
+                  name="Crash reporting"
+                  desc="Off by default. When on, a crashed panel — or a native crash found on the next launch — offers to send an anonymous report: the error and stack, app version and your OS. Nothing else, and never without a click."
+                >
+                  <label className="set-inline-check">
+                    <input
+                      type="checkbox"
+                      checked={s.crashReporting}
+                      onChange={(e) => patch({ crashReporting: e.target.checked })}
+                    />
+                    <span>Offer to send anonymous crash reports</span>
+                  </label>
+                </Item>
+              </>
+            )}
 
             {tab === "integrations" && (
               <>

@@ -3,15 +3,12 @@
 // markdown description, with the start-work actions pinned to the bottom —
 // the two things you do with a ticket you're reading are understand it and
 // hand it to an agent.
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { renderMarkdown } from "../markdown";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type * as ipc from "../ipc";
 import { TRACKERS } from "../trackers";
-import { AGENT_CLIS } from "../projects";
-import { getSettings } from "../settings";
-import { agentMenuItems } from "../agentMenu";
-import { ContextMenu, useContextMenu } from "./ContextMenu";
+import { AgentLaunchButton } from "./AgentLaunchButton";
 import { TrackerIcon } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
 
@@ -39,16 +36,6 @@ export function TicketView({
   onStartNew,
   onSendToAgent,
 }: TicketViewProps) {
-  const menu = useContextMenu();
-  const [, force] = useState(0);
-  // The agent the button will actually start: the preference IF it is
-  // installed, else the first CLI that is. Falling back to the registry's
-  // first entry meant offering to start Claude on machines where it isn't
-  // installed — a button that can only fail, and an implicit endorsement.
-  const preferred = getSettings().defaultAgent;
-  const installedClis = AGENT_CLIS.filter((c) => installed[c.bin]);
-  const preferredCli =
-    installedClis.find((c) => c.id === preferred) ?? installedClis[0] ?? AGENT_CLIS[0];
   const trackerName = TRACKERS.find((t) => t.id === source)?.name ?? source;
 
   const html = useMemo(
@@ -95,53 +82,22 @@ export function TicketView({
       />
 
       <div className="ticket-view-actions">
-        {menu.menu && (
-          <ContextMenu
-            x={menu.menu.x}
-            y={menu.menu.y}
-            items={menu.menu.items}
-            onClose={menu.close}
-          />
-        )}
         {/* One control: the primary action is the obvious thing (your default
             agent, in this ticket's worktree); the caret is where every other
             choice lives — running agents to hand it to, or a different CLI. */}
-        <span className="split-btn">
-          <button
-            className="btn btn-accent split-btn-main"
-            onClick={() => onStartNew(preferredCli.id)}
-            // The agent is named in the tooltip and the caret menu, not in
-            // the label: the button is "start work", not an endorsement of
-            // one CLI.
-            title={`Start ${preferredCli.name} (your default) on this ticket${
+        <AgentLaunchButton
+          label="Start work"
+          agentTargets={agentTargets}
+          installed={installed}
+          newAgentLabel={worktree ? `New agent in ${worktree.branch}` : "New agent in a new worktree"}
+          primaryTitle={(cli) =>
+            `Start ${cli} (your default) on this ticket${
               worktree ? ` in ${worktree.branch}` : " in a new worktree"
-            }`}
-          >
-            ▶ Start work
-            <span className="split-btn-agent">{preferredCli.name}</span>
-          </button>
-          <button
-            className="btn btn-accent split-btn-caret"
-            title="Send to a running agent, or start a different one"
-            onClick={(e) => {
-              force((n) => n + 1);
-              menu.open(
-                e,
-                agentMenuItems({
-                  targets: agentTargets,
-                  installed,
-                  newLabel: worktree
-                    ? `New agent in ${worktree.branch}`
-                    : "New agent in a new worktree",
-                  onSend: onSendToAgent,
-                  onStart: onStartNew,
-                }),
-              );
-            }}
-          >
-            ▾
-          </button>
-        </span>
+            }`
+          }
+          onStart={onStartNew}
+          onSend={onSendToAgent}
+        />
         <span className="ticket-view-note">
           Starts in a terminal you can watch. No commit, no PR — that stays
           yours to do.

@@ -9,7 +9,9 @@ import "@git-diff-view/react/styles/diff-view.css";
 import * as ipc from "../ipc";
 import { renderMarkdown } from "../markdown";
 import type { Notify, RelayHandle } from "../types";
+import { AgentLaunchButton } from "./AgentLaunchButton";
 import { TeamIcon } from "./icons";
+import type { AgentTarget } from "./TicketsPanel";
 // NB: PR diffs arrive as real patches from `gh pr diff`, so they go straight
 // into the renderer. Working-tree diffs (components/DiffView.tsx) have to build
 // their patch first — see the note there about Monaco's diff not computing.
@@ -20,6 +22,14 @@ interface PrViewProps {
   onNotice: Notify;
   /** Team relay, when connected: "ask a teammate to review" lives here. */
   relay?: RelayHandle;
+  /** Agent terminals open in this project — the "send it there" targets. */
+  agentTargets: AgentTarget[];
+  /** Which agent CLIs are on PATH. */
+  installed: Record<string, boolean>;
+  /** Check the PR's branch out in a worktree and start an agent reviewing it. */
+  onStartReview: (agentId: string) => void;
+  /** Hand the review to an already-running agent. */
+  onSendToAgent: (target: AgentTarget) => void;
 }
 
 type Review = "approve" | "request-changes" | "comment";
@@ -91,7 +101,16 @@ const absTime = (iso?: string) => {
   return Number.isNaN(t) ? "" : new Date(t).toLocaleString();
 };
 
-export function PrView({ repo, pr, onNotice, relay }: PrViewProps) {
+export function PrView({
+  repo,
+  pr,
+  onNotice,
+  relay,
+  agentTargets,
+  installed,
+  onStartReview,
+  onSendToAgent,
+}: PrViewProps) {
   const [patch, setPatch] = useState<string | null>(null);
   const [body, setBody] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -305,6 +324,18 @@ export function PrView({ repo, pr, onNotice, relay }: PrViewProps) {
           >
             Checkout
           </button>
+          {/* Review with an agent — the same block the ticket tab uses, so
+              handing a PR to a CLI works exactly like handing it a ticket:
+              checks the branch out in a worktree and starts the agent there. */}
+          <AgentLaunchButton
+            variant="mini"
+            label="Review"
+            agentTargets={agentTargets}
+            installed={installed}
+            newAgentLabel={`New agent in ${pr.branch}`}
+            onStart={onStartReview}
+            onSend={onSendToAgent}
+          />
           {pr.draft && pr.state === "OPEN" && (
             <button
               className="btn-mini"
