@@ -132,7 +132,11 @@ export const onAgentBrowser = (cb: (op: AgentBrowserOp) => void): Promise<Unlist
   listen<AgentBrowserOp>("agent:browser", (event) => cb(event.payload));
 /** Answer a browser op: `data` (any JSON value) becomes the tool's result. */
 export const browserResult = (id: number, ok: boolean, data: unknown) =>
-  invoke<void>("browser_result", { id, ok, data: JSON.stringify(data ?? null) });
+  // Never rejects: a dropped answer would leave the agent's tool call hanging
+  // to its timeout with no trace of why, so failures are logged, not thrown.
+  invoke<void>("browser_result", { id, ok, data: JSON.stringify(data ?? null) }).catch((err) =>
+    console.warn("browser_result failed", id, err),
+  );
 
 // ---------- Workspaces / FS ----------
 

@@ -675,6 +675,40 @@ fn truncate(s: &str, max: usize) -> String {
 // that no IDE is around, instead of the process refusing to run (which the
 // agent CLI would surface as a broken MCP server).
 
+/// Server instructions, injected into the agent's system prompt by the client.
+/// Deliberately a routing table, not a feature tour: the failure it exists to
+/// stop is an agent defaulting to the shell (`npm run dev`, `open <url>`,
+/// `kill`) when the IDE it is running inside can do the same thing visibly,
+/// with the output and the preview staying available afterwards.
+const INSTRUCTIONS: &str = "\
+This session runs inside the Canopy IDE. Prefer these tools over shell or \
+system equivalents — they act in the IDE the user is watching, and their \
+results stay inspectable:
+
+- Start a dev server / build / worker -> canopy_start_server (not `npm run dev` \
+  in bash; it runs in Canopy's RUNS rail, with logs via canopy_server_output)
+- Open or look at a page -> canopy_browser_navigate, then canopy_browser_snapshot \
+  (not `open`/`xdg-open`, and never an external browser; the embedded preview is \
+  what the user annotates and what you can drive)
+- Interact with a page -> canopy_browser_click / _type / _eval; diagnose with \
+  canopy_browser_console / _network
+- Stop or restart a server -> canopy_stop_server / canopy_restart_server (not \
+  kill/pkill)
+- See what's running, CPU, memory -> canopy_resources (not ps/top/lsof)
+- Read a running server's logs -> canopy_server_output (don't re-run the command)
+- The user's marked-up feedback on a page -> canopy_annotations
+
+Call canopy_project first for component paths, configured run commands, \
+terminal ids, and the ports servers are listening on. Fall back to the shell \
+only for work these tools don't cover.";
+
+/// Whether the IDE is actually reachable — the bridge env only Canopy's PTYs
+/// export. The MCP registration is user-global, so this is what separates
+/// "running inside Canopy" from "registered on this machine".
+fn in_canopy() -> bool {
+    std::env::var("CANOPY_CTX_PORT").is_ok()
+}
+
 fn mcp_main() {
     use std::io::{BufRead, Write};
     let stdin = std::io::stdin();
@@ -700,14 +734,21 @@ fn mcp_main() {
                     .pointer("/params/protocolVersion")
                     .and_then(|v| v.as_str())
                     .unwrap_or("2024-11-05");
-                rpc_ok(
-                    id,
-                    serde_json::json!({
-                        "protocolVersion": proto,
-                        "capabilities": { "tools": {} },
-                        "serverInfo": { "name": "canopy", "version": env!("CARGO_PKG_VERSION") },
-                    }),
-                )
+                let mut result = serde_json::json!({
+                    "protocolVersion": proto,
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "canopy", "version": env!("CARGO_PKG_VERSION") },
+                });
+                // The client injects this into the agent's system prompt. It is
+                // the only channel that makes these tools *chosen* rather than
+                // merely available: without it an agent asked to "start the
+                // server" reaches for bash, and "preview it" opens a browser.
+                // Only sent inside Canopy — elsewhere the tools can't work, and
+                // telling an agent to prefer them would be actively wrong.
+                if in_canopy() {
+                    result["instructions"] = serde_json::json!(INSTRUCTIONS);
+                }
+                rpc_ok(id, result)
             }
             "ping" => rpc_ok(id, serde_json::json!({})),
             "tools/list" => rpc_ok(id, tools_list()),
@@ -752,126 +793,130 @@ fn rpc_ok(id: serde_json::Value, result: serde_json::Value) -> serde_json::Value
 }
 
 fn tools_list() -> serde_json::Value {
+    // Descriptions stay terse on purpose: every one of these is re-sent in the
+    // agent's context on each session. Which tool to reach for is established
+    // once, in INSTRUCTIONS above; these only need to say what the tool does
+    // and how to call it correctly.
     serde_json::json!({ "tools": [
         {
             "name": "canopy_project",
-            "description": "Live context from the Canopy IDE this session is running inside: every open project with its components (labeled directories and absolute paths), their configured run commands, the dev servers / run terminals currently running (with terminal ids and exit state), and other active agents. Call this first to orient instead of exploring the filesystem blind.",
+            "description": "The IDE's live project map: components (labels + absolute paths), their configured run commands, running servers (terminal id, listening ports, exit state), open previews, and other agents. Call first to orient.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {
             "name": "canopy_component_files",
-            "description": "List the files inside one of the project's component directories (paths come from canopy_project), skipping dependency and build directories (node_modules, target, dist, ...). Breadth-first and capped, so shallow structure survives truncation.",
+            "description": "List files under a component directory, skipping node_modules/target/dist. Breadth-first and capped.",
             "inputSchema": { "type": "object", "properties": {
-                "dir": { "type": "string", "description": "Absolute path of a component, or a subdirectory of one, from canopy_project" },
-                "max": { "type": "integer", "description": "Maximum number of files to return (default 500)" }
+                "dir": { "type": "string", "description": "Component path (or subdirectory) from canopy_project" },
+                "max": { "type": "integer", "description": "Max files (default 500)" }
             }, "required": ["dir"], "additionalProperties": false }
         },
         {
             "name": "canopy_server_output",
-            "description": "The recent terminal output of a dev server, build, or agent running in Canopy — compile errors, request logs, stack traces — without restarting anything. `server` is a terminal id from canopy_project's runServers or agents.",
+            "description": "Recent terminal output of a running server, build, or agent — logs, compile errors, stack traces.",
             "inputSchema": { "type": "object", "properties": {
                 "server": { "type": "integer", "description": "Terminal id (ptyId) from canopy_project" },
-                "lines": { "type": "integer", "description": "Trailing lines to return (default 200)" }
+                "lines": { "type": "integer", "description": "Trailing lines (default 200)" }
             }, "required": ["server"], "additionalProperties": false }
         },
         {
             "name": "canopy_start_server",
-            "description": "Start one of a component's configured run commands (a dev server, worker, build) in Canopy's RUNS rail, without the user clicking anything. Use this to bring up the server you need to preview or test a change. `dir` and `command` come from canopy_project (components[].path and components[].commands[].name). If a matching command is already running it is reused, not duplicated. Returns immediately; the server takes a moment to boot — call canopy_project again to see its localhost address once it's listening, and canopy_server_output to watch it start (or catch a startup error).",
+            "description": "Run one of a component's configured commands in Canopy's RUNS rail. Reuses a tab already running it. Returns before the server is listening — poll canopy_project for its port, canopy_server_output for startup errors.",
             "inputSchema": { "type": "object", "properties": {
-                "dir": { "type": "string", "description": "Absolute path of the component (components[].path from canopy_project)" },
-                "command": { "type": "string", "description": "Name of the run command to start (components[].commands[].name from canopy_project)" }
+                "dir": { "type": "string", "description": "components[].path from canopy_project" },
+                "command": { "type": "string", "description": "components[].commands[].name from canopy_project" }
             }, "required": ["dir", "command"], "additionalProperties": false }
         },
         {
             "name": "canopy_open_preview",
-            "description": "Open a local server's URL in Canopy's built-in preview browser (an embedded, annotatable browser tab), so the user sees your change rendered without leaving the IDE and can mark elements on it for feedback. `url` should be a running server's address from canopy_project (runServers[].url), or any http://localhost URL. External (non-localhost) URLs are refused — the preview is for local servers. Opens the tab and focuses it; returns once requested.",
+            "description": "Open a local URL in Canopy's preview browser for the user to look at and annotate. To drive the page yourself, use canopy_browser_navigate instead.",
             "inputSchema": { "type": "object", "properties": {
-                "url": { "type": "string", "description": "A local http://localhost[:port][/path] URL — typically a runServers[].url from canopy_project" }
+                "url": { "type": "string", "description": "A local http://localhost[:port][/path] URL" }
             }, "required": ["url"], "additionalProperties": false }
         },
         {
             "name": "canopy_annotations",
-            "description": "The visual feedback the user has marked on Canopy preview pages: for each tagged element, its number, the CSS selector and React component, the visible text, the user's comment, the page URL, and the component that serves it. This is the same feedback the user sends from the preview's ‘Send feedback’ button — reading it here lets you act on in-progress annotations directly, or re-check exactly what was asked. Returns an empty list when nothing is marked.",
+            "description": "Elements the user marked on preview pages: selector, React component, visible text, their comment, and the component serving the page. Empty when nothing is marked.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {
             "name": "canopy_resources",
-            "description": "Live CPU and memory for every terminal Canopy is running (dev servers, builds, agents), with a per-process breakdown — pid, command, CPU %, and memory for each process in the terminal's tree, plus the terminal's totals and any listening ports. Use it to find what's pegging the CPU or leaking memory, or to confirm a server is actually working versus idle. Reflects the latest ~1s sample.",
+            "description": "Per-terminal CPU and memory with a per-process breakdown (pid, command, cpu%, mem) and listening ports. Latest ~1s sample.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {
             "name": "canopy_stop_server",
-            "description": "Stop (kill) a process Canopy is running — a dev server, a stuck build, a runaway agent — by its terminal id (`ptyId` from canopy_project or canopy_resources). Terminates the whole process tree. The terminal stays open showing it exited; use canopy_restart_server or canopy_start_server to bring it back. Only affects Canopy-managed terminals.",
+            "description": "Kill a Canopy terminal's process tree. The tab stays open showing it exited.",
             "inputSchema": { "type": "object", "properties": {
-                "ptyId": { "type": "integer", "description": "Terminal id to stop (from canopy_project runServers/agents or canopy_resources)" }
+                "ptyId": { "type": "integer", "description": "Terminal id from canopy_project or canopy_resources" }
             }, "required": ["ptyId"], "additionalProperties": false }
         },
         {
             "name": "canopy_restart_server",
-            "description": "Restart a run terminal in place by its terminal id (`ptyId`) — kills the current process and relaunches the same command in the same tab. Use after a change that needs a fresh server, or to recover a crashed one. Returns immediately; call canopy_server_output shortly after to watch it come back up.",
+            "description": "Relaunch a run terminal's command in place. Returns immediately; watch it come back with canopy_server_output.",
             "inputSchema": { "type": "object", "properties": {
-                "ptyId": { "type": "integer", "description": "Terminal id of the run server to restart (from canopy_project or canopy_resources)" }
+                "ptyId": { "type": "integer", "description": "Terminal id from canopy_project or canopy_resources" }
             }, "required": ["ptyId"], "additionalProperties": false }
         },
         {
             "name": "canopy_browser_navigate",
-            "description": "Drive Canopy's embedded preview browser to a page: opens (or reuses) the preview tab and loads the URL, or moves through history. Pass `url` (a local server address — see canopy_project runServers) to load a page, or `action` (back / forward / reload) to move within the current one. Waits for the page and returns its final URL and title. This is the entry point for browser control: after it, canopy_browser_snapshot shows the page and canopy_browser_click / canopy_browser_type interact with it.",
+            "description": "Load a local URL in Canopy's embedded preview (opening or reusing the tab), or move through history. Waits for the page; returns its final url and title.",
             "inputSchema": { "type": "object", "properties": {
-                "url": { "type": "string", "description": "A local http://localhost[:port][/path] URL to load — typically runServers[].url from canopy_project" },
-                "action": { "type": "string", "enum": ["back", "forward", "reload"], "description": "History move on the current preview page (instead of url)" }
+                "url": { "type": "string", "description": "A local http://localhost[:port][/path] URL — see canopy_project runServers" },
+                "action": { "type": "string", "enum": ["back", "forward", "reload"], "description": "History move instead of a url" }
             }, "additionalProperties": false }
         },
         {
             "name": "canopy_browser_snapshot",
-            "description": "What's on the previewed page right now: its URL, title, visible text, and every interactive element (links, buttons, inputs, selects, ARIA-role widgets) with a numbered `ref`, its label/value, its CSS selector, and the React component rendering it. Use the refs to address elements in canopy_browser_click and canopy_browser_type — they stay valid until the page re-renders (then just snapshot again). This is the browser-control equivalent of a screenshot: call it after navigating or acting to see the result.",
+            "description": "The previewed page as it stands: url, title, visible text, and each interactive element with a numbered ref, label, CSS selector, and React component. Refs address click/type and stay valid until the page re-renders. Use instead of a screenshot.",
             "inputSchema": { "type": "object", "properties": {
-                "url": { "type": "string", "description": "Which preview tab, when several are open (matched by origin); defaults to the active one" },
-                "max": { "type": "integer", "description": "Cap on interactive elements returned (default 150)" }
+                "url": { "type": "string", "description": "Which preview tab (by origin); defaults to the active one" },
+                "max": { "type": "integer", "description": "Max elements (default 150)" }
             }, "additionalProperties": false }
         },
         {
             "name": "canopy_browser_click",
-            "description": "Click an element on the previewed page — a button, link, tab, checkbox — addressed by `ref` from the latest canopy_browser_snapshot (preferred) or a CSS `selector`. Scrolls it into view and fires a real pointer/mouse event sequence, so React handlers run. Follow with canopy_browser_snapshot to see what changed (a stale ref after a re-render means: snapshot again).",
+            "description": "Click an element by snapshot ref (preferred) or CSS selector; scrolls it into view and fires a real event sequence.",
             "inputSchema": { "type": "object", "properties": {
                 "ref": { "type": "integer", "description": "Element ref from canopy_browser_snapshot" },
-                "selector": { "type": "string", "description": "CSS selector, when no snapshot ref is at hand" },
-                "url": { "type": "string", "description": "Which preview tab, when several are open" }
+                "selector": { "type": "string", "description": "CSS selector, if no ref is at hand" },
+                "url": { "type": "string", "description": "Which preview tab (by origin)" }
             }, "additionalProperties": false }
         },
         {
             "name": "canopy_browser_type",
-            "description": "Type into an input, textarea, select, or contenteditable on the previewed page, addressed by `ref` (from canopy_browser_snapshot) or CSS `selector`. Replaces the current value by default (`append: true` appends); the value is set the way React expects, so controlled inputs update. For a <select>, `text` picks the option by value or label. `submit: true` presses Enter afterwards — for forms that don't submit on Enter, click their submit button instead.",
+            "description": "Enter text into an input, textarea, select, or contenteditable by ref or selector. Replaces the value unless append; for a select, text picks the option by value or label.",
             "inputSchema": { "type": "object", "properties": {
                 "ref": { "type": "integer", "description": "Element ref from canopy_browser_snapshot" },
-                "selector": { "type": "string", "description": "CSS selector, when no snapshot ref is at hand" },
-                "text": { "type": "string", "description": "The text to enter (or the option to pick, for a select)" },
-                "submit": { "type": "boolean", "description": "Press Enter after typing" },
-                "append": { "type": "boolean", "description": "Append to the current value instead of replacing it" },
-                "url": { "type": "string", "description": "Which preview tab, when several are open" }
+                "selector": { "type": "string", "description": "CSS selector, if no ref is at hand" },
+                "text": { "type": "string", "description": "Text to enter (or option to pick)" },
+                "submit": { "type": "boolean", "description": "Press Enter afterwards" },
+                "append": { "type": "boolean", "description": "Append instead of replacing" },
+                "url": { "type": "string", "description": "Which preview tab (by origin)" }
             }, "required": ["text"], "additionalProperties": false }
         },
         {
             "name": "canopy_browser_eval",
-            "description": "Run a JavaScript expression (or statements) inside the previewed page and return the result, JSON-serialized — window state, computed styles, app store contents, anything the page can see. Promises are awaited. Use it for checks the snapshot can't express (e.g. `getComputedStyle(document.querySelector('.btn')).color`, `window.__APP_STATE__`). Prefer canopy_browser_click / canopy_browser_type for interactions — they fire the full event sequence the app expects.",
+            "description": "Evaluate JavaScript in the previewed page and return the result JSON-serialized; promises are awaited. For interactions prefer click/type — they fire the events the app listens for.",
             "inputSchema": { "type": "object", "properties": {
                 "code": { "type": "string", "description": "JavaScript to evaluate in the page" },
-                "url": { "type": "string", "description": "Which preview tab, when several are open" }
+                "url": { "type": "string", "description": "Which preview tab (by origin)" }
             }, "required": ["code"], "additionalProperties": false }
         },
         {
             "name": "canopy_browser_console",
-            "description": "The previewed page's console output — every console.log/info/warn/error/debug, uncaught error, and unhandled promise rejection since the page loaded (captured before the app's own scripts run). The fastest way to see why a page is broken after your change: navigate, then read the console. `clear: true` empties the buffer after reading, so the next call shows only what happened since.",
+            "description": "The previewed page's console output, uncaught errors, and unhandled rejections since it loaded. First thing to check when a page looks broken.",
             "inputSchema": { "type": "object", "properties": {
-                "lines": { "type": "integer", "description": "Most recent messages to return (default 100)" },
-                "clear": { "type": "boolean", "description": "Clear the buffer after reading" },
-                "url": { "type": "string", "description": "Which preview tab, when several are open" }
+                "lines": { "type": "integer", "description": "Most recent messages (default 100)" },
+                "clear": { "type": "boolean", "description": "Empty the buffer after reading" },
+                "url": { "type": "string", "description": "Which preview tab (by origin)" }
             }, "additionalProperties": false }
         },
         {
             "name": "canopy_browser_network",
-            "description": "The requests the previewed page has made — method, path, status, duration, content type — as seen by Canopy's preview proxy, newest last (WebSocket upgrades included, so HMR connections show too). Use it to spot failing API calls (4xx/5xx), slow endpoints, or a request that never fired. No page instrumentation involved, so it can't be fooled by the page's own error handling.",
+            "description": "Requests the previewed page made, as seen by Canopy's proxy: method, path, status, duration, content type (WebSocket upgrades included). Finds failing or missing API calls.",
             "inputSchema": { "type": "object", "properties": {
-                "url": { "type": "string", "description": "Only requests for this preview origin; defaults to all open previews" }
+                "url": { "type": "string", "description": "Only this preview origin; defaults to all" }
             }, "additionalProperties": false }
         }
     ]})
