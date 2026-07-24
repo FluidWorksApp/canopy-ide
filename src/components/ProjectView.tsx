@@ -88,6 +88,8 @@ import { PrView } from "./PrView";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { TeamPanel } from "./TeamPanel";
 import { ChatView } from "./ChatView";
+import { Coachmark } from "./Coachmark";
+import { shouldShowTip, markTipSeen, type CoachTip } from "../coachmarks";
 
 type SideTab = "files" | "changes" | "git" | "trackers" | "agents" | "team";
 
@@ -339,7 +341,7 @@ function Rail({
   );
   if (chips.length === 1) {
     return (
-      <div className={`run-rail ${dimCls}`}>
+      <div className={`run-rail ${dimCls}`} data-rail={label}>
         <span className="run-rail-label">{label}</span>
         {chip(chips[0], false)}
       </div>
@@ -347,7 +349,7 @@ function Rail({
   }
   const active = chips.find((c) => c.active);
   return (
-    <div className={`run-rail rail-menu-anchor ${dimCls}`}>
+    <div className={`run-rail rail-menu-anchor ${dimCls}`} data-rail={label}>
       <span className="run-rail-label">{label}</span>
       <button
         className={`run-chip rail-toggle ${active ? "run-chip-active" : ""}`}
@@ -2212,6 +2214,42 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       ? "runs"
       : "tabs";
 
+  // First-run coach-marks: spotlight each new workspace section the first time
+  // it appears — the SHELLS rail when a terminal opens, RUNS when something
+  // runs, and the agent's tab when one is focused. Each fires once (localStorage
+  // -gated), only on the visible project, and only one shows at a time; the
+  // effect re-picks the next eligible tip after one is dismissed.
+  const [coachTip, setCoachTip] = useState<CoachTip | null>(null);
+  const agentTabOpen = activeTab?.type === "agent";
+  useEffect(() => {
+    if (!visible || coachTip) return;
+    if (shellChips.length && shouldShowTip("shells")) setCoachTip("shells");
+    else if (runChips.length && shouldShowTip("runs")) setCoachTip("runs");
+    else if (agentTabOpen && shouldShowTip("agent")) setCoachTip("agent");
+  }, [visible, coachTip, shellChips.length, runChips.length, agentTabOpen]);
+
+  const dismissCoach = () => {
+    if (coachTip) markTipSeen(coachTip);
+    setCoachTip(null);
+  };
+  const COACH_TIPS: Record<CoachTip, { selector: string; title: string; body: string }> = {
+    shells: {
+      selector: '[data-rail="SHELLS"]',
+      title: "Your shell lives here",
+      body: "Every plain terminal you open shows up in the SHELLS rail — click a chip to jump back to it, ✕ to close it.",
+    },
+    runs: {
+      selector: '[data-rail="RUNS"]',
+      title: "Your runs live here",
+      body: "Run commands and dev servers land in the RUNS rail as live services, each with a status dot. Every server you start shows up here.",
+    },
+    agent: {
+      selector: ".tab.tab-active",
+      title: "Your agent workspace lives here",
+      body: "This tab is the agent's workspace — its terminal, diffs and activity. Reopen it any time from the tab strip.",
+    },
+  };
+
   // One summary glyph for the runs dropdown: any live wins, then any failure.
   const runSummary = runTabs.some((t) => !t.exited) ? (
     <LiveDot size={7} className="run-chip-dot" />
@@ -3573,6 +3611,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           components={components.map((c) => ({ label: c.label, path: c.path }))}
           onOpen={(p) => void openFile(p)}
           onClose={() => setPalette(null)}
+        />
+      )}
+      {coachTip && visible && (
+        <Coachmark
+          targetSelector={COACH_TIPS[coachTip].selector}
+          title={COACH_TIPS[coachTip].title}
+          body={COACH_TIPS[coachTip].body}
+          onDismiss={dismissCoach}
         />
       )}
     </div>
