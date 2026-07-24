@@ -1,5 +1,6 @@
 // Content of one file sub-tab: native viewer (preview), Monaco (source),
 // git diff (HEAD vs working tree), or the external-change diff.
+import type { ReactNode } from "react";
 import type { OpenFile } from "../types";
 import { modelFor } from "../monaco-setup";
 import { MonacoEditor } from "./MonacoEditor";
@@ -26,6 +27,8 @@ interface FileViewProps {
   onCloseDiff: () => void;
   /** Set while this file is shared live, so the caret goes out as presence. */
   onCursor?: (anchor: number, head: number) => void;
+  /** "Ask an agent about this diff" control, shown on the git-diff view only. */
+  diffAgentBar?: ReactNode;
 }
 
 export function FileView(props: FileViewProps) {
@@ -59,6 +62,7 @@ export function FileView(props: FileViewProps) {
         original={file.diffOriginal}
         modified={current}
         actions={[{ label: "Edit file", accent: true, onClick: props.onCloseDiff }]}
+        agentBar={props.diffAgentBar}
       />
     );
   }

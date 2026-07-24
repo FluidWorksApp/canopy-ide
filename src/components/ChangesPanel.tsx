@@ -2,6 +2,7 @@
 // component they live in. Git is the source of truth — not the raw fs watcher —
 // so this list already excludes everything in .gitignore (build output, object
 // files, editor temp files) and reflects real staged/unstaged/untracked state.
+import type { ReactNode } from "react";
 import type { FileChange } from "../ipc";
 
 export interface ChangeGroup {
@@ -30,6 +31,8 @@ interface ChangesPanelProps {
   collab?: CollabChange[];
   onOpenCollab?: (path: string) => void;
   onSaveCollab?: (path: string) => void;
+  /** "Ask an agent about these changes" control, shown when the tree isn't clean. */
+  agentBar?: ReactNode;
 }
 
 const kindClass = (f: FileChange) =>
@@ -51,6 +54,7 @@ export function ChangesPanel({
   collab,
   onOpenCollab,
   onSaveCollab,
+  agentBar,
 }: ChangesPanelProps) {
   const total = groups.reduce((n, g) => n + g.files.length, 0);
   // Only files with unsaved live edits — a shared-but-untouched file isn't a
@@ -67,6 +71,7 @@ export function ChangesPanel({
           ↻
         </button>
       </div>
+      {total > 0 && agentBar}
       {collabEdited.length > 0 && (
         <div className="change-group changes-collab">
           <div className="git-section-head change-group-head">
