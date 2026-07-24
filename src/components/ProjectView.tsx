@@ -2545,6 +2545,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
 
   const compMenu = useContextMenu();
   const tabMenu = useContextMenu();
+  const termMenu = useContextMenu();
+  /** Prefill for the Tasks panel's create form — set when the user makes a
+   *  task out of selected terminal text. The nonce re-opens the form even for
+   *  the same selection twice. */
+  const [taskSeed, setTaskSeed] = useState<{ brief: string; nonce: number } | null>(null);
 
   const submitRootCreate = async () => {
     if (!rootCreate) return;
@@ -3175,6 +3180,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onClose={tabMenu.close}
         />
       )}
+      {termMenu.menu && (
+        <ContextMenu
+          x={termMenu.menu.x}
+          y={termMenu.menu.y}
+          items={termMenu.menu.items}
+          onClose={termMenu.close}
+        />
+      )}
       <div className={`pane-bar pane-bar-focus-${activeSection}`}>
         <div className={`tabs ${activeSection !== "tabs" ? "pane-section-dim" : ""}`}>
           {tabGroups.map((group, gi) =>
@@ -3573,6 +3586,24 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               key={tab.id}
               className="fill term-host"
               style={{ display: tab.id === activeTabId && visible ? "block" : "none" }}
+              // Selected text is a task waiting to be written down — an error,
+              // a TODO the shell just printed, a command worth automating.
+              // Right-click offers to make one; without a selection the event
+              // passes through untouched.
+              onContextMenu={(e) => {
+                const sel = termHandles.current.get(tab.id)?.getSelection().trim();
+                if (!sel) return;
+                termMenu.open(e, [
+                  {
+                    label: "New task from selection",
+                    onClick: () => {
+                      setCollapsed(false);
+                      setSideTab("tasks");
+                      setTaskSeed((prev) => ({ brief: sel, nonce: (prev?.nonce ?? 0) + 1 }));
+                    },
+                  },
+                ]);
+              }}
             >
               <TermPorts ptyId={tab.ptyId} stats={stats} onPreview={openPreview} />
               <Term
@@ -4274,6 +4305,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         <TasksPanel
           components={components.map((c) => ({ label: c.label, path: c.path }))}
           running={runningMicro}
+          seed={taskSeed}
           onFocus={setActiveTabId}
           onStop={closeTab}
           onRunCustom={(task: CustomMicroTask, dir: string, query: string) =>

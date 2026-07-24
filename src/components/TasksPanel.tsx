@@ -5,7 +5,7 @@
 // branch tab, where its payload comes from). Running a custom task asks for
 // the optional extra context — and the directory, when the project has more
 // than one component — then hands off to ProjectView's startMicroTask.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   MICRO_TASKS,
   type CustomMicroTask,
@@ -23,6 +23,10 @@ export interface RunningMicroTask {
 interface TasksPanelProps {
   components: { label: string; path: string }[];
   running: RunningMicroTask[];
+  /** Prefill for the create form — set when the user right-clicks selected
+   *  terminal text → "New task from selection". The nonce distinguishes two
+   *  seeds with identical text, so the form re-opens each time. */
+  seed?: { brief: string; nonce: number } | null;
   /** Bring the task's terminal tab forward. */
   onFocus: (tabId: string) => void;
   /** Close the task's tab (kills its agent; the session is forgotten). */
@@ -36,9 +40,25 @@ type Draft = { id: string; label: string; icon: string; placeholder: string; bri
 
 const emptyDraft = (): Draft => ({ id: "", label: "", icon: "", placeholder: "", brief: "" });
 
-export function TasksPanel({ components, running, onFocus, onStop, onRunCustom }: TasksPanelProps) {
+export function TasksPanel({
+  components,
+  running,
+  seed,
+  onFocus,
+  onStop,
+  onRunCustom,
+}: TasksPanelProps) {
   const [custom, setCustom] = useState<CustomMicroTask[]>(() => getSettings().customMicroTasks);
   const [draft, setDraft] = useState<Draft | null>(null);
+
+  // A seed from "New task from selection" opens the create form with the
+  // selected text as the brief; the user names it and tweaks from there. Also
+  // fires on first mount — the panel mounts lazily, often *because* the seed
+  // just flipped the rail to Tasks.
+  useEffect(() => {
+    if (seed) setDraft({ ...emptyDraft(), brief: seed.brief });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seed?.nonce]);
   /** Which task row has its run controls (context + dir) expanded. */
   const [runOpen, setRunOpen] = useState<string | null>(null);
   const [runQuery, setRunQuery] = useState("");

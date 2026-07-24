@@ -36,6 +36,8 @@ export interface TermHandle {
   clearScrollback: () => void;
   hardReset: () => void;
   focus: () => void;
+  /** The text currently selected in the terminal, "" when none. */
+  getSelection: () => string;
 }
 
 interface TermProps {
@@ -83,6 +85,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       if (ptyIdRef.current != null) void ipc.ptyWrite(ptyIdRef.current, "\x0c");
     },
     focus: () => termRef.current?.focus(),
+    getSelection: () => termRef.current?.getSelection() ?? "",
   }));
 
   useEffect(() => {
