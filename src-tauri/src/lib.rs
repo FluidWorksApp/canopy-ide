@@ -294,6 +294,7 @@ pub fn run() {
         .manage(portal::RemoteManager::default())
         .manage(preview::PreviewManager::default())
         .manage(context::ContextBridge::default())
+        .manage(agents::StatsCache::default())
         .manage(tunnel::TunnelManager::default())
         .manage(dictation::DictationManager::default())
         .manage(cli::pending_from_env())

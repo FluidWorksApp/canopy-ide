@@ -58,6 +58,12 @@ pub struct SessionStats {
     pub ports: Vec<u16>,
 }
 
+/// The most recent `pty:stats` reading, kept so the context bridge can serve
+/// live CPU/memory to agents (canopy_resources) without re-deriving it — the
+/// monitor loop already pays for the sysinfo walk once per tick.
+#[derive(Default)]
+pub struct StatsCache(pub std::sync::Mutex<Vec<SessionStats>>);
+
 static MONITOR_STARTED: AtomicBool = AtomicBool::new(false);
 
 /// TCP listening ports for `pids`, as pid -> ports.
@@ -278,6 +284,9 @@ pub fn start_monitor(app: AppHandle) {
                             s.ports = p.clone();
                         }
                     }
+                }
+                if let Some(cache) = app.try_state::<StatsCache>() {
+                    *cache.0.lock().unwrap() = stats.clone();
                 }
                 let _ = app.emit("pty:stats", &stats);
             }

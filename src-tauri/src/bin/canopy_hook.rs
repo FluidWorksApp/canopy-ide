@@ -773,6 +773,45 @@ fn tools_list() -> serde_json::Value {
                 "server": { "type": "integer", "description": "Terminal id (ptyId) from canopy_project" },
                 "lines": { "type": "integer", "description": "Trailing lines to return (default 200)" }
             }, "required": ["server"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_start_server",
+            "description": "Start one of a component's configured run commands (a dev server, worker, build) in Canopy's RUNS rail, without the user clicking anything. Use this to bring up the server you need to preview or test a change. `dir` and `command` come from canopy_project (components[].path and components[].commands[].name). If a matching command is already running it is reused, not duplicated. Returns immediately; the server takes a moment to boot — call canopy_project again to see its localhost address once it's listening, and canopy_server_output to watch it start (or catch a startup error).",
+            "inputSchema": { "type": "object", "properties": {
+                "dir": { "type": "string", "description": "Absolute path of the component (components[].path from canopy_project)" },
+                "command": { "type": "string", "description": "Name of the run command to start (components[].commands[].name from canopy_project)" }
+            }, "required": ["dir", "command"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_open_preview",
+            "description": "Open a local server's URL in Canopy's built-in preview browser (an embedded, annotatable browser tab), so the user sees your change rendered without leaving the IDE and can mark elements on it for feedback. `url` should be a running server's address from canopy_project (runServers[].url), or any http://localhost URL. External (non-localhost) URLs are refused — the preview is for local servers. Opens the tab and focuses it; returns once requested.",
+            "inputSchema": { "type": "object", "properties": {
+                "url": { "type": "string", "description": "A local http://localhost[:port][/path] URL — typically a runServers[].url from canopy_project" }
+            }, "required": ["url"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_annotations",
+            "description": "The visual feedback the user has marked on Canopy preview pages: for each tagged element, its number, the CSS selector and React component, the visible text, the user's comment, the page URL, and the component that serves it. This is the same feedback the user sends from the preview's ‘Send feedback’ button — reading it here lets you act on in-progress annotations directly, or re-check exactly what was asked. Returns an empty list when nothing is marked.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
+        {
+            "name": "canopy_resources",
+            "description": "Live CPU and memory for every terminal Canopy is running (dev servers, builds, agents), with a per-process breakdown — pid, command, CPU %, and memory for each process in the terminal's tree, plus the terminal's totals and any listening ports. Use it to find what's pegging the CPU or leaking memory, or to confirm a server is actually working versus idle. Reflects the latest ~1s sample.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
+        {
+            "name": "canopy_stop_server",
+            "description": "Stop (kill) a process Canopy is running — a dev server, a stuck build, a runaway agent — by its terminal id (`ptyId` from canopy_project or canopy_resources). Terminates the whole process tree. The terminal stays open showing it exited; use canopy_restart_server or canopy_start_server to bring it back. Only affects Canopy-managed terminals.",
+            "inputSchema": { "type": "object", "properties": {
+                "ptyId": { "type": "integer", "description": "Terminal id to stop (from canopy_project runServers/agents or canopy_resources)" }
+            }, "required": ["ptyId"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_restart_server",
+            "description": "Restart a run terminal in place by its terminal id (`ptyId`) — kills the current process and relaunches the same command in the same tab. Use after a change that needs a fresh server, or to recover a crashed one. Returns immediately; call canopy_server_output shortly after to watch it come back up.",
+            "inputSchema": { "type": "object", "properties": {
+                "ptyId": { "type": "integer", "description": "Terminal id of the run server to restart (from canopy_project or canopy_resources)" }
+            }, "required": ["ptyId"], "additionalProperties": false }
         }
     ]})
 }
@@ -796,8 +835,58 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<String, String> {
             let lines = args.get("lines").and_then(|v| v.as_u64()).unwrap_or(200);
             ctx_get(format!("/ctx/server-output/{server}?lines={lines}"))
         }
+        "canopy_annotations" => ctx_get("/ctx/annotations".into()).map(pretty),
+        "canopy_resources" => ctx_get("/ctx/resources".into()).map(pretty),
+        "canopy_stop_server" => {
+            let pty = args
+                .get("ptyId")
+                .and_then(|v| v.as_u64())
+                .ok_or("missing required argument: ptyId (a terminal id from canopy_project)")?;
+            ctx_post(serde_json::json!({ "kind": "stop_server", "cwd": cwd(), "ptyId": pty }))
+        }
+        "canopy_restart_server" => {
+            let pty = args
+                .get("ptyId")
+                .and_then(|v| v.as_u64())
+                .ok_or("missing required argument: ptyId (a terminal id from canopy_project)")?;
+            ctx_post(serde_json::json!({ "kind": "restart_server", "cwd": cwd(), "ptyId": pty }))
+        }
+        "canopy_start_server" => {
+            let dir = args
+                .get("dir")
+                .and_then(|v| v.as_str())
+                .ok_or("missing required argument: dir (a component path from canopy_project)")?;
+            let command = args.get("command").and_then(|v| v.as_str()).ok_or(
+                "missing required argument: command (a run command name from canopy_project)",
+            )?;
+            ctx_post(serde_json::json!({
+                "kind": "start_server",
+                "cwd": cwd(),
+                "dir": dir,
+                "command": command,
+            }))
+        }
+        "canopy_open_preview" => {
+            let url = args
+                .get("url")
+                .and_then(|v| v.as_str())
+                .ok_or("missing required argument: url")?;
+            ctx_post(serde_json::json!({
+                "kind": "open_preview",
+                "cwd": cwd(),
+                "url": url,
+            }))
+        }
         other => Err(format!("unknown tool: {other}")),
     }
+}
+
+/// The sidecar's working directory — inherited from the agent CLI, so it's the
+/// agent's cwd, which routes an action to the right project.
+fn cwd() -> String {
+    std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default()
 }
 
 /// Re-indent JSON bodies for the model; non-JSON comes back as-is.
@@ -807,10 +896,21 @@ fn pretty(body: String) -> String {
         .unwrap_or(body)
 }
 
-/// GET from the app's context bridge. Plain std TCP: it's loopback, the
+/// GET from the app's context bridge.
+fn ctx_get(path: String) -> Result<String, String> {
+    ctx_request("GET", &path, None)
+}
+
+/// POST a JSON action to the context bridge. The bridge validates and returns a
+/// human-readable ack (or a 4xx with a message the agent can correct against).
+fn ctx_post(body: serde_json::Value) -> Result<String, String> {
+    ctx_request("POST", "/ctx/action", Some(body.to_string()))
+}
+
+/// One request to the app's context bridge. Plain std TCP: it's loopback, the
 /// responses carry Content-Length (Connection: close makes read-to-end
 /// correct), and the hook binary stays dependency-light.
-fn ctx_get(path: String) -> Result<String, String> {
+fn ctx_request(method: &str, path: &str, body: Option<String>) -> Result<String, String> {
     let port: u16 = std::env::var("CANOPY_CTX_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -826,8 +926,11 @@ fn ctx_get(path: String) -> Result<String, String> {
     })?;
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
+    let body = body.unwrap_or_default();
     let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
     );
     std::io::Write::write_all(&mut stream, req.as_bytes()).map_err(|e| e.to_string())?;
     let mut raw = Vec::new();
