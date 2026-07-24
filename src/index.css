@@ -7978,3 +7978,55 @@ a.btn-mini {
   display: flex;
   gap: 6px;
 }
+.preview-server-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: min(420px, 80%);
+}
+.preview-server {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.preview-server:hover {
+  border-color: var(--accent);
+}
+.preview-server-dot {
+  color: var(--ok);
+  flex: none;
+}
+.preview-server-title {
+  font-weight: 600;
+}
+.preview-server-url {
+  color: var(--text-dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  flex: 1;
+}
+.preview-component-badge {
+  flex: none;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: 9px;
+  font-size: 11px;
+  line-height: 16px;
+  padding: 0 7px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+}
+.preview-empty-none {
+  font-size: 12px;
+}

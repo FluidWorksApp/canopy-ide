@@ -5,8 +5,14 @@
 // AgentLaunchButton + PTY-seed path tickets and PRs use.
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as ipc from "../ipc";
-import { previewFeedbackContext, type PreviewAnnotation } from "../preview";
+import {
+  previewFeedbackContext,
+  serverForUrl,
+  type PreviewAnnotation,
+  type PreviewServer,
+} from "../preview";
 import { AgentLaunchButton } from "./AgentLaunchButton";
+import { LiveDot } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
 
 interface PreviewViewProps {
@@ -15,10 +21,14 @@ interface PreviewViewProps {
   /** Persist navigation / annotation changes onto the tab, so they survive a
    *  switch away and back (the view itself unmounts like every doc tab). */
   onPatch: (patch: { url?: string; annotations?: PreviewAnnotation[] }) => void;
+  /** Servers detected listening in this project's terminals, each tied to its
+   *  component — what the empty tab offers, and what links a URL to a codebase. */
+  servers: PreviewServer[];
   agentTargets: AgentTarget[];
   installed: Record<string, boolean>;
   onSendToAgent: (target: AgentTarget, text: string) => void;
-  onStartNew: (agentId: string, text: string) => void;
+  /** `cwd` is the serving component's directory when the URL is linked to one. */
+  onStartNew: (agentId: string, text: string, cwd: string | null) => void;
   onNotice: (msg: string) => void;
 }
 
@@ -47,13 +57,11 @@ const normalize = (raw: string): string | null => {
   return originOf(withScheme) ? withScheme : null;
 };
 
-/** Common dev-server addresses, for the empty tab's one-click chips. */
-const SUGGESTIONS = ["http://localhost:3000", "http://localhost:5173", "http://localhost:8080"];
-
 export function PreviewView({
   url,
   annotations,
   onPatch,
+  servers,
   agentTargets,
   installed,
   onSendToAgent,
@@ -197,17 +205,50 @@ export function PreviewView({
     post({ canopy: "sync", marks: [] });
   };
 
-  const feedback = () => previewFeedbackContext(urlRef.current, annotationsRef.current);
+  /** The codebase behind whatever page is currently shown — re-derived on
+   *  every navigation, so crossing to another server's port relinks. */
+  const linked = serverForUrl(url, servers);
 
-  // ---------- empty tab: pick a server ----------
+  const feedback = () =>
+    previewFeedbackContext(
+      urlRef.current,
+      annotationsRef.current,
+      serverForUrl(urlRef.current, servers),
+    );
+
+  // ---------- empty tab: pick one of the project's own servers ----------
   if (!origin) {
     return (
       <div className="preview-empty">
         <h2>Preview a running server</h2>
         <p className="preview-empty-hint">
-          Open a dev server in an embedded browser, then mark elements and send the feedback to an
-          agent.
+          Open one of this project's servers in an embedded browser, then mark elements and send
+          the feedback to an agent working in the right component.
         </p>
+        {servers.length > 0 ? (
+          <div className="preview-server-list">
+            {servers.map((s) => (
+              <button
+                key={`${s.ptyId}:${s.port}`}
+                className="preview-server"
+                title={`${s.command ?? "shell"} — ${s.cwd}`}
+                onClick={() => navigate(s.url)}
+              >
+                <LiveDot size={7} className="preview-server-dot" />
+                <span className="preview-server-title">{s.title}</span>
+                <span className="preview-server-url">localhost:{s.port}</span>
+                {s.componentLabel && (
+                  <span className="preview-component-badge">{s.componentLabel}</span>
+                )}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="preview-empty-hint preview-empty-none">
+            Nothing is listening yet — start a run command (＋ ▾ on a component, or the RUNS rail)
+            and its server will be listed here.
+          </p>
+        )}
         <form
           className="preview-empty-form"
           onSubmit={(e) => {
@@ -217,22 +258,14 @@ export function PreviewView({
         >
           <input
             className="preview-url-input"
-            autoFocus
-            placeholder="http://localhost:5173"
+            placeholder="or any http://localhost URL…"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
           />
-          <button className="btn btn-accent" type="submit">
+          <button className="btn" type="submit">
             Open
           </button>
         </form>
-        <div className="preview-empty-chips">
-          {SUGGESTIONS.map((s) => (
-            <button key={s} className="btn-mini" onClick={() => navigate(s)}>
-              {s}
-            </button>
-          ))}
-        </div>
       </div>
     );
   }
@@ -269,6 +302,16 @@ export function PreviewView({
             onChange={(e) => setDraft(e.target.value)}
           />
         </form>
+        {linked && (
+          <span
+            className="preview-component-badge"
+            title={`Served by "${linked.title}"${linked.command ? ` (${linked.command})` : ""} — ${
+              linked.componentPath
+            }\nFeedback from this page goes to an agent in this component.`}
+          >
+            {linked.componentLabel ?? linked.title}
+          </span>
+        )}
         <button
           className={`btn-mini preview-annotate-toggle ${picking ? "preview-annotate-on" : ""}`}
           title="Annotate: click any element on the page to attach feedback to it"
@@ -346,9 +389,19 @@ export function PreviewView({
                   label="Send feedback"
                   agentTargets={agentTargets}
                   installed={installed}
-                  newAgentLabel="New agent on this feedback"
-                  primaryTitle={(cli) => `Start ${cli} on this feedback`}
-                  onStart={(agentId) => onStartNew(agentId, feedback())}
+                  newAgentLabel={
+                    linked?.componentLabel
+                      ? `New agent in ${linked.componentLabel}`
+                      : "New agent on this feedback"
+                  }
+                  primaryTitle={(cli) =>
+                    `Start ${cli} on this feedback${
+                      linked?.componentLabel ? ` in the ${linked.componentLabel} component` : ""
+                    }`
+                  }
+                  onStart={(agentId) =>
+                    onStartNew(agentId, feedback(), linked?.componentPath ?? null)
+                  }
                   onSend={(target) => onSendToAgent(target, feedback())}
                 />
               </div>

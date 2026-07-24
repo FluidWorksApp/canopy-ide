@@ -38,6 +38,9 @@ interface AgentsPanelProps {
    *  for numbered-prompt CLIs (claude/codex). */
   onRespond?: (item: PendingItem, decision: "approve" | "deny") => void;
   onJumpToTerminal?: (item: PendingItem) => void;
+  /** Open a detected server URL in the in-app preview tab (⌘-click on the
+   *  chip still opens the system browser). */
+  onPreviewUrl?: (url: string) => void;
   /** Focus the tab a running session is in. Separate from onJumpToTerminal:
    *  that one guesses a tab from a notification's cwd, this one has the pty
    *  id in hand and is exact. */
@@ -151,6 +154,7 @@ export function AgentsPanel({
   onAnswer,
   onJumpToTerminal,
   onJumpToPty,
+  onPreviewUrl,
   onOpenAgent,
   activePty,
   roots,
@@ -481,12 +485,20 @@ export function AgentsPanel({
             <button
               key={p}
               className="agent-port"
-              title={`Open http://localhost:${p} in your browser`}
+              title={
+                onPreviewUrl
+                  ? `Preview http://localhost:${p} in Canopy — ⌘-click for your browser`
+                  : `Open http://localhost:${p} in your browser`
+              }
               onClick={(e) => {
                 e.stopPropagation();
-                void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
-                  openUrl(`http://localhost:${p}`),
-                );
+                if (onPreviewUrl && !e.metaKey && !e.ctrlKey) {
+                  onPreviewUrl(`http://localhost:${p}`);
+                } else {
+                  void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
+                    openUrl(`http://localhost:${p}`),
+                  );
+                }
               }}
             >
               :{p}

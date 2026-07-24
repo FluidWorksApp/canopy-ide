@@ -78,7 +78,7 @@ import { ReviewView, type ReviewPayload } from "./ReviewView";
 import { BranchView } from "./BranchView";
 import { AgentWorkspaceView } from "./AgentWorkspaceView";
 import { PreviewView } from "./PreviewView";
-import type { PreviewAnnotation } from "../preview";
+import type { PreviewAnnotation, PreviewServer } from "../preview";
 import { ticketBranch, ticketContext, ticketWorktree } from "../trackers";
 import { prConflictContext, prReviewContext, prWorktree } from "../prs";
 import { fileDiffContext, reviewContext, sessionChangesContext } from "../diffContext";
@@ -409,7 +409,17 @@ function Rail({
  *  overlay rather than a bar above the grid on purpose: the terminal's size is
  *  what the pty is told, and anything that changes its height risks the
  *  wrap-at-the-wrong-column class of bug. An absolute chip changes nothing. */
-function TermPorts({ ptyId, stats }: { ptyId: number | null | undefined; stats: ipc.SessionStats[] }) {
+function TermPorts({
+  ptyId,
+  stats,
+  onPreview,
+}: {
+  ptyId: number | null | undefined;
+  stats: ipc.SessionStats[];
+  /** Open in the in-app preview tab; plain click. ⌘/ctrl-click still goes to
+   *  the system browser for the times a real browser is the point. */
+  onPreview: (url: string) => void;
+}) {
   if (ptyId == null) return null;
   const ports = stats.find((s) => s.id === ptyId)?.ports ?? [];
   if (ports.length === 0) return null;
@@ -419,12 +429,16 @@ function TermPorts({ ptyId, stats }: { ptyId: number | null | undefined; stats: 
         <button
           key={p}
           className="term-port"
-          title={`Open http://localhost:${p} in your browser`}
-          onClick={() =>
-            void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
-              openUrl(`http://localhost:${p}`),
-            )
-          }
+          title={`Preview http://localhost:${p} in Canopy — ⌘-click for your browser`}
+          onClick={(e) => {
+            if (e.metaKey || e.ctrlKey) {
+              void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
+                openUrl(`http://localhost:${p}`),
+              );
+            } else {
+              onPreview(`http://localhost:${p}`);
+            }
+          }}
         >
           localhost:{p}
         </button>
@@ -2471,6 +2485,33 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     componentsRef.current[0]?.path ??
     null;
 
+  // Every port something in this project's terminals is listening on, tied to
+  // the component whose directory the terminal runs in. This is what makes a
+  // previewed URL traceable to a codebase: the preview tab lists exactly these,
+  // and feedback from a linked page targets that component. RUNS-rail servers
+  // sort first — they're the configured dev servers, a shell's port is a bonus.
+  const previewServers: PreviewServer[] = tabs
+    .filter(
+      (t): t is TermSubTab => t.type === "terminal" && t.ptyId != null && !t.exited,
+    )
+    .flatMap((t) => {
+      const ports = projectStats.find((s) => s.id === t.ptyId)?.ports ?? [];
+      const comp =
+        components.find((c) => t.cwd === c.path || t.cwd.startsWith(`${c.path}/`)) ?? null;
+      return ports.map((p) => ({
+        url: `http://localhost:${p}`,
+        port: p,
+        ptyId: t.ptyId as number,
+        title: t.customTitle ?? t.title,
+        command: t.command,
+        cwd: t.cwd,
+        componentLabel: comp?.label ?? null,
+        componentPath: comp?.path ?? t.cwd,
+        run: !!t.run,
+      }));
+    })
+    .sort((a, b) => Number(b.run) - Number(a.run));
+
   // Mirror this project's live shape — components, run servers, agents — into
   // the Rust context bridge, where `canopy-hook --mcp` serves it to agents as
   // the canopy_* tools. Runs every render, but the stringify diff means a
@@ -2492,6 +2533,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           title: t.customTitle ?? t.title,
           command: t.command ?? "",
           cwd: t.cwd,
+          component:
+            components.find((c) => t.cwd === c.path || t.cwd.startsWith(`${c.path}/`))?.label ??
+            null,
+          listeningPorts: projectStats.find((s) => s.id === t.ptyId)?.ports ?? [],
           running: !t.exited && t.ptyId != null,
           exitCode: t.exitCode ?? null,
         })),
@@ -2985,7 +3030,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               className="fill term-host"
               style={{ display: tab.id === activeTabId && visible ? "block" : "none" }}
             >
-              <TermPorts ptyId={tab.ptyId} stats={stats} />
+              <TermPorts ptyId={tab.ptyId} stats={stats} onPreview={openPreview} />
               <Term
                 // epoch remounts the Term (fresh PTY) when a run tab restarts
                 key={`${tab.id}:${tab.epoch ?? 0}`}
@@ -3158,11 +3203,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             url={activeTab.url}
             annotations={activeTab.annotations}
             onPatch={(patch) => patchTabRaw(activeTab.id, patch as Partial<SubTab>)}
+            servers={previewServers}
             agentTargets={agentTargets}
             installed={installed}
             onSendToAgent={sendTicketToAgent}
-            onStartNew={(agentId, text) => {
-              const dir = componentsRef.current[0]?.path;
+            onStartNew={(agentId, text, cwd) => {
+              // The serving component's checkout when the page is linked to
+              // one; the first component only as a last resort.
+              const dir = cwd ?? componentsRef.current[0]?.path;
               if (!dir) {
                 onNotice("No project directory to start the agent in.");
                 return;
@@ -3851,6 +3899,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onRespond={respondPermission}
           onJumpToTerminal={jumpToTerminal}
           onJumpToPty={jumpToPty}
+          onPreviewUrl={openPreview}
           onOpenAgent={(p) => void openAgent(p)}
           activePty={activePty}
           roots={roots}
