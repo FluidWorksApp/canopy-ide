@@ -109,6 +109,31 @@ export interface AgentAction {
 export const onAgentAction = (cb: (a: AgentAction) => void): Promise<UnlistenFn> =>
   listen<AgentAction>("agent:action", (event) => cb(event.payload));
 
+/** A browser-control op an agent sent through the MCP bridge (canopy_browser_*).
+ *  Request/response: the bridge holds the agent's HTTP request open under `id`
+ *  until the answer comes back via `browserResult`. Routed like AgentAction. */
+export interface AgentBrowserOp {
+  id: number;
+  op: "navigate" | "snapshot" | "click" | "type" | "eval" | "console";
+  route: string;
+  url?: string | null;
+  action?: string | null;
+  ref?: number | null;
+  selector?: string | null;
+  text?: string | null;
+  submit?: boolean | null;
+  append?: boolean | null;
+  code?: string | null;
+  lines?: number | null;
+  clear?: boolean | null;
+  max?: number | null;
+}
+export const onAgentBrowser = (cb: (op: AgentBrowserOp) => void): Promise<UnlistenFn> =>
+  listen<AgentBrowserOp>("agent:browser", (event) => cb(event.payload));
+/** Answer a browser op: `data` (any JSON value) becomes the tool's result. */
+export const browserResult = (id: number, ok: boolean, data: unknown) =>
+  invoke<void>("browser_result", { id, ok, data: JSON.stringify(data ?? null) });
+
 // ---------- Workspaces / FS ----------
 
 export interface DirEntry {

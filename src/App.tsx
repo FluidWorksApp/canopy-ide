@@ -782,6 +782,53 @@ export default function App() {
     return () => un?.();
   }, [notify]);
 
+  // A browser-control op (canopy_browser_*). Routed like agent:action, but
+  // request/response: an op that can't reach a project must answer the bridge
+  // now, or the agent's tool call sits on the full timeout for nothing.
+  useEffect(() => {
+    const norm = (p: string) => p.replace(/\/+$/, "");
+    const projectForCwd = (cwd: string): string | undefined => {
+      const c = norm(cwd);
+      let bestId: string | undefined;
+      let bestLen = -1;
+      for (const p of wsRef.current.projects) {
+        for (const comp of p.components) {
+          const r = norm(comp.path);
+          if (r && (c === r || c.startsWith(r + "/")) && r.length > bestLen) {
+            bestLen = r.length;
+            bestId = p.id;
+          }
+        }
+      }
+      return bestId;
+    };
+    let un: (() => void) | undefined;
+    void ipc
+      .onAgentBrowser(async (op) => {
+        const projectId =
+          projectForCwd(op.route) ??
+          (wsRef.current.openIds.length === 1 ? wsRef.current.openIds[0] : undefined);
+        if (!projectId) {
+          void ipc.browserResult(
+            op.id,
+            false,
+            "This session's directory isn't inside any open Canopy project, so there's no preview to drive.",
+          );
+          return;
+        }
+        await openProjectRef.current(projectId);
+        requestAnimationFrame(() =>
+          window.dispatchEvent(
+            new CustomEvent("canopy:agent-browser", { detail: { projectId, op } }),
+          ),
+        );
+      })
+      .then((u) => {
+        un = u;
+      });
+    return () => un?.();
+  }, []);
+
   const saveProject = useCallback(
     async (project: Project) => {
       const state = wsRef.current;

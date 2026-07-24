@@ -18,6 +18,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tauri::{Emitter, Manager};
 
@@ -43,6 +44,10 @@ pub struct ContextBridge {
     snapshots: Mutex<HashMap<String, serde_json::Value>>,
     port: OnceLock<u16>,
     token: String,
+    /// Browser-control ops in flight: the HTTP handler parks a sender here and
+    /// waits; the frontend answers through the `browser_result` command.
+    pending: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<(bool, serde_json::Value)>>>,
+    next_op: AtomicU64,
 }
 
 impl Default for ContextBridge {
@@ -53,6 +58,8 @@ impl Default for ContextBridge {
             snapshots: Mutex::new(HashMap::new()),
             port: OnceLock::new(),
             token: hex::encode(bytes),
+            pending: Mutex::new(HashMap::new()),
+            next_op: AtomicU64::new(1),
         }
     }
 }
@@ -91,6 +98,8 @@ pub fn start(app: tauri::AppHandle) {
             .route("/ctx/annotations", get(annotations))
             .route("/ctx/resources", get(resources))
             .route("/ctx/action", post(action))
+            .route("/ctx/browser", post(browser))
+            .route("/ctx/network", get(network))
             .with_state(app.clone());
         let _ = axum::serve(listener, router).await;
     });
@@ -113,6 +122,17 @@ pub fn context_publish(
 #[tauri::command]
 pub fn context_remove(state: tauri::State<'_, ContextBridge>, project_id: String) {
     state.snapshots.lock().unwrap().remove(&project_id);
+}
+
+/// The frontend's answer to a browser-control op: `data` is a JSON document
+/// (or plain text) that becomes the waiting HTTP response's body. An id nobody
+/// is waiting on (op timed out, duplicate answer) is dropped silently.
+#[tauri::command]
+pub fn browser_result(state: tauri::State<'_, ContextBridge>, id: u64, ok: bool, data: String) {
+    if let Some(tx) = state.pending.lock().unwrap().remove(&id) {
+        let value = serde_json::from_str(&data).unwrap_or(serde_json::Value::String(data));
+        let _ = tx.send((ok, value));
+    }
 }
 
 // ---- HTTP handlers --------------------------------------------------------
@@ -347,6 +367,209 @@ async fn action(
         other => return (StatusCode::BAD_REQUEST, format!("unknown action: {other}")),
     };
     (StatusCode::OK, msg)
+}
+
+/// A browser-control op (canopy_browser_* tools): drive the embedded preview —
+/// navigate, snapshot the DOM, click, type, eval, read the console. Unlike
+/// /ctx/action these are request/response: the op is handed to the UI with a
+/// ticket id, the handler parks on a oneshot, and the frontend (ultimately the
+/// script injected into the previewed page) answers through `browser_result`.
+/// The network op short-circuits: the preview proxy already logs every request
+/// it forwards, so it's answered here without a page round-trip.
+#[derive(serde::Deserialize)]
+struct BrowserOp {
+    op: String,
+    cwd: Option<String>,
+    url: Option<String>,
+    /// navigate: back | forward | reload (when no url is given).
+    action: Option<String>,
+    /// click / type: element address — a snapshot ref or a CSS selector.
+    r#ref: Option<u64>,
+    selector: Option<String>,
+    /// type
+    text: Option<String>,
+    submit: Option<bool>,
+    append: Option<bool>,
+    /// eval
+    code: Option<String>,
+    /// console
+    lines: Option<u64>,
+    clear: Option<bool>,
+    /// snapshot
+    max: Option<u64>,
+}
+
+/// How long the app + page get to answer a browser op. Covers a preview tab
+/// mounting and its page loading; the sidecar's own read timeout is longer.
+const BROWSER_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+async fn browser(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+    Json(op): Json<BrowserOp>,
+) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    // Everything checkable without the page is checked here, so the agent gets
+    // an immediate 4xx to correct against instead of a UI round-trip.
+    match op.op.as_str() {
+        "navigate" => match (&op.url, op.action.as_deref()) {
+            (Some(u), _) if !is_local_http(u) => {
+                return (
+                        StatusCode::BAD_REQUEST,
+                        format!("{u} isn't a local http:// URL — the preview only opens servers running on this machine"),
+                    );
+            }
+            (Some(_), _) | (None, Some("back" | "forward" | "reload")) => {}
+            _ => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "navigate needs a url, or action = back | forward | reload".into(),
+                )
+            }
+        },
+        "click" | "type" => {
+            if op.r#ref.is_none() && op.selector.is_none() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "{} needs a ref (from canopy_browser_snapshot) or a selector",
+                        op.op
+                    ),
+                );
+            }
+            if op.op == "type" && op.text.is_none() {
+                return (StatusCode::BAD_REQUEST, "type needs text".into());
+            }
+        }
+        "eval" => {
+            if op.code.as_deref().map_or(true, |c| c.trim().is_empty()) {
+                return (StatusCode::BAD_REQUEST, "eval needs code".into());
+            }
+        }
+        "snapshot" | "console" => {}
+        "network" => return network_response(&app, op.url.as_deref()),
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("unknown browser op: {other}"),
+            )
+        }
+    }
+
+    let bridge = app.state::<ContextBridge>();
+    let id = bridge.next_op.fetch_add(1, Ordering::Relaxed);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    bridge.pending.lock().unwrap().insert(id, tx);
+
+    let _ = app.emit(
+        "agent:browser",
+        serde_json::json!({
+            "id": id,
+            "op": op.op,
+            "route": op.cwd.clone().unwrap_or_default(),
+            "url": op.url,
+            "action": op.action,
+            "ref": op.r#ref,
+            "selector": op.selector,
+            "text": op.text,
+            "submit": op.submit,
+            "append": op.append,
+            "code": op.code,
+            "lines": op.lines,
+            "clear": op.clear,
+            "max": op.max,
+        }),
+    );
+
+    match tokio::time::timeout(BROWSER_OP_TIMEOUT, rx).await {
+        Ok(Ok((true, data))) => (StatusCode::OK, body_text(data)),
+        Ok(Ok((false, data))) => (StatusCode::BAD_REQUEST, body_text(data)),
+        // Sender dropped without answering — shouldn't happen, but don't hang.
+        Ok(Err(_)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the preview dropped this request".into(),
+        ),
+        Err(_) => {
+            app.state::<ContextBridge>()
+                .pending
+                .lock()
+                .unwrap()
+                .remove(&id);
+            (
+                StatusCode::GATEWAY_TIMEOUT,
+                "The preview didn't answer in time. The page may still be loading, or the \
+                 Canopy window may be busy — try again, or call canopy_project to check the \
+                 server is running."
+                    .into(),
+            )
+        }
+    }
+}
+
+/// A result payload as an HTTP body: strings verbatim, JSON otherwise.
+fn body_text(data: serde_json::Value) -> String {
+    match data {
+        serde_json::Value::String(s) => s,
+        other => other.to_string(),
+    }
+}
+
+/// The preview proxy's request log — served straight from PreviewManager.
+fn network_response(app: &tauri::AppHandle, url: Option<&str>) -> (StatusCode, String) {
+    let previews = app.state::<crate::preview::PreviewManager>();
+    let origin = match url {
+        Some(u) => match origin_of(u) {
+            Some(o) => Some(o),
+            None => return (StatusCode::BAD_REQUEST, format!("not an http:// URL: {u}")),
+        },
+        None => None,
+    };
+    match previews.network_log(origin.as_deref(), 100) {
+        Some(log) => (StatusCode::OK, log.to_string()),
+        None => {
+            let running = previews.origins();
+            let hint = if running.is_empty() {
+                "no preview is open — open one with canopy_browser_navigate first".to_string()
+            } else {
+                format!("previews are open for: {}", running.join(", "))
+            };
+            (
+                StatusCode::NOT_FOUND,
+                format!(
+                    "no preview proxy for {} ({hint})",
+                    origin.unwrap_or_default()
+                ),
+            )
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct NetworkParams {
+    url: Option<String>,
+}
+
+async fn network(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+    Query(params): Query<NetworkParams>,
+) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    network_response(&app, params.url.as_deref())
+}
+
+/// `http://host:port/...` → `http://host:port` (the proxy map's key shape).
+fn origin_of(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("http://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() {
+        return None;
+    }
+    Some(format!("http://{authority}"))
 }
 
 /// Look up a component's run command by name in the published snapshots,

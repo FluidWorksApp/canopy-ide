@@ -79,6 +79,7 @@ import { BranchView } from "./BranchView";
 import { AgentWorkspaceView } from "./AgentWorkspaceView";
 import { PreviewView } from "./PreviewView";
 import type { PreviewAnnotation, PreviewServer } from "../preview";
+import { dispatchBrowserOp } from "../previewAgent";
 import { serverForUrl } from "../preview";
 import { ticketBranch, ticketContext, ticketWorktree } from "../trackers";
 import { prConflictContext, prReviewContext, prWorktree } from "../prs";
@@ -745,11 +746,12 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
 
   /** Open an embedded-browser preview tab. With no URL the tab opens on the
    *  pick-a-server form; a URL (a run rail's detected server, a reopened tab)
-   *  loads immediately. */
+   *  loads immediately. Returns the new tab's id (agent ops target it). */
   const openPreview = useCallback((url = "") => {
     const id = tabId();
     setTabs((prev) => [...prev, { id, type: "preview", url, annotations: [] }]);
     setActiveTabId(id);
+    return id;
   }, []);
 
   /** Open a relay conversation as its own tab — the everyone channel (peer
@@ -1643,6 +1645,50 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     window.addEventListener("canopy:agent-action", onAction);
     return () => window.removeEventListener("canopy:agent-action", onAction);
   }, [project.id, openPreview, addTerminal, restartRun]);
+
+  // A browser-control op (canopy_browser_*): pick the preview tab it targets —
+  // by origin when it names a URL, else the active/first preview tab, creating
+  // one when navigation asks for a page and none is open — focus it (agent ops
+  // mount the view; the user watching the tab drive itself is the point), and
+  // hand the op to the PreviewView through the queueing bus. Everything else,
+  // including answering the bridge, happens in the view; only the no-tab case
+  // must answer here or the agent would wait out the bridge's timeout.
+  useEffect(() => {
+    const originOf = (u: string): string | null => {
+      try {
+        return new URL(u).origin;
+      } catch {
+        return null;
+      }
+    };
+    const onBrowserOp = (e: Event) => {
+      const d = (e as CustomEvent).detail as { projectId: string; op: ipc.AgentBrowserOp };
+      if (d?.projectId !== project.id) return;
+      const op = d.op;
+      const previews = tabsRef.current.filter((t): t is PreviewSubTab => t.type === "preview");
+      const wantOrigin = op.url ? originOf(op.url) : null;
+      const tab =
+        (wantOrigin && previews.find((t) => originOf(t.url) === wantOrigin)) ||
+        previews.find((t) => t.id === activeTabIdRef.current && t.url) ||
+        previews.find((t) => !!t.url) ||
+        // A URL navigation can take over an empty (server-picker) preview tab.
+        (op.op === "navigate" && op.url ? previews[0] : undefined);
+      if (tab) {
+        setActiveTabId(tab.id);
+        dispatchBrowserOp(tab.id, op);
+      } else if (op.op === "navigate" && op.url) {
+        dispatchBrowserOp(openPreview(op.url), op);
+      } else {
+        void ipc.browserResult(
+          op.id,
+          false,
+          "No preview page is open in this project. Call canopy_browser_navigate with a url first — canopy_project's runServers lists the addresses.",
+        );
+      }
+    };
+    window.addEventListener("canopy:agent-browser", onBrowserOp);
+    return () => window.removeEventListener("canopy:agent-browser", onBrowserOp);
+  }, [project.id, openPreview]);
 
   const patchTab = useCallback((id: string, patch: Partial<TermSubTab> & Partial<FileSubTab>) => {
     setTabs((prev) => prev.map((t) => (t.id === id ? ({ ...t, ...patch } as SubTab) : t)));
@@ -2600,6 +2646,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             servingComponentPath: server?.componentPath ?? null,
           }));
         }),
+      // Open preview tabs, so agents know what the browser-control tools
+      // (canopy_browser_*) are currently pointed at.
+      previews: tabs
+        .filter((t): t is PreviewSubTab => t.type === "preview")
+        .map((t) => ({ url: t.url || null, annotations: t.annotations.length })),
     });
     if (snapshot !== lastContextRef.current) {
       lastContextRef.current = snapshot;
@@ -3254,6 +3305,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         {activeTab?.type === "preview" && (
           <PreviewView
             key={activeTab.id}
+            tabId={activeTab.id}
             url={activeTab.url}
             annotations={activeTab.annotations}
             onPatch={(patch) => patchTabRaw(activeTab.id, patch as Partial<SubTab>)}

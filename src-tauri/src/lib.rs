@@ -452,6 +452,7 @@ pub fn run() {
             preview::preview_stop,
             context::context_publish,
             context::context_remove,
+            context::browser_result,
             portal::remote_enable,
             portal::remote_disable,
             portal::remote_status,

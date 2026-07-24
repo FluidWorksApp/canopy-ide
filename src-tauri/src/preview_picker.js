@@ -4,8 +4,10 @@
 // one channel that crosses the origin boundary on purpose.
 //
 // Protocol (all messages tagged { canopy: <type> }):
-//   parent -> page: mode {on}, navigate {delta|url}, sync {marks: [{n, selector}]}
-//   page -> parent: ready {url, title}, nav {url, title}, annotation {payload}
+//   parent -> page: mode {on}, navigate {delta|url}, sync {marks: [{n, selector}]},
+//                   agent {id, op, ...} (browser-control ops from MCP agents)
+//   page -> parent: ready {url, title}, nav {url, title}, annotation {payload},
+//                   agent-result {id, ok, data}
 (function () {
   "use strict";
   if (window.__canopyPicker || window.top === window) return;
@@ -14,6 +16,45 @@
   var picking = false;
   var marks = []; // {n, selector, el|null, badge}
   var Z = 2147483000;
+
+  // ---------- console capture ----------
+  // Installed immediately — the proxy injects this script at the top of <head>,
+  // so the wrap is in place before the app's own scripts log anything. Agents
+  // read the buffer through the canopy_browser_console tool.
+
+  var logs = []; // {level, text, ts}
+  var LOG_CAP = 300;
+
+  function logArg(a) {
+    if (typeof a === "string") return a;
+    if (a instanceof Error) return a.stack || String(a);
+    try {
+      var s = JSON.stringify(a);
+      return s && s.length > 500 ? s.slice(0, 500) + "…" : s || String(a);
+    } catch (_) {
+      return String(a);
+    }
+  }
+
+  function record(level, args) {
+    var text = Array.prototype.map.call(args, logArg).join(" ");
+    logs.push({ level: level, text: text.slice(0, 2000), ts: Date.now() });
+    if (logs.length > LOG_CAP) logs.splice(0, logs.length - LOG_CAP);
+  }
+
+  ["log", "info", "warn", "error", "debug"].forEach(function (level) {
+    var orig = console[level];
+    console[level] = function () {
+      record(level, arguments);
+      if (orig) orig.apply(console, arguments);
+    };
+  });
+  addEventListener("error", function (e) {
+    record("error", [e.message + (e.filename ? " (" + e.filename + ":" + e.lineno + ")" : "")]);
+  });
+  addEventListener("unhandledrejection", function (e) {
+    record("error", ["Unhandled promise rejection: " + logArg(e.reason)]);
+  });
 
   // ---------- overlay chrome ----------
 
@@ -216,6 +257,220 @@
   addEventListener("popstate", function () { announce("nav"); });
   addEventListener("hashchange", function () { announce("nav"); });
 
+  // ---------- agent browser control ----------
+  // Ops arrive from MCP tools (canopy_browser_*) relayed by the app. Every op
+  // answers with agent-result {id, ok, data}; refs from the last snapshot are
+  // how click/type address elements without brittle selectors.
+
+  var agentRefs = []; // elements handed out as refs by the last snapshot
+
+  function visible(el) {
+    if (!el.getClientRects().length) return false;
+    var r = el.getBoundingClientRect();
+    return r.width > 0 || r.height > 0;
+  }
+
+  function labelFor(el) {
+    var t =
+      el.getAttribute("aria-label") ||
+      (el.innerText || "").trim() ||
+      el.getAttribute("placeholder") ||
+      el.getAttribute("title") ||
+      el.getAttribute("alt") ||
+      (el.localName === "input" ? el.value : "") ||
+      "";
+    return t.replace(/\s+/g, " ").slice(0, 80);
+  }
+
+  function snapshotPage(d) {
+    var sel =
+      "a[href],button,input,select,textarea,summary,[role=button],[role=link]," +
+      "[role=tab],[role=checkbox],[role=radio],[role=menuitem],[role=option]," +
+      "[role=switch],[role=combobox],[onclick],[contenteditable=true],[contenteditable='']";
+    var all = document.querySelectorAll(sel);
+    agentRefs = [];
+    var els = [];
+    var cap = Math.min(Number(d.max) || 150, 400);
+    for (var i = 0; i < all.length && agentRefs.length < cap; i++) {
+      var el = all[i];
+      if (!visible(el)) continue;
+      agentRefs.push(el);
+      var entry = {
+        ref: agentRefs.length,
+        tag: el.localName,
+        text: labelFor(el),
+        selector: cssPath(el),
+      };
+      var role = el.getAttribute("role");
+      if (role) entry.role = role;
+      if (el.localName === "a") entry.href = el.getAttribute("href");
+      if (el.localName === "input" || el.localName === "textarea" || el.localName === "select") {
+        entry.value = String(el.value == null ? "" : el.value).slice(0, 120);
+        if (el.type) entry.type = el.type;
+        if (el.checked != null && (el.type === "checkbox" || el.type === "radio"))
+          entry.checked = el.checked;
+      }
+      if (el.disabled) entry.disabled = true;
+      var comps = reactComponents(el);
+      if (comps.length) entry.component = comps[0];
+      els.push(entry);
+    }
+    var text = (document.body && document.body.innerText) || "";
+    return {
+      url: location.href,
+      title: document.title,
+      text: text.length > 6000 ? text.slice(0, 6000) + "\n…(page text truncated)" : text,
+      elements: els,
+      elementsTruncated: agentRefs.length >= cap && all.length > agentRefs.length,
+    };
+  }
+
+  function resolveTarget(d) {
+    if (d.ref != null) {
+      var el = agentRefs[Number(d.ref) - 1];
+      if (!el || !el.isConnected)
+        throw new Error(
+          "ref " + d.ref + " is stale (the page re-rendered) — call canopy_browser_snapshot again",
+        );
+      return el;
+    }
+    if (d.selector) {
+      var found = document.querySelector(d.selector);
+      if (!found) throw new Error("no element matches selector: " + d.selector);
+      return found;
+    }
+    throw new Error("pass a ref (from canopy_browser_snapshot) or a CSS selector");
+  }
+
+  function clickTarget(el) {
+    el.scrollIntoView({ block: "center", inline: "center" });
+    var r = el.getBoundingClientRect();
+    var opts = {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX: r.x + r.width / 2,
+      clientY: r.y + r.height / 2,
+    };
+    if (el.focus) el.focus();
+    ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach(function (type) {
+      el.dispatchEvent(new MouseEvent(type, opts));
+    });
+  }
+
+  function typeInto(el, d) {
+    if (el.focus) el.focus();
+    var text = String(d.text == null ? "" : d.text);
+    if (el.localName === "input" || el.localName === "textarea") {
+      // Through the prototype's setter so controlled (React) inputs see it.
+      var proto = el.localName === "textarea" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      var desc = Object.getOwnPropertyDescriptor(proto, "value");
+      var next = d.append ? el.value + text : text;
+      if (desc && desc.set) desc.set.call(el, next);
+      else el.value = next;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    } else if (el.localName === "select") {
+      var opt = Array.prototype.find.call(el.options, function (o) {
+        return o.value === text || o.textContent.trim() === text;
+      });
+      if (!opt) throw new Error('no <option> matches "' + text + '"');
+      el.value = opt.value;
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    } else if (el.isContentEditable) {
+      document.execCommand("selectAll", false, null);
+      if (!d.append) document.execCommand("delete", false, null);
+      else window.getSelection().collapseToEnd();
+      document.execCommand("insertText", false, text);
+    } else {
+      throw new Error("<" + el.localName + "> is not a text input, select, or contenteditable");
+    }
+    if (d.submit) {
+      var key = { bubbles: true, cancelable: true, key: "Enter", code: "Enter", keyCode: 13 };
+      el.dispatchEvent(new KeyboardEvent("keydown", key));
+      el.dispatchEvent(new KeyboardEvent("keyup", key));
+    }
+  }
+
+  // JSON-safe copy for eval results: cycles, functions and DOM nodes flattened.
+  function safeValue(v, seen, depth) {
+    if (v === undefined) return null;
+    if (v === null || typeof v === "number" || typeof v === "boolean") return v;
+    if (typeof v === "string") return v.length > 4000 ? v.slice(0, 4000) + "…" : v;
+    if (typeof v === "function") return "[function " + (v.name || "anonymous") + "]";
+    if (v instanceof Element) return "<" + v.localName + "> " + cssPath(v);
+    if (v instanceof Error) return String(v.stack || v);
+    if (depth > 4) return "[…depth]";
+    if (seen.indexOf(v) !== -1) return "[cyclic]";
+    seen.push(v);
+    if (Array.isArray(v)) {
+      return v.slice(0, 100).map(function (x) { return safeValue(x, seen, depth + 1); });
+    }
+    var out = {};
+    var keys = Object.keys(v).slice(0, 100);
+    for (var i = 0; i < keys.length; i++) out[keys[i]] = safeValue(v[keys[i]], seen, depth + 1);
+    return out;
+  }
+
+  function agentReply(id, ok, data) {
+    parent.postMessage({ canopy: "agent-result", id: id, ok: ok, data: data }, "*");
+  }
+
+  function runAgentOp(d) {
+    switch (d.op) {
+      case "snapshot":
+        return agentReply(d.id, true, snapshotPage(d));
+      case "click": {
+        var el = resolveTarget(d);
+        var brief = { tag: el.localName, text: labelFor(el), selector: cssPath(el) };
+        clickTarget(el);
+        return agentReply(d.id, true, { clicked: brief, url: location.href });
+      }
+      case "type": {
+        var t = resolveTarget(d);
+        typeInto(t, d);
+        return agentReply(d.id, true, {
+          typed: String(d.text == null ? "" : d.text).slice(0, 120),
+          into: { tag: t.localName, selector: cssPath(t) },
+          submitted: !!d.submit,
+        });
+      }
+      case "eval": {
+        var fn;
+        try {
+          fn = new Function('"use strict";return (' + d.code + ")");
+        } catch (_) {
+          fn = new Function('"use strict";' + d.code);
+        }
+        return Promise.resolve(fn()).then(
+          function (v) { agentReply(d.id, true, { result: safeValue(v, [], 0) }); },
+          function (err) { agentReply(d.id, false, String((err && err.stack) || err)); },
+        );
+      }
+      case "console": {
+        var n = Math.min(Number(d.lines) || 100, LOG_CAP);
+        var out = logs.slice(-n);
+        if (d.clear) logs.length = 0;
+        return agentReply(d.id, true, { messages: out, total: logs.length });
+      }
+      default:
+        return agentReply(d.id, false, "unknown browser op: " + d.op);
+    }
+  }
+
+  function onAgentMessage(d) {
+    var exec = function () {
+      try {
+        runAgentOp(d);
+      } catch (err) {
+        agentReply(d.id, false, String((err && err.message) || err));
+      }
+    };
+    // The script runs from <head>, so an op can land before the body exists.
+    if (document.readyState === "loading") addEventListener("DOMContentLoaded", exec, { once: true });
+    else exec();
+  }
+
   // ---------- parent commands ----------
 
   addEventListener("message", function (e) {
@@ -223,6 +478,7 @@
     if (!d || typeof d !== "object") return;
     if (d.canopy === "mode") setPicking(!!d.on);
     else if (d.canopy === "sync") syncMarks(d.marks);
+    else if (d.canopy === "agent") onAgentMessage(d);
     else if (d.canopy === "navigate") {
       if (typeof d.url === "string") location.href = d.url;
       else if (d.delta === 0) location.reload();
