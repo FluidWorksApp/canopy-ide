@@ -18,12 +18,18 @@ Antigravity, and OpenCode).
 | Hook auto-setup | full | full | plugin | notification | full | plugin | hook |
 | Event stream (stamped w/ pty) | yes | yes | yes | limited | yes | yes | yes |
 | MCP auto-setup | yes | yes | no native config adapter | no native MCP | yes | yes | no native MCP |
-| Session digests (powers restore + shared context) | yes | yes | yes | limited | yes | yes | yes |
+| Session digests (powers restore + shared context) | yes | yes | yes | limited | yes | limited¹ | yes |
 | Resume command in registry | yes | yes | yes | – | yes | yes | yes |
 | Token/cost/model tray | yes | – | – | – | – | – | – |
 | Model switcher | yes | – | – | – | – | – | – |
 | Shared context (receive) | yes | – | – | – | – | – | – |
 | Detection / tab promotion / launcher | yes | yes | yes | yes | yes | yes | yes |
+
+¹ OpenCode's bus has no event Canopy can map to `UserPromptSubmit`, so its
+plugin forwards `SessionStart`, `Stop`, `permission.asked` and tool use but
+never a `prompt`. Its digests exist and drive detection and state, but they are
+promptless — which is what "resume with history" labels rows from, so those read
+as untitled.
 
 The load-bearing pieces every feature hangs off:
 
@@ -137,11 +143,14 @@ The load-bearing pieces every feature hangs off:
 1. **Codex → full pipeline.** Done: `setup_codex_hooks` writes
    `~/.codex/hooks.json`, keeps legacy `notify` for old versions, and setup
    now also registers the Canopy MCP server in `~/.codex/config.toml`.
-2. **Antigravity → hooks + OSC.** Add a `setup_agent_hooks("agy")` arm:
-   write `hooks.json` (PreToolUse/PostToolUse/PreInvocation/PostInvocation/
-   Notification → `canopy-hook`), and enable its `notifications` setting so
-   OSC 9 reaches the handlers Canopy already has. `canopy-hook` needs a small
-   event-name mapping (PreInvocation≈UserPromptSubmit, PostInvocation≈Stop).
+2. **Antigravity → hooks + OSC.** Done: `setup_agy_hooks` writes
+   `~/.gemini/antigravity-cli/hooks.json` (PreToolUse/PostToolUse/
+   PreInvocation/PostInvocation/Notification → `canopy-hook`) and flips its
+   `notifications` setting so OSC 9 reaches the handlers Canopy already has;
+   `canopy-hook` maps PreInvocation≈UserPromptSubmit and PostInvocation≈Stop.
+   Setup also registers the MCP server in `~/.gemini/config/mcp_config.json`
+   (the global registry named by Antigravity's own bundled
+   `skills/agy-customizations/docs/mcp_servers.md`).
 3. **Aider → waiting signal.** Auto-setup writes
    `notifications-command` (via `.aider.conf.yml` or env) to a one-line
    append of a `Notification` event to the bridge. Gives "waiting for you"

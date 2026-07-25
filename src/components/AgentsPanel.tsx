@@ -211,9 +211,12 @@ export function AgentsPanel({
 }: AgentsPanelProps) {
   const [showHookHelp, setShowHookHelp] = useState(false);
   const [setupResult, setSetupResult] = useState<string | null>(null);
-  // null while we haven't checked yet — the nudge stays hidden until we know,
-  // so it never flashes the wrong message. See the effect keyed on noHookSignal.
-  const [hooksInstalled, setHooksInstalled] = useState<boolean | null>(null);
+  // Which of the running CLIs have no hooks — not a single boolean over all of
+  // them. `every` called a mixed roster (claude hooked, aider not) uninstalled
+  // and told the user nothing was streaming when most of it was, then re-ran
+  // setup across the lot; `some` would have under-reported the same way. null
+  // while we haven't checked, so the nudge never flashes the wrong message.
+  const [unhooked, setUnhooked] = useState<string[] | null>(null);
   // Per-CLI integration state, so "why is this agent silent?" has an answer in
   // the panel rather than in a config file the user has to go and read.
   const [health, setHealth] = useState<ipc.IntegrationHealth[]>([]);
@@ -433,10 +436,13 @@ export function AgentsPanel({
   const setupAgents = useMemo(
     () =>
       [...new Set(agentSessions.map((x) => x.agent?.id).filter((id): id is string => !!id))].filter(
-        (id) => ["claude", "codex", "agy", "aider", "opencode", "omp", "amp"].includes(id),
+        (id) => AGENT_LABELS.some((a) => a.id === id),
       ),
     [agentSessions],
   );
+  // The dependency the effect below actually reads. Hoisted so the array holds
+  // a value rather than an expression over one, which is what lint can check.
+  const setupKey = setupAgents.join(",");
 
   // No digest could mean hooks aren't installed OR that these agents were
   // started before they were — opposite fixes. Ask the backend which it is, so
@@ -444,18 +450,19 @@ export function AgentsPanel({
   // says "restart to stream". Re-checked whenever the silence appears (e.g.
   // right after a one-click setup), never polled.
   useEffect(() => {
-    if (!noHookSignal) {
-      setHooksInstalled(null);
+    if (!noHookSignal || setupAgents.length === 0) {
+      setUnhooked(null);
       return;
     }
-    if (setupAgents.length === 0) {
-      setHooksInstalled(null);
-      return;
-    }
-    void Promise.all(setupAgents.map((agent) => ipc.agentHooksInstalled(agent)))
-      .then((installed) => setHooksInstalled(installed.every(Boolean)))
-      .catch(() => {});
-  }, [noHookSignal, setupAgents.join(","), setupResult]);
+    void Promise.all(
+      setupAgents.map(async (agent) => ({ agent, ok: await ipc.agentHooksInstalled(agent) })),
+    )
+      .then((rows) => setUnhooked(rows.filter((r) => !r.ok).map((r) => r.agent)))
+      // Back to "don't know" rather than leaving the last answer up: a
+      // transient IPC failure must not keep a banner on screen that describes
+      // a state we can no longer confirm.
+      .catch(() => setUnhooked(null));
+  }, [noHookSignal, setupKey, setupResult]);
 
   // Hibernate an agent: kill its terminal to reclaim the memory, keeping the
   // session digest (which is already the restore record) so the row reappears
@@ -914,13 +921,14 @@ export function AgentsPanel({
       >
 
       {/* Hooks genuinely absent — offer the one-click setup. */}
-      {noHookSignal && !showHookHelp && hooksInstalled === false && (
+      {noHookSignal && !showHookHelp && unhooked !== null && unhooked.length > 0 && (
         <div className="hook-nudge">
           <span>
-            Agents are running, but no events are streaming in — questions,
-            tasks and tokens won't show until hooks are set up.
+            No events are streaming in from{" "}
+            {unhooked.map((id) => AGENT_LABELS.find((a) => a.id === id)?.label ?? id).join(", ")} —
+            questions, tasks and tokens won't show until hooks are set up.
           </span>
-          <button className="btn btn-accent" onClick={() => void autoSetup(setupAgents)}>
+          <button className="btn btn-accent" onClick={() => void autoSetup(unhooked)}>
             Set up agent integrations
           </button>
           {setupResult && <p className="hook-result">{setupResult}</p>}
@@ -930,7 +938,7 @@ export function AgentsPanel({
       {/* Hooks are installed; these agents just predate them. Say the thing that
           actually fixes it (restart) instead of the setup button, and let it be
           dismissed — otherwise it nags in every project forever. */}
-      {noHookSignal && !showHookHelp && hooksInstalled === true && !hintDismissed && (
+      {noHookSignal && !showHookHelp && unhooked?.length === 0 && !hintDismissed && (
         <div className="hook-nudge">
           <span>
             Hooks are set up, but these agents started before that — restart one

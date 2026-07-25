@@ -1438,6 +1438,20 @@ fn require_helper(home: &str, consequence: &str) -> Result<std::path::PathBuf, S
 /// `canopy` that launches something else belongs to whoever wrote it. Both
 /// registry shapes are accepted: a command string (claude, antigravity) and an
 /// argv array (opencode).
+/// The keys we own, laid over the ones we don't. Only defined for two objects:
+/// anything else the user replaced our entry with is theirs, and the ownership
+/// check upstream has already decided whether we may touch it at all.
+fn merged_entry(existing: &serde_json::Value, want: serde_json::Value) -> serde_json::Value {
+    let (Some(existing), Some(ours)) = (existing.as_object(), want.as_object()) else {
+        return want;
+    };
+    let mut out = existing.clone();
+    for (k, v) in ours {
+        out.insert(k.clone(), v.clone());
+    }
+    serde_json::Value::Object(out)
+}
+
 fn is_canopy_mcp_entry(entry: &serde_json::Value) -> bool {
     let command = entry.get("command");
     let as_string = command.and_then(|v| v.as_str());
@@ -1534,16 +1548,27 @@ fn upsert_json_mcp(
     let servers = servers
         .as_object_mut()
         .ok_or_else(|| format!("{key} in {} is not an object", path.display()))?;
-    if let Some(existing) = servers.get("canopy") {
-        if existing == &want {
-            return Ok(false);
-        }
+    let existing = servers.get("canopy").cloned();
+    if let Some(existing) = &existing {
         if !is_ours(existing) {
             return Err(format!(
                 "{} already has an MCP server named 'canopy' that Canopy does not own",
                 path.display()
             ));
         }
+    }
+    // Merged over the entry, not written across it. `command` and `args` are
+    // ours and must stay current (the helper's path moves when Canopy is
+    // reinstalled), but anything else in there was put there by the user —
+    // `"enabled": false` is OpenCode's documented way to switch a server off,
+    // and setup runs on every launch, so replacing the entry wholesale turned
+    // it silently back on each time the app started.
+    let want = match &existing {
+        Some(e) => merged_entry(e, want),
+        None => want,
+    };
+    if existing.as_ref() == Some(&want) {
+        return Ok(false);
     }
     servers.insert("canopy".into(), want);
     let body = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
@@ -1555,6 +1580,23 @@ fn upsert_json_mcp(
 /// TOML round-trip would reformat and drop the comments in a file we don't
 /// own, so the section is edited in place instead. `Ok(None)` means the config
 /// already says exactly this and must not be rewritten.
+/// Is this line the header of *our* table, however it was spelled? TOML lets a
+/// key be quoted — `[mcp_servers."canopy"]` is the same table as
+/// `[mcp_servers.canopy]` — and matching only the bare form appended a second
+/// copy beside it, which is a duplicate-key parse error that breaks every codex
+/// session.
+fn is_canopy_table(line: &str) -> bool {
+    let t = line.trim();
+    let Some(inner) = t.strip_prefix('[').and_then(|t| t.strip_suffix(']')) else {
+        return false;
+    };
+    let parts: Vec<&str> = inner
+        .split('.')
+        .map(|p| p.trim().trim_matches('"'))
+        .collect();
+    parts == ["mcp_servers", "canopy"]
+}
+
 fn codex_toml_with_canopy(existing: &str, helper: &str) -> Result<Option<String>, String> {
     let header = "[mcp_servers.canopy]";
     // `{:?}` gives a quoted, escaped string — valid TOML for a Windows path's
@@ -1580,17 +1622,14 @@ fn codex_toml_with_canopy(existing: &str, helper: &str) -> Result<Option<String>
             }
         }
     }
-    let mut lines: Vec<&str> = existing.lines().collect();
-    if let Some(start) = lines.iter().position(|line| line.trim() == header) {
+    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
+    if let Some(start) = lines.iter().position(|line| is_canopy_table(line)) {
         let end = lines[start + 1..]
             .iter()
             .position(|line| line.trim_start().starts_with('['))
             .map(|offset| start + 1 + offset)
             .unwrap_or(lines.len());
         let old = lines[start..end].join("\n");
-        if old.trim_end() == wanted {
-            return Ok(None);
-        }
         if !old.contains("canopy-hook") {
             return Err(
                 "~/.codex/config.toml already has an MCP server named 'canopy' that Canopy \
@@ -1598,12 +1637,28 @@ fn codex_toml_with_canopy(existing: &str, helper: &str) -> Result<Option<String>
                     .into(),
             );
         }
-        lines.splice(start..end, wanted.lines());
+        // Everything in the section that isn't one of the two keys we write is
+        // the user's — `env`, `startup_timeout_ms` and `tool_timeout_sec` are
+        // all real codex options, and setup runs on every launch, so replacing
+        // the table wholesale deleted them again each time the app started.
+        let extras = lines[start + 1..end].iter().filter(|line| {
+            let key = line.split('=').next().unwrap_or("").trim();
+            !key.is_empty() && key != "command" && key != "args"
+        });
+        let replacement: Vec<String> = wanted
+            .lines()
+            .map(str::to_string)
+            .chain(extras.cloned())
+            .collect();
+        if old.trim_end() == replacement.join("\n") {
+            return Ok(None);
+        }
+        lines.splice(start..end, replacement);
     } else {
         if !lines.is_empty() && !lines.last().is_some_and(|line| line.is_empty()) {
-            lines.push("");
+            lines.push(String::new());
         }
-        lines.extend(wanted.lines());
+        lines.extend(wanted.lines().map(str::to_string));
     }
     let mut out = lines.join("\n");
     out.push('\n');
@@ -2978,6 +3033,100 @@ mod integration_tests {
         assert_eq!(cfg["mcpServers"]["docker"]["command"], "docker");
         assert_eq!(cfg["theme"], "dark", "unrelated keys must survive");
         assert!(is_canopy_mcp_entry(&cfg["mcpServers"]["canopy"]));
+    }
+
+    /// Setup runs on every launch, so anything it overwrites it overwrites
+    /// forever. `enabled: false` is OpenCode's documented way to switch a
+    /// server off — turning it back on at each start is the app fighting the
+    /// user, silently.
+    #[test]
+    fn the_users_own_keys_on_our_entry_survive_a_re_register() {
+        let home = scratch_home("keeps-user-keys");
+        let path = home.join("cfg.json");
+        let helper = helper_path_in(home.to_str().unwrap());
+        write(
+            &path,
+            &format!(
+                r#"{{"mcpServers":{{"canopy":{{"command":"{}","args":["--mcp"],"enabled":false,"timeout":90}}}}}}"#,
+                helper.to_string_lossy().replace('\\', "\\\\")
+            ),
+        );
+        let want = canopy_mcp_command(&helper);
+        assert_eq!(
+            upsert_json_mcp(path.clone(), "mcpServers", want, is_canopy_mcp_entry),
+            Ok(false),
+            "nothing of ours changed, so nothing should be written"
+        );
+        let cfg = read_json_config(&path).unwrap();
+        assert_eq!(cfg["mcpServers"]["canopy"]["enabled"], false);
+        assert_eq!(cfg["mcpServers"]["canopy"]["timeout"], 90);
+    }
+
+    /// The same rule when the helper *has* moved: our keys are refreshed, the
+    /// user's are carried across.
+    #[test]
+    fn a_rewrite_refreshes_our_keys_and_keeps_theirs() {
+        let home = scratch_home("rewrite-keeps-user-keys");
+        let path = home.join("cfg.json");
+        write(
+            &path,
+            r#"{"mcpServers":{"canopy":{"command":"/old/canopy-hook","args":["--mcp"],"enabled":false}}}"#,
+        );
+        let helper = helper_path_in(home.to_str().unwrap());
+        let want = canopy_mcp_command(&helper);
+        assert_eq!(
+            upsert_json_mcp(path.clone(), "mcpServers", want, is_canopy_mcp_entry),
+            Ok(true)
+        );
+        let cfg = read_json_config(&path).unwrap();
+        assert_eq!(
+            cfg["mcpServers"]["canopy"]["command"].as_str(),
+            helper.to_str()
+        );
+        assert_eq!(cfg["mcpServers"]["canopy"]["enabled"], false);
+    }
+
+    /// `[mcp_servers."canopy"]` is the same table as the bare spelling. Missing
+    /// it appended a second copy, and a duplicate key is a parse error that
+    /// takes down every codex session.
+    #[test]
+    fn a_quoted_table_header_is_our_table() {
+        let existing =
+            "[mcp_servers.\"canopy\"]\ncommand = \"/old/canopy-hook\"\nargs = [\"--mcp\"]\n";
+        let out = codex_toml_with_canopy(existing, "/new/canopy-hook")
+            .unwrap()
+            .expect("a moved helper path rewrites");
+        assert_eq!(
+            out.matches("mcp_servers").count(),
+            1,
+            "one table, not two: {out}"
+        );
+        assert!(out.contains("/new/canopy-hook"), "{out}");
+    }
+
+    /// Codex's own per-server options live in our table, and a launch that
+    /// dropped them would drop them again on the next one.
+    #[test]
+    fn codex_keeps_the_options_the_user_added_to_our_table() {
+        let existing = concat!(
+            "[mcp_servers.canopy]\n",
+            "command = \"/old/canopy-hook\"\n",
+            "args = [\"--mcp\"]\n",
+            "startup_timeout_ms = 30000\n",
+            "\n",
+            "[history]\n",
+            "persistence = \"save-all\"\n",
+        );
+        let out = codex_toml_with_canopy(existing, "/new/canopy-hook")
+            .unwrap()
+            .expect("a moved helper path rewrites");
+        assert!(out.contains("startup_timeout_ms = 30000"), "{out}");
+        assert!(out.contains("[history]"), "{out}");
+        // And now it settles: the same input twice is a no-op.
+        assert_eq!(
+            codex_toml_with_canopy(&out, "/new/canopy-hook").unwrap(),
+            None
+        );
     }
 
     /// A server called `canopy` that runs something else belongs to whoever
