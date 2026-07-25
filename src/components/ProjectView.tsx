@@ -65,6 +65,7 @@ import {
 } from "../microTasks";
 import { TasksPanel, type RunningMicroTask } from "./TasksPanel";
 import { TaskHistoryView } from "./TaskHistoryView";
+import { InstructionsView } from "./InstructionsView";
 import {
   recordTaskEnd,
   recordTaskStart,
@@ -221,6 +222,15 @@ export interface TaskHistorySubTab {
   type: "task-history";
 }
 
+/** The instruction files every agent reads before it sees any code — the
+ *  project's, the user's own, and the skill and subagent packs. One per
+ *  project; `focus` is the file a panel row asked it to open on. */
+export interface InstructionsSubTab {
+  id: string;
+  type: "instructions";
+  focus?: string;
+}
+
 export interface ChatSubTab {
   id: string;
   type: "chat";
@@ -275,6 +285,7 @@ export type SubTab =
   | ReviewSubTab
   | AgentSubTab
   | TaskHistorySubTab
+  | InstructionsSubTab
   | ChatSubTab;
 
 /** Every tab that isn't a terminal — the "document" tabs, rendered together
@@ -309,6 +320,8 @@ function describeTab(tab: SubTab | undefined) {
       return { kind: "agent", label: tab.agent, cwd: tab.cwd, ptyId: tab.ptyId ?? null };
     case "task-history":
       return { kind: "task-history", label: "Completed tasks" };
+    case "instructions":
+      return { kind: "instructions", label: "Agent instructions" };
     default:
       return { kind: tab.type };
   }
@@ -359,6 +372,8 @@ function tabDisplayLabel(t: SubTab): string {
       return t.review.title;
     case "task-history":
       return "Completed tasks";
+    case "instructions":
+      return "Agent instructions";
     case "shared-project":
       return t.name;
     case "preview":
@@ -1351,6 +1366,20 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     setTabs((prev) => [...prev, { id, type: "task-history" }]);
     setActiveTabId(id);
   }, []);
+
+  /** Open the agent-instructions tab, focused on one file when a panel row
+   *  asked for it. One per project, like the history tab. */
+  const openInstructions = useCallback((focus?: string) => {
+    const existing = tabsRef.current.find((t) => t.type === "instructions");
+    if (existing) {
+      if (focus) patchTabRaw(existing.id, { focus } as Partial<SubTab>);
+      setActiveTabId(existing.id);
+      return;
+    }
+    const id = tabId();
+    setTabs((prev) => [...prev, { id, type: "instructions", focus }]);
+    setActiveTabId(id);
+  }, [patchTabRaw]);
 
   /** Open an issue as its own tab, reusing one already open for it. */
   const openTicket = useCallback(
@@ -3385,6 +3414,15 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             onOpenFile={(path) => void openFile(path)}
           />
         );
+      case "instructions":
+        return (
+          <InstructionsView
+            roots={roots}
+            installed={installed}
+            focus={tab.focus}
+            onNotice={onNotice}
+          />
+        );
       case "chat":
         return <ChatView peer={tab.peer} title={tab.name} relay={relay} onNotice={onNotice} />;
       case "collab": {
@@ -4327,6 +4365,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             addTerminal(cwd, cmd, title, AGENT_CLIS.find((c) => c.id === agentId)?.icon)
           }
           onNotice={onNotice}
+          onOpenInstructions={openInstructions}
+          installed={installed}
         />
       ))}
     </div>

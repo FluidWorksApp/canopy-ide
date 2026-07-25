@@ -38,6 +38,7 @@ function tabDisplayLabel(t: SubTab): string {
     case "collab": return t.name;
     case "review": return t.review.title;
     case "task-history": return "Completed tasks";
+    case "instructions": return "Agent instructions";
     case "shared-project": return t.name;
     case "preview": return previewLabel(t.url);
   }
@@ -61,6 +62,7 @@ function tabTitle(tab: SubTab): string {
     case "collab": return `${tab.name} — live, owned by ${tab.ownerName}`;
     case "review": return `Review from ${tab.review.from}: ${tab.review.title}`;
     case "task-history": return "Every one-shot task that has finished, and what it reported";
+    case "instructions": return "CLAUDE.md, AGENTS.md, skills and subagents — what every agent reads first";
     case "shared-project": return `${tab.name} — shared live by ${tab.ownerName}`;
     case "preview": return tab.url || "Preview";
     case "file": return tab.file.path;
@@ -79,6 +81,7 @@ function tabText(tab: SubTab): string {
     case "collab": return `${tab.name} ⇄`;
     case "review": return tab.review.title;
     case "task-history": return "Completed tasks";
+    case "instructions": return "Agent instructions";
     case "shared-project": return tab.name;
     case "preview": return previewLabel(tab.url);
     case "file": return `${tab.file.name}${tab.file.dirty ? " •" : ""}`;

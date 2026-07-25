@@ -229,6 +229,44 @@ export async function fsReadText(path: string): Promise<string> {
   return textDecoder.decode(await fsReadFile(path));
 }
 
+// ---------- agent instructions ----------
+
+/** One instruction file an agent reads — a CLAUDE.md, an AGENTS.md, a SKILL.md,
+ *  a subagent definition. `exists: false` is a real row: a project set up with a
+ *  CLI that has no instruction file yet still lists it, so it can be created.
+ *  See src-tauri/src/instructions.rs for where each one lives and who reads it. */
+export interface InstructionFile {
+  path: string;
+  /** instructions | rule | skill | subagent | command | style */
+  kind: string;
+  /** project | global */
+  scope: string;
+  /** Agent registry ids (projects.ts) that read this file. */
+  agents: string[];
+  /** Display name relative to its root; `~/`-prefixed when global. */
+  label: string;
+  /** Workspace root it belongs to; "" for global files. */
+  root: string;
+  exists: boolean;
+  bytes: number;
+  /** Unix seconds. */
+  modified: number | null;
+  /** `name` / `description` from YAML frontmatter, for skills and subagents. */
+  title: string | null;
+  description: string | null;
+}
+
+export const instructionsScan = (roots: string[]) =>
+  invoke<InstructionFile[]>("instructions_scan", { roots });
+
+// `roots` rides along on read/write too: the backend re-derives the allowlist
+// from them rather than trusting that a path came from a previous scan.
+export const instructionsRead = (path: string, roots: string[]) =>
+  invoke<string>("instructions_read", { path, roots });
+
+export const instructionsWrite = (path: string, roots: string[], content: string) =>
+  invoke<void>("instructions_write", { path, roots, content });
+
 export interface GitStatusResult {
   is_repo: boolean;
   branch: string | null;

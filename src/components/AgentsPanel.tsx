@@ -4,7 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
-import { restoreCommand } from "../projects";
+import { AGENT_CLIS, restoreCommand } from "../projects";
 import { identifyAgent, observeForLearning } from "../agentIdentity";
 import { forgetSessions, restorableFrom } from "../restorable";
 import { AgentIcon, DiffIcon, MoonIcon, RestartIcon, TerminalIcon, TrashIcon } from "./icons";
@@ -76,6 +76,11 @@ interface AgentsPanelProps {
   onRestore?: (cwd: string, cmd: string, title: string, agentId: string) => void;
   /** Toasts for background actions (auto-hibernation) the user didn't click. */
   onNotice?: (msg: string) => void;
+  /** Open the agent-instructions tab, optionally on one file. */
+  onOpenInstructions?: (focus?: string) => void;
+  /** Which agent CLIs are on PATH, keyed by bin — decides which instruction
+   *  formats are worth listing when the file doesn't exist yet. */
+  installed?: Record<string, boolean>;
 }
 
 /** Compact relative age; the panel is narrow and "3h" beats a timestamp. */
@@ -171,7 +176,42 @@ export function AgentsPanel({
   onRestore,
   onRespond,
   onNotice,
+  onOpenInstructions,
+  installed = {},
 }: AgentsPanelProps) {
+  // Instruction files: scanned once when the panel comes into view, and again
+  // when the project's roots change. It's a bounded filesystem walk, but it is
+  // still a walk — nothing runs while another side tab is in front.
+  const [instructionFiles, setInstructionFiles] = useState<ipc.InstructionFile[]>([]);
+  useEffect(() => {
+    if (!visible || roots.length === 0) return;
+    let live = true;
+    void ipc
+      .instructionsScan(roots)
+      .then((fs) => live && setInstructionFiles(fs))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [visible, roots]);
+
+  /** What to show in a panel this narrow: the files that exist, plus — for the
+   *  CLIs actually installed here — the top-level ones that don't yet, since
+   *  "you have no CLAUDE.md" is the most useful thing this list can tell you. */
+  const headlineInstructions = useMemo(() => {
+    const installedIds = new Set(
+      AGENT_CLIS.filter((c) => installed[c.bin]).map((c) => c.id),
+    );
+    const exists = instructionFiles.filter((f) => f.exists && f.kind === "instructions");
+    const missing = instructionFiles.filter(
+      (f) =>
+        !f.exists &&
+        f.kind === "instructions" &&
+        f.scope === "project" &&
+        f.agents.some((a) => installedIds.has(a)),
+    );
+    return [...exists, ...missing].slice(0, 6);
+  }, [instructionFiles, installed]);
   const [showHookHelp, setShowHookHelp] = useState(false);
   const [setupResult, setSetupResult] = useState<string | null>(null);
   // null while we haven't checked yet — the nudge stays hidden until we know,
@@ -762,6 +802,43 @@ export function AgentsPanel({
           ))}
         </>
       )}
+      {/* What every agent here reads before it sees any code. A count and the
+          headline files; the tab is where they're actually edited. */}
+      <Section
+        title="Instructions"
+        count={instructionFiles.filter((f) => f.exists).length}
+        action={
+          <button
+            className="btn-icon"
+            title="Open all agent instructions — CLAUDE.md, AGENTS.md, skills, subagents"
+            onClick={() => onOpenInstructions?.()}
+          >
+            ⤢
+          </button>
+        }
+      >
+        {instructionFiles.length === 0 ? (
+          <div className="tree-empty">
+            No instruction files yet. Agents here start with nothing but your prompt —
+            open this to write the first one.
+          </div>
+        ) : (
+          headlineInstructions.map((f) => (
+            <div className="task-row" key={f.path}>
+              <span className={`instr-row-mark ${f.exists ? "" : "is-missing"}`} />
+              <span
+                className={`task-label task-label-link ${f.exists ? "" : "task-label-dim"}`}
+                title={`${f.path}\nRead by ${f.agents.join(", ")}`}
+                onClick={() => onOpenInstructions?.(f.path)}
+              >
+                {f.title ?? f.label}
+              </span>
+              {!f.exists && <span className="task-note">create</span>}
+            </div>
+          ))
+        )}
+      </Section>
+
       {/* Shared context — opt-in, and always inspectable. */}
       <div className="side-panel-head">
         <span>Shared context</span>
