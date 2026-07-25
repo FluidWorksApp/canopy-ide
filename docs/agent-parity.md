@@ -1,29 +1,35 @@
 # Agent parity: research and plan (July 2026)
 
-Canopy's agent features were built against Claude Code first, and it shows.
-This document records (a) exactly which features are Claude-only today and the
-contract each feature demands from a CLI, and (b) what every CLI in the
-launcher actually offers, verified against docs/source in July 2026. It ends
-with the ranked implementation plan.
+Canopy's agent features were built against Claude Code first, and some focused
+paths remain. This document records the current capability surface and the
+remaining work needed to keep every supported CLI deliberate rather than
+accidentally second-class.
 
 ## Where we are today
 
-Everything beyond process detection, launch/install, and the resume-command
-string is effectively Claude-only. Codex has a thin second path (its legacy
-`notify` appends raw events to the bridge — enough for "finished" cards only:
-unstamped, no digests, no restore, no per-tab attribution).
+Hooks now have first-class installers for every launcher CLI. Codex uses its
+native hook contract; the plugin/hook adapters for the other CLIs normalize
+events through the same Canopy helper. MCP registration is available for the
+clients with a documented local-server configuration (Claude, Codex,
+Antigravity, and OpenCode).
 
 | Feature | claude | codex | amp | aider | agy | opencode | omp |
 |---|---|---|---|---|---|---|---|
-| Hook auto-setup | full | notify only | – | – | – | – | – |
-| Event stream (stamped w/ pty) | yes | unstamped | – | – | – | – | – |
-| Pending cards (questions/permissions/idle) | all | idle only | – | – | – | – | – |
-| Session digests (powers restore + shared context) | yes | – | – | – | – | – | – |
+| Hook auto-setup | full | full | plugin | notification | full | plugin | hook |
+| Event stream (stamped w/ pty) | yes | yes | yes | limited | yes | yes | yes |
+| MCP auto-setup | yes | yes | no native config adapter | no native MCP | yes | yes | no native MCP |
+| Session digests (powers restore + shared context) | yes | yes | yes | limited | yes | limited¹ | yes |
 | Resume command in registry | yes | yes | yes | – | yes | yes | yes |
 | Token/cost/model tray | yes | – | – | – | – | – | – |
 | Model switcher | yes | – | – | – | – | – | – |
 | Shared context (receive) | yes | – | – | – | – | – | – |
 | Detection / tab promotion / launcher | yes | yes | yes | yes | yes | yes | yes |
+
+¹ OpenCode's bus has no event Canopy can map to `UserPromptSubmit`, so its
+plugin forwards `SessionStart`, `Stop`, `permission.asked` and tool use but
+never a `prompt`. Its digests exist and drive detection and state, but they are
+promptless — which is what "resume with history" labels rows from, so those read
+as untitled.
 
 The load-bearing pieces every feature hangs off:
 
@@ -32,8 +38,8 @@ The load-bearing pieces every feature hangs off:
 - `~/.canopy/bin/canopy-hook` reads hook JSON on stdin, gates on `$CANOPY`,
   stamps `canopy_pty` from `$CANOPY_PTY`, appends to
   `~/.canopy/agent-events.jsonl`, maintains per-session digests
-  (`~/.canopy/sessions/<id>.json`), and (Claude only) prints context-injection
-  JSON on SessionStart/UserPromptSubmit.
+  (`~/.canopy/sessions/<id>.json`), and prints context-injection JSON for the
+  compatible Claude/Codex hook contract on SessionStart/UserPromptSubmit.
 - The minimum JSON contract to join: `session_id` (or `conversation-id`),
   `cwd`, `hook_event_name` (or `type`). Extra value: `prompt` (digests),
   `tool_name` + `tool_input.file_path` (edited-file tracking),
@@ -134,17 +140,17 @@ The load-bearing pieces every feature hangs off:
 ## Ranked plan
 
 **P0 — big wins, small diffs**
-1. **Codex → full pipeline.** Rewrite `setup_codex_hooks` to write
-   `~/.codex/hooks.json` pointing the same six-ish events at `canopy-hook`
-   (contract already matches). Keep legacy `notify` for old versions. Handle
-   the one-time hook-trust step (surface the `/hooks` trust requirement in the
-   UI). Unlocks: stamped events, digests, restore, permission cards, shared
-   context contribution.
-2. **Antigravity → hooks + OSC.** Add a `setup_agent_hooks("agy")` arm:
-   write `hooks.json` (PreToolUse/PostToolUse/PreInvocation/PostInvocation/
-   Notification → `canopy-hook`), and enable its `notifications` setting so
-   OSC 9 reaches the handlers Canopy already has. `canopy-hook` needs a small
-   event-name mapping (PreInvocation≈UserPromptSubmit, PostInvocation≈Stop).
+1. **Codex → full pipeline.** Done: `setup_codex_hooks` writes
+   `~/.codex/hooks.json`, keeps legacy `notify` for old versions, and setup
+   now also registers the Canopy MCP server in `~/.codex/config.toml`.
+2. **Antigravity → hooks + OSC.** Done: `setup_agy_hooks` writes
+   `~/.gemini/antigravity-cli/hooks.json` (PreToolUse/PostToolUse/
+   PreInvocation/PostInvocation/Notification → `canopy-hook`) and flips its
+   `notifications` setting so OSC 9 reaches the handlers Canopy already has;
+   `canopy-hook` maps PreInvocation≈UserPromptSubmit and PostInvocation≈Stop.
+   Setup also registers the MCP server in `~/.gemini/config/mcp_config.json`
+   (the global registry named by Antigravity's own bundled
+   `skills/agy-customizations/docs/mcp_servers.md`).
 3. **Aider → waiting signal.** Auto-setup writes
    `notifications-command` (via `.aider.conf.yml` or env) to a one-line
    append of a `Notification` event to the bridge. Gives "waiting for you"

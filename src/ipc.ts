@@ -439,6 +439,51 @@ export const hookBridgePath = () => invoke<string | null>("hook_bridge_path");
  *  it" (restart to stream) rather than nagging on a missing digest alone. */
 export const agentHooksInstalled = (agent: string) =>
   invoke<boolean>("agent_hooks_installed", { agent });
+
+/** One step of one agent's setup. Steps are reported apart because they fail
+ *  apart: an unparseable MCP registry says nothing about whether the hooks
+ *  landed, and collapsing them lost one result behind the other's error. */
+export interface SetupStep {
+  step: string;
+  ok: boolean;
+  message: string;
+}
+export interface SetupReport {
+  agent: string;
+  /** True only when every step succeeded. */
+  ok: boolean;
+  steps: SetupStep[];
+  /** One line, naming the agent and any step that failed. */
+  summary: string;
+}
+export const setupAgentHooks = (agent: string) =>
+  invoke<SetupReport>("setup_agent_hooks", { agent });
+
+/** State of one half of one CLI's integration: `ours` (points at our helper),
+ *  `missing`, `foreign` (someone else took the name — never touched),
+ *  `unreadable`, or `unsupported` (no such integration point for this CLI). */
+export interface IntegrationHealth {
+  agent: string;
+  cli_installed: boolean;
+  hooks: string;
+  mcp: string;
+}
+export interface HealthReport {
+  version: string;
+  upgraded: boolean;
+  agents: IntegrationHealth[];
+  repaired: string[];
+  failed: string[];
+}
+export const agentIntegrationHealth = () =>
+  invoke<IntegrationHealth[]>("agent_integration_health");
+/** The launch's integration report if the pass has already finished. It runs
+ *  before the webview does, so the event below can fire with nobody listening —
+ *  ask for this on mount and take whichever arrives first. */
+export const agentHealthReport = () => invoke<HealthReport | null>("agent_health_report");
+/** What the launch's integration pass found and did. Emitted once per start. */
+export const onIntegrationHealth = (cb: (r: HealthReport) => void): Promise<UnlistenFn> =>
+  listen<HealthReport>("agents:health", (e) => cb(e.payload));
 /** This app launch's instance tag — pair with SessionDigest.instance so a
  *  digest from another instance/run can't bind to this instance's terminals. */
 export const instanceId = () => invoke<string>("instance_id");

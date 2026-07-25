@@ -414,7 +414,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 </Item>
                 <Item
                   name="Tools available"
-                  desc="What an agent running in a Canopy terminal can do through the built-in MCP server. Switching one off removes it from the agent's tool list entirely — it costs no context and can't be called."
+                  desc="What MCP-capable agents running in a Canopy terminal can do through the built-in MCP server. Switching one off removes it from the agent's tool list entirely — it costs no context and can't be called."
                 >
                   <div className="tool-groups">
                     <div className="tool-bulk">
