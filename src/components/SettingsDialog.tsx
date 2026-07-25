@@ -118,17 +118,35 @@ function AgentBinaries({
 }) {
   const [drafts, setDrafts] = useState<Record<string, string>>(() => ({ ...value }));
   const [found, setFound] = useState<Record<string, boolean>>({});
+  /** Rows whose last entry named arguments rather than an executable — kept out
+   *  of the stored overrides, and said out loud instead of probed. */
+  const [rejected, setRejected] = useState<Record<string, boolean>>({});
 
   // Probe the resolved binaries — AGENT_CLIS already carries the overrides.
+  // Keyed on the overrides' *contents*: `updateSettings` rebuilds the settings
+  // object on every write, so once any override is stored, depending on the
+  // object's identity would spawn a login shell — the costly part of the probe
+  // — for every unrelated toggle on this tab.
+  const overridesKey = JSON.stringify(value);
   useEffect(() => {
     void ipc
       .whichCheck(AGENT_CLIS.map((c) => c.bin))
       .then(setFound)
       .catch(() => {});
-  }, [value]);
+  }, [overridesKey]);
 
   const commit = (def: AgentCliDef, raw: string) => {
     const typed = raw.trim();
+    // A command line, not a command. `acme run claude` would be probed as a
+    // single executable of that name, so it reports ✗ with nothing to say why
+    // — and would be launched the same way. A path may hold spaces (`/opt/Acme
+    // CLI/claude`); a bare name that does is arguments.
+    if (typed && !/[/\\]/.test(typed) && /\s/.test(typed)) {
+      setDrafts((d) => ({ ...d, [def.id]: typed }));
+      setRejected((r) => ({ ...r, [def.id]: true }));
+      return;
+    }
+    setRejected((r) => ({ ...r, [def.id]: false }));
     const next = { ...value };
     // An empty box, or the vendor's own name typed back in, is not an override
     // — storing it would pin the entry to a name that may change in a later
@@ -171,10 +189,22 @@ function AgentBinaries({
               }}
             />
             <span
-              className={`cli-bin-state ${state === false ? "cli-bin-missing" : ""}`}
-              title={state === false ? `Nothing named ${bin} on your PATH` : bin}
+              className={`cli-bin-state ${state === false || rejected[def.id] ? "cli-bin-missing" : ""}`}
+              title={
+                rejected[def.id]
+                  ? "This field names one executable — a path or a command name, with no arguments"
+                  : state === false
+                    ? `Nothing named ${bin} on your PATH`
+                    : bin
+              }
             >
-              {state === undefined ? "" : state ? "✓ found" : "✗ not found"}
+              {rejected[def.id]
+                ? "✗ a command, not a command line"
+                : state === undefined
+                  ? ""
+                  : state
+                    ? "✓ found"
+                    : "✗ not found"}
             </span>
           </div>
         );

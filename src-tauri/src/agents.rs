@@ -2047,7 +2047,17 @@ fn sh_quote(s: &str) -> String {
 /// shell sees it, where tilde expansion does not happen.
 fn probe_target(raw: &str) -> Option<String> {
     let s = raw.trim();
-    if s.is_empty() || s.chars().any(char::is_control) || s.split_whitespace().count() != 1 {
+    if s.is_empty() || s.chars().any(char::is_control) {
+        return None;
+    }
+    // The one-token rule applies to a bare command name, where whitespace can
+    // only mean arguments were smuggled into a field that must name a single
+    // executable. A *path* is different: `C:\Program Files\Acme\Claude.exe` is
+    // the standard enterprise install location on Windows, and refusing it
+    // reports a CLI the user definitely has as not installed — the same failure
+    // the charset whitelist caused, moved one guard along.
+    let path_shaped = s.contains('/') || s.contains('\\');
+    if !path_shaped && s.split_whitespace().count() != 1 {
         return None;
     }
     match s.strip_prefix("~/") {
@@ -2106,7 +2116,17 @@ pub async fn which_check(commands: Vec<String>) -> HashMap<String, bool> {
                 continue;
             };
             let ok = if target.contains('\\') || target.contains('/') {
+                // PATHEXT, the way the shell that launches it would: an npm
+                // shim is `claude.cmd`, so a path written without an extension
+                // is on disk under a name `is_file` alone never sees, and the
+                // probe would say "not installed" about something that launches
+                // fine.
                 std::path::Path::new(&target).is_file()
+                    || std::env::var("PATHEXT")
+                        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
+                        .split(';')
+                        .filter(|e| !e.is_empty())
+                        .any(|ext| std::path::Path::new(&format!("{target}{ext}")).is_file())
             } else {
                 std::process::Command::new("where")
                     .no_console_window()
@@ -2523,6 +2543,22 @@ mod tests {
         assert_eq!(
             probe_target("~/bin/claude").as_deref(),
             Some(format!("{home}/bin/claude").as_str())
+        );
+    }
+
+    /// `Program Files` is *the* enterprise install location on Windows, and
+    /// spaced application paths are ordinary on macOS too. Rejecting them left
+    /// the row saying "install" forever — the exact symptom rebinding exists to
+    /// end, and the shape the identity-folding test already uses as its fixture.
+    #[test]
+    fn probe_target_keeps_the_spaces_in_a_path() {
+        assert_eq!(
+            probe_target(r"C:\Program Files\Acme\Claude.exe").as_deref(),
+            Some(r"C:\Program Files\Acme\Claude.exe")
+        );
+        assert_eq!(
+            probe_target("/Applications/Acme CLI/bin/claude").as_deref(),
+            Some("/Applications/Acme CLI/bin/claude")
         );
     }
 

@@ -239,6 +239,20 @@ export interface AgentCliDef extends Omit<AgentCli, "resume" | "prompt" | "rebou
 /** Single-quote a string for a POSIX shell. */
 export const shellQuote = (text: string) => `'${text.replaceAll("'", `'\\''`)}'`;
 
+/** A binary as it must appear at the head of a shell command line.
+ *
+ *  Quoted only when it has to be. A rebound CLI can name a path with a space
+ *  in it — `/Applications/Acme CLI/bin/claude`, or the `C:\Program Files\…`
+ *  that is the standard enterprise install on Windows — and written raw the
+ *  shell reads that as a command plus arguments. Everything else is left
+ *  exactly as it was: quoting is per-shell (cmd.exe knows nothing of single
+ *  quotes) and a bare `claude` needs none, so the quoting only happens for the
+ *  values that cannot launch at all today. */
+export function shellBin(bin: string): string {
+  if (!/\s/.test(bin)) return bin;
+  return currentPlatform() === "windows" ? `"${bin}"` : shellQuote(bin);
+}
+
 /** The CLIs Canopy ships knowledge of, under the names their vendors use.
  *  Never read this directly to launch or probe anything — read AGENT_CLIS,
  *  which is this list with the user's overrides applied. */
@@ -357,12 +371,16 @@ export const binName = (bin: string) =>
 /** Bind a definition to the binary this machine actually has. */
 function bindCli(def: AgentCliDef, bin: string): AgentCli {
   const { resume, prompt, ...rest } = def;
+  // `bin` stays raw on the entry — it is the key every probe answer and every
+  // identity comparison is looked up under. Only the templates, which build a
+  // line for a shell to read, get the quoted form.
+  const arg = shellBin(bin);
   return {
     ...rest,
     bin,
     rebound: bin !== def.bin,
-    resume: resume && ((id: string) => resume(id, bin)),
-    prompt: prompt && ((text: string) => prompt(text, bin)),
+    resume: resume && ((id: string) => resume(id, arg)),
+    prompt: prompt && ((text: string) => prompt(text, arg)),
   };
 }
 
@@ -639,7 +657,7 @@ export function startCommand(
   if (!cli) return null;
   return cli.prompt
     ? { command: cli.prompt(text), typePrompt: false }
-    : { command: cli.bin, typePrompt: true };
+    : { command: shellBin(cli.bin), typePrompt: true };
 }
 
 export function restoreCommand(agentId: string, sessionId: string): string | null {
@@ -664,7 +682,12 @@ export function resumeSessionId(command: string | null | undefined): string | nu
   const SENTINEL = "__CANOPY_SID__";
   const templates = BUILTIN_AGENT_CLIS.flatMap((d) => {
     const bins = new Set([AGENT_CLIS.find((c) => c.id === d.id)?.bin ?? d.bin, d.bin]);
-    return [...bins].map((bin) => d.resume?.(SENTINEL, bin));
+    // Each spelling as written *and* as quoted: a path with a space in it goes
+    // to the shell quoted, so that is the form a remembered resume command
+    // carries — while an id from before the override is still bare.
+    return [...new Set([...bins].flatMap((bin) => [bin, shellBin(bin)]))].map((bin) =>
+      d.resume?.(SENTINEL, bin),
+    );
   });
   for (const tmpl of templates) {
     if (!tmpl) continue;

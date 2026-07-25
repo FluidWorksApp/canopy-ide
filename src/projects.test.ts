@@ -198,6 +198,30 @@ describe("binary overrides", () => {
     expect(AGENT_CLIS.find((c) => c.id === "codex")?.rebound).toBe(false);
   });
 
+  it("quotes a binary whose path has a space, and only then", () => {
+    // `C:\Program Files\…` is the standard enterprise install on Windows and
+    // `/Applications/Acme CLI/…` its macOS equivalent; written raw, the shell
+    // reads the first word as the command and the rest as arguments. Every
+    // other value is left exactly as it was — quoting is per-shell, and a bare
+    // name never needs it.
+    rebind({ claude: "/Applications/Acme CLI/bin/claude", codex: "/opt/acme/codex" });
+    expect(startCommand("claude", "fix it")).toEqual({
+      command: "'/Applications/Acme CLI/bin/claude' 'fix it'",
+      typePrompt: false,
+    });
+    expect(restoreCommand("claude", "abc123")).toBe(
+      "'/Applications/Acme CLI/bin/claude' --resume abc123",
+    );
+    expect(restoreCommand("codex", "abc123")).toBe("/opt/acme/codex resume abc123");
+  });
+
+  it("still reads the session id back out of a quoted resume command", () => {
+    rebind({ claude: "/Applications/Acme CLI/bin/claude" });
+    expect(resumeSessionId(restoreCommand("claude", "SID42"))).toBe("SID42");
+    // And the bare spelling a terminal remembered from before the override.
+    expect(resumeSessionId("claude --resume SID42")).toBe("SID42");
+  });
+
   it("ignores a blank override and falls back to the vendor's name", () => {
     rebind({ claude: "   " });
     expect(AGENT_CLIS.find((c) => c.id === "claude")?.bin).toBe("claude");

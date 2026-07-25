@@ -25,6 +25,7 @@ import type { AgentCli, Project } from "../projects";
 import {
   AGENT_CLIS,
   AGENT_CLIS_CHANGED_EVENT,
+  binName,
   SHELL_PATTERN,
   checkCliUpdates,
   checkInstalledClis,
@@ -33,6 +34,7 @@ import {
   PREREQS,
   restoreCommand,
   resumeSessionId,
+  shellBin,
   startCommand,
   updateCommand,
 } from "../projects";
@@ -2474,17 +2476,25 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     const cwd = at ?? componentsRef.current[0]?.path;
     if (!cwd) return;
     if (installed[cli.bin]) {
-      addTerminal(cwd, cli.bin, cli.name, cli.icon);
+      addTerminal(cwd, shellBin(cli.bin), cli.name, cli.icon);
       // Surface the new agent where it lives: the Agents section, expanded so
       // the just-launched row is actually in view.
       setSideTab("agents");
       setCollapsed(false);
+    } else if (cli.rebound) {
+      // The vendor's installer would install the vendor's binary, which an
+      // override pointing somewhere else can never be satisfied by — so the
+      // "install" offer would repeat forever, which is the loop rebinding
+      // exists to end. Send them to the setting that is actually wrong.
+      onNotice(
+        `${cli.name} is set to \`${cli.bin}\`, which isn't on this machine — check Settings → Agents.`,
+      );
     } else {
       // A run tab, so the installer exits when done — and that exit is the
       // signal to re-probe (see onExited below). No timers, no staleness.
       addTerminal(cwd, cli.install, `install ${cli.name}`, "⬇", true);
     }
-  }, [installed, addTerminal]);
+  }, [installed, addTerminal, onNotice]);
 
   /** Run `cli`'s updater in a run tab. Its exit re-probes versions (see
    *  onExited), so the badge clears the moment the update lands — no timers. */
@@ -2804,10 +2814,17 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       // when the agent was typed by hand into a plain shell), then the launch
       // command as a fallback.
       const procs = projectStats.find((s) => s.id === t.ptyId)?.procs ?? [];
+      // Folded through binName on both sides: an override can be a full path
+      // while a process table reports a basename, and an exact fold is what
+      // keeps `amp` from matching a process called `ramp`.
       const byProc = AGENT_CLIS.find((c) =>
-        procs.some((p) => p.name === c.bin || p.cmd.split(" ")[0]?.endsWith(c.bin)),
+        procs.some(
+          (p) => binName(p.name) === binName(c.bin) || binName(p.cmd.split(" ")[0] ?? "") === binName(c.bin),
+        ),
       );
-      const byCommand = AGENT_CLIS.find((c) => (t.command ?? "").startsWith(c.bin));
+      // Via the registry id, so a terminal remembered from before a rebind —
+      // still carrying the vendor's name — keeps its agent and its icon.
+      const byCommand = AGENT_CLIS.find((c) => c.id === agentIdForCommand(t.command));
       return {
         tabId: t.id,
         title: t.customTitle ?? t.title,
@@ -2947,9 +2964,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           const stat = projectStats.find((s) => s.id === activeTab.ptyId);
           const procs = stat?.procs ?? [];
           const byProc = AGENT_CLIS.find((c) =>
-            procs.some((p) => p.name === c.bin || p.cmd.split(" ")[0]?.endsWith(c.bin)),
+            procs.some(
+              (p) =>
+                binName(p.name) === binName(c.bin) ||
+                binName(p.cmd.split(" ")[0] ?? "") === binName(c.bin),
+            ),
           );
-          const byCommand = AGENT_CLIS.find((c) => (activeTab.command ?? "").startsWith(c.bin));
+          const byCommand = AGENT_CLIS.find((c) => c.id === agentIdForCommand(activeTab.command));
           const agent = (byProc ?? byCommand)?.id ?? "agent";
           // The live session cwd — the same source the Agents panel keys off,
           // so the overlay and a panel-opened tab resolve the same workspace.
@@ -3722,7 +3743,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                       Agents — started fresh, no history to resume
                     </div>
                     {freshAgents.map((t, i) => {
-                      const cli = AGENT_CLIS.find((c) => (t.command ?? "").startsWith(c.bin));
+                      const cli = AGENT_CLIS.find((c) => c.id === agentIdForCommand(t.command));
                       return (
                         <div
                           key={`a-${t.cwd}-${i}`}

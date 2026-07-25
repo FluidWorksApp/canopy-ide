@@ -164,6 +164,14 @@ describe("agentIdForCommand", () => {
     expect(agentIdForCommand("/opt/homebrew/bin/omp")).toBe("omp");
   });
 
+  it("reads a quoted head, and a Windows path", () => {
+    // A rebound binary whose path has a space goes to the shell quoted, and
+    // that is the spelling a remembered terminal then carries.
+    expect(agentIdForCommand("'/Applications/Acme CLI/bin/claude' --resume abc")).toBe("claude");
+    expect(agentIdForCommand('"C:\\Program Files\\Acme\\Claude.exe"')).toBe("claude");
+    expect(agentIdForCommand("C:\\acme\\codex.exe resume abc")).toBe("codex");
+  });
+
   it("is not fooled by a command that merely mentions an agent", () => {
     expect(agentIdForCommand("python train.py --model claude")).toBeNull();
     expect(agentIdForCommand("claude-utils sync")).toBeNull();

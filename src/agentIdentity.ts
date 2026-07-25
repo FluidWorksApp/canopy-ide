@@ -152,9 +152,16 @@ export function identifyAgent(
  * or a script that merely mentions an agent's name is not one.
  */
 export function agentIdForCommand(command?: string | null): string | null {
-  const first = (command ?? "").trim().split(/\s+/)[0] ?? "";
-  const bin = stripExe(first.split("/").pop() ?? "");
-  return agentForBin(bin) ?? null;
+  const line = (command ?? "").trim();
+  // A quoted head, because a rebound binary can be a path with a space in it
+  // and is written to the shell quoted. Unterminated quoting falls back to the
+  // rest of the line, which then fails to match — the right answer for a
+  // command string that isn't one.
+  const q = line[0] === "'" || line[0] === '"' ? line[0] : "";
+  const first = q ? (line.slice(1).split(q)[0] ?? "") : (line.split(/\s+/)[0] ?? "");
+  // binName rather than a hand-rolled split: it folds the Windows separator and
+  // `.exe` too, which is the shape an override on that platform takes.
+  return agentForBin(binName(first)) ?? null;
 }
 
 /**
