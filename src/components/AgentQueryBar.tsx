@@ -23,6 +23,11 @@ interface AgentQueryBarProps {
   onSend: (target: AgentTarget, query: string) => void;
   /** Start a fresh agent (the given CLI) with the typed query. */
   onStart: (agentId: string, query: string) => void;
+  /** Run it as a one-shot task instead: an agent that does this one job,
+   *  reports the outcome and closes itself. The primary action where it's
+   *  offered — handing work to a long-lived session stays available beside it,
+   *  for work that isn't one-shot. */
+  onRunTask?: (query: string) => void;
 }
 
 export function AgentQueryBar({
@@ -33,6 +38,7 @@ export function AgentQueryBar({
   placeholder = "Ask an agent about these changes…",
   onSend,
   onStart,
+  onRunTask,
 }: AgentQueryBarProps) {
   const [query, setQuery] = useState("");
   const take = () => {
@@ -47,7 +53,19 @@ export function AgentQueryBar({
         placeholder={placeholder}
         value={query}
         onChange={(e) => setQuery(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && onRunTask) onRunTask(take());
+        }}
       />
+      {onRunTask && (
+        <button
+          className="btn btn-accent"
+          title="Run this as a one-shot task: an agent does it, reports back, and closes itself"
+          onClick={() => onRunTask(take())}
+        >
+          ◆ Run task
+        </button>
+      )}
       <AgentLaunchButton
         variant="mini"
         label={label}

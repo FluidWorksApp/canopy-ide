@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useState } from "react";
 import * as ipc from "../ipc";
 import type { Notify } from "../types";
+import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 
 interface LooseEndsProps {
   repo: string | null;
@@ -21,6 +22,9 @@ interface LooseEndsProps {
   onNotice: Notify;
   /** Ask for a confirmation before something destructive. */
   onConfirm: (text: string, run: () => void) => void;
+  /** The "Tasks ▸" submenu for a right-clicked branch, built by the owner (it
+   *  knows the task registry). Omitted where tasks don't apply. */
+  taskMenuFor?: (b: ipc.BranchWork) => MenuItem;
 }
 
 type Bucket = "uncommitted" | "unpushed" | "open" | "cleanable";
@@ -80,7 +84,9 @@ export function LooseEnds({
   onUseWorktree,
   onNotice,
   onConfirm,
+  taskMenuFor,
 }: LooseEndsProps) {
+  const ctx = useContextMenu();
   const [audit, setAudit] = useState<ipc.WorkAudit | null>(null);
   const [busy, setBusy] = useState(false);
   const [showAll, setShowAll] = useState(false);
@@ -195,8 +201,35 @@ export function LooseEnds({
     );
   };
 
+  /** Right-click a branch row. The click already opens its work, so the menu
+   *  carries what a click can't: hand this branch to a one-shot agent, or the
+   *  directory actions that otherwise need the hover buttons. */
+  const rowMenu = (b: ipc.BranchWork): MenuItem[] => {
+    const items: MenuItem[] = [
+      { label: "Open branch work", onClick: () => repo && onOpenBranch(repo, b) },
+    ];
+    if (taskMenuFor) items.push(taskMenuFor(b));
+    if (b.worktree && !b.prunable) {
+      items.push({ separator: true });
+      items.push({
+        label: "Open terminal here",
+        onClick: () => onOpenTerminal(b.worktree as string, b.branch),
+      });
+      if (!b.is_main && repo) {
+        items.push({
+          label: "Use this worktree",
+          onClick: () => onUseWorktree(repo, b.worktree as string, b.branch),
+        });
+      }
+    }
+    return items;
+  };
+
   return (
     <div className="git-scroll loose-ends">
+      {ctx.menu && (
+        <ContextMenu x={ctx.menu.x} y={ctx.menu.y} items={ctx.menu.items} onClose={ctx.close} />
+      )}
       <div className="loose-summary">
         <span>
           <strong>{risky}</strong> hold work that exists nowhere else
@@ -241,6 +274,7 @@ export function LooseEnds({
               className="loose-row loose-row-click"
               title={`${b.worktree ?? "no worktree"}\n\nClick to see what's in this branch`}
               onClick={() => repo && onOpenBranch(repo, b)}
+              onContextMenu={(e) => ctx.open(e, rowMenu(b))}
             >
               <div className="loose-main">
                 <span className="loose-branch">

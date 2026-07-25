@@ -54,8 +54,15 @@ interface GitPanelProps {
   /** One-shot agent jobs off the context menus: push a branch and open its PR;
    *  review a PR and post the findings. The agent reports and its terminal
    *  closes itself. */
-  onRaisePrTask?: (repo: string, branch: string) => void;
-  onReviewPrTask?: (repo: string, pr: ipc.PrInfo) => void;
+  /** The "Tasks ▸" submenu for a right-clicked branch or PR, built by the
+   *  owner (it knows the task registry). Omitted where tasks don't apply. */
+  branchTaskMenu?: (
+    repo: string,
+    branch: string,
+    worktree: string | null,
+    merged: boolean,
+  ) => MenuItem;
+  prTaskMenu?: (repo: string, pr: ipc.PrInfo) => MenuItem;
 }
 
 type Section = "changes" | "branches" | "worktrees" | "loose" | "history" | "prs";
@@ -90,8 +97,8 @@ export function GitPanel({
   activeWorktree,
   onUseWorktree,
   onNotice,
-  onRaisePrTask,
-  onReviewPrTask,
+  branchTaskMenu,
+  prTaskMenu,
 }: GitPanelProps) {
   const [repos, setRepos] = useState<ipc.RepoInfo[]>([]);
   const [repo, setRepo] = useState<string | null>(null);
@@ -278,12 +285,8 @@ export function GitPanel({
         onClick: () => repo && void act("checkout", () => ipc.gitCheckout(repo, b.name, false)),
       });
     }
-    if (onRaisePrTask && !PROTECTED.has(b.name)) {
-      items.push({
-        label: "Raise PR with agent",
-        hint: "one-shot task",
-        onClick: () => repo && onRaisePrTask(repo, b.name),
-      });
+    if (branchTaskMenu && repo) {
+      items.push(branchTaskMenu(repo, b.name, null, PROTECTED.has(b.name)));
     }
 
     // The branch you're on and protected branches never offer a delete — say why
@@ -400,15 +403,7 @@ export function GitPanel({
     { label: "Open pull request", onClick: () => repo && onOpenPr(repo, pr) },
     { label: "View on GitHub", onClick: () => openExternal(pr.url) },
     { label: "Copy link", onClick: () => void navigator.clipboard.writeText(pr.url) },
-    ...(onReviewPrTask
-      ? [
-          {
-            label: "Review with agent",
-            hint: "one-shot task",
-            onClick: () => repo && onReviewPrTask(repo, pr),
-          },
-        ]
-      : []),
+    ...(prTaskMenu && repo ? [prTaskMenu(repo, pr)] : []),
     { separator: true },
     {
       label: "Check out this PR",
@@ -916,6 +911,11 @@ export function GitPanel({
           onUseWorktree={onUseWorktree}
           onNotice={onNotice}
           onConfirm={(text, run) => setConfirm({ text, run })}
+          taskMenuFor={
+            branchTaskMenu && repo
+              ? (b) => branchTaskMenu(repo, b.branch, b.worktree, b.merged)
+              : undefined
+          }
         />
       )}
 

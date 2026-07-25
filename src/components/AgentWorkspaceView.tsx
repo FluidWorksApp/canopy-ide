@@ -13,6 +13,8 @@ import { splitPatch } from "./PrView";
 import { STATE_META, lastHumanPrompt } from "./AgentsPanel";
 import { AgentIcon, GitBranchIcon, RestartIcon } from "./icons";
 import { sessionCost } from "../pricing";
+import { getSettings } from "../settings";
+import type { CustomMicroTask } from "../microTasks";
 
 // Compact number formats for the header stats strip — matched to the status
 // tray so the same session reads the same everywhere.
@@ -51,6 +53,13 @@ interface AgentWorkspaceViewProps {
   /** When set, the header shows a close button — the overlay is the single
    *  banner. The standalone agent tab omits it (the tab closes itself). */
   onClose?: () => void;
+  /** Run a one-shot task on what this agent produced: push its branch and open
+   *  the PR, review the PR that came out of it, or any task the user saved.
+   *  Separate from onMessageAgent — a task is a fresh ephemeral agent, not a
+   *  message to this one. */
+  onRaisePrTask?: (branch: string, worktree: string | null) => void;
+  onReviewPrTask?: (pr: ipc.PrInfo) => void;
+  onRunSavedTask?: (task: CustomMicroTask, dir: string) => void;
 }
 
 /** A review comment the user attached to a diff line, held as a draft until
@@ -308,7 +317,17 @@ export function AgentWorkspaceView({
   onNotice,
   onMessageAgent,
   onClose,
+  onRaisePrTask,
+  onReviewPrTask,
+  onRunSavedTask,
 }: AgentWorkspaceViewProps) {
+  const [taskMenu, setTaskMenu] = useState(false);
+  // Read when the menu opens rather than held in state: tasks are saved in
+  // another panel, and a stale list here would be the first thing you'd notice.
+  const savedTasks = useMemo(
+    () => (taskMenu ? getSettings().customMicroTasks : []),
+    [taskMenu],
+  );
   const [ws, setWs] = useState<ipc.AgentWorkspace | null>(null);
   const [wsErr, setWsErr] = useState<string | null>(null);
   const [pane, setPane] = useState<Pane | null>(null);
@@ -684,7 +703,7 @@ export function AgentWorkspaceView({
     before?: string,
     after?: string,
   ): DiffViewData => {
-    const sig = `${hunk} ${before?.length ?? -1} ${after?.length ?? -1}`;
+    const sig = `${hunk}\0${before?.length ?? -1}\0${after?.length ?? -1}`;
     const hit = dataCache.current.get(key);
     if (hit && hit.sig === sig) return hit.data;
     const data: DiffViewData = {
@@ -759,6 +778,69 @@ export function AgentWorkspaceView({
             >
               New shell in worktree
             </button>
+          )}
+          {/* Hand this agent's output to a fresh one-shot agent: raise the PR
+              for the branch it built, review the PR that came out of it, or run
+              any task you've saved — in this workspace's directory. */}
+          {(onRaisePrTask || onReviewPrTask || onRunSavedTask) && (
+            <div className="review-send">
+              <button
+                className="btn"
+                title="Run a one-shot task on this work"
+                onClick={() => setTaskMenu((v) => !v)}
+              >
+                Run task ▾
+              </button>
+              {taskMenu && (
+                <div className="cli-menu review-menu" onMouseLeave={() => setTaskMenu(false)}>
+                  {onRaisePrTask && ws?.branch && !ws.on_base && !pr && (
+                    <button
+                      className="cli-menu-item"
+                      onClick={() => {
+                        setTaskMenu(false);
+                        onRaisePrTask(ws.branch as string, ws.isolated ? ws.workdir : null);
+                      }}
+                    >
+                      ⇈ Raise PR for {ws.branch}
+                    </button>
+                  )}
+                  {onReviewPrTask && pr && (
+                    <button
+                      className="cli-menu-item"
+                      onClick={() => {
+                        setTaskMenu(false);
+                        onReviewPrTask(pr);
+                      }}
+                    >
+                      ⌕ Review PR #{pr.number}
+                    </button>
+                  )}
+                  {onRunSavedTask && savedTasks.length > 0 && (
+                    <>
+                      <div className="cli-menu-label">Saved tasks</div>
+                      {savedTasks.map((t) => (
+                        <button
+                          key={t.id}
+                          className="cli-menu-item"
+                          title={t.brief}
+                          onClick={() => {
+                            setTaskMenu(false);
+                            onRunSavedTask(t, ws?.workdir ?? cwd);
+                          }}
+                        >
+                          {t.icon || "◆"} {t.label}
+                        </button>
+                      ))}
+                    </>
+                  )}
+                  {savedTasks.length === 0 && !pr && (!ws?.branch || ws.on_base) && (
+                    <button className="cli-menu-item" disabled>
+                      Nothing to run here yet
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
           )}
           <button
             className="btn-icon aw-refresh"
