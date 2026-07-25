@@ -1450,7 +1450,7 @@ fn tool_defs() -> serde_json::Value {
         },
         {
             "name": "canopy_agents",
-            "description": "The other agent sessions in this project: CLI, working directory, branch, last request, files edited, active or idle, the last thing each said, terminal id. Several agents routinely share one checkout — read this before you start. Pass ptyId or session for one agent's conversation; canopy_message_agent types into it. Also lists held file claims.",
+            "description": "What the other agent sessions in this project are doing — often where the context behind a request already is. Read it when the user refers to work you can't see, or when you need background another session has: what each was asked, its branch and files, the last thing it said; pass ptyId or session for that agent's full conversation. Also: terminal ids (canopy_message_agent types into them) and held file claims, for a shared checkout.",
             "inputSchema": { "type": "object", "properties": {
                 "ptyId": { "type": "integer", "description": "One agent, by terminal — adds its conversation" },
                 "session": { "type": "string", "description": "One agent, by session id (prefix is enough)" },
