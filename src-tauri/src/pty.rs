@@ -5,6 +5,8 @@
 //!   shared `pending` buffer.
 //! - One flusher thread per session drains `pending` every FLUSH_INTERVAL (coalescing
 //!   many small reads into one IPC message) and sends raw bytes over a `Channel`.
+//! - One writer thread per session owns the master's write end and is the only
+//!   thread that ever blocks in `write()`. Callers enqueue and return.
 //! - Backpressure: `outstanding` counts bytes sent to the WebView but not yet acked
 //!   (the frontend acks after xterm.js consumes a chunk). When pending + outstanding
 //!   exceeds `high_water`, the reader stops reading — the kernel PTY buffer fills and
@@ -17,7 +19,7 @@ use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::ipc::{Channel, InvokeResponseBody};
@@ -32,6 +34,14 @@ const FLUSH_INTERVAL: Duration = Duration::from_millis(10);
 const REAP_WAIT: Duration = Duration::from_millis(1000);
 const READ_BUF_SIZE: usize = 64 * 1024;
 const DEFAULT_HIGH_WATER: usize = 2 * 1024 * 1024;
+/// How much unwritten input a session may queue before writes are refused.
+/// A child that has stopped reading its stdin fills the kernel's tty buffer in
+/// about a kilobyte, after which every further byte just accumulates here — so
+/// this is the point at which we say the terminal is not taking input rather
+/// than buffering forever. Far above any realistic paste or agent prompt.
+const INPUT_HIGH_WATER: usize = 1024 * 1024;
+/// How often the writer thread re-checks for teardown while its queue is empty.
+const WRITER_POLL: Duration = Duration::from_millis(250);
 /// Per-session output retained for a remote (Canopy Remote) attach: a
 /// late-joining browser gets this many recent bytes as a catch-up snapshot
 /// before the live tail. The local WebView is unaffected and keeps its own
@@ -84,7 +94,12 @@ pub struct Session {
     pub pid: Option<u32>,
     pub title: Mutex<String>,
     pub cwd: String,
-    writer: Mutex<Box<dyn Write + Send>>,
+    /// Input queued for the writer thread, and the signal that wakes it. The
+    /// PTY master's write end lives on that thread and nowhere else, so a child
+    /// that has stopped reading can only ever block the writer thread — never
+    /// the caller, which for `pty_write` is the main/IPC thread.
+    input: Mutex<Vec<u8>>,
+    input_ready: Condvar,
     master: Mutex<Box<dyn MasterPty + Send>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     child: Mutex<Option<Box<dyn Child + Send + Sync>>>,
@@ -184,19 +199,20 @@ impl PtyManager {
             .collect()
     }
 
-    /// Write bytes to a session's PTY stdin. Shared by the `pty_write` command
+    /// Queue bytes for a session's PTY stdin. Shared by the `pty_write` command
     /// and the remote portal so both drive agent input through one path.
+    ///
+    /// Returns once the bytes are queued, not once the child has taken them.
+    /// That distinction is the whole point: `pty_write` is a synchronous Tauri
+    /// command, so it runs on the main/IPC thread, and writing to the master
+    /// there froze the entire app whenever a child stopped draining its stdin —
+    /// the kernel tty buffer fills after ~1KB and `write(2)` sleeps until the
+    /// child reads or dies. The blocking write now happens on the session's own
+    /// writer thread; a child that never reads costs us a full queue and an
+    /// error, not the UI.
     pub fn write(&self, id: u32, data: &str) -> Result<(), String> {
         let session = self.get(id).ok_or_else(|| format!("no pty session {id}"))?;
-        // Bind before returning so the MutexGuard temporary is dropped before
-        // `session` — returning the expression directly outlives the Arc.
-        let result = session
-            .writer
-            .lock()
-            .unwrap()
-            .write_all(data.as_bytes())
-            .map_err(|e| e.to_string());
-        result
+        session.enqueue_input(data.as_bytes())
     }
 
     /// Tear a session down (SIGTERM, grace, SIGKILL) on a detached thread, as
@@ -309,6 +325,20 @@ impl Session {
     #[cfg(not(unix))]
     pub fn raw_mode(&self) -> bool {
         false
+    }
+
+    /// Hand bytes to the writer thread. Never blocks on the child: if the queue
+    /// is already at its bound the child has stopped reading, and the honest
+    /// answer is an error the caller can show rather than input that silently
+    /// piles up in memory behind a terminal that will never take it.
+    fn enqueue_input(&self, bytes: &[u8]) -> Result<(), String> {
+        let mut queue = self.input.lock().unwrap();
+        if queue.len() + bytes.len() > INPUT_HIGH_WATER {
+            return Err(format!("terminal {} is not accepting input", self.id));
+        }
+        queue.extend_from_slice(bytes);
+        self.input_ready.notify_one();
+        Ok(())
     }
 
     /// Feed a freshly-flushed chunk to remote consumers: append to the bounded
@@ -548,7 +578,7 @@ impl PtyManager {
         drop(pair.slave);
 
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-        let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+        let mut writer = pair.master.take_writer().map_err(|e| e.to_string())?;
 
         let pid = child.process_id();
         let killer = child.clone_killer();
@@ -558,7 +588,8 @@ impl PtyManager {
             pid,
             title: Mutex::new(shell.clone()),
             cwd,
-            writer: Mutex::new(writer),
+            input: Mutex::new(Vec::new()),
+            input_ready: Condvar::new(),
             master: Mutex::new(pair.master),
             killer: Mutex::new(killer),
             child: Mutex::new(Some(child)),
@@ -607,6 +638,39 @@ impl PtyManager {
                     session.eof.store(true, Ordering::SeqCst);
                 })
                 .expect("spawn pty reader thread");
+        }
+
+        // Writer thread: the only place a write to the PTY master happens, so the
+        // one call that can sleep indefinitely — a child that has stopped reading
+        // its stdin — sleeps here instead of on the caller's thread. Ends when the
+        // session is torn down or the child's output has ended; a write that is
+        // still blocked at that point returns EIO once the last slave fd closes.
+        {
+            let session = session.clone();
+            thread::Builder::new()
+                .name(format!("pty-writer-{id}"))
+                .spawn(move || loop {
+                    let chunk = {
+                        let mut queue = session.input.lock().unwrap();
+                        while queue.is_empty() {
+                            if session.shutdown.load(Ordering::SeqCst)
+                                || session.eof.load(Ordering::SeqCst)
+                            {
+                                return;
+                            }
+                            queue = session
+                                .input_ready
+                                .wait_timeout(queue, WRITER_POLL)
+                                .unwrap()
+                                .0;
+                        }
+                        std::mem::take(&mut *queue)
+                    };
+                    if writer.write_all(&chunk).is_err() {
+                        break;
+                    }
+                })
+                .expect("spawn pty writer thread");
         }
 
         // Flusher thread: coalesce pending bytes into batched IPC messages; on EOF,
@@ -938,6 +1002,55 @@ mod tests {
         let seen = wait_for(&pm, id, "WRITE_MARKER", Duration::from_secs(8));
         let _ = pm.kill(id);
         assert!(seen, "written command output never appeared");
+    }
+
+    // Regression (hang, not crash): a child that has stopped reading its stdin
+    // must not block the caller. `pty_write` is a synchronous Tauri command, so
+    // the caller is the main/IPC thread — a blocking write to the master there
+    // froze the whole app until the child read or died. Writes must return
+    // promptly and eventually refuse, never sleep in the kernel.
+    #[test]
+    fn write_does_not_block_on_a_child_that_never_reads() {
+        let app = tauri::test::mock_app();
+        let pm = Arc::new(PtyManager::default());
+        let id = pm
+            .spawn_headless(app.handle().clone(), Some("/tmp".into()), None)
+            .expect("spawn");
+        thread::sleep(Duration::from_millis(400)); // let the shell come up
+
+        // Foreground a process that reads nothing, with the tty in raw mode —
+        // the state every agent CLI puts it in, and the one that matters: a
+        // canonical-mode tty discards overflowing input, but a raw one applies
+        // backpressure, so from here the buffer fills within about a kilobyte
+        // and every further byte would block the writer.
+        pm.write(id, "stty raw -echo; sleep 30\r").expect("write");
+        thread::sleep(Duration::from_millis(400));
+
+        // Off this thread, so a write that does block fails the test instead of
+        // hanging it — and so the kill below can unwedge it either way.
+        let (tx, rx) = std::sync::mpsc::channel();
+        {
+            let pm = pm.clone();
+            thread::spawn(move || {
+                let blob = "x".repeat(256 * 1024);
+                // Ten times the queue bound: a session that keeps accepting this
+                // is buffering without limit.
+                for _ in 0..40 {
+                    if pm.write(id, &blob).is_err() {
+                        let _ = tx.send(true);
+                        return;
+                    }
+                }
+                let _ = tx.send(false);
+            });
+        }
+        let outcome = rx.recv_timeout(Duration::from_secs(10));
+        let _ = pm.kill(id);
+        match outcome {
+            Ok(true) => {}
+            Ok(false) => panic!("queue grew without bound instead of refusing input"),
+            Err(_) => panic!("pty write blocked — it is writing on the caller's thread"),
+        }
     }
 
     // A fresh attach replays the scrollback so a late viewer sees prior output.
