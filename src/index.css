@@ -2781,9 +2781,19 @@ body.dragging-tab * {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  /* `safe` so a long resume list scrolls from its top instead of overflowing
+     past the top edge, where centred content is unreachable. */
+  justify-content: safe center;
   height: 100%;
+  overflow-y: auto;
+  padding: 20px 0;
   color: var(--text-dim);
+}
+
+/* Flex items shrink by default; without this the resume block gets squeezed
+   (and clips its own rows) instead of letting the pane scroll. */
+.editor-empty > * {
+  flex-shrink: 0;
 }
 
 .editor-empty h2 {

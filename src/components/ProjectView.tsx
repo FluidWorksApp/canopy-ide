@@ -1000,9 +1000,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // state. Snapshotted on change rather than on unmount: a crash or a force
   // quit never runs cleanup, and those are precisely the cases this exists
   // for.
+  // Micro-task tabs are excluded: they're one-shot and ephemeral, so
+  // "reopen it" would re-run a task that already finished.
   useEffect(() => {
     const open: RememberedTerminal[] = tabs
-      .filter((t): t is TermSubTab => t.type === "terminal" && !t.exited)
+      .filter((t): t is TermSubTab => t.type === "terminal" && !t.exited && !t.micro)
       .map((t) => ({
         cwd: t.cwd,
         command: t.command,
@@ -1016,7 +1018,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const [remembered, setRemembered] = useState<RememberedTerminal[]>([]);
   useEffect(() => {
     if (tabs.length > 0 || !visible) return;
-    setRemembered(rememberedTerminals(project.id));
+    // The command marker drops micro-tasks snapshotted before they were
+    // excluded above — they'd otherwise sit in the list until overwritten.
+    setRemembered(
+      rememberedTerminals(project.id).filter(
+        (t) => !(t.command ?? "").includes("CANOPY_MICRO_TASK="),
+      ),
+    );
   }, [tabs.length, visible, project.id]);
 
   // A terminal running `claude` or `omp` is an agent, not a shell — listing it
