@@ -339,7 +339,9 @@ Canopy is open source under the [MIT License](./LICENSE.md) — free to use,
 modify, and distribute, including commercially.
 
 Third-party components keep their own licenses — see
-[THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md). Notably, Canopy bundles
-jschardet (LGPL-2.1-or-later) as a separately replaceable chunk.
+[THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md), which is generated from the
+resolved dependency trees (`npm run licenses`) and ships inside the app bundle.
+Notably, Canopy bundles jschardet (LGPL-2.1-or-later) as a separately
+replaceable chunk, and Microsoft's ONNX Runtime (MIT) as a prebuilt library.
 
 Copyright 2026 Cause Connect Pte Ltd.

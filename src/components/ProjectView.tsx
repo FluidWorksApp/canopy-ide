@@ -4,18 +4,26 @@
 // right-hand rails (single chip, or a dropdown once there's more than one).
 // Terminals stay mounted so TUIs keep running. Bottom status tray shows git
 // branch, agents, model, tokens, cost.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
 import { modelFor, monaco, languageForPath } from "../monaco-setup";
+import { getCaret, subscribeCaret } from "../editorState";
 import { GuestSession, OwnerSession } from "../collab";
 import { CollabView } from "./CollabView";
 import { SharedProjectView } from "./SharedProjectView";
 import type { AgentCli, Project } from "../projects";
 import {
   AGENT_CLIS,
-  AGENT_PATTERN,
   SHELL_PATTERN,
   checkCliUpdates,
   checkInstalledClis,
@@ -43,9 +51,20 @@ import {
   derivePending,
   eventPtyId,
   eventsForProject,
+  isStopFor,
   pendingForRoots,
   type PendingItem,
 } from "../notifications";
+import {
+  customTaskDef,
+  microTaskProtocol,
+  raisePrTask,
+  reviewPrTask,
+  type CustomMicroTask,
+  type MicroTaskDef,
+} from "../microTasks";
+import { TasksPanel, type RunningMicroTask } from "./TasksPanel";
+import { taskMenuItem } from "../taskMenu";
 import { viewerKindFor } from "./viewers";
 import { ensureLanguageServer } from "../lsp/client";
 import { Term, type TermHandle } from "./Term";
@@ -54,6 +73,8 @@ import { FileTree } from "./FileTree";
 import { FileView } from "./FileView";
 import { ChangesPanel, type ChangeGroup } from "./ChangesPanel";
 import { useEscape } from "../useEscape";
+import { useTabDrag, applyOrder } from "../tabDrag";
+import { agentIdForCommand, identifyAgent } from "../agentIdentity";
 import { AgentsPanel, digestBySurface } from "./AgentsPanel";
 import { StatusBar } from "./StatusBar";
 import { Palette, type PaletteMode } from "./Palette";
@@ -66,6 +87,8 @@ import { BranchView } from "./BranchView";
 import { AgentWorkspaceView } from "./AgentWorkspaceView";
 import { PreviewView } from "./PreviewView";
 import type { PreviewAnnotation, PreviewServer } from "../preview";
+import { dispatchBrowserOp } from "../previewAgent";
+import { serverForUrl } from "../preview";
 import { ticketBranch, ticketContext, ticketWorktree } from "../trackers";
 import { prConflictContext, prReviewContext, prWorktree } from "../prs";
 import { fileDiffContext, reviewContext, sessionChangesContext } from "../diffContext";
@@ -86,7 +109,7 @@ import { shouldShowTip, markTipSeen, type CoachTip } from "../coachmarks";
 import { ActivityRail } from "./ActivityRail";
 import { PaneBar } from "./PaneBar";
 
-export type SideTab = "files" | "changes" | "git" | "trackers" | "agents" | "team";
+export type SideTab = "files" | "changes" | "git" | "trackers" | "tasks" | "agents" | "team";
 
 export interface TermSubTab {
   id: string;
@@ -118,6 +141,9 @@ export interface TermSubTab {
    *  whether it is still unread. Cleared when the tab is looked at. */
   notice?: string;
   unread?: boolean;
+  /** An ephemeral micro-task tab: closed and its session forgotten once the
+   *  agent calls canopy_job_done (or the user closes it). Never restored. */
+  micro?: { taskId: string };
 }
 
 export interface FileSubTab {
@@ -233,6 +259,41 @@ export type SubTab =
   | ReviewSubTab
   | AgentSubTab
   | ChatSubTab;
+
+/** Every tab that isn't a terminal — the "document" tabs, rendered together
+ *  below the terminals and display-toggled the same way. */
+type DocSubTab = Exclude<SubTab, TermSubTab>;
+
+/** One tab as canopy_editor_state describes it: enough for an agent to know
+ *  what the user has in front of them, without shipping the tab's contents. */
+function describeTab(tab: SubTab | undefined) {
+  if (!tab) return null;
+  switch (tab.type) {
+    case "file":
+      return { kind: "file", path: tab.file.path, view: tab.file.view, dirty: tab.file.dirty };
+    case "terminal":
+      return {
+        kind: tab.run ? "run" : "terminal",
+        label: tab.customTitle ?? tab.title,
+        cwd: tab.cwd,
+        ptyId: tab.ptyId,
+      };
+    case "preview":
+      return { kind: "preview", url: tab.url || null };
+    case "ticket":
+      return { kind: "ticket", label: tab.ticket.title };
+    case "pr":
+      return { kind: "pr", label: `#${tab.pr.number} ${tab.pr.title}` };
+    case "commit":
+      return { kind: "commit", label: `${tab.short} ${tab.subject}` };
+    case "branch":
+      return { kind: "branch", label: tab.branch.branch };
+    case "agent":
+      return { kind: "agent", label: tab.agent, cwd: tab.cwd, ptyId: tab.ptyId ?? null };
+    default:
+      return { kind: tab.type };
+  }
+}
 
 const decoder = new TextDecoder();
 
@@ -357,7 +418,6 @@ function TermPorts({
   );
 }
 
-
 interface ProjectViewProps {
   project: Project;
   visible: boolean;
@@ -379,6 +439,9 @@ interface ProjectViewProps {
 
 export function ProjectView({ project, visible, zen, events, hookPath, allProjects, dismissedPending, onDismissPending, onEdit, onNotice, onShareContext, relay }: ProjectViewProps) {
   const [sideTab, setSideTab] = useState<SideTab>("files");
+  // Monaco's caret, for the context snapshot. Subscribed rather than passed
+  // down: the editor sits several components below, and this is read-only.
+  const caret = useSyncExternalStore(subscribeCaret, getCaret);
   const [collapsed, setCollapsed] = useState(false);
   const [tabs, setTabs] = useState<SubTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
@@ -462,7 +525,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       );
       const mine = all.filter((s) => ids.has(s.id));
       for (const s of mine) {
-        const hasAgent = s.procs.some((p) => AGENT_PATTERN.test(p.name));
+        const hasAgent = !!identifyAgent(s.agent_hint);
         if (hasAgent) {
           agentLife.current.set(s.id, 0);
         } else if (agentLife.current.has(s.id)) {
@@ -470,9 +533,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           // work — a server, a build, any non-shell/non-agent process still
           // running — it's a working shell now, not a spent agent shell:
           // stop tracking it and never auto-close it out from under them.
-          const hasRealWork = s.procs.some(
-            (p) => !SHELL_PATTERN.test(p.name) && !AGENT_PATTERN.test(p.name),
-          );
+          const hasRealWork = s.procs.some((p) => !SHELL_PATTERN.test(p.name));
           if (hasRealWork) {
             agentLife.current.delete(s.id);
           } else {
@@ -484,7 +545,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               );
               // A launched agent tab (command matches) or a run stays put; only
               // an idle plain shell that hosted a now-exited agent gets closed.
-              if (tab && !tab.run && !AGENT_PATTERN.test(tab.command ?? "")) {
+              if (tab && !tab.run && !agentIdForCommand(tab.command)) {
                 closeTabRef.current(tab.id);
               }
             } else {
@@ -639,11 +700,12 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
 
   /** Open an embedded-browser preview tab. With no URL the tab opens on the
    *  pick-a-server form; a URL (a run rail's detected server, a reopened tab)
-   *  loads immediately. */
+   *  loads immediately. Returns the new tab's id (agent ops target it). */
   const openPreview = useCallback((url = "") => {
     const id = tabId();
     setTabs((prev) => [...prev, { id, type: "preview", url, annotations: [] }]);
     setActiveTabId(id);
+    return id;
   }, []);
 
   /** Open a relay conversation as its own tab — the everyone channel (peer
@@ -960,12 +1022,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // A terminal running `claude` or `omp` is an agent, not a shell — listing it
   // under "Terminals" was accurate about the mechanism and wrong about the
   // thing. Split by what the command actually starts.
-  const rememberedAgents = remembered.filter((t) =>
-    AGENT_CLIS.some((c) => (t.command ?? "").startsWith(c.bin)),
-  );
-  const rememberedShells = remembered.filter(
-    (t) => !AGENT_CLIS.some((c) => (t.command ?? "").startsWith(c.bin)),
-  );
+  const rememberedAgents = remembered.filter((t) => agentIdForCommand(t.command));
+  const rememberedShells = remembered.filter((t) => !agentIdForCommand(t.command));
   // An agent terminal whose directory already has a restorable session is
   // redundant — that row restores the same work WITH its history, so offering
   // "start it fresh" beside it is just a worse duplicate.
@@ -1326,6 +1384,119 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     [addTerminal, onNotice],
   );
 
+  /** Launch a micro-task: a one-shot agent seeded with the task's brief plus
+   *  the completion protocol, in a tab marked ephemeral. The CANOPY_MICRO_TASK
+   *  prefix reaches the MCP sidecar through PTY env inheritance and marks the
+   *  session as one whose job_done must always be honored. Prefers claude —
+   *  the only CLI with the MCP registration — over the default agent; others
+   *  still work via the protocol's printed-fallback ending, minus auto-close. */
+  const startMicroTask = useCallback(
+    <P,>(def: MicroTaskDef<P>, payload: P, userQuery: string) => {
+      const installedClis = AGENT_CLIS.filter((c) => installedRef.current[c.bin]);
+      if (installedClis.length === 0) {
+        onNotice("Running a task needs an agent CLI — install one in Settings → Agents.");
+        return;
+      }
+      const preferred = getSettings().defaultAgent;
+      const agent = (
+        installedClis.find((c) => c.id === "claude") ??
+        installedClis.find((c) => c.id === preferred) ??
+        installedClis[0]
+      )?.id;
+      const cli = AGENT_CLIS.find((c) => c.id === agent);
+      const seed = `${def.buildContext(payload, userQuery)} ${microTaskProtocol()}`;
+      const start = agent ? startCommand(agent, seed) : null;
+      if (!cli || !start) {
+        onNotice(`No agent CLI installed to run "${def.label}".`);
+        return;
+      }
+      const dir = def.cwd(payload);
+      const id = addTerminal(
+        dir,
+        `CANOPY_MICRO_TASK=1 ${start.command}`,
+        `${def.label} · ${cli.name}`,
+        def.icon,
+      );
+      if (!id) return;
+      patchTabRaw(id, { micro: { taskId: def.id } } as Partial<SubTab>);
+      if (start.typePrompt) {
+        setTimeout(() => {
+          const pty = tabsRef.current.find(
+            (t): t is TermSubTab => t.id === id && t.type === "terminal",
+          )?.ptyId;
+          if (pty == null) return;
+          void ipc.ptyWrite(pty, seed);
+          setTimeout(() => void ipc.ptyWrite(pty, "\r"), 250);
+        }, 2500);
+      }
+    },
+    [addTerminal, patchTabRaw, onNotice],
+  );
+
+  /** Run a brief that was composed on the spot (a diff surface's "ask about
+   *  this" box) as a one-shot task — same lifecycle as a saved one, no entry in
+   *  the registry. The context builder already folded the user's words in. */
+  const runAdhocTask = useCallback(
+    (label: string, brief: string, dir: string) => {
+      startMicroTask(
+        customTaskDef({ id: label.toLowerCase().replace(/\s+/g, "-"), label, icon: "◆", placeholder: "", brief }),
+        { dir },
+        "",
+      );
+    },
+    [startMicroTask],
+  );
+
+  /** Micro-task tabs waiting to close: job_done was acknowledged, and we hold
+   *  off killing the PTY until the agent's turn actually ends (its Stop hook)
+   *  so the tool result and last words land — with a timer as backstop for a
+   *  broken hook. Keyed by pty id; sid is captured at job_done time because the
+   *  event stream goes quiet once the PTY dies. */
+  const microFinish = useRef(new Map<number, { sid?: string; since: number; timer: number }>());
+
+  const reapMicroTask = useCallback((ptyId: number) => {
+    const entry = microFinish.current.get(ptyId);
+    if (!entry) return;
+    microFinish.current.delete(ptyId);
+    window.clearTimeout(entry.timer);
+    const sid = entry.sid ?? liveSessionByPtyRef.current.get(ptyId);
+    // Grace-kill (SIGTERM + 2.5s) lets claude flush its transcript and run its
+    // last hooks; pty:exit then auto-closes the tab like any spent terminal.
+    void ipc.ptyKill(ptyId).finally(() => {
+      // The SessionEnd hook rewrites the digest as the CLI dies — forget after
+      // that final write, or the delete would race it and the session would
+      // resurface in restorables.
+      if (sid) setTimeout(() => void ipc.sessionForget(sid).catch(() => {}), 500);
+    });
+  }, []);
+
+  const finishMicroTask = useCallback(
+    (tab: TermSubTab) => {
+      if (tab.ptyId == null) return;
+      const ptyId = tab.ptyId;
+      if (microFinish.current.has(ptyId)) return;
+      const timer = window.setTimeout(() => reapMicroTask(ptyId), 10_000);
+      microFinish.current.set(ptyId, {
+        sid: liveSessionByPtyRef.current.get(ptyId),
+        since: Date.now(),
+        timer,
+      });
+    },
+    [reapMicroTask],
+  );
+
+  // The wait-for-Stop half of the micro-task close: once the turn that called
+  // job_done ends, reap. `ts >= since` skips Stop events from earlier turns of
+  // the same session (a blocked task the user replied to, then finished).
+  useEffect(() => {
+    if (microFinish.current.size === 0) return;
+    for (const [ptyId, entry] of microFinish.current) {
+      if (events.some((e) => e.ts >= entry.since && isStopFor(e.raw, ptyId))) {
+        reapMicroTask(ptyId);
+      }
+    }
+  }, [events, reapMicroTask]);
+
   /** A relay review's diff isn't in any local checkout, so an agent can't
    *  `git diff` for it — write the patch into the project (an authorized
    *  workspace, so the write is in scope) and hand the agent that path. Returns
@@ -1503,6 +1674,113 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     };
   }, [visible, project.components, addTerminal]);
 
+  // An agent asked the IDE to do something through the MCP bridge — start a
+  // run command, or open a preview. App routed it here by matching the action's
+  // path to this project; act on it with the same handlers the UI buttons use.
+  useEffect(() => {
+    const onAction = (e: Event) => {
+      const d = (e as CustomEvent).detail as { projectId: string | null; action: ipc.AgentAction };
+      const a = d.action;
+      // restart is keyed by terminal, not project: only the ProjectView that
+      // owns that pty acts, whatever project it belongs to.
+      if (a.kind === "restart_server") {
+        const tab = tabsRef.current.find(
+          (t): t is TermSubTab => t.type === "terminal" && t.ptyId === a.ptyId,
+        );
+        if (tab) restartRun(tab.id);
+        return;
+      }
+      // A micro-task reported in (App already surfaced the notice). Done →
+      // wait out the turn, then kill + close + forget. Blocked → bring the tab
+      // forward so the user can answer. Only ever closes tabs marked micro: a
+      // normal session that somehow calls the tool gets the notice and nothing
+      // else.
+      if (a.kind === "job_done") {
+        const tab = tabsRef.current.find(
+          (t): t is TermSubTab => t.type === "terminal" && a.ptyId != null && t.ptyId === a.ptyId,
+        );
+        if (!tab || !tab.micro) return;
+        if (a.status === "blocked") setActiveTabId(tab.id);
+        else finishMicroTask(tab);
+        return;
+      }
+      if (d?.projectId !== project.id) return;
+      if (a.kind === "open_preview" && a.url) {
+        openPreview(a.url);
+      } else if (a.kind === "start_server" && a.dir && a.command) {
+        // `command` is the resolved command line, `name` its label — the same
+        // pair the component-commands ▶ uses. Reuse a tab already on it.
+        const existing = tabsRef.current.find(
+          (t): t is TermSubTab =>
+            t.type === "terminal" && Boolean(t.run) && t.cwd === a.dir && t.command === a.command,
+        );
+        if (existing && !existing.exited) setActiveTabId(existing.id);
+        else if (existing) restartRun(existing.id);
+        else addTerminal(a.dir, a.command, a.name || a.command, "▶", true);
+      } else if ((a.kind === "open_file" || a.kind === "show_diff") && a.path) {
+        // "Look at line 340" — put the file in front of the user and land on
+        // the line. The reveal is an event because the tab may already be open,
+        // and because opening is async either way.
+        const path = a.path;
+        const line = a.line;
+        void openFileRef.current(path, { diff: a.kind === "show_diff" }).then(() => {
+          if (line)
+            requestAnimationFrame(() =>
+              window.dispatchEvent(
+                new CustomEvent("canopy:reveal-line", { detail: { path, line } }),
+              ),
+            );
+        });
+      }
+    };
+    window.addEventListener("canopy:agent-action", onAction);
+    return () => window.removeEventListener("canopy:agent-action", onAction);
+  }, [project.id, openPreview, addTerminal, restartRun, finishMicroTask]);
+
+  // A browser-control op (canopy_browser_*): pick the preview tab it targets —
+  // by origin when it names a URL, else the active/first preview tab, creating
+  // one when navigation asks for a page and none is open — focus it (agent ops
+  // mount the view; the user watching the tab drive itself is the point), and
+  // hand the op to the PreviewView through the queueing bus. Everything else,
+  // including answering the bridge, happens in the view; only the no-tab case
+  // must answer here or the agent would wait out the bridge's timeout.
+  useEffect(() => {
+    const originOf = (u: string): string | null => {
+      try {
+        return new URL(u).origin;
+      } catch {
+        return null;
+      }
+    };
+    const onBrowserOp = (e: Event) => {
+      const d = (e as CustomEvent).detail as { projectId: string; op: ipc.AgentBrowserOp };
+      if (d?.projectId !== project.id) return;
+      const op = d.op;
+      const previews = tabsRef.current.filter((t): t is PreviewSubTab => t.type === "preview");
+      const wantOrigin = op.url ? originOf(op.url) : null;
+      const tab =
+        (wantOrigin && previews.find((t) => originOf(t.url) === wantOrigin)) ||
+        previews.find((t) => t.id === activeTabIdRef.current && t.url) ||
+        previews.find((t) => !!t.url) ||
+        // A URL navigation can take over an empty (server-picker) preview tab.
+        (op.op === "navigate" && op.url ? previews[0] : undefined);
+      if (tab) {
+        setActiveTabId(tab.id);
+        dispatchBrowserOp(tab.id, op);
+      } else if (op.op === "navigate" && op.url) {
+        dispatchBrowserOp(openPreview(op.url), op);
+      } else {
+        void ipc.browserResult(
+          op.id,
+          false,
+          "No preview page is open in this project. Call canopy_browser_navigate with a url first — canopy_project's runServers lists the addresses.",
+        );
+      }
+    };
+    window.addEventListener("canopy:agent-browser", onBrowserOp);
+    return () => window.removeEventListener("canopy:agent-browser", onBrowserOp);
+  }, [project.id, openPreview]);
+
   const patchTab = useCallback((id: string, patch: Partial<TermSubTab> & Partial<FileSubTab>) => {
     setTabs((prev) => prev.map((t) => (t.id === id ? ({ ...t, ...patch } as SubTab) : t)));
   }, []);
@@ -1521,6 +1799,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     termHandles.current.delete(id);
     setTabs((prev) => {
       const closing = prev.find((t) => t.id === id);
+      if (closing?.type === "terminal" && closing.micro && closing.ptyId != null) {
+        // A micro-task session never reaches restorables, however it ends —
+        // that includes the user closing the tab mid-run. Forget after the
+        // unmount-kill's grace window so the delete lands on the CLI's final
+        // digest write instead of racing it.
+        const sid = liveSessionByPtyRef.current.get(closing.ptyId);
+        if (sid) setTimeout(() => void ipc.sessionForget(sid).catch(() => {}), 4000);
+      }
       if (closing?.type === "file") {
         // Closing the tab disposes the model the OwnerSession is subscribed
         // to, so the share has to end first — otherwise it sits there holding
@@ -1919,11 +2205,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     },
     [addTerminal],
   );
-  const runningAgents = projectStats.flatMap((s) =>
-    s.procs
-      .filter((p) => AGENT_PATTERN.test(p.name))
-      .map((p) => ({ name: p.name, cpu: p.cpu })),
-  );
+  const runningAgents = projectStats.flatMap((s) => {
+    const agent = identifyAgent(s.agent_hint);
+    return agent ? [{ name: agent.label, cpu: s.total_cpu }] : [];
+  });
   const changedPaths = new Set(changeGroups.flatMap((g) => g.files.map((f) => f.abs)));
   const changeCount = changeGroups.reduce((n, g) => n + g.files.length, 0);
   // Files teammates are editing live in a project we're sharing — no git
@@ -2001,9 +2286,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         (t): t is TermSubTab => t.type === "terminal",
       );
       const agentPtyIds = new Set(
-        stats
-          .filter((s) => s.procs.some((p) => AGENT_PATTERN.test(p.name)))
-          .map((s) => s.id),
+        stats.filter((s) => identifyAgent(s.agent_hint)).map((s) => s.id),
       );
       const target =
         // The event's own pty stamp is an identity, not a guess — prefer it.
@@ -2218,6 +2501,31 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
 
   const compMenu = useContextMenu();
   const tabMenu = useContextMenu();
+  const termMenu = useContextMenu();
+  /** Prefill for the Tasks panel's create form — set when the user makes a
+   *  task out of something they're looking at (selected terminal text, a file
+   *  in the tree, a tab). The nonce re-opens the form even for the same seed
+   *  twice. */
+  const [taskSeed, setTaskSeed] = useState<{ brief: string; nonce: number } | null>(null);
+  const seedTaskFrom = useCallback((brief: string) => {
+    setCollapsed(false);
+    setSideTab("tasks");
+    setTaskSeed((prev) => ({ brief, nonce: (prev?.nonce ?? 0) + 1 }));
+  }, []);
+  /** The "Tasks ▸" submenu for a right-clicked row, wherever it lives: write a
+   *  new task about it, then run one on it. The surfaces stay ignorant of the
+   *  task registry — they ask for the item and splice it into their menu. */
+  const taskMenu = useCallback(
+    (seed: string, runnable?: { label: string; icon?: string; run: () => void }[]) =>
+      taskMenuItem({
+        seed,
+        runnable,
+        onNewTask: seedTaskFrom,
+        onRunSaved: (t) => startMicroTask(customTaskDef(t), { dir: roots[0] ?? "" }, ""),
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [seedTaskFrom, startMicroTask, roots[0]],
+  );
 
   const submitRootCreate = async () => {
     if (!rootCreate) return;
@@ -2253,11 +2561,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // `claude` typed by hand into a shell promotes that tab too. Plain shells and
   // long-running commands are demoted to their own right-hand rails (below);
   // reference docs (files, PRs, tickets) form a quieter group after the agents.
-  // Content-keyed: `stats` re-samples every ~4s, but this set only earns a new
-  // identity when the set of agent-bearing ptys actually changes — so the
-  // memoized PaneBar isn't repainted by a sample that changed nothing.
+  // Detection uses the agentIdentity module (agent_hint from stats, command
+  // for launched tabs). Content-keyed: `stats` re-samples every ~4s, but this
+  // set only earns a new identity when the set of agent-bearing ptys actually
+  // changes — so the memoized PaneBar isn't repainted by a sample that changed
+  // nothing.
   const agentPtyList = projectStats
-    .filter((s) => s.procs.some((p) => AGENT_PATTERN.test(p.name)))
+    .filter((s) => identifyAgent(s.agent_hint))
     .map((s) => s.id);
   const agentPtyKey = agentPtyList.slice().sort((a, b) => a - b).join(",");
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2265,7 +2575,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const isAgentTab = useCallback(
     (t: SubTab): t is TermSubTab =>
       t.type === "terminal" &&
-      (AGENT_PATTERN.test(t.command ?? "") ||
+      (!!agentIdForCommand(t.command) ||
         (t.ptyId != null && agentPtyIds.has(t.ptyId))),
     [agentPtyIds],
   );
@@ -2295,6 +2605,20 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     },
     [isAgentTab, liveSessionByPty, wsDigests, busyPtyIds],
   );
+  // Micro-task tabs, for the Tasks panel's Running list. Same state resolution
+  // as the tab dots so the two never disagree.
+  const runningMicro: RunningMicroTask[] = useMemo(
+    () =>
+      tabs
+        .filter((t): t is TermSubTab => t.type === "terminal" && Boolean(t.micro))
+        .map((t) => ({
+          tabId: t.id,
+          title: t.customTitle || t.title,
+          state: tabState(t),
+          icon: t.icon,
+        })),
+    [tabs, tabState],
+  );
   const stripTabs = useMemo(
     () => tabs.filter((t) => t.type !== "terminal" || !t.run),
     [tabs],
@@ -2310,6 +2634,23 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     ],
     [stripTabs, isAgentTab],
   );
+  // Drag to reorder, one strip per group: agents stay left of docs however you
+  // shuffle them, and a tab dropped outside its own group simply snaps back.
+  // The order lives in `tabs` itself, so the panes (which are all mounted)
+  // follow along without anything else having to know about the drag.
+  const reorderGroup = useCallback(
+    (ids: string[]) => setTabs((prev) => applyOrder(prev, (t) => t.id, ids)),
+    [],
+  );
+  const agentDrag = useTabDrag(
+    tabGroups[0].map((t) => t.id),
+    reorderGroup,
+  );
+  const docDrag = useTabDrag(
+    tabGroups[1].map((t) => t.id),
+    reorderGroup,
+  );
+  const groupDrags = [agentDrag, docDrag];
   // Shells and runs each get a compact rail; Rail collapses to a dropdown at 2+.
   const shellChips: RailChip[] = useMemo(
     () =>
@@ -2526,6 +2867,41 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         title: a.title,
         dir: a.dir,
       })),
+      // Preview annotations, so canopy_annotations can serve the visual
+      // feedback the user marked — element, comment, and serving component.
+      annotations: tabs
+        .filter((t): t is PreviewSubTab => t.type === "preview")
+        .flatMap((t) => {
+          const server = serverForUrl(t.url, previewServers);
+          return t.annotations.map((a) => ({
+            n: a.n,
+            selector: a.selector,
+            component: a.components[0] ?? null,
+            tag: a.tag,
+            text: a.text,
+            comment: a.comment,
+            pageUrl: a.pageUrl || t.url,
+            servingComponent: server?.componentLabel ?? null,
+            servingComponentPath: server?.componentPath ?? null,
+          }));
+        }),
+      // Open preview tabs, so agents know what the browser-control tools
+      // (canopy_browser_*) are currently pointed at.
+      previews: tabs
+        .filter((t): t is PreviewSubTab => t.type === "preview")
+        .map((t) => ({ url: t.url || null, annotations: t.annotations.length })),
+      // What the user is looking at (canopy_editor_state) — the tab in front of
+      // them, the caret, the selection. Deixis: "fix this" has a referent, and
+      // this is it.
+      editor: {
+        focused: visible,
+        activeTab: describeTab(tabs.find((t) => t.id === activeTabId)),
+        openTabs: tabs.map(describeTab).filter(Boolean),
+        caret:
+          caret && tabs.some((t) => t.type === "file" && t.file.path === caret.path)
+            ? caret
+            : null,
+      },
     });
     if (snapshot !== lastContextRef.current) {
       lastContextRef.current = snapshot;
@@ -2640,16 +3016,67 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   );
   const onTabContextMenu = useCallback(
     (e: React.MouseEvent, tab: SubTab) => {
+      // Every tab kind that names a concrete thing can seed a task about it —
+      // the same create-form flow as a terminal selection, with the tab's
+      // subject prefilled (and a quick-run action where one applies).
+      const taskItem: MenuItem[] =
+        tab.type === "file"
+          ? [taskMenu(`In \`${tab.file.path}\`: `)]
+          : tab.type === "pr"
+            ? [
+                taskMenu(`About PR #${tab.pr.number} "${tab.pr.title}" (${tab.pr.url}): `, [
+                  {
+                    label: `Review PR #${tab.pr.number}`,
+                    icon: reviewPrTask.icon,
+                    run: () => startMicroTask(reviewPrTask, { repo: tab.repo, pr: tab.pr }, ""),
+                  },
+                ]),
+              ]
+            : tab.type === "branch"
+              ? [
+                  taskMenu(
+                    `On branch ${tab.branch.branch}: `,
+                    tab.branch.merged
+                      ? undefined
+                      : [
+                          {
+                            label: `Raise PR for ${tab.branch.branch}`,
+                            icon: raisePrTask.icon,
+                            run: () =>
+                              startMicroTask(
+                                raisePrTask,
+                                {
+                                  repo: tab.repo,
+                                  branch: tab.branch.branch,
+                                  worktree: tab.branch.worktree,
+                                  unpushed: !tab.branch.upstream || tab.branch.ahead > 0,
+                                },
+                                "",
+                              ),
+                          },
+                        ],
+                  ),
+                ]
+              : tab.type === "ticket"
+                ? [
+                    taskMenu(
+                      `About ticket ${tab.ticket.id} "${tab.ticket.title}" (${tab.ticket.url}): `,
+                    ),
+                  ]
+                : [];
       const items: MenuItem[] =
         tab.type === "terminal"
           ? [
               { label: "Rename", onClick: () => { if (tab.type === "terminal") startRename(tab); } },
               { label: "Close", danger: true, onClick: () => closeTab(tab.id) },
             ]
-          : [{ label: "Close", danger: true, onClick: () => closeTab(tab.id) }];
+          : [
+              ...taskItem,
+              { label: "Close", danger: true, onClick: () => closeTab(tab.id) },
+            ];
       tabMenu.open(e, items);
     },
-    [startRename, closeTab, tabMenu.open],
+    [startRename, closeTab, tabMenu.open, taskMenu, startMicroTask],
   );
   const onClearScrollback = useCallback(() => {
     if (activeTermTab) termHandles.current.get(activeTermTab.id)?.clearScrollback();
@@ -2689,6 +3116,250 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     [tabMenu.open, stripTabs, activeTabId],
   );
 
+  // ---------- document tabs ----------
+  // Doc tabs used to render only while active, so switching away and back
+  // rebuilt the view from scratch: scroll jumped to the top, loaded data was
+  // refetched, and a preview reloaded its page (losing whatever you had it in
+  // the middle of). They now stay mounted and are display-toggled, exactly
+  // like the terminals above.
+  //
+  // The catch is that ProjectView re-renders often (pty stats tick every 2s),
+  // and re-rendering ten mounted views on each tick — PR diffs, editors —
+  // would be real work for nothing. So an inactive pane whose own tab data
+  // hasn't changed is handed back the SAME element it last rendered: React
+  // compares element identity and skips that subtree entirely. A pane is
+  // rebuilt when it's in front (so it always sees current props) or when its
+  // tab changed underneath it.
+  const docTabs = tabs.filter((t): t is DocSubTab => t.type !== "terminal");
+  const panes = useRef(new Map<string, { tab: DocSubTab; el: ReactNode }>());
+  useEffect(() => {
+    const live = new Set(tabs.map((t) => t.id));
+    for (const id of [...panes.current.keys()]) if (!live.has(id)) panes.current.delete(id);
+  }, [tabs]);
+  const paneFor = (tab: DocSubTab): ReactNode => {
+    const cached = panes.current.get(tab.id);
+    if (cached && cached.tab === tab && tab.id !== activeTabId) return cached.el;
+    const el = docTabView(tab);
+    panes.current.set(tab.id, { tab, el });
+    return el;
+  };
+
+  function docTabView(tab: DocSubTab): ReactNode {
+    switch (tab.type) {
+      case "branch":
+        return (
+          <BranchView
+            relay={relay}
+            repo={tab.repo}
+            branch={tab.branch}
+            onOpenCommit={openCommit}
+            onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
+            onNotice={onNotice}
+            onMicroTask={startMicroTask}
+          />
+        );
+      case "agent":
+        return (
+          <AgentWorkspaceView
+            repo={tab.repo}
+            agent={tab.agent}
+            cwd={tab.cwd}
+            sessionId={tab.sessionId}
+            digest={tab.digest}
+            onOpenCommit={openCommit}
+            onOpenPr={openPr}
+            onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
+            onNotice={onNotice}
+            onMessageAgent={(text) =>
+              messageAgent({
+                sessionId: tab.sessionId,
+                agentId: tab.agent,
+                cwd: tab.cwd,
+                text,
+              })
+            }
+            onRaisePrTask={
+              tab.repo
+                ? (branch, worktree) =>
+                    startMicroTask(raisePrTask, { repo: tab.repo as string, branch, worktree }, "")
+                : undefined
+            }
+            onReviewPrTask={
+              tab.repo
+                ? (pr) => startMicroTask(reviewPrTask, { repo: tab.repo as string, pr }, "")
+                : undefined
+            }
+            onRunSavedTask={(task, dir) => startMicroTask(customTaskDef(task), { dir }, "")}
+          />
+        );
+      case "commit":
+        return <CommitView repo={tab.repo} hash={tab.hash} onNotice={onNotice} />;
+      case "ticket":
+        return (
+          <TicketView
+            ticket={tab.ticket}
+            source={tab.source}
+            worktree={ticketWorktree(tab.ticket, ticketWorktrees)}
+            agentTargets={agentTargets}
+            installed={installed}
+            onStartNew={(agentId) => void startTicketWork(tab.ticket, agentId)}
+            onSendToAgent={(target) => sendTicketToAgent(target, ticketContext(tab.ticket))}
+          />
+        );
+      case "pr":
+        return (
+          <PrView
+            repo={tab.repo}
+            pr={tab.pr}
+            onNotice={onNotice}
+            relay={relay}
+            agentTargets={agentTargets}
+            installed={installed}
+            onStartReview={(agentId) => void startPrReview(tab.repo, tab.pr, agentId)}
+            onSendToAgent={(target) => sendTicketToAgent(target, prReviewContext(tab.pr))}
+            onStartResolve={(agentId) => void startPrConflictResolve(tab.repo, tab.pr, agentId)}
+            onSendResolve={(target) => sendTicketToAgent(target, prConflictContext(tab.pr))}
+            onMicroTask={startMicroTask}
+          />
+        );
+      case "review":
+        return (
+          <ReviewView
+            review={tab.review}
+            agentBar={
+              <AgentQueryBar
+                agentTargets={agentTargets}
+                installed={installed}
+                newAgentLabel="New agent in this project"
+                label="Send to agent"
+                placeholder="Ask an agent to review this…"
+                onSend={(target, query) =>
+                  void writeReviewPatch(tab.review).then((path) => {
+                    if (path) sendTicketToAgent(target, reviewContext(tab.review, path, query));
+                  })
+                }
+                onStart={(agentId, query) =>
+                  void writeReviewPatch(tab.review).then((path) => {
+                    const dir = componentsRef.current[0]?.path;
+                    if (!path || !dir) return;
+                    startAgentInDir(
+                      dir,
+                      agentId,
+                      reviewContext(tab.review, path, query),
+                      `Review ${tab.review.branch}`,
+                    );
+                  })
+                }
+                onRunTask={(query) =>
+                  void writeReviewPatch(tab.review).then((path) => {
+                    const dir = componentsRef.current[0]?.path;
+                    if (!path || !dir) return;
+                    runAdhocTask(
+                      `Review ${tab.review.branch}`,
+                      reviewContext(tab.review, path, query),
+                      dir,
+                    );
+                  })
+                }
+              />
+            }
+          />
+        );
+      case "preview":
+        return (
+          <PreviewView
+            tabId={tab.id}
+            url={tab.url}
+            annotations={tab.annotations}
+            onPatch={(patch) => patchTabRaw(tab.id, patch as Partial<SubTab>)}
+            servers={previewServers}
+            agentTargets={agentTargets}
+            installed={installed}
+            onSendToAgent={sendTicketToAgent}
+            onStartNew={(agentId, text, cwd) => {
+              // The serving component's checkout when the page is linked to
+              // one; the first component only as a last resort.
+              const dir = cwd ?? componentsRef.current[0]?.path;
+              if (!dir) {
+                onNotice("No project directory to start the agent in.");
+                return;
+              }
+              startAgentInDir(dir, agentId, text, "Preview feedback");
+            }}
+            onNotice={onNotice}
+          />
+        );
+      case "chat":
+        return <ChatView peer={tab.peer} title={tab.name} relay={relay} onNotice={onNotice} />;
+      case "collab": {
+        const session = relay.collab.get(tab.doc);
+        return session instanceof GuestSession ? (
+          <CollabView session={session} ownerName={tab.ownerName} onNotice={onNotice} />
+        ) : (
+          <div className="editor-empty">
+            <h2>{tab.name}</h2>
+            <p>This live session has ended.</p>
+          </div>
+        );
+      }
+      case "shared-project":
+        return (
+          <SharedProjectView
+            name={tab.name}
+            ownerName={tab.ownerName}
+            paths={relay.collab.joinedProjects.get(tab.doc)?.paths ?? []}
+            onOpen={(relPath) => relay.collab.openProjectFile(tab.doc, relPath)}
+          />
+        );
+      case "file":
+        return (
+          <FileView
+            file={tab.file}
+            onCursor={
+              // Only a shared file broadcasts a caret; every other tab passes
+              // undefined and the subscription in MonacoEditor short-circuits.
+              sharedDocFor(tab.file.path)
+                ? (anchor, head) => sendOwnerCursor(tab.file.path, anchor, head)
+                : undefined
+            }
+            onSave={() => void saveFile(tab.file.path)}
+            onDirty={(dirty) => {
+              if (tab.file.dirty !== dirty) patchFile(tab.file.path, { dirty });
+            }}
+            onAcceptExternal={() => acceptExternal(tab.file.path)}
+            onKeepMine={() => keepMine(tab.file.path)}
+            onCloseDiff={() => patchFile(tab.file.path, { view: "source", diffOriginal: null })}
+            diffAgentBar={
+              <AgentQueryBar
+                agentTargets={agentTargets}
+                installed={installed}
+                newAgentLabel="New agent in this project"
+                placeholder="Ask an agent about this file's changes…"
+                onSend={(target, query) =>
+                  sendTicketToAgent(target, fileDiffContext(tab.file.path, query))
+                }
+                onStart={(agentId, query) => {
+                  const dir = repoForFile(tab.file.path);
+                  if (!dir) return onNotice("No git repository in this project.");
+                  startAgentInDir(
+                    dir,
+                    agentId,
+                    fileDiffContext(tab.file.path, query),
+                    tab.file.name,
+                  );
+                }}
+                onRunTask={(query) => {
+                  const dir = repoForFile(tab.file.path);
+                  if (!dir) return onNotice("No git repository in this project.");
+                  runAdhocTask(tab.file.name, fileDiffContext(tab.file.path, query), dir);
+                }}
+              />
+            }
+          />
+        );
+    }
+  }
+
   const mainArea = (
     <div className="project-main">
       {tabMenu.menu && (
@@ -2701,6 +3372,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       )}
       <PaneBar
         tabGroups={tabGroups}
+        groupDrags={groupDrags}
         stripTabs={stripTabs}
         activeTabId={activeTabId}
         flashTabId={flashTabId}
@@ -2758,6 +3430,15 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               key={tab.id}
               className="fill term-host"
               style={{ display: tab.id === activeTabId && visible ? "block" : "none" }}
+              // Selected text is a task waiting to be written down — an error,
+              // a TODO the shell just printed, a command worth automating.
+              // Right-click offers to make one; without a selection the event
+              // passes through untouched.
+              onContextMenu={(e) => {
+                const sel = termHandles.current.get(tab.id)?.getSelection().trim();
+                if (!sel) return;
+                termMenu.open(e, [taskMenu(sel)]);
+              }}
             >
               <TermPorts ptyId={tab.ptyId} stats={stats} onPreview={openPreview} />
               <Term
@@ -2775,8 +3456,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 // sitting at a prompt looking "running" forever — and it's
                 // correct on cmd.exe / PowerShell, not just POSIX. A non-run tab
                 // types its command (e.g. launching an agent CLI).
-                initialCommand={tab.run ? undefined : tab.command}
-                runCommand={tab.run && tab.command ? tab.command : undefined}
+                //
+                // Micro-tasks go the runCommand way too, for a different
+                // reason: their brief is a whole paragraph on one line, and a
+                // command that long typed at a shell that is still starting
+                // loses its Enter to zsh's line editor — the task sat unrun at
+                // a prompt. As an argv it never touches the tty.
+                initialCommand={tab.run || tab.micro ? undefined : tab.command}
+                runCommand={(tab.run || tab.micro) && tab.command ? tab.command : undefined}
                 onSpawned={(ptyId) =>
                   // A freshly spawned pty is alive by definition, so clear any
                   // stale exited/failed state. Restart kills the old pty and
@@ -2816,221 +3503,21 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               />
             </div>
           ))}
-        {/* A non-terminal view throwing (a PR diff, an editor, a ticket) must
-            not take the app — or the running terminals beside it — down. Keyed
-            by tab so switching away from a crashed view clears the fallback.
-            Terminals stay outside: they're display-toggled, not unmounted, and
-            catching here would kill their PTYs. */}
-        <ErrorBoundary key={activeTab?.id ?? "none"} label="this tab">
-        {activeTab?.type === "branch" && (
-          <BranchView
-            relay={relay}
-            key={activeTab.id}
-            repo={activeTab.repo}
-            branch={activeTab.branch}
-            onOpenCommit={openCommit}
-            onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
-            onNotice={onNotice}
-          />
-        )}
-        {activeTab?.type === "agent" && (
-          <AgentWorkspaceView
-            key={activeTab.id}
-            repo={activeTab.repo}
-            agent={activeTab.agent}
-            cwd={activeTab.cwd}
-            sessionId={activeTab.sessionId}
-            digest={activeTab.digest}
-            onOpenCommit={openCommit}
-            onOpenPr={openPr}
-            onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
-            onNotice={onNotice}
-            onMessageAgent={(text) =>
-              messageAgent({
-                sessionId: activeTab.sessionId,
-                agentId: activeTab.agent,
-                cwd: activeTab.cwd,
-                text,
-              })
-            }
-          />
-        )}
-        {activeTab?.type === "commit" && (
-          <CommitView
-            key={activeTab.id}
-            repo={activeTab.repo}
-            hash={activeTab.hash}
-            onNotice={onNotice}
-          />
-        )}
-        {activeTab?.type === "ticket" && (
-          <TicketView
-            key={activeTab.id}
-            ticket={activeTab.ticket}
-            source={activeTab.source}
-            worktree={ticketWorktree(activeTab.ticket, ticketWorktrees)}
-            agentTargets={agentTargets}
-          installed={installed}
-            onStartNew={(agentId) => void startTicketWork(activeTab.ticket, agentId)}
-            onSendToAgent={(target) =>
-              sendTicketToAgent(target, ticketContext(activeTab.ticket))
-            }
-          />
-        )}
-        {activeTab?.type === "pr" && (
-          <PrView
-            key={activeTab.id}
-            repo={activeTab.repo}
-            pr={activeTab.pr}
-            onNotice={onNotice}
-            relay={relay}
-            agentTargets={agentTargets}
-            installed={installed}
-            onStartReview={(agentId) => void startPrReview(activeTab.repo, activeTab.pr, agentId)}
-            onSendToAgent={(target) => sendTicketToAgent(target, prReviewContext(activeTab.pr))}
-            onStartResolve={(agentId) =>
-              void startPrConflictResolve(activeTab.repo, activeTab.pr, agentId)
-            }
-            onSendResolve={(target) => sendTicketToAgent(target, prConflictContext(activeTab.pr))}
-          />
-        )}
-        {activeTab?.type === "review" && (
-          <ReviewView
-            key={activeTab.id}
-            review={activeTab.review}
-            agentBar={
-              <AgentQueryBar
-                agentTargets={agentTargets}
-                installed={installed}
-                newAgentLabel="New agent in this project"
-                label="Send to agent"
-                placeholder="Ask an agent to review this…"
-                onSend={(target, query) =>
-                  void writeReviewPatch(activeTab.review).then((path) => {
-                    if (path) sendTicketToAgent(target, reviewContext(activeTab.review, path, query));
-                  })
-                }
-                onStart={(agentId, query) =>
-                  void writeReviewPatch(activeTab.review).then((path) => {
-                    const dir = componentsRef.current[0]?.path;
-                    if (!path || !dir) return;
-                    startAgentInDir(
-                      dir,
-                      agentId,
-                      reviewContext(activeTab.review, path, query),
-                      `Review ${activeTab.review.branch}`,
-                    );
-                  })
-                }
-              />
-            }
-          />
-        )}
-        {activeTab?.type === "preview" && (
-          <PreviewView
-            key={activeTab.id}
-            url={activeTab.url}
-            annotations={activeTab.annotations}
-            onPatch={(patch) => patchTabRaw(activeTab.id, patch as Partial<SubTab>)}
-            servers={previewServers}
-            agentTargets={agentTargets}
-            installed={installed}
-            onSendToAgent={sendTicketToAgent}
-            onStartNew={(agentId, text, cwd) => {
-              // The serving component's checkout when the page is linked to
-              // one; the first component only as a last resort.
-              const dir = cwd ?? componentsRef.current[0]?.path;
-              if (!dir) {
-                onNotice("No project directory to start the agent in.");
-                return;
-              }
-              startAgentInDir(dir, agentId, text, "Preview feedback");
-            }}
-            onNotice={onNotice}
-          />
-        )}
-        {activeTab?.type === "chat" && (
-          <ChatView
-            key={activeTab.id}
-            peer={activeTab.peer}
-            title={activeTab.name}
-            relay={relay}
-            onNotice={onNotice}
-          />
-        )}
-        {activeTab?.type === "collab" &&
-          (() => {
-            const session = relay.collab.get(activeTab.doc);
-            return session instanceof GuestSession ? (
-              <CollabView
-                key={activeTab.id}
-                session={session}
-                ownerName={activeTab.ownerName}
-                onNotice={onNotice}
-              />
-            ) : (
-              <div className="editor-empty">
-                <h2>{activeTab.name}</h2>
-                <p>This live session has ended.</p>
-              </div>
-            );
-          })()}
-        {activeTab?.type === "shared-project" && (
-          <SharedProjectView
-            key={activeTab.id}
-            name={activeTab.name}
-            ownerName={activeTab.ownerName}
-            paths={relay.collab.joinedProjects.get(activeTab.doc)?.paths ?? []}
-            onOpen={(relPath) => relay.collab.openProjectFile(activeTab.doc, relPath)}
-          />
-        )}
-        {activeTab?.type === "file" && (
-          <FileView
-            key={activeTab.id}
-            file={activeTab.file}
-            onCursor={
-              // Only a shared file broadcasts a caret; every other tab passes
-              // undefined and the subscription in MonacoEditor short-circuits.
-              sharedDocFor(activeTab.file.path)
-                ? (anchor, head) => sendOwnerCursor(activeTab.file.path, anchor, head)
-                : undefined
-            }
-            onSave={() => void saveFile(activeTab.file.path)}
-            onDirty={(dirty) => {
-              if (activeTab.file.dirty !== dirty) patchFile(activeTab.file.path, { dirty });
-            }}
-            onAcceptExternal={() => acceptExternal(activeTab.file.path)}
-            onKeepMine={() => keepMine(activeTab.file.path)}
-            onCloseDiff={() =>
-              patchFile(activeTab.file.path, { view: "source", diffOriginal: null })
-            }
-            diffAgentBar={
-              <AgentQueryBar
-                agentTargets={agentTargets}
-                installed={installed}
-                newAgentLabel="New agent in this project"
-                placeholder="Ask an agent about this file's changes…"
-                onSend={(target, query) =>
-                  sendTicketToAgent(
-                    target,
-                    fileDiffContext(activeTab.file.path, query),
-                  )
-                }
-                onStart={(agentId, query) => {
-                  const dir = repoForFile(activeTab.file.path);
-                  if (!dir) return onNotice("No git repository in this project.");
-                  startAgentInDir(
-                    dir,
-                    agentId,
-                    fileDiffContext(activeTab.file.path, query),
-                    activeTab.file.name,
-                  );
-                }}
-              />
-            }
-          />
-        )}
-        </ErrorBoundary>
+        {/* Doc tabs, mounted for as long as they're open and shown by display
+            like the terminals above — see docTabView. Each pane carries its own
+            boundary: a view throwing (a PR diff, an editor, a ticket) must not
+            take the app — or the running terminals beside it — down, and only
+            the offending tab shows the fallback ("Reload this panel" clears it).
+            Terminals stay outside: catching around them would kill their PTYs. */}
+        {docTabs.map((tab) => (
+          <div
+            key={tab.id}
+            className="fill doc-host"
+            style={{ display: tab.id === activeTabId && visible ? "block" : "none" }}
+          >
+            <ErrorBoundary label="this tab">{paneFor(tab)}</ErrorBoundary>
+          </div>
+        ))}
         {tabs.length === 0 && (
           <div className="editor-empty">
             <h2>{project.name}</h2>
@@ -3319,6 +3806,29 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                         })
                       }
                       onClose={() => setWsDrawerOpen(false)}
+                      onRaisePrTask={
+                        agentTermWs.repo
+                          ? (branch, worktree) =>
+                              startMicroTask(
+                                raisePrTask,
+                                { repo: agentTermWs.repo as string, branch, worktree },
+                                "",
+                              )
+                          : undefined
+                      }
+                      onReviewPrTask={
+                        agentTermWs.repo
+                          ? (pr) =>
+                              startMicroTask(
+                                reviewPrTask,
+                                { repo: agentTermWs.repo as string, pr },
+                                "",
+                              )
+                          : undefined
+                      }
+                      onRunSavedTask={(task, dir) =>
+                        startMicroTask(customTaskDef(task), { dir }, "")
+                      }
                     />
                   )}
                 </div>
@@ -3329,6 +3839,42 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       </div>
     </div>
   );
+
+  // ---------- side panels ----------
+  // The rail has the same problem the doc tabs had: a panel unmounted the
+  // moment you picked another icon, so coming back collapsed the file tree you
+  // had expanded, threw away a commit message you had half-typed, and refetched
+  // the ticket list. They stay mounted now, and are display-toggled — but only
+  // from the first time each is opened, so a project never pays for a panel you
+  // never look at (trackers talks to GitHub/Jira on mount).
+  //
+  // `display: contents` rather than block: the panels are flex children of
+  // .sidebar and size themselves with flex, so the wrapper has to disappear
+  // from the layout rather than become a box in it.
+  //
+  // Inactive panels reuse their last element for the same reason doc panes do —
+  // a hidden panel has nothing to say. It still updates itself if its own state
+  // changes (a file watcher firing, a fetch landing); the bailout only skips
+  // re-rendering it from here. What it must NOT do is keep polling while nobody
+  // is looking, so the two panels that poll take a `visible` prop.
+  const [sideSeen, setSideSeen] = useState<SideTab[]>([sideTab]);
+  useEffect(() => {
+    setSideSeen((prev) => (prev.includes(sideTab) ? prev : [...prev, sideTab]));
+  }, [sideTab]);
+  const sidePanes = useRef(new Map<SideTab, { active: boolean; el: ReactNode }>());
+  const sidePane = (key: SideTab, build: () => ReactNode) => {
+    if (!sideSeen.includes(key)) return null;
+    const active = sideTab === key;
+    const cached = sidePanes.current.get(key);
+    // Rebuilt while in front, and once more on the way out — that last build is
+    // what hands a polling panel `visible: false`. After that it sits still.
+    if (cached && !active && !cached.active) {
+      return <div style={{ display: "none" }}>{cached.el}</div>;
+    }
+    const el = build();
+    sidePanes.current.set(key, { active, el });
+    return <div style={{ display: active ? "contents" : "none" }}>{el}</div>;
+  };
 
   const sidePanel = (
     <div className="sidebar">
@@ -3371,7 +3917,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           </div>
         </div>
       )}
-      {sideTab === "files" && (
+      {sidePane("files", () => (
         <div
           className="components-panel"
           // The empty area below the file list still belongs to the last
@@ -3531,15 +4077,17 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                     onOpenFile={(p) => void openFile(p)}
                     onNotice={onNotice}
                     hideRootHeader
+                    taskMenuFor={(p) => taskMenu(`In \`${p}\`: `)}
                   />
                 </>
               )}
             </div>
           ))}
         </div>
-      )}
-      {sideTab === "git" && (
+      ))}
+      {sidePane("git", () => (
         <GitPanel
+          visible={sideTab === "git" && visible}
           components={project.components.map((c) => ({ label: c.label, path: c.path }))}
           activeWorktree={worktreeEnv?.path ?? null}
           onUseWorktree={(repo, path, branch) => {
@@ -3553,9 +4101,32 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onOpenBranch={openBranch}
           onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
           onNotice={onNotice}
+          branchTaskMenu={(repo, branch, worktree, merged) =>
+            taskMenu(
+              `On branch ${branch}: `,
+              merged
+                ? undefined
+                : [
+                    {
+                      label: `Raise PR for ${branch}`,
+                      icon: raisePrTask.icon,
+                      run: () => startMicroTask(raisePrTask, { repo, branch, worktree }, ""),
+                    },
+                  ],
+            )
+          }
+          prTaskMenu={(repo, pr) =>
+            taskMenu(`About PR #${pr.number} "${pr.title}" (${pr.url}): `, [
+              {
+                label: `Review PR #${pr.number}`,
+                icon: reviewPrTask.icon,
+                run: () => startMicroTask(reviewPrTask, { repo, pr }, ""),
+              },
+            ])
+          }
         />
-      )}
-      {sideTab === "changes" && (
+      ))}
+      {sidePane("changes", () => (
         <ChangesPanel
           groups={changeGroups}
           loading={changesLoading}
@@ -3583,11 +4154,16 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 if (!dir) return onNotice("No git repository in this project.");
                 startAgentInDir(dir, agentId, sessionChangesContext(changeContextGroups(), query), "Changes");
               }}
+              onRunTask={(query) => {
+                const dir = changeGroups[0]?.repo ?? componentsRef.current[0]?.path;
+                if (!dir) return onNotice("No git repository in this project.");
+                runAdhocTask("Changes", sessionChangesContext(changeContextGroups(), query), dir);
+              }}
             />
           }
         />
-      )}
-      {sideTab === "trackers" && (
+      ))}
+      {sidePane("trackers", () => (
         <TicketsPanel
           components={project.components.map((c) => ({ label: c.label, path: c.path }))}
           agentTargets={agentTargets}
@@ -3601,17 +4177,30 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             );
           }}
         />
-      )}
-      {sideTab === "team" && (
+      ))}
+      {sidePane("team", () => (
         <TeamPanel
           relay={relay}
           onOpenChat={openChat}
           onOpenInboxItem={(item) => void openInboxItem(item)}
           onNotice={onNotice}
         />
-      )}
-      {sideTab === "agents" && (
+      ))}
+      {sidePane("tasks", () => (
+        <TasksPanel
+          components={components.map((c) => ({ label: c.label, path: c.path }))}
+          running={runningMicro}
+          seed={taskSeed}
+          onFocus={setActiveTabId}
+          onStop={closeTab}
+          onRunCustom={(task: CustomMicroTask, dir: string, query: string) =>
+            startMicroTask(customTaskDef(task), { dir }, query)
+          }
+        />
+      ))}
+      {sidePane("agents", () => (
         <AgentsPanel
+          visible={sideTab === "agents" && visible}
           stats={projectStats}
           hookPath={hookPath}
           pending={pending}
@@ -3632,7 +4221,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           }
           onNotice={onNotice}
         />
-      )}
+      ))}
     </div>
   );
 
@@ -3646,6 +4235,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             sideTab={sideTab}
             collapsed={collapsed}
             changeBadge={changeCount + collabEditedCount}
+            tasksBadge={runningMicro.length}
             pending={pending}
             urgentPending={urgentPending}
             teamBadge={teamBadge}

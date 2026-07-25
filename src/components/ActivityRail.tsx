@@ -7,11 +7,12 @@ import {
   IssueIcon,
   SettingsIcon,
   SidebarIcon,
+  TasksIcon,
   TeamIcon,
 } from "./icons";
 import type { PendingItem } from "../notifications";
 
-type SideTab = "files" | "changes" | "git" | "trackers" | "agents" | "team";
+type SideTab = "files" | "changes" | "git" | "trackers" | "tasks" | "agents" | "team";
 
 const RAIL_TABS: {
   key: SideTab;
@@ -22,6 +23,7 @@ const RAIL_TABS: {
   { key: "changes", Icon: DiffIcon, title: "Session changes" },
   { key: "git", Icon: GitBranchIcon, title: "Git — branches, commits, worktrees, PRs" },
   { key: "trackers", Icon: IssueIcon, title: "Issues — GitHub, Linear, …" },
+  { key: "tasks", Icon: TasksIcon, title: "Tasks — one-shot agent jobs" },
   { key: "agents", Icon: AgentsIcon, title: "Agents" },
   { key: "team", Icon: TeamIcon, title: "Team — relay, chat, notifications" },
 ];
@@ -30,6 +32,7 @@ interface ActivityRailProps {
   sideTab: SideTab;
   collapsed: boolean;
   changeBadge: number;
+  tasksBadge: number;
   pending: PendingItem[];
   urgentPending: PendingItem[];
   teamBadge: number;
@@ -43,6 +46,7 @@ function ActivityRailImpl({
   sideTab,
   collapsed,
   changeBadge,
+  tasksBadge,
   pending,
   urgentPending,
   teamBadge,
@@ -63,6 +67,9 @@ function ActivityRailImpl({
           <t.Icon size={22} />
           {t.key === "changes" && changeBadge > 0 && (
             <span className="rail-badge">{Math.min(changeBadge, 99)}</span>
+          )}
+          {t.key === "tasks" && tasksBadge > 0 && (
+            <span className="rail-badge">{Math.min(tasksBadge, 99)}</span>
           )}
           {t.key === "agents" && pending.length > 0 && (
             <span

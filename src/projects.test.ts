@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   AGENT_CLIS,
-  AGENT_PATTERN,
+  BIN_TO_AGENT,
+  PKG_TO_AGENT,
   restoreCommand,
   resumeSessionId,
   SHELL_PATTERN,
@@ -93,15 +94,40 @@ describe("updateCommand", () => {
   });
 });
 
-describe("AGENT_PATTERN", () => {
-  it("matches registered CLI binaries and known extras", () => {
-    expect(AGENT_PATTERN.test("claude")).toBe(true);
-    expect(AGENT_PATTERN.test("gemini")).toBe(true); // extra bin, not a launcher
-    expect(AGENT_PATTERN.test("droid")).toBe(true);
+describe("BIN_TO_AGENT", () => {
+  it("covers every registered CLI and the hand-run extras", () => {
+    for (const cli of AGENT_CLIS) expect(BIN_TO_AGENT[cli.bin]).toBe(cli.id);
+    expect(BIN_TO_AGENT.gemini).toBe("gemini"); // extra bin, not a launcher
+    expect(BIN_TO_AGENT.droid).toBe("droid");
   });
 
-  it("does not match an unrelated process name", () => {
-    expect(AGENT_PATTERN.test("vim")).toBe(false);
+  it("is exact — no prefixes, no substrings", () => {
+    // The failures this replaced: `startsWith("amp")` branded `ampere`, and a
+    // `\bomp\b` regex over paths branded anything under ~/.omp/.
+    expect(BIN_TO_AGENT.ampere).toBeUndefined();
+    expect(BIN_TO_AGENT["claude-utils"]).toBeUndefined();
+    expect(BIN_TO_AGENT.vim).toBeUndefined();
+    expect(BIN_TO_AGENT.python3).toBeUndefined();
+  });
+});
+
+describe("PKG_TO_AGENT", () => {
+  it("maps each declared package to its CLI", () => {
+    for (const cli of AGENT_CLIS) {
+      for (const pkg of cli.pkgs ?? []) expect(PKG_TO_AGENT[pkg]).toBe(cli.id);
+    }
+  });
+
+  it("names the package the install command installs", () => {
+    // A package identity that doesn't match what `install` puts on disk would
+    // silently identify nothing, so keep the two in step.
+    for (const cli of AGENT_CLIS) {
+      for (const pkg of cli.pkgs ?? []) {
+        const [kind, name] = [pkg.slice(0, pkg.indexOf(":")), pkg.slice(pkg.indexOf(":") + 1)];
+        expect(["npm", "brew", "py"]).toContain(kind);
+        if (kind === "npm") expect(cli.install).toContain(name);
+      }
+    }
   });
 });
 

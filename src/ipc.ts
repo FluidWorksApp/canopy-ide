@@ -93,6 +93,112 @@ export interface PtySpawned {
 export const onPtySpawned = (cb: (e: PtySpawned) => void): Promise<UnlistenFn> =>
   listen<PtySpawned>("pty:spawned", (event) => cb(event.payload));
 
+/** An action an agent requested through the MCP context bridge (start a run
+ *  command, open a preview). `route` is a path used to pick the target project;
+ *  the rest is action-specific. Handled the same way as pty:spawned — App
+ *  routes it to a project and hands it to that ProjectView. */
+export interface AgentAction {
+  kind:
+    | "start_server"
+    | "open_preview"
+    | "restart_server"
+    | "open_file"
+    | "show_diff"
+    | "notify"
+    | "job_done";
+  route: string;
+  dir?: string;
+  name?: string;
+  command?: string;
+  url?: string;
+  ptyId?: number;
+  path?: string;
+  line?: number;
+  text?: string;
+  level?: "info" | "success" | "warn" | "error";
+  /** job_done: how the micro-task ended and its one-line summary. */
+  status?: "done" | "blocked";
+  summary?: string;
+}
+export const onAgentAction = (cb: (a: AgentAction) => void): Promise<UnlistenFn> =>
+  listen<AgentAction>("agent:action", (event) => cb(event.payload));
+
+/** A browser-control op an agent sent through the MCP bridge (canopy_browser_*).
+ *  Request/response: the bridge holds the agent's HTTP request open under `id`
+ *  until the answer comes back via `browserResult`. Routed like AgentAction. */
+export interface AgentBrowserOp {
+  id: number;
+  op: "navigate" | "snapshot" | "click" | "type" | "point" | "eval" | "console" | "screenshot";
+  route: string;
+  url?: string | null;
+  action?: string | null;
+  ref?: number | null;
+  selector?: string | null;
+  text?: string | null;
+  /** point: the caption shown on the cursor while it rests on the element. */
+  label?: string | null;
+  submit?: boolean | null;
+  append?: boolean | null;
+  code?: string | null;
+  lines?: number | null;
+  clear?: boolean | null;
+  max?: number | null;
+}
+export const onAgentBrowser = (cb: (op: AgentBrowserOp) => void): Promise<UnlistenFn> =>
+  listen<AgentBrowserOp>("agent:browser", (event) => cb(event.payload));
+/** Answer a browser op: `data` (any JSON value) becomes the tool's result. */
+export const browserResult = (id: number, ok: boolean, data: unknown) =>
+  // Never rejects: a dropped answer would leave the agent's tool call hanging
+  // to its timeout with no trace of why, so failures are logged, not thrown.
+  invoke<void>("browser_result", { id, ok, data: JSON.stringify(data ?? null) }).catch((err) =>
+    console.warn("browser_result failed", id, err),
+  );
+
+/** An op only the running UI can answer: a language-server question, the
+ *  trackers it holds keys for, a question for the user. Same ticketing as
+ *  AgentBrowserOp — answer with `browserResult`. */
+export interface AgentUiOp {
+  id: number;
+  op: "diagnostics" | "references" | "definition" | "tickets" | "reviews" | "ask";
+  route: string;
+  path?: string | null;
+  line?: number | null;
+  column?: number | null;
+  symbol?: string | null;
+  question?: string | null;
+  options?: string[];
+}
+export const onAgentUi = (cb: (op: AgentUiOp) => void): Promise<UnlistenFn> =>
+  listen<AgentUiOp>("agent:ui", (event) => cb(event.payload));
+
+/** Which canopy_* tools are switched off (Settings → Agents), pushed to the
+ *  bridge so the sidecar can hide them from the agent entirely. */
+export const contextTools = (disabled: string[]) =>
+  invoke<void>("context_tools", { disabled }).catch(() => {});
+
+/** Advisory file claims agents have taken, for the Agents panel. */
+export interface AgentClaim {
+  paths: string[];
+  owner: string;
+  note: string | null;
+  at_ms: number;
+}
+export const contextClaims = () => invoke<AgentClaim[]>("context_claims");
+export const contextReleaseClaim = (owner: string) =>
+  invoke<void>("context_release_claim", { owner });
+export const onAgentClaims = (cb: () => void): Promise<UnlistenFn> =>
+  listen("agent:claims", () => cb());
+
+/** PNG (base64) of a rectangle of this window, via the webview's own snapshot
+ *  API — used to hand an agent a picture of the preview. */
+export const webviewSnapshot = (
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  maxWidth?: number,
+) => invoke<string>("webview_snapshot", { x, y, width, height, maxWidth });
+
 // ---------- Workspaces / FS ----------
 
 export interface DirEntry {
@@ -248,6 +354,21 @@ export interface ProcInfo {
   cpu: number;
   mem_bytes: number;
 }
+/** What a terminal is running, resolved from the process the pty has in the
+ *  foreground — evidence, not a verdict. `bin` is the invoked name with any
+ *  language runtime already seen through (`python train.py` is `train.py`, not
+ *  `Python`); `pkg` is the package that ships it (`npm:@anthropic-ai/claude-code`,
+ *  `brew:omp`, `py:aider`), which is what survives a renamed or wrapped binary;
+ *  `path` is the canonical executable, stable enough to key a learned mapping
+ *  on. Turning this into an agent id is agentIdentity.ts's job. */
+export interface AgentHint {
+  bin: string;
+  pkg: string | null;
+  path: string | null;
+  /** The foreground app holds the tty in raw mode — something interactive is
+   *  in control, not a script printing lines. */
+  interactive: boolean;
+}
 export interface SessionStats {
   id: number;
   title: string;
@@ -257,6 +378,8 @@ export interface SessionStats {
   procs: ProcInfo[];
   /** TCP ports anything in this session is listening on, ascending. */
   ports: number[];
+  /** Absent when the terminal is an idle shell. */
+  agent_hint: AgentHint | null;
 }
 export const onPtyStats = (cb: (stats: SessionStats[]) => void): Promise<UnlistenFn> =>
   listen<SessionStats[]>("pty:stats", (event) => cb(event.payload));

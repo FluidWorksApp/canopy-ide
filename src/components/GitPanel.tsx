@@ -28,6 +28,10 @@ const PROTECTED = new Set([
 ]);
 
 interface GitPanelProps {
+  /** False while another side tab is in front. The panel stays mounted (so
+   *  your section, commit message draft and scroll survive a switch away) but
+   *  stops polling git — nobody is looking. */
+  visible: boolean;
   components: { label: string; path: string }[];
   /** Open a file's diff in the main area. */
   onOpenDiff: (repo: string, file: ipc.FileChange) => void;
@@ -47,6 +51,18 @@ interface GitPanelProps {
   /** Make a worktree the project's working environment. */
   onUseWorktree: (repo: string, path: string, branch: string) => void;
   onNotice: Notify;
+  /** One-shot agent jobs off the context menus: push a branch and open its PR;
+   *  review a PR and post the findings. The agent reports and its terminal
+   *  closes itself. */
+  /** The "Tasks ▸" submenu for a right-clicked branch or PR, built by the
+   *  owner (it knows the task registry). Omitted where tasks don't apply. */
+  branchTaskMenu?: (
+    repo: string,
+    branch: string,
+    worktree: string | null,
+    merged: boolean,
+  ) => MenuItem;
+  prTaskMenu?: (repo: string, pr: ipc.PrInfo) => MenuItem;
 }
 
 type Section = "changes" | "branches" | "worktrees" | "loose" | "history" | "prs";
@@ -71,6 +87,7 @@ const absTime = (iso?: string) => {
 };
 
 export function GitPanel({
+  visible,
   components,
   onOpenDiff,
   onOpenPr,
@@ -80,6 +97,8 @@ export function GitPanel({
   activeWorktree,
   onUseWorktree,
   onNotice,
+  branchTaskMenu,
+  prTaskMenu,
 }: GitPanelProps) {
   const [repos, setRepos] = useState<ipc.RepoInfo[]>([]);
   const [repo, setRepo] = useState<string | null>(null);
@@ -124,20 +143,19 @@ export function GitPanel({
     ]);
   }, [repo]);
 
+  // Keep status live against edits made by agents in the terminals — while the
+  // panel is actually in front. Coming back re-runs this, so what you see is
+  // never the state from whenever you last looked.
   useEffect(() => {
+    if (!repo || !visible) return;
     void refresh();
-  }, [refresh]);
-
-  // Keep status live against edits made by agents in the terminals.
-  useEffect(() => {
-    if (!repo) return;
     const sub = ipc.onFsChange(() => void refresh());
     const poll = setInterval(() => void refresh(), 5000);
     return () => {
       clearInterval(poll);
       void sub.then((fn) => fn());
     };
-  }, [repo, refresh]);
+  }, [repo, refresh, visible]);
 
   const loadPrs = useCallback(async () => {
     if (!repo || !hasGh) return;
@@ -267,6 +285,9 @@ export function GitPanel({
         onClick: () => repo && void act("checkout", () => ipc.gitCheckout(repo, b.name, false)),
       });
     }
+    if (branchTaskMenu && repo) {
+      items.push(branchTaskMenu(repo, b.name, null, PROTECTED.has(b.name)));
+    }
 
     // The branch you're on and protected branches never offer a delete — say why
     // rather than dangling a menu item that would always be refused.
@@ -382,6 +403,7 @@ export function GitPanel({
     { label: "Open pull request", onClick: () => repo && onOpenPr(repo, pr) },
     { label: "View on GitHub", onClick: () => openExternal(pr.url) },
     { label: "Copy link", onClick: () => void navigator.clipboard.writeText(pr.url) },
+    ...(prTaskMenu && repo ? [prTaskMenu(repo, pr)] : []),
     { separator: true },
     {
       label: "Check out this PR",
@@ -889,6 +911,11 @@ export function GitPanel({
           onUseWorktree={onUseWorktree}
           onNotice={onNotice}
           onConfirm={(text, run) => setConfirm({ text, run })}
+          taskMenuFor={
+            branchTaskMenu && repo
+              ? (b) => branchTaskMenu(repo, b.branch, b.worktree, b.merged)
+              : undefined
+          }
         />
       )}
 

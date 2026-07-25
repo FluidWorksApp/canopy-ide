@@ -14,6 +14,7 @@ import {
 } from "./icons";
 import type { AgentCli } from "../projects";
 import { AGENT_CLIS } from "../projects";
+import type { TabDrag } from "../tabDrag";
 import type {
   SubTab,
   TermSubTab,
@@ -148,6 +149,8 @@ export interface PaneBarProps {
   collabPaths: Set<string>;
   isAgentTab: (t: SubTab) => t is TermSubTab;
   tabState: (t: TermSubTab) => "working" | "waiting" | "idle" | "ended";
+  /** Drag-to-reorder, one per tab group (agents, docs) — index-aligned with tabGroups. */
+  groupDrags: TabDrag[];
   // rail data
   shellChips: RailChip[];
   runChips: RailChip[];
@@ -198,7 +201,7 @@ export interface PaneBarProps {
 // ── PaneBar ───────────────────────────────────────────────────────────────────
 
 function PaneBarImpl({
-  tabGroups, stripTabs, activeTabId, flashTabId, renamingTabId, renameDraft,
+  tabGroups, groupDrags, stripTabs, activeTabId, flashTabId, renamingTabId, renameDraft,
   collabPaths, isAgentTab, tabState,
   shellChips, runChips, runSummary, shellMenuOpen, setShellMenuOpen,
   runMenuOpen, setRunMenuOpen, activeSection,
@@ -259,7 +262,8 @@ function PaneBarImpl({
                     tab.type === "chat" && tab.unread ? "tab-unread" : ""
                   } ${tab.type !== "terminal" ? "tab-doc" : isAgentTab(tab) ? "tab-agent" : ""} ${
                     tab.id === flashTabId ? "tab-flash" : ""
-                  }`}
+                  } ${tab.id === groupDrags[gi].dragId ? "tab-dragging" : ""}`}
+                  {...groupDrags[gi].itemProps(tab.id)}
                   onClick={(e) => onSelectTab(tab.id, e.detail)}
                   onContextMenu={(e) => onTabContextMenu(e, tab)}
                   title={tabTitle(tab)}

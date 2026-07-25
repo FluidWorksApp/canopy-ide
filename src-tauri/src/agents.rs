@@ -3,8 +3,9 @@
 //! One global thread polls sysinfo every 2s while sessions exist and emits
 //! `pty:stats` with per-session process trees (CPU %, memory). The frontend uses
 //! this for two things: the runaway-process guard (threshold warnings + kill) and
-//! the Agents panel (detecting agent CLIs like claude/codex/aider running inside
-//! terminals). Also hosts the file-based agent hook bridge.
+//! the Agents panel, which needs to know what each terminal is running — one
+//! candidate per session, identified in agentid.rs rather than guessed from the
+//! names in its process tree. Also hosts the file-based agent hook bridge.
 
 #[cfg(windows)]
 use crate::winproc::NoConsoleWindow;
@@ -16,6 +17,7 @@ use std::time::Duration;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::agentid::AgentHint;
 use crate::pty::PtyManager;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -42,6 +44,19 @@ pub struct AppStats {
     pub procs: u32,
 }
 
+/// A live terminal as the monitor sees it before it walks any processes.
+struct SessionMeta {
+    id: u32,
+    /// The process we spawned the terminal with — usually the shell.
+    root: Option<u32>,
+    title: String,
+    cwd: String,
+    /// Process group the pty currently has in the foreground.
+    foreground: Option<u32>,
+    /// The foreground app has the tty in raw mode.
+    interactive: bool,
+}
+
 #[derive(Serialize, Clone)]
 pub struct SessionStats {
     pub id: u32,
@@ -56,7 +71,75 @@ pub struct SessionStats {
     /// "there is a dev server in here, on 5173" without you opening the tab and
     /// reading scrollback. Empty unless something is actually listening.
     pub ports: Vec<u16>,
+    /// What this terminal is running, when it is running anything: the
+    /// evidence the frontend needs to name the session, resolved from the
+    /// foreground process's executable. See agentid.rs — in particular, this
+    /// is deliberately evidence and not a verdict.
+    pub agent_hint: Option<AgentHint>,
 }
+
+/// The one process worth identifying in a terminal.
+///
+/// The foreground process group is what the terminal is running, but the leader
+/// can be a tool the agent shelled out to (a pager, `git`, a language server) —
+/// so climb from it to the direct child of the session's shell. That child is
+/// the thing the user launched, and it stays the answer for as long as it lives,
+/// whatever it spawns underneath.
+fn candidate_pid(
+    sys: &System,
+    root: u32,
+    foreground: Option<u32>,
+    children: &HashMap<u32, Vec<u32>>,
+) -> Option<u32> {
+    let name_of = |pid: u32| {
+        sys.process(Pid::from_u32(pid))
+            .map(|p| p.name().to_string_lossy().to_string())
+            .unwrap_or_default()
+    };
+    let parent_of = |pid: u32| {
+        sys.process(Pid::from_u32(pid))
+            .and_then(|p| p.parent())
+            .map(|p| p.as_u32())
+    };
+    // A terminal Canopy launched the CLI in directly (or that the user exec'd
+    // over) has no shell to be a child of — the session root is the program.
+    let root_is_shell = crate::agentid::is_shell(&name_of(root));
+    if let Some(fg) = foreground {
+        if fg == root {
+            // The shell itself holds the terminal: it is sitting at its prompt.
+            return (!root_is_shell).then_some(root);
+        }
+        let mut pid = fg;
+        // Bounded: a corrupt parent chain must not spin the monitor thread.
+        for _ in 0..64 {
+            match parent_of(pid) {
+                Some(parent) if parent == root => return Some(pid),
+                Some(parent) => pid = parent,
+                None => break,
+            }
+        }
+    }
+    // No foreground group to ask (Windows, or a pty that has gone away). The
+    // only non-shell child of the session is the same answer whenever a
+    // terminal is running exactly one thing, which is the case that matters.
+    if !root_is_shell {
+        return Some(root);
+    }
+    let mut kids = children
+        .get(&root)
+        .into_iter()
+        .flatten()
+        .copied()
+        .filter(|pid| !crate::agentid::is_shell(&name_of(*pid)));
+    let only = kids.next()?;
+    kids.next().is_none().then_some(only)
+}
+
+/// The most recent `pty:stats` reading, kept so the context bridge can serve
+/// live CPU/memory to agents (canopy_resources) without re-deriving it — the
+/// monitor loop already pays for the sysinfo walk once per tick.
+#[derive(Default)]
+pub struct StatsCache(pub std::sync::Mutex<Vec<SessionStats>>);
 
 static MONITOR_STARTED: AtomicBool = AtomicBool::new(false);
 
@@ -125,18 +208,33 @@ pub fn start_monitor(app: AppHandle) {
             let mut sys = System::new();
             let mut tick: u64 = 0;
             let mut last_ports: HashMap<u32, Vec<u16>> = HashMap::new();
+            // Lives across ticks: identification is filesystem work, and the
+            // answer for a given binary only changes when it is reinstalled.
+            let mut resolver = crate::agentid::Resolver::default();
             loop {
                 thread::sleep(POLL_INTERVAL);
                 tick = tick.wrapping_add(1);
                 let manager = app.state::<PtyManager>();
-                let sessions: Vec<(u32, Option<u32>, String, String)> = {
+                // Clone the handles out, then ask each pty what it has in the
+                // foreground: that reads the pty's own state, and doing it
+                // while holding the session map would block every spawn and
+                // close for the duration.
+                let live: Vec<std::sync::Arc<crate::pty::Session>> = {
                     let map = manager.sessions();
                     let guard = map.lock().unwrap();
-                    guard
-                        .values()
-                        .map(|s| (s.id, s.pid, s.title.lock().unwrap().clone(), s.cwd.clone()))
-                        .collect()
+                    guard.values().cloned().collect()
                 };
+                let sessions: Vec<SessionMeta> = live
+                    .iter()
+                    .map(|s| SessionMeta {
+                        id: s.id,
+                        root: s.pid,
+                        title: s.title.lock().unwrap().clone(),
+                        cwd: s.cwd.clone(),
+                        foreground: s.foreground_pid(),
+                        interactive: s.raw_mode(),
+                    })
+                    .collect();
                 // With no terminals there is nothing hot to watch — only the
                 // app-footprint number in the status bar, which nobody needs at
                 // 2s resolution. Skip two of every three ticks entirely.
@@ -146,16 +244,19 @@ pub fn start_monitor(app: AppHandle) {
                 // Refresh only what the monitor actually reads. The default
                 // full refresh re-fetches every process's cmdline, exe path,
                 // environment and cwd — each a sysctl/proc read, for every
-                // process on the machine, every tick. cmd is the one non-cheap
-                // field we use (agent detection / restore), and it never
-                // changes after exec — fetch it once per process and keep it.
+                // process on the machine, every tick. cmd and exe are the
+                // non-cheap fields we use (identification / restore), and
+                // neither changes after exec — fetch once per process and keep.
+                // On macOS exe costs nothing on top of cmd: both come out of
+                // the same KERN_PROCARGS2 read that already fills in the name.
                 sys.refresh_processes_specifics(
                     ProcessesToUpdate::All,
                     true,
                     ProcessRefreshKind::nothing()
                         .with_cpu()
                         .with_memory()
-                        .with_cmd(UpdateKind::OnlyIfNotSet),
+                        .with_cmd(UpdateKind::OnlyIfNotSet)
+                        .with_exe(UpdateKind::OnlyIfNotSet),
                 );
 
                 // parent pid -> child pids
@@ -209,8 +310,34 @@ pub fn start_monitor(app: AppHandle) {
                 }
 
                 let mut stats: Vec<SessionStats> = Vec::new();
-                for (id, root_pid, title, cwd) in sessions {
-                    let Some(root) = root_pid else { continue };
+                for meta in sessions {
+                    let SessionMeta {
+                        id,
+                        root,
+                        title,
+                        cwd,
+                        foreground,
+                        interactive,
+                    } = meta;
+                    let Some(root) = root else { continue };
+                    // What this terminal is running, identified once from the
+                    // foreground process rather than guessed from every name in
+                    // the tree. None means an idle shell — or a program we can
+                    // see but cannot name, which the frontend renders as itself.
+                    let agent_hint = candidate_pid(&sys, root, foreground, &children)
+                        .and_then(|pid| {
+                            let p = sys.process(Pid::from_u32(pid))?;
+                            let argv: Vec<String> = p
+                                .cmd()
+                                .iter()
+                                .map(|c| c.to_string_lossy().to_string())
+                                .collect();
+                            resolver.hint(&argv, p.exe(), std::path::Path::new(&cwd))
+                        })
+                        .map(|hint| AgentHint {
+                            interactive,
+                            ..hint
+                        });
                     let mut procs: Vec<ProcInfo> = Vec::new();
                     let mut queue = vec![root];
                     while let Some(pid) = queue.pop() {
@@ -241,6 +368,7 @@ pub fn start_monitor(app: AppHandle) {
                         total_mem_bytes: procs.iter().map(|p| p.mem_bytes).sum(),
                         procs,
                         ports: Vec::new(),
+                        agent_hint,
                     });
                 }
 
@@ -278,6 +406,9 @@ pub fn start_monitor(app: AppHandle) {
                             s.ports = p.clone();
                         }
                     }
+                }
+                if let Some(cache) = app.try_state::<StatsCache>() {
+                    *cache.0.lock().unwrap() = stats.clone();
                 }
                 let _ = app.emit("pty:stats", &stats);
             }
@@ -2169,6 +2300,90 @@ pub async fn kill_process(pid: u32) -> Result<(), String> {
 mod tests {
     use super::claude_bucket;
     use super::first_version_token;
+
+    /// The whole point of the rewrite, against a real pty: the terminal's
+    /// foreground program is the candidate — not the shell that is idling, and
+    /// not a grandchild the program spawned.
+    #[cfg(unix)]
+    #[test]
+    fn the_foreground_program_is_the_candidate() {
+        use super::{
+            candidate_pid, HashMap, Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind,
+        };
+        use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+        use std::io::{Read, Write};
+        use std::time::{Duration, Instant};
+
+        let pty = native_pty_system().openpty(PtySize::default()).unwrap();
+        // Interactive, so the shell turns on job control and hands the terminal
+        // to what it runs — which is what tcgetpgrp reports.
+        let mut cmd = CommandBuilder::new("bash");
+        cmd.arg("-i");
+        cmd.env("PS1", "$ ");
+        let mut child = pty.slave.spawn_command(cmd).unwrap();
+        drop(pty.slave);
+        let root = child.process_id().unwrap();
+        let mut writer = pty.master.take_writer().unwrap();
+        // Drain the master: a full buffer would block the shell.
+        let mut reader = pty.master.try_clone_reader().unwrap();
+        std::thread::spawn(move || {
+            let mut buf = [0_u8; 4096];
+            while reader.read(&mut buf).map(|n| n > 0).unwrap_or(false) {}
+        });
+
+        let scan = |sys: &mut System| {
+            sys.refresh_processes_specifics(
+                ProcessesToUpdate::All,
+                true,
+                ProcessRefreshKind::nothing().with_cmd(UpdateKind::OnlyIfNotSet),
+            );
+            let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+            for (pid, proc_) in sys.processes() {
+                if let Some(parent) = proc_.parent() {
+                    children
+                        .entry(parent.as_u32())
+                        .or_default()
+                        .push(pid.as_u32());
+                }
+            }
+            children
+        };
+        let settle = |pty: &Box<dyn portable_pty::MasterPty + Send>, want_root: bool| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let fg = pty.process_group_leader().map(|p| p as u32);
+                if (fg == Some(root)) == want_root && fg.is_some() {
+                    return fg;
+                }
+                assert!(Instant::now() < deadline, "pty foreground never settled");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+
+        let mut sys = System::new();
+        // Idle at its prompt: the shell holds its own terminal, and a shell is
+        // not something to put in the Agents panel.
+        let fg = settle(&pty.master, true);
+        let children = scan(&mut sys);
+        assert_eq!(candidate_pid(&sys, root, fg, &children), None);
+
+        // Now run something that itself spawns a child. The candidate must be
+        // the program the shell started, never the grandchild underneath it —
+        // that is the failure mode where an MCP server or a `git` named the row.
+        writeln!(writer, "bash -c 'sleep 30 & wait' ").unwrap();
+        writer.flush().unwrap();
+        let fg = settle(&pty.master, false);
+        let children = scan(&mut sys);
+        let candidate = candidate_pid(&sys, root, fg, &children).expect("a foreground program");
+        assert_eq!(
+            sys.process(Pid::from_u32(candidate))
+                .and_then(|p| p.parent())
+                .map(|p| p.as_u32()),
+            Some(root),
+            "the candidate must be the shell's own child"
+        );
+        let _ = child.kill();
+    }
 
     /// Real `--version` output shapes from the registered CLIs, plus the
     /// noise cases: a bare CLI name has no version, and a prerelease suffix

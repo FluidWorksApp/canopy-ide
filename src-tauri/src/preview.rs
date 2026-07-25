@@ -30,17 +30,26 @@ const PICKER_PATH: &str = "/__canopy__/picker.js";
 /// Request bodies are buffered to forward; cap so a runaway upload can't OOM.
 const MAX_BODY: usize = 64 * 1024 * 1024;
 
+/// One proxied request, as the canopy_browser_network tool reports it.
+type NetLog = Arc<Mutex<std::collections::VecDeque<serde_json::Value>>>;
+/// Entries kept per origin; old ones roll off.
+const NET_LOG_CAP: usize = 300;
+
 struct ProxyCtx {
     /// Target origin, e.g. `http://localhost:5173` — scheme + authority only.
     origin: String,
     /// Just the authority (`localhost:5173`), for Host headers and TCP dials.
     authority: String,
     client: reqwest::Client,
+    /// Rolling log of proxied requests — the proxy sees every request the page
+    /// makes, so agents get a network tab without instrumenting the page.
+    log: NetLog,
 }
 
 struct RunningProxy {
     port: u16,
     shutdown: tokio::sync::watch::Sender<bool>,
+    log: NetLog,
 }
 
 #[derive(Default)]
@@ -55,6 +64,37 @@ impl PreviewManager {
         for (_, p) in self.proxies.lock().unwrap().drain() {
             let _ = p.shutdown.send(true);
         }
+    }
+
+    /// The recent requests each running proxy forwarded, newest last. With an
+    /// origin, just that origin's log (None if it has no proxy); without, every
+    /// origin's. Serves the canopy_browser_network MCP tool.
+    pub fn network_log(&self, origin: Option<&str>, limit: usize) -> Option<serde_json::Value> {
+        let proxies = self.proxies.lock().unwrap();
+        let mut origins: Vec<(&String, &RunningProxy)> = match origin {
+            Some(o) => vec![proxies.get_key_value(o)?],
+            None => proxies.iter().collect(),
+        };
+        origins.sort_by(|a, b| a.0.cmp(b.0));
+        let out: Vec<serde_json::Value> = origins
+            .into_iter()
+            .map(|(origin, p)| {
+                let log = p.log.lock().unwrap();
+                let skip = log.len().saturating_sub(limit);
+                serde_json::json!({
+                    "origin": origin,
+                    "requests": log.iter().skip(skip).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        Some(serde_json::json!(out))
+    }
+
+    /// The origins that currently have a proxy running — for error messages.
+    pub fn origins(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.proxies.lock().unwrap().keys().cloned().collect();
+        v.sort();
+        v
     }
 }
 
@@ -98,10 +138,12 @@ pub async fn preview_start(
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| e.to_string())?;
+    let log: NetLog = Arc::default();
     let ctx = Arc::new(ProxyCtx {
         origin: origin.clone(),
         authority,
         client,
+        log: log.clone(),
     });
 
     let router = Router::new().fallback(proxy_handler).with_state(ctx);
@@ -138,6 +180,7 @@ pub async fn preview_start(
         RunningProxy {
             port,
             shutdown: sd_tx,
+            log,
         },
     );
     Ok(PreviewInfo { port, origin })
@@ -178,20 +221,75 @@ async fn proxy_handler(State(ctx): State<Arc<ProxyCtx>>, req: Request) -> Respon
             .body(Body::from(PICKER_JS))
             .unwrap();
     }
+    let method = req.method().to_string();
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_else(|| "/".into());
+    let started = std::time::Instant::now();
     if is_upgrade(req.headers()) {
-        return tunnel_upgrade(ctx, req).await.unwrap_or_else(|e| {
+        let resp = tunnel_upgrade(ctx.clone(), req).await.unwrap_or_else(|e| {
             plain(
                 StatusCode::BAD_GATEWAY,
                 format!("Canopy preview: websocket tunnel failed: {e}"),
             )
         });
+        record_request(&ctx, &method, &path, &resp, started, true);
+        return resp;
     }
-    forward_http(ctx, req).await.unwrap_or_else(|e| {
+    let resp = forward_http(ctx.clone(), req).await.unwrap_or_else(|e| {
         plain(
             StatusCode::BAD_GATEWAY,
             format!("Canopy preview: the server didn't answer: {e}\n\nIs it still running?"),
         )
-    })
+    });
+    record_request(&ctx, &method, &path, &resp, started, false);
+    resp
+}
+
+/// Append one request to the origin's rolling network log.
+fn record_request(
+    ctx: &ProxyCtx,
+    method: &str,
+    path: &str,
+    resp: &Response,
+    started: std::time::Instant,
+    websocket: bool,
+) {
+    let mut entry = serde_json::json!({
+        "ts": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+        "method": method,
+        "path": path,
+        "status": resp.status().as_u16(),
+        "ms": started.elapsed().as_millis() as u64,
+    });
+    if websocket {
+        entry["websocket"] = serde_json::json!(true);
+    }
+    if let Some(ct) = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+    {
+        entry["contentType"] = serde_json::json!(ct.split(';').next().unwrap_or(ct));
+    }
+    if let Some(len) = resp
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        entry["bytes"] = serde_json::json!(len);
+    }
+    let mut log = ctx.log.lock().unwrap();
+    log.push_back(entry);
+    while log.len() > NET_LOG_CAP {
+        log.pop_front();
+    }
 }
 
 fn plain(status: StatusCode, msg: String) -> Response {
@@ -270,13 +368,29 @@ async fn forward_http(ctx: Arc<ProxyCtx>, req: Request) -> Result<Response, Stri
         .map_err(|e| e.to_string())
 }
 
-/// Add the picker <script> to an HTML document — before </head> so it's ready
-/// early, else before </body>, else appended (fragment responses).
+/// Add the picker <script> to an HTML document — right after <head> opens, so
+/// its console capture is ahead of the app's own (deferred/module) scripts in
+/// the execution order; else before </head> / </body>, else appended (fragment
+/// responses).
 fn inject_picker(bytes: &[u8]) -> Vec<u8> {
     let tag = format!(r#"<script src="{PICKER_PATH}" defer></script>"#);
     let html = String::from_utf8_lossy(bytes);
     let lower = html.to_lowercase();
-    let insert_at = lower.find("</head>").or_else(|| lower.find("</body>"));
+    // After the `>` of the opening <head ...> tag, if there is one.
+    let head_open = lower.find("<head").and_then(|i| {
+        let close = lower[i..].find('>')?;
+        // Not </head> or <header>: the char after "<head" must end the tag or
+        // start an attribute list.
+        match lower.as_bytes().get(i + 5) {
+            Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r') => {
+                Some(i + close + 1)
+            }
+            _ => None,
+        }
+    });
+    let insert_at = head_open
+        .or_else(|| lower.find("</head>"))
+        .or_else(|| lower.find("</body>"));
     let mut out = String::with_capacity(html.len() + tag.len());
     match insert_at {
         Some(i) => {
@@ -393,16 +507,28 @@ mod tests {
     }
 
     #[test]
-    fn inject_prefers_head_then_body_then_appends() {
+    fn inject_prefers_head_start_then_body_then_appends() {
+        // At the top of <head>: the console hook must beat the app's scripts.
         let head = inject_picker(b"<html><head><title>t</title></head><body></body></html>");
         let head = String::from_utf8(head).unwrap();
         assert!(head.contains(&format!(
-            r#"<script src="{PICKER_PATH}" defer></script></head>"#
+            r#"<head><script src="{PICKER_PATH}" defer></script><title>"#
+        )));
+
+        let attrs = inject_picker(b"<html><head data-x=\"1\"><script>app()</script></head></html>");
+        let attrs = String::from_utf8(attrs).unwrap();
+        assert!(attrs.contains(&format!(
+            r#"<head data-x="1"><script src="{PICKER_PATH}" defer></script><script>app()"#
         )));
 
         let body = inject_picker(b"<html><body>hi</body></html>");
         let body = String::from_utf8(body).unwrap();
         assert!(body.contains(r#"defer></script></body>"#));
+
+        // <header> alone must not fool the head-open matcher.
+        let hdr = String::from_utf8(inject_picker(b"<header>x</header>")).unwrap();
+        assert!(hdr.starts_with("<header>x</header>"));
+        assert!(hdr.ends_with("</script>"));
 
         let frag = String::from_utf8(inject_picker(b"<div>x</div>")).unwrap();
         assert!(frag.ends_with("</script>"));
@@ -447,7 +573,9 @@ mod tests {
             origin: format!("http://127.0.0.1:{upstream_port}"),
             authority: format!("127.0.0.1:{upstream_port}"),
             client: reqwest::Client::new(),
+            log: NetLog::default(),
         });
+        let net_log = ctx.log.clone();
         let proxy = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
@@ -476,5 +604,14 @@ mod tests {
 
         let missing = client.get(format!("{base}/nope")).send().await.unwrap();
         assert_eq!(missing.status(), 404);
+
+        // Every proxied request landed in the network log; the picker's own
+        // script fetch did not.
+        let log = net_log.lock().unwrap();
+        let paths: Vec<&str> = log.iter().filter_map(|e| e["path"].as_str()).collect();
+        assert_eq!(paths, vec!["/", "/data", "/nope"]);
+        assert_eq!(log[1]["status"], 200);
+        assert_eq!(log[2]["status"], 404);
+        assert!(log[0]["ms"].is_u64());
     }
 }

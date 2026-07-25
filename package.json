@@ -4,7 +4,7 @@
   "workspaces": [
     "packages/*"
   ],
-  "version": "0.2.11",
+  "version": "0.2.14",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -18,7 +18,9 @@
     "tauri": "tauri",
     "build:hook": "node scripts/prepare-sidecar.mjs",
     "build:hook:release": "node scripts/prepare-sidecar.mjs --release",
-    "build:portal": "vite build --config portal/vite.config.ts"
+    "build:portal": "vite build --config portal/vite.config.ts",
+    "licenses": "node scripts/generate-third-party-notices.mjs",
+    "licenses:check": "node scripts/generate-third-party-notices.mjs --check"
   },
   "dependencies": {
     "@codingame/monaco-vscode-files-service-override": "~25.1.2",

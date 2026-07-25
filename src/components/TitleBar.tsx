@@ -1,6 +1,7 @@
 import { memo } from "react";
 import { CloseIcon } from "./icons";
 import type { Project } from "../projects";
+import type { TabDrag } from "../tabDrag";
 
 // macOS gets the frameless "Overlay" titlebar (set in tauri.conf.json), so our
 // TitleBar becomes the real window titlebar: it must reserve space for the
@@ -17,6 +18,8 @@ interface TitleBarProps {
   pendingCount: (p: Project) => number;
   /** True while a live collaboration session is active anywhere. */
   collabActive: boolean;
+  /** Drag-to-reorder for the project pills; order persists in the workspace. */
+  tabDrag: TabDrag;
   onSelectProject: (id: string) => void;
   onCloseProject: (id: string) => void;
   onStopCollab: () => void;
@@ -32,6 +35,7 @@ function TitleBarImpl({
   activeId,
   pendingCount,
   collabActive,
+  tabDrag,
   onSelectProject,
   onCloseProject,
   onStopCollab,
@@ -53,7 +57,10 @@ function TitleBarImpl({
         {openProjects.map((p) => (
           <div
             key={p.id}
-            className={`project-tab ${p.id === activeId ? "project-tab-active" : ""}`}
+            className={`project-tab ${p.id === activeId ? "project-tab-active" : ""} ${
+              p.id === tabDrag.dragId ? "tab-dragging" : ""
+            }`}
+            {...tabDrag.itemProps(p.id)}
             onClick={() => onSelectProject(p.id)}
             title={p.components.map((c) => c.path).join("\n")}
           >

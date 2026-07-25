@@ -1479,6 +1479,40 @@ body,
   padding: 4px;
 }
 
+/* A plain row in a .cli-menu popover — the launcher's teammate list, the task
+ * menu, the confirm buttons. Was referenced before it was styled, so those
+ * rows rendered as unpadded, unhoverable text. */
+.cli-menu-item {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: 4px;
+  text-align: left;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cli-menu-item:hover {
+  background: var(--bg-alt);
+}
+.cli-menu-item:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.cli-menu-item:disabled:hover {
+  background: transparent;
+}
+/* Section label inside a popover ("Saved tasks"), not a target. */
+.cli-menu-label {
+  padding: 6px 10px 2px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+
 .cli-item {
   display: flex;
   align-items: center;
@@ -2114,6 +2148,22 @@ body,
 
 .tab-exited {
   opacity: 0.5;
+}
+
+/* Drag to reorder (project tabs and the strip alike). The tab in hand fades and
+   stops taking pointer hits, both to read as "in flight" and so the strip
+   underneath can be hit-tested for the tab it's passing over. */
+.tab-dragging {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* While a tab is in flight the whole window says so, and nothing the pointer
+   sweeps across starts selecting text. */
+body.dragging-tab,
+body.dragging-tab * {
+  cursor: grabbing !important;
+  user-select: none !important;
 }
 
 /* Agents first-class in the strip: groups render agents | shells | docs, a
@@ -3269,6 +3319,85 @@ body,
   .agent-state-dot.st-working {
     animation: none;
   }
+}
+
+/* ---------- tasks panel (micro-tasks) ---------- */
+
+.task-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+.task-row:hover {
+  background: var(--hover, rgba(255, 255, 255, 0.04));
+}
+.task-row .btn-icon {
+  visibility: hidden;
+}
+.task-row:hover .btn-icon {
+  visibility: visible;
+}
+.task-icon {
+  flex: 0 0 auto;
+  width: 14px;
+  text-align: center;
+  color: var(--text-dim);
+}
+.task-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-label-link {
+  cursor: pointer;
+}
+.task-label-link:hover {
+  text-decoration: underline;
+}
+.task-label-dim {
+  color: var(--text-dim);
+}
+.task-note {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+.task-run-form,
+.task-edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 10px 10px;
+}
+.task-run-form .agent-query-input,
+.task-edit-form .agent-query-input {
+  /* The bar version's flex-basis (160px) is a WIDTH in its row; in these
+   * column forms it becomes a height and every input balloons. */
+  flex: none;
+  width: 100%;
+  box-sizing: border-box;
+}
+.task-run-dir {
+  font: inherit;
+  font-size: 12px;
+  background: var(--bg-input, var(--bg));
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 6px;
+}
+.task-brief-input {
+  font: inherit;
+  font-size: 12px;
+  background: var(--bg-input, var(--bg));
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 6px;
+  resize: vertical;
 }
 
 .agent-session {
@@ -6529,8 +6658,18 @@ a.btn-mini {
 }
 
 /* Nested menu panel ("New agent ›") and section headings. */
+/* The row that opens a submenu. Flex, not a bare block: a <button> is
+ * inline-block, so inside a plain wrapper it shrank to its label and the
+ * highlight hugged the text instead of filling the row like every other item. */
 .ctx-sub-anchor {
   position: relative;
+  display: flex;
+  flex-direction: column;
+}
+.ctx-sub-anchor > .ctx-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
 }
 
 .ctx-caret {
@@ -8621,4 +8760,177 @@ a.btn-mini {
   padding: 0 5px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
+}
+
+/* ---- Settings → Agents ---------------------------------------------------
+   The CLI picker was a card grid that spent half the page on seven names.
+   Chips say the same thing in two rows and leave room for the tool switches
+   underneath, which are the part you actually come here to change. */
+.agent-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.agent-chip {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.agent-chip:hover {
+  border-color: var(--text-dim);
+}
+
+.agent-chip-active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.tool-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tool-bulk {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tool-count {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-right: auto;
+}
+
+.tool-group {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--bg-raised);
+}
+
+.tool-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tool-group-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tool-group-blurb {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.tool-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 2px 14px;
+  margin-top: 6px;
+}
+
+.tool-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 0;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.tool-name {
+  font-size: 12px;
+}
+
+.tool-note {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- An agent's question (canopy_ask_user) ------------------------------- */
+.ask-dialog {
+  max-width: 460px;
+  text-align: left;
+}
+
+.ask-from {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+
+.ask-question {
+  font-size: 14px;
+  line-height: 1.5;
+  margin-bottom: 10px;
+}
+
+.ask-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.ask-form {
+  display: flex;
+  gap: 6px;
+}
+
+.ask-form input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---- Advisory file claims, in the Agents panel --------------------------- */
+.claim-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--border);
+}
+
+.claim-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.claim-owner {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40%;
+}
+
+.claim-paths {
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
 }

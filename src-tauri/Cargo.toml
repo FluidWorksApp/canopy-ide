@@ -1,6 +1,6 @@
 [package]
 name = "canopy"
-version = "0.2.11"
+version = "0.2.14"
 description = "Local-first, memory-light, vibe-coding-first IDE"
 authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
 license = "MIT"
@@ -136,6 +136,16 @@ tauri-plugin-notification = "2"
 # Unix signals for killing whole PTY process groups (no zombies)
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# canopy_screenshot: the webview's own snapshot API, so capturing our own window
+# needs no Screen Recording permission. Same objc2 generation wry already links,
+# so this adds bindings, not a second Objective-C runtime.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSValue", "NSGeometry", "NSDictionary", "NSString", "NSError", "NSData"] }
+objc2-app-kit = { version = "0.3", features = ["NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphics"] }
+objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKSnapshotConfiguration", "block2"] }
 
 [dev-dependencies]
 # `test` feature enables tauri::test::mock_app for exercising PTY spawn/attach

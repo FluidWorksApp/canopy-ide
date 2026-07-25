@@ -1,3 +1,4 @@
+mod agentid;
 mod agents;
 mod cli;
 mod context;
@@ -17,6 +18,7 @@ mod preview;
 mod pty;
 mod punch;
 mod relay;
+mod snapshot;
 mod tunnel;
 mod winproc;
 mod wsbridge;
@@ -294,6 +296,7 @@ pub fn run() {
         .manage(portal::RemoteManager::default())
         .manage(preview::PreviewManager::default())
         .manage(context::ContextBridge::default())
+        .manage(agents::StatsCache::default())
         .manage(tunnel::TunnelManager::default())
         .manage(dictation::DictationManager::default())
         .manage(cli::pending_from_env())
@@ -451,6 +454,11 @@ pub fn run() {
             preview::preview_stop,
             context::context_publish,
             context::context_remove,
+            context::context_tools,
+            context::context_claims,
+            context::context_release_claim,
+            context::browser_result,
+            snapshot::webview_snapshot,
             portal::remote_enable,
             portal::remote_disable,
             portal::remote_status,

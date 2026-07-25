@@ -153,6 +153,18 @@ export interface AgentCli {
   icon: string;
   install: string;
   /**
+   * Packages that ship this CLI, as the resolver reports them (see
+   * agentid.rs): `npm:<name>` from the nearest package.json, `brew:<formula>`
+   * from the Cellar path, `py:<module>` from a console script's entry import.
+   *
+   * This is what identifies a CLI that was installed under another name — an
+   * enterprise build of Claude Code invoked as `acme-claude` still resolves to
+   * `npm:@anthropic-ai/claude-code`. Derived from `install` above, so it stays
+   * as verified as the rest of the entry; CLIs shipped as opaque single
+   * binaries (agy) have no package to name and are matched by `bin` alone.
+   */
+  pkgs?: string[];
+  /**
    * Command that reopens an earlier conversation *by its session id*, or
    * undefined when the CLI cannot do that.
    *
@@ -206,6 +218,7 @@ export const AGENT_CLIS: AgentCli[] = [
     bin: "claude",
     icon: "✳",
     install: "npm install -g @anthropic-ai/claude-code",
+    pkgs: ["npm:@anthropic-ai/claude-code"],
     latestUrl: "https://registry.npmjs.org/@anthropic-ai/claude-code/latest",
     // Verified: `claude update` self-updates both the npm and native installs.
     update: "claude update",
@@ -221,6 +234,7 @@ export const AGENT_CLIS: AgentCli[] = [
     bin: "codex",
     icon: "⌬",
     install: "npm install -g @openai/codex",
+    pkgs: ["npm:@openai/codex"],
     latestUrl: "https://registry.npmjs.org/@openai/codex/latest",
     // Verified: `codex resume <SESSION_ID>` — subcommand, id is positional and
     // takes a UUID or a session name.
@@ -235,6 +249,7 @@ export const AGENT_CLIS: AgentCli[] = [
     bin: "amp",
     icon: "⚡",
     install: "npm install -g @sourcegraph/amp",
+    pkgs: ["npm:@sourcegraph/amp"],
     latestUrl: "https://registry.npmjs.org/@sourcegraph/amp/latest",
     // Verified: `amp threads continue <threadId>`; thread ids look like T-<uuid>.
     resume: (id) => `amp threads continue ${id}`,
@@ -246,13 +261,16 @@ export const AGENT_CLIS: AgentCli[] = [
     icon: "a",
     // `-U` makes this the update command too.
     install: "python3 -m pip install -U aider-chat",
+    // The console script imports `aider`; `aider-chat` is only the
+    // distribution name, which nothing on disk states.
+    pkgs: ["py:aider"],
     latestUrl: "https://pypi.org/pypi/aider-chat/json",
   },
   // Gemini CLI is gone from this list on purpose: Google killed its "Login
   // with Google" path for individuals (2026-06-18, "migrate to the Antigravity
   // suite") and Antigravity below is its named successor. Offering both meant
   // new users installed the deprecated one. Terminals running `gemini` are
-  // still detected as agents (AGENT_PATTERN keeps the name).
+  // still detected as agents (EXTRA_AGENT_BINS keeps the name).
   // Antigravity ships as a single Go binary — the npm package some guides cite
   // doesn't exist.
   {
@@ -271,6 +289,7 @@ export const AGENT_CLIS: AgentCli[] = [
     bin: "opencode",
     icon: "▣",
     install: "npm install -g opencode-ai",
+    pkgs: ["npm:opencode-ai"],
     latestUrl: "https://registry.npmjs.org/opencode-ai/latest",
     // Verified: `opencode upgrade` self-updates regardless of install method.
     update: "opencode upgrade",
@@ -286,20 +305,32 @@ export const AGENT_CLIS: AgentCli[] = [
     bin: "omp",
     icon: "π",
     install: "curl -fsSL https://omp.sh/install | sh",
+    // Also published as a Homebrew formula (can1357/tap).
+    pkgs: ["brew:omp"],
     // Verified: `-r, --resume=<value>  Resume a session (by ID prefix, path...)`.
     resume: (id) => `omp --resume ${id}`,
   },
 ];
 
-/** Matches process names that are agent CLIs. Derived from the registry so a
- *  newly added CLI can never be missed by detection again — the Antigravity
- *  launch shipped with `agy` absent from a hand-maintained copy of this regex,
- *  so its sessions showed as plain shells. The extras cover agents users run
- *  by hand that we don't ship a launcher entry for. */
+/** Agents users run by hand that we don't ship a launcher entry for. Their id
+ *  is their bin: enough to name a row and pick an icon where one exists. */
 const EXTRA_AGENT_BINS = ["gemini", "goose", "copilot", "cursor-agent", "qwen", "droid"];
-export const AGENT_PATTERN = new RegExp(
-  `\\b(${[...AGENT_CLIS.map((c) => c.bin), ...EXTRA_AGENT_BINS].join("|")})\\b`,
-  "i",
+
+/** Executable name -> agent id, matched exactly.
+ *
+ *  Exactly, and never as a substring or a prefix: this used to be a regex of
+ *  alternatives tested against whole executable *paths*, where `\bomp\b` is a
+ *  match inside `~/.omp/hooks/run.py` and `startsWith("amp")` is a match for
+ *  `ampere`. A near-miss must produce no brand at all — see agentIdentity.ts. */
+export const BIN_TO_AGENT: Record<string, string> = Object.fromEntries([
+  ...AGENT_CLIS.map((c) => [c.bin, c.id] as const),
+  ...EXTRA_AGENT_BINS.map((bin) => [bin, bin] as const),
+]);
+
+/** Package identity -> agent id. The rung that survives renaming: whatever an
+ *  enterprise build calls its binary, it still ships from a package we know. */
+export const PKG_TO_AGENT: Record<string, string> = Object.fromEntries(
+  AGENT_CLIS.flatMap((c) => (c.pkgs ?? []).map((pkg) => [pkg, c.id] as const)),
 );
 
 /** Interactive shells — the process sitting at the root of a plain terminal.

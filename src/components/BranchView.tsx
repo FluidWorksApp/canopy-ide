@@ -9,6 +9,8 @@ import * as ipc from "../ipc";
 import type { Notify, RelayHandle } from "../types";
 import { splitPatch } from "./PrView";
 import { GitBranchIcon } from "./icons";
+import { raisePrTask, type MicroTaskDef, type RaisePrPayload } from "../microTasks";
+import { MicroTaskButton } from "./MicroTaskButton";
 
 interface BranchViewProps {
   repo: string;
@@ -22,6 +24,10 @@ interface BranchViewProps {
   /** When connected to a relay, a branch can be sent to a teammate for review
    *  — the diff travels with the request, so they needn't have the code. */
   relay?: RelayHandle;
+  /** Launch a one-shot micro-task agent ("Raise PR"). Always offered — with no
+   *  agent CLI installed the launcher explains instead of launching, and the
+   *  compare-link path below still works regardless. */
+  onMicroTask?: (task: MicroTaskDef<RaisePrPayload>, payload: RaisePrPayload, query: string) => void;
 }
 
 type Pane = "uncommitted" | "diff";
@@ -33,6 +39,7 @@ export function BranchView({
   onOpenTerminal,
   onNotice,
   relay,
+  onMicroTask,
 }: BranchViewProps) {
   const [commits, setCommits] = useState<ipc.CommitInfo[] | null>(null);
   // Which patch is on screen. Defaults to uncommitted work when there is any,
@@ -172,6 +179,19 @@ export function BranchView({
                 </a>
               )}
             </>
+          )}
+          {!branch.merged && onMicroTask && (
+            <MicroTaskButton
+              task={raisePrTask}
+              payload={{
+                repo,
+                branch: branch.branch,
+                worktree: branch.worktree,
+                unpushed: !branch.upstream || branch.ahead > 0,
+              }}
+              title="Have an agent push this branch and open the pull request"
+              onLaunch={onMicroTask}
+            />
           )}
           {branch.worktree && !branch.prunable && (
             <button

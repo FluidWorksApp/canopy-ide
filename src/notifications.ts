@@ -185,6 +185,21 @@ export function eventPtyId(raw: string): number | null {
   }
 }
 
+/** Whether this raw hook event is the given terminal's turn ending — Claude's
+ *  Stop, or codex's turn-complete. Micro-tasks wait on this before closing the
+ *  tab: it means the job_done tool result reached the agent and the terminal
+ *  has quiesced. */
+export function isStopFor(raw: string, pty: number): boolean {
+  try {
+    const parsed = JSON.parse(raw) as { canopy_pty?: unknown; hook_event_name?: unknown; type?: unknown };
+    if (parsed.canopy_pty !== pty) return false;
+    const event = String(parsed.hook_event_name ?? parsed.type ?? "");
+    return event === "Stop" || /turn.complete/i.test(event);
+  } catch {
+    return false;
+  }
+}
+
 export function eventCwd(raw: string): string {
   try {
     return String((JSON.parse(raw) as { cwd?: unknown }).cwd ?? "");

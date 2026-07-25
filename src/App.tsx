@@ -15,6 +15,9 @@ import {
 } from "./projects";
 import type { AgentEventEntry, NoticeKind, RelayHandle } from "./types";
 import { derivePending, pendingForRoots } from "./notifications";
+import { runUiOp } from "./agentOps";
+import { getSettings, THEME_CHANGE_EVENT } from "./settings";
+import { useTabDrag } from "./tabDrag";
 import { CollabManager, safeName } from "./collab";
 import { ProjectView } from "./components/ProjectView";
 import { TitleBar } from "./components/TitleBar";
@@ -23,6 +26,7 @@ import { ProjectDialog } from "./components/ProjectDialog";
 import { ProjectManager } from "./components/ProjectManager";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { HelpDialog } from "./components/HelpDialog";
+import { AskDialog } from "./components/AskDialog";
 import { AboutDialog } from "./components/AboutDialog";
 import { Dictation } from "./components/Dictation";
 import { Onboarding } from "./components/Onboarding";
@@ -130,6 +134,18 @@ export default function App() {
   const [relayChat, setRelayChat] = useState<ipc.RelayChatMsg[]>([]);
   const [relayInbox, setRelayInbox] = useState<ipc.RelayCommandMsg[]>([]);
   const [relayTransfers, setRelayTransfers] = useState<import("./types").RelayTransfer[]>([]);
+  // The agent-facing ops read the inbox from an event handler that outlives any
+  // one render, so they read it through a ref.
+  const relayInboxRef = useRef(relayInbox);
+  relayInboxRef.current = relayInbox;
+  /** A question an agent put to the user (canopy_ask_user), held until they
+   *  answer — the agent's tool call is parked on the other end of `resolve`. */
+  const [ask, setAsk] = useState<{
+    id: number;
+    question: string;
+    options: string[];
+    resolve: (answer: string) => void;
+  } | null>(null);
   const relayIntentional = useRef(false);
   const prevRelayRole = useRef(relayStatus.role);
   useEffect(() => {
@@ -614,6 +630,16 @@ export default function App() {
     if (loaded && shouldOnboard()) setOnboarding(true);
   }, [loaded]);
 
+  // Keep the bridge's copy of the tool switches (Settings → Agents) current.
+  // Republished on every settings write, because the sidecar reads it when an
+  // agent asks for its tool list — which can be at any moment.
+  useEffect(() => {
+    const publish = () => void ipc.contextTools(getSettings().disabledTools);
+    publish();
+    window.addEventListener(THEME_CHANGE_EVENT, publish);
+    return () => window.removeEventListener(THEME_CHANGE_EVENT, publish);
+  }, []);
+
   // `canopy <dir>` delivery. Cold start: the arg waited in Rust state while
   // the webview booted — collect it once the workspace is loaded (opening a
   // project before load would be clobbered by setWs). Warm: a second CLI
@@ -743,15 +769,20 @@ export default function App() {
           return;
         }
         await openProjectRef.current(projectId);
-        // One frame so a not-yet-open project's ProjectView mounts and registers
+        // A beat so a not-yet-open project's ProjectView mounts and registers
         // its listener before the event fires; attachTerminal is idempotent by
-        // pty id, so a redundant dispatch just re-focuses the tab.
-        requestAnimationFrame(() =>
-          window.dispatchEvent(
-            new CustomEvent("canopy:attach-terminal", {
-              detail: { projectId, ptyId: e.id, cwd: e.cwd, title: e.title },
-            }),
-          ),
+        // pty id, so a redundant dispatch just re-focuses the tab. A timer, not
+        // requestAnimationFrame: rAF stops firing while the window is occluded,
+        // and these flows start from an agent/phone precisely when the user is
+        // looking elsewhere. React commits (and timers) run fine unpainted.
+        window.setTimeout(
+          () =>
+            window.dispatchEvent(
+              new CustomEvent("canopy:attach-terminal", {
+                detail: { projectId, ptyId: e.id, cwd: e.cwd, title: e.title },
+              }),
+            ),
+          80,
         );
       })
       .then((u) => {
@@ -759,6 +790,198 @@ export default function App() {
       });
     return () => un?.();
   }, [notify]);
+
+  // An action an agent requested via the MCP context bridge (canopy_start_server
+  // / canopy_open_preview). Routed exactly like a phone-spawned PTY: find the
+  // project whose component most-specifically contains the action's `route`
+  // path, open it, and hand the action to that ProjectView.
+  useEffect(() => {
+    const norm = (p: string) => p.replace(/\/+$/, "");
+    const projectForCwd = (cwd: string): string | undefined => {
+      const c = norm(cwd);
+      let bestId: string | undefined;
+      let bestLen = -1;
+      for (const p of wsRef.current.projects) {
+        for (const comp of p.components) {
+          const r = norm(comp.path);
+          if (r && (c === r || c.startsWith(r + "/")) && r.length > bestLen) {
+            bestLen = r.length;
+            bestId = p.id;
+          }
+        }
+      }
+      return bestId;
+    };
+    let un: (() => void) | undefined;
+    void ipc
+      .onAgentAction(async (a) => {
+        // Keyed by terminal id, not a path: the project owning that pty is
+        // already open (its server is running), so just broadcast — the owning
+        // ProjectView matches by pty and acts, the rest ignore it.
+        if (a.kind === "restart_server") {
+          window.dispatchEvent(
+            new CustomEvent("canopy:agent-action", { detail: { projectId: null, action: a } }),
+          );
+          return;
+        }
+        // A micro-task reporting in. Surface the outcome here — the user has
+        // likely tabbed away, which is the whole point of a fire-and-forget
+        // task — then broadcast by pty like restart_server so the owning
+        // ProjectView can close (done) or focus (blocked) the tab.
+        if (a.kind === "job_done") {
+          const ok = a.status === "done";
+          const summary = a.summary ?? "A micro-task finished.";
+          notify(`${ok ? "Task done" : "Task blocked"}: ${summary}${a.url ? ` — ${a.url}` : ""}`, ok ? "success" : "warn");
+          void nativeNotify("Canopy — Task", summary);
+          window.dispatchEvent(
+            new CustomEvent("canopy:agent-action", { detail: { projectId: null, action: a } }),
+          );
+          return;
+        }
+        // An agent reaching for the user (canopy_notify) — often one running in
+        // a terminal nobody is watching. It belongs to no project in
+        // particular, so it lands as a notice here rather than being routed.
+        if (a.kind === "notify") {
+          notify(a.text ?? "", (a.level ?? "info") as NoticeKind);
+          if (a.level === "error" || a.level === "warn")
+            void nativeNotify("Canopy — Agent", a.text ?? "");
+          return;
+        }
+        const projectId =
+          projectForCwd(a.route) ??
+          // A worktree the agent runs in follows `<repo>-wt-…`; fall back to the
+          // single open project so an action still lands somewhere sensible.
+          (wsRef.current.openIds.length === 1 ? wsRef.current.openIds[0] : undefined);
+        if (!projectId) {
+          notify("An agent asked to act, but its directory isn't in any open project.", "info");
+          return;
+        }
+        await openProjectRef.current(projectId);
+        // Timer, not rAF — see the attach-terminal dispatch above.
+        window.setTimeout(
+          () =>
+            window.dispatchEvent(
+              new CustomEvent("canopy:agent-action", { detail: { projectId, action: a } }),
+            ),
+          80,
+        );
+      })
+      .then((u) => {
+        un = u;
+      });
+    return () => un?.();
+  }, [notify, nativeNotify]);
+
+  // A browser-control op (canopy_browser_*). Routed like agent:action, but
+  // request/response: an op that can't reach a project must answer the bridge
+  // now, or the agent's tool call sits on the full timeout for nothing.
+  useEffect(() => {
+    const norm = (p: string) => p.replace(/\/+$/, "");
+    const projectForCwd = (cwd: string): string | undefined => {
+      const c = norm(cwd);
+      let bestId: string | undefined;
+      let bestLen = -1;
+      for (const p of wsRef.current.projects) {
+        for (const comp of p.components) {
+          const r = norm(comp.path);
+          if (r && (c === r || c.startsWith(r + "/")) && r.length > bestLen) {
+            bestLen = r.length;
+            bestId = p.id;
+          }
+        }
+      }
+      return bestId;
+    };
+    let un: (() => void) | undefined;
+    void ipc
+      .onAgentBrowser(async (op) => {
+        const projectId =
+          projectForCwd(op.route) ??
+          (wsRef.current.openIds.length === 1 ? wsRef.current.openIds[0] : undefined);
+        if (!projectId) {
+          void ipc.browserResult(
+            op.id,
+            false,
+            "This session's directory isn't inside any open Canopy project, so there's no preview to drive.",
+          );
+          return;
+        }
+        await openProjectRef.current(projectId);
+        // Timer, not rAF: rAF starves while the window is occluded, which held
+        // the agent's request open until the bridge's timeout even though the
+        // op would have run fine — the whole preview pipeline (React commits,
+        // iframe loads, postMessage) works without paints.
+        window.setTimeout(
+          () =>
+            window.dispatchEvent(
+              new CustomEvent("canopy:agent-browser", { detail: { projectId, op } }),
+            ),
+          80,
+        );
+      })
+      .then((u) => {
+        un = u;
+      });
+    return () => un?.();
+  }, []);
+
+  // The ops only this window can answer (canopy_diagnostics, canopy_references,
+  // canopy_definition, canopy_tickets, canopy_reviews, canopy_ask_user). Unlike
+  // the browser ops these need no tab, so they're answered here: find the
+  // project the agent is working in, hand it the roots and repos, answer.
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    void ipc
+      .onAgentUi(async (op) => {
+        const norm = (p: string) => p.replace(/\/+$/, "");
+        const project =
+          wsRef.current.projects.find((p) =>
+            p.components.some((c) => {
+              const r = norm(c.path);
+              const cwd = norm(op.route);
+              return r && (cwd === r || cwd.startsWith(r + "/"));
+            }),
+          ) ??
+          (wsRef.current.openIds.length === 1
+            ? wsRef.current.projects.find((p) => p.id === wsRef.current.openIds[0])
+            : undefined);
+        const roots = project?.components.map((c) => c.path) ?? [];
+        // An "ask" needs no project — a background agent with a question is
+        // exactly the case where its cwd may be a worktree we don't track.
+        if (!roots.length && op.op !== "ask") {
+          void ipc.browserResult(
+            op.id,
+            false,
+            "This session's directory isn't inside any open Canopy project, so the IDE has nothing to answer with.",
+          );
+          return;
+        }
+        try {
+          const repos = project
+            ? await ipc
+                .gitRepos(project.components.map((c) => [c.label, c.path] as [string, string]))
+                .then((rs) => [...new Set(rs.map((r) => r.path))])
+                .catch(() => [])
+            : [];
+          const data = await runUiOp(op, {
+            roots,
+            repos,
+            inbox: relayInboxRef.current,
+            ask: (question, options) =>
+              new Promise<string>((resolve) => {
+                setAsk({ id: op.id, question, options, resolve });
+              }),
+          });
+          void ipc.browserResult(op.id, true, data);
+        } catch (err) {
+          void ipc.browserResult(op.id, false, String(err instanceof Error ? err.message : err));
+        }
+      })
+      .then((u) => {
+        un = u;
+      });
+    return () => un?.();
+  }, []);
 
   const saveProject = useCallback(
     async (project: Project) => {
@@ -897,6 +1120,9 @@ export default function App() {
     () => derivePending(agentEvents).filter((i) => !dismissedPending.has(i.key)),
     [agentEvents, dismissedPending],
   );
+  // Project tabs are draggable; their order is the workspace's own, so it
+  // persists with everything else in the workspace file.
+  const tabDrag = useTabDrag(ws.openIds, (openIds) => update({ openIds }));
   // Tab badges count only what's blocked on the user — an agent that finished
   // and is idling is not urgent. Stable identity so the memoized TitleBar
   // isn't re-rendered by a fresh closure each tick.
@@ -922,6 +1148,7 @@ export default function App() {
         activeId={ws.activeId}
         pendingCount={pendingCount}
         collabActive={collabTick >= 0 && (collab.current?.activeCount ?? 0) > 0}
+        tabDrag={tabDrag}
         onSelectProject={selectProject}
         onCloseProject={handleCloseProject}
         onStopCollab={stopCollab}
@@ -1030,6 +1257,17 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {ask && (
+        <AskDialog
+          question={ask.question}
+          options={ask.options}
+          onAnswer={(answer) => {
+            ask.resolve(answer);
+            setAsk(null);
+          }}
+        />
       )}
 
       {dialog && (
