@@ -645,7 +645,13 @@ function Detail({
   const m = agentMeta(row?.agent ?? 'shell')
   const send = () => {
     if (!text) return
-    transport.writePty(pty, text + '\r')
+    // Enter has to be its own write, a beat after the text: TUIs like Codex read
+    // a burst ending in \r as a paste and drop a literal newline in the composer
+    // instead of submitting, so "text\r" in one write left the message sitting
+    // there waiting on a second Enter. Same two-write pattern (and delay) the
+    // desktop uses to message an agent.
+    transport.writePty(pty, text)
+    setTimeout(() => transport.writePty(pty, '\r'), 350)
     setText('')
   }
   return (
