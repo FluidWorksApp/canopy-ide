@@ -201,14 +201,15 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
   return (
     <div className="status-bar">
       {branch && (
-        <span className="status-item" title={`git branch (${dirty} changed files)`}>
+        <span className="status-item status-branch" title={`git branch (${dirty} changed files)`}>
           ⎇ {branch}
           {dirty > 0 && <span className="status-dirty"> ±{dirty}</span>}
         </span>
       )}
       {agents.length > 0 && (
         <span className="status-item status-agent" title="running agents">
-          ✳ {agents.map((a) => a.name).join(", ")}
+          <span className="status-agent-dot" aria-hidden />
+          {agents.map((a) => a.name).join(", ")}
         </span>
       )}
       <span className="status-spacer" />

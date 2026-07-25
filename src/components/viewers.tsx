@@ -2,6 +2,11 @@
 // renders fully offline (mermaid and SheetJS are lazy-loaded so they cost
 // nothing until a matching file is opened).
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  parse as parseJsonc,
+  printParseErrorCode,
+  type ParseError,
+} from "jsonc-parser";
 import { renderMarkdown, sanitizeHtml } from "../markdown";
 import "highlight.js/styles/github-dark.css";
 
@@ -221,15 +226,48 @@ export function SheetView({ bytes }: { bytes: Uint8Array }) {
 
 // ---------- JSON (collapsible tree) ----------
 
-export function JsonView({ bytes }: { bytes: Uint8Array }) {
-  const parsed = useMemo(() => {
-    try {
-      return { value: JSON.parse(decoder.decode(bytes)) };
-    } catch (e) {
-      return { error: String(e) };
-    }
-  }, [bytes]);
+// Files that legitimately carry // comments and trailing commas — the same
+// set VSCode opens in "jsonc" language mode. Everything else is strict JSON
+// so stray comments in package.json or lock files are flagged, not silently swallowed.
+// Files that legitimately carry // comments and trailing commas — the same
+// set VS Code opens in "jsonc" language mode. Everything else uses strict JSON.
+function isJsoncFile(path: string): boolean {
+  const name = path.split(/[\\/]/).pop() ?? "";
+  if (name.endsWith(".jsonc")) return true;
+  if (/^(tsconfig|jsconfig).*\.json$/.test(name)) return true;
+  if (/[/\\]\.(vscode|devcontainer)[/\\]/.test(path) || path.includes("devcontainer.json")) return true;
+  if (name === "devcontainer.json") return true;
+  if (name === ".eslintrc.json" || name === "keybindings.json") return true;
+  if (name.endsWith(".code-workspace")) return true;
+  return false;
+}
 
+export function JsonView({ bytes, path }: { bytes: Uint8Array; path: string }) {
+  const parsed = useMemo(() => {
+    const text = decoder.decode(bytes);
+    if (text.trim() === "") return { empty: true };
+    const errors: ParseError[] = [];
+    const jsonc = isJsoncFile(path);
+    // jsonc-parser (the same tolerant parser VSCode uses) is used for JSONC
+    // files; strict JSON.parse for everything else so stray comments in
+    // package.json, lock files, or data fixtures are not silently swallowed.
+    const value = parseJsonc(text, errors, {
+      allowTrailingComma: jsonc,
+      disallowComments: !jsonc,
+    });
+    if (errors.length > 0) {
+      const e = errors[0];
+      const lines = text.slice(0, e.offset).split("\n");
+      const line = lines.length;
+      const col = (lines[lines.length - 1]?.length ?? 0) + 1;
+      return { error: `${printParseErrorCode(e.error)} at ${line}:${col}` };
+    }
+    return { value };
+  }, [bytes, path]);
+
+  if ("empty" in parsed) {
+    return <div className="viewer-error">Empty file</div>;
+  }
   if ("error" in parsed) {
     return <div className="viewer-error">Invalid JSON: {parsed.error}</div>;
   }

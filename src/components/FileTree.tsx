@@ -10,6 +10,9 @@ import { fileIconUrl } from "./fileIcons";
 interface FileTreeProps {
   roots: string[];
   changedPaths: Set<string>;
+  /** Path of the file currently open in the active tab — gets the accent-soft
+   *  selected treatment. */
+  selectedPath?: string | null;
   onOpenFile: (path: string) => void;
   /** Only meaningful with the root header shown — that's the sole caller of it. */
   onRemoveRoot?: (root: string) => void;
@@ -72,6 +75,7 @@ interface GitInfo {
 export function FileTree({
   roots,
   changedPaths,
+  selectedPath,
   onOpenFile,
   onRemoveRoot,
   onNotice,
@@ -328,7 +332,9 @@ export function FileTree({
       return (
         <div key={entry.path} className={depth > 0 ? "tree-indent" : undefined}>
           <div
-            className={`tree-row ${changedPaths.has(entry.path) ? "tree-changed" : ""} ${gitClass(entry.path, entry.is_dir)}`}
+            className={`tree-row ${changedPaths.has(entry.path) ? "tree-changed" : ""} ${
+              !entry.is_dir && entry.path === selectedPath ? "tree-row-selected" : ""
+            } ${gitClass(entry.path, entry.is_dir)}`}
             onClick={() =>
               entry.is_dir ? toggleDir(entry.path) : onOpenFile(entry.path)
             }
@@ -336,13 +342,16 @@ export function FileTree({
               if (!readOnly) open(e, itemsFor(entry.path, entry.is_dir, entry.name));
             }}
           >
-            <span className="tree-chevron">
-              {entry.is_dir ? (expanded ? "▾" : "▸") : ""}
+            <span className={`tree-chevron ${entry.is_dir && expanded ? "tree-chevron-open" : ""}`}>
+              {entry.is_dir ? "▸" : ""}
             </span>
             <span className="tree-file-icon">
               {entry.is_dir ? <FolderIcon open={expanded} /> : <FileIcon name={entry.name} />}
             </span>
             <span className={entry.is_dir ? "tree-dir" : "tree-file"}>{entry.name}</span>
+            {changedPaths.has(entry.path) && !entry.is_dir && (
+              <span className="tree-changed-dot" aria-hidden />
+            )}
           </div>
           {entry.is_dir && renderDir(entry.path, depth + 1)}
         </div>

@@ -779,9 +779,9 @@ terms govern use of the model:
 
 - **foldhash 0.2.0** — Copyright (c) 2024 Orson Peters
 
-## npm packages (231)
+## npm packages (232)
 
-### MIT — 172
+### MIT — 173
 
 - **@antfu/install-pkg 1.1.0** — Copyright (c) 2021 Anthony Fu <https://github.com/antfu>
 - **@braintree/sanitize-url 7.1.2** — Copyright (c) 2017 Braintree
@@ -908,6 +908,7 @@ terms govern use of the model:
 - **immediate 3.0.6** — Copyright (c) 2012 Barnesandnoble.com, llc, Donavon West, Domenic Denicola, Brian Cavalier
 - **import-meta-resolve 4.2.0** — Copyright (c) Titus Wormer <mailto:tituswormer@gmail.com>; Copyright Node.js contributors. All rights reserved; Copyright Joyent, Inc. and other Node contributors. All rights reserved
 - **isarray 1.0.0** — Copyright Julian Gruber (per package manifest; the distributed license file carries no copyright line)
+- **jsonc-parser 3.3.1** — Copyright (c) Microsoft
 - **jszip 3.10.1** — Copyright (c) 2009-2016 Stuart Knightley, David Duponchel, Franz Buchinger, António Afonso
 - **katex 0.16.47** — Copyright (c) 2013-2020 Khan Academy and other contributors
 - **khroma 2.1.0** — Copyright (c) 2019-present Fabio Spampinato, Andrew Maney
