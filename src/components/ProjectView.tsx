@@ -3384,6 +3384,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onClose={tabMenu.close}
         />
       )}
+      {termMenu.menu && (
+        <ContextMenu
+          x={termMenu.menu.x}
+          y={termMenu.menu.y}
+          items={termMenu.menu.items}
+          onClose={termMenu.close}
+        />
+      )}
       <PaneBar
         tabGroups={tabGroups}
         groupDrags={groupDrags}

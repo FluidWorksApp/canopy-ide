@@ -304,9 +304,24 @@ body,
    content at the top-left, so reserve ~78px on the left for them. The bar
    itself is the window drag handle (data-tauri-drag-region in TitleBar.tsx).
    Only applied on macOS — Windows/Linux keep the native bar and this class is
-   never added. */
+   never added.
+
+   Both values divide by the zoom level, because the lights are native chrome:
+   setZoom scales our CSS px but not AppKit's. A raw 78px would under-reserve
+   when zoomed out — the lights land on the first project pill, which is a
+   click target — and leave a dead gap when zoomed in. min-height keeps the bar
+   at least as tall as the lights for the same reason; it only bites below
+   100%, since above it the 34px height is already taller. --zoom is stamped by
+   applyZoom (src/zoom.ts) and falls back to 1 when zoom never applied. */
 .titlebar-overlay {
-  padding-left: 78px;
+  padding-left: calc(78px / var(--zoom, 1));
+  min-height: calc(28px / var(--zoom, 1));
+}
+
+/* macOS hides the traffic lights in fullscreen, so the reservation would just
+   be dead space at the top-left. TitleBar.tsx tracks the window state. */
+.titlebar-overlay.titlebar-fullscreen {
+  padding-left: 10px;
 }
 
 .app-name {
