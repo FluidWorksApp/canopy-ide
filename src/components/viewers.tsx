@@ -229,19 +229,23 @@ export function SheetView({ bytes }: { bytes: Uint8Array }) {
 // Files that legitimately carry // comments and trailing commas — the same
 // set VSCode opens in "jsonc" language mode. Everything else is strict JSON
 // so stray comments in package.json or lock files are flagged, not silently swallowed.
+// Files that legitimately carry // comments and trailing commas — the same
+// set VS Code opens in "jsonc" language mode. Everything else uses strict JSON.
 function isJsoncFile(path: string): boolean {
   const name = path.split(/[\\/]/).pop() ?? "";
   if (name.endsWith(".jsonc")) return true;
   if (/^(tsconfig|jsconfig).*\.json$/.test(name)) return true;
-  if (/\.(vscode|devcontainer)[/\\]/.test(path)) return true;
+  if (/[/\\]\.(vscode|devcontainer)[/\\]/.test(path) || path.includes("devcontainer.json")) return true;
   if (name === "devcontainer.json") return true;
+  if (name === ".eslintrc.json" || name === "keybindings.json") return true;
+  if (name.endsWith(".code-workspace")) return true;
   return false;
 }
 
 export function JsonView({ bytes, path }: { bytes: Uint8Array; path: string }) {
   const parsed = useMemo(() => {
     const text = decoder.decode(bytes);
-    if (text.trim() === "") return { value: null };
+    if (text.trim() === "") return { empty: true };
     const errors: ParseError[] = [];
     const jsonc = isJsoncFile(path);
     // jsonc-parser (the same tolerant parser VSCode uses) is used for JSONC
@@ -261,6 +265,9 @@ export function JsonView({ bytes, path }: { bytes: Uint8Array; path: string }) {
     return { value };
   }, [bytes, path]);
 
+  if ("empty" in parsed) {
+    return <div className="viewer-error">Empty file</div>;
+  }
   if ("error" in parsed) {
     return <div className="viewer-error">Invalid JSON: {parsed.error}</div>;
   }

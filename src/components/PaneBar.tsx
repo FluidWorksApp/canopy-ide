@@ -235,15 +235,20 @@ function PaneBarImpl({
     // offsetLeft is in the row's content coordinates (the row is the positioned
     // offsetParent), so the absolutely-positioned blob scrolls with the tabs.
     const next = { left: el.offsetLeft, width: el.offsetWidth };
-    // Arm the compositing-layer hint while the CSS transition runs, then disarm.
-    // This pins the layer only during the slide — not for the app's lifetime.
-    if (blobElRef.current) {
-      blobElRef.current.classList.add("blob-animating");
-      const el2 = blobElRef.current;
-      const off = () => el2.classList.remove("blob-animating");
-      el2.addEventListener("transitionend", off, { once: true });
-    }
-    setBlob((b) => (b && b.left === next.left && b.width === next.width ? b : next));
+    setBlob((prev) => {
+      if (prev && prev.left === next.left && prev.width === next.width) return prev;
+      // Arm the compositing-layer hint only when geometry actually changes.
+      // Disarm on transitionend (normal path) or after a timeout (no transition
+      // fires: reduced-motion, instant re-measure, or blob was null).
+      const blobEl = blobElRef.current;
+      if (blobEl) {
+        blobEl.classList.add("blob-animating");
+        const off = () => blobEl.classList.remove("blob-animating");
+        blobEl.addEventListener("transitionend", off, { once: true });
+        window.setTimeout(off, 400); // fallback: longer than --dur-med
+      }
+      return next;
+    });
   };
 
   // Re-measure when the tab set or active tab changes.

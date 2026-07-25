@@ -580,6 +580,14 @@ export default function App() {
     };
     const keys = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
+      // On Linux/Windows Ctrl is the modifier, but Ctrl+- and Ctrl+0 are also
+      // meaningful inside terminals (readline undo, NUL). macOS uses Cmd so
+      // there's no conflict there. Skip zoom if focus is inside an xterm canvas
+      // or textarea so the keypress reaches the shell rather than being consumed.
+      if (e.ctrlKey && !e.metaKey &&
+          (e.target as HTMLElement | null)?.closest(".xterm-screen, .xterm-helper-textarea")) {
+        return;
+      }
       if (e.key === "Escape") {
         setZen(false);
       } else if (mod && e.shiftKey && e.code === "Enter") {

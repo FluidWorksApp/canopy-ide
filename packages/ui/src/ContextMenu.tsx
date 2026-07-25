@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import "./ContextMenu.css";
 
 export interface MenuItem {
@@ -97,12 +97,15 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
 /** Menu state helper: call `open(e, items)` from an `onContextMenu` handler. */
 export function useContextMenu() {
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
-  const open = (e: MouseEvent, items: MenuItem[]) => {
+  const open = useCallback((e: MouseEvent, items: MenuItem[]) => {
     e.preventDefault();
     // Stop the parent's own onContextMenu from replacing this menu with its own.
     e.stopPropagation();
     setMenu({ x: e.clientX, y: e.clientY, items });
-  };
-  const close = () => setMenu(null);
-  return { menu, open, close };
+  }, []);
+  const close = useCallback(() => setMenu(null), []);
+  // Memoize the returned object so consumers can list `open`/`close` in dep
+  // arrays without triggering re-renders on every caller render — the key
+  // pre-condition for memo(PaneBar) to actually hold between stats ticks.
+  return useMemo(() => ({ menu, open, close }), [menu, open, close]);
 }
