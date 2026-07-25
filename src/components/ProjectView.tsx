@@ -24,6 +24,7 @@ import { SharedProjectView } from "./SharedProjectView";
 import type { AgentCli, Project } from "../projects";
 import {
   AGENT_CLIS,
+  AGENT_CLIS_CHANGED_EVENT,
   SHELL_PATTERN,
   checkCliUpdates,
   checkInstalledClis,
@@ -1581,6 +1582,19 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   useEffect(() => {
     refreshInstalled();
     refreshUpdates();
+  }, [refreshInstalled, refreshUpdates]);
+
+  // Rebinding a CLI to the binary this machine actually has (Settings → Agents)
+  // changes what there is to probe. Without this, the row that sent the user to
+  // Settings in the first place goes on offering to install until the launcher
+  // is reopened — which reads as the setting not having worked.
+  useEffect(() => {
+    const onChanged = () => {
+      refreshInstalled();
+      refreshUpdates();
+    };
+    window.addEventListener(AGENT_CLIS_CHANGED_EVENT, onChanged);
+    return () => window.removeEventListener(AGENT_CLIS_CHANGED_EVENT, onChanged);
   }, [refreshInstalled, refreshUpdates]);
 
   // Looking at a tab is what marks it read. As an effect rather than something

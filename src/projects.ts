@@ -3,6 +3,7 @@
 // workspace (projects, which are open, which is active) persists via the Rust
 // core to ~/.canopy/projects.json.
 import { invoke } from "@tauri-apps/api/core";
+import { getSettings } from "./settings";
 
 export interface RunCommand {
   name: string;
@@ -147,6 +148,13 @@ export const newProjectId = () =>
 export interface AgentCli {
   id: string;
   name: string;
+  /**
+   * The executable to run. This is the *resolved* binary: an entry the user has
+   * rebound (Settings → Agents) carries their command here, not the name the
+   * vendor ships. Read it freely — every consumer gets the override for free,
+   * which is the whole point of resolving once at the registry rather than
+   * teaching twenty call sites about overrides.
+   */
   bin: string;
   /** Fallback glyph for the terminal tab strip; the menu uses the brand SVG
    *  registered under the same `id` in components/icons.tsx. */
@@ -181,6 +189,12 @@ export interface AgentCli {
    */
   resume?: (sessionId: string) => string;
 
+  /** True when `bin` came from the user's override rather than the entry's own
+   *  name. Suppresses the update badge: `latestUrl` points at the public
+   *  registry, and nagging someone to overwrite a sanctioned enterprise build
+   *  with a public release is worse than showing no version at all. */
+  rebound?: boolean;
+
   /**
    * Command that starts the CLI with an opening prompt already in hand.
    *
@@ -208,10 +222,27 @@ export interface AgentCli {
   update?: string;
 }
 
+/**
+ * A registry entry as authored, before the user's binary override is applied.
+ *
+ * `resume` and `prompt` take the binary as a second argument rather than
+ * spelling it out, so a rebound entry builds `acme-claude --resume <id>` instead
+ * of launching a `claude` that isn't there. Writing the name twice is exactly
+ * the drift the resolver exists to prevent — and a resume command naming the
+ * wrong binary is the silent-failure mode these entries are documented against.
+ */
+export interface AgentCliDef extends Omit<AgentCli, "resume" | "prompt" | "rebound"> {
+  resume?: (sessionId: string, bin: string) => string;
+  prompt?: (text: string, bin: string) => string;
+}
+
 /** Single-quote a string for a POSIX shell. */
 export const shellQuote = (text: string) => `'${text.replaceAll("'", `'\\''`)}'`;
 
-export const AGENT_CLIS: AgentCli[] = [
+/** The CLIs Canopy ships knowledge of, under the names their vendors use.
+ *  Never read this directly to launch or probe anything — read AGENT_CLIS,
+ *  which is this list with the user's overrides applied. */
+export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
   {
     id: "claude",
     name: "Claude Code",
@@ -223,10 +254,10 @@ export const AGENT_CLIS: AgentCli[] = [
     // Verified: `claude update` self-updates both the npm and native installs.
     update: "claude update",
     // Verified: `-r, --resume [value]  Resume a conversation by session ID`.
-    resume: (id) => `claude --resume ${id}`,
+    resume: (id, bin) => `${bin} --resume ${id}`,
     // Verified: claude takes the opening prompt as a positional argument and
     // stays interactive.
-    prompt: (text) => `claude ${shellQuote(text)}`,
+    prompt: (text, bin) => `${bin} ${shellQuote(text)}`,
   },
   {
     id: "codex",
@@ -238,10 +269,10 @@ export const AGENT_CLIS: AgentCli[] = [
     latestUrl: "https://registry.npmjs.org/@openai/codex/latest",
     // Verified: `codex resume <SESSION_ID>` — subcommand, id is positional and
     // takes a UUID or a session name.
-    resume: (id) => `codex resume ${id}`,
+    resume: (id, bin) => `${bin} resume ${id}`,
     // Verified: codex takes a positional prompt and stays interactive.
     // (`codex exec` is the headless one — deliberately not that.)
-    prompt: (text) => `codex ${shellQuote(text)}`,
+    prompt: (text, bin) => `${bin} ${shellQuote(text)}`,
   },
   {
     id: "amp",
@@ -252,7 +283,7 @@ export const AGENT_CLIS: AgentCli[] = [
     pkgs: ["npm:@sourcegraph/amp"],
     latestUrl: "https://registry.npmjs.org/@sourcegraph/amp/latest",
     // Verified: `amp threads continue <threadId>`; thread ids look like T-<uuid>.
-    resume: (id) => `amp threads continue ${id}`,
+    resume: (id, bin) => `${bin} threads continue ${id}`,
   },
   {
     id: "aider",
@@ -281,7 +312,7 @@ export const AGENT_CLIS: AgentCli[] = [
     install: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
     // Verified: `--conversation <uuid>` resumes by id (`-c` takes the most
     // recent). It is NOT `--resume`.
-    resume: (id) => `agy --conversation ${id}`,
+    resume: (id, bin) => `${bin} --conversation ${id}`,
   },
   {
     id: "opencode",
@@ -295,7 +326,7 @@ export const AGENT_CLIS: AgentCli[] = [
     update: "opencode upgrade",
     // Verified: `-s, --session <id>` = "session id to continue". Treat the id as
     // opaque — enumerate via `opencode session list --format json`.
-    resume: (id) => `opencode --session ${id}`,
+    resume: (id, bin) => `${bin} --session ${id}`,
   },
   // oh-my-pi. NB: the bare `omp` npm package is an unrelated squat — the
   // official installer is the omp.sh script.
@@ -308,7 +339,7 @@ export const AGENT_CLIS: AgentCli[] = [
     // Also published as a Homebrew formula (can1357/tap).
     pkgs: ["brew:omp"],
     // Verified: `-r, --resume=<value>  Resume a session (by ID prefix, path...)`.
-    resume: (id) => `omp --resume ${id}`,
+    resume: (id, bin) => `${bin} --resume ${id}`,
   },
 ];
 
@@ -316,22 +347,80 @@ export const AGENT_CLIS: AgentCli[] = [
  *  is their bin: enough to name a row and pick an icon where one exists. */
 const EXTRA_AGENT_BINS = ["gemini", "goose", "copilot", "cursor-agent", "qwen", "droid"];
 
+/** Last path segment of a command, folded the same way the process resolver
+ *  folds what it observes (case, `.exe`), so an override written as a full path
+ *  — `/opt/acme/bin/claude`, `C:\acme\Claude.exe` — matches the plain basename
+ *  that identification actually has in hand. */
+export const binName = (bin: string) =>
+  (bin.split(/[/\\]/).pop() ?? bin).replace(/\.exe$/i, "").toLowerCase();
+
+/** Bind a definition to the binary this machine actually has. */
+function bindCli(def: AgentCliDef, bin: string): AgentCli {
+  const { resume, prompt, ...rest } = def;
+  return {
+    ...rest,
+    bin,
+    rebound: bin !== def.bin,
+    resume: resume && ((id: string) => resume(id, bin)),
+    prompt: prompt && ((text: string) => prompt(text, bin)),
+  };
+}
+
+/**
+ * The registry every consumer reads: the built-ins with the user's binary
+ * overrides applied.
+ *
+ * Mutated in place by refreshAgentClis() rather than reassigned, because a
+ * couple of dozen modules hold this array by import and would otherwise keep
+ * pointing at the pre-override version.
+ */
+export const AGENT_CLIS: AgentCli[] = [];
+
+/** Fired after the registry is re-resolved, so open menus re-render with the
+ *  new binary rather than waiting for an unrelated state change. */
+export const AGENT_CLIS_CHANGED_EVENT = "canopy:agentClis";
+
+/** Re-resolve the registry against the current settings. Called at boot and
+ *  whenever an override is edited. */
+export function refreshAgentClis(): void {
+  const overrides = getSettings().cliBins;
+  AGENT_CLIS.splice(
+    0,
+    AGENT_CLIS.length,
+    ...BUILTIN_AGENT_CLIS.map((d) => bindCli(d, overrides[d.id]?.trim() || d.bin)),
+  );
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(AGENT_CLIS_CHANGED_EVENT));
+  }
+}
+
+refreshAgentClis();
+
 /** Executable name -> agent id, matched exactly.
  *
  *  Exactly, and never as a substring or a prefix: this used to be a regex of
  *  alternatives tested against whole executable *paths*, where `\bomp\b` is a
  *  match inside `~/.omp/hooks/run.py` and `startsWith("amp")` is a match for
- *  `ampere`. A near-miss must produce no brand at all — see agentIdentity.ts. */
-export const BIN_TO_AGENT: Record<string, string> = Object.fromEntries([
-  ...AGENT_CLIS.map((c) => [c.bin, c.id] as const),
-  ...EXTRA_AGENT_BINS.map((bin) => [bin, bin] as const),
-]);
+ *  `ampere`. A near-miss must produce no brand at all — see agentIdentity.ts.
+ *
+ *  A function rather than the frozen map it replaced: an override can change
+ *  which name belongs to which CLI at runtime. Both names resolve — the vendor's
+ *  and the user's — because a terminal remembered from before the override was
+ *  set still carries the stock command. */
+export function agentForBin(bin: string): string | undefined {
+  const name = binName(bin);
+  if (EXTRA_AGENT_BINS.includes(name)) return name;
+  const hit =
+    AGENT_CLIS.find((c) => binName(c.bin) === name) ??
+    BUILTIN_AGENT_CLIS.find((d) => d.bin === name);
+  return hit?.id;
+}
 
 /** Package identity -> agent id. The rung that survives renaming: whatever an
  *  enterprise build calls its binary, it still ships from a package we know. */
-export const PKG_TO_AGENT: Record<string, string> = Object.fromEntries(
-  AGENT_CLIS.flatMap((c) => (c.pkgs ?? []).map((pkg) => [pkg, c.id] as const)),
-);
+export function agentForPkg(pkg: string): string | undefined {
+  return BUILTIN_AGENT_CLIS.find((d) => (d.pkgs ?? []).includes(pkg))?.id;
+}
 
 /** Interactive shells — the process sitting at the root of a plain terminal.
  *  Lets us tell "the shell is idle at a prompt" (only shells running) from "the
@@ -484,7 +573,11 @@ export async function checkCliUpdates(): Promise<Record<string, CliUpdate>> {
     >("cli_versions", {
       queries: AGENT_CLIS.map((c) => ({
         bin: c.bin,
-        latestUrl: fresh ? null : (c.latestUrl ?? null),
+        // A rebound binary is compared against nothing: `latestUrl` is the
+        // vendor's public registry, and an enterprise build's version numbering
+        // is its own. Probing it anyway would badge a sanctioned install as out
+        // of date and offer to overwrite it with a public release.
+        latestUrl: fresh || c.rebound ? null : (c.latestUrl ?? null),
       })),
     });
     const latest: Record<string, string> = fresh ? cached!.latest : {};
@@ -560,13 +653,20 @@ export function restoreCommand(agentId: string, sessionId: string): string | nul
  *  builder (via a sentinel), so it can never drift from the command that was
  *  actually spawned. This is a restart-proof session identity: the command names
  *  the session outright, so it holds even after a relaunch reassigns pty ids and
- *  before the resumed agent has emitted its first hook event. */
+ *  before the resumed agent has emitted its first hook event.
+ *
+ *  Both the resolved and the stock binary are tried, so a terminal remembered
+ *  from before an override was set still yields its session id — the command on
+ *  disk names whichever binary was current when it was spawned. */
 export function resumeSessionId(command: string | null | undefined): string | null {
   const cmd = (command ?? "").trim();
   if (!cmd) return null;
   const SENTINEL = "__CANOPY_SID__";
-  for (const c of AGENT_CLIS) {
-    const tmpl = c.resume?.(SENTINEL);
+  const templates = BUILTIN_AGENT_CLIS.flatMap((d) => {
+    const bins = new Set([AGENT_CLIS.find((c) => c.id === d.id)?.bin ?? d.bin, d.bin]);
+    return [...bins].map((bin) => d.resume?.(SENTINEL, bin));
+  });
+  for (const tmpl of templates) {
     if (!tmpl) continue;
     const at = tmpl.indexOf(SENTINEL);
     if (at < 0) continue;

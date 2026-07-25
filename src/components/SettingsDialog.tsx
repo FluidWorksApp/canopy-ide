@@ -22,7 +22,13 @@ import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
 import * as ipc from "../ipc";
 import { availableMonoFonts, fontLabel, fontStack } from "../fonts";
 import { AgentIcon, TrackerIcon } from "./icons";
-import { AGENT_CLIS, currentPlatform } from "../projects";
+import {
+  AGENT_CLIS,
+  BUILTIN_AGENT_CLIS,
+  currentPlatform,
+  refreshAgentClis,
+  type AgentCliDef,
+} from "../projects";
 import { AGENT_TOOL_GROUPS, ALL_AGENT_TOOLS } from "../agentTools";
 
 export type SettingsTab =
@@ -88,6 +94,91 @@ function Item({
       <div className="set-item-name">{name}</div>
       {desc && <div className="set-item-desc">{desc}</div>}
       <div className="set-item-control">{children}</div>
+    </div>
+  );
+}
+
+/**
+ * Point a registry entry at the binary this machine actually has.
+ *
+ * The case this exists for: an enterprise build of Claude Code installed as
+ * `acme-claude`. Canopy probed the stock name, found nothing, and offered to
+ * install a public copy the user couldn't authenticate — forever, because
+ * nothing they did could make a `claude` appear.
+ *
+ * Each edit re-probes and says what it found, so the answer arrives before the
+ * dialog closes rather than as a launcher row that still says "install".
+ */
+function AgentBinaries({
+  value,
+  onChange,
+}: {
+  value: Record<string, string>;
+  onChange: (next: Record<string, string>) => void;
+}) {
+  const [drafts, setDrafts] = useState<Record<string, string>>(() => ({ ...value }));
+  const [found, setFound] = useState<Record<string, boolean>>({});
+
+  // Probe the resolved binaries — AGENT_CLIS already carries the overrides.
+  useEffect(() => {
+    void ipc
+      .whichCheck(AGENT_CLIS.map((c) => c.bin))
+      .then(setFound)
+      .catch(() => {});
+  }, [value]);
+
+  const commit = (def: AgentCliDef, raw: string) => {
+    const typed = raw.trim();
+    const next = { ...value };
+    // An empty box, or the vendor's own name typed back in, is not an override
+    // — storing it would pin the entry to a name that may change in a later
+    // release of Canopy.
+    if (typed && typed !== def.bin) next[def.id] = typed;
+    else delete next[def.id];
+    setDrafts((d) => ({ ...d, [def.id]: typed }));
+    onChange(next);
+  };
+
+  return (
+    <div className="cli-bins">
+      {BUILTIN_AGENT_CLIS.map((def) => {
+        const resolved = AGENT_CLIS.find((c) => c.id === def.id);
+        const bin = resolved?.bin ?? def.bin;
+        const state = found[bin];
+        return (
+          <div key={def.id} className="cli-bin-row">
+            <label className="cli-bin-name" htmlFor={`cli-bin-${def.id}`}>
+              <AgentIcon id={def.id} size={16} />
+              <span>{def.name}</span>
+            </label>
+            <input
+              id={`cli-bin-${def.id}`}
+              className="cli-bin-input"
+              type="text"
+              spellCheck={false}
+              autoCapitalize="off"
+              autoCorrect="off"
+              placeholder={def.bin}
+              value={drafts[def.id] ?? ""}
+              onChange={(e) => setDrafts((d) => ({ ...d, [def.id]: e.target.value }))}
+              onBlur={(e) => commit(def, e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") e.currentTarget.blur();
+                if (e.key === "Escape") {
+                  setDrafts((d) => ({ ...d, [def.id]: value[def.id] ?? "" }));
+                  e.currentTarget.blur();
+                }
+              }}
+            />
+            <span
+              className={`cli-bin-state ${state === false ? "cli-bin-missing" : ""}`}
+              title={state === false ? `Nothing named ${bin} on your PATH` : bin}
+            >
+              {state === undefined ? "" : state ? "✓ found" : "✗ not found"}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -276,6 +367,20 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                       </button>
                     ))}
                   </div>
+                </Item>
+                <Item
+                  name="CLI commands"
+                  desc="What each CLI is called on this machine. Leave blank unless yours was installed under another name or outside your PATH — an enterprise build of Claude Code shipped as `acme-claude`, say. Accepts a command or a full path; a name Canopy can't find is what makes a launcher row keep offering to install."
+                >
+                  <AgentBinaries
+                    value={s.cliBins}
+                    onChange={(cliBins) => {
+                      patch({ cliBins });
+                      // Re-resolve before anything re-renders: the launcher, the
+                      // probes and the resume commands all read the registry.
+                      refreshAgentClis();
+                    }}
+                  />
                 </Item>
                 <Item
                   name="Tools available"

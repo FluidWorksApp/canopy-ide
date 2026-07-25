@@ -8815,6 +8815,54 @@ a.btn-mini {
   box-shadow: 0 0 0 1px var(--accent);
 }
 
+.cli-bins {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cli-bin-row {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr) 90px;
+  align-items: center;
+  gap: 10px;
+}
+
+.cli-bin-name {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.cli-bin-input {
+  min-width: 0;
+  padding: 5px 8px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.cli-bin-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.cli-bin-state {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.cli-bin-missing {
+  color: var(--danger, #e06c75);
+}
+
 .tool-groups {
   display: flex;
   flex-direction: column;

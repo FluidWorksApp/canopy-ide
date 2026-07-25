@@ -2025,8 +2025,44 @@ pub async fn agent_usage() -> Result<Vec<AgentSessionUsage>, String> {
     Ok(out)
 }
 
+/// Single-quote a string for a POSIX shell. Airtight for arbitrary content:
+/// inside single quotes the shell interprets nothing, and the only character
+/// that can end the quoting is escaped by closing, escaping, and reopening.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// Normalise a probe candidate, or None if it isn't one.
+///
+/// This replaced an `is_alphanumeric() || '-' || '_'` whitelist. That guard was
+/// there because the name lands in a shell line unquoted — but it also silently
+/// failed every binary override that is a path (`/opt/acme/bin/claude`) or has a
+/// dot in it, reporting a CLI the user definitely has as not installed. Quoting
+/// makes injection impossible, so the remaining checks are only about the value
+/// being one sane token: control characters would corrupt the line-based output
+/// parsing, and whitespace means arguments were smuggled into a field that must
+/// name a single executable.
+///
+/// A leading `~/` is expanded here because it is inside quotes by the time the
+/// shell sees it, where tilde expansion does not happen.
+fn probe_target(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() || s.chars().any(char::is_control) || s.split_whitespace().count() != 1 {
+        return None;
+    }
+    match s.strip_prefix("~/") {
+        Some(rest) => Some(format!("{}/{rest}", std::env::var("HOME").ok()?)),
+        None => Some(s.to_string()),
+    }
+}
+
 /// Check which commands exist on the user's login-shell PATH (GUI apps don't
 /// inherit it). Used by the agent-CLI launcher to offer launch vs. install.
+///
+/// A command may also be an absolute or `~/`-relative path, which is how a
+/// rebound CLI (Settings → Agents) names an enterprise build installed outside
+/// PATH. `command -v` answers for both: given a path it reports it when it is
+/// executable, and fails when it is not.
 #[tauri::command]
 pub async fn which_check(commands: Vec<String>) -> HashMap<String, bool> {
     let mut result: HashMap<String, bool> = commands.iter().map(|c| (c.clone(), false)).collect();
@@ -2035,11 +2071,16 @@ pub async fn which_check(commands: Vec<String>) -> HashMap<String, bool> {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
         let script = commands
             .iter()
-            .filter(|c| {
-                c.chars()
-                    .all(|ch| ch.is_alphanumeric() || ch == '-' || ch == '_')
+            .filter_map(|c| probe_target(c).map(|t| (c, t)))
+            // Echo the caller's original spelling, not the expanded target: it
+            // is the key the caller looks the answer up under.
+            .map(|(orig, target)| {
+                format!(
+                    "command -v {} >/dev/null 2>&1 && printf '%s\\n' {}",
+                    sh_quote(&target),
+                    sh_quote(orig)
+                )
             })
-            .map(|c| format!("command -v {c} >/dev/null 2>&1 && echo {c}"))
             .collect::<Vec<_>>()
             .join("; ");
         if let Ok(out) = std::process::Command::new(shell)
@@ -2056,22 +2097,26 @@ pub async fn which_check(commands: Vec<String>) -> HashMap<String, bool> {
     #[cfg(windows)]
     {
         // No login shell on Windows; `where <cmd>` (where.exe on PATH) exits 0
-        // when the command is found. Same charset guard as the unix branch so a
-        // name can't smuggle in extra arguments. Without this, every command
-        // (CLIs and prerequisites alike) read as "not installed" on Windows.
+        // when the command is found. No quoting needed and no charset guard:
+        // the argument is passed to the process directly, never through a shell.
+        // A command given as a path is answered by the filesystem instead —
+        // `where` only searches PATH and would miss it.
         for c in &commands {
-            if c.chars()
-                .all(|ch| ch.is_alphanumeric() || ch == '-' || ch == '_')
-            {
-                let ok = std::process::Command::new("where")
+            let Some(target) = probe_target(c) else {
+                continue;
+            };
+            let ok = if target.contains('\\') || target.contains('/') {
+                std::path::Path::new(&target).is_file()
+            } else {
+                std::process::Command::new("where")
                     .no_console_window()
-                    .arg(c)
+                    .arg(&target)
                     .output()
                     .map(|o| o.status.success())
-                    .unwrap_or(false);
-                if let Some(found) = result.get_mut(c) {
-                    *found = ok;
-                }
+                    .unwrap_or(false)
+            };
+            if let Some(found) = result.get_mut(c) {
+                *found = ok;
             }
         }
     }
@@ -2173,11 +2218,10 @@ pub async fn cli_versions(queries: Vec<CliVersionQuery>) -> HashMap<String, CliV
             tasks.push(tokio::spawn(async move {
                 let mut v = CliVersions::default();
                 let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-                // Same charset guard as which_check — the name lands in a shell line.
-                if q.bin
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-                {
+                // Same normalisation as which_check — the name lands in a shell
+                // line, where quoting (not a charset whitelist) makes it safe.
+                if let Some(target) = probe_target(&q.bin) {
+                    let qb = sh_quote(&target);
                     // One login shell (the costly part) yields both the version
                     // string and the resolved binary path, split on a sentinel —
                     // the path is how we learn who installed it.
@@ -2185,8 +2229,7 @@ pub async fn cli_versions(queries: Vec<CliVersionQuery>) -> HashMap<String, CliV
                         .args([
                             "-lc",
                             &format!(
-                                "{0} --version 2>&1; echo '@@P@@'; command -v {0} 2>/dev/null",
-                                q.bin
+                                "{qb} --version 2>&1; echo '@@P@@'; command -v {qb} 2>/dev/null"
                             ),
                         ])
                         .kill_on_drop(true)
@@ -2300,6 +2343,8 @@ pub async fn kill_process(pid: u32) -> Result<(), String> {
 mod tests {
     use super::claude_bucket;
     use super::first_version_token;
+    use super::probe_target;
+    use super::sh_quote;
 
     /// The whole point of the rewrite, against a real pty: the terminal's
     /// foreground program is the candidate — not the shell that is idling, and
@@ -2441,5 +2486,54 @@ mod tests {
     fn bucket_encoding_is_lossy() {
         assert_eq!(claude_bucket("/a/b-c"), claude_bucket("/a/b_c"));
         assert_eq!(claude_bucket("/a/b.c"), claude_bucket("/a/b-c"));
+    }
+
+    #[test]
+    fn sh_quote_neutralises_embedded_quotes() {
+        assert_eq!(sh_quote("claude"), "'claude'");
+        // The POSIX '\'' idiom: close, escaped quote, reopen. Anything that
+        // tried to break out ends up as literal text inside the quotes.
+        assert_eq!(
+            sh_quote("a'; rm -rf /; echo '"),
+            r"'a'\''; rm -rf /; echo '\'''"
+        );
+    }
+
+    /// The whole point of replacing the old charset whitelist: these are the
+    /// shapes a rebound enterprise CLI actually takes, and every one of them
+    /// used to report "not installed" no matter what was on disk.
+    #[test]
+    fn probe_target_accepts_the_shapes_an_override_takes() {
+        assert_eq!(probe_target("claude").as_deref(), Some("claude"));
+        assert_eq!(probe_target("acme-claude").as_deref(), Some("acme-claude"));
+        assert_eq!(
+            probe_target("/opt/acme/bin/claude").as_deref(),
+            Some("/opt/acme/bin/claude")
+        );
+        assert_eq!(probe_target("claude.sh").as_deref(), Some("claude.sh"));
+        // Surrounding whitespace is the user's, not the value's.
+        assert_eq!(probe_target("  claude  ").as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn probe_target_expands_a_leading_tilde() {
+        // Tilde expansion doesn't happen inside the quotes the value lands in,
+        // so it has to happen here or `~/bin/claude` never resolves.
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(
+            probe_target("~/bin/claude").as_deref(),
+            Some(format!("{home}/bin/claude").as_str())
+        );
+    }
+
+    #[test]
+    fn probe_target_rejects_non_candidates() {
+        assert_eq!(probe_target(""), None);
+        assert_eq!(probe_target("   "), None);
+        // Arguments belong to a launch command, not to a field naming one
+        // executable — and `command -v` would answer about the wrong thing.
+        assert_eq!(probe_target("acme run claude"), None);
+        // A newline would corrupt the line-based parse of the probe's output.
+        assert_eq!(probe_target("claude\necho pwned"), None);
     }
 }

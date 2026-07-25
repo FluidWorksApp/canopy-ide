@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   AGENT_CLIS,
-  BIN_TO_AGENT,
-  PKG_TO_AGENT,
+  agentForBin,
+  agentForPkg,
+  BUILTIN_AGENT_CLIS,
+  refreshAgentClis,
   restoreCommand,
   resumeSessionId,
   SHELL_PATTERN,
@@ -10,6 +12,15 @@ import {
   startCommand,
   updateCommand,
 } from "./projects";
+import { updateSettings } from "./settings";
+
+/** Point a registry entry at a different binary, as Settings → Agents does. */
+const rebind = (bins: Record<string, string>) => {
+  updateSettings({ cliBins: bins });
+  refreshAgentClis();
+};
+
+afterEach(() => rebind({}));
 
 describe("shellQuote", () => {
   it("wraps in single quotes", () => {
@@ -94,27 +105,46 @@ describe("updateCommand", () => {
   });
 });
 
-describe("BIN_TO_AGENT", () => {
+describe("agentForBin", () => {
   it("covers every registered CLI and the hand-run extras", () => {
-    for (const cli of AGENT_CLIS) expect(BIN_TO_AGENT[cli.bin]).toBe(cli.id);
-    expect(BIN_TO_AGENT.gemini).toBe("gemini"); // extra bin, not a launcher
-    expect(BIN_TO_AGENT.droid).toBe("droid");
+    for (const cli of AGENT_CLIS) expect(agentForBin(cli.bin)).toBe(cli.id);
+    expect(agentForBin("gemini")).toBe("gemini"); // extra bin, not a launcher
+    expect(agentForBin("droid")).toBe("droid");
   });
 
   it("is exact — no prefixes, no substrings", () => {
     // The failures this replaced: `startsWith("amp")` branded `ampere`, and a
     // `\bomp\b` regex over paths branded anything under ~/.omp/.
-    expect(BIN_TO_AGENT.ampere).toBeUndefined();
-    expect(BIN_TO_AGENT["claude-utils"]).toBeUndefined();
-    expect(BIN_TO_AGENT.vim).toBeUndefined();
-    expect(BIN_TO_AGENT.python3).toBeUndefined();
+    expect(agentForBin("ampere")).toBeUndefined();
+    expect(agentForBin("claude-utils")).toBeUndefined();
+    expect(agentForBin("vim")).toBeUndefined();
+    expect(agentForBin("python3")).toBeUndefined();
+  });
+
+  it("recognises a rebound binary, and still the stock one", () => {
+    rebind({ claude: "acme-claude" });
+    expect(agentForBin("acme-claude")).toBe("claude");
+    // A terminal remembered from before the override still names `claude`.
+    expect(agentForBin("claude")).toBe("claude");
+  });
+
+  it("matches an override given as a full path by its basename", () => {
+    // The process resolver reports a basename, never the path it was invoked by.
+    rebind({ claude: "/opt/acme/bin/claude-ent" });
+    expect(agentForBin("claude-ent")).toBe("claude");
+  });
+
+  it("folds Windows paths and .exe the way the resolver does", () => {
+    rebind({ claude: "C:\\Program Files\\Acme\\Claude.exe" });
+    expect(agentForBin("claude")).toBe("claude");
+    expect(agentForBin("Claude.exe")).toBe("claude");
   });
 });
 
-describe("PKG_TO_AGENT", () => {
+describe("agentForPkg", () => {
   it("maps each declared package to its CLI", () => {
     for (const cli of AGENT_CLIS) {
-      for (const pkg of cli.pkgs ?? []) expect(PKG_TO_AGENT[pkg]).toBe(cli.id);
+      for (const pkg of cli.pkgs ?? []) expect(agentForPkg(pkg)).toBe(cli.id);
     }
   });
 
@@ -128,6 +158,50 @@ describe("PKG_TO_AGENT", () => {
         if (kind === "npm") expect(cli.install).toContain(name);
       }
     }
+  });
+
+  it("survives a rebind — the package is what a renamed binary still ships from", () => {
+    rebind({ claude: "acme-claude" });
+    expect(agentForPkg("npm:@anthropic-ai/claude-code")).toBe("claude");
+  });
+});
+
+describe("binary overrides", () => {
+  it("launches, resumes and prompts with the overridden binary", () => {
+    rebind({ claude: "acme-claude" });
+    expect(startCommand("claude", "fix it")).toEqual({
+      command: "acme-claude 'fix it'",
+      typePrompt: false,
+    });
+    expect(restoreCommand("claude", "abc123")).toBe("acme-claude --resume abc123");
+  });
+
+  it("round-trips resume ids for a rebound CLI, and for commands spawned before", () => {
+    rebind({ claude: "acme-claude", codex: "/opt/acme/codex" });
+    expect(resumeSessionId("acme-claude --resume SID42")).toBe("SID42");
+    expect(resumeSessionId("/opt/acme/codex resume SID42")).toBe("SID42");
+    // Remembered from before the override was set.
+    expect(resumeSessionId("claude --resume SID42")).toBe("SID42");
+  });
+
+  it("round-trips with restoreCommand for every resumable agent when rebound", () => {
+    rebind(Object.fromEntries(BUILTIN_AGENT_CLIS.map((d) => [d.id, `ent-${d.bin}`])));
+    for (const cli of AGENT_CLIS) {
+      const cmd = restoreCommand(cli.id, "SID42");
+      if (cmd) expect(resumeSessionId(cmd)).toBe("SID42");
+    }
+  });
+
+  it("marks an overridden entry rebound, so the update badge can stand down", () => {
+    rebind({ claude: "acme-claude" });
+    expect(AGENT_CLIS.find((c) => c.id === "claude")?.rebound).toBe(true);
+    expect(AGENT_CLIS.find((c) => c.id === "codex")?.rebound).toBe(false);
+  });
+
+  it("ignores a blank override and falls back to the vendor's name", () => {
+    rebind({ claude: "   " });
+    expect(AGENT_CLIS.find((c) => c.id === "claude")?.bin).toBe("claude");
+    expect(AGENT_CLIS.find((c) => c.id === "claude")?.rebound).toBe(false);
   });
 });
 
