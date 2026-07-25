@@ -64,6 +64,13 @@ import {
   type MicroTaskDef,
 } from "../microTasks";
 import { TasksPanel, type RunningMicroTask } from "./TasksPanel";
+import { TaskHistoryView } from "./TaskHistoryView";
+import {
+  recordTaskEnd,
+  recordTaskStart,
+  updateTaskRun,
+  type TaskRun,
+} from "../taskHistory";
 import { taskMenuItem } from "../taskMenu";
 import { viewerKindFor } from "./viewers";
 import { ensureLanguageServer } from "../lsp/client";
@@ -142,8 +149,10 @@ export interface TermSubTab {
   notice?: string;
   unread?: boolean;
   /** An ephemeral micro-task tab: closed and its session forgotten once the
-   *  agent calls canopy_job_done (or the user closes it). Never restored. */
-  micro?: { taskId: string };
+   *  agent calls canopy_job_done (or the user closes it). Never restored.
+   *  `runId` keys this run's entry in the task history — the record outlives
+   *  the tab, which is the point. */
+  micro?: { taskId: string; runId?: string };
 }
 
 export interface FileSubTab {
@@ -205,6 +214,13 @@ export interface AgentSubTab {
   ptyId?: number;
 }
 
+/** Every micro-task that has finished, with what it reported and the tail of
+ *  its terminal. One per project — opening it twice just focuses the first. */
+export interface TaskHistorySubTab {
+  id: string;
+  type: "task-history";
+}
+
 export interface ChatSubTab {
   id: string;
   type: "chat";
@@ -258,6 +274,7 @@ export type SubTab =
   | BranchSubTab
   | ReviewSubTab
   | AgentSubTab
+  | TaskHistorySubTab
   | ChatSubTab;
 
 /** Every tab that isn't a terminal — the "document" tabs, rendered together
@@ -290,6 +307,8 @@ function describeTab(tab: SubTab | undefined) {
       return { kind: "branch", label: tab.branch.branch };
     case "agent":
       return { kind: "agent", label: tab.agent, cwd: tab.cwd, ptyId: tab.ptyId ?? null };
+    case "task-history":
+      return { kind: "task-history", label: "Completed tasks" };
     default:
       return { kind: tab.type };
   }
@@ -338,6 +357,8 @@ function tabDisplayLabel(t: SubTab): string {
       return t.name;
     case "review":
       return t.review.title;
+    case "task-history":
+      return "Completed tasks";
     case "shared-project":
       return t.name;
     case "preview":
@@ -1318,6 +1339,19 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     [patchTabRaw],
   );
 
+  /** Open the completed-tasks tab, or focus it if it's already up. Only ever
+   *  one — it's a view of a single app-wide log, so a second would be a copy. */
+  const openTaskHistory = useCallback(() => {
+    const existing = tabsRef.current.find((t) => t.type === "task-history");
+    if (existing) {
+      setActiveTabId(existing.id);
+      return;
+    }
+    const id = tabId();
+    setTabs((prev) => [...prev, { id, type: "task-history" }]);
+    setActiveTabId(id);
+  }, []);
+
   /** Open an issue as its own tab, reusing one already open for it. */
   const openTicket = useCallback(
     (ticket: ipc.TicketInfo, source: string) => {
@@ -1418,7 +1452,20 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         def.icon,
       );
       if (!id) return;
-      patchTabRaw(id, { micro: { taskId: def.id } } as Partial<SubTab>);
+      // Logged at launch, not at completion: a task that is stopped, or whose
+      // agent dies without ever reporting, still has to leave a trace — and the
+      // brief is only in hand here. The protocol is stripped back off; it is the
+      // same boilerplate on every run and pure noise in the history.
+      const runId = recordTaskStart({
+        taskId: def.id,
+        label: def.label,
+        icon: def.icon,
+        agent: cli.id,
+        cwd: dir,
+        projectId: project.id,
+        brief: def.buildContext(payload, userQuery),
+      });
+      patchTabRaw(id, { micro: { taskId: def.id, runId } } as Partial<SubTab>);
       if (start.typePrompt) {
         setTimeout(() => {
           const pty = tabsRef.current.find(
@@ -1430,7 +1477,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         }, 2500);
       }
     },
-    [addTerminal, patchTabRaw, onNotice],
+    [addTerminal, patchTabRaw, onNotice, project.id],
   );
 
   /** Run a brief that was composed on the spot (a diff surface's "ask about
@@ -1708,8 +1755,18 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           (t): t is TermSubTab => t.type === "terminal" && a.ptyId != null && t.ptyId === a.ptyId,
         );
         if (!tab || !tab.micro) return;
-        if (a.status === "blocked") setActiveTabId(tab.id);
-        else finishMicroTask(tab);
+        const runId = tab.micro.runId;
+        if (a.status === "blocked") {
+          // Blocked is not an ending — the agent is waiting on the user and the
+          // run continues. Keep what it said, leave the run open; if the user
+          // walks away instead of answering, closing the tab settles it.
+          if (runId) updateTaskRun(runId, { summary: a.summary, url: a.url });
+          setActiveTabId(tab.id);
+        } else {
+          if (runId)
+            recordTaskEnd(runId, { status: "done", summary: a.summary, url: a.url });
+          finishMicroTask(tab);
+        }
         return;
       }
       if (d?.projectId !== project.id) return;
@@ -1804,6 +1861,18 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   }, []);
 
   const closeTab = useCallback((id: string) => {
+    // The last moment the terminal's scrollback exists: the handle goes on the
+    // next line and the buffer dies with the unmount. Both endings pass through
+    // here — job_done's self-close and the user closing the tab — so capturing
+    // once here covers a finished task and an abandoned one alike. recordTaskEnd
+    // ignores a run that already settled, so "stopped" can't clobber "done".
+    const closingTab = tabsRef.current.find((t) => t.id === id);
+    if (closingTab?.type === "terminal" && closingTab.micro?.runId) {
+      const runId = closingTab.micro.runId;
+      const output = termHandles.current.get(id)?.captureText(8000);
+      if (output) updateTaskRun(runId, { output });
+      recordTaskEnd(runId, { status: "stopped" });
+    }
     termHandles.current.delete(id);
     setTabs((prev) => {
       const closing = prev.find((t) => t.id === id);
@@ -3303,6 +3372,19 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             onNotice={onNotice}
           />
         );
+      case "task-history":
+        return (
+          <TaskHistoryView
+            // Re-runs the stored brief rather than the task definition: a
+            // built-in's payload came from the surface it was clicked on
+            // (a branch tab, a PR), which is long gone — but the brief that
+            // payload produced was recorded, and it says everything.
+            onRunAgain={(run: TaskRun) =>
+              runAdhocTask(run.label, run.brief, run.cwd)
+            }
+            onOpenFile={(path) => void openFile(path)}
+          />
+        );
       case "chat":
         return <ChatView peer={tab.peer} title={tab.name} relay={relay} onNotice={onNotice} />;
       case "collab": {
@@ -4220,6 +4302,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onRunCustom={(task: CustomMicroTask, dir: string, query: string) =>
             startMicroTask(customTaskDef(task), { dir }, query)
           }
+          onOpenHistory={openTaskHistory}
         />
       ))}
       {sidePane("agents", () => (
