@@ -171,6 +171,64 @@ describe("editing", () => {
     doc.sections[0].dirty = true;
     expect(serializeDoc(doc)).toContain("## Commands\n\n- kept\n\n");
   });
+
+  // Reordering is the one edit that regenerates two sections at once, so it's
+  // the one most likely to reformat something the user didn't touch.
+  it("reorders two sections without disturbing a third", () => {
+    const doc = parseDoc(FIXTURES.deepHeadings);
+    const [a, b] = [doc.sections[0], doc.sections[3]];
+    doc.sections[0] = { ...b, dirty: true };
+    doc.sections[3] = { ...a, dirty: true };
+    const out = serializeDoc(doc);
+    expect(out.startsWith("## B\n\nend\n")).toBe(true);
+    // `## A` has no body of its own — everything under it belongs to `### A.1`.
+    expect(out.endsWith("## A\n\n")).toBe(true);
+    // The untouched middle sections are still verbatim, in place.
+    expect(out).toContain("### A.1\n\ntext\n");
+    expect(out).toContain("#### A.1.1\n\nmore\n");
+  });
+
+  it("edits the preamble, which is where a #-organised file lives", () => {
+    const doc = parseDoc(FIXTURES.typical);
+    doc.preamble = "# Canopy\n\nAn IDE for agents, rewritten.";
+    doc.preambleDirty = true;
+    const out = serializeDoc(doc);
+    expect(out.startsWith("# Canopy\n\nAn IDE for agents, rewritten.\n\n## Commands")).toBe(true);
+  });
+});
+
+describe("line endings", () => {
+  // The round-trip covers CRLF for an *untouched* document. This is the case
+  // that reaches a shared repo as a whole-file diff: one edited bullet in a
+  // CRLF file, written back half-LF.
+  it("keeps CRLF when a section is edited", () => {
+    const doc = parseDoc(FIXTURES.crlf);
+    expect(doc.eol).toBe("\r\n");
+    doc.sections[0].items = ["a", "c"];
+    doc.sections[0].dirty = true;
+    const out = serializeDoc(doc);
+    expect(out).toBe("# Title\r\n\r\n## One\r\n\r\n- a\r\n- c\r\n\r\n");
+    expect(out).not.toMatch(/[^\r]\n/);
+  });
+
+  it("does not leave a stray \\r on items read from a CRLF file", () => {
+    expect(parseDoc(FIXTURES.crlf).sections[0].items).toEqual(["a", "b"]);
+  });
+
+  it("keeps CRLF when a frontmatter field is set", () => {
+    const fm = "---\r\nname: x\r\ntools:\r\n  - Read\r\n---\r\n";
+    expect(setFrontmatterField(fm, "name", "y")).toBe(
+      "---\r\nname: y\r\ntools:\r\n  - Read\r\n---\r\n",
+    );
+  });
+
+  it("keeps LF on an LF document", () => {
+    const doc = parseDoc(FIXTURES.typical);
+    expect(doc.eol).toBe("\n");
+    doc.sections[1].body = "Prefer very small functions.";
+    doc.sections[1].dirty = true;
+    expect(serializeDoc(doc)).not.toContain("\r");
+  });
 });
 
 describe("frontmatter fields", () => {

@@ -3506,6 +3506,17 @@ body.dragging-tab * {
   white-space: nowrap;
   color: var(--text-dim);
 }
+/* Which project a run belongs to — only shown in the all-projects view. */
+.task-history-project {
+  flex: 0 0 auto;
+  background: var(--bg-raised);
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  color: var(--text-dim);
+  font-size: 10px;
+  padding: 0 6px;
+}
 .task-history-when,
 .task-history-took {
   flex: 0 0 auto;
@@ -3854,16 +3865,16 @@ body.dragging-tab * {
   flex: 1;
   min-width: 0;
 }
-/* The title and intro prose above the first heading. Shown, not edited: it is
-   usually one line naming the project, and a card for it would out-weigh the
-   sections carrying the actual instructions. Raw mode edits it. */
-.instr-preamble pre {
-  margin: 0;
+/* The title and intro above the first `##`. Editable, because a document that
+   uses a single `#` per section lives entirely here. Labelled rather than given
+   a heading input — it isn't a section and shouldn't look like one. */
+.instr-preamble-label {
+  display: block;
+  margin-bottom: 6px;
   color: var(--text-dim);
-  font-family: inherit;
-  font-size: 12px;
-  line-height: 1.5;
-  white-space: pre-wrap;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .task-run-form,

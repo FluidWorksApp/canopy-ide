@@ -48,15 +48,28 @@ function took(run: TaskRun): string {
 }
 
 interface TaskHistoryViewProps {
-  /** Launch this run's task again, in the directory it ran in. Absent when the
-   *  task's definition no longer exists (a custom task since deleted). */
+  /** The project this tab was opened from — the default scope. */
+  projectId: string;
+  /** Name of that project, for the "everywhere" view's per-row label. */
+  projectName: string;
+  /** Launch this run's task again, in the directory it ran in. Only offered for
+   *  runs from this project: the brief would otherwise be fired into another
+   *  project's tree while being recorded against this one. */
   onRunAgain?: (run: TaskRun) => void;
   /** Open a path in the editor — the files an agent touched are clickable. */
   onOpenFile?: (path: string) => void;
 }
 
-export function TaskHistoryView({ onRunAgain, onOpenFile }: TaskHistoryViewProps) {
-  const [runs, setRuns] = useState<TaskRun[]>(() => completedTaskRuns());
+export function TaskHistoryView({
+  projectId,
+  projectName,
+  onRunAgain,
+  onOpenFile,
+}: TaskHistoryViewProps) {
+  // The log is app-wide, the view is not: you opened this from a project, so
+  // that project's work is what you meant. "Everywhere" is one click away.
+  const [everywhere, setEverywhere] = useState(false);
+  const [runs, setRuns] = useState<TaskRun[]>(() => completedTaskRuns(projectId));
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<TaskRunStatus | "all">("all");
   const [page, setPage] = useState(0);
@@ -66,10 +79,11 @@ export function TaskHistoryView({ onRunAgain, onOpenFile }: TaskHistoryViewProps
   // A task finishing while this tab is open should land in the list — the whole
   // point is that you can leave it open and watch outcomes arrive.
   useEffect(() => {
-    const refresh = () => setRuns(completedTaskRuns());
+    const refresh = () => setRuns(completedTaskRuns(everywhere ? undefined : projectId));
+    refresh();
     window.addEventListener(TASK_HISTORY_EVENT, refresh);
     return () => window.removeEventListener(TASK_HISTORY_EVENT, refresh);
-  }, []);
+  }, [everywhere, projectId]);
 
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -147,6 +161,21 @@ export function TaskHistoryView({ onRunAgain, onOpenFile }: TaskHistoryViewProps
             {f.label}
           </button>
         ))}
+        <span className="status-spacer" />
+        <button
+          className={`task-history-chip ${everywhere ? "task-history-chip-on" : ""}`}
+          title={
+            everywhere
+              ? `Showing tasks from every project — click for ${projectName} only`
+              : "Tasks run in your other projects too"
+          }
+          onClick={() => {
+            setEverywhere((v) => !v);
+            setPage(0);
+          }}
+        >
+          All projects
+        </button>
       </div>
 
       {shown.length === 0 ? (
@@ -168,6 +197,13 @@ export function TaskHistoryView({ onRunAgain, onOpenFile }: TaskHistoryViewProps
                   <span className={`task-history-dot st-${run.status}`} title={run.status} />
                   <span className="task-icon">{run.icon || "◆"}</span>
                   <span className="task-history-label">{run.label}</span>
+                  {/* Only in the everywhere view — in the scoped one every row
+                      is this project and the chip would be noise on all of them. */}
+                  {everywhere && (
+                    <span className="task-history-project" title={run.cwd}>
+                      {run.projectName ?? run.cwd.split("/").filter(Boolean).pop()}
+                    </span>
+                  )}
                   <span className="task-history-said">{run.summary ?? "No summary reported."}</span>
                   <span className="task-history-when" title={new Date(run.startedAt).toLocaleString()}>
                     {ago(run.startedAt)}
@@ -194,7 +230,11 @@ export function TaskHistoryView({ onRunAgain, onOpenFile }: TaskHistoryViewProps
                         </a>
                       )}
                       <span className="status-spacer" />
-                      {onRunAgain && (
+                      {/* Only for this project's runs: re-running fires the
+                          brief into `run.cwd`, and a run from elsewhere would
+                          land in another project's tree while being recorded
+                          against this one. */}
+                      {onRunAgain && run.projectId === projectId && (
                         <button
                           className="btn"
                           title="Run this task again, in the same directory"

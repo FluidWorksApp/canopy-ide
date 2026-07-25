@@ -33,9 +33,17 @@ export interface InstructionDoc {
   /** The leading `---` block, fences and trailing newline included. */
   frontmatter: string | null;
   /** Everything between the frontmatter and the first `##` heading — usually
-   *  the `# Title` and an intro paragraph. */
+   *  the `# Title` and an intro paragraph. Editable: a document organised with
+   *  `#` per section lands wholly in here, and so does the intro of most
+   *  CLAUDE.md files. */
   preamble: string;
+  /** Marks the preamble as edited, same contract as a section's `dirty`. */
+  preambleDirty?: boolean;
   sections: DocSection[];
+  /** The document's own line ending, reapplied to anything regenerated. A file
+   *  written on Windows must not come back half-LF because one bullet was
+   *  edited — that reaches a shared repo as a whole-file diff. */
+  eol: "\n" | "\r\n";
 }
 
 /** A heading that opens a section. `#` is left alone: a document's title is not
@@ -59,6 +67,8 @@ function splitLines(text: string): string[] {
 const BULLET = /^[-*]\s+(.*)$/;
 
 function bulletItems(body: string): string[] | undefined {
+  // `body` is already normalized to LF, so a CRLF file doesn't yield items with
+  // a trailing \r that would then be written back as \r\r\n.
   const lines = body.split("\n");
   const content = lines.filter((l) => l.trim() !== "");
   if (content.length === 0) return undefined;
@@ -114,7 +124,10 @@ export function parseDoc(text: string): InstructionDoc {
   const sections: DocSection[] = starts.map((s, k) => {
     const end = k + 1 < starts.length ? starts[k + 1].index : lines.length;
     const raw = lines.slice(s.index, end).join("");
-    const body = trimBlankLines(lines.slice(s.index + 1, end).join(""));
+    // Bodies are held as LF for editing (a textarea normalizes to LF anyway);
+    // `raw` keeps the file's own endings for everything left untouched, and
+    // `eol` puts them back on anything regenerated.
+    const body = trimBlankLines(lines.slice(s.index + 1, end).join("")).replace(/\r\n/g, "\n");
     return {
       id: `s${k}`,
       level: s.level,
@@ -125,30 +138,41 @@ export function parseDoc(text: string): InstructionDoc {
     };
   });
 
-  return { frontmatter, preamble, sections };
+  return { frontmatter, preamble, sections, eol: text.includes("\r\n") ? "\r\n" : "\n" };
 }
 
 /** Regenerate one section from its edited parts. Only ever called for a section
  *  the user changed — which is what keeps the rest of the file byte-identical. */
-function render(section: DocSection): string {
-  const head = `${"#".repeat(section.level)} ${section.heading}\n`;
+function render(section: DocSection, eol: "\n" | "\r\n"): string {
+  const nl = (s: string) => s.replace(/\r?\n/g, eol);
+  const head = `${"#".repeat(section.level)} ${section.heading}${eol}`;
   const body = section.items
     ? section.items
         .map((it) => it.trim())
         .filter((it) => it !== "")
-        .map((it) => `- ${it}\n`)
+        .map((it) => `- ${it}${eol}`)
         .join("")
-    : `${trimBlankLines(section.body)}\n`;
-  if (trimBlankLines(body) === "") return `${head}\n`;
-  return `${head}\n${body}\n`;
+    : `${nl(trimBlankLines(section.body))}${eol}`;
+  if (trimBlankLines(body) === "") return `${head}${eol}`;
+  return `${head}${eol}${body}${eol}`;
 }
 
 export function serializeDoc(doc: InstructionDoc): string {
+  const preamble = doc.preambleDirty
+    ? renderPreamble(doc.preamble, doc.eol)
+    : doc.preamble;
   return (
     (doc.frontmatter ?? "") +
-    doc.preamble +
-    doc.sections.map((s) => (s.dirty ? render(s) : s.raw)).join("")
+    preamble +
+    doc.sections.map((s) => (s.dirty ? render(s, doc.eol) : s.raw)).join("")
   );
+}
+
+/** An edited preamble, normalized to the document's line endings and left with
+ *  one blank line before whatever heading follows. */
+function renderPreamble(text: string, eol: "\n" | "\r\n"): string {
+  const body = trimBlankLines(text).replace(/\r?\n/g, eol);
+  return body === "" ? "" : `${body}${eol}${eol}`;
 }
 
 // ---------- frontmatter fields ----------
@@ -205,5 +229,8 @@ export function setFrontmatterField(
   const line = `${key}: ${quote(value)}`;
   const i = fields.findIndex((f) => f.key === key);
   const next = i === -1 ? [...fields.map((f) => f.raw), line] : fields.map((f, j) => (j === i ? line : f.raw));
-  return `---\n${next.join("\n")}\n---\n`;
+  // Rebuilt with the block's own line ending: joining with \n on a CRLF file
+  // left the frontmatter mixed, which shows up as a whole-block diff.
+  const eol = frontmatter?.includes("\r\n") ? "\r\n" : "\n";
+  return `---${eol}${next.join(eol)}${eol}---${eol}`;
 }

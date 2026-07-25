@@ -2,10 +2,13 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   clearTaskHistory,
   completedTaskRuns,
+  endAbandonedRun,
   recordTaskEnd,
   recordTaskStart,
   removeTaskRun,
+  sweepStaleRuns,
   taskRuns,
+  updateTaskRun,
   type TaskRun,
 } from "./taskHistory";
 
@@ -76,6 +79,72 @@ describe("completedTaskRuns", () => {
     start({ label: "still going" });
     recordTaskEnd(done, { status: "done" });
     expect(completedTaskRuns().map((r) => r.label)).toEqual(["done"]);
+  });
+
+  // The log is app-wide, but every surface showing it sits inside a project.
+  it("scopes to one project when asked, and to all when not", () => {
+    const a = start({ label: "here", projectId: "p1" });
+    const b = start({ label: "elsewhere", projectId: "p2" });
+    recordTaskEnd(a, { status: "done" });
+    recordTaskEnd(b, { status: "done" });
+    expect(completedTaskRuns("p1").map((r) => r.label)).toEqual(["here"]);
+    expect(completedTaskRuns().map((r) => r.label)).toEqual(["elsewhere", "here"]);
+  });
+});
+
+describe("abandoned runs", () => {
+  // "It needed you and you never came back" is a different outcome from "you
+  // called it off", and it's the only thing that ever writes `blocked`.
+  it("settles as blocked when the agent had asked for the user", () => {
+    const id = start();
+    updateTaskRun(id, { summary: "Need a token", askedForUser: true });
+    endAbandonedRun(id, "tail");
+    const run = taskRuns()[0];
+    expect(run.status).toBe("blocked");
+    expect(run.summary).toBe("Need a token");
+    expect(run.output).toBe("tail");
+  });
+
+  it("settles as stopped otherwise", () => {
+    const id = start();
+    endAbandonedRun(id);
+    expect(taskRuns()[0].status).toBe("stopped");
+  });
+
+  it("leaves a run that already reported done alone", () => {
+    const id = start();
+    recordTaskEnd(id, { status: "done", summary: "shipped" });
+    endAbandonedRun(id);
+    expect(taskRuns()[0].status).toBe("done");
+  });
+});
+
+describe("sweepStaleRuns", () => {
+  // A micro-task in flight when the app quits has no tab to come back to, so it
+  // can never report — without the sweep it stays "running" forever: invisible
+  // to the history tab and still holding one of the 200 slots.
+  it("settles anything left running by a previous launch", () => {
+    const running = start({ label: "orphan" });
+    const blocked = start({ label: "orphan asking" });
+    updateTaskRun(blocked, { askedForUser: true });
+    const finished = start({ label: "finished" });
+    recordTaskEnd(finished, { status: "done" });
+
+    sweepStaleRuns();
+
+    const byId = Object.fromEntries(taskRuns().map((r) => [r.id, r]));
+    expect(byId[running].status).toBe("stopped");
+    expect(byId[blocked].status).toBe("blocked");
+    expect(byId[finished].status).toBe("done");
+    expect(completedTaskRuns()).toHaveLength(3);
+  });
+
+  it("does nothing, and writes nothing, when everything already settled", () => {
+    const id = start();
+    recordTaskEnd(id, { status: "done" });
+    const before = localStorage.getItem("canopy.taskHistory");
+    sweepStaleRuns();
+    expect(localStorage.getItem("canopy.taskHistory")).toBe(before);
   });
 });
 

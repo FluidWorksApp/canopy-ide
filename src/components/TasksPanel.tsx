@@ -37,6 +37,8 @@ interface TasksPanelProps {
   onRunCustom: (task: CustomMicroTask, dir: string, query: string) => void;
   /** Open the completed-tasks tab — the full searchable history. */
   onOpenHistory: () => void;
+  /** Scopes the Completed count to this project's runs. */
+  projectId: string;
 }
 
 /** The edit form's working copy — also the "new task" state when id is "". */
@@ -52,17 +54,21 @@ export function TasksPanel({
   onStop,
   onRunCustom,
   onOpenHistory,
+  projectId,
 }: TasksPanelProps) {
   const [custom, setCustom] = useState<CustomMicroTask[]>(() => getSettings().customMicroTasks);
   const [draft, setDraft] = useState<Draft | null>(null);
   // A task finishing has to move the count here even though the panel didn't
   // do anything — the whole lifecycle happens in a tab the user has left.
-  const [done, setDone] = useState<TaskRun[]>(() => completedTaskRuns());
+  // Scoped to this project, like the tab it opens: a count in a project's
+  // sidebar that included other projects' work would just be wrong.
+  const [done, setDone] = useState<TaskRun[]>(() => completedTaskRuns(projectId));
   useEffect(() => {
-    const refresh = () => setDone(completedTaskRuns());
+    const refresh = () => setDone(completedTaskRuns(projectId));
+    refresh();
     window.addEventListener(TASK_HISTORY_EVENT, refresh);
     return () => window.removeEventListener(TASK_HISTORY_EVENT, refresh);
-  }, []);
+  }, [projectId]);
 
   // A seed from "New task from selection" opens the create form with the
   // selected text as the brief; the user names it and tweaks from there. Also

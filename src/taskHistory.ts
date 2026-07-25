@@ -21,6 +21,9 @@ export interface TaskRun {
   /** Where the agent ran; also where "run again" would run it. */
   cwd: string;
   projectId: string;
+  /** Recorded, not looked up: the history outlives a project being closed or
+   *  renamed, and an id alone tells the reader nothing. */
+  projectName?: string;
   /** The brief it was launched with, minus the completion protocol. */
   brief: string;
   startedAt: number;
@@ -34,6 +37,11 @@ export interface TaskRun {
   files?: string[];
   /** Tail of the terminal, plain text, captured just before the tab closed. */
   output?: string;
+  /** The agent reported `blocked` at some point — it asked for the user. Set
+   *  while the run is still going (blocked is not an ending: the user can
+   *  answer and the task finishes), and read when the tab closes to tell an
+   *  abandoned-while-waiting run from one that was simply called off. */
+  askedForUser?: boolean;
 }
 
 const KEY = "canopy.taskHistory";
@@ -90,15 +98,26 @@ export function recordTaskStart(run: Omit<TaskRun, "id" | "status" | "startedAt"
   return id;
 }
 
-/** Complete (or stop) a run. A no-op for an unknown id, and — deliberately —
- *  for a run that already ended: the tab-close path fires after job_done on
- *  every successful task, and must not overwrite "done" with "stopped". */
+/** Complete a run. A no-op for an unknown id, and — deliberately — for a run
+ *  that already ended: the tab-close path fires after job_done on every
+ *  successful task, and must not overwrite "done" with "stopped". */
 export function recordTaskEnd(id: string, patch: Partial<Omit<TaskRun, "id">>): void {
   const runs = read();
   const i = runs.findIndex((r) => r.id === id);
   if (i === -1 || runs[i].status !== "running") return;
   runs[i] = { ...runs[i], ...patch, endedAt: patch.endedAt ?? Date.now() };
   write(runs);
+}
+
+/** Settle a run whose tab is closing without it ever having reported done.
+ *  "Blocked" when the agent asked for the user and never got an answer, plain
+ *  "stopped" otherwise — the difference between "it needed you" and "you called
+ *  it off", which is the whole reason the Blocked filter exists. */
+export function endAbandonedRun(id: string, output?: string): void {
+  const runs = read();
+  const run = runs.find((r) => r.id === id);
+  if (!run || run.status !== "running") return;
+  recordTaskEnd(id, { status: run.askedForUser ? "blocked" : "stopped", output });
 }
 
 /** Patch a run without settling its outcome — used for the captured terminal
@@ -112,14 +131,37 @@ export function updateTaskRun(id: string, patch: Partial<Omit<TaskRun, "id" | "s
   write(runs);
 }
 
+/** Settle anything left `running` by a previous app launch. Micro-task tabs are
+ *  never restored, so a task in flight when Canopy quit has no terminal to come
+ *  back to and no way to ever report — without this it stays `running` for
+ *  good: invisible to the history tab (which lists only finished runs), yet
+ *  still taking up one of the 200 slots. Call once, on startup, before anything
+ *  new is recorded. */
+export function sweepStaleRuns(): void {
+  const runs = read();
+  if (!runs.some((r) => r.status === "running")) return;
+  write(
+    runs.map((r) =>
+      r.status === "running"
+        ? { ...r, status: r.askedForUser ? "blocked" : "stopped", endedAt: r.endedAt ?? Date.now() }
+        : r,
+    ),
+  );
+}
+
 /** Every run, newest first. */
 export function taskRuns(): TaskRun[] {
   return read();
 }
 
-/** Runs that have finished — what the Completed section counts and lists. */
-export function completedTaskRuns(): TaskRun[] {
-  return read().filter((r) => r.status !== "running");
+/** Runs that have finished — what the Completed section counts and lists. The
+ *  log itself is app-wide (a task like "changelog entry" is about how you work,
+ *  not about one repo), but every surface showing it is inside a project, so
+ *  the default view is scoped and `projectId` is how. */
+export function completedTaskRuns(projectId?: string): TaskRun[] {
+  return read().filter(
+    (r) => r.status !== "running" && (projectId === undefined || r.projectId === projectId),
+  );
 }
 
 export function removeTaskRun(id: string): void {

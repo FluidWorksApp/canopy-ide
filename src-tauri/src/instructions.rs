@@ -228,15 +228,22 @@ fn home() -> Option<PathBuf> {
 /// a YAML parser: two scalar keys out of a frontmatter block is the whole job,
 /// and a malformed block should degrade to "no title", never to an error.
 fn frontmatter_fields(path: &Path) -> (Option<String>, Option<String>) {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    // Streamed, not `read_to_string`: this runs for every skill, rule, command
+    // and subagent on every scan, and a skill's SKILL.md can be tens of KB of
+    // body below the four lines actually wanted here.
+    use std::io::BufRead;
+    let Ok(file) = std::fs::File::open(path) else {
         return (None, None);
     };
-    let mut lines = text.lines();
-    if lines.next().map(str::trim) != Some("---") {
+    let mut lines = std::io::BufReader::new(file)
+        .lines()
+        .take(41)
+        .map_while(Result::ok);
+    if lines.next().map(|l| l.trim().to_string()).as_deref() != Some("---") {
         return (None, None);
     }
     let (mut name, mut desc) = (None, None);
-    for line in lines.take(40) {
+    for line in lines {
         let t = line.trim();
         if t == "---" {
             break;
@@ -343,10 +350,15 @@ fn expand(spec: &Spec, root: &Path) -> Vec<(PathBuf, String)> {
         Loc::Nested(name) => {
             let mut found = Vec::new();
             walk_nested(root, name, 0, &mut found);
-            if found.is_empty() {
-                // Nothing on disk: still offer the root one, so a project with no
-                // AGENTS.md has somewhere to create it.
-                return vec![(root.join(name), name.to_string())];
+            // The root candidate is always offered, even when nested ones exist:
+            // a repo with `packages/api/AGENTS.md` and no root one still needs
+            // somewhere to put the instructions that apply to all of it, and an
+            // all-or-nothing fallback left that repo unable to create it here.
+            // (`walk_nested` already yields the root file when it does exist, so
+            // this only ever adds the missing case.)
+            let root_file = root.join(name);
+            if !found.contains(&root_file) {
+                found.insert(0, root_file);
             }
             found
                 .into_iter()
@@ -406,6 +418,15 @@ fn expand(spec: &Spec, root: &Path) -> Vec<(PathBuf, String)> {
 /// and can create it.
 #[tauri::command]
 pub async fn instructions_scan(roots: Vec<String>) -> Result<Vec<InstructionFile>, String> {
+    // Off the async runtime: this is two recursive walks, forty-odd read_dirs
+    // and a frontmatter read per pack — heavier than the fs commands next door,
+    // and the Agents panel re-runs it every time that tab comes into view.
+    tauri::async_runtime::spawn_blocking(move || scan(roots))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn scan(roots: Vec<String>) -> Vec<InstructionFile> {
     let all = specs();
     let mut out: Vec<InstructionFile> = Vec::new();
     // Keyed on the *canonical* path, so one file reached by several routes is
@@ -459,7 +480,7 @@ pub async fn instructions_scan(roots: Vec<String>) -> Result<Vec<InstructionFile
         }
     }
 
-    Ok(out)
+    out
 }
 
 /// The gate. A path is reachable only if some spec, resolved against a passed
@@ -472,8 +493,24 @@ pub async fn instructions_scan(roots: Vec<String>) -> Result<Vec<InstructionFile
 fn gate(path: &str, roots: &[String]) -> Result<PathBuf, String> {
     let target = canonical_ish(Path::new(path))?;
 
+    // Both sides canonical, always. `expand` yields the path as *written* —
+    // `~/.claude/skills/caveman/SKILL.md` — while the target resolves through
+    // the symlink to `~/shared/caveman/SKILL.md`, so comparing them raw refuses
+    // every shared skill: exactly the files the scanner works hardest to find,
+    // and exactly the ones the scan then lists but couldn't open. A symlinked
+    // `~/.claude/CLAUDE.md` (dotfiles) and a project `CLAUDE.md` linked in from
+    // outside the root fail the same way.
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    // Where the file sits *as written*, with `..` collapsed but symlinks left
+    // alone. A project's `CLAUDE.md` is often a link into a dotfiles repo; as
+    // far as the project is concerned that file is in the project, and judging
+    // containment on where the link lands refuses it. `..` still can't escape,
+    // because this collapses it before anything is compared.
+    let written = lexical(Path::new(path));
+
     for spec in specs().iter().filter(|s| s.scope == Scope::Project) {
         for root in roots {
+            let raw_root = lexical(Path::new(root));
             let Ok(root) = PathBuf::from(root).canonicalize() else {
                 continue;
             };
@@ -483,19 +520,32 @@ fn gate(path: &str, roots: &[String]) -> Result<PathBuf, String> {
                 // genuinely inside the root, rather than expanding the walk —
                 // which would refuse to create the very file being created.
                 Loc::Nested(name) => {
-                    if target.file_name().map(|f| f == name).unwrap_or(false)
-                        && target.starts_with(&root)
-                        && !target
-                            .components()
+                    let rel = target
+                        .strip_prefix(&root)
+                        .ok()
+                        .or_else(|| written.strip_prefix(&root).ok())
+                        .or_else(|| written.strip_prefix(&raw_root).ok());
+                    // SKIP_DIRS is checked against the path *relative to the
+                    // root*, never the absolute one: a checkout that happens to
+                    // live under ~/build or ~/dist is still a checkout, and
+                    // matching on the whole path locked those users out of
+                    // their own AGENTS.md entirely.
+                    let vendored = rel.is_some_and(|rel| {
+                        rel.components()
                             .any(|c| SKIP_DIRS.contains(&c.as_os_str().to_string_lossy().as_ref()))
+                    });
+                    if target.file_name().map(|f| f == name).unwrap_or(false)
+                        && rel.is_some()
+                        && !vendored
                     {
                         return Ok(target);
                     }
                 }
                 _ => {
-                    if expand(spec, &root).iter().any(|(p, _)| *p == target)
-                        || matches!(spec.loc, Loc::File(rel) if root.join(rel) == target)
-                    {
+                    if expand(spec, &root).iter().any(|(p, _)| canon(p) == target) {
+                        return Ok(target);
+                    }
+                    if new_file_in_location(&spec.loc, &root, &target) {
                         return Ok(target);
                     }
                 }
@@ -505,26 +555,11 @@ fn gate(path: &str, roots: &[String]) -> Result<PathBuf, String> {
 
     if let Some(home) = home().and_then(|h| h.canonicalize().ok()) {
         for spec in specs().iter().filter(|s| s.scope == Scope::Global) {
-            if expand(spec, &home).iter().any(|(p, _)| *p == target)
-                || matches!(spec.loc, Loc::File(rel) if home.join(rel) == target)
-            {
+            if expand(spec, &home).iter().any(|(p, _)| canon(p) == target) {
                 return Ok(target);
             }
-            // A skill or rule being created inside a directory that is itself an
-            // instruction location: `~/.claude/skills/<new>/SKILL.md`.
-            if let Loc::Pack(dir, file) = spec.loc {
-                if target.file_name().map(|f| f == file).unwrap_or(false)
-                    && target.parent().and_then(|p| p.parent()) == Some(home.join(dir).as_path())
-                {
-                    return Ok(target);
-                }
-            }
-            if let Loc::Dir(dir, ext) = spec.loc {
-                if target.extension().map(|e| e == ext).unwrap_or(false)
-                    && target.parent() == Some(home.join(dir).as_path())
-                {
-                    return Ok(target);
-                }
+            if new_file_in_location(&spec.loc, &home, &target) {
+                return Ok(target);
             }
         }
     }
@@ -533,6 +568,55 @@ fn gate(path: &str, roots: &[String]) -> Result<PathBuf, String> {
         "not an agent instruction file: {}",
         target.display()
     ))
+}
+
+/// Does `target` name a file that doesn't exist yet, but sits exactly where this
+/// spec's files belong? `~/.claude/skills/<new>/SKILL.md`, `<repo>/CLAUDE.md`.
+///
+/// Applied to project and global scope alike — the asymmetry where only `$HOME`
+/// admitted new skills would have bitten the first time "New skill" grew a
+/// button in a project.
+fn new_file_in_location(loc: &Loc, root: &Path, target: &Path) -> bool {
+    let canon = |p: PathBuf| p.canonicalize().unwrap_or(p);
+    match *loc {
+        Loc::File(rel) => canon(root.join(rel)) == target,
+        // A pack is `<dir>/<anything>/<file>`; the middle segment is the new
+        // skill's own directory, so only the grandparent is pinned.
+        Loc::Pack(dir, file) => {
+            target.file_name().map(|f| f == file).unwrap_or(false)
+                && target
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .map(|p| canon(p.to_path_buf()) == canon(root.join(dir)))
+                    .unwrap_or(false)
+        }
+        Loc::Dir(dir, ext) => {
+            target.extension().map(|e| e == ext).unwrap_or(false)
+                && target
+                    .parent()
+                    .map(|p| canon(p.to_path_buf()) == canon(root.join(dir)))
+                    .unwrap_or(false)
+        }
+        Loc::Nested(_) => false,
+    }
+}
+
+/// Collapse `.` and `..` without touching the filesystem — the path as the user
+/// wrote it, minus any way to climb out of a directory. Used for containment
+/// checks where following a symlink would give the wrong answer.
+fn lexical(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// Canonicalize the deepest existing ancestor and re-append the rest, so a file
@@ -585,126 +669,212 @@ pub async fn instructions_write(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn roots() -> Vec<String> {
-        vec![std::env::temp_dir().to_string_lossy().to_string()]
+    /// A private directory per test. Shared fixed names under `temp_dir()` meant
+    /// two tests wrote to `canopy-instr-test` and nothing ever cleaned up, which
+    /// is fine locally and flaky the moment CI runs them in parallel or twice.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            static N: AtomicUsize = AtomicUsize::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "canopy-instr-{tag}-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+        fn roots(&self) -> Vec<String> {
+            vec![self.0.to_string_lossy().to_string()]
+        }
+        fn touch(&self, rel: &str, body: &str) -> PathBuf {
+            let p = self.0.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, body).unwrap();
+            p
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn gate_ok(path: &Path, roots: &[String]) -> bool {
+        gate(&path.to_string_lossy(), roots).is_ok()
     }
 
     #[test]
     fn gate_admits_a_project_agents_md() {
-        let dir = std::env::temp_dir().join("canopy-instr-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let roots = vec![dir.to_string_lossy().to_string()];
+        let s = Scratch::new("admit");
         // Doesn't exist yet — creating it is the point.
-        let p = dir.join("AGENTS.md");
-        assert!(gate(&p.to_string_lossy(), &roots).is_ok());
-        assert!(gate(&dir.join("CLAUDE.md").to_string_lossy(), &roots).is_ok());
-        assert!(gate(
-            &dir.join(".github/copilot-instructions.md")
-                .to_string_lossy(),
-            &roots
-        )
-        .is_ok());
+        assert!(gate_ok(&s.path().join("AGENTS.md"), &s.roots()));
+        assert!(gate_ok(&s.path().join("CLAUDE.md"), &s.roots()));
+        assert!(gate_ok(
+            &s.path().join(".github/copilot-instructions.md"),
+            &s.roots()
+        ));
     }
 
     #[test]
     fn gate_admits_nested_agents_md_but_not_in_vendored_trees() {
-        let dir = std::env::temp_dir().join("canopy-instr-nested");
-        std::fs::create_dir_all(dir.join("packages/api")).unwrap();
-        std::fs::create_dir_all(dir.join("node_modules/dep")).unwrap();
-        let roots = vec![dir.to_string_lossy().to_string()];
-        assert!(gate(
-            &dir.join("packages/api/AGENTS.md").to_string_lossy(),
-            &roots
-        )
-        .is_ok());
-        assert!(gate(
-            &dir.join("node_modules/dep/AGENTS.md").to_string_lossy(),
-            &roots
-        )
-        .is_err());
+        let s = Scratch::new("nested");
+        std::fs::create_dir_all(s.path().join("packages/api")).unwrap();
+        std::fs::create_dir_all(s.path().join("node_modules/dep")).unwrap();
+        assert!(gate_ok(
+            &s.path().join("packages/api/AGENTS.md"),
+            &s.roots()
+        ));
+        assert!(!gate_ok(
+            &s.path().join("node_modules/dep/AGENTS.md"),
+            &s.roots()
+        ));
+    }
+
+    /// SKIP_DIRS used to be matched against the whole absolute path, so anyone
+    /// whose checkout lived under `~/build`, `~/dist` or `~/out` could never
+    /// open their own AGENTS.md. It has to be relative to the root.
+    #[test]
+    fn a_checkout_inside_a_directory_named_build_is_still_a_checkout() {
+        let outer = Scratch::new("build");
+        let repo = outer.path().join("build/myapp");
+        std::fs::create_dir_all(&repo).unwrap();
+        let roots = vec![repo.to_string_lossy().to_string()];
+        assert!(gate_ok(&repo.join("AGENTS.md"), &roots));
+        assert!(gate_ok(&repo.join("CLAUDE.md"), &roots));
+        // …but a vendored tree *inside* that root is still skipped.
+        std::fs::create_dir_all(repo.join("dist")).unwrap();
+        assert!(!gate_ok(&repo.join("dist/AGENTS.md"), &roots));
     }
 
     #[test]
     fn gate_refuses_anything_that_is_not_an_instruction_file() {
-        let dir = std::env::temp_dir().join("canopy-instr-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let roots = vec![dir.to_string_lossy().to_string()];
-        // Right place, wrong file.
-        assert!(gate(&dir.join("README.md").to_string_lossy(), &roots).is_err());
-        assert!(gate(&dir.join(".env").to_string_lossy(), &roots).is_err());
+        let s = Scratch::new("refuse");
+        assert!(!gate_ok(&s.path().join("README.md"), &s.roots()));
+        assert!(!gate_ok(&s.path().join(".env"), &s.roots()));
         // The agent's own settings are not instructions, and are not editable here.
-        assert!(gate(&dir.join(".claude/settings.json").to_string_lossy(), &roots).is_err());
+        assert!(!gate_ok(
+            &s.path().join(".claude/settings.json"),
+            &s.roots()
+        ));
+        assert!(!gate_ok(&s.path().join(".mcp.json"), &s.roots()));
     }
 
     #[test]
     fn gate_refuses_paths_outside_every_root() {
-        assert!(gate("/etc/passwd", &roots()).is_err());
+        let s = Scratch::new("outside");
+        assert!(gate("/etc/passwd", &s.roots()).is_err());
         if let Some(home) = home() {
-            // Right *name* shape, nowhere near an instruction location.
-            assert!(gate(&home.join(".ssh/config").to_string_lossy(), &roots()).is_err());
-            assert!(gate(&home.join("AGENTS.md").to_string_lossy(), &roots()).is_err());
+            assert!(!gate_ok(&home.join(".ssh/config"), &s.roots()));
+            // Right *name*, nowhere near an instruction location.
+            assert!(!gate_ok(&home.join("Downloads/AGENTS.md"), &s.roots()));
         }
     }
 
     #[test]
     fn gate_refuses_a_traversal_out_of_a_root() {
-        let dir = std::env::temp_dir().join("canopy-instr-esc");
-        std::fs::create_dir_all(&dir).unwrap();
-        let roots = vec![dir.to_string_lossy().to_string()];
-        let escape = dir.join("../../etc/AGENTS.md");
-        assert!(gate(&escape.to_string_lossy(), &roots).is_err());
+        let s = Scratch::new("escape");
+        assert!(!gate_ok(&s.path().join("../../etc/AGENTS.md"), &s.roots()));
     }
 
+    /// The gate's counterpart to the scanner's symlink handling. `expand` yields
+    /// the path as written; the target canonicalizes through the link. Comparing
+    /// them raw refused every shared skill — the file would list in the panel and
+    /// then fail to open.
+    #[cfg(unix)]
     #[test]
-    fn gate_admits_a_new_global_skill() {
-        let Some(home) = home() else { return };
-        let p = home.join(".claude/skills/brand-new-skill/SKILL.md");
-        assert!(gate(&p.to_string_lossy(), &[]).is_ok());
+    fn gate_admits_a_skill_reached_through_a_symlink() {
+        let s = Scratch::new("symgate");
+        let real = s.path().join("shared/caveman");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("SKILL.md"), "---\nname: caveman\n---\n").unwrap();
+
+        let skills = s.path().join("repo/.claude/skills");
+        std::fs::create_dir_all(&skills).unwrap();
+        std::os::unix::fs::symlink(&real, skills.join("caveman")).unwrap();
+
+        let roots = vec![s.path().join("repo").to_string_lossy().to_string()];
+        assert!(gate_ok(&skills.join("caveman/SKILL.md"), &roots));
+    }
+
+    /// A CLAUDE.md that is a symlink into a dotfiles repo — the other shape the
+    /// raw comparison refused.
+    #[cfg(unix)]
+    #[test]
+    fn gate_admits_a_symlinked_instructions_file() {
+        let s = Scratch::new("symfile");
+        let store = s.touch("dotfiles/CLAUDE.md", "# shared\n");
+        let repo = s.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::os::unix::fs::symlink(&store, repo.join("CLAUDE.md")).unwrap();
+        let roots = vec![repo.to_string_lossy().to_string()];
+        assert!(gate_ok(&repo.join("CLAUDE.md"), &roots));
+    }
+
+    /// Creating a skill that doesn't exist yet, in a project as well as in
+    /// `$HOME` — the asymmetry that would have bitten the first "New skill" button.
+    #[test]
+    fn gate_admits_a_new_skill_in_either_scope() {
+        let s = Scratch::new("newskill");
+        assert!(gate_ok(
+            &s.path().join(".claude/skills/brand-new/SKILL.md"),
+            &s.roots()
+        ));
         // But not an arbitrary file smuggled into the same tree.
-        let bad = home.join(".claude/skills/brand-new-skill/payload.sh");
-        assert!(gate(&bad.to_string_lossy(), &[]).is_err());
+        assert!(!gate_ok(
+            &s.path().join(".claude/skills/brand-new/payload.sh"),
+            &s.roots()
+        ));
+        assert!(gate_ok(
+            &s.path().join(".claude/rules/new-rule.md"),
+            &s.roots()
+        ));
     }
 
     #[test]
     fn frontmatter_is_read_and_a_broken_block_degrades_quietly() {
-        let dir = std::env::temp_dir().join("canopy-instr-fm");
-        std::fs::create_dir_all(&dir).unwrap();
-        let good = dir.join("good.md");
-        std::fs::write(
-            &good,
+        let s = Scratch::new("fm");
+        let good = s.touch(
+            "good.md",
             "---\nname: caveman\ndescription: \"Speak plainly\"\n---\n\nBody\n",
-        )
-        .unwrap();
+        );
         let (n, d) = frontmatter_fields(&good);
         assert_eq!(n.as_deref(), Some("caveman"));
         assert_eq!(d.as_deref(), Some("Speak plainly"));
 
-        let plain = dir.join("plain.md");
-        std::fs::write(&plain, "# Just a heading\n").unwrap();
+        let plain = s.touch("plain.md", "# Just a heading\n");
         assert_eq!(frontmatter_fields(&plain), (None, None));
+
+        // An opener with no closer is a horizontal rule, not frontmatter — and
+        // the streamed read must not run past its 40-line budget looking for one.
+        let unclosed = s.touch("unclosed.md", &format!("---\n{}", "x\n".repeat(500)));
+        assert_eq!(frontmatter_fields(&unclosed), (None, None));
     }
 
     /// Skills are routinely shared between CLIs by symlinking one directory into
     /// each tool's `skills/`. `DirEntry::file_type()` reports the *link*, not its
     /// target, so checking it there silently skipped every shared skill — which
     /// on a real multi-agent machine is most of them.
+    #[cfg(unix)]
     #[test]
     fn a_symlinked_skill_is_found_like_a_real_one() {
-        let base = std::env::temp_dir().join("canopy-instr-symlink");
-        let _ = std::fs::remove_dir_all(&base);
-        let real = base.join("shared/caveman");
+        let s = Scratch::new("symlink");
+        let real = s.path().join("shared/caveman");
         std::fs::create_dir_all(&real).unwrap();
         std::fs::write(real.join("SKILL.md"), "---\nname: caveman\n---\n\nBody\n").unwrap();
 
-        let skills = base.join("root/.claude/skills");
-        std::fs::create_dir_all(&skills).unwrap();
+        let skills = s.path().join("root/.claude/skills");
         std::fs::create_dir_all(skills.join("plain-one")).unwrap();
         std::fs::write(skills.join("plain-one/SKILL.md"), "---\nname: plain\n---\n").unwrap();
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&real, skills.join("caveman")).unwrap();
-        #[cfg(not(unix))]
-        return;
 
         let spec = Spec {
             loc: Loc::Pack(".claude/skills", "SKILL.md"),
@@ -712,7 +882,7 @@ mod tests {
             agents: SKILL_MD,
             scope: Scope::Project,
         };
-        let mut found: Vec<String> = expand(&spec, &base.join("root"))
+        let mut found: Vec<String> = expand(&spec, &s.path().join("root"))
             .into_iter()
             .map(|(_, label)| label)
             .collect();
@@ -726,21 +896,76 @@ mod tests {
         );
     }
 
-    /// A symlink that points back up its own tree must not send the nested walk
+    /// A symlink pointing back up its own tree must not send the nested walk
     /// round forever — which is why walk_nested, unlike the skills scan, checks
     /// the link type rather than following it.
+    #[cfg(unix)]
     #[test]
     fn a_symlink_cycle_does_not_hang_the_nested_walk() {
-        let base = std::env::temp_dir().join("canopy-instr-cycle");
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(base.join("packages")).unwrap();
-        std::fs::write(base.join("packages/AGENTS.md"), "nested\n").unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&base, base.join("packages/loop")).unwrap();
+        let s = Scratch::new("cycle");
+        std::fs::create_dir_all(s.path().join("packages")).unwrap();
+        std::fs::write(s.path().join("packages/AGENTS.md"), "nested\n").unwrap();
+        std::os::unix::fs::symlink(s.path(), s.path().join("packages/loop")).unwrap();
 
         let mut out = Vec::new();
-        walk_nested(&base, "AGENTS.md", 0, &mut out);
+        walk_nested(s.path(), "AGENTS.md", 0, &mut out);
         assert_eq!(out.len(), 1);
         assert!(out[0].ends_with("packages/AGENTS.md"));
+    }
+
+    /// A repo whose only AGENTS.md is in a sub-package still needs somewhere to
+    /// put the one that covers everything.
+    #[test]
+    fn the_root_file_is_offered_even_when_only_a_nested_one_exists() {
+        let s = Scratch::new("rootrow");
+        std::fs::create_dir_all(s.path().join("packages/api")).unwrap();
+        std::fs::write(s.path().join("packages/api/AGENTS.md"), "nested\n").unwrap();
+
+        let spec = Spec {
+            loc: Loc::Nested("AGENTS.md"),
+            kind: "instructions",
+            agents: AGENTS_MD,
+            scope: Scope::Project,
+        };
+        let mut labels: Vec<String> = expand(&spec, s.path())
+            .into_iter()
+            .map(|(_, l)| l)
+            .collect();
+        labels.sort();
+        assert_eq!(
+            labels,
+            vec![
+                "AGENTS.md".to_string(),
+                "packages/api/AGENTS.md".to_string()
+            ]
+        );
+    }
+
+    /// One skill symlinked into several CLIs' directories is one skill, listed
+    /// once, read by all of them.
+    #[cfg(unix)]
+    #[test]
+    fn scan_merges_a_skill_shared_across_clis_into_one_row() {
+        let s = Scratch::new("merge");
+        let real = s.path().join("shared/nano");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("SKILL.md"), "---\nname: nano\n---\n").unwrap();
+
+        let repo = s.path().join("repo");
+        for dir in [".claude/skills", ".github/skills"] {
+            std::fs::create_dir_all(repo.join(dir)).unwrap();
+            std::os::unix::fs::symlink(&real, repo.join(dir).join("nano")).unwrap();
+        }
+
+        let rows = scan(vec![repo.to_string_lossy().to_string()]);
+        // Project scope only: `scan` always sweeps the real $HOME as well, and
+        // this machine's own skills are not what's under test.
+        let skills: Vec<_> = rows
+            .iter()
+            .filter(|r| r.kind == "skill" && r.exists && r.scope == "project")
+            .collect();
+        assert_eq!(skills.len(), 1, "one file, reached two ways, is one row");
+        assert_eq!(skills[0].title.as_deref(), Some("nano"));
+        assert!(skills[0].agents.contains(&"claude".to_string()));
     }
 }

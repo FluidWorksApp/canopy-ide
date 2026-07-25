@@ -9,7 +9,7 @@
 // parser can't model edits raw instead (see instructionDoc.ts) — and either way
 // only the parts you touched are rewritten, so this never reformats a file your
 // team shares.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
 import { AGENT_CLIS } from "../projects";
 import {
@@ -83,17 +83,36 @@ function template(f: ipc.InstructionFile): string {
   return `# ${name}\n\n## Commands\n\n- \n\n## Conventions\n\n- \n`;
 }
 
+/** One file's in-progress edit, parked while another file is on screen. */
+interface Draft {
+  doc: InstructionDoc;
+  raw: string;
+  rawMode: boolean;
+}
+
 interface InstructionsViewProps {
   /** Workspace roots to scan, and the allowlist the backend re-derives. */
   roots: string[];
   /** Which agent CLIs are on PATH, keyed by bin (projects.ts). */
   installed: Record<string, boolean>;
-  /** Path to open on mount — set when a panel row was clicked. */
+  /** File to open. Changes when a panel row is clicked while the tab is already
+   *  open, so it has to be watched, not just read at mount. */
   focus?: string;
+  /** False while another tab is in front. Doc tabs stay mounted (display:none),
+   *  so without this the ⌘S handler below would fire for a dirty Instructions
+   *  tab sitting in the background — swallowing the keystroke from the editor
+   *  the user is actually in, and silently writing an instruction file. */
+  active: boolean;
   onNotice: Notify;
 }
 
-export function InstructionsView({ roots, installed, focus, onNotice }: InstructionsViewProps) {
+export function InstructionsView({
+  roots,
+  installed,
+  focus,
+  active,
+  onNotice,
+}: InstructionsViewProps) {
   const [files, setFiles] = useState<ipc.InstructionFile[] | null>(null);
   const [showAll, setShowAll] = useState(false);
   const [query, setQuery] = useState("");
@@ -104,6 +123,12 @@ export function InstructionsView({ roots, installed, focus, onNotice }: Instruct
   const [rawMode, setRawMode] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  /** Unsaved edits, per file. Switching to another row and back restores what
+   *  you had rather than losing it — the row list sits one click from the
+   *  editor and the dirty dot is easy to miss, so silently discarding on a
+   *  stray click was the wrong trade. Cleared for a file once it saves. */
+  const drafts = useRef(new Map<string, Draft>());
 
   // Keyed on the roots' contents rather than the array: ProjectView rebuilds
   // that array on every render, so depending on its identity would re-walk the
@@ -151,7 +176,36 @@ export function InstructionsView({ roots, installed, focus, onNotice }: Instruct
 
   const current = files?.find((f) => f.path === selected) ?? null;
 
-  // Load the selected file. A missing one opens on its template — unsaved, so
+  /** Switch files, parking whatever is unsaved on the way out. */
+  const select = useCallback(
+    (path: string) => {
+      setSelected((prev) => {
+        if (prev && prev !== path && dirtyRef.current && docRef.current) {
+          drafts.current.set(prev, {
+            doc: docRef.current,
+            raw: rawRef.current,
+            rawMode: rawModeRef.current,
+          });
+        }
+        return path;
+      });
+    },
+    [],
+  );
+
+  // Read by `select`, which runs inside a state updater and so can't close over
+  // the current render's values.
+  const docRef = useRef(doc);
+  docRef.current = doc;
+  const rawRef = useRef(raw);
+  rawRef.current = raw;
+  const rawModeRef = useRef(rawMode);
+  rawModeRef.current = rawMode;
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+
+  // Load the selected file — from its parked draft if it has one, otherwise
+  // from disk. A file that doesn't exist yet opens on its template, unsaved, so
   // nothing hits the disk until the user actually writes it.
   useEffect(() => {
     if (!current) {
@@ -160,6 +214,14 @@ export function InstructionsView({ roots, installed, focus, onNotice }: Instruct
     }
     let live = true;
     setLoadError(null);
+    const parked = drafts.current.get(current.path);
+    if (parked) {
+      setDoc(parked.doc);
+      setRaw(parked.raw);
+      setRawMode(parked.rawMode);
+      setDirty(true);
+      return;
+    }
     setDirty(false);
     setRawMode(false);
     if (!current.exists) {
@@ -209,24 +271,38 @@ export function InstructionsView({ roots, installed, focus, onNotice }: Instruct
         setRaw(text);
         setDoc(parseDoc(text));
         setDirty(false);
+        // Saved, so there is nothing left to park for this file.
+        drafts.current.delete(current.path);
         rescan();
         onNotice(`Saved ${current.label}`, "success");
       })
       .catch((e) => onNotice(`Couldn't save ${current.label}: ${e}`, "error"));
   };
 
-  // ⌘S while this tab is in front. Scoped to the view, so it can't fight the
-  // editor's own save when a file tab is the one focused.
+  // ⌘S, but only while this tab is the one in front — see `active`. The
+  // listener is on window because that is where the keystroke lands, so the
+  // gate has to be explicit; "scoped to the view" is not something a window
+  // listener gets for free.
+  const saveRef = useRef(save);
+  saveRef.current = save;
   useEffect(() => {
+    if (!active || !dirty) return;
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "s" && dirty) {
+      if ((e.metaKey || e.ctrlKey) && e.key === "s") {
         e.preventDefault();
-        save();
+        saveRef.current();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  });
+  }, [active, dirty]);
+
+  // The tab is reused: clicking a second file in the Agents panel patches
+  // `focus` onto the open tab rather than opening another, so reading it only
+  // at mount left the previous file on screen.
+  useEffect(() => {
+    if (focus) select(focus);
+  }, [focus, select]);
 
   const addSection = () => {
     setDoc((d) =>
@@ -322,7 +398,7 @@ export function InstructionsView({ roots, installed, focus, onNotice }: Instruct
                     }`}
                     key={f.path}
                     title={f.description ?? f.path}
-                    onClick={() => setSelected(f.path)}
+                    onClick={() => select(f.path)}
                   >
                     <div className="instr-row-main">
                       <span className="instr-row-label">{f.title ?? f.label}</span>
@@ -442,11 +518,26 @@ export function InstructionsView({ roots, installed, focus, onNotice }: Instruct
                     </div>
                   )}
 
-                  {doc.preamble.trim() && (
-                    <div className="instr-card instr-preamble">
-                      <pre>{doc.preamble.trim()}</pre>
-                    </div>
-                  )}
+                  {/* Editable, not a read-only <pre>: a file organised with a
+                      single `#` per section lands wholly in the preamble (the
+                      section split starts at `##`), and so does the title and
+                      intro of most CLAUDE.md files. Read-only meant those were
+                      reachable only through Raw. */}
+                  <div className="instr-card instr-preamble">
+                    <label className="instr-preamble-label">
+                      Intro — everything above the first section
+                    </label>
+                    <textarea
+                      className="instr-body"
+                      spellCheck={false}
+                      rows={Math.min(14, Math.max(2, doc.preamble.trim().split("\n").length + 1))}
+                      value={doc.preamble.trim()}
+                      onChange={(e) => {
+                        setDoc((d) => (d ? { ...d, preamble: e.target.value, preambleDirty: true } : d));
+                        setDirty(true);
+                      }}
+                    />
+                  </div>
 
                   {doc.sections.map((s, i) => (
                     <div className="instr-card" key={s.id}>

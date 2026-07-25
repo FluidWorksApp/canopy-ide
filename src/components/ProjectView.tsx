@@ -67,6 +67,7 @@ import { TasksPanel, type RunningMicroTask } from "./TasksPanel";
 import { TaskHistoryView } from "./TaskHistoryView";
 import { InstructionsView } from "./InstructionsView";
 import {
+  endAbandonedRun,
   recordTaskEnd,
   recordTaskStart,
   updateTaskRun,
@@ -986,6 +987,12 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const [wsDigests, setWsDigests] = useState<ipc.SessionDigest[]>([]);
   const [thisInstance, setThisInstance] = useState<string | null>(null);
   const [wsDrawerOpen, setWsDrawerOpen] = useState(false);
+  // Mirrored for the agent-action handler, which is mounted once and must not
+  // re-subscribe every time a digest poll lands.
+  const wsDigestsRef = useRef(wsDigests);
+  wsDigestsRef.current = wsDigests;
+  const thisInstanceRef = useRef(thisInstance);
+  thisInstanceRef.current = thisInstance;
   useEffect(() => {
     void ipc.instanceId().then(setThisInstance).catch(() => {});
   }, []);
@@ -1492,6 +1499,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         agent: cli.id,
         cwd: dir,
         projectId: project.id,
+        projectName: project.name,
         brief: def.buildContext(payload, userQuery),
       });
       patchTabRaw(id, { micro: { taskId: def.id, runId } } as Partial<SubTab>);
@@ -1785,15 +1793,30 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         );
         if (!tab || !tab.micro) return;
         const runId = tab.micro.runId;
+        // Files the session touched, when a hook wrote a digest for it — the
+        // same pty→digest binding the Agents panel uses.
+        const files =
+          tab.ptyId != null
+            ? digestBySurface(wsDigestsRef.current, thisInstanceRef.current).get(
+                String(tab.ptyId),
+              )?.files
+            : undefined;
         if (a.status === "blocked") {
           // Blocked is not an ending — the agent is waiting on the user and the
-          // run continues. Keep what it said, leave the run open; if the user
-          // walks away instead of answering, closing the tab settles it.
-          if (runId) updateTaskRun(runId, { summary: a.summary, url: a.url });
+          // run continues. Keep what it said and mark that it asked, so that if
+          // the user walks away instead of answering, closing the tab can settle
+          // it as "blocked" rather than the flatter "stopped".
+          if (runId)
+            updateTaskRun(runId, {
+              summary: a.summary,
+              url: a.url,
+              files,
+              askedForUser: true,
+            });
           setActiveTabId(tab.id);
         } else {
           if (runId)
-            recordTaskEnd(runId, { status: "done", summary: a.summary, url: a.url });
+            recordTaskEnd(runId, { status: "done", summary: a.summary, url: a.url, files });
           finishMicroTask(tab);
         }
         return;
@@ -1898,9 +1921,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     const closingTab = tabsRef.current.find((t) => t.id === id);
     if (closingTab?.type === "terminal" && closingTab.micro?.runId) {
       const runId = closingTab.micro.runId;
-      const output = termHandles.current.get(id)?.captureText(8000);
+      const output = termHandles.current.get(id)?.captureText(8000) || undefined;
       if (output) updateTaskRun(runId, { output });
-      recordTaskEnd(runId, { status: "stopped" });
+      // A no-op for a run that already reported done; otherwise it settles as
+      // "blocked" if the agent had asked for the user, else "stopped".
+      endAbandonedRun(runId, output);
     }
     termHandles.current.delete(id);
     setTabs((prev) => {
@@ -3404,6 +3429,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       case "task-history":
         return (
           <TaskHistoryView
+            projectId={project.id}
+            projectName={project.name}
             // Re-runs the stored brief rather than the task definition: a
             // built-in's payload came from the surface it was clicked on
             // (a branch tab, a PR), which is long gone — but the brief that
@@ -3420,6 +3447,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             roots={roots}
             installed={installed}
             focus={tab.focus}
+            active={tab.id === activeTabId && visible}
             onNotice={onNotice}
           />
         );
@@ -4341,6 +4369,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             startMicroTask(customTaskDef(task), { dir }, query)
           }
           onOpenHistory={openTaskHistory}
+          projectId={project.id}
         />
       ))}
       {sidePane("agents", () => (

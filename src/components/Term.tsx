@@ -93,6 +93,13 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     captureText: (maxChars = 8000) => {
       const term = termRef.current;
       if (!term) return "";
+      // Whichever screen the CLI is actually on. For an inline agent (claude,
+      // which micro-tasks prefer) that's the normal buffer and this really is
+      // the tail of the run. For a full-TUI agent on the alternate screen there
+      // is no scrollback to have: that buffer is one screenful, so what gets
+      // stored is the final frame. Deliberately not falling back to
+      // `buffer.normal` there — it holds what was on screen *before* the CLI
+      // took over, which is the shell prompt, and that is worse than the frame.
       const buf = term.buffer.active;
       const lines: string[] = [];
       // Walk backwards and stop once we have enough: the scrollback is up to

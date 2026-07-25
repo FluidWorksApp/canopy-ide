@@ -186,15 +186,22 @@ export function AgentsPanel({
   // that array every render, and keying on its identity would re-walk the
   // filesystem on every agent event that ticks the view. Same idiom as the
   // termSessions effect below.
-  const [instructionFiles, setInstructionFiles] = useState<ipc.InstructionFile[]>([]);
+  // null until the first scan lands (and again if it fails) — an empty array
+  // would render "no instruction files yet", which is a claim, not a wait.
+  const [instructionFiles, setInstructionFiles] = useState<ipc.InstructionFile[] | null>(null);
+  const [instructionsFailed, setInstructionsFailed] = useState(false);
   const rootsKey = roots.join("\n");
   useEffect(() => {
     if (!visible || rootsKey === "") return;
     let live = true;
     void ipc
       .instructionsScan(rootsKey.split("\n"))
-      .then((fs) => live && setInstructionFiles(fs))
-      .catch(() => {});
+      .then((fs) => {
+        if (!live) return;
+        setInstructionFiles(fs);
+        setInstructionsFailed(false);
+      })
+      .catch(() => live && setInstructionsFailed(true));
     return () => {
       live = false;
     };
@@ -204,18 +211,19 @@ export function AgentsPanel({
    *  CLIs actually installed here — the top-level ones that don't yet, since
    *  "you have no CLAUDE.md" is the most useful thing this list can tell you. */
   const headlineInstructions = useMemo(() => {
+    const files = instructionFiles ?? [];
     const installedIds = new Set(
       AGENT_CLIS.filter((c) => installed[c.bin]).map((c) => c.id),
     );
-    const exists = instructionFiles.filter((f) => f.exists && f.kind === "instructions");
-    const missing = instructionFiles.filter(
+    const exists = files.filter((f) => f.exists && f.kind === "instructions");
+    const missing = files.filter(
       (f) =>
         !f.exists &&
         f.kind === "instructions" &&
         f.scope === "project" &&
         f.agents.some((a) => installedIds.has(a)),
     );
-    return [...exists, ...missing].slice(0, 6);
+    return { rows: [...exists, ...missing], live: exists.length };
   }, [instructionFiles, installed]);
   const [showHookHelp, setShowHookHelp] = useState(false);
   const [setupResult, setSetupResult] = useState<string | null>(null);
@@ -811,7 +819,10 @@ export function AgentsPanel({
           headline files; the tab is where they're actually edited. */}
       <Section
         title="Instructions"
-        count={instructionFiles.filter((f) => f.exists).length}
+        // The count is what the list below shows — the instruction files in
+        // effect. Counting every scanned file put "143" (mostly global skills)
+        // over a list of four.
+        count={headlineInstructions.live}
         action={
           <button
             className="btn-icon"
@@ -822,13 +833,17 @@ export function AgentsPanel({
           </button>
         }
       >
-        {instructionFiles.length === 0 ? (
+        {instructionsFailed ? (
+          <div className="tree-empty">Couldn't look for instruction files.</div>
+        ) : instructionFiles === null ? (
+          <div className="tree-empty">Looking…</div>
+        ) : headlineInstructions.rows.length === 0 ? (
           <div className="tree-empty">
             No instruction files yet. Agents here start with nothing but your prompt —
             open this to write the first one.
           </div>
         ) : (
-          headlineInstructions.map((f) => (
+          headlineInstructions.rows.slice(0, 6).map((f) => (
             <div className="task-row" key={f.path}>
               <span className={`instr-row-mark ${f.exists ? "" : "is-missing"}`} />
               <span
