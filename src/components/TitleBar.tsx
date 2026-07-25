@@ -18,8 +18,10 @@ interface TitleBarProps {
   pendingCount: (p: Project) => number;
   /** True while a live collaboration session is active anywhere. */
   collabActive: boolean;
-  /** Drag-to-reorder for the project pills; order persists in the workspace. */
-  tabDrag: TabDrag;
+  /** Which project pill is currently being dragged (null if none). */
+  tabDragId: string | null;
+  /** Returns pointer-event props for a draggable pill by project id. */
+  tabDragItemProps: TabDrag["itemProps"];
   onSelectProject: (id: string) => void;
   onCloseProject: (id: string) => void;
   onStopCollab: () => void;
@@ -35,7 +37,8 @@ function TitleBarImpl({
   activeId,
   pendingCount,
   collabActive,
-  tabDrag,
+  tabDragId,
+  tabDragItemProps,
   onSelectProject,
   onCloseProject,
   onStopCollab,
@@ -58,9 +61,9 @@ function TitleBarImpl({
           <div
             key={p.id}
             className={`project-tab ${p.id === activeId ? "project-tab-active" : ""} ${
-              p.id === tabDrag.dragId ? "tab-dragging" : ""
+              p.id === tabDragId ? "tab-dragging" : ""
             }`}
-            {...tabDrag.itemProps(p.id)}
+            {...tabDragItemProps(p.id)}
             onClick={() => onSelectProject(p.id)}
             title={p.components.map((c) => c.path).join("\n")}
           >

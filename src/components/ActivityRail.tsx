@@ -10,8 +10,6 @@ import {
   TasksIcon,
   TeamIcon,
 } from "./icons";
-import type { PendingItem } from "../notifications";
-
 type SideTab = "files" | "changes" | "git" | "trackers" | "tasks" | "agents" | "team";
 
 const RAIL_TABS: {
@@ -33,8 +31,8 @@ interface ActivityRailProps {
   collapsed: boolean;
   changeBadge: number;
   tasksBadge: number;
-  pending: PendingItem[];
-  urgentPending: PendingItem[];
+  pendingCount: number;
+  urgentCount: number;
   teamBadge: number;
   relayRole: "off" | "host" | "client";
   onSelectTab: (tab: SideTab) => void;
@@ -47,8 +45,8 @@ function ActivityRailImpl({
   collapsed,
   changeBadge,
   tasksBadge,
-  pending,
-  urgentPending,
+  pendingCount,
+  urgentCount,
   teamBadge,
   relayRole,
   onSelectTab,
@@ -71,11 +69,9 @@ function ActivityRailImpl({
           {t.key === "tasks" && tasksBadge > 0 && (
             <span className="rail-badge">{Math.min(tasksBadge, 99)}</span>
           )}
-          {t.key === "agents" && pending.length > 0 && (
-            <span
-              className={`rail-badge ${urgentPending.length > 0 ? "rail-badge-urgent" : ""}`}
-            >
-              {pending.length}
+          {t.key === "agents" && pendingCount > 0 && (
+            <span className={`rail-badge ${urgentCount > 0 ? "rail-badge-urgent" : ""}`}>
+              {pendingCount}
             </span>
           )}
           {t.key === "team" && teamBadge > 0 && (

@@ -1148,7 +1148,8 @@ export default function App() {
         activeId={ws.activeId}
         pendingCount={pendingCount}
         collabActive={collabTick >= 0 && (collab.current?.activeCount ?? 0) > 0}
-        tabDrag={tabDrag}
+        tabDragId={tabDrag.dragId}
+        tabDragItemProps={tabDrag.itemProps}
         onSelectProject={selectProject}
         onCloseProject={handleCloseProject}
         onStopCollab={stopCollab}

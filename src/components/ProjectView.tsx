@@ -2555,6 +2555,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     if (renamingTabId) patchTab(renamingTabId, { customTitle: renameDraft.trim() || undefined });
     setRenamingTabId(null);
   }, [renamingTabId, renameDraft, patchTab]);
+  const cancelRename = useCallback(() => setRenamingTabId(null), []);
 
   // Agents are the crux of this IDE, so they own the main strip. Detection is
   // by launch command OR by what's actually running in the pty tree, so a
@@ -2650,7 +2651,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     tabGroups[1].map((t) => t.id),
     reorderGroup,
   );
-  const groupDrags = [agentDrag, docDrag];
+  const groupDrags = useMemo(() => [agentDrag, docDrag], [agentDrag, docDrag]);
   // Shells and runs each get a compact rail; Rail collapses to a dropdown at 2+.
   const shellChips: RailChip[] = useMemo(
     () =>
@@ -2998,7 +2999,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // not on every 4s stats sample, so the memoized PaneBar stays put between samples.
   const isSharedFile = useMemo(
     () => activeFileTab != null && shared.current.has(activeFileTab.file.path),
-    [activeFileTab],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeFileTab, relay.collabTick],
   );
   const isProjectShared = useCallback(
     (memberId: string) =>
@@ -3097,6 +3099,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const onShareProject = useCallback(
     (memberId: string, memberName: string) => shareProjectLive(memberId, memberName),
     [shareProjectLive],
+  );
+  const onNewShell = useCallback(
+    () => { const cwd = componentsRef.current[0]?.path; if (cwd) addTerminal(cwd); },
+    [addTerminal],
   );
   const onLaunchCli = useCallback((cli: AgentCli) => launchCli(cli), [launchCli]);
   const onRunCliUpdate = useCallback(
@@ -3391,7 +3397,6 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         activeSection={activeSection}
         activeFileKind={activeFileTab?.file.kind}
         activeFileView={activeFileTab?.file.view}
-        activeFilePath={activeFileTab?.file.path}
         isSharedFile={isSharedFile}
         isRelayConnectedWithPeers={isRelayConnectedWithPeers}
         cliMenuOpen={cliMenuOpen}
@@ -3404,11 +3409,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         setShareProjectMenuOpen={setShareProjectMenuOpen}
         relayMembers={peerMembers}
         isProjectShared={isProjectShared}
+        isTerminalTab={activeTermTab !== null}
         onSelectTab={onSelectTab}
         onTabContextMenu={onTabContextMenu}
         onCloseTab={closeTab}
         onCommitRename={commitRename}
+        onCancelRename={cancelRename}
         onRenameDraftChange={setRenameDraft}
+        onNewShell={onNewShell}
         onClearScrollback={onClearScrollback}
         onHardReset={onHardReset}
         onToggleView={onToggleView}
@@ -4236,8 +4244,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             collapsed={collapsed}
             changeBadge={changeCount + collabEditedCount}
             tasksBadge={runningMicro.length}
-            pending={pending}
-            urgentPending={urgentPending}
+            pendingCount={pending.length}
+            urgentCount={urgentPending.length}
             teamBadge={teamBadge}
             relayRole={relay.status.role}
             onSelectTab={selectSideTab}

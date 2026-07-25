@@ -238,7 +238,7 @@ export function JsonView({ bytes }: { bytes: Uint8Array }) {
       disallowComments: false,
     });
     if (errors.length > 0) {
-      return { error: printParseErrorCode(errors[0].error) };
+      return { error: `${printParseErrorCode(errors[0].error)} at offset ${errors[0].offset}` };
     }
     return { value };
   }, [bytes]);

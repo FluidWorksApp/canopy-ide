@@ -1,4 +1,4 @@
-import { memo, useLayoutEffect, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type React from "react";
 import {
   AgentIcon,
@@ -163,7 +163,6 @@ export interface PaneBarProps {
   // active tab extra
   activeFileKind?: string;
   activeFileView?: string;
-  activeFilePath?: string;
   isSharedFile: boolean;
   isRelayConnectedWithPeers: boolean;
   // launcher
@@ -178,12 +177,16 @@ export interface PaneBarProps {
   setShareProjectMenuOpen: (v: boolean) => void;
   relayMembers: { id: string; name: string }[];
   isProjectShared: (memberId: string) => boolean;
+  /** True only when the active tab is a terminal — gates scrollback/reset buttons. */
+  isTerminalTab: boolean;
   // callbacks
   onSelectTab: (id: string, clickCount?: number) => void;
   onTabContextMenu: (e: React.MouseEvent, tab: SubTab) => void;
   onCloseTab: (id: string) => void;
   onCommitRename: () => void;
+  onCancelRename: () => void;
   onRenameDraftChange: (v: string) => void;
+  onNewShell: () => void;
   onClearScrollback: () => void;
   onHardReset: () => void;
   onToggleView: () => void;
@@ -205,12 +208,13 @@ function PaneBarImpl({
   collabPaths, isAgentTab, tabState,
   shellChips, runChips, runSummary, shellMenuOpen, setShellMenuOpen,
   runMenuOpen, setRunMenuOpen, activeSection,
-  activeFileKind, activeFileView, activeFilePath,
-  isSharedFile, isRelayConnectedWithPeers,
+  activeFileKind, activeFileView,
+  isSharedFile, isRelayConnectedWithPeers, isTerminalTab,
   cliMenuOpen, setCliMenuOpen, installed, cliUpdates,
   shareMenuOpen, setShareMenuOpen, shareProjectMenuOpen, setShareProjectMenuOpen,
   relayMembers, isProjectShared,
-  onSelectTab, onTabContextMenu, onCloseTab, onCommitRename, onRenameDraftChange,
+  onSelectTab, onTabContextMenu, onCloseTab, onCommitRename, onCancelRename,
+  onRenameDraftChange, onNewShell,
   onClearScrollback, onHardReset, onToggleView,
   onShareFile, onShareProject, onOpenPreview, onLaunchCli, onRunCliUpdate,
   onRefreshInstalled, onRefreshUpdates, onOpenAllTabs,
@@ -222,19 +226,31 @@ function PaneBarImpl({
   // container already threads to it) and animate a blob to its box.
   const tabsRowRef = useRef<HTMLDivElement>(null);
   const [blob, setBlob] = useState<{ left: number; width: number } | null>(null);
-  useLayoutEffect(() => {
+
+  const measureBlob = () => {
     const el = (activeTabElRef as React.RefObject<HTMLDivElement>)?.current;
     const row = tabsRowRef.current;
-    if (!el || !row) {
-      setBlob((b) => (b === null ? b : null));
-      return;
-    }
+    if (!el || !row) { setBlob((b) => (b === null ? b : null)); return; }
     // offsetLeft is in the row's content coordinates (the row is the positioned
     // offsetParent), so the absolutely-positioned blob scrolls with the tabs.
     const next = { left: el.offsetLeft, width: el.offsetWidth };
     setBlob((b) => (b && b.left === next.left && b.width === next.width ? b : next));
-    // Re-measure whenever the tab set or the active tab changes.
-  }, [activeTabId, tabGroups, stripTabs, renamingTabId, activeTabElRef]);
+  };
+
+  // Re-measure when the tab set or active tab changes.
+  useLayoutEffect(measureBlob, [activeTabId, tabGroups, stripTabs, renamingTabId, activeTabElRef]);
+
+  // Re-measure on geometry changes that leave the tab set unchanged: panel
+  // resize, window resize, zoom changes, and font loading.
+  useEffect(() => {
+    const row = tabsRowRef.current;
+    if (!row) return;
+    const ro = new ResizeObserver(measureBlob);
+    ro.observe(row);
+    return () => ro.disconnect();
+    // measureBlob reads refs; no dep needed here
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div className={`pane-bar pane-bar-focus-${activeSection}`}>
@@ -313,7 +329,7 @@ function PaneBarImpl({
                       onBlur={onCommitRename}
                       onKeyDown={(e) => {
                         if (e.key === "Enter") { e.preventDefault(); onCommitRename(); }
-                        else if (e.key === "Escape") { e.preventDefault(); onRenameDraftChange(""); onCommitRename(); }
+                        else if (e.key === "Escape") { e.preventDefault(); onCancelRename(); }
                       }}
                     />
                   ) : (
@@ -421,8 +437,8 @@ function PaneBarImpl({
           </button>
         )}
 
-        {/* Terminal actions */}
-        {activeFilePath === undefined && activeFileKind === undefined && (
+        {/* Terminal actions — only when a terminal tab is active */}
+        {isTerminalTab && (
           <>
             <button className="btn-icon" title="Clear scrollback" onClick={onClearScrollback}>⌫</button>
             <button className="btn-icon" title="Hard reset" onClick={onHardReset}>↺</button>
@@ -443,7 +459,7 @@ function PaneBarImpl({
           </button>
           {cliMenuOpen && (
             <div className="cli-menu" onMouseLeave={() => setCliMenuOpen(false)}>
-              <div className="cli-item" onClick={() => { setCliMenuOpen(false); /* shell handled by parent via onLaunchCli-equivalent */ }}>
+              <div className="cli-item" onClick={() => { setCliMenuOpen(false); onNewShell(); }}>
                 <span><TerminalIcon size={15} className="cli-icon" /> Shell</span>
               </div>
               <div className="cli-item" onClick={() => { setCliMenuOpen(false); onOpenPreview(); }}>
