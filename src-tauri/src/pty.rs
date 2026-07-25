@@ -1017,6 +1017,7 @@ mod tests {
             .spawn_headless(app.handle().clone(), Some("/tmp".into()), None)
             .expect("spawn");
         thread::sleep(Duration::from_millis(400)); // let the shell come up
+
         // Foreground a process that reads nothing, with the tty in raw mode —
         // the state every agent CLI puts it in, and the one that matters: a
         // canonical-mode tty discards overflowing input, but a raw one applies
