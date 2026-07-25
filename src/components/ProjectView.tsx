@@ -2165,7 +2165,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       agentId?: string;
       cwd: string;
       text: string;
-    }): Promise<{ delivered: boolean; note: string }> => {
+    }): Promise<{ delivered: boolean; note: string; ptyId?: number }> => {
       const { sessionId, cwd, text } = opts;
       const agentId = opts.agentId ?? "agent";
       const alive = (pty: number | null | undefined): pty is number =>
@@ -2179,13 +2179,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       // 1) The workspace's own terminal, if it's still live.
       if (alive(opts.ptyId)) {
         typeInto(opts.ptyId);
-        return { delivered: true, note: `Sent to ${agentId}.` };
+        return { delivered: true, note: `Sent to ${agentId}.`, ptyId: opts.ptyId };
       }
       // 2) Any live terminal running this session (it may have moved tabs).
       const moved = sessionId ? livePtyForSession() : undefined;
       if (moved != null) {
         typeInto(moved);
-        return { delivered: true, note: `Sent to ${agentId}.` };
+        return { delivered: true, note: `Sent to ${agentId}.`, ptyId: moved };
       }
       // 3) Ended: resume, wait for the session to report a PTY, then deliver.
       if (!sessionId) {
@@ -2203,7 +2203,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           // A moment past first paint before pasting into the resumed TUI.
           await new Promise((r) => setTimeout(r, 800));
           typeInto(back);
-          return { delivered: true, note: `Resumed ${agentId} and sent the comments.` };
+          return {
+            delivered: true,
+            note: `Resumed ${agentId} and sent the comments.`,
+            ptyId: back,
+          };
         }
       }
       return {
@@ -3192,6 +3196,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 text,
               })
             }
+            onFocusAgent={jumpToPty}
             onRaisePrTask={
               tab.repo
                 ? (branch, worktree) =>
@@ -3829,6 +3834,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                           text,
                         })
                       }
+                      onFocusAgent={jumpToPty}
                       onClose={() => setWsDrawerOpen(false)}
                       onRaisePrTask={
                         agentTermWs.repo
