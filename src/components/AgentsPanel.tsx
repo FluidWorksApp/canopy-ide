@@ -25,6 +25,43 @@ export const STATE_META: Record<string, { cls: string; label: string }> = {
  *  buttons that might type into the wrong UI. */
 const KEYSTROKE_APPROVAL_AGENTS = new Set(["claude", "codex"]);
 
+/** Every CLI with an auto-setup arm, in the order the integrations list shows
+ *  them. Mirrors SUPPORTED_AGENTS in agents.rs. */
+const AGENT_LABELS = [
+  { id: "claude", label: "Claude Code" },
+  { id: "codex", label: "Codex" },
+  { id: "agy", label: "Antigravity" },
+  { id: "aider", label: "Aider" },
+  { id: "opencode", label: "OpenCode" },
+  { id: "omp", label: "oh-my-pi" },
+  { id: "amp", label: "Amp" },
+];
+
+const HEALTH_TONE: Record<string, string> = {
+  ours: "hs-ok",
+  missing: "hs-warn",
+  foreign: "hs-warn",
+  unreadable: "hs-warn",
+  unsupported: "hs-none",
+};
+
+/** Spelled out because "foreign" and "unsupported" look like problems and only
+ *  one of them is. */
+const HEALTH_HELP: Record<string, Record<string, string>> = {
+  hooks: {
+    ours: "This CLI's config points its events at Canopy",
+    missing: "No Canopy hooks in this CLI's config — nothing will stream in",
+  },
+  mcp: {
+    ours: "The Canopy MCP server is registered for this CLI",
+    missing: "Not registered — this CLI's agents can't ask the IDE for context",
+    foreign:
+      "An MCP server named 'canopy' exists here that Canopy didn't write. It is left alone — rename or remove it, then set up again.",
+    unreadable: "This CLI's MCP config exists but can't be parsed",
+    unsupported: "This CLI has no MCP configuration Canopy can write",
+  },
+};
+
 interface AgentsPanelProps {
   /** False while another side tab is in front. The panel stays mounted (so
    *  its scroll and expanded rows survive a switch away) but stops polling
@@ -177,6 +214,11 @@ export function AgentsPanel({
   // null while we haven't checked yet — the nudge stays hidden until we know,
   // so it never flashes the wrong message. See the effect keyed on noHookSignal.
   const [hooksInstalled, setHooksInstalled] = useState<boolean | null>(null);
+  // Per-CLI integration state, so "why is this agent silent?" has an answer in
+  // the panel rather than in a config file the user has to go and read.
+  const [health, setHealth] = useState<ipc.IntegrationHealth[]>([]);
+  const refreshHealth = () =>
+    ipc.agentIntegrationHealth().then(setHealth).catch(() => {});
   // Dismissing the "restart to stream" hint sticks across panels and launches:
   // once you know the agents just predate the hooks, you don't need telling in
   // every project. The genuine "not set up" nudge ignores this and always shows.
@@ -284,17 +326,34 @@ export function AgentsPanel({
     return () => un?.();
   }, [visible]);
 
+  // Read the integrations when the help panel opens (that's the only place
+  // they're shown) and whenever the startup pass reports in, so a repair that
+  // happened while the panel was open is reflected without a manual refresh.
+  useEffect(() => {
+    if (!showHookHelp) return;
+    void refreshHealth();
+    let un: (() => void) | undefined;
+    void ipc.onIntegrationHealth((r) => setHealth(r.agents)).then((u) => {
+      un = u;
+    });
+    return () => un?.();
+  }, [showHookHelp]);
+
+  // allSettled, not all: one CLI whose config can't be written must not erase
+  // the report for the others. `Promise.all` rejected on the first failure and
+  // showed that error alone, so a single unparseable registry made a setup that
+  // wired up three CLIs look like it had done nothing at all.
   const autoSetup = async (agents: string | string[]) => {
     const ids = Array.isArray(agents) ? agents : [agents];
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const results = await Promise.all(
-        ids.map(async (agent) => invoke<string>("setup_agent_hooks", { agent })),
-      );
-      setSetupResult(results.join("; "));
-    } catch (err) {
-      setSetupResult(String(err));
-    }
+    const results = await Promise.allSettled(ids.map((agent) => ipc.setupAgentHooks(agent)));
+    setSetupResult(
+      results
+        .map((r, i) =>
+          r.status === "fulfilled" ? r.value.summary : `${ids[i]}: ${String(r.reason)}`,
+        )
+        .join("\n"),
+    );
+    void refreshHealth();
   };
 
   // One row per terminal session, named after the agent running inside it.
@@ -886,27 +945,45 @@ export function AgentsPanel({
       {showHookHelp && hookPath && (
         <div className="hook-help">
           <p>Stream tool-use events from agent CLIs into this panel:</p>
-          {/* One button per CLI with an auto-setup arm — every CLI whose
+          {/* One row per CLI with an auto-setup arm — every CLI whose
               integration surface supports it (see docs/agent-parity.md).
-              setup_agent_hooks in agents.rs is the registry for these. */}
-          <div className="hook-setup-row">
-            {[
-              { id: "claude", label: "Claude Code" },
-              { id: "codex", label: "Codex" },
-              { id: "agy", label: "Antigravity" },
-              { id: "aider", label: "Aider" },
-              { id: "opencode", label: "OpenCode" },
-              { id: "omp", label: "oh-my-pi" },
-              { id: "amp", label: "Amp" },
-            ].map((a) => (
-              <button
-                key={a.id}
-                className="btn btn-accent"
-                onClick={() => void autoSetup(a.id)}
-              >
-                {a.label}
-              </button>
-            ))}
+              SUPPORTED_AGENTS in agents.rs is the registry for these.
+              Each row states what is actually on disk: a registration that
+              silently failed used to be invisible here, which is how one
+              survived unnoticed until a user asked why an agent was quiet. */}
+          <div className="hook-setup-list">
+            {AGENT_LABELS.map((a) => {
+              const h = health.find((x) => x.agent === a.id);
+              return (
+                <div key={a.id} className="hook-setup-row">
+                  <span className="hook-setup-name">{a.label}</span>
+                  {h && !h.cli_installed && (
+                    <span className="hook-setup-state" title="This CLI isn't on your PATH">
+                      not installed
+                    </span>
+                  )}
+                  {h?.cli_installed && (
+                    <>
+                      <span
+                        className={`hook-setup-state ${HEALTH_TONE[h.hooks] ?? ""}`}
+                        title={HEALTH_HELP.hooks[h.hooks] ?? h.hooks}
+                      >
+                        hooks {h.hooks}
+                      </span>
+                      <span
+                        className={`hook-setup-state ${HEALTH_TONE[h.mcp] ?? ""}`}
+                        title={HEALTH_HELP.mcp[h.mcp] ?? h.mcp}
+                      >
+                        MCP {h.mcp}
+                      </span>
+                    </>
+                  )}
+                  <button className="btn btn-accent" onClick={() => void autoSetup(a.id)}>
+                    Set up
+                  </button>
+                </div>
+              );
+            })}
           </div>
           {setupResult && <p className="hook-result">{setupResult}</p>}
           <p>

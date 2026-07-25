@@ -4074,6 +4074,48 @@ body.dragging-tab * {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
+  align-items: center;
+}
+
+/* One row per CLI: what it is, what's actually wired up, and the button that
+   fixes it. The states are words rather than icons — "foreign" and
+   "unsupported" are distinctions a tick and a cross can't carry. */
+.hook-setup-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0;
+}
+
+.hook-setup-name {
+  min-width: 96px;
+  font-weight: 600;
+}
+
+.hook-setup-state {
+  padding: 1px 6px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  background: var(--bg-alt);
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.hook-setup-row .btn {
+  margin-left: auto;
+}
+
+.hs-ok {
+  color: var(--ok);
+}
+
+.hs-warn {
+  color: var(--warn);
+}
+
+.hs-none {
+  opacity: 0.5;
 }
 
 .pending-option-clickable {
