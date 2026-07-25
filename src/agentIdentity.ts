@@ -18,7 +18,7 @@
 // heard of names itself the first time it reports a single event.
 
 import type { AgentHint, SessionDigest } from "./ipc";
-import { AGENT_CLIS, BIN_TO_AGENT, PKG_TO_AGENT } from "./projects";
+import { AGENT_CLIS, agentForBin, agentForPkg, binName } from "./projects";
 
 export interface AgentIdentity {
   /** Registry id, or null when the terminal is running something we can see
@@ -41,7 +41,9 @@ const KNOWN_TUIS = new Set([
   "fzf", "tmux", "screen", "ssh", "mosh", "psql", "sqlite3", "irb", "node",
 ]);
 
-const CLI_BY_ID = new Map(AGENT_CLIS.map((c) => [c.id, c]));
+/** Looked up per call rather than cached in a Map built at module load: the
+ *  registry is re-resolved whenever a binary override is edited. */
+const cliById = (id: string) => AGENT_CLIS.find((c) => c.id === id);
 
 /** Learned binary -> agent id, keyed by canonical executable path.
  *
@@ -115,21 +117,23 @@ export function identifyAgent(
   if (!hint) return null;
   const named = (id: string, via: AgentIdentity["via"]): AgentIdentity => ({
     id,
-    label: CLI_BY_ID.get(id)?.bin ?? id,
+    // Through binName, because an override may be a full path and a row is a
+    // name, not a location.
+    label: cliById(id)?.bin ? binName(cliById(id)!.bin) : id,
     via,
   });
 
-  if (hint.pkg && PKG_TO_AGENT[hint.pkg]) {
-    return named(PKG_TO_AGENT[hint.pkg], "package");
-  }
+  const byPkg = hint.pkg ? agentForPkg(hint.pkg) : undefined;
+  if (byPkg) return named(byPkg, "package");
   const bin = stripExe(hint.bin);
-  if (BIN_TO_AGENT[bin]) return named(BIN_TO_AGENT[bin], "binary");
+  const byBin = agentForBin(bin);
+  if (byBin) return named(byBin, "binary");
   const learned = hint.path ? learnedBins()[hint.path] : undefined;
   if (learned) return named(learned, "learned");
   // Nothing on disk identifies it, but the CLI itself has spoken.
   if (digestIsLive(digest, now)) {
     const agent = digest!.agent!;
-    return { id: CLI_BY_ID.has(agent) ? agent : null, label: hint.bin, via: "hook" };
+    return { id: cliById(agent) ? agent : null, label: hint.bin, via: "hook" };
   }
   // Last rung: an interactive program we cannot name. It gets a row under its
   // own name because a terminal held by a full-screen app is not an idle
@@ -148,9 +152,16 @@ export function identifyAgent(
  * or a script that merely mentions an agent's name is not one.
  */
 export function agentIdForCommand(command?: string | null): string | null {
-  const first = (command ?? "").trim().split(/\s+/)[0] ?? "";
-  const bin = stripExe(first.split("/").pop() ?? "");
-  return BIN_TO_AGENT[bin] ?? null;
+  const line = (command ?? "").trim();
+  // A quoted head, because a rebound binary can be a path with a space in it
+  // and is written to the shell quoted. Unterminated quoting falls back to the
+  // rest of the line, which then fails to match — the right answer for a
+  // command string that isn't one.
+  const q = line[0] === "'" || line[0] === '"' ? line[0] : "";
+  const first = q ? (line.slice(1).split(q)[0] ?? "") : (line.split(/\s+/)[0] ?? "");
+  // binName rather than a hand-rolled split: it folds the Windows separator and
+  // `.exe` too, which is the shape an override on that platform takes.
+  return agentForBin(binName(first)) ?? null;
 }
 
 /**
