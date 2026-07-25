@@ -25,6 +25,11 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::broadcast;
 
 const FLUSH_INTERVAL: Duration = Duration::from_millis(10);
+/// How long the flusher polls for the child's exit status once its output has
+/// ended, before reporting the exit without one. Long enough for a normally
+/// exiting process (the status is usually there on the first poll), short enough
+/// that a process wedged mid-exit can't keep a dead terminal on screen.
+const REAP_WAIT: Duration = Duration::from_millis(1000);
 const READ_BUF_SIZE: usize = 64 * 1024;
 const DEFAULT_HIGH_WATER: usize = 2 * 1024 * 1024;
 /// Per-session output retained for a remote (Canopy Remote) attach: a
@@ -648,14 +653,35 @@ impl PtyManager {
                             }
                         }
                     }
-                    // Reap the child so it never lingers as a zombie.
-                    let exit_code = session
-                        .child
-                        .lock()
-                        .unwrap()
-                        .take()
-                        .and_then(|mut c| c.wait().ok())
-                        .map(|status| status.exit_code());
+                    // Reap the child so it never lingers as a zombie — but never
+                    // let the tab's fate hang on it. A process can wedge partway
+                    // through exit (macOS leaves it unreapable, and an agent CLI
+                    // occasionally lands there on SIGTERM); a blocking wait()
+                    // then holds back the pty:exit that closes a spent terminal
+                    // and the session removal that frees the id — the terminal
+                    // sits on screen forever, and a finished micro-task never
+                    // closes itself. So poll for the status briefly, report the
+                    // exit either way, and let a detached thread finish the reap.
+                    let mut child = session.child.lock().unwrap().take();
+                    let exit_code = child.as_mut().and_then(|c| {
+                        let deadline = std::time::Instant::now() + REAP_WAIT;
+                        loop {
+                            match c.try_wait() {
+                                Ok(Some(status)) => return Some(status.exit_code()),
+                                Ok(None) if std::time::Instant::now() < deadline => {
+                                    thread::sleep(Duration::from_millis(20));
+                                }
+                                _ => return None,
+                            }
+                        }
+                    });
+                    if exit_code.is_none() {
+                        if let Some(mut c) = child {
+                            thread::spawn(move || {
+                                let _ = c.wait();
+                            });
+                        }
+                    }
                     sessions.lock().unwrap().remove(&session.id);
                     let _ = app.emit(
                         "pty:exit",
