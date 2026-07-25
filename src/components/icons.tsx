@@ -30,6 +30,15 @@ export function PlayIcon({ size = 14, className }: IconProps) {
   );
 }
 
+// Close cross for tab/pill dismiss slots — replaces the bare ✕ glyph.
+export function CloseIcon({ size = 12, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M6.5 6.5l11 11M17.5 6.5l-11 11" />
+    </svg>
+  );
+}
+
 export function StopIcon({ size = 14, className }: IconProps) {
   return (
     <svg {...svgProps(size, className)} fill="currentColor" stroke="none">

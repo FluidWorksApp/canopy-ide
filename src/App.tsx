@@ -17,6 +17,8 @@ import type { AgentEventEntry, NoticeKind, RelayHandle } from "./types";
 import { derivePending, pendingForRoots } from "./notifications";
 import { CollabManager, safeName } from "./collab";
 import { ProjectView } from "./components/ProjectView";
+import { TitleBar } from "./components/TitleBar";
+import { UpdateToast, NoticeToast } from "./components/Toast";
 import { ProjectDialog } from "./components/ProjectDialog";
 import { ProjectManager } from "./components/ProjectManager";
 import { SettingsDialog } from "./components/SettingsDialog";
@@ -26,6 +28,7 @@ import { Dictation } from "./components/Dictation";
 import { Onboarding } from "./components/Onboarding";
 import { Welcome } from "./components/Welcome";
 import { shouldOnboard, markOnboarded } from "./onboarding";
+import { loadZoom, setZoom, applyZoom, STEP } from "./zoom";
 import { stopWorkspaceServers } from "./lsp/client";
 import { checkForUpdateAnyChannel, installUpdate, type UpdateAvailability } from "./updater";
 
@@ -86,6 +89,9 @@ export default function App() {
   const [confirmDelete, setConfirmDelete] = useState<Project | null>(null);
   const [hookPath, setHookPath] = useState<string | null>(null);
   const [zen, setZen] = useState(false);
+  // Transient "110%" chip shown for ~1s after a zoom change, then cleared.
+  const [zoomPct, setZoomPct] = useState<number | null>(null);
+  const zoomHideTimer = useRef<number | null>(null);
   const [notice, setNotice] = useState<{ text: string; kind: NoticeKind } | null>(null);
   const notify = useCallback(
     (text: string, kind: NoticeKind = "info") => setNotice({ text, kind }),
@@ -550,15 +556,41 @@ export default function App() {
     // reaches the menu, which left users stuck inside focus mode with no way
     // back out. The dedupe below means whichever arrives first wins and a
     // second path firing for the same press can't toggle it straight back.
+    // Show the zoom chip and (re)arm its 1s auto-hide.
+    const flashZoom = (z: number) => {
+      setZoomPct(Math.round(z * 100));
+      if (zoomHideTimer.current !== null) window.clearTimeout(zoomHideTimer.current);
+      zoomHideTimer.current = window.setTimeout(() => setZoomPct(null), 1000);
+    };
     const keys = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
       if (e.key === "Escape") {
         setZen(false);
-      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.code === "Enter") {
+      } else if (mod && e.shiftKey && e.code === "Enter") {
         e.preventDefault();
         toggleZen("keydown");
+      } else if (mod && !e.shiftKey && !e.altKey) {
+        // Window zoom: Cmd/Ctrl with +, -, or 0. Match both the main-row and
+        // numpad keys; "=" is the unshifted "+" key. e.code covers layouts
+        // where the character is remapped.
+        const inKey = e.key === "+" || e.key === "=" || e.code === "NumpadAdd";
+        const outKey = e.key === "-" || e.code === "Minus" || e.code === "NumpadSubtract";
+        const resetKey = e.key === "0" || e.code === "Digit0" || e.code === "Numpad0";
+        if (inKey) {
+          e.preventDefault();
+          flashZoom(setZoom(loadZoom() + STEP));
+        } else if (outKey) {
+          e.preventDefault();
+          flashZoom(setZoom(loadZoom() - STEP));
+        } else if (resetKey) {
+          e.preventDefault();
+          flashZoom(setZoom(1));
+        }
       }
     };
     window.addEventListener("keydown", keys);
+    // Restore the persisted zoom level on launch.
+    void applyZoom(loadZoom());
     // The status bar's 🎨 button (and anything else outside App) opens
     // Settings at a specific tab through this event.
     const openSettings = (e: Event) =>
@@ -571,6 +603,7 @@ export default function App() {
     return () => {
       window.removeEventListener("keydown", keys);
       window.removeEventListener("canopy:open-settings", openSettings);
+      if (zoomHideTimer.current !== null) window.clearTimeout(zoomHideTimer.current);
       subs.forEach((s) => void s.then((fn) => fn()));
     };
   }, []);
@@ -761,6 +794,37 @@ export default function App() {
     [update, closeProject],
   );
 
+  // Stable titlebar handlers — kept out of render so the memoized TitleBar
+  // only re-renders when its data props change, not on every App state tick.
+  const selectProject = useCallback((id: string) => update({ activeId: id }), [update]);
+  const handleCloseProject = useCallback((id: string) => void closeProject(id), [closeProject]);
+  const stopCollab = useCallback(() => {
+    collab.current?.stopAll();
+    notify("Collaboration ended.");
+  }, [notify]);
+  const newProject = useCallback(() => setDialog({ mode: "new" }), []);
+  const openManager = useCallback(() => setManager(true), []);
+
+  // Update-toast handlers.
+  const openDownloadsPage = useCallback(() => {
+    void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
+      openUrl("https://canopyide.dev/downloads"),
+    );
+  }, []);
+  const installAndRestart = useCallback(() => {
+    setUpdateProgress(0);
+    void installUpdate(setUpdateProgress).catch((err) => {
+      setUpdateProgress(null);
+      setUpdateAvail(null);
+      notify(`Update failed: ${err}`, "error");
+    });
+  }, [notify]);
+  const dismissUpdate = useCallback(() => {
+    if (updateAvail) dismissedUpdate.current = updateAvail.info.version;
+    setUpdateAvail(null);
+  }, [updateAvail]);
+  const dismissNotice = useCallback(() => setNotice(null), []);
+
   // The relay handle every ProjectView shares. Sends append the stamped
   // message locally — the relay never echoes a frame back to its author, so
   // this is the only way our own words reach our own transcript.
@@ -822,82 +886,48 @@ export default function App() {
     unread,
   };
 
-  if (!loaded) return null;
-
-  const openProjects = ws.openIds
-    .map((id) => ws.projects.find((p) => p.id === id))
-    .filter((p): p is Project => Boolean(p));
-  const allPending = derivePending(agentEvents).filter((i) => !dismissedPending.has(i.key));
+  const openProjects = useMemo(
+    () =>
+      ws.openIds
+        .map((id) => ws.projects.find((p) => p.id === id))
+        .filter((p): p is Project => Boolean(p)),
+    [ws.openIds, ws.projects],
+  );
+  const allPending = useMemo(
+    () => derivePending(agentEvents).filter((i) => !dismissedPending.has(i.key)),
+    [agentEvents, dismissedPending],
+  );
   // Tab badges count only what's blocked on the user — an agent that finished
-  // and is idling is not urgent.
-  const pendingCount = (p: Project) =>
-    pendingForRoots(allPending, p.components.map((c) => c.path)).filter(
-      (i) => i.kind !== "idle",
-    ).length;
+  // and is idling is not urgent. Stable identity so the memoized TitleBar
+  // isn't re-rendered by a fresh closure each tick.
+  const pendingCount = useCallback(
+    (p: Project) =>
+      pendingForRoots(allPending, p.components.map((c) => c.path)).filter(
+        (i) => i.kind !== "idle",
+      ).length,
+    [allPending],
+  );
+
+  if (!loaded) return null;
 
   return (
     <div className={`app ${zen ? "zen" : ""}`}>
       {/* Focus mode: chrome slides away but stays reachable — hovering the top
           edge brings the project tabs and the tab strip back. */}
       {zen && <div className="zen-hotzone" />}
-      <div className="titlebar">
-        <div className="project-tabs">
-          {openProjects.map((p) => (
-            <div
-              key={p.id}
-              className={`project-tab ${p.id === ws.activeId ? "project-tab-active" : ""}`}
-              onClick={() => update({ activeId: p.id })}
-              title={p.components.map((c) => c.path).join("\n")}
-            >
-              <span>{p.name}</span>
-              {pendingCount(p) > 0 && (
-                <span className="badge badge-urgent" title="agent needs your input">
-                  {pendingCount(p)}
-                </span>
-              )}
-              <span
-                className="tab-close"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void closeProject(p.id);
-                }}
-              >
-                ✕
-              </span>
-            </div>
-          ))}
-          <button className="btn-icon" title="New project" onClick={() => setDialog({ mode: "new" })}>
-            ＋
-          </button>
-        </div>
-        <div className="titlebar-spacer" />
-        {collabTick >= 0 && collab.current!.activeCount > 0 && (
-          <div
-            className="collab-live"
-            title="Live collaboration in progress — click ✕ to end every share and session"
-          >
-            <span className="collab-live-dot" />
-            Collaborating
-            <button
-              className="collab-live-stop"
-              title="Stop collaborating — end every share and live session"
-              onClick={() => {
-                collab.current!.stopAll();
-                notify("Collaboration ended.");
-              }}
-            >
-              ✕
-            </button>
-          </div>
-        )}
-        <button
-          className="btn project-manage-btn"
-          title="Manage projects — open, create, edit, delete"
-          onClick={() => setManager(true)}
-        >
-          Projects ▾
-        </button>
-      </div>
+      {/* Transient zoom level, shown ~1s after Cmd +/-/0. */}
+      {zoomPct !== null && <div className="zoom-indicator">{zoomPct}%</div>}
+      <TitleBar
+        openProjects={openProjects}
+        activeId={ws.activeId}
+        pendingCount={pendingCount}
+        collabActive={collabTick >= 0 && (collab.current?.activeCount ?? 0) > 0}
+        onSelectProject={selectProject}
+        onCloseProject={handleCloseProject}
+        onStopCollab={stopCollab}
+        onNewProject={newProject}
+        onManageProjects={openManager}
+      />
 
       <div className="app-body">
         {openProjects.length === 0 && (
@@ -942,86 +972,17 @@ export default function App() {
       </div>
 
       {updateAvail && (
-        <div className="update-toast">
-          <div className="update-head">
-            <strong>Canopy {updateAvail.info.version}</strong> is available
-          </div>
-          {updateAvail.info.notes && <div className="update-notes">{updateAvail.info.notes}</div>}
-          {updateAvail.kind === "manual" ? (
-            <div className="update-actions">
-              {/* This install type can't self-update (.deb/.rpm — the package
-                  manager owns it, but there's no apt/dnf repo to serve it) —
-                  hand off to the downloads page rather than pretend. */}
-              <button
-                className="btn btn-accent"
-                onClick={() => {
-                  void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
-                    openUrl("https://canopyide.dev/downloads"),
-                  );
-                }}
-              >
-                Open downloads page
-              </button>
-              <button
-                className="btn"
-                onClick={() => {
-                  dismissedUpdate.current = updateAvail.info.version;
-                  setUpdateAvail(null);
-                }}
-              >
-                Later
-              </button>
-            </div>
-          ) : updateProgress === null ? (
-            <div className="update-actions">
-              {/* Never install without asking: the terminals hold live agent
-                  sessions whose scrollback exists nowhere else, and installing
-                  relaunches the app. */}
-              <button
-                className="btn btn-accent"
-                onClick={() => {
-                  setUpdateProgress(0);
-                  void installUpdate(setUpdateProgress).catch((err) => {
-                    setUpdateProgress(null);
-                    setUpdateAvail(null);
-                    notify(`Update failed: ${err}`, "error");
-                  });
-                }}
-              >
-                Install and restart
-              </button>
-              <button
-                className="btn"
-                onClick={() => {
-                  dismissedUpdate.current = updateAvail.info.version;
-                  setUpdateAvail(null);
-                }}
-              >
-                Later
-              </button>
-            </div>
-          ) : (
-            <div className="update-progress">
-              <div
-                className="update-bar"
-                style={{ width: `${Math.round(updateProgress * 100)}%` }}
-              />
-              <span className="update-pct">
-                {Math.round(updateProgress * 100)}% — Canopy will restart itself
-              </span>
-            </div>
-          )}
-        </div>
+        <UpdateToast
+          update={updateAvail}
+          progress={updateProgress}
+          onOpenDownloads={openDownloadsPage}
+          onInstall={installAndRestart}
+          onDismiss={dismissUpdate}
+        />
       )}
 
       {notice && (
-        <div
-          className={`notice notice-${notice.kind}`}
-          onClick={() => setNotice(null)}
-          title="dismiss"
-        >
-          {notice.text}
-        </div>
+        <NoticeToast text={notice.text} kind={notice.kind} onDismiss={dismissNotice} />
       )}
 
       {manager && (

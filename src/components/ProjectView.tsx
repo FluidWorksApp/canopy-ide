@@ -30,25 +30,12 @@ import {
 import type { CliUpdate } from "../projects";
 import {
   AgentIcon,
-  AgentsIcon,
-  CommitIcon,
-  PullRequestIcon,
-  TrackerIcon,
-  DiffIcon,
-  FilesIcon,
-  GitBranchIcon,
-  IssueIcon,
-  SettingsIcon,
-  SidebarIcon,
   CheckIcon,
   FailIcon,
   LiveDot,
-  GlobeIcon,
-  LiveShareIcon,
   PlayIcon,
   RestartIcon,
   StopIcon,
-  TeamIcon,
   TerminalIcon,
 } from "./icons";
 import type { AgentEventEntry, OpenFile, Notify, RelayHandle } from "../types";
@@ -96,10 +83,12 @@ import { TeamPanel } from "./TeamPanel";
 import { ChatView } from "./ChatView";
 import { Coachmark } from "./Coachmark";
 import { shouldShowTip, markTipSeen, type CoachTip } from "../coachmarks";
+import { ActivityRail } from "./ActivityRail";
+import { PaneBar } from "./PaneBar";
 
-type SideTab = "files" | "changes" | "git" | "trackers" | "agents" | "team";
+export type SideTab = "files" | "changes" | "git" | "trackers" | "agents" | "team";
 
-interface TermSubTab {
+export interface TermSubTab {
   id: string;
   type: "terminal";
   cwd: string;
@@ -131,27 +120,27 @@ interface TermSubTab {
   unread?: boolean;
 }
 
-interface FileSubTab {
+export interface FileSubTab {
   id: string;
   type: "file";
   file: OpenFile;
 }
 
-interface TicketSubTab {
+export interface TicketSubTab {
   id: string;
   type: "ticket";
   ticket: ipc.TicketInfo;
   source: string;
 }
 
-interface BranchSubTab {
+export interface BranchSubTab {
   id: string;
   type: "branch";
   repo: string;
   branch: ipc.BranchWork;
 }
 
-interface CommitSubTab {
+export interface CommitSubTab {
   id: string;
   type: "commit";
   repo: string;
@@ -160,21 +149,21 @@ interface CommitSubTab {
   subject: string;
 }
 
-interface PrSubTab {
+export interface PrSubTab {
   id: string;
   type: "pr";
   repo: string;
   pr: ipc.PrInfo;
 }
 
-interface ReviewSubTab {
+export interface ReviewSubTab {
   id: string;
   type: "review";
   review: ReviewPayload;
 }
 
 /** An agent session's workspace: its branch, diffs, commits and PR. */
-interface AgentSubTab {
+export interface AgentSubTab {
   id: string;
   type: "agent";
   /** Repo the agent's cwd matched; null renders the digest-only view. */
@@ -190,7 +179,7 @@ interface AgentSubTab {
   ptyId?: number;
 }
 
-interface ChatSubTab {
+export interface ChatSubTab {
   id: string;
   type: "chat";
   /** Relay member id for a DM; null for the everyone channel. */
@@ -202,7 +191,7 @@ interface ChatSubTab {
 
 /** A file someone else owns, live. Distinct from FileSubTab because it has no
  *  path — that is the point, see docs/collab-editing.md §5. */
-interface CollabSubTab {
+export interface CollabSubTab {
   id: string;
   type: "collab";
   doc: string;
@@ -212,7 +201,7 @@ interface CollabSubTab {
 
 /** A whole project someone else shared, live: a browsable tree of their files,
  *  each opened on demand into a CollabSubTab. */
-interface SharedProjectSubTab {
+export interface SharedProjectSubTab {
   id: string;
   type: "shared-project";
   doc: string;
@@ -223,7 +212,7 @@ interface SharedProjectSubTab {
 /** An embedded browser onto a locally running server, with annotate mode.
  *  Navigation and collected annotations live on the tab so they survive
  *  switching away (the view, like every doc tab, unmounts when inactive). */
-interface PreviewSubTab {
+export interface PreviewSubTab {
   id: string;
   type: "preview";
   /** The previewed page's real URL ("" until the user picks a server). */
@@ -231,7 +220,7 @@ interface PreviewSubTab {
   annotations: PreviewAnnotation[];
 }
 
-type SubTab =
+export type SubTab =
   | CollabSubTab
   | SharedProjectSubTab
   | PreviewSubTab
@@ -307,7 +296,7 @@ function previewLabel(url: string): string {
 }
 
 /** One entry in a right-hand rail (a shell or a running command). */
-interface RailChip {
+export interface RailChip {
   id: string;
   active: boolean;
   /** Extra state class for the chip (e.g. run-chip-live / -done / -failed). */
@@ -321,85 +310,6 @@ interface RailChip {
   onClose: () => void;
 }
 
-// A compact right-hand rail for terminals that aren't the hero — shells and
-// running commands. One entry shows as a single chip; two or more collapse
-// into a dropdown so the strip stays quiet and the agent keeps center stage.
-function Rail({
-  label,
-  chips,
-  summary,
-  open,
-  setOpen,
-  dim,
-}: {
-  label: string;
-  chips: RailChip[];
-  summary: React.ReactNode;
-  open: boolean;
-  setOpen: (v: boolean) => void;
-  /** Recede this rail (dimmed + blurred) because the active tab lives in
-   *  another section. Hovering or clicking still works — it just isn't the
-   *  section you're currently in. */
-  dim?: boolean;
-}) {
-  if (chips.length === 0) return null;
-  const dimCls = dim ? "pane-section-dim" : "";
-  const chip = (c: RailChip, inMenu: boolean) => (
-    <div
-      key={c.id}
-      className={`run-chip ${c.className ?? ""} ${c.active ? "run-chip-active" : ""} ${
-        inMenu ? "rail-menu-chip" : ""
-      }`}
-      onClick={() => {
-        c.onSelect();
-        if (inMenu) setOpen(false);
-      }}
-      title={c.tooltip}
-    >
-      {c.dot}
-      <span className="run-chip-title">{c.title}</span>
-      {c.action}
-      <span
-        className="tab-close"
-        onClick={(e) => {
-          e.stopPropagation();
-          c.onClose();
-        }}
-      >
-        ✕
-      </span>
-    </div>
-  );
-  if (chips.length === 1) {
-    return (
-      <div className={`run-rail ${dimCls}`} data-rail={label}>
-        <span className="run-rail-label">{label}</span>
-        {chip(chips[0], false)}
-      </div>
-    );
-  }
-  const active = chips.find((c) => c.active);
-  return (
-    <div className={`run-rail rail-menu-anchor ${dimCls}`} data-rail={label}>
-      <span className="run-rail-label">{label}</span>
-      <button
-        className={`run-chip rail-toggle ${active ? "run-chip-active" : ""}`}
-        onClick={() => setOpen(!open)}
-        title={`${chips.length} ${label.toLowerCase()}`}
-      >
-        {summary}
-        <span className="run-chip-title">{active ? active.title : label}</span>
-        <span className="rail-count">{chips.length}</span>
-        <span className="rail-caret">▾</span>
-      </button>
-      {open && (
-        <div className="cli-menu rail-menu" onMouseLeave={() => setOpen(false)}>
-          {chips.map((c) => chip(c, true))}
-        </div>
-      )}
-    </div>
-  );
-}
 
 /** Endpoints a shell is actually serving, offered where you are looking.
  *
@@ -447,21 +357,6 @@ function TermPorts({
   );
 }
 
-// Real icons, not glyphs: this is a 5-item column where shape is the only
-// thing distinguishing entries, and the Agents button used to be Claude's
-// asterisk — which read as "Claude" rather than "agents".
-const RAIL_TABS: {
-  key: SideTab;
-  Icon: (p: { size?: number; className?: string }) => React.ReactElement;
-  title: string;
-}[] = [
-  { key: "files", Icon: FilesIcon, title: "Components & files" },
-  { key: "changes", Icon: DiffIcon, title: "Session changes" },
-  { key: "git", Icon: GitBranchIcon, title: "Git — branches, commits, worktrees, PRs" },
-  { key: "trackers", Icon: IssueIcon, title: "Issues — GitHub, Linear, …" },
-  { key: "agents", Icon: AgentsIcon, title: "Agents" },
-  { key: "team", Icon: TeamIcon, title: "Team — relay, chat, notifications" },
-];
 
 interface ProjectViewProps {
   project: Project;
@@ -1886,23 +1781,37 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
 
   // ---------- render ----------
 
-  const activeTab = tabs.find((t) => t.id === activeTabId) ?? null;
+  const activeTab = useMemo(
+    () => tabs.find((t) => t.id === activeTabId) ?? null,
+    [tabs, activeTabId],
+  );
   // The pty of the terminal tab in front, so the Agents panel can highlight its
   // row — relating the tab you're looking at back to its entry in the list.
   const activePty = activeTab?.type === "terminal" ? activeTab.ptyId : null;
-  const runTabs = tabs.filter(
-    (t): t is TermSubTab => t.type === "terminal" && Boolean(t.run),
+  const runTabs = useMemo(
+    () => tabs.filter((t): t is TermSubTab => t.type === "terminal" && Boolean(t.run)),
+    [tabs],
   );
-  const ptyIds = new Set(
-    tabs
-      .filter((t): t is TermSubTab => t.type === "terminal")
-      .map((t) => t.ptyId)
-      .filter((id): id is number => id != null),
+  const ptyIds = useMemo(
+    () =>
+      new Set(
+        tabs
+          .filter((t): t is TermSubTab => t.type === "terminal")
+          .map((t) => t.ptyId)
+          .filter((id): id is number => id != null),
+      ),
+    [tabs],
   );
   const projectStats = stats; // already filtered to this project's ptys at the door
   // Hooks are global, so the raw stream carries every agent on the machine.
   // Everything below this line sees only what our own terminals raised.
-  const projectEvents = eventsForProject(events, ptyIds, roots);
+  // Memoized so the derived pending/urgent arrays keep a stable identity —
+  // that's what lets the memoized ActivityRail skip unrelated re-renders.
+  const projectEvents = useMemo(
+    () => eventsForProject(events, ptyIds, roots),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [events, ptyIds, rootsKey],
+  );
   // Session ids seen on this project's live terminals during this app run. A
   // digest not in here has no terminal — either it ended, or the IDE died with
   // it running, which is exactly the case restore exists for. Derived from
@@ -2028,15 +1937,48 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     [relay.collabTick, rootsKey],
   );
   const collabEditedCount = collabChanges.filter((c) => c.edited).length;
-  const collabPaths = new Set(collabChanges.filter((c) => c.edited).map((c) => c.path));
+  const collabPaths = useMemo(
+    () => new Set(collabChanges.filter((c) => c.edited).map((c) => c.path)),
+    [collabChanges],
+  );
   const teamBadge =
     relay.inbox.length + Object.values(relay.unread).reduce((a, b) => a + b, 0);
   const sectionOpen = (path: string) => openSections[path] ?? true;
-  const pending = pendingForRoots(derivePending(projectEvents), roots).filter(
-    (i) => !dismissedPending.has(i.key),
+  const pending = useMemo(
+    () =>
+      pendingForRoots(derivePending(projectEvents), roots).filter(
+        (i) => !dismissedPending.has(i.key),
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [projectEvents, rootsKey, dismissedPending],
   );
   // Blocked-on-you items drive the urgent styling; completions are quiet.
-  const urgentPending = pending.filter((i) => i.kind !== "idle");
+  const urgentPending = useMemo(
+    () => pending.filter((i) => i.kind !== "idle"),
+    [pending],
+  );
+
+  // Stable ActivityRail handlers. Identity only changes with collapsed/sideTab
+  // (a user action), not on every render — so the memoized rail stays put while
+  // terminals stream, agents tick, and stats update.
+  const selectSideTab = useCallback(
+    (tab: SideTab) => {
+      if (collapsed) {
+        setCollapsed(false);
+        setSideTab(tab);
+      } else if (sideTab === tab) {
+        setCollapsed(true);
+      } else {
+        setSideTab(tab);
+      }
+    },
+    [collapsed, sideTab],
+  );
+  const openSettings = useCallback(
+    () => window.dispatchEvent(new CustomEvent("canopy:open-settings")),
+    [],
+  );
+  const toggleSidebar = useCallback(() => setCollapsed((v) => !v), []);
 
   // Jump to the terminal running the agent that raised the item: prefer a
   // terminal whose PTY tree contains an agent process, then match by cwd.
@@ -2223,8 +2165,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   /** Launch an agent CLI. `at` defaults to the first component; right-clicking a
    *  component header passes that component's path so it starts in the right
    *  directory rather than wherever the ＋ menu would have put it. */
-  const launchCli = (cli: AgentCli, at?: string) => {
-    const cwd = at ?? components[0]?.path;
+  const launchCli = useCallback((cli: AgentCli, at?: string) => {
+    const cwd = at ?? componentsRef.current[0]?.path;
     if (!cwd) return;
     if (installed[cli.bin]) {
       addTerminal(cwd, cli.bin, cli.name, cli.icon);
@@ -2237,18 +2179,18 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       // signal to re-probe (see onExited below). No timers, no staleness.
       addTerminal(cwd, cli.install, `install ${cli.name}`, "⬇", true);
     }
-  };
+  }, [installed, addTerminal]);
 
   /** Run `cli`'s updater in a run tab. Its exit re-probes versions (see
    *  onExited), so the badge clears the moment the update lands — no timers. */
-  const runCliUpdate = (cli: AgentCli, at?: string) => {
-    const cwd = at ?? components[0]?.path;
+  const runCliUpdate = useCallback((cli: AgentCli, at?: string) => {
+    const cwd = at ?? componentsRef.current[0]?.path;
     if (!cwd) return;
     // Route to the command matched to the install source (e.g. `brew upgrade`);
     // fall back to the CLI's own updater when the source is a plain registry.
     const cmd = cliUpdates[cli.bin]?.updateCmd ?? updateCommand(cli);
     addTerminal(cwd, cmd, `update ${cli.name}`, "⬆", true);
-  };
+  }, [cliUpdates, addTerminal]);
 
   /** The launcher list — shell plus every agent CLI — for a given directory.
    *  Shared by the ＋ menu, the empty-state grid and the component right-click
@@ -2296,112 +2238,146 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     }
   };
 
-  const startRename = (tab: TermSubTab) => {
+  const startRename = useCallback((tab: TermSubTab) => {
     setRenamingTabId(tab.id);
     setRenameDraft(tab.customTitle ?? tab.title);
-  };
+  }, []);
   // Empty draft clears the custom name and falls back to the auto title.
-  const commitRename = () => {
+  const commitRename = useCallback(() => {
     if (renamingTabId) patchTab(renamingTabId, { customTitle: renameDraft.trim() || undefined });
     setRenamingTabId(null);
-  };
+  }, [renamingTabId, renameDraft, patchTab]);
 
   // Agents are the crux of this IDE, so they own the main strip. Detection is
   // by launch command OR by what's actually running in the pty tree, so a
   // `claude` typed by hand into a shell promotes that tab too. Plain shells and
   // long-running commands are demoted to their own right-hand rails (below);
   // reference docs (files, PRs, tickets) form a quieter group after the agents.
-  const agentPtyIds = new Set(
-    projectStats
-      .filter((s) => s.procs.some((p) => AGENT_PATTERN.test(p.name)))
-      .map((s) => s.id),
+  // Content-keyed: `stats` re-samples every ~4s, but this set only earns a new
+  // identity when the set of agent-bearing ptys actually changes — so the
+  // memoized PaneBar isn't repainted by a sample that changed nothing.
+  const agentPtyList = projectStats
+    .filter((s) => s.procs.some((p) => AGENT_PATTERN.test(p.name)))
+    .map((s) => s.id);
+  const agentPtyKey = agentPtyList.slice().sort((a, b) => a - b).join(",");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const agentPtyIds = useMemo(() => new Set(agentPtyList), [agentPtyKey]);
+  const isAgentTab = useCallback(
+    (t: SubTab): t is TermSubTab =>
+      t.type === "terminal" &&
+      (AGENT_PATTERN.test(t.command ?? "") ||
+        (t.ptyId != null && agentPtyIds.has(t.ptyId))),
+    [agentPtyIds],
   );
-  const isAgentTab = (t: SubTab): t is TermSubTab =>
-    t.type === "terminal" &&
-    (AGENT_PATTERN.test(t.command ?? "") ||
-      (t.ptyId != null && agentPtyIds.has(t.ptyId)));
   // A single dot carries an agent tab's whole state: orange sharp-pulse when it
   // wants attention (unread — set by OSC or the went-quiet heuristic), gray
   // soft-pulse while its work burns CPU, gray steady when idle.
-  const busyPtyIds = new Set(
-    projectStats.filter((s) => s.total_cpu > 10).map((s) => s.id),
-  );
+  // Same content-keying as agentPtyIds: identity changes only when the set of
+  // busy ptys crosses the CPU threshold, not on every sample.
+  const busyPtyList = projectStats.filter((s) => s.total_cpu > 10).map((s) => s.id);
+  const busyPtyKey = busyPtyList.slice().sort((a, b) => a - b).join(",");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const busyPtyIds = useMemo(() => new Set(busyPtyList), [busyPtyKey]);
   // The tab dot's state. For an agent tab we use the authoritative session state
   // — resolved through the live pty→session→digest binding the workspace uses —
   // so the titlebar and the Agents panel never disagree, and `waiting` (blocked
   // on you) and `ended` are shown as themselves rather than guessed. A plain
   // shell, or an agent whose session we can't resolve yet, falls back to the CPU
   // heuristic. `unread` (unseen activity) is layered on separately as a ring.
-  const tabState = (t: TermSubTab): "working" | "waiting" | "idle" | "ended" => {
-    if (isAgentTab(t) && t.ptyId != null) {
-      const sid = liveSessionByPty.get(t.ptyId);
-      const st = sid ? wsDigests.find((d) => d.session_id === sid)?.state : undefined;
-      if (st === "working" || st === "waiting" || st === "idle" || st === "ended") return st;
-    }
-    return t.ptyId != null && busyPtyIds.has(t.ptyId) ? "working" : "idle";
-  };
-  const stripTabs = tabs.filter((t) => t.type !== "terminal" || !t.run);
-  const shellTabs = stripTabs.filter(
-    (t): t is TermSubTab => t.type === "terminal" && !isAgentTab(t),
+  const tabState = useCallback(
+    (t: TermSubTab): "working" | "waiting" | "idle" | "ended" => {
+      if (isAgentTab(t) && t.ptyId != null) {
+        const sid = liveSessionByPty.get(t.ptyId);
+        const st = sid ? wsDigests.find((d) => d.session_id === sid)?.state : undefined;
+        if (st === "working" || st === "waiting" || st === "idle" || st === "ended") return st;
+      }
+      return t.ptyId != null && busyPtyIds.has(t.ptyId) ? "working" : "idle";
+    },
+    [isAgentTab, liveSessionByPty, wsDigests, busyPtyIds],
   );
-  const tabGroups: SubTab[][] = [
-    stripTabs.filter(isAgentTab),
-    stripTabs.filter((t) => t.type !== "terminal"),
-  ];
+  const stripTabs = useMemo(
+    () => tabs.filter((t) => t.type !== "terminal" || !t.run),
+    [tabs],
+  );
+  const shellTabs = useMemo(
+    () => stripTabs.filter((t): t is TermSubTab => t.type === "terminal" && !isAgentTab(t)),
+    [stripTabs, isAgentTab],
+  );
+  const tabGroups: SubTab[][] = useMemo(
+    () => [
+      stripTabs.filter(isAgentTab),
+      stripTabs.filter((t) => t.type !== "terminal"),
+    ],
+    [stripTabs, isAgentTab],
+  );
   // Shells and runs each get a compact rail; Rail collapses to a dropdown at 2+.
-  const shellChips: RailChip[] = shellTabs.map((tab) => ({
-    id: tab.id,
-    active: tab.id === activeTabId,
-    dot: <TerminalIcon size={11} className="run-chip-shell-dot" />,
-    title: tab.customTitle ?? tab.title,
-    tooltip: `${tab.command ?? "shell"} — ${tab.cwd}`,
-    onSelect: () => setActiveTabId(tab.id),
-    onClose: () => closeTab(tab.id),
-  }));
-  const runChips: RailChip[] = runTabs.map((tab) => {
-    const ok = tab.exitCode === 0;
-    const state = !tab.exited ? "live" : ok ? "done" : "failed";
-    return {
-      id: tab.id,
-      active: tab.id === activeTabId,
-      className: `run-chip-${state}`,
-      dot: !tab.exited ? (
-        <LiveDot size={7} className="run-chip-dot" />
-      ) : ok ? (
-        <CheckIcon size={11} className="run-chip-ok" />
-      ) : (
-        <FailIcon size={11} className="run-chip-fail" />
-      ),
-      title: tab.title,
-      tooltip: tab.exited
-        ? `${ok ? "finished" : `exited ${tab.exitCode ?? "?"}`} — ${tab.command ?? ""}`
-        : `running — ${tab.command ?? ""}`,
-      action: tab.exited ? (
-        <button
-          className="icon-btn run-chip-btn"
-          title="Run again"
-          onClick={(e) => {
-            e.stopPropagation();
-            restartRun(tab.id);
-          }}
-        >
-          <RestartIcon size={11} />
-        </button>
-      ) : undefined,
-      onSelect: () => setActiveTabId(tab.id),
-      onClose: () => closeTab(tab.id),
-    };
-  });
+  const shellChips: RailChip[] = useMemo(
+    () =>
+      shellTabs.map((tab) => ({
+        id: tab.id,
+        active: tab.id === activeTabId,
+        dot: <TerminalIcon size={11} className="run-chip-shell-dot" />,
+        title: tab.customTitle ?? tab.title,
+        tooltip: `${tab.command ?? "shell"} — ${tab.cwd}`,
+        onSelect: () => setActiveTabId(tab.id),
+        onClose: () => closeTab(tab.id),
+      })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [shellTabs, activeTabId, closeTab],
+  );
+  const runChips: RailChip[] = useMemo(
+    () =>
+      runTabs.map((tab) => {
+        const ok = tab.exitCode === 0;
+        const state = !tab.exited ? "live" : ok ? "done" : "failed";
+        return {
+          id: tab.id,
+          active: tab.id === activeTabId,
+          className: `run-chip-${state}`,
+          dot: !tab.exited ? (
+            <LiveDot size={7} className="run-chip-dot" />
+          ) : ok ? (
+            <CheckIcon size={11} className="run-chip-ok" />
+          ) : (
+            <FailIcon size={11} className="run-chip-fail" />
+          ),
+          title: tab.title,
+          tooltip: tab.exited
+            ? `${ok ? "finished" : `exited ${tab.exitCode ?? "?"}`} — ${tab.command ?? ""}`
+            : `running — ${tab.command ?? ""}`,
+          action: tab.exited ? (
+            <button
+              className="icon-btn run-chip-btn"
+              title="Run again"
+              onClick={(e) => {
+                e.stopPropagation();
+                restartRun(tab.id);
+              }}
+            >
+              <RestartIcon size={11} />
+            </button>
+          ) : undefined,
+          onSelect: () => setActiveTabId(tab.id),
+          onClose: () => closeTab(tab.id),
+        };
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [runTabs, activeTabId, closeTab, restartRun],
+  );
   // Which pane-bar section owns the active tab. The other sections recede
   // (dimmed + softly blurred) so it's unmistakable where you are: closing a
   // shell no longer means squinting past an equally-bright "IDE" tab and
   // hitting it by mistake. Clicking a recessed section shifts focus here and
   // clears the dim.
-  const activeSection: "tabs" | "shells" | "runs" = shellChips.some((c) => c.active)
-    ? "shells"
-    : runChips.some((c) => c.active)
-      ? "runs"
-      : "tabs";
+  const activeSection: "tabs" | "shells" | "runs" = useMemo(
+    () =>
+      shellChips.some((c) => c.active)
+        ? "shells"
+        : runChips.some((c) => c.active)
+          ? "runs"
+          : "tabs",
+    [shellChips, runChips],
+  );
 
   // First-run coach-marks: spotlight each new workspace section the first time
   // it appears — the SHELLS rail when a terminal opens, RUNS when something
@@ -2440,12 +2416,16 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   };
 
   // One summary glyph for the runs dropdown: any live wins, then any failure.
-  const runSummary = runTabs.some((t) => !t.exited) ? (
-    <LiveDot size={7} className="run-chip-dot" />
-  ) : runTabs.some((t) => t.exitCode !== 0) ? (
-    <FailIcon size={11} className="run-chip-fail" />
-  ) : (
-    <CheckIcon size={11} className="run-chip-ok" />
+  const runSummary = useMemo(
+    () =>
+      runTabs.some((t) => !t.exited) ? (
+        <LiveDot size={7} className="run-chip-dot" />
+      ) : runTabs.some((t) => t.exitCode !== 0) ? (
+        <FailIcon size={11} className="run-chip-fail" />
+      ) : (
+        <CheckIcon size={11} className="run-chip-ok" />
+      ),
+    [runTabs],
   );
 
   // Agent terminals that can receive a ticket, shared by the Issues panel and
@@ -2622,6 +2602,93 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     return () => window.removeEventListener("keydown", onKey);
   }, [wsDrawerOpen]);
 
+  const peerMembers = useMemo(
+    () => relay.status.members.filter((m) => m.id !== relay.status.self_id),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [relay.status.members, relay.status.self_id],
+  );
+  const isRelayConnectedWithPeers =
+    relay.status.role !== "off" && peerMembers.length > 0;
+  const activeFileTab = useMemo(
+    () => (activeTab?.type === "file" ? activeTab : null),
+    [activeTab],
+  );
+  const activeTermTab = useMemo(
+    () => (activeTab?.type === "terminal" ? activeTab : null),
+    [activeTab],
+  );
+
+  // Stable PaneBar callbacks — identity only changes when their actual deps change,
+  // not on every 4s stats sample, so the memoized PaneBar stays put between samples.
+  const isSharedFile = useMemo(
+    () => activeFileTab != null && shared.current.has(activeFileTab.file.path),
+    [activeFileTab],
+  );
+  const isProjectShared = useCallback(
+    (memberId: string) =>
+      relay.collab.projectSharedWith(rootsRef.current[0] ?? "").has(memberId),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [relay.collabTick],
+  );
+  const onSelectTab = useCallback(
+    (id: string, clickCount?: number) => {
+      const tab = tabsRef.current.find((t) => t.id === id);
+      if (tab?.type === "terminal" && clickCount === 2) startRename(tab);
+      else setActiveTabId(id);
+    },
+    [startRename],
+  );
+  const onTabContextMenu = useCallback(
+    (e: React.MouseEvent, tab: SubTab) => {
+      const items: MenuItem[] =
+        tab.type === "terminal"
+          ? [
+              { label: "Rename", onClick: () => { if (tab.type === "terminal") startRename(tab); } },
+              { label: "Close", danger: true, onClick: () => closeTab(tab.id) },
+            ]
+          : [{ label: "Close", danger: true, onClick: () => closeTab(tab.id) }];
+      tabMenu.open(e, items);
+    },
+    [startRename, closeTab, tabMenu.open],
+  );
+  const onClearScrollback = useCallback(() => {
+    if (activeTermTab) termHandles.current.get(activeTermTab.id)?.clearScrollback();
+  }, [activeTermTab]);
+  const onHardReset = useCallback(() => {
+    if (activeTermTab) termHandles.current.get(activeTermTab.id)?.hardReset();
+  }, [activeTermTab]);
+  const onToggleView = useCallback(() => {
+    if (activeFileTab) toggleView(activeFileTab.file.path);
+  }, [activeFileTab, toggleView]);
+  const onShareFile = useCallback(
+    (memberId: string, memberName: string) => {
+      if (activeFileTab)
+        shareFileLive(activeFileTab.file.path, activeFileTab.file.name, memberId, memberName);
+    },
+    [activeFileTab, shareFileLive],
+  );
+  const onShareProject = useCallback(
+    (memberId: string, memberName: string) => shareProjectLive(memberId, memberName),
+    [shareProjectLive],
+  );
+  const onLaunchCli = useCallback((cli: AgentCli) => launchCli(cli), [launchCli]);
+  const onRunCliUpdate = useCallback(
+    (cli: AgentCli, _e: React.MouseEvent) => runCliUpdate(cli),
+    [runCliUpdate],
+  );
+  const onOpenAllTabs = useCallback(
+    (e: React.MouseEvent) =>
+      tabMenu.open(
+        e,
+        stripTabs.map((t) => ({
+          label: `${t.id === activeTabId ? "› " : ""}${tabDisplayLabel(t)}`,
+          onClick: () => setActiveTabId(t.id),
+        })),
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tabMenu.open, stripTabs, activeTabId],
+  );
+
   const mainArea = (
     <div className="project-main">
       {tabMenu.menu && (
@@ -2632,395 +2699,57 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onClose={tabMenu.close}
         />
       )}
-      <div className={`pane-bar pane-bar-focus-${activeSection}`}>
-        <div className={`tabs ${activeSection !== "tabs" ? "pane-section-dim" : ""}`}>
-          {tabGroups.map((group, gi) =>
-            group.length === 0 ? null : (
-              <div className="tab-group" key={gi}>
-                {group.map((tab) => (
-              <div
-                key={tab.id}
-                ref={tab.id === activeTabId ? activeTabElRef : undefined}
-                className={`tab ${tab.id === activeTabId ? "tab-active" : ""} ${
-                  tab.type === "chat" && tab.unread ? "tab-unread" : ""
-                } ${tab.type !== "terminal" ? "tab-doc" : isAgentTab(tab) ? "tab-agent" : ""} ${
-                  tab.id === flashTabId ? "tab-flash" : ""
-                }`}
-                onClick={(e) => {
-                  // e.detail is the click count and fires even though app chrome
-                  // is user-select:none — unlike dblclick, which WebKit drops on
-                  // non-selectable text. Second click on a terminal tab renames.
-                  if (tab.type === "terminal" && e.detail === 2) startRename(tab);
-                  else setActiveTabId(tab.id);
-                }}
-                onContextMenu={(e) => {
-                  const items: MenuItem[] =
-                    tab.type === "terminal"
-                      ? [
-                          { label: "Rename", onClick: () => startRename(tab) },
-                          { label: "Close", danger: true, onClick: () => closeTab(tab.id) },
-                        ]
-                      : [{ label: "Close", danger: true, onClick: () => closeTab(tab.id) }];
-                  tabMenu.open(e, items);
-                }}
-                title={
-                  tab.type === "terminal"
-                    ? `${tab.notice ? `${tab.notice}\n` : ""}${tab.command ?? ""} — ${tab.cwd}`
-                    : tab.type === "pr"
-                      ? `${tab.pr.title} — ${tab.pr.url}`
-                      : tab.type === "ticket"
-                        ? `${tab.ticket.id} — ${tab.ticket.title}\n${tab.ticket.url}`
-                        : tab.type === "commit"
-                          ? `${tab.short} — ${tab.subject}`
-                          : tab.type === "branch"
-                            ? `${tab.branch.branch}\n${tab.branch.worktree ?? "no worktree"}`
-                            : tab.type === "agent"
-                              ? `${tab.agent} workspace\n${tab.cwd}`
-                              : tab.type === "chat"
-                              ? tab.peer === null
-                                ? "Team chat — everyone on the relay"
-                                : `Direct chat with ${tab.name}`
-                              : tab.type === "collab"
-                                ? `${tab.name} — live, owned by ${tab.ownerName}`
-                                : tab.type === "review"
-                                  ? `Review from ${tab.review.from}: ${tab.review.title}`
-                                  : tab.type === "shared-project"
-                                    ? `${tab.name} — shared live by ${tab.ownerName}`
-                                    : tab.type === "preview"
-                                      ? tab.url || "Preview"
-                                      : tab.file.path
-                }
-              >
-                {tab.type === "terminal" ? (
-                  <span
-                    className={`tab-status tab-status-${tabState(tab)} ${tab.unread ? "tab-status-unread" : ""}`}
-                    aria-hidden
-                  />
-                ) : tab.type === "pr" ? (
-                  <PullRequestIcon size={12} className="tab-pr-icon" />
-                ) : tab.type === "ticket" ? (
-                  <TrackerIcon id={tab.source} size={12} className="tab-ticket-icon" />
-                ) : tab.type === "commit" ? (
-                  <CommitIcon size={12} className="tab-commit-icon" />
-                ) : tab.type === "branch" ? (
-                  <GitBranchIcon size={12} className="tab-branch-icon" />
-                ) : tab.type === "agent" ? (
-                  <AgentIcon id={tab.agent} size={12} className="tab-branch-icon" />
-                ) : tab.type === "chat" ? (
-                  <TeamIcon size={12} className="tab-chat-icon" />
-                ) : tab.type === "collab" ? (
-                  <TeamIcon size={12} className="tab-collab-icon" />
-                ) : tab.type === "review" ? (
-                  <PullRequestIcon size={12} className="tab-pr-icon" />
-                ) : tab.type === "shared-project" ? (
-                  <LiveShareIcon size={12} className="tab-collab-icon" />
-                ) : tab.type === "preview" ? (
-                  <GlobeIcon size={12} className="tab-preview-icon" />
-                ) : (
-                  <>
-                    {/* Live-collaborated file: a teammate is editing this one,
-                        distinct from a plain unsaved dot. */}
-                    {tab.type === "file" && collabPaths.has(tab.file.path) && (
-                      <TeamIcon size={11} className="tab-collab-icon" />
-                    )}
-                    {tab.file.external != null && <span className="tab-external">●</span>}
-                  </>
-                )}
-                {tab.type === "terminal" && renamingTabId === tab.id ? (
-                  <input
-                    className="tab-rename-input"
-                    autoFocus
-                    value={renameDraft}
-                    onClick={(e) => e.stopPropagation()}
-                    onChange={(e) => setRenameDraft(e.target.value)}
-                    onBlur={commitRename}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        commitRename();
-                      } else if (e.key === "Escape") {
-                        e.preventDefault();
-                        setRenamingTabId(null);
-                      }
-                    }}
-                  />
-                ) : (
-                  <span
-                    className="tab-title"
-                    title={tab.type === "terminal" ? "Double-click or right-click to rename" : undefined}
-                  >
-                    {tab.type === "terminal"
-                      ? (tab.customTitle ?? tab.title)
-                      : tab.type === "pr"
-                        ? `#${tab.pr.number} ${tab.pr.title}`
-                        : tab.type === "ticket"
-                          ? `${tab.ticket.id} ${tab.ticket.title}`
-                          : tab.type === "commit"
-                            ? `${tab.short} ${tab.subject}`
-                            : tab.type === "branch"
-                              ? tab.branch.branch
-                              : tab.type === "agent"
-                                ? tabDisplayLabel(tab)
-                                : tab.type === "chat"
-                                ? tab.name
-                                : tab.type === "collab"
-                                  ? `${tab.name} ⇄`
-                                  : tab.type === "review"
-                                    ? tab.review.title
-                                    : tab.type === "shared-project"
-                                      ? tab.name
-                                      : tab.type === "preview"
-                                        ? previewLabel(tab.url)
-                                        : `${tab.file.name}${tab.file.dirty ? " •" : ""}`}
-                  </span>
-                )}
-                <span
-                  className="tab-close"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    closeTab(tab.id);
-                  }}
-                >
-                  ✕
-                </span>
-              </div>
-                ))}
-              </div>
-            ),
-          )}
-        </div>
-        {/* Plain shells and long-running commands aren't the hero — they live
-            in compact right-hand rails, each collapsing to a dropdown at 2+. */}
-        <Rail
-          label="SHELLS"
-          chips={shellChips}
-          summary={<TerminalIcon size={11} className="run-chip-shell-dot" />}
-          open={shellMenuOpen}
-          setOpen={setShellMenuOpen}
-          dim={activeSection !== "shells"}
-        />
-        <Rail
-          label="RUNS"
-          chips={runChips}
-          summary={runSummary}
-          open={runMenuOpen}
-          setOpen={setRunMenuOpen}
-          dim={activeSection !== "runs"}
-        />
-        <div className="pane-actions">
-          {/* Jump to any open tab — the strip caps tab width and scrolls, so a
-              crowded strip stays navigable without hunting. */}
-          {stripTabs.length > 4 && (
-            <button
-              className="btn-icon"
-              title="All open tabs"
-              onClick={(e) =>
-                tabMenu.open(
-                  e,
-                  stripTabs.map((t) => ({
-                    label: `${t.id === activeTabId ? "› " : ""}${tabDisplayLabel(t)}`,
-                    onClick: () => setActiveTabId(t.id),
-                  })),
-                )
-              }
-            >
-              ⌄
-            </button>
-          )}
-          {/* Live share. Offered for any open file on a live relay with a
-              teammate connected — whatever the file is, if it has a text buffer
-              it can be edited together; shareFileLive reports the rare case
-              (e.g. a binary preview) with no buffer to synchronise. */}
-          {activeTab?.type === "file" &&
-            relay.status.role !== "off" &&
-            relay.status.members.some((m) => m.id !== relay.status.self_id) && (
-              <div className="cli-menu-anchor">
-                <button
-                  className={`btn btn-icon-text ${shared.current.has(activeTab.file.path) ? "btn-accent" : ""}`}
-                  title="Edit this file live with a teammate"
-                  onClick={() => setShareMenuOpen((v) => !v)}
-                >
-                  <LiveShareIcon size={14} />
-                  {shared.current.has(activeTab.file.path) ? "Sharing" : "Share live"}
-                </button>
-                {shareMenuOpen && (
-                  <div className="cli-menu" onMouseLeave={() => setShareMenuOpen(false)}>
-                    {relay.status.members
-                      .filter((m) => m.id !== relay.status.self_id)
-                      .map((m) => (
-                        <div
-                          key={m.id}
-                          className="cli-item"
-                          onClick={() => {
-                            setShareMenuOpen(false);
-                            shareFileLive(
-                              activeTab.file.path,
-                              activeTab.file.name,
-                              m.id,
-                              m.name,
-                            );
-                          }}
-                        >
-                          <span>
-                            <TeamIcon size={15} className="cli-icon" /> {m.name}
-                          </span>
-                        </div>
-                      ))}
-                  </div>
-                )}
-              </div>
-            )}
-          {/* Share the whole project: a teammate browses the tree and opens any
-              file live. Available whenever the relay has a teammate, regardless
-              of what tab is in front. Stopping is done from the "Collaborating"
-              pill in the titlebar, not here — one place to end a session. */}
-          {relay.status.role !== "off" &&
-            relay.status.members.some((m) => m.id !== relay.status.self_id) && (
-              <div className="cli-menu-anchor">
-                <button
-                  className={`btn btn-icon-text ${
-                    relay.collab.ownedProjectFor(roots[0] ?? "") ? "btn-accent" : ""
-                  }`}
-                  title="Share this whole project live — teammates open any file to edit together"
-                  onClick={() => setShareProjectMenuOpen((v) => !v)}
-                >
-                  <LiveShareIcon size={14} />
-                  {relay.collab.ownedProjectFor(roots[0] ?? "") ? "Sharing project" : "Share project"}
-                </button>
-                {shareProjectMenuOpen &&
-                  (() => {
-                    const sharedWith = relay.collab.projectSharedWith(roots[0] ?? "");
-                    return (
-                      <div className="cli-menu" onMouseLeave={() => setShareProjectMenuOpen(false)}>
-                        {relay.status.members
-                          .filter((m) => m.id !== relay.status.self_id)
-                          .map((m) => {
-                            const already = sharedWith.has(m.id);
-                            return (
-                              <div
-                                key={m.id}
-                                className={`cli-item ${already ? "cli-item-done" : ""}`}
-                                onClick={() => {
-                                  if (already) return;
-                                  setShareProjectMenuOpen(false);
-                                  shareProjectLive(m.id, m.name);
-                                }}
-                              >
-                                <span>
-                                  <TeamIcon size={15} className="cli-icon" /> {m.name}
-                                </span>
-                                {already && <span className="cli-item-tick">✓ sharing</span>}
-                              </div>
-                            );
-                          })}
-                      </div>
-                    );
-                  })()}
-              </div>
-            )}
-          {activeTab?.type === "file" &&
-            ["markdown", "html", "notebook", "sheet", "json"].includes(activeTab.file.kind) && (
-              <button className="btn" onClick={() => toggleView(activeTab.file.path)}>
-                {activeTab.file.view === "preview" ? "Source" : "Preview"}
-              </button>
-            )}
-          {/* This agent's workspace opens from a handle on the terminal's right
-              edge (see below), not a toolbar button — so it lives where the eye
-              already is on the live terminal. */}
-          {activeTab?.type === "terminal" && (
-            <>
-              <button
-                className="btn-icon"
-                title="Clear scrollback"
-                onClick={() => termHandles.current.get(activeTab.id)?.clearScrollback()}
-              >
-                ⌫
-              </button>
-              <button
-                className="btn-icon"
-                title="Hard reset"
-                onClick={() => termHandles.current.get(activeTab.id)?.hardReset()}
-              >
-                ↺
-              </button>
-            </>
-          )}
-          <div className="cli-menu-anchor">
-            <button
-              className="btn"
-              title="New terminal / agent"
-              onClick={() => {
-                // Opening the launcher re-probes, so a CLI installed outside
-                // Canopy (or in another project) shows as installed here —
-                // and its update badge reflects that install, not a stale one.
-                if (!cliMenuOpen) {
-                  refreshInstalled();
-                  refreshUpdates();
-                }
-                setCliMenuOpen((v) => !v);
-              }}
-            >
-              ＋ ▾
-            </button>
-            {cliMenuOpen && (
-              <div className="cli-menu" onMouseLeave={() => setCliMenuOpen(false)}>
-                <div
-                  className="cli-item"
-                  onClick={() => {
-                    setCliMenuOpen(false);
-                    if (components[0]) addTerminal(components[0].path);
-                  }}
-                >
-                  <span>
-                    <TerminalIcon size={15} className="cli-icon" /> Shell
-                  </span>
-                </div>
-                <div
-                  className="cli-item"
-                  onClick={() => {
-                    setCliMenuOpen(false);
-                    openPreview();
-                  }}
-                >
-                  <span>
-                    <GlobeIcon size={15} className="cli-icon" /> Preview
-                  </span>
-                </div>
-                <div className="cli-sep" />
-                {AGENT_CLIS.map((cli) => (
-                  <div
-                    key={cli.id}
-                    className="cli-item"
-                    onClick={() => {
-                      setCliMenuOpen(false);
-                      launchCli(cli);
-                    }}
-                  >
-                    <span>
-                      <AgentIcon id={cli.id} size={15} className="cli-icon" /> {cli.name}
-                    </span>
-                    {!installed[cli.bin] && <span className="cli-install">install</span>}
-                    {installed[cli.bin] && cliUpdates[cli.bin]?.hasUpdate && (
-                      <span
-                        className="cli-update"
-                        title={`${cliUpdates[cli.bin]?.installed} → ${cliUpdates[cli.bin]?.latest} — click to update`}
-                        onClick={(e) => {
-                          // The row launches; only the badge updates.
-                          e.stopPropagation();
-                          setCliMenuOpen(false);
-                          runCliUpdate(cli);
-                        }}
-                      >
-                        ⇡ {cliUpdates[cli.bin]?.latest}
-                      </span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
+      <PaneBar
+        tabGroups={tabGroups}
+        stripTabs={stripTabs}
+        activeTabId={activeTabId}
+        flashTabId={flashTabId}
+        renamingTabId={renamingTabId}
+        renameDraft={renameDraft}
+        collabPaths={collabPaths}
+        isAgentTab={isAgentTab}
+        tabState={tabState}
+        shellChips={shellChips}
+        runChips={runChips}
+        runSummary={runSummary}
+        shellMenuOpen={shellMenuOpen}
+        setShellMenuOpen={setShellMenuOpen}
+        runMenuOpen={runMenuOpen}
+        setRunMenuOpen={setRunMenuOpen}
+        activeSection={activeSection}
+        activeFileKind={activeFileTab?.file.kind}
+        activeFileView={activeFileTab?.file.view}
+        activeFilePath={activeFileTab?.file.path}
+        isSharedFile={isSharedFile}
+        isRelayConnectedWithPeers={isRelayConnectedWithPeers}
+        cliMenuOpen={cliMenuOpen}
+        setCliMenuOpen={setCliMenuOpen}
+        installed={installed}
+        cliUpdates={cliUpdates}
+        shareMenuOpen={shareMenuOpen}
+        setShareMenuOpen={setShareMenuOpen}
+        shareProjectMenuOpen={shareProjectMenuOpen}
+        setShareProjectMenuOpen={setShareProjectMenuOpen}
+        relayMembers={peerMembers}
+        isProjectShared={isProjectShared}
+        onSelectTab={onSelectTab}
+        onTabContextMenu={onTabContextMenu}
+        onCloseTab={closeTab}
+        onCommitRename={commitRename}
+        onRenameDraftChange={setRenameDraft}
+        onClearScrollback={onClearScrollback}
+        onHardReset={onHardReset}
+        onToggleView={onToggleView}
+        onShareFile={onShareFile}
+        onShareProject={onShareProject}
+        onOpenPreview={openPreview}
+        onLaunchCli={onLaunchCli}
+        onRunCliUpdate={onRunCliUpdate}
+        onRefreshInstalled={refreshInstalled}
+        onRefreshUpdates={refreshUpdates}
+        onOpenAllTabs={onOpenAllTabs}
+        activeTabElRef={activeTabElRef}
+      />
       <div className="project-content">
         {tabs
           .filter((t): t is TermSubTab => t.type === "terminal")
@@ -3598,15 +3327,6 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           </>
         )}
       </div>
-      <StatusBar
-        roots={roots}
-        agents={runningAgents}
-        events={projectEvents}
-        visible={visible}
-        projects={allProjects}
-        onSetModel={hasClaude ? setAgentModel : undefined}
-        activePtyId={activeTab?.type === "terminal" ? activeTab.ptyId : null}
-      />
     </div>
   );
 
@@ -3807,6 +3527,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                   <FileTree
                     roots={[c.path]}
                     changedPaths={changedPaths}
+                    selectedPath={activeFileTab?.file.path ?? null}
                     onOpenFile={(p) => void openFile(p)}
                     onNotice={onNotice}
                     hideRootHeader
@@ -3917,83 +3638,52 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
 
   return (
     <div className="project-view" style={{ display: visible ? "flex" : "none" }}>
-      {!zen && (
-        <div className="rail">
-          {RAIL_TABS.map((t) => (
-            <button
-              key={t.key}
-              className={`rail-btn ${!collapsed && sideTab === t.key ? "rail-btn-active" : ""}`}
-              title={t.title}
-              onClick={() => {
-                if (collapsed) {
-                  setCollapsed(false);
-                  setSideTab(t.key);
-                } else if (sideTab === t.key) {
-                  setCollapsed(true);
-                } else {
-                  setSideTab(t.key);
-                }
-              }}
-            >
-              <t.Icon size={18} />
-              {t.key === "changes" && changeCount + collabEditedCount > 0 && (
-                <span className="rail-badge">{Math.min(changeCount + collabEditedCount, 99)}</span>
-              )}
-              {t.key === "agents" && pending.length > 0 && (
-                <span
-                  className={`rail-badge ${urgentPending.length > 0 ? "rail-badge-urgent" : ""}`}
-                >
-                  {pending.length}
-                </span>
-              )}
-              {t.key === "team" && teamBadge > 0 && (
-                <span className="rail-badge rail-badge-urgent">{Math.min(teamBadge, 99)}</span>
-              )}
-              {t.key === "team" && relay.status.role !== "off" && (
-                <span
-                  className="rail-conn"
-                  title={relay.status.role === "host" ? "Hosting a relay" : "Connected to a relay"}
-                />
-              )}
-            </button>
-          ))}
-          <div className="rail-spacer" />
-          <button
-            className="rail-btn"
-            title="Settings (Cmd+,)"
-            onClick={() =>
-              window.dispatchEvent(new CustomEvent("canopy:open-settings"))
-            }
-          >
-            <SettingsIcon size={18} />
-          </button>
-          <button
-            className="rail-btn"
-            title="Toggle sidebar (Cmd+B)"
-            onClick={() => setCollapsed((v) => !v)}
-          >
-            <SidebarIcon size={18} collapsed={collapsed} />
-          </button>
-        </div>
-      )}
-      {/* The PanelGroup renders in every mode on purpose. Swapping mainArea
-          between a bare child and a <Panel> changes its element type, which
-          unmounts the subtree — and Term's cleanup kills the PTY. Toggling
-          focus mode would silently kill every terminal (and any agent running
-          in one). Keeping the tree shape fixed keeps the PTYs alive. */}
-      <PanelGroup direction="horizontal">
-        {!collapsed && !zen && (
-          <>
-            <Panel id="side" order={1} defaultSize={20} minSize={13} maxSize={40}>
-              {sidePanel}
-            </Panel>
-            <PanelResizeHandle className="resize-handle" />
-          </>
+      {/* Rail + panels share a row; the status bar sits below it so it spans the
+          full window width (rail + sidebar + main), not just the editor column. */}
+      <div className="project-body">
+        {!zen && (
+          <ActivityRail
+            sideTab={sideTab}
+            collapsed={collapsed}
+            changeBadge={changeCount + collabEditedCount}
+            pending={pending}
+            urgentPending={urgentPending}
+            teamBadge={teamBadge}
+            relayRole={relay.status.role}
+            onSelectTab={selectSideTab}
+            onOpenSettings={openSettings}
+            onToggleSidebar={toggleSidebar}
+          />
         )}
-        <Panel id="main" order={2}>
-          {mainArea}
-        </Panel>
-      </PanelGroup>
+        {/* The PanelGroup renders in every mode on purpose. Swapping mainArea
+            between a bare child and a <Panel> changes its element type, which
+            unmounts the subtree — and Term's cleanup kills the PTY. Toggling
+            focus mode would silently kill every terminal (and any agent running
+            in one). Keeping the tree shape fixed keeps the PTYs alive. */}
+        <PanelGroup direction="horizontal">
+          {!collapsed && !zen && (
+            <>
+              <Panel id="side" order={1} defaultSize={20} minSize={13} maxSize={40}>
+                {sidePanel}
+              </Panel>
+              <PanelResizeHandle className="resize-handle" />
+            </>
+          )}
+          <Panel id="main" order={2}>
+            {mainArea}
+          </Panel>
+        </PanelGroup>
+      </div>
+      {/* Full-width, spanning rail + sidebar + main. Zen hides it via CSS. */}
+      <StatusBar
+        roots={roots}
+        agents={runningAgents}
+        events={projectEvents}
+        visible={visible}
+        projects={allProjects}
+        onSetModel={hasClaude ? setAgentModel : undefined}
+        activePtyId={activeTab?.type === "terminal" ? activeTab.ptyId : null}
+      />
       {palette && visible && (
         <Palette
           mode={palette}

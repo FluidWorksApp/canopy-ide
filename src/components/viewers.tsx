@@ -2,6 +2,11 @@
 // renders fully offline (mermaid and SheetJS are lazy-loaded so they cost
 // nothing until a matching file is opened).
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  parse as parseJsonc,
+  printParseErrorCode,
+  type ParseError,
+} from "jsonc-parser";
 import { renderMarkdown, sanitizeHtml } from "../markdown";
 import "highlight.js/styles/github-dark.css";
 
@@ -223,11 +228,19 @@ export function SheetView({ bytes }: { bytes: Uint8Array }) {
 
 export function JsonView({ bytes }: { bytes: Uint8Array }) {
   const parsed = useMemo(() => {
-    try {
-      return { value: JSON.parse(decoder.decode(bytes)) };
-    } catch (e) {
-      return { error: String(e) };
+    // JSONC, not strict JSON: config files like tsconfig.json, .vscode/*.json
+    // and devcontainer.json legitimately carry // comments and trailing commas.
+    // jsonc-parser (the same tolerant parser VSCode uses) accepts those and
+    // reports genuine syntax problems via the errors array instead of throwing.
+    const errors: ParseError[] = [];
+    const value = parseJsonc(decoder.decode(bytes), errors, {
+      allowTrailingComma: true,
+      disallowComments: false,
+    });
+    if (errors.length > 0) {
+      return { error: printParseErrorCode(errors[0].error) };
     }
+    return { value };
   }, [bytes]);
 
   if ("error" in parsed) {

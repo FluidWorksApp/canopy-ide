@@ -5,24 +5,80 @@
    of these custom properties. Switching themes is one attribute flip on
    <html data-theme="…"> (see settings.ts applyTheme()); nothing re-renders. */
 :root {
-  /* Default: the original palette, unchanged, plus --on-accent factored out of
-     what used to be five separate hardcoded #12131c's. */
-  --bg: #1a1b26;
-  --bg-alt: #16161e;
-  --bg-raised: #1f2335;
-  --border: #2a2e42;
-  --text: #c9d1d9;
-  --text-dim: #787f97;
-  --accent: #7aa2f7;
+  /* ---- surfaces, back to front (shell → panel → editor → raised → overlay) ---- */
+  --bg-deep: #0f101a;    /* window shell: titlebar, activity rail, status bar */
+  --bg-alt: #13141f;     /* side panels, terminal */
+  --bg: #171826;         /* editor canvas */
+  --bg-raised: #1f2133;  /* cards, inputs, hover */
+  --bg-overlay: #242840; /* palette, menus, toasts */
+
+  /* ---- borders ---- */
+  --border: #262a3f;
+  --border-strong: #363c5c; /* lifted elements: active tabs, project pills */
+
+  /* ---- text ---- */
+  --text: #d7dcea;
+  --text-dim: #7d84a0;
+  --text-faint: #565d78;
+
+  /* ---- status — accent doubles as the primary action colour ---- */
+  --accent: #82aaff;
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
   --danger: #f7768e;
   --ok: #9ece6a;
   --warn: #e0af68;
-  /* Text color for content sitting on a filled --accent/--ok/--warn/--danger
-     surface (buttons, badges) — those are all light/saturated, so this stays
-     dark across every theme below except the ones that invert it. */
-  --on-accent: #12131c;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 13px;
+  --magenta: #bb9af7; /* agent identity, decorative chips */
+  --cyan: #7dcfff;    /* links, secondary info */
+
+  /* ---- ink on filled surfaces ---- */
+  --on-accent: #0d0f1a;
+  --on-danger: #14101a;
+
+  /* ---- focus ring — one rule everywhere: box-shadow: var(--ring) ---- */
+  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+
+  /* ---- radius — squircle-flavored; pair with corner-shape: squircle ---- */
+  --r-xs: 5px;  /* chips, badges, status pills */
+  --r-sm: 8px;  /* buttons, inputs, tree-row hover */
+  --r-md: 12px; /* tabs, cards, panels */
+  --r-lg: 16px; /* palette, dialogs, toasts */
+  --r-xl: 22px; /* window shell corners */
+
+  /* ---- elevation — layered, cool-black ---- */
+  --shadow-1: 0 1px 2px rgba(6, 8, 18, 0.28);
+  --shadow-2: 0 4px 14px rgba(6, 8, 18, 0.35), 0 1px 3px rgba(6, 8, 18, 0.3);
+  --shadow-3: 0 24px 64px rgba(4, 6, 16, 0.55), 0 6px 18px rgba(4, 6, 16, 0.35);
+
+  /* ---- motion ---- */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-fast: 120ms; /* hover, press */
+  --dur-med: 200ms;  /* panel reveal, sliding indicators */
+  --dur-pop: 260ms;  /* overlays: palette, toast (rise 6px + scale .98) */
+
+  /* ---- spacing — 4px grid ---- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 40px;
+  --sp-8: 48px;
+
+  /* ---- typography ---- */
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "SF Mono", Menlo, Monaco, "JetBrains Mono", "Fira Code", monospace;
+  --fs-xs: 11px;  /* badges, tab meta, status bar */
+  --fs-sm: 12px;  /* buttons, tree rows, tabs */
+  --fs-md: 13px;  /* base UI + editor default */
+  --fs-lg: 15px;  /* panel titles, palette input */
+  --fs-xl: 18px;  /* dialog titles */
+  --lh-tight: 1.25;
+  --lh-ui: 1.45;
+  --lh-code: 1.6;
+
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
   color-scheme: dark;
 }
 
@@ -30,35 +86,54 @@
    (no logos, no marks, nothing but a palette — same idea as a "Dracula" or
    "Nord" published editor theme). */
 :root[data-theme="gotham"] {
-  --bg: #0d0f12;
+  --bg-deep: #090b0e;
   --bg-alt: #101317;
+  --bg: #0d0f12;
   --bg-raised: #171b20;
+  --bg-overlay: #1e2228;
   --border: #2b2f36;
+  --border-strong: #3a3f4a;
   --text: #e8e6df;
   --text-dim: #8b8d93;
+  --text-faint: #575a60;
   --accent: #d4af37;
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
   --danger: #e0483e;
   --ok: #4caf7d;
   --warn: #e2943a;
+  --magenta: #c792ea;
+  --cyan: #89ddff;
   --on-accent: #14110a;
+  --on-danger: #14100a;
+  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
   color-scheme: dark;
 }
 
-/* Daylight — a clean light theme: the other kind of "fun alternate" from a
-   dark-charcoal reskin, and a real contrast test for every --on-accent /
-   --text-dim pairing in the app. */
+/* Daylight — clean light theme; matches the design handoff's light token set. */
 :root[data-theme="daylight"] {
-  --bg: #f5f6f8;
-  --bg-alt: #eceef1;
+  --bg-deep: #e4e7ee;
+  --bg-alt: #edeff4;
+  --bg: #f7f8fa;
   --bg-raised: #ffffff;
-  --border: #d8dbe0;
+  --bg-overlay: #ffffff;
+  --border: #d9dde5;
+  --border-strong: #b9c0cf;
   --text: #1c1f26;
-  --text-dim: #62687a;
+  --text-dim: #626a7e;
+  --text-faint: #99a0b2;
   --accent: #3b6fd6;
+  --accent-soft: color-mix(in srgb, var(--accent) 10%, transparent);
   --danger: #c9414f;
   --ok: #2f9e5c;
   --warn: #a5690f;
+  --magenta: #8250df;
+  --cyan: #1b7c83;
   --on-accent: #ffffff;
+  --on-danger: #ffffff;
+  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+  --shadow-1: 0 1px 2px rgba(28, 31, 38, 0.1);
+  --shadow-2: 0 4px 14px rgba(28, 31, 38, 0.12), 0 1px 3px rgba(28, 31, 38, 0.08);
+  --shadow-3: 0 24px 64px rgba(28, 31, 38, 0.22), 0 6px 18px rgba(28, 31, 38, 0.12);
   color-scheme: light;
 }
 
@@ -66,15 +141,22 @@
    overridden inline by applyTheme() (settings.ts) from the user's picked
    color, computed there rather than here since it's a runtime value. */
 :root[data-theme="custom"] {
-  --bg: #1a1b26;
-  --bg-alt: #16161e;
-  --bg-raised: #1f2335;
-  --border: #2a2e42;
-  --text: #c9d1d9;
-  --text-dim: #787f97;
+  --bg-deep: #0f101a;
+  --bg-alt: #13141f;
+  --bg: #171826;
+  --bg-raised: #1f2133;
+  --bg-overlay: #242840;
+  --border: #262a3f;
+  --border-strong: #363c5c;
+  --text: #d7dcea;
+  --text-dim: #7d84a0;
+  --text-faint: #565d78;
   --danger: #f7768e;
   --ok: #9ece6a;
   --warn: #e0af68;
+  --magenta: #bb9af7;
+  --cyan: #7dcfff;
+  --on-danger: #14101a;
   color-scheme: dark;
 }
 
@@ -138,7 +220,7 @@ body,
   z-index: 55;
   transform: translateY(-100%);
   opacity: 0;
-  transition: transform 0.16s ease, opacity 0.16s ease;
+  transition: transform var(--dur-fast) var(--ease-out), opacity var(--dur-fast) var(--ease-out);
 }
 
 .app.zen .project-main > .pane-bar {
@@ -149,7 +231,7 @@ body,
   z-index: 50;
   transform: translateY(-100%);
   opacity: 0;
-  transition: transform 0.16s ease, opacity 0.16s ease;
+  transition: transform var(--dur-fast) var(--ease-out), opacity var(--dur-fast) var(--ease-out);
 }
 
 /* Hovering the top edge (or the revealed chrome) brings both strips back. The
@@ -178,16 +260,54 @@ body,
   height: 100%;
 }
 
+/* Transient zoom-level chip (Cmd +/-/0). Centred near the top, lifted glass
+   surface, fades itself out after ~1s via the unmount in App. */
+.zoom-indicator {
+  position: fixed;
+  top: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 200;
+  padding: 6px 14px;
+  border-radius: var(--r-md);
+  corner-shape: squircle;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-2), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  animation: zoom-pop var(--dur-fast) var(--ease-out);
+}
+
+@keyframes zoom-pop {
+  from { opacity: 0; transform: translate(-50%, -4px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
 /* ---------- chrome ---------- */
 
 .titlebar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  background: var(--bg-alt);
+  gap: 10px;
+  padding: 0 10px;
+  height: 34px;
+  background: var(--bg-deep);
   border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
+}
+
+/* macOS frameless "Overlay" titlebar: the native traffic lights float over our
+   content at the top-left, so reserve ~78px on the left for them. The bar
+   itself is the window drag handle (data-tauri-drag-region in TitleBar.tsx).
+   Only applied on macOS — Windows/Linux keep the native bar and this class is
+   never added. */
+.titlebar-overlay {
+  padding-left: 78px;
 }
 
 .app-name {
@@ -211,9 +331,9 @@ body,
   border-radius: 999px;
   font-size: 12px;
   font-weight: 600;
-  color: #f2544b;
-  background: rgba(239, 68, 68, 0.13);
-  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
   user-select: none;
   white-space: nowrap;
 }
@@ -221,7 +341,7 @@ body,
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #ef4444;
+  background: var(--danger);
   animation: collab-blink 1.15s ease-in-out infinite;
 }
 .collab-live-stop {
@@ -234,25 +354,25 @@ body,
   padding: 0;
   border: none;
   border-radius: 50%;
-  background: rgba(239, 68, 68, 0.22);
-  color: #f2544b;
+  background: color-mix(in srgb, var(--danger) 22%, transparent);
+  color: var(--danger);
   font-size: 10px;
   line-height: 1;
   cursor: pointer;
 }
 .collab-live-stop:hover {
-  background: #ef4444;
+  background: var(--danger);
   color: #fff;
 }
 @keyframes collab-blink {
   0%,
   100% {
     opacity: 1;
-    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--danger) 55%, transparent);
   }
   55% {
     opacity: 0.3;
-    box-shadow: 0 0 0 5px rgba(239, 68, 68, 0);
+    box-shadow: 0 0 0 5px transparent;
   }
 }
 
@@ -266,7 +386,8 @@ body,
 .root-chip {
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--r-md);
+  corner-shape: squircle;
   padding: 2px 10px;
   font-size: 11px;
   color: var(--text-dim);
@@ -290,7 +411,7 @@ body,
 .project-tabs {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 6px;
   overflow-x: auto;
   /* Already scrollable (data was always reachable) — scrollbar-width:none
      just hid any hint of it. See the .run-rail comment for why both
@@ -307,39 +428,75 @@ body,
   border-radius: 2px;
 }
 
+/* Floating squircle pills on the deep shell surface — no bottom-notch "folder
+   tab" anymore. Inactive pills are quiet text; the active pill lifts onto the
+   raised surface with a strong border and shadow-1. */
 .project-tab {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 12px;
-  border-radius: 6px 6px 0 0;
+  gap: 5px;
+  height: 24px;
+  padding: 0 6px 0 10px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   font-size: 12px;
+  font-weight: 500;
   color: var(--text-dim);
   cursor: pointer;
   border: 1px solid transparent;
   white-space: nowrap;
+  transition: background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+
+.project-tab:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--bg-raised) 60%, transparent);
 }
 
 .project-tab-active {
   color: var(--text);
-  background: var(--bg);
-  border-color: var(--border);
-  border-bottom-color: var(--bg);
+  background: var(--bg-raised);
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-1);
   font-weight: 600;
 }
 
+/* The pill's close slot is reserved and fades in on hover / when active, so
+   pills don't jump width as the ✕ appears. */
+.project-tab .tab-close {
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.project-tab:hover .tab-close,
+.project-tab-active .tab-close {
+  opacity: 1;
+}
+
 .project-manage-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
   background: var(--bg-raised);
-  color: var(--text-dim);
+  color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 3px 8px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  padding: 0 10px;
   font-size: 12px;
   cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
 }
 
 .project-manage-btn:hover {
-  color: var(--text);
+  border-color: var(--border-strong);
 }
 
 /* ---------- project manager (CRUD modal) ---------- */
@@ -392,7 +549,8 @@ body,
   font-weight: 400;
   color: var(--ok);
   border: 1px solid var(--ok);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   padding: 0 6px;
 }
 
@@ -415,9 +573,21 @@ body,
 .project-view {
   flex: 1;
   min-height: 0;
+  /* Column: the body row (rail + sidebar + main) on top, then the full-width
+     status bar. This lets the status bar span the whole window, not just the
+     editor column. */
+  display: flex;
+  flex-direction: column;
 }
 
-.project-view > *:not(.rail) {
+/* The body row holds the rail and the resizable panel group. */
+.project-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.project-body > *:not(.rail) {
   flex: 1;
   min-width: 0;
 }
@@ -515,7 +685,8 @@ body,
   color: var(--text);
   background: var(--bg-raised);
   border: 1px solid var(--accent, #7aa2f7);
-  border-radius: 3px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   padding: 0 4px;
   margin: -1px 0;
   width: 10ch;
@@ -554,15 +725,26 @@ body,
 /* ---------- rail (collapsed sidebar) ---------- */
 
 .rail {
-  width: 46px;
-  flex: 0 0 46px;
+  width: 54px;
+  flex: 0 0 54px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  /* Real icons need separating; 4px read as one continuous column. */
-  gap: 8px;
-  padding: 10px 0;
-  background: var(--bg-alt);
+  /* Full-bleed items: no rail padding or gaps — they run edge to edge. */
+  gap: 0;
+  padding: 0;
+  position: relative;
+  z-index: 1;
+  /* Vertical aurora wash: accent at the top, magenta mid, cyan at the foot,
+     over the deep shell surface. Purely decorative — sits behind the icons. */
+  background:
+    radial-gradient(120% 40% at 50% 0%, color-mix(in srgb, var(--accent) 22%, transparent), transparent 70%),
+    radial-gradient(140% 34% at 50% 46%, color-mix(in srgb, var(--magenta) 12%, transparent), transparent 72%),
+    radial-gradient(150% 40% at 50% 100%, color-mix(in srgb, var(--cyan) 13%, transparent), transparent 74%),
+    var(--bg-deep);
+  /* Hairline inner edge instead of a hard border, so the wash never merges
+     into the file tree. */
+  box-shadow: inset -1px 0 0 color-mix(in srgb, var(--border) 70%, transparent);
 }
 
 /* merge rail + side panel into one visual panel: divider only against main */
@@ -573,46 +755,66 @@ body,
 .rail-btn {
   position: relative;
   /* Centres an SVG rather than a glyph: the rail carries real icons now. */
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
+  display: grid;
+  place-items: center;
+  width: 54px;
+  height: 46px;
   background: none;
   border: none;
-  border-radius: 8px;
+  border-radius: 0;
   color: var(--text-dim);
   font-size: 15px;
   cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
 }
 
+/* No hover background — matches the handoff (default vs active only). The icon
+   just brightens so the item still confirms it's the click target, without a
+   wash that would out-shout the subtle accent-soft active state. */
 .rail-btn:hover {
   color: var(--text);
-  background: var(--bg-raised);
-}
-
-.rail-btn:hover {
-  color: var(--text);
-  background: var(--bg-raised);
 }
 
 .rail-btn-active {
-  color: var(--accent);
-  background: var(--bg-raised);
+  /* Icon stays white (same as hover); the accent-soft wash + left accent bar
+     carry the "active" signal, not the icon color. */
+  color: var(--text);
+  background: var(--accent-soft);
+}
+
+/* 3px squircle accent bar on the active item's left edge. */
+.rail-btn-active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 var(--r-xs) var(--r-xs) 0;
+  corner-shape: squircle;
+  background: var(--accent);
 }
 
 .rail-badge {
   position: absolute;
   z-index: 2;
-  /* Clear of the glyph: at 34px the badge used to sit on top of the icon. */
-  top: -3px;
-  right: -4px;
+  top: 5px;
+  right: 9px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  display: grid;
+  place-items: center;
   background: var(--accent);
   color: var(--on-accent);
-  border-radius: 7px;
-  font-size: 9px;
-  padding: 0 4px;
-  line-height: 13px;
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 1;
+  /* Ring against the deep rail so the badge reads as a floating count. */
+  box-shadow: 0 0 0 2px var(--bg-deep);
 }
 
 .rail-spacer {
@@ -654,7 +856,8 @@ body,
   height: 24px;
   padding: 0;
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   background: none;
 }
 
@@ -689,11 +892,15 @@ body,
 .status-bar {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 3px 12px;
-  font-size: 11px;
+  /* Chips carry their own padding now, so the row gap is tight. */
+  gap: 6px;
+  padding: 0 10px;
+  height: 30px;
+  font-size: var(--fs-xs);
   color: var(--text-dim);
-  background: var(--bg-alt);
+  /* Deepest shell surface — the status bar belongs to the window chrome, not
+     the editor. */
+  background: var(--bg-deep);
   border-top: 1px solid var(--border);
   flex: 0 0 auto;
   white-space: nowrap;
@@ -714,22 +921,50 @@ body,
   border-radius: 2px;
 }
 
+/* Every status entry is a mono-numeral chip: fixed height, squircle corners,
+   its own padding. Numerals line up column-to-column across ticks. */
 .status-item {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  line-height: 1;
+}
+
+/* Branch: a raised chip so the current branch reads as the anchor of the bar. */
+.status-branch {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
 }
 
 .status-dirty {
   color: var(--warn);
 }
 
-.status-agent {
-  color: var(--ok);
+/* Agent lifecycle dot — solid ok-green while a session runs. */
+.status-agent-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--ok);
 }
 
+.status-agent {
+  color: var(--text-dim);
+}
+
+/* Cost: the one accent pill on the bar — the number you actually watch. */
 .status-cost {
-  color: var(--warn);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .status-spacer {
@@ -739,6 +974,14 @@ body,
 /* Model switcher: the model chip opens a menu that drops UP from the tray. */
 .status-model-anchor {
   position: relative;
+}
+
+/* The model picker is a raised chip (handoff); the cpu/mem chip (.status-res)
+   reuses this anchor only for menu positioning and stays plain. */
+.status-model-anchor:not(.status-res) {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
 }
 
 .status-model-btn {
@@ -761,7 +1004,8 @@ body,
   z-index: 40;
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   min-width: 210px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
   padding: 4px;
@@ -820,7 +1064,8 @@ body,
   justify-content: space-between;
   gap: 12px;
   padding: 5px 10px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   font-size: 11px;
   white-space: nowrap;
 }
@@ -828,7 +1073,8 @@ body,
 /* Each project is a bordered card, so groups can't visually run together. */
 .bd-group {
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   background: var(--bg-alt);
   margin: 6px 6px 0;
   padding-bottom: 4px;
@@ -948,7 +1194,8 @@ body,
   padding: 8px 10px;
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   overflow: hidden;
 }
 
@@ -1075,7 +1322,8 @@ body,
   height: 24px;
   padding: 0 8px 0 22px;
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   font-size: 12px;
   color: var(--text-dim);
 }
@@ -1133,7 +1381,8 @@ body,
   height: 22px;
   padding: 0;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   background: transparent;
   color: var(--text-dim);
   cursor: pointer;
@@ -1158,7 +1407,8 @@ body,
 
 .component-block {
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   padding: 8px;
   margin-bottom: 8px;
 }
@@ -1184,7 +1434,8 @@ body,
   background: var(--bg-raised);
   border: 1px solid var(--border);
   color: var(--text);
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   font-size: 11px;
   padding: 2px 8px;
   margin-top: 6px;
@@ -1221,7 +1472,8 @@ body,
   z-index: 40;
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   min-width: 180px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
   padding: 4px;
@@ -1233,7 +1485,8 @@ body,
   justify-content: space-between;
   gap: 12px;
   padding: 6px 10px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   cursor: pointer;
   font-size: 12px;
 }
@@ -1259,7 +1512,8 @@ body,
   font-size: 10px;
   color: var(--warn);
   border: 1px solid var(--warn);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   padding: 0 6px;
 }
 
@@ -1268,7 +1522,8 @@ body,
   font-size: 10px;
   color: var(--accent);
   border: 1px solid var(--accent);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   padding: 0 6px;
   white-space: nowrap;
 }
@@ -1316,7 +1571,8 @@ body,
   max-height: 40vh;
   overflow-y: auto;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   background: var(--bg-alt);
 }
 
@@ -1363,7 +1619,8 @@ body,
 .modal {
   background: var(--bg-alt);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--r-md);
+  corner-shape: squircle;
   padding: 20px 22px;
   width: 520px;
   max-height: 80vh;
@@ -1386,7 +1643,8 @@ body,
 .field input {
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 5px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   color: var(--text);
   padding: 7px 10px;
   font-size: 13px;
@@ -1430,19 +1688,46 @@ body,
   cursor: default;
 }
 
+/* A wide, transparent grab zone with a hairline 1px line drawn down its centre,
+   so the divider reads as thin but stays easy to grab. The line + hover accent
+   live on a pseudo-element; the handle itself is invisible. */
 .resize-handle {
-  width: 3px;
+  width: 7px;
+  background: transparent;
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.resize-handle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
   background: var(--border);
-  transition: background 0.15s;
+  transition: background var(--dur-fast) var(--ease-out);
 }
 
 .resize-handle-h {
   width: auto;
-  height: 3px;
+  height: 7px;
 }
 
-.resize-handle:hover,
-.resize-handle[data-resize-handle-active] {
+/* Horizontal handle: the hairline runs left-to-right instead. */
+.resize-handle-h::before {
+  top: 50%;
+  bottom: auto;
+  left: 0;
+  right: 0;
+  width: auto;
+  height: 1px;
+  transform: translateY(-50%);
+}
+
+.resize-handle:hover::before,
+.resize-handle[data-resize-handle-active]::before {
   background: var(--accent);
 }
 
@@ -1452,7 +1737,8 @@ body,
   background: var(--bg-raised);
   border: 1px solid var(--border);
   color: var(--text);
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   padding: 3px 10px;
   font-size: 12px;
   cursor: pointer;
@@ -1476,7 +1762,8 @@ body,
   cursor: pointer;
   font-size: 12px;
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
 }
 
 .btn-icon:hover {
@@ -1523,7 +1810,8 @@ body,
 .badge {
   background: var(--accent);
   color: var(--on-accent);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   font-size: 10px;
   padding: 0 5px;
   margin-left: 4px;
@@ -1574,22 +1862,48 @@ body,
 .tree-row {
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 2px 8px 2px 4px;
+  gap: 6px;
+  height: 26px;
+  padding: 0 8px 0 6px;
+  margin: 0 6px;
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  border-radius: 4px;
-  line-height: 1.7;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
 }
 
 .tree-row:hover {
-  background: var(--bg-raised);
+  background: color-mix(in srgb, var(--bg-raised) 60%, transparent);
+}
+
+/* Selected file: accent-soft wash, brightened label — the row you're editing. */
+.tree-row-selected,
+.tree-row-selected:hover {
+  background: var(--accent-soft);
+}
+
+.tree-row-selected .tree-file {
+  color: var(--text);
+  font-weight: 550;
 }
 
 .tree-changed .tree-file {
   color: var(--warn);
+}
+
+/* Trailing git-changed dot — the diff-first workflow's entry point. */
+.tree-changed-dot {
+  margin-left: auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warn);
+  flex: 0 0 auto;
 }
 
 /* nesting: each level indents with a guide line */
@@ -1605,6 +1919,18 @@ body,
   color: var(--text-dim);
   font-size: 9px;
   text-align: center;
+  /* Rotates in place when the directory opens, rather than swapping glyphs. */
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.tree-chevron-open {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tree-chevron {
+    transition: none;
+  }
 }
 
 .tree-file-icon {
@@ -1668,7 +1994,9 @@ body,
   background: var(--bg-alt);
   border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
-  min-height: 30px;
+  /* Harbor tabs stand 34px so the gliding docked shape reads as fused with the
+     editor surface below. */
+  min-height: 34px;
 }
 
 .tabs {
@@ -1713,6 +2041,75 @@ body,
   color: var(--text);
   background: var(--bg);
   box-shadow: inset 0 2px 0 var(--accent);
+}
+
+/* ---------- harbor tabs ----------
+   The active tab's docked "fused to the editor" shape is a single gliding
+   element (.tab-harbor-blob) that slides between tabs instead of the .tab-active
+   styling repainting in place. */
+.tabs-harbor {
+  position: relative;
+  align-items: flex-end;
+}
+
+/* In harbor mode the tabs float above the gliding blob; the blob carries the
+   surface + accent hairline, so tabs themselves drop their per-tab chrome. */
+.tabs-harbor .tab {
+  position: relative;
+  z-index: 1;
+  height: 34px;
+  padding: 0 12px;
+  margin-bottom: -1px;
+  border-right: none;
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+  corner-shape: squircle;
+  background: transparent;
+  transition:
+    color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+
+/* Hover on a non-active tab: a faint raised wash so the row feels alive. */
+.tabs-harbor .tab:not(.tab-active):hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--bg-raised) 55%, transparent);
+}
+
+/* Active tab in harbor mode is transparent — the blob behind it IS the surface;
+   drop the inset accent + solid bg that the static docked treatment used. The
+   agent tint is dropped too so the blob's clean editor surface shows through. */
+.tabs-harbor .tab-active,
+.tabs-harbor .tab-agent.tab-active {
+  background: transparent;
+  box-shadow: none;
+}
+
+/* The gliding docked shape: fused with the editor (--bg), bordered, accent
+   hairline on top, sliding on left/width. */
+.tab-harbor-blob {
+  position: absolute;
+  z-index: 0;
+  left: 0;
+  bottom: -1px;
+  height: 34px;
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+  corner-shape: squircle;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  box-shadow: inset 0 2px 0 var(--accent);
+  /* transform is GPU-composited (no per-frame layout); width reflows only this
+     out-of-flow element, which is cheap. Never transition `left`. */
+  transition:
+    transform var(--dur-med) var(--ease-out),
+    width var(--dur-med) var(--ease-out);
+  will-change: transform, width;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab-harbor-blob {
+    transition: none;
+  }
 }
 
 .tab-exited {
@@ -1764,16 +2161,24 @@ body,
   display: none;
 }
 
+/* A proper square slot for the CloseIcon SVG — grid-centered so the 12px glyph
+   sits dead-center, with a hover danger tint + soft danger wash. */
 .tab-close {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
   color: var(--text-dim);
-  font-size: 10px;
-  border-radius: 3px;
-  padding: 1px 3px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  transition: background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
 }
 
 .tab-close:hover {
   color: var(--danger);
-  background: var(--bg-raised);
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
 }
 
 .tab-external {
@@ -1840,7 +2245,8 @@ body,
   max-width: 60%;
   padding: 3px 6px;
   border-left-color: transparent;
-  border-radius: 9px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   background: color-mix(in srgb, var(--bg-raised) 62%, transparent);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--border) 75%, transparent);
   transition:
@@ -1945,7 +2351,7 @@ body,
   border: 1px solid var(--border);
   opacity: 0.75;
   cursor: pointer;
-  transition: opacity 0.12s ease, color 0.12s ease;
+  transition: opacity var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
 }
 
 .term-port:hover {
@@ -2007,7 +2413,8 @@ body,
   flex: 0 0 auto;
   max-width: 150px;
   padding: 3px 6px;
-  border-radius: 5px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   font-size: 11px;
   color: var(--text-dim);
   background: rgba(158, 206, 106, 0.07);
@@ -2072,13 +2479,14 @@ body,
   border: 1px solid color-mix(in srgb, var(--border) 90%, transparent);
   border-right: none;
   border-radius: 12px 0 0 12px;
+  corner-shape: squircle;
   color: var(--text-dim);
   box-shadow: -10px 0 30px -16px rgba(0, 0, 0, 0.6);
   cursor: pointer;
   transition:
-    color 0.15s ease,
-    background 0.15s ease,
-    padding-right 0.15s ease;
+    color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out),
+    padding-right var(--dur-fast) var(--ease-out);
 }
 .workspace-handle:hover {
   color: var(--text);
@@ -2103,7 +2511,7 @@ body,
   z-index: 20;
   pointer-events: none; /* closed: clicks fall through to the terminal */
   opacity: 0;
-  transition: opacity 200ms ease;
+  transition: opacity var(--dur-med) var(--ease-out);
 }
 .workspace-overlay-layer.open {
   pointer-events: auto;
@@ -2120,7 +2528,7 @@ body,
   backdrop-filter: blur(18px) saturate(135%);
   -webkit-backdrop-filter: blur(18px) saturate(135%);
   transform: scale(1.015);
-  transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: transform var(--dur-med) var(--ease-out);
   will-change: transform;
 }
 .workspace-overlay-layer.open .workspace-overlay {
@@ -2202,7 +2610,8 @@ body,
   font-weight: 500;
   color: var(--text-dim);
   padding: 3px 10px;
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   border-color: color-mix(in srgb, var(--border) 80%, transparent);
   white-space: nowrap;
 }
@@ -2230,7 +2639,8 @@ body,
 .aw-stat-model {
   color: var(--text);
   border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
-  border-radius: 5px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   padding: 1px 7px;
 }
 .aw-stat-state {
@@ -2255,7 +2665,8 @@ body,
 .workspace-overlay-close {
   flex: 0 0 auto;
   border: 1px solid var(--danger);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   color: var(--danger);
   background: color-mix(in srgb, var(--danger) 12%, transparent);
   padding: 5px 9px;
@@ -2331,7 +2742,8 @@ body,
   padding: 12px 16px;
   max-width: 460px;
   border: 1px solid var(--warn);
-  border-radius: 10px;
+  border-radius: var(--r-md);
+  corner-shape: squircle;
   background: var(--bg-raised);
 }
 
@@ -2352,7 +2764,8 @@ body,
   color: var(--on-accent, #1a1b26);
   background: var(--warn, #e0af68);
   border: none;
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   padding: 5px 12px;
   cursor: pointer;
 }
@@ -2372,12 +2785,13 @@ body,
   height: 82px;
   padding: 8px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   background: var(--bg-alt);
   color: var(--text-dim);
   font-size: 11px;
   cursor: pointer;
-  transition: border-color 0.12s, background 0.12s, color 0.12s;
+  transition: border-color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
 }
 
 .launch-card:hover {
@@ -2393,7 +2807,8 @@ body,
   font-size: 8px;
   letter-spacing: 0.04em;
   padding: 1px 4px;
-  border-radius: 3px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   color: var(--warn);
   border: 1px solid var(--warn);
   opacity: 0.75;
@@ -2407,7 +2822,8 @@ body,
   font-size: 8px;
   letter-spacing: 0.04em;
   padding: 1px 4px;
-  border-radius: 3px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   color: var(--accent);
   border: 1px solid var(--accent);
   opacity: 0.85;
@@ -2462,7 +2878,8 @@ body,
   color: var(--text);
   background: var(--bg-alt);
   border: 1px solid var(--border);
-  border-radius: 5px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
 }
 
 .agent-query-input:focus {
@@ -2560,14 +2977,16 @@ body,
 .markdown-body code {
   background: var(--bg-raised);
   padding: 1px 5px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   font-size: 0.9em;
 }
 
 .markdown-body pre {
   background: var(--bg-alt);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   padding: 12px;
   overflow-x: auto;
 }
@@ -2604,7 +3023,8 @@ body,
 
 .mermaid-diagram {
   background: var(--bg-alt);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   padding: 12px;
   display: flex;
   justify-content: center;
@@ -2656,7 +3076,8 @@ body,
   background: var(--bg-alt);
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   padding: 10px 12px;
   overflow-x: auto;
   font-size: 12px;
@@ -2666,6 +3087,7 @@ body,
 .nb-output {
   background: var(--bg-raised);
   border-radius: 0 0 4px 4px;
+  corner-shape: squircle;
   padding: 8px 12px;
   overflow-x: auto;
   font-size: 12px;
@@ -2674,7 +3096,8 @@ body,
 
 .nb-output-img {
   background: #fff;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   margin-top: 4px;
   max-width: 100%;
 }
@@ -2767,7 +3190,8 @@ body,
   letter-spacing: 0.5px;
   color: var(--on-accent);
   background: var(--accent);
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   padding: 0 5px;
   width: auto;
   flex: 0 0 auto;
@@ -2888,7 +3312,8 @@ body,
   color: var(--danger);
   font-size: 10px;
   border: 1px solid var(--danger);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   padding: 0 6px;
 }
 
@@ -2900,7 +3325,8 @@ body,
   font-weight: 600;
   color: var(--on-accent, #1a1b26);
   background: var(--warn, #e0af68);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   padding: 0 7px;
   line-height: 16px;
   text-transform: lowercase;
@@ -2911,7 +3337,8 @@ body,
   font-size: 10px;
   color: var(--text-dim);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   padding: 0 6px;
 }
 
@@ -2927,7 +3354,8 @@ body,
   color: var(--text-dim);
   background: rgba(224, 175, 104, 0.08);
   border: 1px solid rgba(224, 175, 104, 0.35);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
 }
 .hook-nudge button {
   align-self: flex-start;
@@ -2944,7 +3372,8 @@ body,
 .hook-snippet {
   display: block;
   background: var(--bg-raised);
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   padding: 6px 8px;
   font-size: 10px;
   overflow-x: auto;
@@ -2966,7 +3395,8 @@ body,
   padding: 10px 12px;
   background: var(--bg-raised);
   border: 1px solid var(--warn);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   cursor: pointer;
 }
 
@@ -3020,7 +3450,8 @@ body,
 
 .pd-dir-card {
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   background: var(--bg-raised);
   overflow: hidden;
 }
@@ -3142,7 +3573,8 @@ body,
   align-items: stretch;
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   overflow: hidden;
 }
 .pd-clone-group:focus-within {
@@ -3260,7 +3692,8 @@ body,
   text-align: left;
   background: none;
   border: none;
-  border-radius: 5px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   padding: 7px 10px;
   font-size: 13px;
   color: var(--text-dim);
@@ -3360,7 +3793,8 @@ body,
   padding: 8px;
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   cursor: pointer;
   color: var(--text);
 }
@@ -3379,7 +3813,8 @@ body,
   align-items: center;
   gap: 5px;
   height: 40px;
-  border-radius: 5px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   border: 1px solid var(--border);
   padding-left: 8px;
 }
@@ -3480,7 +3915,8 @@ body,
 .help-keys code {
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   padding: 0 6px;
   white-space: nowrap;
 }
@@ -3493,7 +3929,8 @@ body,
 
 .pending-option-clickable {
   cursor: pointer;
-  border-radius: 5px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
 }
 
 .pending-option-clickable:hover {
@@ -3527,7 +3964,8 @@ body,
   font-size: 10px;
   color: var(--accent);
   border: 1px solid var(--accent);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   padding: 0 7px;
   margin-bottom: 4px;
 }
@@ -3550,7 +3988,8 @@ body,
   flex-direction: column;
   padding: 3px 8px;
   background: var(--bg-alt);
-  border-radius: 5px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
 }
 
 .pending-option-label {
@@ -3585,7 +4024,8 @@ body,
   padding: 4px 8px;
   font-size: 11px;
   font-weight: 600;
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   border: 1px solid var(--border);
   background: var(--bg-raised);
   color: var(--text);
@@ -3661,7 +4101,8 @@ body,
   background: #fff;
   color: #1a1a1a;
   padding: 40px 48px;
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   max-width: 760px;
 }
 
@@ -3696,18 +4137,25 @@ body,
   display: flex;
   justify-content: center;
   align-items: flex-start;
-  padding-top: 90px;
-  background: rgba(0, 0, 0, 0.42);
+  padding-top: 14vh;
+  /* Shell-tinted, blurred: the palette floats over a frosted window, not a
+     flat black scrim. */
+  background: color-mix(in srgb, var(--bg-deep) 55%, transparent);
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
 }
 
 .palette {
   width: min(680px, 88vw);
   display: flex;
   flex-direction: column;
-  background: var(--bg-alt);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+  /* Overlay surface + strong border + deep shadow with a top sheen — reads as
+     a lifted glass panel. */
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+  corner-shape: squircle;
+  box-shadow: var(--shadow-3), inset 0 1px 0 rgba(255, 255, 255, 0.05);
   overflow: hidden;
 }
 
@@ -3724,25 +4172,33 @@ body,
 .palette-list {
   max-height: 46vh;
   overflow-y: auto;
+  padding: 6px 0;
 }
 
 .palette-row {
   display: flex;
   align-items: baseline;
-  gap: 8px;
-  padding: 6px 14px;
+  gap: 10px;
+  padding: 7px 12px;
+  margin: 0 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   font-size: 12px;
   cursor: pointer;
   white-space: nowrap;
 }
 
 .palette-row-active {
-  background: var(--bg-raised);
+  background: var(--accent-soft);
 }
 
 .palette-name {
   color: var(--text);
   flex: 0 0 auto;
+}
+
+.palette-row-active .palette-name {
+  font-weight: 550;
 }
 
 .palette-line {
@@ -3759,7 +4215,7 @@ body,
 }
 
 .palette-snippet {
-  font-family: var(--mono, ui-monospace, monospace);
+  font-family: var(--font-mono);
 }
 
 .palette-empty {
@@ -3801,7 +4257,8 @@ body,
   font-size: 9px;
   color: var(--danger);
   border: 1px solid var(--danger);
-  border-radius: 3px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   padding: 0 3px;
   flex: 0 0 auto;
 }
@@ -3846,19 +4303,21 @@ body,
   right: 16px;
   z-index: 300;
   max-width: 60vw;
-  padding: 8px 14px;
-  border-radius: 6px;
-  background: var(--bg-raised);
+  padding: 9px 14px;
+  border-radius: var(--r-md);
+  corner-shape: squircle;
+  /* Lifted overlay-glass surface, matching the palette and update toast. */
+  background: var(--bg-overlay);
   /* Neutral by default. Every message used to wear the danger border, so a
      plain status line ("Switched to origin") read as a failure. */
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   color: var(--text);
   font-size: 12px;
   cursor: pointer;
   display: flex;
   align-items: center;
   gap: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--shadow-2), inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 /* palette: component scoping */
@@ -3872,30 +4331,36 @@ body,
 }
 
 .palette-scope {
-  padding: 2px 8px;
+  padding: 2px 9px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 999px;
   background: transparent;
   color: var(--text-dim);
-  font-size: 10px;
+  font-size: var(--fs-xs);
   cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
 }
 
 .palette-scope:hover {
   color: var(--text);
-  background: var(--bg-raised);
+  border-color: var(--border-strong);
 }
 
 .palette-scope-on {
-  color: var(--bg);
+  color: var(--on-accent);
   background: var(--accent);
   border-color: var(--accent);
+  font-weight: 600;
 }
 
 .palette-component {
   flex: 0 0 auto;
   padding: 0 5px;
-  border-radius: 3px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   background: var(--bg-raised);
   color: var(--accent);
   font-size: 9px;
@@ -3921,7 +4386,8 @@ body,
 .git-repo-chip {
   padding: 2px 8px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--r-md);
+  corner-shape: squircle;
   background: transparent;
   color: var(--text-dim);
   font-size: 10px;
@@ -3945,7 +4411,8 @@ body,
 .git-branch {
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   color: var(--text);
   font-size: 11px;
   padding: 2px 8px;
@@ -4087,7 +4554,8 @@ body,
   resize: vertical;
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   color: var(--text);
   font-family: inherit;
   font-size: 12px;
@@ -4116,7 +4584,8 @@ body,
   flex: 1;
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   color: var(--text);
   font-size: 11px;
   padding: 3px 6px;
@@ -4146,7 +4615,8 @@ body,
   flex: 0 0 auto;
   font-size: 9px;
   padding: 0 5px;
-  border-radius: 3px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   border: 1px solid var(--border);
   color: var(--text-dim);
   opacity: 0.8;
@@ -4210,7 +4680,8 @@ body,
   color: var(--text);
   background: var(--bg-raised);
   padding: 0 3px;
-  border-radius: 3px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
 }
 .git-pr-age { color: var(--text-dim); }
 .git-pr-mergeable { color: var(--ok); margin-left: 2px; }
@@ -4226,7 +4697,8 @@ body,
   margin-right: 5px;
   padding: 0 4px;
   border: 1px solid var(--text-dim);
-  border-radius: 3px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   font-size: 9px;
   opacity: 0.7;
 }
@@ -4259,7 +4731,8 @@ body,
   /* Paths and commands appear in these dialogs and have no spaces to break
      at. */
   overflow-wrap: anywhere;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   background: var(--bg-alt);
   border: 1px solid var(--border);
   font-size: 13px;
@@ -4335,14 +4808,16 @@ body,
 
 .pr-decision {
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   border: 1px solid var(--border);
   font-size: 10px;
 }
 
 .pr-checks {
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   font-size: 10px;
   cursor: default;
 }
@@ -4367,7 +4842,8 @@ body,
 .pr-description {
   background: var(--bg-alt);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   padding: 12px 14px;
   margin-bottom: 12px;
 }
@@ -4377,7 +4853,8 @@ body,
 
 .pr-file {
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   margin-bottom: 10px;
   overflow: hidden;
 }
@@ -4474,7 +4951,8 @@ body,
   resize: vertical;
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   color: var(--text);
   font-family: inherit;
   font-size: 12px;
@@ -4516,7 +4994,8 @@ body,
   margin-top: 6px;
   padding: 6px 8px;
   border: 1px solid var(--border);
-  border-radius: 5px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   background: var(--bg);
 }
 
@@ -4595,7 +5074,8 @@ body,
   flex: 0 0 auto;
   padding: 0 4px;
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   font-size: 9px;
   color: var(--text-dim);
 }
@@ -4629,7 +5109,8 @@ body,
   margin: 0 8px 6px;
   padding: 3px 6px;
   border: 1px solid var(--accent);
-  border-radius: 5px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   background: rgba(122, 162, 247, 0.1);
   font-size: 11px;
   color: var(--text);
@@ -4654,7 +5135,8 @@ body,
   color: var(--accent);
   padding: 1px 5px;
   border: 1px solid var(--accent);
-  border-radius: 3px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
 }
 
 .tree-icon-img {
@@ -4674,7 +5156,8 @@ body,
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   background: var(--bg-raised);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
@@ -4682,7 +5165,8 @@ body,
 .ctx-item {
   padding: 5px 10px;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   background: none;
   color: var(--text);
   font: inherit;
@@ -4777,7 +5261,8 @@ textarea,
    colour: it qualifies the location rather than competing with it. */
 .agent-branch {
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   background: var(--bg-raised);
   color: var(--text-dim);
   font-size: 10px;
@@ -4805,7 +5290,8 @@ textarea,
    not a location — it reads differently from the directory chip beside it. */
 .agent-port {
   padding: 1px 5px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   background: var(--bg-raised);
   color: var(--ok);
   font-size: 10px;
@@ -4815,7 +5301,8 @@ textarea,
 
 .agent-dir {
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   background: var(--bg-raised);
   color: var(--accent);
   font-size: 10px;
@@ -4832,12 +5319,14 @@ textarea,
   right: 16px;
   bottom: 40px;
   z-index: 450;
-  width: 320px;
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-raised);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  width: 360px;
+  padding: 13px 14px;
+  /* Lifted overlay-glass surface, matching the palette and notice toasts. */
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+  corner-shape: squircle;
+  background: var(--bg-overlay);
+  box-shadow: var(--shadow-2), inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 .update-head {
@@ -4867,7 +5356,7 @@ textarea,
   height: 4px;
   border-radius: 2px;
   background: var(--accent);
-  transition: width 0.2s ease;
+  transition: width var(--dur-med) var(--ease-out);
 }
 
 .update-pct {
@@ -5136,7 +5625,8 @@ textarea,
 
 .commit-chip {
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   padding: 0 6px;
 }
 
@@ -5153,7 +5643,8 @@ textarea,
   padding: 8px 10px;
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   font-family: 'SF Mono', Menlo, monospace;
   font-size: 11px;
   white-space: pre-wrap;
@@ -5218,7 +5709,8 @@ textarea,
 
 .ticket-view-chip {
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   padding: 0 6px;
 }
 
@@ -5239,7 +5731,8 @@ textarea,
 .ticket-view-body pre {
   background: var(--bg-alt);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   padding: 10px 12px;
   overflow-x: auto;
 }
@@ -5251,7 +5744,8 @@ textarea,
 
 .ticket-view-body :not(pre) > code {
   background: var(--bg-alt);
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   padding: 1px 5px;
 }
 
@@ -5393,7 +5887,8 @@ textarea,
 
 .loose-chip {
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   padding: 0 6px;
   font-weight: 400;
   text-transform: none;
@@ -5423,7 +5918,8 @@ textarea,
   padding: 6px 10px;
   background: var(--bg-raised, rgba(255, 255, 255, 0.03));
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   color: var(--text);
   font-size: 12px;
   cursor: pointer;
@@ -5479,7 +5975,8 @@ textarea,
   color: var(--text-dim);
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 5px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   padding: 0 5px;
 }
 
@@ -5493,7 +5990,8 @@ textarea,
   margin: 4px 0;
   background: var(--bg-alt);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
 }
 .aw-cc-input {
   width: 100%;
@@ -5504,7 +6002,8 @@ textarea,
   color: var(--text);
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   padding: 6px 8px;
   box-sizing: border-box;
 }
@@ -5530,7 +6029,8 @@ textarea,
   background: var(--bg-alt);
   border: 1px solid var(--border);
   border-left: 2px solid var(--accent);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
 }
 .aw-comment-sel {
   margin-top: 2px;
@@ -5605,7 +6105,8 @@ textarea,
   font-size: 11px;
   color: var(--text-dim);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   padding: 1px 6px;
   max-width: 100%;
   overflow: hidden;
@@ -5619,7 +6120,7 @@ textarea,
   background: none;
   font-family: ui-monospace, monospace;
   cursor: pointer;
-  transition: color 120ms ease, border-color 120ms ease;
+  transition: color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
 }
 .aw-touched-file-link:hover {
   color: var(--accent);
@@ -5657,7 +6158,8 @@ textarea,
   backdrop-filter: blur(18px) saturate(140%);
   -webkit-backdrop-filter: blur(18px) saturate(140%);
   border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   box-shadow: 0 16px 40px -16px rgba(0, 0, 0, 0.55);
 }
 .aw-touched-more-row {
@@ -5667,7 +6169,8 @@ textarea,
   gap: 10px;
   padding: 4px 8px;
   border: none;
-  border-radius: 5px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   background: none;
   font-size: 11px;
   color: var(--text);
@@ -5784,7 +6287,8 @@ textarea,
      shouldn't move depending on whether there's history to restore. */
   margin: 26px 0 0;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--r-md);
+  corner-shape: squircle;
   background: var(--bg-alt);
   overflow: hidden;
   text-align: left;
@@ -5961,7 +6465,8 @@ a.btn-mini {
   align-items: center;
   justify-content: center;
   height: 40px;
-  border-radius: 5px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   border: 1px solid var(--border);
   background: var(--bg);
 }
@@ -6176,7 +6681,8 @@ a.btn-mini {
   margin: 0;
   visibility: hidden;
   padding: 2px 2px 2px 34px;
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   background: linear-gradient(
     to right,
     transparent 0,
@@ -6198,7 +6704,8 @@ a.btn-mini {
      is why every row carried an empty fourth line. */
   visibility: hidden;
   padding: 2px 4px 2px 34px;
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   background: linear-gradient(
     to right,
     transparent 0,
@@ -6217,7 +6724,8 @@ a.btn-mini {
   align-items: center;
   gap: 4px;
   padding: 3px 5px;
-  border-radius: 5px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   border: 1px solid transparent;
   background: none;
   color: var(--text-dim);
@@ -6382,7 +6890,8 @@ a.btn-mini {
 .team-input {
   background: var(--bg-alt);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   color: var(--text);
   padding: 6px 8px;
   font-size: 13px;
@@ -6407,7 +6916,8 @@ a.btn-mini {
 .team-visibility {
   display: inline-flex;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   overflow: hidden;
   margin-top: 2px;
 }
@@ -6460,7 +6970,8 @@ a.btn-mini {
   padding: 10px;
   background: var(--bg-alt);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -6487,7 +6998,8 @@ a.btn-mini {
   padding: 10px 6px;
   background: var(--bg);
   border: 1px dashed var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   cursor: pointer;
   color: var(--accent);
   user-select: none;
@@ -6505,7 +7017,8 @@ a.btn-mini {
 .team-addr {
   font-family: "SF Mono", Menlo, monospace;
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   padding: 2px 6px;
 }
 
@@ -6607,7 +7120,8 @@ a.btn-mini {
   letter-spacing: 0.5px;
   color: var(--accent);
   border: 1px solid var(--accent);
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   padding: 0 4px;
   flex: 0 0 auto;
 }
@@ -6627,7 +7141,8 @@ a.btn-mini {
   padding: 8px 10px;
   background: var(--bg-alt);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -6735,7 +7250,8 @@ a.btn-mini {
 .chat-msg-text {
   background: var(--bg-alt);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--r-md);
+  corner-shape: squircle;
   border-top-left-radius: 3px;
   padding: 7px 10px;
   line-height: 1.5;
@@ -6760,7 +7276,8 @@ a.btn-mini {
   flex: 1;
   background: var(--bg-alt);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   color: var(--text);
   padding: 8px 10px;
   font-size: 13px;
@@ -6782,7 +7299,8 @@ a.btn-mini {
   padding: 7px 10px;
   background: var(--bg-alt);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   display: flex;
   flex-direction: column;
   gap: 5px;
@@ -6815,7 +7333,8 @@ a.btn-mini {
 
 .team-transfer-bar {
   height: 5px;
-  border-radius: 3px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   background: var(--bg);
   overflow: hidden;
 }
@@ -6823,8 +7342,9 @@ a.btn-mini {
 .team-transfer-fill {
   height: 100%;
   background: var(--accent);
-  border-radius: 3px;
-  transition: width 0.2s ease;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  transition: width var(--dur-med) var(--ease-out);
 }
 
 .team-transfer-ok .team-transfer-fill {
@@ -6861,7 +7381,8 @@ a.btn-mini {
   align-items: center;
   justify-content: center;
   border: 2px dashed var(--accent);
-  border-radius: 10px;
+  border-radius: var(--r-md);
+  corner-shape: squircle;
   background: color-mix(in srgb, var(--accent) 12%, var(--bg));
   color: var(--text);
   font-weight: 600;
@@ -6894,7 +7415,8 @@ a.btn-mini {
 .team-mark-changed {
   color: var(--on-accent);
   background: var(--danger);
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   padding: 0 4px;
   font-weight: 600;
 }
@@ -6911,7 +7433,8 @@ a.btn-mini {
   min-width: 18px;
   height: 18px;
   padding: 0 5px;
-  border-radius: 9px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   background: var(--accent);
   color: var(--on-accent);
   font-size: 11px;
@@ -6932,7 +7455,8 @@ a.btn-mini {
   font-size: 15px;
   line-height: 1;
   padding: 6px 8px;
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   background: none;
   border: 1px solid transparent;
   cursor: pointer;
@@ -7029,7 +7553,8 @@ a.btn-mini {
   align-items: center;
   gap: 6px;
   padding: 6px 10px;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   background: var(--bg-raised);
   border: 1px solid var(--border);
   cursor: pointer;
@@ -7071,14 +7596,15 @@ a.btn-mini {
 
 .rail-conn {
   position: absolute;
-  top: -3px;
-  right: -4px;
-  z-index: 1;
+  /* Bottom-right so it never collides with the team count badge (top-right). */
+  bottom: 6px;
+  right: 8px;
+  z-index: 2;
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--ok, #3fb950);
-  border: 2px solid var(--bg);
+  border: 2px solid var(--bg-deep);
   box-shadow: 0 0 4px color-mix(in srgb, var(--ok, #3fb950) 70%, transparent);
 }
 
@@ -7145,7 +7671,8 @@ a.btn-mini {
   gap: 10px;
   padding: 8px 10px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   cursor: pointer;
 }
 .dictation-model:hover {
@@ -7172,7 +7699,8 @@ a.btn-mini {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   padding: 1px 5px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   background: color-mix(in srgb, var(--accent) 20%, transparent);
   color: var(--accent);
 }
@@ -7260,7 +7788,7 @@ a.btn-mini {
   border-radius: 50%;
   background: var(--border);
   cursor: pointer;
-  transition: background 0.15s, transform 0.15s;
+  transition: background var(--dur-fast) var(--ease-out), transform 0.15s;
 }
 
 .onboarding-dot:hover {
@@ -7292,7 +7820,8 @@ a.btn-mini {
   aspect-ratio: 300 / 132;
   background: var(--bg-alt);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   overflow: hidden;
 }
 
@@ -7337,7 +7866,8 @@ a.btn-mini {
   gap: 6px;
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 5px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   padding: 5px 7px;
   font-size: 9.5px;
   color: var(--text-dim);
@@ -7347,11 +7877,12 @@ a.btn-mini {
 .ob-dot.ok { background: var(--ok); }
 .ob-dot.warn { background: var(--warn); }
 .ob-dot.run { background: var(--accent); }
-.ob-bar { height: 5px; border-radius: 3px; background: var(--border); }
+.ob-bar { height: 5px; border-radius: var(--r-xs); corner-shape: squircle; background: var(--border); }
 .ob-chip {
   font-size: 9px;
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   background: var(--bg-raised);
   border: 1px solid var(--border);
   color: var(--text-dim);
@@ -7360,7 +7891,8 @@ a.btn-mini {
 .ob-btn {
   font-size: 9px;
   padding: 3px 8px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   background: var(--accent);
   color: var(--on-accent);
   font-weight: 600;
@@ -7485,7 +8017,8 @@ a.btn-mini {
   min-width: 12px;
   text-align: center;
   padding: 0 3px;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   background: var(--accent);
   color: var(--on-accent);
 }
@@ -7494,7 +8027,8 @@ a.btn-mini {
 .ob-logo {
   width: 15px;
   height: 15px;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -7517,7 +8051,8 @@ a.btn-mini {
   gap: 4px;
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   font-size: 8px;
   color: var(--text-dim);
 }
@@ -7529,7 +8064,8 @@ a.btn-mini {
   font-size: 6.5px;
   color: var(--warn);
   border: 1px solid var(--warn);
-  border-radius: 3px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   padding: 0 2px;
 }
 .ob-term {
@@ -7538,7 +8074,8 @@ a.btn-mini {
   gap: 2px;
   background: #0d0d13;
   border: 1px solid var(--border);
-  border-radius: 5px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   padding: 5px 7px;
 }
 
@@ -7546,7 +8083,8 @@ a.btn-mini {
 .ob-card2 {
   background: var(--bg-raised);
   border: 1px solid var(--warn);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   padding: 6px 7px;
   font-size: 9.5px;
   color: var(--text-dim);
@@ -7556,7 +8094,8 @@ a.btn-mini {
   text-align: center;
   font-size: 9px;
   padding: 3px 0;
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   border: 1px solid var(--border);
   color: var(--text-dim);
 }
@@ -7579,6 +8118,7 @@ a.btn-mini {
   font-size: 9px;
   padding: 3px 8px;
   border-radius: 5px 5px 0 0;
+  corner-shape: squircle;
   color: var(--text-dim);
   background: var(--bg-raised);
   border: 1px solid transparent;
@@ -7635,7 +8175,8 @@ a.btn-mini {
   gap: 4px;
   font-size: 8.5px;
   padding: 2px 6px;
-  border-radius: 5px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   border: 1px solid var(--border);
   background: rgba(158, 206, 106, 0.07);
   color: var(--text-dim);
@@ -7662,13 +8203,14 @@ a.btn-mini {
   font-size: 8.5px;
   padding: 3px 7px;
   border-radius: 5px 5px 0 0;
+  corner-shape: squircle;
   color: var(--text-dim);
   background: var(--bg-raised);
   border: 1px solid transparent;
 }
 .ob-ftab.sel { color: var(--text); background: var(--bg); border-color: var(--border); border-bottom-color: var(--bg); }
 .ob-ftab .x { opacity: 0.5; }
-.ob-pane { background: var(--bg); border: 1px solid var(--border); border-radius: 5px; padding: 5px; }
+.ob-pane { background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-xs); corner-shape: squircle; padding: 5px; }
 .ob-sheetrow { display: flex; font-size: 8.5px; color: var(--text); }
 .ob-sheetrow span { flex: 1; padding: 2px 4px; border-bottom: 1px solid var(--border); }
 .ob-sheetrow.head span { color: var(--text-dim); background: var(--bg-raised); }
@@ -7717,21 +8259,22 @@ a.btn-mini {
   color: var(--text-dim);
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 5px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   padding: 3px 0;
 }
 .ob-gauge b { font-size: 12px; color: var(--text); }
 .ob-seg { display: flex; gap: 4px; font-size: 8px; }
-.ob-seg span { flex: 1; text-align: center; padding: 3px 0; border-radius: 5px; color: var(--text-dim); border: 1px solid var(--border); }
+.ob-seg span { flex: 1; text-align: center; padding: 3px 0; border-radius: var(--r-xs); corner-shape: squircle; color: var(--text-dim); border: 1px solid var(--border); }
 .ob-seg .sel { color: var(--text); background: var(--bg-raised); border-color: var(--accent); }
-.ob-pcard { display: flex; align-items: center; gap: 6px; font-size: 9px; color: var(--text); background: var(--bg-raised); border: 1px solid var(--border); border-radius: 5px; padding: 4px 7px; }
+.ob-pcard { display: flex; align-items: center; gap: 6px; font-size: 9px; color: var(--text); background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--r-xs); corner-shape: squircle; padding: 4px 7px; }
 .ob-fab { margin-top: auto; align-self: center; font-size: 9px; font-weight: 600; color: var(--on-accent); background: var(--accent); border-radius: 999px; padding: 4px 12px; }
 
 /* file transfer card */
-.ob-xfer { background: var(--bg-alt); border: 1px solid var(--border); border-radius: 8px; padding: 7px 9px; }
+.ob-xfer { background: var(--bg-alt); border: 1px solid var(--border); border-radius: var(--r-sm); corner-shape: squircle; padding: 7px 9px; }
 .ob-xhead { display: flex; align-items: center; gap: 6px; font-size: 9.5px; color: var(--text); }
-.ob-xbar { height: 5px; border-radius: 3px; background: var(--bg); margin: 5px 0 4px; overflow: hidden; }
-.ob-fill { height: 100%; width: 0; border-radius: 3px; background: var(--accent); animation: ob-grow var(--dur) ease-out infinite; }
+.ob-xbar { height: 5px; border-radius: var(--r-xs); corner-shape: squircle; background: var(--bg); margin: 5px 0 4px; overflow: hidden; }
+.ob-fill { height: 100%; width: 0; border-radius: var(--r-xs); corner-shape: squircle; background: var(--accent); animation: ob-grow var(--dur) ease-out infinite; }
 @keyframes ob-grow {
   0%, 32%  { width: 0; background: var(--accent); }
   62%      { width: 100%; background: var(--accent); }
@@ -7760,17 +8303,19 @@ a.btn-mini {
 }
 .coach-hole {
   position: fixed;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55), 0 0 0 2px var(--accent),
     0 0 16px 2px color-mix(in srgb, var(--accent) 55%, transparent);
   pointer-events: none;
-  transition: top 0.15s, left 0.15s, width 0.15s, height 0.15s;
+  transition: top var(--dur-fast) var(--ease-out), left var(--dur-fast) var(--ease-out), width var(--dur-fast) var(--ease-out), height var(--dur-fast) var(--ease-out);
 }
 .coach-pop {
   position: fixed;
   background: var(--bg-raised);
   border: 1px solid var(--accent);
-  border-radius: 10px;
+  border-radius: var(--r-md);
+  corner-shape: squircle;
   padding: 14px 15px 12px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
   white-space: normal;
@@ -7823,7 +8368,8 @@ a.btn-mini {
   min-width: 0;
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   color: var(--text);
   font: inherit;
   padding: 4px 10px;
@@ -7904,7 +8450,8 @@ a.btn-mini {
 }
 .preview-note {
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   background: var(--bg-raised);
   padding: 8px;
   display: flex;
@@ -7927,7 +8474,8 @@ a.btn-mini {
   height: 18px;
   line-height: 18px;
   text-align: center;
-  border-radius: 9px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   padding: 0 3px;
 }
 .preview-note-what {
@@ -7953,7 +8501,8 @@ a.btn-mini {
 .preview-note-comment {
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   color: var(--text);
   font: inherit;
   font-size: 12px;
@@ -7998,7 +8547,8 @@ a.btn-mini {
   padding: 8px 12px;
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   color: var(--text);
   font: inherit;
   cursor: pointer;
@@ -8025,7 +8575,8 @@ a.btn-mini {
   background: color-mix(in srgb, var(--accent) 18%, transparent);
   color: var(--accent);
   border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
-  border-radius: 9px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   font-size: 11px;
   line-height: 16px;
   padding: 0 7px;
@@ -8038,7 +8589,8 @@ a.btn-mini {
   width: min(480px, 82%);
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--r-md);
+  corner-shape: squircle;
   padding: 16px 18px;
   text-align: left;
 }
@@ -8064,7 +8616,8 @@ a.btn-mini {
 .preview-setup-steps code {
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
   padding: 0 5px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
