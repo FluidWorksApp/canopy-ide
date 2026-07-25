@@ -1,8 +1,9 @@
-// Tasks sidebar section: the home of micro-tasks. Three parts — the micro-task
-// tabs running right now (focus / stop), the tasks the user wrote themselves
-// (run / edit / delete, stored in settings), and the built-ins, listed so
-// they're discoverable but run from their own surface (Raise PR lives on a
-// branch tab, where its payload comes from). Running a custom task asks for
+// Tasks sidebar section: the home of micro-tasks. Four parts — the micro-task
+// tabs running right now (focus / stop), the ones that have finished (a count
+// and the last few, opening the full history tab), the tasks the user wrote
+// themselves (run / edit / delete, stored in settings), and the built-ins,
+// listed so they're discoverable but run from their own surface (Raise PR lives
+// on a branch tab, where its payload comes from). Running a custom task asks for
 // the optional extra context — and the directory, when the project has more
 // than one component — then hands off to ProjectView's startMicroTask.
 import { useEffect, useState } from "react";
@@ -11,6 +12,7 @@ import {
   type CustomMicroTask,
 } from "../microTasks";
 import { getSettings, updateSettings } from "../settings";
+import { completedTaskRuns, TASK_HISTORY_EVENT, type TaskRun } from "../taskHistory";
 import { PlayIcon, StopIcon, TrashIcon } from "./icons";
 
 export interface RunningMicroTask {
@@ -33,6 +35,10 @@ interface TasksPanelProps {
   onStop: (tabId: string) => void;
   /** Launch a custom task in `dir` with the user's extra context. */
   onRunCustom: (task: CustomMicroTask, dir: string, query: string) => void;
+  /** Open the completed-tasks tab — the full searchable history. */
+  onOpenHistory: () => void;
+  /** Scopes the Completed count to this project's runs. */
+  projectId: string;
 }
 
 /** The edit form's working copy — also the "new task" state when id is "". */
@@ -47,9 +53,22 @@ export function TasksPanel({
   onFocus,
   onStop,
   onRunCustom,
+  onOpenHistory,
+  projectId,
 }: TasksPanelProps) {
   const [custom, setCustom] = useState<CustomMicroTask[]>(() => getSettings().customMicroTasks);
   const [draft, setDraft] = useState<Draft | null>(null);
+  // A task finishing has to move the count here even though the panel didn't
+  // do anything — the whole lifecycle happens in a tab the user has left.
+  // Scoped to this project, like the tab it opens: a count in a project's
+  // sidebar that included other projects' work would just be wrong.
+  const [done, setDone] = useState<TaskRun[]>(() => completedTaskRuns(projectId));
+  useEffect(() => {
+    const refresh = () => setDone(completedTaskRuns(projectId));
+    refresh();
+    window.addEventListener(TASK_HISTORY_EVENT, refresh);
+    return () => window.removeEventListener(TASK_HISTORY_EVENT, refresh);
+  }, [projectId]);
 
   // A seed from "New task from selection" opens the create form with the
   // selected text as the brief; the user names it and tweaks from there. Also
@@ -204,6 +223,38 @@ export function TasksPanel({
               <button className="btn-icon" title="Stop and close" onClick={() => onStop(r.tabId)}>
                 <StopIcon size={12} />
               </button>
+            </div>
+          ))}
+        </>
+      )}
+
+      {done.length > 0 && (
+        <>
+          <div className="ticket-state-head">
+            Completed
+            <span className="badge">{done.length}</span>
+            <span className="status-spacer" />
+            <button
+              className="btn-icon"
+              title="Open the full history — search, filter, and read what each task reported"
+              onClick={onOpenHistory}
+            >
+              ⤢
+            </button>
+          </div>
+          {/* The last few, as a way in. Everything else is a click away — the
+              panel is not the place to page through a hundred finished jobs. */}
+          {done.slice(0, 3).map((r) => (
+            <div className="task-row" key={r.id}>
+              <span className={`task-done-dot st-${r.status}`} title={r.status} />
+              <span
+                className="task-label task-label-link"
+                title={r.summary ?? "No summary reported."}
+                onClick={onOpenHistory}
+              >
+                {r.icon ? `${r.icon} ` : ""}
+                {r.label}
+              </span>
             </div>
           ))}
         </>

@@ -34,6 +34,7 @@ import { Welcome } from "./components/Welcome";
 import { shouldOnboard, markOnboarded } from "./onboarding";
 import { loadZoom, setZoom, applyZoom, STEP } from "./zoom";
 import { stopWorkspaceServers } from "./lsp/client";
+import { sweepStaleRuns } from "./taskHistory";
 import { checkForUpdateAnyChannel, installUpdate, type UpdateAvailability } from "./updater";
 
 /** Tell the hook helper which projects share context between their sessions.
@@ -116,6 +117,13 @@ export default function App() {
     } catch {
       // Notifications are a garnish — never fail anything over them.
     }
+  }, []);
+  // A micro-task in flight when Canopy last quit has no terminal to come back
+  // to — its tab is ephemeral and never restored — so it can never report.
+  // Settle those before anything new is recorded, or they stay "running"
+  // forever: hidden from the history tab, still holding one of its slots.
+  useEffect(() => {
+    sweepStaleRuns();
   }, []);
   // Successes and status lines are transient; a failure stays until it has
   // been read and dismissed.

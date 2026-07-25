@@ -12,6 +12,7 @@ mod dictation;
 mod dictation;
 mod fsx;
 mod git;
+mod instructions;
 mod lsp;
 mod portal;
 mod preview;
@@ -379,6 +380,9 @@ pub fn run() {
             fsx::fs_duplicate,
             fsx::workspace_export,
             fsx::workspace_import,
+            instructions::instructions_scan,
+            instructions::instructions_read,
+            instructions::instructions_write,
             git::git_repos,
             git::git_repo_status,
             git::git_branches,
