@@ -141,6 +141,17 @@ export interface Settings {
    *  Was hardcoded to claude, which quietly made every other agent a
    *  second-class citizen in a product built to run all of them. */
   defaultAgent: string;
+  /** Registry id -> the executable this machine actually has, for CLIs whose
+   *  binary isn't the name the vendor ships: an enterprise build of Claude Code
+   *  installed as `acme-claude`, or a wrapper at an absolute path. Without it
+   *  the launcher probes the stock name, finds nothing, and offers to install a
+   *  second copy the user often isn't allowed to authenticate.
+   *
+   *  Machine-wide rather than per-project: an enterprise wrapper is a property
+   *  of the workstation. A single executable or path only — arguments belong in
+   *  a launch command, and a multi-token value would break both `command -v`
+   *  and the basename match that recognises the CLI once it is running. */
+  cliBins: Record<string, string>;
   /** Display name on the team relay, remembered from the last host/join. */
   relayName: string;
   /** Last relay address joined, prefilled on the next join. */
@@ -204,6 +215,7 @@ const DEFAULTS: Settings = {
   runawayMemBytes: 4 * 1024 * 1024 * 1024,
   ptyHighWater: 2 * 1024 * 1024,
   defaultAgent: "claude",
+  cliBins: {},
   relayName: "",
   relayAddr: "",
   autoHibernate: false,

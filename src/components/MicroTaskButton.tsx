@@ -1,7 +1,7 @@
 // The CTA a surface renders to launch a micro-task (microTasks.ts): one
-// button, a small popover for optional user context, and go. Unlike
-// AgentQueryBar there is no "send to running agent" path — a micro-task always
-// owns a fresh ephemeral session, that's what makes closing it safe.
+// button, a small popover for optional user context, and go. Same handoff as
+// AgentQueryBar, minus the free-text box — a micro-task always owns a fresh
+// ephemeral session, which is what makes closing it safe.
 import { useRef, useState } from "react";
 import type { MicroTaskDef } from "../microTasks";
 

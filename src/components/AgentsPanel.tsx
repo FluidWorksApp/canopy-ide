@@ -4,20 +4,24 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
-import { restoreCommand } from "../projects";
+import { AGENT_CLIS, restoreCommand } from "../projects";
 import { identifyAgent, observeForLearning } from "../agentIdentity";
+import { effectiveState, silenceLabel } from "../agentState";
 import { forgetSessions, restorableFrom } from "../restorable";
 import { AgentIcon, DiffIcon, MoonIcon, RestartIcon, TerminalIcon, TrashIcon } from "./icons";
 import type { PendingItem } from "../notifications";
 
 /** Colour + label for the lifecycle dot on a running-agent row. `working` is
  *  the only state that pulses — a moving dot in a column of still ones is
- *  where the eye lands first. */
+ *  where the eye lands first. `stale` is what `working` decays into when
+ *  nothing corroborates it (see agentState.ts): pointedly not `idle`, because
+ *  a session that stopped telling us anything has not told us it finished. */
 export const STATE_META: Record<string, { cls: string; label: string }> = {
   working: { cls: "st-working", label: "working" },
   waiting: { cls: "st-waiting", label: "waiting on you" },
   idle: { cls: "st-idle", label: "idle — finished a turn" },
   ended: { cls: "st-ended", label: "session ended" },
+  stale: { cls: "st-stale", label: "no signal — may have stopped" },
 };
 
 /** CLIs whose approval prompt is a numbered/Escape menu we can drive by
@@ -113,6 +117,11 @@ interface AgentsPanelProps {
   onRestore?: (cwd: string, cmd: string, title: string, agentId: string) => void;
   /** Toasts for background actions (auto-hibernation) the user didn't click. */
   onNotice?: (msg: string) => void;
+  /** Open the agent-instructions tab, optionally on one file. */
+  onOpenInstructions?: (focus?: string) => void;
+  /** Which agent CLIs are on PATH, keyed by bin — decides which instruction
+   *  formats are worth listing when the file doesn't exist yet. */
+  installed?: Record<string, boolean>;
 }
 
 /** Compact relative age; the panel is narrow and "3h" beats a timestamp. */
@@ -208,7 +217,55 @@ export function AgentsPanel({
   onRestore,
   onRespond,
   onNotice,
+  onOpenInstructions,
+  installed = {},
 }: AgentsPanelProps) {
+  // Instruction files: scanned once when the panel comes into view, and again
+  // when the project's roots change. It's a bounded filesystem walk, but it is
+  // still a walk — so nothing runs while another side tab is in front, and the
+  // dependency is the roots' *contents*, not the array: ProjectView rebuilds
+  // that array every render, and keying on its identity would re-walk the
+  // filesystem on every agent event that ticks the view. Same idiom as the
+  // termSessions effect below.
+  // null until the first scan lands (and again if it fails) — an empty array
+  // would render "no instruction files yet", which is a claim, not a wait.
+  const [instructionFiles, setInstructionFiles] = useState<ipc.InstructionFile[] | null>(null);
+  const [instructionsFailed, setInstructionsFailed] = useState(false);
+  const rootsKey = roots.join("\n");
+  useEffect(() => {
+    if (!visible || rootsKey === "") return;
+    let live = true;
+    void ipc
+      .instructionsScan(rootsKey.split("\n"))
+      .then((fs) => {
+        if (!live) return;
+        setInstructionFiles(fs);
+        setInstructionsFailed(false);
+      })
+      .catch(() => live && setInstructionsFailed(true));
+    return () => {
+      live = false;
+    };
+  }, [visible, rootsKey]);
+
+  /** What to show in a panel this narrow: the files that exist, plus — for the
+   *  CLIs actually installed here — the top-level ones that don't yet, since
+   *  "you have no CLAUDE.md" is the most useful thing this list can tell you. */
+  const headlineInstructions = useMemo(() => {
+    const files = instructionFiles ?? [];
+    const installedIds = new Set(
+      AGENT_CLIS.filter((c) => installed[c.bin]).map((c) => c.id),
+    );
+    const exists = files.filter((f) => f.exists && f.kind === "instructions");
+    const missing = files.filter(
+      (f) =>
+        !f.exists &&
+        f.kind === "instructions" &&
+        f.scope === "project" &&
+        f.agents.some((a) => installedIds.has(a)),
+    );
+    return { rows: [...exists, ...missing], live: exists.length };
+  }, [instructionFiles, installed]);
   const [showHookHelp, setShowHookHelp] = useState(false);
   const [setupResult, setSetupResult] = useState<string | null>(null);
   // Which of the running CLIs have no hooks — not a single boolean over all of
@@ -501,9 +558,23 @@ export function AgentsPanel({
     const runaway =
       s.total_cpu > settings.runawayCpuPercent ||
       s.total_mem_bytes > settings.runawayMemBytes;
-    // Lifecycle dot: only for agent rows the hook stream has spoken for.
-    const st = agent && digest?.state ? STATE_META[digest.state] : undefined;
+    // Lifecycle dot: only for agent rows the hook stream has spoken for, and
+    // only believed as far as the session's own activity backs it up — a CLI
+    // that stops without a Stop event leaves "working" behind forever.
+    const shown = effectiveState({
+      state: digest?.state,
+      updated: digest?.updated,
+      cpu: s.total_cpu,
+      now: Date.now() / 1000,
+    });
+    const st = agent && shown ? STATE_META[shown] : undefined;
+    const stTitle =
+      shown === "stale"
+        ? `No hook events for ${silenceLabel(digest?.updated, Date.now() / 1000)} and no CPU — this agent may have stopped without telling Canopy`
+        : st?.label;
     // Only reclaim an agent that has finished — never one mid-turn or blocked.
+    // `stale` is not finished: it is an agent we have lost track of, and
+    // killing its terminal on a guess is not a trade worth making.
     const canHibernate =
       !!agent && (digest?.state === "idle" || digest?.state === "ended");
     // What the human last asked for. The highest-signal line about a session:
@@ -535,7 +606,7 @@ export function AgentsPanel({
         <div className="agent-main">
           {/* Lifecycle at a glance: green pulse = working, amber = waiting on
               you, grey = idle, faded = ended. */}
-          {st && <span className={`agent-state-dot ${st.cls}`} title={st.label} />}
+          {st && <span className={`agent-state-dot ${st.cls}`} title={stTitle} />}
           {/* The CLI's own mark, not its name in bold — the panel is a column
               of near-identical rows and a glyph reads faster than a word. */}
           {/* No id means we can see the program but cannot name whose it
@@ -848,6 +919,50 @@ export function AgentsPanel({
           ))}
         </>
       )}
+      {/* What every agent here reads before it sees any code. A count and the
+          headline files; the tab is where they're actually edited. */}
+      <Section
+        title="Instructions"
+        // The count is what the list below shows — the instruction files in
+        // effect. Counting every scanned file put "143" (mostly global skills)
+        // over a list of four.
+        count={headlineInstructions.live}
+        action={
+          <button
+            className="btn-icon"
+            title="Open all agent instructions — CLAUDE.md, AGENTS.md, skills, subagents"
+            onClick={() => onOpenInstructions?.()}
+          >
+            ⤢
+          </button>
+        }
+      >
+        {instructionsFailed ? (
+          <div className="tree-empty">Couldn't look for instruction files.</div>
+        ) : instructionFiles === null ? (
+          <div className="tree-empty">Looking…</div>
+        ) : headlineInstructions.rows.length === 0 ? (
+          <div className="tree-empty">
+            No instruction files yet. Agents here start with nothing but your prompt —
+            open this to write the first one.
+          </div>
+        ) : (
+          headlineInstructions.rows.slice(0, 6).map((f) => (
+            <div className="task-row" key={f.path}>
+              <span className={`instr-row-mark ${f.exists ? "" : "is-missing"}`} />
+              <span
+                className={`task-label task-label-link ${f.exists ? "" : "task-label-dim"}`}
+                title={`${f.path}\nRead by ${f.agents.join(", ")}`}
+                onClick={() => onOpenInstructions?.(f.path)}
+              >
+                {f.title ?? f.label}
+              </span>
+              {!f.exists && <span className="task-note">create</span>}
+            </div>
+          ))
+        )}
+      </Section>
+
       {/* Shared context — opt-in, and always inspectable. */}
       <div className="side-panel-head">
         <span>Shared context</span>
