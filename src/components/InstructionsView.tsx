@@ -83,6 +83,50 @@ function template(f: ipc.InstructionFile): string {
   return `# ${name}\n\n## Commands\n\n- \n\n## Conventions\n\n- \n`;
 }
 
+function Row({
+  file: f,
+  selected,
+  showRoot,
+  onSelect,
+}: {
+  file: ipc.InstructionFile;
+  selected: boolean;
+  /** True when another root holds a file by the same name — see `ambiguous`. */
+  showRoot: boolean;
+  onSelect: (path: string) => void;
+}) {
+  return (
+    <div
+      className={`instr-row ${selected ? "is-sel" : ""} ${f.exists ? "" : "is-missing"}`}
+      title={f.description ?? f.path}
+      onClick={() => onSelect(f.path)}
+    >
+      <div className="instr-row-main">
+        <span className="instr-row-label">{f.title ?? f.label}</span>
+        {!f.exists && <span className="instr-missing">not created</span>}
+      </div>
+      <div className="instr-row-sub">
+        <span className="instr-kind">{KIND_LABEL[f.kind] ?? f.kind}</span>
+        {showRoot && f.root !== "" && (
+          <span className="instr-root">{f.root.split("/").filter(Boolean).pop()}</span>
+        )}
+        {/* Two chips, then a count: AGENTS.md is read by a dozen tools, and at
+            this width a third chip only pushed the "+N" off the edge. */}
+        {f.agents.slice(0, 2).map((a) => (
+          <span className="instr-chip" key={a}>
+            {agentName(a)}
+          </span>
+        ))}
+        {f.agents.length > 2 && (
+          <span className="instr-chip instr-chip-more" title={f.agents.map(agentName).join(", ")}>
+            +{f.agents.length - 2}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /** One file's in-progress edit, parked while another file is on screen. */
 interface Draft {
   doc: InstructionDoc;
@@ -117,6 +161,8 @@ export function InstructionsView({
   const [showAll, setShowAll] = useState(false);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<string | null>(focus ?? null);
+  /** Which groups have their "Others" (formats not created here) drawer open. */
+  const [openOthers, setOpenOthers] = useState<Record<string, boolean>>({});
 
   const [doc, setDoc] = useState<InstructionDoc | null>(null);
   const [raw, setRaw] = useState("");
@@ -173,6 +219,21 @@ export function InstructionsView({
         .some((s) => (s as string).toLowerCase().includes(q)),
     );
   }, [relevant, query]);
+
+  /** Labels that appear under more than one workspace root. Three rows all
+   *  reading "AGENTS.md" are indistinguishable, so those rows — and only those
+   *  — carry the root they belong to. */
+  const ambiguous = useMemo(() => {
+    const roots = new Map<string, string>();
+    const dupes = new Set<string>();
+    for (const f of shown) {
+      const key = f.title ?? f.label;
+      const seen = roots.get(key);
+      if (seen === undefined) roots.set(key, f.root);
+      else if (seen !== f.root) dupes.add(key);
+    }
+    return dupes;
+  }, [shown]);
 
   const current = files?.find((f) => f.path === selected) ?? null;
 
@@ -385,45 +446,59 @@ export function InstructionsView({
           GROUPS.map((g) => {
             const rows = shown.filter((f) => groupOf(f) === g.id);
             if (rows.length === 0) return null;
+            // The list answers "what is shaping agents here?" — so the files
+            // that exist are the list, and every format that could exist but
+            // doesn't waits in a drawer. Left flat, a dozen "not created" rows
+            // bury the three that are actually being read.
+            const present = rows.filter((f) => f.exists);
+            const others = rows.filter((f) => !f.exists);
+            // A search that only matches uncreated formats must not come back
+            // empty-handed, so searching opens the drawer rather than toggling.
+            const searching = query.trim() !== "";
+            const othersOpen = searching || openOthers[g.id] === true;
             return (
               <div key={g.id}>
                 <div className="ticket-state-head" title={g.note}>
                   {g.title}
-                  <span className="badge">{rows.length}</span>
+                  {present.length > 0 && <span className="badge">{present.length}</span>}
                 </div>
-                {rows.map((f) => (
-                  <div
-                    className={`instr-row ${f.path === selected ? "is-sel" : ""} ${
-                      f.exists ? "" : "is-missing"
-                    }`}
+                {present.map((f) => (
+                  <Row
                     key={f.path}
-                    title={f.description ?? f.path}
-                    onClick={() => select(f.path)}
-                  >
-                    <div className="instr-row-main">
-                      <span className="instr-row-label">{f.title ?? f.label}</span>
-                      {!f.exists && <span className="instr-missing">not created</span>}
-                    </div>
-                    <div className="instr-row-sub">
-                      <span className="instr-kind">{KIND_LABEL[f.kind] ?? f.kind}</span>
-                      {/* Three chips, then a count: AGENTS.md is read by a dozen
-                          tools and naming them all would bury the filename. */}
-                      {f.agents.slice(0, 3).map((a) => (
-                        <span className="instr-chip" key={a}>
-                          {agentName(a)}
-                        </span>
-                      ))}
-                      {f.agents.length > 3 && (
-                        <span
-                          className="instr-chip instr-chip-more"
-                          title={f.agents.map(agentName).join(", ")}
-                        >
-                          +{f.agents.length - 3}
-                        </span>
-                      )}
-                    </div>
-                  </div>
+                    file={f}
+                    selected={f.path === selected}
+                    showRoot={ambiguous.has(f.title ?? f.label)}
+                    onSelect={select}
+                  />
                 ))}
+                {present.length === 0 && !othersOpen && (
+                  <div className="instr-none">None here yet</div>
+                )}
+                {others.length > 0 && (
+                  <div
+                    className="instr-others"
+                    title="Formats Canopy knows how to create in this project, but that don't exist yet"
+                    onClick={
+                      searching
+                        ? undefined
+                        : () => setOpenOthers((o) => ({ ...o, [g.id]: !o[g.id] }))
+                    }
+                  >
+                    <span className="tree-chevron">{othersOpen ? "▾" : "▸"}</span>
+                    Others — not created
+                    <span className="badge">{others.length}</span>
+                  </div>
+                )}
+                {othersOpen &&
+                  others.map((f) => (
+                    <Row
+                      key={f.path}
+                      file={f}
+                      selected={f.path === selected}
+                      showRoot={ambiguous.has(f.title ?? f.label)}
+                      onSelect={select}
+                    />
+                  ))}
               </div>
             );
           })
