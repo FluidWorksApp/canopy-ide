@@ -3242,28 +3242,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             review={tab.review}
             agentBar={
               <AgentQueryBar
-                agentTargets={agentTargets}
-                installed={installed}
-                newAgentLabel="New agent in this project"
-                label="Send to agent"
                 placeholder="Ask an agent to review this…"
-                onSend={(target, query) =>
-                  void writeReviewPatch(tab.review).then((path) => {
-                    if (path) sendTicketToAgent(target, reviewContext(tab.review, path, query));
-                  })
-                }
-                onStart={(agentId, query) =>
-                  void writeReviewPatch(tab.review).then((path) => {
-                    const dir = componentsRef.current[0]?.path;
-                    if (!path || !dir) return;
-                    startAgentInDir(
-                      dir,
-                      agentId,
-                      reviewContext(tab.review, path, query),
-                      `Review ${tab.review.branch}`,
-                    );
-                  })
-                }
                 onRunTask={(query) =>
                   void writeReviewPatch(tab.review).then((path) => {
                     const dir = componentsRef.current[0]?.path;
@@ -3345,23 +3324,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             onCloseDiff={() => patchFile(tab.file.path, { view: "source", diffOriginal: null })}
             diffAgentBar={
               <AgentQueryBar
-                agentTargets={agentTargets}
-                installed={installed}
-                newAgentLabel="New agent in this project"
                 placeholder="Ask an agent about this file's changes…"
-                onSend={(target, query) =>
-                  sendTicketToAgent(target, fileDiffContext(tab.file.path, query))
-                }
-                onStart={(agentId, query) => {
-                  const dir = repoForFile(tab.file.path);
-                  if (!dir) return onNotice("No git repository in this project.");
-                  startAgentInDir(
-                    dir,
-                    agentId,
-                    fileDiffContext(tab.file.path, query),
-                    tab.file.name,
-                  );
-                }}
                 onRunTask={(query) => {
                   const dir = repoForFile(tab.file.path);
                   if (!dir) return onNotice("No git repository in this project.");
@@ -4166,18 +4129,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           }
           agentBar={
             <AgentQueryBar
-              agentTargets={agentTargets}
-              installed={installed}
-              newAgentLabel="New agent in this project"
               placeholder="Ask an agent about these changes…"
-              onSend={(target, query) =>
-                sendTicketToAgent(target, sessionChangesContext(changeContextGroups(), query))
-              }
-              onStart={(agentId, query) => {
-                const dir = changeGroups[0]?.repo ?? componentsRef.current[0]?.path;
-                if (!dir) return onNotice("No git repository in this project.");
-                startAgentInDir(dir, agentId, sessionChangesContext(changeContextGroups(), query), "Changes");
-              }}
               onRunTask={(query) => {
                 const dir = changeGroups[0]?.repo ?? componentsRef.current[0]?.path;
                 if (!dir) return onNotice("No git repository in this project.");

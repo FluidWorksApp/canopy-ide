@@ -2926,8 +2926,8 @@ body.dragging-tab * {
 }
 
 /* "Ask an agent about this diff" — shared by the session-changes panel, a
-   working-tree file diff, and a relay review. A text box plus the mini agent
-   dropdown, laid out in one row that wraps the button under on tight widths. */
+   working-tree file diff, and a relay review. A text box plus the run-task
+   button, laid out in one row that wraps the button under on tight widths. */
 .agent-query-bar {
   display: flex;
   align-items: center;
