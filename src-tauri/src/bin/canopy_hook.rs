@@ -1450,8 +1450,12 @@ fn tool_defs() -> serde_json::Value {
         },
         {
             "name": "canopy_agents",
-            "description": "The other agent sessions in this project: working directory, branch, what they were last asked to do, files they've edited, active or idle, and terminal ids. Several agents routinely share one checkout — read this before you start. Also lists held file claims.",
-            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+            "description": "Every other agent session running in this project: which CLI, working directory, branch, what it was last asked to do, files it has edited, active or idle, the last thing it said, and its terminal id. Several agents routinely share one checkout — read this before you start. Pass `ptyId` or `session` for one agent's actual conversation (what it was asked, what it answered, which tools it ran); pass that same ptyId to canopy_message_agent to type into it. Also lists held file claims.",
+            "inputSchema": { "type": "object", "properties": {
+                "ptyId": { "type": "integer", "description": "Narrow to the agent in this terminal and include its conversation" },
+                "session": { "type": "string", "description": "Narrow by session id (a prefix is enough) instead of terminal" },
+                "transcript": { "type": "integer", "description": "How many recent turns to include (default 12 for one agent, max 100)" }
+            }, "additionalProperties": false }
         },
         {
             "name": "canopy_claim",
@@ -1655,7 +1659,7 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 std::time::Duration::from_millis(ms + 10_000),
             ))
         }
-        "canopy_agents" => text(agents_json()),
+        "canopy_agents" => text(agents_json(args)),
         "canopy_claim" => {
             let action = args
                 .get("action")
@@ -1782,10 +1786,47 @@ fn claim_owner() -> String {
     format!("{name} ({cwd})")
 }
 
+/// Which session *this* one is, as the MCP server can know it: the terminal it
+/// was spawned in, tagged with the app instance that spawned it (pty ids reset
+/// per launch). The digest records the same pair as `surface`/`instance`.
+///
+/// Directory can't stand in for identity here. Several agents routinely share
+/// one checkout — the case canopy_agents exists to serve — so excluding "self"
+/// by cwd excludes every peer alongside it and returns an empty list.
+fn my_surface() -> Option<(String, String)> {
+    let pty = std::env::var("CANOPY_PTY").ok().filter(|s| !s.is_empty())?;
+    Some((pty, std::env::var("CANOPY_INSTANCE").unwrap_or_default()))
+}
+
+/// Does this digest describe the session asking? Terminal + instance when we
+/// know our own (inside Canopy), falling back to cwd when we don't — an agent
+/// started outside Canopy has no surface to compare, and a same-directory match
+/// is the best guess left.
+fn digest_is_self(d: &serde_json::Value, me: Option<&(String, String)>, cwd: &str) -> bool {
+    let Some((pty, instance)) = me else {
+        return d["cwd"].as_str().unwrap_or("") == cwd;
+    };
+    if d["surface"].as_str() != Some(pty.as_str()) {
+        return false;
+    }
+    // Only decide on instance when both sides carry one: digests written by an
+    // older build have no `instance`, and dropping the check there is right —
+    // a matching pty in the same checkout is overwhelmingly us.
+    match (d["instance"].as_str(), instance.as_str()) {
+        (Some(a), b) if !b.is_empty() => a == b,
+        _ => true,
+    }
+}
+
 /// The other agent sessions in this project, merged from two sources that each
 /// know half of it: the session digests the hooks write (what it's working on)
 /// and the app's live snapshot (which terminal it's in, so it can be messaged).
-fn agents_json() -> Result<String, String> {
+///
+/// With no arguments this is the roster. Given `ptyId` or `session` it narrows
+/// to one agent and adds the conversation itself — what it was asked, what it
+/// said back, which tools it ran — so "what is that agent actually doing" is
+/// answerable without watching its terminal.
+fn agents_json(args: &serde_json::Value) -> Result<String, String> {
     let cwd = cwd();
     let scopes = scopes();
     let roots = scopes
@@ -1794,20 +1835,39 @@ fn agents_json() -> Result<String, String> {
         .map(|(_, roots)| roots)
         .unwrap_or_default();
 
-    // ptyId by working directory, so an agent found in a digest can be messaged.
-    let mut ptys: HashMap<String, serde_json::Value> = HashMap::new();
+    let want_pty = args.get("ptyId").and_then(|v| v.as_u64());
+    let want_session = args.get("session").and_then(|v| v.as_str());
+    let detail = want_pty.is_some() || want_session.is_some();
+    // A roster row shows only the last thing the agent said — but the final
+    // turn is often the user's, so read back a few to find one.
+    let turns = args
+        .get("transcript")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(if detail { 12 } else { 6 })
+        .clamp(0, 100) as usize;
+
+    // The live terminal behind each session, keyed by pty id — the digest's
+    // `surface`. Keyed by directory (as this once was) every agent sharing a
+    // checkout collapses onto one entry, and canopy_message_agent then types
+    // into whichever of them happened to be published last.
+    let mut by_pty: HashMap<String, serde_json::Value> = HashMap::new();
+    let mut by_dir: HashMap<String, serde_json::Value> = HashMap::new();
     if let Ok(body) = ctx_get("/ctx/snapshot".into()) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
             for project in v["projects"].as_array().into_iter().flatten() {
                 for agent in project["agents"].as_array().into_iter().flatten() {
+                    if let Some(id) = agent["ptyId"].as_u64() {
+                        by_pty.insert(id.to_string(), agent.clone());
+                    }
                     if let Some(dir) = agent["dir"].as_str() {
-                        ptys.insert(dir.to_string(), agent.clone());
+                        by_dir.insert(dir.to_string(), agent.clone());
                     }
                 }
             }
         }
     }
 
+    let me = my_surface();
     let dir = format!("{}/.canopy/sessions", home());
     let now = now_secs();
     let mut agents: Vec<serde_json::Value> = Vec::new();
@@ -1824,29 +1884,85 @@ fn agents_json() -> Result<String, String> {
         };
         let peer_cwd = d["cwd"].as_str().unwrap_or("");
         // Same scoping as the peer context the hook injects: this project only,
-        // and nothing stale enough to be misleading.
-        if peer_cwd == cwd || !roots.iter().any(|r| under(peer_cwd, r)) {
+        // never ourselves, and nothing stale enough to be misleading.
+        if digest_is_self(&d, me.as_ref(), &cwd) || !roots.iter().any(|r| under(peer_cwd, r)) {
             continue;
         }
         let updated = d["updated"].as_u64().unwrap_or(0);
         if now.saturating_sub(updated) > PEER_MAX_AGE_SECS {
             continue;
         }
-        let live = ptys.get(peer_cwd);
-        agents.push(serde_json::json!({
+        // Closed cleanly — that's restore's business, not a running agent.
+        if d["state"].as_str() == Some("ended") {
+            continue;
+        }
+        let surface = d["surface"].as_str().unwrap_or("");
+        let live = by_pty.get(surface).or_else(|| by_dir.get(peer_cwd));
+        let pty_id = live
+            .and_then(|a| a["ptyId"].as_u64())
+            .or_else(|| surface.parse::<u64>().ok());
+        let session_id = d["session_id"].as_str().unwrap_or("");
+        if let Some(want) = want_pty {
+            if pty_id != Some(want) {
+                continue;
+            }
+        }
+        // Prefix match: session ids are uuids, and no one should have to paste
+        // one back in full to ask a follow-up about the same agent.
+        if let Some(want) = want_session {
+            if !session_id.starts_with(want) {
+                continue;
+            }
+        }
+
+        let conversation = d["transcript_path"]
+            .as_str()
+            .map(|p| transcript_tail(p, turns))
+            .unwrap_or_default();
+        let mut row = serde_json::json!({
+            "session": session_id,
             "cwd": peer_cwd,
             "agent": live.and_then(|a| a["agent"].as_str()).or(d["agent"].as_str()),
             "branch": d["branch"],
             "state": if d["idle"].as_bool().unwrap_or(false) { "idle" } else { "active" },
             "secondsSinceUpdate": now.saturating_sub(updated),
-            "ptyId": live.map(|a| a["ptyId"].clone()),
+            "ptyId": pty_id,
             "recentRequests": d["prompts"].as_array().map(|p| {
                 p.iter().rev().take(3).cloned().collect::<Vec<_>>()
             }),
             "filesEdited": d["files"].as_array().map(|f| {
                 f.iter().rev().take(10).cloned().collect::<Vec<_>>()
             }),
-        }));
+            "saying": conversation.iter().rev().find_map(|t| {
+                (t["role"] == "assistant")
+                    .then(|| t["text"].as_str().map(|s| clip(s, 240)))
+                    .flatten()
+            }),
+        });
+        if detail {
+            row["transcript"] = serde_json::json!(conversation);
+            // The transcript is the agent's own record; the terminal is what the
+            // user is looking at. When we can't parse the former (a CLI whose
+            // format we don't know yet), the latter still answers the question.
+            if conversation.is_empty() {
+                if let Some(id) = pty_id {
+                    if let Ok(tail) = ctx_get(format!("/ctx/server-output/{id}?lines=80")) {
+                        row["terminalTail"] = serde_json::json!(tail);
+                    }
+                }
+            }
+        }
+        agents.push(row);
+    }
+    // Busiest first: the agent that moved most recently is the one you're most
+    // likely asking about.
+    agents.sort_by_key(|a| a["secondsSinceUpdate"].as_u64().unwrap_or(u64::MAX));
+
+    if detail && agents.is_empty() {
+        return Err(
+            "no such agent in this project — call canopy_agents with no arguments for the roster"
+                .into(),
+        );
     }
 
     let claims = ctx_get("/ctx/claims".into())
@@ -1858,10 +1974,176 @@ fn agents_json() -> Result<String, String> {
     Ok(serde_json::json!({
         "agents": agents,
         "claims": claims,
-        "note": "Sessions in this project other than your own. Their state is as of their last \
-                 hook event, not this instant.",
+        "note": if detail {
+            "This agent's conversation, oldest turn first. State is as of its last hook event, \
+             not this instant."
+        } else {
+            "Sessions in this project other than your own, most recently active first. Their \
+             state is as of their last hook event, not this instant. Pass ptyId or session for \
+             one agent's conversation; canopy_message_agent(ptyId) types into it."
+        },
     })
     .to_string())
+}
+
+/// How much of a transcript's tail to read. Transcripts run to megabytes and
+/// only the end is ever wanted, so this reads backwards from EOF rather than
+/// parsing the whole file — enough to cover a long turn's tool traffic.
+const TRANSCRIPT_TAIL_BYTES: u64 = 256 * 1024;
+
+/// The last `turns` conversation turns from an agent's transcript, normalized
+/// to `{role, text, tools}` across CLIs.
+///
+/// Dispatch is per line rather than per agent: each CLI's JSONL is
+/// self-describing (claude tags `type: assistant`, codex `event_msg`, omp
+/// `message`), so sniffing the line handles a session whose agent id we were
+/// told nothing about, and a new CLI degrades to an empty list instead of a
+/// wrong parse.
+fn transcript_tail(path: &str, turns: usize) -> Vec<serde_json::Value> {
+    use std::io::{Read, Seek, SeekFrom};
+    if turns == 0 {
+        return Vec::new();
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let from = len.saturating_sub(TRANSCRIPT_TAIL_BYTES);
+    if file.seek(SeekFrom::Start(from)).is_err() {
+        return Vec::new();
+    }
+    let mut raw = String::new();
+    // Lossy: a tail can start mid-codepoint, and a byte-split emoji is no
+    // reason to lose the conversation.
+    let mut bytes = Vec::new();
+    if file.read_to_end(&mut bytes).is_err() {
+        return Vec::new();
+    }
+    raw.push_str(&String::from_utf8_lossy(&bytes));
+    let body = if from > 0 {
+        raw.split_once('\n').map(|(_, rest)| rest).unwrap_or("")
+    } else {
+        &raw
+    };
+
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    for line in body.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(turn) = parse_turn(&v) {
+            // Tool calls fold into the turn that made them: "ran Bash, Edit" is
+            // the useful shape, not one entry per call.
+            match (&turn, out.last_mut()) {
+                (Tail::Tool(name), Some(prev)) if prev["role"] == "assistant" => {
+                    if let Some(tools) = prev["tools"].as_array_mut() {
+                        if !tools.iter().any(|t| t == name) {
+                            tools.push(serde_json::json!(name));
+                        }
+                    }
+                }
+                (Tail::Tool(_), _) => {}
+                (Tail::Message { role, text }, _) => out.push(serde_json::json!({
+                    "role": role,
+                    "text": clip(text, 1200),
+                    "tools": [],
+                })),
+            }
+        }
+    }
+    if out.len() > turns {
+        out.drain(..out.len() - turns);
+    }
+    out
+}
+
+/// One parsed transcript line: a message, or a tool call belonging to the
+/// message before it.
+enum Tail {
+    Message { role: &'static str, text: String },
+    Tool(String),
+}
+
+fn parse_turn(v: &serde_json::Value) -> Option<Tail> {
+    match v["type"].as_str()? {
+        // Claude Code: content is a string or a block list; tool_result blocks
+        // are the transcript's plumbing, not something the agent said.
+        "user" | "assistant" => {
+            let role = if v["type"] == "assistant" {
+                "assistant"
+            } else {
+                "user"
+            };
+            let content = &v["message"]["content"];
+            if let Some(s) = content.as_str() {
+                return Some(Tail::Message {
+                    role,
+                    text: s.to_string(),
+                });
+            }
+            let mut text = String::new();
+            for block in content.as_array()? {
+                match block["type"].as_str() {
+                    Some("text") => {
+                        if let Some(s) = block["text"].as_str() {
+                            text.push_str(s);
+                        }
+                    }
+                    Some("tool_use") => {
+                        return Some(Tail::Tool(
+                            block["name"].as_str().unwrap_or("tool").to_string(),
+                        ))
+                    }
+                    _ => {}
+                }
+            }
+            (!text.trim().is_empty()).then_some(Tail::Message { role, text })
+        }
+        // Codex rollout: the event stream carries the plain messages, already
+        // free of the reasoning and tool-call items in `response_item`.
+        "event_msg" => {
+            let payload = &v["payload"];
+            let role = match payload["type"].as_str()? {
+                "user_message" => "user",
+                "agent_message" => "assistant",
+                _ => return None,
+            };
+            Some(Tail::Message {
+                role,
+                text: payload["message"].as_str()?.to_string(),
+            })
+        }
+        // oh-my-pi.
+        "message" => {
+            let m = &v["message"];
+            let role = match m["role"].as_str()? {
+                "user" => "user",
+                "assistant" => "assistant",
+                _ => return None,
+            };
+            let text = match &m["content"] {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Array(blocks) => blocks
+                    .iter()
+                    .filter_map(|b| b["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join(""),
+                _ => return None,
+            };
+            (!text.trim().is_empty()).then_some(Tail::Message { role, text })
+        }
+        _ => None,
+    }
+}
+
+/// Trim a turn to something readable, on a char boundary.
+fn clip(text: &str, max: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max).collect();
+    format!("{head}…")
 }
 
 /// POST a browser-control op to the bridge: the tool's arguments ride along
@@ -1973,4 +2255,130 @@ fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn digest(pty: &str, instance: &str, cwd: &str) -> serde_json::Value {
+        serde_json::json!({ "surface": pty, "instance": instance, "cwd": cwd })
+    }
+
+    /// The bug this replaced: identity by directory hid every peer in a shared
+    /// checkout, which is exactly the case the tool exists for.
+    #[test]
+    fn self_is_the_terminal_not_the_directory() {
+        let me = ("14".to_string(), "inst-a".to_string());
+        let shared = "/repo";
+        assert!(digest_is_self(
+            &digest("14", "inst-a", shared),
+            Some(&me),
+            shared
+        ));
+        assert!(!digest_is_self(
+            &digest("6", "inst-a", shared),
+            Some(&me),
+            shared
+        ));
+        // Same terminal number, different app launch — a different session.
+        assert!(!digest_is_self(
+            &digest("14", "inst-b", shared),
+            Some(&me),
+            shared
+        ));
+        // A digest from before `instance` existed still resolves.
+        assert!(digest_is_self(
+            &serde_json::json!({ "surface": "14", "cwd": shared }),
+            Some(&me),
+            shared
+        ));
+    }
+
+    /// Started outside Canopy: no terminal to compare, so cwd is all there is.
+    #[test]
+    fn without_a_surface_self_falls_back_to_cwd() {
+        assert!(digest_is_self(&digest("", "", "/repo"), None, "/repo"));
+        assert!(!digest_is_self(&digest("", "", "/other"), None, "/repo"));
+    }
+
+    fn tail_of(lines: &[serde_json::Value], turns: usize) -> Vec<serde_json::Value> {
+        let path = std::env::temp_dir().join(format!(
+            "canopy-hook-transcript-{}.jsonl",
+            std::process::id() as u64 + lines.len() as u64
+        ));
+        let body: String = lines
+            .iter()
+            .map(|l| format!("{l}\n"))
+            .collect::<Vec<_>>()
+            .join("");
+        std::fs::write(&path, body).unwrap();
+        let out = transcript_tail(path.to_str().unwrap(), turns);
+        let _ = std::fs::remove_file(&path);
+        out
+    }
+
+    #[test]
+    fn claude_transcript_folds_tools_into_the_turn_that_ran_them() {
+        let out = tail_of(
+            &[
+                serde_json::json!({ "type": "user", "message": { "content": "fix the build" } }),
+                serde_json::json!({ "type": "assistant", "message": { "content": [
+                    { "type": "text", "text": "Looking at it now." }
+                ] } }),
+                serde_json::json!({ "type": "assistant", "message": { "content": [
+                    { "type": "tool_use", "name": "Bash" }
+                ] } }),
+                serde_json::json!({ "type": "assistant", "message": { "content": [
+                    { "type": "tool_use", "name": "Edit" }
+                ] } }),
+                // Tool output is plumbing, not something anyone said.
+                serde_json::json!({ "type": "user", "message": { "content": [
+                    { "type": "tool_result", "content": "ok" }
+                ] } }),
+            ],
+            10,
+        );
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["role"], "user");
+        assert_eq!(out[1]["text"], "Looking at it now.");
+        assert_eq!(out[1]["tools"], serde_json::json!(["Bash", "Edit"]));
+    }
+
+    #[test]
+    fn codex_and_omp_transcripts_parse_by_line_shape() {
+        let out = tail_of(
+            &[
+                serde_json::json!({ "type": "event_msg", "payload": {
+                    "type": "user_message", "message": "commit raise pr" } }),
+                serde_json::json!({ "type": "event_msg", "payload": {
+                    "type": "token_count", "info": {} } }),
+                serde_json::json!({ "type": "event_msg", "payload": {
+                    "type": "agent_message", "message": "The branch is pushed." } }),
+                serde_json::json!({ "type": "message", "message": {
+                    "role": "assistant", "content": [{ "type": "text", "text": "Done." }] } }),
+            ],
+            10,
+        );
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0]["role"], "user");
+        assert_eq!(out[1]["text"], "The branch is pushed.");
+        assert_eq!(out[2]["text"], "Done.");
+    }
+
+    #[test]
+    fn transcript_tail_keeps_the_last_turns_and_survives_unknown_lines() {
+        let mut lines = vec![serde_json::json!({ "type": "unknown-future-cli" })];
+        for i in 0..10 {
+            lines.push(
+                serde_json::json!({ "type": "assistant", "message": { "content": [
+                    { "type": "text", "text": format!("turn {i}") }
+                ] } }),
+            );
+        }
+        let out = tail_of(&lines, 3);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[2]["text"], "turn 9");
+        assert!(tail_of(&lines, 0).is_empty());
+    }
 }
