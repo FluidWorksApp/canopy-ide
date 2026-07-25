@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { DiffView, DiffModeEnum, SplitSide } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import { createTwoFilesPatch } from "diff";
+import { fmtTokens } from "../format";
 import * as ipc from "../ipc";
 import type { Notify } from "../types";
 import { splitPatch } from "./PrView";
@@ -16,10 +17,6 @@ import { sessionCost } from "../pricing";
 import { getSettings } from "../settings";
 import type { CustomMicroTask } from "../microTasks";
 
-// Compact number formats for the header stats strip — matched to the status
-// tray so the same session reads the same everywhere.
-const fmtTokens = (n: number) =>
-  n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
 const fmtCost = (n: number) => (n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`);
 /** Tokens Canopy sent the model — fresh input plus both cache legs. */
 const sentTokens = (u: ipc.AgentSessionUsage) =>

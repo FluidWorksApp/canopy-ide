@@ -4,19 +4,11 @@
 // breakdowns. Data comes from ipc.agentUsage(); cost is an estimate except
 // where the CLI reports its own (omp).
 import { useEffect, useMemo, useState } from "react";
+import { fmtTokens } from "../format";
 import * as ipc from "../ipc";
 import { sessionCost } from "../pricing";
 import { AGENT_CLIS } from "../projects";
 import { AgentIcon } from "./icons";
-
-const fmtTokens = (n: number) =>
-  n >= 1e9
-    ? `${(n / 1e9).toFixed(2)}B`
-    : n >= 1e6
-      ? `${(n / 1e6).toFixed(1)}M`
-      : n >= 1000
-        ? `${(n / 1000).toFixed(1)}k`
-        : `${n}`;
 
 const fmtCost = (n: number) => (n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`);
 
