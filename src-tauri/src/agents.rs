@@ -1826,9 +1826,25 @@ pub fn heal_integrations(app: AppHandle) {
             for line in &report.failed {
                 log::warn!("agent integration failed: {line}");
             }
+            // Kept as well as emitted. This pass starts before the webview
+            // does, so the event can fire with nobody listening — and a report
+            // whose whole purpose is to break a silence must not be lost to a
+            // race. The frontend asks for this on mount and uses whichever
+            // arrives first.
+            if let Ok(mut slot) = LAST_HEALTH.lock() {
+                *slot = Some(report.clone());
+            }
             let _ = app.emit("agents:health", &report);
         })
         .ok();
+}
+
+static LAST_HEALTH: std::sync::Mutex<Option<HealthReport>> = std::sync::Mutex::new(None);
+
+/// The launch's integration report, or None if the pass hasn't finished yet.
+#[tauri::command]
+pub async fn agent_health_report() -> Option<HealthReport> {
+    LAST_HEALTH.lock().ok().and_then(|slot| slot.clone())
 }
 
 /// The sync core, against an explicit home, version and PATH probe — so the

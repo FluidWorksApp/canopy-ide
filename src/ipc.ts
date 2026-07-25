@@ -439,6 +439,10 @@ export interface HealthReport {
 }
 export const agentIntegrationHealth = () =>
   invoke<IntegrationHealth[]>("agent_integration_health");
+/** The launch's integration report if the pass has already finished. It runs
+ *  before the webview does, so the event below can fire with nobody listening —
+ *  ask for this on mount and take whichever arrives first. */
+export const agentHealthReport = () => invoke<HealthReport | null>("agent_health_report");
 /** What the launch's integration pass found and did. Emitted once per start. */
 export const onIntegrationHealth = (cb: (r: HealthReport) => void): Promise<UnlistenFn> =>
   listen<HealthReport>("agents:health", (e) => cb(e.payload));

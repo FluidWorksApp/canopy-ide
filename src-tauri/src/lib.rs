@@ -440,6 +440,7 @@ pub fn run() {
             agents::setup_agent_hooks,
             agents::agent_hooks_installed,
             agents::agent_integration_health,
+            agents::agent_health_report,
             agents::claude_session_stats,
             agents::agent_usage,
             agents::hook_bridge_path,

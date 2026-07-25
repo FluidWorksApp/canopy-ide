@@ -564,12 +564,18 @@ export default function App() {
     // runs in agents::heal_integrations at startup, where it can see what's
     // installed and report what it did. Only failures are surfaced: a healthy
     // launch has nothing to say, and a repair that worked is not news.
-    subs.push(
-      ipc.onIntegrationHealth((report) => {
-        if (report.failed.length === 0) return;
-        notify(`Agent integration needs attention — ${report.failed.join("; ")}`, "warn");
-      }),
-    );
+    // The pass starts before this webview does, so the event can fire with
+    // nobody listening. Ask for the cached report too, and let whichever
+    // arrives first be the one that speaks — a report that exists to break a
+    // silence must not be lost to a race.
+    let reported = false;
+    const reportHealth = (report: ipc.HealthReport | null) => {
+      if (reported || !report || report.failed.length === 0) return;
+      reported = true;
+      notify(`Agent integration needs attention — ${report.failed.join("; ")}`, "warn");
+    };
+    subs.push(ipc.onIntegrationHealth(reportHealth));
+    void ipc.agentHealthReport().then(reportHealth).catch(() => {});
     // Focus mode is reachable two ways: the native menu accelerator, and a
     // webview key handler. Belt and braces — the accelerator is what the menu
     // advertises, but a native Cmd+Shift+Enter can be swallowed before it
