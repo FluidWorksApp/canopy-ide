@@ -181,19 +181,24 @@ export function AgentsPanel({
 }: AgentsPanelProps) {
   // Instruction files: scanned once when the panel comes into view, and again
   // when the project's roots change. It's a bounded filesystem walk, but it is
-  // still a walk — nothing runs while another side tab is in front.
+  // still a walk — so nothing runs while another side tab is in front, and the
+  // dependency is the roots' *contents*, not the array: ProjectView rebuilds
+  // that array every render, and keying on its identity would re-walk the
+  // filesystem on every agent event that ticks the view. Same idiom as the
+  // termSessions effect below.
   const [instructionFiles, setInstructionFiles] = useState<ipc.InstructionFile[]>([]);
+  const rootsKey = roots.join("\n");
   useEffect(() => {
-    if (!visible || roots.length === 0) return;
+    if (!visible || rootsKey === "") return;
     let live = true;
     void ipc
-      .instructionsScan(roots)
+      .instructionsScan(rootsKey.split("\n"))
       .then((fs) => live && setInstructionFiles(fs))
       .catch(() => {});
     return () => {
       live = false;
     };
-  }, [visible, roots]);
+  }, [visible, rootsKey]);
 
   /** What to show in a panel this narrow: the files that exist, plus — for the
    *  CLIs actually installed here — the top-level ones that don't yet, since

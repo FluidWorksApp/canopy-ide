@@ -105,15 +105,20 @@ export function InstructionsView({ roots, installed, focus, onNotice }: Instruct
   const [dirty, setDirty] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  // Keyed on the roots' contents rather than the array: ProjectView rebuilds
+  // that array on every render, so depending on its identity would re-walk the
+  // filesystem every time an agent event ticked the view. The same `rootsKey`
+  // idiom is used throughout ProjectView and the Palette.
+  const rootsKey = roots.join("\n");
   const rescan = useCallback(() => {
     void ipc
-      .instructionsScan(roots)
+      .instructionsScan(rootsKey.split("\n"))
       .then(setFiles)
       .catch((e) => {
         setFiles([]);
         onNotice(`Couldn't look for instruction files: ${e}`, "error");
       });
-  }, [roots, onNotice]);
+  }, [rootsKey, onNotice]);
 
   useEffect(rescan, [rescan]);
 
