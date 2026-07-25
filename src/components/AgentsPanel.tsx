@@ -177,23 +177,47 @@ function Section({
   count,
   tone,
   action,
+  collapseKey,
   children,
 }: {
   title: string;
   count?: number;
   tone?: "urgent" | "quiet";
   action?: React.ReactNode;
+  /** Set to make the section collapsible. It starts collapsed, and the choice
+   *  is remembered under this key — a panel section you closed should stay
+   *  closed the next time you open the project. */
+  collapseKey?: string;
   children: React.ReactNode;
 }) {
+  const [open, setOpen] = useState(
+    () => collapseKey != null && localStorage.getItem(`canopy.section.${collapseKey}`) === "1",
+  );
+  const toggle = () => {
+    if (collapseKey == null) return;
+    setOpen((v) => {
+      localStorage.setItem(`canopy.section.${collapseKey}`, v ? "0" : "1");
+      return !v;
+    });
+  };
+  const collapsible = collapseKey != null;
   return (
     <div className={`ap-section ${tone ? `ap-section-${tone}` : ""}`}>
-      <div className="ap-head">
+      <div
+        className={`ap-head ${collapsible ? "ap-head-toggle" : ""}`}
+        onClick={collapsible ? toggle : undefined}
+      >
+        {collapsible && (
+          <span className="tree-chevron">{open ? "▾" : "▸"}</span>
+        )}
         <span className="ap-title">{title}</span>
         {count != null && count > 0 && <span className="badge">{count}</span>}
         <span className="ap-head-spacer" />
-        {action}
+        {/* Actions live inside the header, so their clicks must not also
+            toggle it. */}
+        {action && <span onClick={(e) => e.stopPropagation()}>{action}</span>}
       </div>
-      <div className="ap-body">{children}</div>
+      {(!collapsible || open) && <div className="ap-body">{children}</div>}
     </div>
   );
 }
@@ -927,6 +951,10 @@ export function AgentsPanel({
         // effect. Counting every scanned file put "143" (mostly global skills)
         // over a list of four.
         count={headlineInstructions.live}
+        // Collapsed until asked for: instruction files change rarely, and this
+        // list sat between the pending questions and the running agents — the
+        // two things the panel exists for.
+        collapseKey="instructions"
         action={
           <button
             className="btn-icon"

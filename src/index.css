@@ -2802,8 +2802,22 @@ body.dragging-tab * {
   justify-content: safe center;
   height: 100%;
   overflow-y: auto;
-  padding: 20px 0;
+  /* Horizontal padding matters: this pane butts straight up against the list's
+     border, and prose that starts on the border reads as broken layout. */
+  padding: 20px 28px;
+  box-sizing: border-box;
   color: var(--text-dim);
+}
+
+/* Prose in an empty state is a caption, not a column of body text — measure it
+   so it never stretches the full width of a wide pane. Centred here rather than
+   on the container: the project launcher shares this class and its resume rows
+   are left-aligned lists. */
+.editor-empty p {
+  max-width: 48ch;
+  margin: 0 auto;
+  line-height: 1.55;
+  text-align: center;
 }
 
 /* Flex items shrink by default; without this the resume block gets squeezed
@@ -3716,6 +3730,37 @@ body.dragging-tab * {
 }
 .instr-chip-more {
   cursor: help;
+}
+/* Only rendered when the same filename exists under two roots, where the label
+   alone can't tell three AGENTS.md rows apart. */
+.instr-root {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 10px;
+  opacity: 0.8;
+  white-space: nowrap;
+}
+/* The drawer holding every format that could exist here but doesn't. Closed by
+   default: what's actually being read is the list, and this is the footnote. */
+.instr-others {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11px;
+  user-select: none;
+}
+.instr-others:hover {
+  color: var(--text);
+  background: var(--bg-raised);
+}
+.instr-none {
+  padding: 4px 12px 6px;
+  color: var(--text-dim);
+  font-size: 11px;
+  opacity: 0.75;
 }
 /* Panel-side marker: filled when the file is really there, hollow when it's a
    format waiting to be created. */
@@ -7292,6 +7337,15 @@ a.btn-mini {
   align-items: center;
   gap: 7px;
   padding: 7px 12px 4px;
+}
+
+/* A collapsible header is the hit target for the whole section. */
+.ap-head-toggle {
+  cursor: pointer;
+  user-select: none;
+}
+.ap-head-toggle:hover .ap-title {
+  color: var(--text);
 }
 
 .ap-title {
