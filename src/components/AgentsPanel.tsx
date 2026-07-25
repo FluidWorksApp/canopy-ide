@@ -284,10 +284,14 @@ export function AgentsPanel({
     return () => un?.();
   }, [visible]);
 
-  const autoSetup = async (agent: string) => {
+  const autoSetup = async (agents: string | string[]) => {
+    const ids = Array.isArray(agents) ? agents : [agents];
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      setSetupResult(await invoke<string>("setup_agent_hooks", { agent }));
+      const results = await Promise.all(
+        ids.map(async (agent) => invoke<string>("setup_agent_hooks", { agent })),
+      );
+      setSetupResult(results.join("; "));
     } catch (err) {
       setSetupResult(String(err));
     }
@@ -364,6 +368,16 @@ export function AgentsPanel({
   // leave the panel silently blind.
   const noHookSignal =
     agentSessions.length > 0 && agentSessions.every((x) => !x.digest);
+  // Only offer setup for CLIs whose configuration Canopy knows how to edit.
+  // Unknown agents remain visible, but we must not imply they have a safe
+  // one-click integration path.
+  const setupAgents = useMemo(
+    () =>
+      [...new Set(agentSessions.map((x) => x.agent?.id).filter((id): id is string => !!id))].filter(
+        (id) => ["claude", "codex", "agy", "aider", "opencode", "omp", "amp"].includes(id),
+      ),
+    [agentSessions],
+  );
 
   // No digest could mean hooks aren't installed OR that these agents were
   // started before they were — opposite fixes. Ask the backend which it is, so
@@ -375,8 +389,14 @@ export function AgentsPanel({
       setHooksInstalled(null);
       return;
     }
-    void ipc.agentHooksInstalled("claude").then(setHooksInstalled).catch(() => {});
-  }, [noHookSignal, setupResult]);
+    if (setupAgents.length === 0) {
+      setHooksInstalled(null);
+      return;
+    }
+    void Promise.all(setupAgents.map((agent) => ipc.agentHooksInstalled(agent)))
+      .then((installed) => setHooksInstalled(installed.every(Boolean)))
+      .catch(() => {});
+  }, [noHookSignal, setupAgents.join(","), setupResult]);
 
   // Hibernate an agent: kill its terminal to reclaim the memory, keeping the
   // session digest (which is already the restore record) so the row reappears
@@ -841,8 +861,8 @@ export function AgentsPanel({
             Agents are running, but no events are streaming in — questions,
             tasks and tokens won't show until hooks are set up.
           </span>
-          <button className="btn btn-accent" onClick={() => void autoSetup("claude")}>
-            Set up Claude Code hooks
+          <button className="btn btn-accent" onClick={() => void autoSetup(setupAgents)}>
+            Set up agent integrations
           </button>
           {setupResult && <p className="hook-result">{setupResult}</p>}
         </div>

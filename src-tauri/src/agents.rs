@@ -498,10 +498,22 @@ pub async fn setup_agent_hooks(agent: String) -> Result<String, String> {
             let mcp = setup_claude_mcp(&home)?;
             Ok(format!("{hooks}; {mcp}"))
         }
-        "codex" => setup_codex_hooks(&home, &bridge),
-        "agy" => setup_agy_hooks(&home),
+        "codex" => {
+            let hooks = setup_codex_hooks(&home, &bridge)?;
+            let mcp = setup_codex_mcp(&home)?;
+            Ok(format!("{hooks}; {mcp}"))
+        }
+        "agy" => {
+            let hooks = setup_agy_hooks(&home)?;
+            let mcp = setup_agy_mcp(&home)?;
+            Ok(format!("{hooks}; {mcp}"))
+        }
         "aider" => setup_aider_hooks(&home),
-        "opencode" => setup_opencode_plugin(&home),
+        "opencode" => {
+            let plugin = setup_opencode_plugin(&home)?;
+            let mcp = setup_opencode_mcp(&home)?;
+            Ok(format!("{plugin}; {mcp}"))
+        }
         "omp" => setup_omp_hook(&home),
         "amp" => setup_amp_plugin(&home),
         _ => Err(format!("auto-setup not supported for {agent} yet")),
@@ -524,9 +536,10 @@ pub async fn agent_hooks_installed(agent: String) -> bool {
         "claude" => Some(format!("{home}/.claude/settings.json")),
         "codex" => Some(format!("{home}/.codex/config.toml")),
         "aider" => Some(format!("{home}/.aider.conf.yml")),
-        // Plugin/hook-file agents drop a whole file rather than editing config;
-        // presence of the installed marker path is the signal there. Kept out of
-        // this check (the nudge only auto-installs Claude) until each is wired.
+        "agy" => Some(format!("{home}/.gemini/antigravity-cli/hooks.json")),
+        "opencode" => Some(format!("{home}/.config/opencode/plugin/canopy.ts")),
+        "omp" => Some(format!("{home}/.omp/agent/hooks/canopy.ts")),
+        "amp" => Some(format!("{home}/.config/amp/plugins/canopy.ts")),
         _ => None,
     };
     let Some(config) = config else { return false };
@@ -1352,6 +1365,165 @@ fn setup_claude_mcp(home: &str) -> Result<String, String> {
     )
     .map_err(|e| e.to_string())?;
     Ok("Canopy MCP server registered — new claude sessions get canopy_* context tools".into())
+}
+
+/// MCP clients all speak to the same `canopy-hook --mcp` process, but each CLI
+/// keeps its server registry in a different format. Keep those format details
+/// here, beside the hook installers, rather than letting a Claude-shaped setup
+/// path become the accidental integration API for every other agent.
+fn canopy_mcp_command(helper: &std::path::Path) -> serde_json::Value {
+    serde_json::json!({
+        "command": helper.to_string_lossy(),
+        "args": ["--mcp"],
+    })
+}
+
+/// Insert one Canopy-owned MCP entry into a JSON config without touching other
+/// servers. A pre-existing `canopy` server belongs to the user unless it points
+/// at our helper; silently replacing it would be surprising and unsafe.
+fn upsert_json_mcp(
+    path: std::path::PathBuf,
+    key: &str,
+    want: serde_json::Value,
+    is_ours: impl Fn(&serde_json::Value) -> bool,
+) -> Result<bool, String> {
+    let mut cfg: serde_json::Value = if path.exists() {
+        let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        serde_json::from_str(&raw)
+            .map_err(|e| format!("{} is not valid JSON: {e}", path.display()))?
+    } else {
+        serde_json::json!({})
+    };
+    let obj = cfg
+        .as_object_mut()
+        .ok_or_else(|| format!("{} is not an object", path.display()))?;
+    let servers = obj.entry(key).or_insert_with(|| serde_json::json!({}));
+    let servers = servers
+        .as_object_mut()
+        .ok_or_else(|| format!("{key} in {} is not an object", path.display()))?;
+    if let Some(existing) = servers.get("canopy") {
+        if existing == &want {
+            return Ok(false);
+        }
+        if !is_ours(existing) {
+            return Err(format!(
+                "{} already has an MCP server named 'canopy' that Canopy does not own",
+                path.display()
+            ));
+        }
+    }
+    servers.insert("canopy".into(), want);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+fn setup_codex_mcp(home: &str) -> Result<String, String> {
+    let helper = helper_path()?;
+    if !helper.exists() {
+        return Err(format!(
+            "hook helper missing at {} — MCP server not registered",
+            helper.display()
+        ));
+    }
+    let path = std::path::PathBuf::from(home).join(".codex/config.toml");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let header = "[mcp_servers.canopy]";
+    let wanted = format!(
+        "{header}\ncommand = {:?}\nargs = [\"--mcp\"]\n",
+        helper.to_string_lossy()
+    );
+    let mut lines: Vec<&str> = existing.lines().collect();
+    if let Some(start) = lines.iter().position(|line| line.trim() == header) {
+        let end = lines[start + 1..]
+            .iter()
+            .position(|line| line.trim_start().starts_with('['))
+            .map(|offset| start + 1 + offset)
+            .unwrap_or(lines.len());
+        let old = lines[start..end].join("\n");
+        if old == wanted.trim_end() {
+            return Ok("Canopy MCP server already registered".into());
+        }
+        if !old.contains("canopy-hook") {
+            return Err(format!(
+                "{} already has an MCP server named 'canopy' that Canopy does not own",
+                path.display()
+            ));
+        }
+        lines.splice(start..end, wanted.trim_end().lines());
+    } else {
+        if !lines.is_empty() && !lines.last().is_some_and(|line| line.is_empty()) {
+            lines.push("");
+        }
+        lines.extend(wanted.trim_end().lines());
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, out).map_err(|e| e.to_string())?;
+    Ok("Canopy MCP server registered — new codex sessions get canopy_* context tools".into())
+}
+
+fn setup_agy_mcp(home: &str) -> Result<String, String> {
+    let helper = helper_path()?;
+    if !helper.exists() {
+        return Err(format!(
+            "hook helper missing at {} — MCP server not registered",
+            helper.display()
+        ));
+    }
+    let want = canopy_mcp_command(&helper);
+    let path = std::path::PathBuf::from(home).join(".gemini/config/mcp_config.json");
+    let changed = upsert_json_mcp(path, "mcpServers", want, |entry| {
+        entry
+            .get("command")
+            .and_then(|v| v.as_str())
+            .is_some_and(|command| command.contains("canopy-hook"))
+    })?;
+    Ok(if changed {
+        "Canopy MCP server registered — new agy sessions get canopy_* context tools"
+    } else {
+        "Canopy MCP server already registered"
+    }
+    .into())
+}
+
+fn setup_opencode_mcp(home: &str) -> Result<String, String> {
+    let helper = helper_path()?;
+    if !helper.exists() {
+        return Err(format!(
+            "hook helper missing at {} — MCP server not registered",
+            helper.display()
+        ));
+    }
+    let want = serde_json::json!({
+        "type": "local",
+        "command": [helper.to_string_lossy(), "--mcp"],
+        "enabled": true,
+    });
+    let path = std::path::PathBuf::from(home).join(".config/opencode/opencode.json");
+    let changed = upsert_json_mcp(path, "mcp", want, |entry| {
+        entry
+            .get("command")
+            .and_then(|v| v.as_array())
+            .and_then(|args| args.first())
+            .and_then(|v| v.as_str())
+            .is_some_and(|command| command.contains("canopy-hook"))
+    })?;
+    Ok(if changed {
+        "Canopy MCP server registered — new opencode sessions get canopy_* context tools"
+    } else {
+        "Canopy MCP server already registered"
+    }
+    .into())
 }
 
 fn setup_codex_hooks(home: &str, bridge: &str) -> Result<String, String> {
