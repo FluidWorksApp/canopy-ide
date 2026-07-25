@@ -2726,6 +2726,10 @@ body.dragging-tab * {
 .aw-stat-state.st-idle {
   color: var(--text-dim);
 }
+.aw-stat-state.st-stale {
+  color: var(--warn);
+  opacity: 0.8;
+}
 /* Make the close affordance unmistakable: a red-bordered target that reads as
    "close" at a glance, and fills solid red on hover/focus. */
 .workspace-overlay-close {
@@ -3319,6 +3323,14 @@ body.dragging-tab * {
   background: transparent;
   border: 1px solid var(--text-dim);
   opacity: 0.6;
+}
+/* Lost track of it. A hollow ring, deliberately not green and deliberately not
+   the same as `idle`: we know this agent stopped reporting, not that it
+   finished. Never pulses — the pulse is the claim we can no longer make. */
+.agent-state-dot.st-stale {
+  background: transparent;
+  border: 1px dashed var(--warn);
+  opacity: 0.75;
 }
 @keyframes agent-pulse {
   0%,

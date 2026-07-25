@@ -6,18 +6,22 @@ import * as ipc from "../ipc";
 import { getSettings } from "../settings";
 import { restoreCommand } from "../projects";
 import { identifyAgent, observeForLearning } from "../agentIdentity";
+import { effectiveState, silenceLabel } from "../agentState";
 import { forgetSessions, restorableFrom } from "../restorable";
 import { AgentIcon, DiffIcon, MoonIcon, RestartIcon, TerminalIcon, TrashIcon } from "./icons";
 import type { PendingItem } from "../notifications";
 
 /** Colour + label for the lifecycle dot on a running-agent row. `working` is
  *  the only state that pulses — a moving dot in a column of still ones is
- *  where the eye lands first. */
+ *  where the eye lands first. `stale` is what `working` decays into when
+ *  nothing corroborates it (see agentState.ts): pointedly not `idle`, because
+ *  a session that stopped telling us anything has not told us it finished. */
 export const STATE_META: Record<string, { cls: string; label: string }> = {
   working: { cls: "st-working", label: "working" },
   waiting: { cls: "st-waiting", label: "waiting on you" },
   idle: { cls: "st-idle", label: "idle — finished a turn" },
   ended: { cls: "st-ended", label: "session ended" },
+  stale: { cls: "st-stale", label: "no signal — may have stopped" },
 };
 
 /** CLIs whose approval prompt is a numbered/Escape menu we can drive by
@@ -415,9 +419,23 @@ export function AgentsPanel({
     const runaway =
       s.total_cpu > settings.runawayCpuPercent ||
       s.total_mem_bytes > settings.runawayMemBytes;
-    // Lifecycle dot: only for agent rows the hook stream has spoken for.
-    const st = agent && digest?.state ? STATE_META[digest.state] : undefined;
+    // Lifecycle dot: only for agent rows the hook stream has spoken for, and
+    // only believed as far as the session's own activity backs it up — a CLI
+    // that stops without a Stop event leaves "working" behind forever.
+    const shown = effectiveState({
+      state: digest?.state,
+      updated: digest?.updated,
+      cpu: s.total_cpu,
+      now: Date.now() / 1000,
+    });
+    const st = agent && shown ? STATE_META[shown] : undefined;
+    const stTitle =
+      shown === "stale"
+        ? `No hook events for ${silenceLabel(digest?.updated, Date.now() / 1000)} and no CPU — this agent may have stopped without telling Canopy`
+        : st?.label;
     // Only reclaim an agent that has finished — never one mid-turn or blocked.
+    // `stale` is not finished: it is an agent we have lost track of, and
+    // killing its terminal on a guess is not a trade worth making.
     const canHibernate =
       !!agent && (digest?.state === "idle" || digest?.state === "ended");
     // What the human last asked for. The highest-signal line about a session:
@@ -449,7 +467,7 @@ export function AgentsPanel({
         <div className="agent-main">
           {/* Lifecycle at a glance: green pulse = working, amber = waiting on
               you, grey = idle, faded = ended. */}
-          {st && <span className={`agent-state-dot ${st.cls}`} title={st.label} />}
+          {st && <span className={`agent-state-dot ${st.cls}`} title={stTitle} />}
           {/* The CLI's own mark, not its name in bold — the panel is a column
               of near-identical rows and a glyph reads faster than a word. */}
           {/* No id means we can see the program but cannot name whose it
