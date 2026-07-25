@@ -309,6 +309,13 @@ fn update_digest(
                 // unique per launch, is what the panel pairs on so one instance's
                 // "term #5" digest can't bind to another's terminal.
                 "instance": std::env::var("CANOPY_INSTANCE").ok(),
+                // A one-shot task terminal, from the env its launch command
+                // carries. Recorded so "never offer this for restore" is a
+                // property of the session rather than a delete that has to win
+                // a race: the app deletes these digests when the task ends, but
+                // a force quit or a crash never gets to, and what survives is
+                // indistinguishable from a conversation worth resuming.
+                "micro": std::env::var("CANOPY_MICRO_TASK").is_ok(),
             })
         });
 

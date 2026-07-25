@@ -738,6 +738,11 @@ export interface SessionDigest {
   resume_cwd?: string;
   /** False when no transcript was ever persisted, so every --resume would fail. */
   resumable?: boolean;
+  /** A one-shot micro-task session (CANOPY_MICRO_TASK in its launch env),
+   *  recorded by the hook at first sighting. Never offered for restore —
+   *  resuming a finished task re-runs it. Absent on digests written before the
+   *  marker existed, and on any CLI read straight from disk. */
+  micro?: boolean;
 }
 
 /** Publish which projects share context between their agent sessions. The hook

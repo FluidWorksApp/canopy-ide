@@ -119,6 +119,12 @@ export function restorableFrom(
       const id = d.session_id;
       if (!id || /-pty\d*$/.test(id)) return false;
 
+      // A one-shot task, finished the moment it ended — restoring it would run
+      // it again. The app also deletes these digests when the task's terminal
+      // closes, but that is a timer racing the CLI's last write and neither
+      // survives a force quit; the marker is on the session itself.
+      if (d.micro) return false;
+
       // Forgotten by the user, and the transcript hasn't been written since —
       // stay gone. A newer mtime (real new activity) crosses the threshold and
       // brings it back.
