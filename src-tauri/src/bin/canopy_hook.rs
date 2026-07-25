@@ -1450,11 +1450,11 @@ fn tool_defs() -> serde_json::Value {
         },
         {
             "name": "canopy_agents",
-            "description": "Every other agent session running in this project: which CLI, working directory, branch, what it was last asked to do, files it has edited, active or idle, the last thing it said, and its terminal id. Several agents routinely share one checkout — read this before you start. Pass `ptyId` or `session` for one agent's actual conversation (what it was asked, what it answered, which tools it ran); pass that same ptyId to canopy_message_agent to type into it. Also lists held file claims.",
+            "description": "The other agent sessions in this project: CLI, working directory, branch, last request, files edited, active or idle, the last thing each said, terminal id. Several agents routinely share one checkout — read this before you start. Pass ptyId or session for one agent's conversation; canopy_message_agent types into it. Also lists held file claims.",
             "inputSchema": { "type": "object", "properties": {
-                "ptyId": { "type": "integer", "description": "Narrow to the agent in this terminal and include its conversation" },
-                "session": { "type": "string", "description": "Narrow by session id (a prefix is enough) instead of terminal" },
-                "transcript": { "type": "integer", "description": "How many recent turns to include (default 12 for one agent, max 100)" }
+                "ptyId": { "type": "integer", "description": "One agent, by terminal — adds its conversation" },
+                "session": { "type": "string", "description": "One agent, by session id (prefix is enough)" },
+                "transcript": { "type": "integer", "description": "Turns to include (default 12, max 100)" }
             }, "additionalProperties": false }
         },
         {
