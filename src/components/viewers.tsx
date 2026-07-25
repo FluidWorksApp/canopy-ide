@@ -226,22 +226,40 @@ export function SheetView({ bytes }: { bytes: Uint8Array }) {
 
 // ---------- JSON (collapsible tree) ----------
 
-export function JsonView({ bytes }: { bytes: Uint8Array }) {
+// Files that legitimately carry // comments and trailing commas — the same
+// set VSCode opens in "jsonc" language mode. Everything else is strict JSON
+// so stray comments in package.json or lock files are flagged, not silently swallowed.
+function isJsoncFile(path: string): boolean {
+  const name = path.split(/[\\/]/).pop() ?? "";
+  if (name.endsWith(".jsonc")) return true;
+  if (/^(tsconfig|jsconfig).*\.json$/.test(name)) return true;
+  if (/\.(vscode|devcontainer)[/\\]/.test(path)) return true;
+  if (name === "devcontainer.json") return true;
+  return false;
+}
+
+export function JsonView({ bytes, path }: { bytes: Uint8Array; path: string }) {
   const parsed = useMemo(() => {
-    // JSONC, not strict JSON: config files like tsconfig.json, .vscode/*.json
-    // and devcontainer.json legitimately carry // comments and trailing commas.
-    // jsonc-parser (the same tolerant parser VSCode uses) accepts those and
-    // reports genuine syntax problems via the errors array instead of throwing.
+    const text = decoder.decode(bytes);
+    if (text.trim() === "") return { value: null };
     const errors: ParseError[] = [];
-    const value = parseJsonc(decoder.decode(bytes), errors, {
-      allowTrailingComma: true,
-      disallowComments: false,
+    const jsonc = isJsoncFile(path);
+    // jsonc-parser (the same tolerant parser VSCode uses) is used for JSONC
+    // files; strict JSON.parse for everything else so stray comments in
+    // package.json, lock files, or data fixtures are not silently swallowed.
+    const value = parseJsonc(text, errors, {
+      allowTrailingComma: jsonc,
+      disallowComments: !jsonc,
     });
     if (errors.length > 0) {
-      return { error: `${printParseErrorCode(errors[0].error)} at offset ${errors[0].offset}` };
+      const e = errors[0];
+      const lines = text.slice(0, e.offset).split("\n");
+      const line = lines.length;
+      const col = (lines[lines.length - 1]?.length ?? 0) + 1;
+      return { error: `${printParseErrorCode(e.error)} at ${line}:${col}` };
     }
     return { value };
-  }, [bytes]);
+  }, [bytes, path]);
 
   if ("error" in parsed) {
     return <div className="viewer-error">Invalid JSON: {parsed.error}</div>;

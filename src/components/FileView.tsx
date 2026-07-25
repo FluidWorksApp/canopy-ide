@@ -93,7 +93,7 @@ export function FileView(props: FileViewProps) {
     case "notebook":
       return <NotebookView bytes={file.bytes} />;
     case "json":
-      return <JsonView bytes={file.bytes} />;
+      return <JsonView bytes={file.bytes} path={file.path} />;
     case "docx":
       return <DocxView bytes={file.bytes} />;
     case "image":

@@ -225,6 +225,7 @@ function PaneBarImpl({
   // .tab-active styling teleporting. We measure the active tab (via the ref the
   // container already threads to it) and animate a blob to its box.
   const tabsRowRef = useRef<HTMLDivElement>(null);
+  const blobElRef = useRef<HTMLSpanElement>(null);
   const [blob, setBlob] = useState<{ left: number; width: number } | null>(null);
 
   const measureBlob = () => {
@@ -234,6 +235,14 @@ function PaneBarImpl({
     // offsetLeft is in the row's content coordinates (the row is the positioned
     // offsetParent), so the absolutely-positioned blob scrolls with the tabs.
     const next = { left: el.offsetLeft, width: el.offsetWidth };
+    // Arm the compositing-layer hint while the CSS transition runs, then disarm.
+    // This pins the layer only during the slide — not for the app's lifetime.
+    if (blobElRef.current) {
+      blobElRef.current.classList.add("blob-animating");
+      const el2 = blobElRef.current;
+      const off = () => el2.classList.remove("blob-animating");
+      el2.addEventListener("transitionend", off, { once: true });
+    }
     setBlob((b) => (b && b.left === next.left && b.width === next.width ? b : next));
   };
 
@@ -241,12 +250,14 @@ function PaneBarImpl({
   useLayoutEffect(measureBlob, [activeTabId, tabGroups, stripTabs, renamingTabId, activeTabElRef]);
 
   // Re-measure on geometry changes that leave the tab set unchanged: panel
-  // resize, window resize, zoom changes, and font loading.
+  // resize, window resize, zoom changes, and font loading (font swap changes
+  // tab widths without resizing the row).
   useEffect(() => {
     const row = tabsRowRef.current;
     if (!row) return;
     const ro = new ResizeObserver(measureBlob);
     ro.observe(row);
+    void document.fonts.ready.then(measureBlob);
     return () => ro.disconnect();
     // measureBlob reads refs; no dep needed here
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -260,6 +271,7 @@ function PaneBarImpl({
       >
         {blob && (
           <span
+            ref={blobElRef}
             className="tab-harbor-blob"
             aria-hidden
             // Slide via transform (GPU-composited, no per-frame layout) rather

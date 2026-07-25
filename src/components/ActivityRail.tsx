@@ -10,7 +10,7 @@ import {
   TasksIcon,
   TeamIcon,
 } from "./icons";
-type SideTab = "files" | "changes" | "git" | "trackers" | "tasks" | "agents" | "team";
+import type { SideTab } from "./ProjectView";
 
 const RAIL_TABS: {
   key: SideTab;

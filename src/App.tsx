@@ -585,13 +585,14 @@ export default function App() {
       } else if (mod && e.shiftKey && e.code === "Enter") {
         e.preventDefault();
         toggleZen("keydown");
-      } else if (mod && !e.shiftKey && !e.altKey) {
+      } else if (mod && !e.altKey) {
         // Window zoom: Cmd/Ctrl with +, -, or 0. Match both the main-row and
-        // numpad keys; "=" is the unshifted "+" key. e.code covers layouts
-        // where the character is remapped.
-        const inKey = e.key === "+" || e.key === "=" || e.code === "NumpadAdd";
-        const outKey = e.key === "-" || e.code === "Minus" || e.code === "NumpadSubtract";
-        const resetKey = e.key === "0" || e.code === "Digit0" || e.code === "Numpad0";
+        // numpad keys; "=" is the unshifted "+" key on US layout; "+" always
+        // requires Shift, so zoom-in allows shiftKey. e.code covers layouts
+        // where the character is remapped (QWERTZ, AZERTY, etc.).
+        const inKey = e.key === "+" || e.key === "=" || e.code === "Equal" || e.code === "NumpadAdd";
+        const outKey = !e.shiftKey && (e.key === "-" || e.code === "Minus" || e.code === "NumpadSubtract");
+        const resetKey = !e.shiftKey && (e.key === "0" || e.code === "Digit0" || e.code === "Numpad0");
         if (inKey) {
           e.preventDefault();
           flashZoom(setZoom(loadZoom() + STEP));

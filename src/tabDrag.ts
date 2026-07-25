@@ -8,7 +8,7 @@
 // Reordering is committed live — each time the dragged tab passes a
 // neighbour's midpoint — so the strip you see while dragging is the strip you
 // get when you let go, and no ghost element or drop indicator is needed.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 
 export interface TabDrag {
@@ -103,7 +103,11 @@ export function useTabDrag(ids: string[], reorder: (ids: string[]) => void): Tab
     [],
   );
 
-  return { dragId, itemProps };
+  // Memoize the returned object so consumers that spread it as two props
+  // (tabDragId/tabDragItemProps) or wrap it in useMemo([agentDrag, docDrag])
+  // get a stable reference — memo(Component) won't re-render just because
+  // useTabDrag re-ran.
+  return useMemo(() => ({ dragId, itemProps }), [dragId, itemProps]);
 }
 
 /** Write `order` (a reordered subset of `all`) back into `all`, leaving every
