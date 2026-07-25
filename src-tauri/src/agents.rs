@@ -1699,10 +1699,16 @@ fn setup_agy_mcp(home: &str) -> Result<String, String> {
 fn setup_opencode_mcp(home: &str) -> Result<String, String> {
     let helper = require_helper(home, "MCP server not registered")?;
     // OpenCode takes the command as an argv array rather than a string.
+    //
+    // `enabled` is deliberately not written. Its own schema has it optional
+    // ("Enable or disable the MCP server on startup" — McpLocalConfig in
+    // @opencode-ai/sdk), so leaving it out means enabled, and it stays a key
+    // only the user ever sets. Writing `true` would put it among the keys this
+    // setup keeps current, and setup runs on every launch — so switching the
+    // server off, the documented way, would last until the next start.
     let want = serde_json::json!({
         "type": "local",
         "command": [helper.to_string_lossy(), "--mcp"],
-        "enabled": true,
     });
     let changed = upsert_json_mcp(
         std::path::PathBuf::from(home).join(".config/opencode/opencode.json"),
@@ -3084,6 +3090,27 @@ mod integration_tests {
             helper.to_str()
         );
         assert_eq!(cfg["mcpServers"]["canopy"]["enabled"], false);
+    }
+
+    /// The CLI the "app fights me" report was actually about: OpenCode's own
+    /// switch for turning a server off. It must survive a launch, which means
+    /// `enabled` must not be a key setup writes.
+    #[test]
+    fn a_disabled_opencode_server_stays_disabled() {
+        let home = scratch_home("opencode-disabled");
+        let h = home.to_str().unwrap();
+        let path = home.join(".config/opencode/opencode.json");
+        setup_opencode_mcp(h).unwrap();
+        // The user switches it off, the documented way.
+        let mut cfg = read_json_config(&path).unwrap();
+        cfg["mcp"]["canopy"]["enabled"] = serde_json::json!(false);
+        write(&path, &serde_json::to_string_pretty(&cfg).unwrap());
+        // Next launch.
+        setup_opencode_mcp(h).unwrap();
+        assert_eq!(
+            read_json_config(&path).unwrap()["mcp"]["canopy"]["enabled"],
+            false
+        );
     }
 
     /// `[mcp_servers."canopy"]` is the same table as the bare spelling. Missing
