@@ -1560,7 +1560,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
    *  so the tool result and last words land — with a timer as backstop for a
    *  broken hook. Keyed by pty id; sid is captured at job_done time because the
    *  event stream goes quiet once the PTY dies. */
-  const microFinish = useRef(new Map<number, { sid?: string; since: number; timer: number }>());
+  const microFinish = useRef(
+    new Map<number, { tabId: string; sid?: string; since: number; timer: number }>(),
+  );
 
   const reapMicroTask = useCallback((ptyId: number) => {
     const entry = microFinish.current.get(ptyId);
@@ -1576,6 +1578,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       // resurface in restorables.
       if (sid) setTimeout(() => void ipc.sessionForget(sid).catch(() => {}), 500);
     });
+    // The promise is that the terminal closes itself, so don't leave that to
+    // pty:exit alone: a CLI that wedges on its way out never reaches EOF, and
+    // the finished task would sit there for good. A clean exit closes the tab
+    // long before this fires, and closing an already-closed tab is a no-op.
+    setTimeout(() => closeTabRef.current(entry.tabId), 4000);
   }, []);
 
   const finishMicroTask = useCallback(
@@ -1585,6 +1592,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       if (microFinish.current.has(ptyId)) return;
       const timer = window.setTimeout(() => reapMicroTask(ptyId), 10_000);
       microFinish.current.set(ptyId, {
+        tabId: tab.id,
         sid: liveSessionByPtyRef.current.get(ptyId),
         since: Date.now(),
         timer,
