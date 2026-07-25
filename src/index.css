@@ -2109,8 +2109,6 @@ body,
   padding: 0 12px;
   margin-bottom: -1px;
   border-right: none;
-  border-radius: var(--r-sm) var(--r-sm) 0 0;
-  corner-shape: squircle;
   background: transparent;
   transition:
     color var(--dur-fast) var(--ease-out),
@@ -2140,8 +2138,6 @@ body,
   left: 0;
   bottom: -1px;
   height: 34px;
-  border-radius: var(--r-sm) var(--r-sm) 0 0;
-  corner-shape: squircle;
   background: var(--bg);
   border: 1px solid var(--border);
   border-bottom: none;
