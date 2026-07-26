@@ -8,7 +8,17 @@ import { AGENT_CLIS, restoreCommand } from "../projects";
 import { identifyAgent, observeForLearning } from "../agentIdentity";
 import { effectiveState, silenceLabel } from "../agentState";
 import { forgetSessions, restorableFrom } from "../restorable";
-import { AgentIcon, DiffIcon, MoonIcon, RestartIcon, TerminalIcon, TrashIcon } from "./icons";
+import {
+  AgentIcon,
+  DiffIcon,
+  ExchangeIcon,
+  InstructionKindIcon,
+  MoonIcon,
+  RestartIcon,
+  TerminalIcon,
+  TrashIcon,
+} from "./icons";
+import { useEscape } from "../useEscape";
 import type { PendingItem } from "../notifications";
 
 /** Colour + label for the lifecycle dot on a running-agent row. `working` is
@@ -28,6 +38,18 @@ export const STATE_META: Record<string, { cls: string; label: string }> = {
  *  synthesising keystrokes. Anything else gets "answer in terminal" instead of
  *  buttons that might type into the wrong UI. */
 const KEYSTROKE_APPROVAL_AGENTS = new Set(["claude", "codex"]);
+
+/** What shared context actually does, in one hover rather than one paragraph.
+ *  Both halves of the header carry it, so it's there whether you reach for the
+ *  question mark or the switch.
+ *
+ *  Written for someone deciding whether to turn it on: what each agent is told,
+ *  what of yours that costs, and where the boundary is. The old copy also
+ *  promised a session "never sees its own work", which is an implementation
+ *  note phrased as a riddle — of course an agent knows what it just did. */
+const SHARE_EXPLAIN =
+  "Agents in this project can see what the others are up to. Before each prompt, an agent is told " +
+  "the recent prompts you gave the other sessions here and the files they touched.";
 
 /** Every CLI with an auto-setup arm, in the order the integrations list shows
  *  them. Mirrors SUPPORTED_AGENTS in agents.rs. */
@@ -168,6 +190,58 @@ const fmtMem = (bytes: number) =>
   bytes > 1024 * 1024 * 1024
     ? `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`
     : `${Math.round(bytes / 1024 / 1024)} MB`;
+
+/** Exactly what the other sessions in this project are being told, verbatim.
+ *
+ *  A dialog rather than an expander under the switch: this is a wall of other
+ *  people's prompts, and inline it pushed the running agents — the thing the
+ *  panel is for — off the bottom of the screen. Opened from the count on the
+ *  header line, so the panel itself stays one row. */
+function SharedDialog({
+  shared,
+  onClose,
+}: {
+  shared: ipc.SessionDigest[];
+  onClose: () => void;
+}) {
+  useEscape(onClose);
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal share-modal" onClick={(e) => e.stopPropagation()}>
+        <h3>What's shared</h3>
+        <p className="share-modal-note">{SHARE_EXPLAIN}</p>
+        {shared.length === 0 ? (
+          <p className="share-none">Nothing yet — a session appears here once it runs a prompt.</p>
+        ) : (
+          shared.map((d) => (
+            <div key={d.session_id} className="share-digest">
+              <div className="share-digest-head">
+                {d.cwd?.split("/").pop()}
+                {d.branch && <span className="share-branch">⎇ {d.branch}</span>}
+                <span className={d.idle ? "share-idle" : "share-active"}>
+                  {d.idle ? "idle" : "active"}
+                </span>
+              </div>
+              {(d.prompts ?? []).slice(-2).map((p, i) => (
+                <div key={i} className="share-prompt">
+                  {p}
+                </div>
+              ))}
+              {(d.files ?? []).length > 0 && (
+                <div className="share-files">{(d.files ?? []).slice(-6).join(", ")}</div>
+              )}
+            </div>
+          ))
+        )}
+        <div className="modal-actions">
+          <button className="btn" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /** One group. The panel used to be five identical full-width lists with
  *  identical headings, so "running now" and "restorable from before" looked
@@ -976,8 +1050,16 @@ export function AgentsPanel({
           </div>
         ) : (
           headlineInstructions.rows.slice(0, 6).map((f) => (
+            // Same mark as the Instructions tab: the CLI's logo when one CLI
+            // owns the file, the kind's shape when several read it.
             <div className="task-row" key={f.path}>
-              <span className={`instr-row-mark ${f.exists ? "" : "is-missing"}`} />
+              <span className={`instr-row-icon ${f.exists ? "" : "is-missing"}`}>
+                {f.agents.length === 1 ? (
+                  <AgentIcon id={f.agents[0]} size={13} />
+                ) : (
+                  <InstructionKindIcon kind={f.kind} size={13} />
+                )}
+              </span>
               <span
                 className={`task-label task-label-link ${f.exists ? "" : "task-label-dim"}`}
                 title={`${f.path}\nRead by ${f.agents.join(", ")}`}
@@ -991,63 +1073,43 @@ export function AgentsPanel({
         )}
       </Section>
 
-      {/* Shared context — opt-in, and always inspectable. */}
-      <div className="side-panel-head">
-        <span>Shared context</span>
-        <label className="share-toggle" title="Let agent sessions in this project see each other's recent work">
-          <input
-            type="checkbox"
-            checked={shareContext}
-            onChange={(e) => onShareContext(e.target.checked)}
-          />
-          <span>{shareContext ? "on" : "off"}</span>
-        </label>
-      </div>
-      <div className="share-help">
-        {shareContext ? (
-          <>
-            <p>
-              Each session sees a short summary of what the <strong>other</strong> sessions in this
-              project are doing, injected on its next prompt. It never sees its own work, and
-              sessions outside this project are never included.
-            </p>
-            <button className="btn-mini" onClick={() => setShowShared((v) => !v)}>
-              {showShared ? "Hide" : "Show"} what's shared ({shared.length})
+      {/* Shared context — opt-in, and always inspectable, in one line.
+          The four-line explanation is a tooltip: it is read once, and it was
+          costing a permanent block of a panel whose job is to show what the
+          agents are doing right now. What's actually shared is a click away in
+          a dialog rather than an expander, because it is a wall of other
+          sessions' prompts and it was pushing the running agents off screen.
+          The mark tells this row apart from the section headings around it —
+          it is a switch, not a list. */}
+      <div className="side-panel-head share-head">
+        <span className="share-head-title">
+          <ExchangeIcon size={13} />
+          Shared context
+        </span>
+        <span className="side-head-actions">
+          {shareContext && (
+            <button
+              className="share-peek"
+              title="See exactly what the other sessions are being told"
+              onClick={() => setShowShared(true)}
+            >
+              {shared.length} shared
             </button>
-            {showShared &&
-              (shared.length === 0 ? (
-                <p className="share-none">
-                  Nothing yet — a session appears here once it runs a prompt.
-                </p>
-              ) : (
-                shared.map((d) => (
-                  <div key={d.session_id} className="share-digest">
-                    <div className="share-digest-head">
-                      {d.cwd?.split("/").pop()}
-                      {d.branch && <span className="share-branch">⎇ {d.branch}</span>}
-                      <span className={d.idle ? "share-idle" : "share-active"}>
-                        {d.idle ? "idle" : "active"}
-                      </span>
-                    </div>
-                    {(d.prompts ?? []).slice(-2).map((p, i) => (
-                      <div key={i} className="share-prompt">
-                        {p}
-                      </div>
-                    ))}
-                    {(d.files ?? []).length > 0 && (
-                      <div className="share-files">{(d.files ?? []).slice(-6).join(", ")}</div>
-                    )}
-                  </div>
-                ))
-              ))}
-          </>
-        ) : (
-          <p>
-            Off. Sessions in this project can't see each other's work. Turning this on shares your
-            prompts and edited file paths between them.
-          </p>
-        )}
+          )}
+          <span className="share-hint" title={SHARE_EXPLAIN}>
+            ?
+          </span>
+          <label className="share-toggle" title={SHARE_EXPLAIN}>
+            <input
+              type="checkbox"
+              checked={shareContext}
+              onChange={(e) => onShareContext(e.target.checked)}
+            />
+            <span>{shareContext ? "on" : "off"}</span>
+          </label>
+        </span>
       </div>
+      {showShared && <SharedDialog shared={shared} onClose={() => setShowShared(false)} />}
 
       <Section
         title="Running agents"
