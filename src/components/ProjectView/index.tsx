@@ -53,9 +53,19 @@ import {
   eventPtyId,
   eventsForProject,
   isStopFor,
+  lastStepFor,
   pendingForRoots,
   type PendingItem,
 } from "../../notifications";
+import {
+  findRun,
+  patchRun,
+  runNote,
+  withRun,
+  withoutRun,
+  type MicroRun,
+} from "../../microRuns";
+import { renderPtyText } from "../../ptyText";
 import {
   addressPrCommentsTask,
   adhocTaskDef,
@@ -317,6 +327,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   const closeTabRef = useRef<(id: string) => void>(() => {});
+  /** Set from stopMicroRun below, for the teardown paths that run before it is
+   *  in scope (hibernation, unmount) — a detached task must never outlive the
+   *  project it was launched from. */
+  const stopMicroRunRef = useRef<(ptyId: number) => void>(() => {});
   const openFileRef = useRef<(path: string, opts?: { diff?: boolean }) => Promise<void>>(
     async () => {},
   );
@@ -456,17 +470,19 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     [],
   );
 
-  /** Open (or re-focus) a tab attached to a headless PTY the remote portal
-   *  spawned. Idempotent by pty id, so a re-dispatched event just re-focuses
-   *  the existing tab rather than stacking duplicates. */
+  /** Open (or re-focus) a tab attached to a PTY that already exists — one the
+   *  remote portal spawned, or a detached micro-task the user wants to watch.
+   *  Idempotent by pty id, so a re-dispatched event just re-focuses the existing
+   *  tab rather than stacking duplicates. Returns the tab's id, which is how a
+   *  caller that opened a viewer can close it again. */
   const attachTerminal = useCallback(
-    (ptyId: number, cwd: string, title: string) => {
+    (ptyId: number, cwd: string, title: string, icon = "📱"): string => {
       const existing = tabsRef.current.find(
         (t): t is TermSubTab => t.type === "terminal" && t.attachId === ptyId,
       );
       if (existing) {
         setActiveTabId(existing.id);
-        return;
+        return existing.id;
       }
       const id = tabId();
       setTabs((prev) => [
@@ -478,10 +494,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           title: title || "agent",
           ptyId,
           attachId: ptyId,
-          icon: "📱",
+          icon,
         },
       ]);
       setActiveTabId(id);
+      return id;
     },
     [],
   );
@@ -1307,12 +1324,52 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     [addTerminal, onNotice, getInstalled],
   );
 
+  /** Micro-tasks running with no tab of their own. The Tasks panel is their
+   *  surface; ProjectView owns their PTYs, which is why the list lives here.
+   *  Ref and state move together so an event arriving between renders (a
+   *  job_done, a pty exit) sees the list as it is now, not as it was painted. */
+  const [microRuns, setMicroRuns] = useState<MicroRun[]>([]);
+  const microRunsRef = useRef<MicroRun[]>(microRuns);
+  const updateMicroRuns = useCallback((fn: (runs: MicroRun[]) => MicroRun[]) => {
+    microRunsRef.current = fn(microRunsRef.current);
+    setMicroRuns(microRunsRef.current);
+  }, []);
+  // Ages the "· 2m" on each running row, and only while something is running:
+  // a project with no task in flight should not repaint on a timer.
+  const [microClock, setMicroClock] = useState(() => Date.now());
+  useEffect(() => {
+    if (microRuns.length === 0) return;
+    setMicroClock(Date.now());
+    const tick = window.setInterval(() => setMicroClock(Date.now()), 5_000);
+    return () => window.clearInterval(tick);
+  }, [microRuns.length]);
+
+  /** Whether `agent` can report its own ending — i.e. Canopy's MCP bridge is
+   *  registered with it, so `canopy_job_done` exists to be called. That is the
+   *  whole condition for running a task with no terminal: an agent that cannot
+   *  say "done" would sit invisibly forever, and its tab is the only way it
+   *  would ever be seen. Unreadable registry, or an unregistered CLI, keeps the
+   *  tab it has always had. */
+  const canReportDone = useCallback(async (agent: string) => {
+    try {
+      const health = await ipc.agentIntegrationHealth();
+      return health.find((h) => h.agent === agent)?.mcp === "ours";
+    } catch {
+      return false;
+    }
+  }, []);
+
   /** Launch a micro-task: a one-shot agent seeded with the task's brief plus
-   *  the completion protocol, in a tab marked ephemeral. The CANOPY_MICRO_TASK
-   *  prefix reaches the MCP sidecar through PTY env inheritance and marks the
-   *  session as one whose job_done must always be honored. Prefers claude —
-   *  the only CLI with the MCP registration — over the default agent; others
-   *  still work via the protocol's printed-fallback ending, minus auto-close. */
+   *  the completion protocol. CANOPY_MICRO_TASK reaches the MCP sidecar through
+   *  PTY env inheritance and marks the session as one whose job_done must
+   *  always be honored. Prefers claude — the CLI Canopy registers the bridge
+   *  with by default — over the default agent.
+   *
+   *  Where it runs depends on whether it can report back. An agent with the
+   *  bridge runs detached: no tab, no window taken over, just a row in Tasks
+   *  that says what it's doing and what it found. Anything else keeps the
+   *  ephemeral tab, which for those CLIs is the only place the run is visible
+   *  at all. */
   const startMicroTask = useCallback(
     async <P,>(def: MicroTaskDef<P>, payload: P, userQuery: string) => {
       const installedClis = AGENT_CLIS.filter((c) => getInstalled()[c.bin]);
@@ -1362,6 +1419,60 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         onNotice(`No agent CLI installed to run "${def.label}".`);
         return;
       }
+      // Logged at launch, not at completion: a task that is stopped, or whose
+      // agent dies without ever reporting, still has to leave a trace — and the
+      // brief is only in hand here. The protocol is stripped back off; it is the
+      // same boilerplate on every run and pure noise in the history.
+      const record = () =>
+        recordTaskStart({
+          taskId: def.id,
+          label: def.label,
+          icon: def.icon,
+          agent: cli.id,
+          cwd: dir,
+          projectId: project.id,
+          projectName: project.name,
+          brief: def.buildContext(payload, userQuery, env),
+        });
+      /** Type the brief in for a CLI that takes no prompt argument: write, then
+       *  submit a beat later, once the agent has had time to come up. */
+      const seedPrompt = (pty: number) => {
+        void ipc.ptyWrite(pty, seed);
+        setTimeout(() => void ipc.ptyWrite(pty, "\r"), 250);
+      };
+
+      if (await canReportDone(agent)) {
+        let pty: number;
+        try {
+          const res = await ipc.ptySpawnDetached({
+            cwd: dir,
+            command: start.command,
+            env: [["CANOPY_MICRO_TASK", "1"]],
+          });
+          pty = res.id;
+        } catch (err) {
+          onNotice(`Couldn't start "${def.label}": ${String(err)}`, "error");
+          return;
+        }
+        updateMicroRuns((runs) =>
+          withRun(runs, {
+            ptyId: pty,
+            runId: record(),
+            taskId: def.id,
+            label: def.label,
+            icon: def.icon,
+            cwd: dir,
+            agent: cli.id,
+            startedAt: Date.now(),
+          }),
+        );
+        if (start.typePrompt) setTimeout(() => seedPrompt(pty), 2500);
+        // Said once per launch because the alternative is a click that appears
+        // to do nothing: the work is real, it is just not in front of you.
+        onNotice(`“${def.label}” is running — watch it in Tasks.`);
+        return;
+      }
+
       const id = addTerminal(
         dir,
         `CANOPY_MICRO_TASK=1 ${start.command}`,
@@ -1369,33 +1480,17 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         def.icon,
       );
       if (!id) return;
-      // Logged at launch, not at completion: a task that is stopped, or whose
-      // agent dies without ever reporting, still has to leave a trace — and the
-      // brief is only in hand here. The protocol is stripped back off; it is the
-      // same boilerplate on every run and pure noise in the history.
-      const runId = recordTaskStart({
-        taskId: def.id,
-        label: def.label,
-        icon: def.icon,
-        agent: cli.id,
-        cwd: dir,
-        projectId: project.id,
-        projectName: project.name,
-        brief: def.buildContext(payload, userQuery, env),
-      });
-      patchTabRaw(id, { micro: { taskId: def.id, runId } } as Partial<SubTab>);
+      patchTabRaw(id, { micro: { taskId: def.id, runId: record() } } as Partial<SubTab>);
       if (start.typePrompt) {
         setTimeout(() => {
           const pty = tabsRef.current.find(
             (t): t is TermSubTab => t.id === id && t.type === "terminal",
           )?.ptyId;
-          if (pty == null) return;
-          void ipc.ptyWrite(pty, seed);
-          setTimeout(() => void ipc.ptyWrite(pty, "\r"), 250);
+          if (pty != null) seedPrompt(pty);
         }, 2500);
       }
     },
-    [addTerminal, patchTabRaw, onNotice, project.id, getInstalled],
+    [addTerminal, patchTabRaw, onNotice, project.id, getInstalled, canReportDone, updateMicroRuns],
   );
 
   /** Run a brief that was composed on the spot (a diff surface's "ask about
@@ -1410,44 +1505,81 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     [startMicroTask],
   );
 
-  /** Micro-task tabs waiting to close: job_done was acknowledged, and we hold
+  /** Micro-tasks waiting to be torn down: job_done was acknowledged, and we hold
    *  off killing the PTY until the agent's turn actually ends (its Stop hook)
    *  so the tool result and last words land — with a timer as backstop for a
    *  broken hook. Keyed by pty id; sid is captured at job_done time because the
-   *  event stream goes quiet once the PTY dies. */
+   *  event stream goes quiet once the PTY dies. `tabId` is set only for a task
+   *  that ran in a tab; a detached one has nothing to close. */
   const microFinish = useRef(
-    new Map<number, { tabId: string; sid?: string; since: number; timer: number }>(),
+    new Map<number, { tabId?: string; sid?: string; since: number; timer: number }>(),
   );
 
-  const reapMicroTask = useCallback((ptyId: number) => {
-    const entry = microFinish.current.get(ptyId);
-    if (!entry) return;
-    microFinish.current.delete(ptyId);
-    window.clearTimeout(entry.timer);
-    const sid = entry.sid ?? liveSessionByPtyRef.current.get(ptyId);
-    // Grace-kill (SIGTERM + 2.5s) lets claude flush its transcript and run its
-    // last hooks; pty:exit then auto-closes the tab like any spent terminal.
-    void ipc.ptyKill(ptyId).finally(() => {
-      // The SessionEnd hook rewrites the digest as the CLI dies — forget after
-      // that final write, or the delete would race it and the session would
-      // resurface in restorables.
-      if (sid) setTimeout(() => void ipc.sessionForget(sid).catch(() => {}), 500);
-    });
-    // The promise is that the terminal closes itself, so don't leave that to
-    // pty:exit alone: a CLI that wedges on its way out never reaches EOF, and
-    // the finished task would sit there for good. A clean exit closes the tab
-    // long before this fires, and closing an already-closed tab is a no-op.
-    setTimeout(() => closeTabRef.current(entry.tabId), 4000);
+  /** The transcript of a detached run, read off the PTY's own scrollback and
+   *  replayed through a terminal parser — the equivalent of what closeTab
+   *  captures from a tab's xterm buffer, and the last chance to take it: the
+   *  session is gone the moment the PTY is killed. */
+  const captureDetachedOutput = useCallback(async (ptyId: number, runId?: string) => {
+    if (!runId) return;
+    try {
+      const raw = await ipc.ptyOutput(ptyId, 64 * 1024);
+      const text = raw ? await renderPtyText(raw) : "";
+      if (text) updateTaskRun(runId, { output: text });
+    } catch {
+      // A missing transcript is a smaller loss than a task that never settles.
+    }
   }, []);
 
+  const reapMicroTask = useCallback(
+    (ptyId: number) => {
+      const entry = microFinish.current.get(ptyId);
+      if (!entry) return;
+      microFinish.current.delete(ptyId);
+      window.clearTimeout(entry.timer);
+      const sid = entry.sid ?? liveSessionByPtyRef.current.get(ptyId);
+      const detached = findRun(microRunsRef.current, ptyId);
+      const kill = () =>
+        // Grace-kill (SIGTERM + 2.5s) lets claude flush its transcript and run
+        // its last hooks; pty:exit then auto-closes a tab like any spent
+        // terminal, and settles a detached run's row.
+        void ipc.ptyKill(ptyId).finally(() => {
+          // The SessionEnd hook rewrites the digest as the CLI dies — forget
+          // after that final write, or the delete would race it and the session
+          // would resurface in restorables.
+          if (sid) setTimeout(() => void ipc.sessionForget(sid).catch(() => {}), 500);
+        });
+      if (detached) {
+        // Capture first, kill second: the scrollback dies with the session.
+        void captureDetachedOutput(ptyId, detached.runId).finally(kill);
+        updateMicroRuns((runs) => withoutRun(runs, ptyId));
+        // A terminal the user opened onto this run has nothing left to show.
+        if (detached.viewTabId) {
+          const viewTabId = detached.viewTabId;
+          setTimeout(() => closeTabRef.current(viewTabId), 4000);
+        }
+        return;
+      }
+      kill();
+      // The promise is that the terminal closes itself, so don't leave that to
+      // pty:exit alone: a CLI that wedges on its way out never reaches EOF, and
+      // the finished task would sit there for good. A clean exit closes the tab
+      // long before this fires, and closing an already-closed tab is a no-op.
+      if (entry.tabId) {
+        const tabId = entry.tabId;
+        setTimeout(() => closeTabRef.current(tabId), 4000);
+      }
+    },
+    [captureDetachedOutput, updateMicroRuns],
+  );
+
+  /** Begin the ending: wait out the turn, then reap. Idempotent per pty, so a
+   *  task that reports twice still tears down once. */
   const finishMicroTask = useCallback(
-    (tab: TermSubTab) => {
-      if (tab.ptyId == null) return;
-      const ptyId = tab.ptyId;
+    (ptyId: number, tabId?: string) => {
       if (microFinish.current.has(ptyId)) return;
       const timer = window.setTimeout(() => reapMicroTask(ptyId), 10_000);
       microFinish.current.set(ptyId, {
-        tabId: tab.id,
+        tabId,
         sid: liveSessionByPtyRef.current.get(ptyId),
         since: Date.now(),
         timer,
@@ -1455,6 +1587,68 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     },
     [reapMicroTask],
   );
+
+  /** Call a detached run off: settle its history entry the way closing its tab
+   *  would have, keep what it printed, then kill the PTY. */
+  const stopMicroRun = useCallback(
+    (ptyId: number) => {
+      const run = findRun(microRunsRef.current, ptyId);
+      if (!run) return;
+      updateMicroRuns((runs) => withoutRun(runs, ptyId));
+      const sid = liveSessionByPtyRef.current.get(ptyId);
+      void captureDetachedOutput(ptyId, run.runId).finally(() => {
+        if (run.runId) endAbandonedRun(run.runId);
+        void ipc.ptyKill(ptyId).finally(() => {
+          if (sid) setTimeout(() => void ipc.sessionForget(sid).catch(() => {}), 500);
+        });
+      });
+    },
+    [captureDetachedOutput, updateMicroRuns],
+  );
+  stopMicroRunRef.current = stopMicroRun;
+
+  // Closing the project (or quitting to it) takes its detached tasks with it.
+  // Their PTYs belong to no tab, so nothing else would ever kill them, and an
+  // agent still working for a project that is gone has nobody left to report to.
+  useEffect(
+    () => () => {
+      for (const r of [...microRunsRef.current]) stopMicroRunRef.current(r.ptyId);
+    },
+    [],
+  );
+
+  /** Look at a detached run: a terminal attached to its PTY, which streams the
+   *  scrollback first, so opening it mid-run shows everything up to now. The
+   *  viewer is a window onto the run, not the run itself — closing it detaches
+   *  and the agent keeps going. */
+  const showMicroRun = useCallback(
+    (ptyId: number) => {
+      const run = findRun(microRunsRef.current, ptyId);
+      if (!run) return;
+      const id = attachTerminal(ptyId, run.cwd, `${run.label} · task`, run.icon ?? "⚡");
+      updateMicroRuns((runs) => patchRun(runs, ptyId, { viewTabId: id }));
+    },
+    [attachTerminal, updateMicroRuns],
+  );
+
+  // A detached run whose agent quit on its own — it crashed, or the CLI exited
+  // without ever calling job_done. Nothing is left to report, so settle the
+  // history entry rather than leaving a row that will never finish. A no-op for
+  // a run that already ended (a reap kills the pty, which lands here too).
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    void ipc
+      .onPtyExit(({ id }) => {
+        const run = findRun(microRunsRef.current, id);
+        if (!run) return;
+        updateMicroRuns((runs) => withoutRun(runs, id));
+        if (run.runId) endAbandonedRun(run.runId);
+      })
+      .then((u) => {
+        un = u;
+      });
+    return () => un?.();
+  }, [updateMicroRuns]);
 
   // The wait-for-Stop half of the micro-task close: once the turn that called
   // job_done ends, reap. `ts >= since` skips Stop events from earlier turns of
@@ -1642,29 +1836,30 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         return;
       }
       // A micro-task reported in (App already surfaced the notice). Done →
-      // wait out the turn, then kill + close + forget. Blocked → bring the tab
-      // forward so the user can answer. Only ever closes tabs marked micro: a
-      // normal session that somehow calls the tool gets the notice and nothing
-      // else.
+      // wait out the turn, then kill + forget, closing the tab if it had one.
+      // Blocked → the agent wants the user: bring its tab forward, or mark the
+      // Tasks row for a detached run, which is where the user goes to answer.
+      // Only ever acts on a run Canopy started: a normal session that somehow
+      // calls the tool gets the notice and nothing else.
       if (a.kind === "job_done") {
         const tab = tabsRef.current.find(
-          (t): t is TermSubTab => t.type === "terminal" && a.ptyId != null && t.ptyId === a.ptyId,
+          (t): t is TermSubTab =>
+            t.type === "terminal" && a.ptyId != null && t.ptyId === a.ptyId && Boolean(t.micro),
         );
-        if (!tab || !tab.micro) return;
-        const runId = tab.micro.runId;
+        const detached = findRun(microRunsRef.current, a.ptyId);
+        const ptyId = tab?.ptyId ?? detached?.ptyId;
+        if (ptyId == null) return;
+        const runId = tab?.micro?.runId ?? detached?.runId;
         // Files the session touched, when a hook wrote a digest for it — the
         // same pty→digest binding the Agents panel uses.
-        const files =
-          tab.ptyId != null
-            ? digestBySurface(wsDigestsRef.current, thisInstanceRef.current).get(
-                String(tab.ptyId),
-              )?.files
-            : undefined;
+        const files = digestBySurface(wsDigestsRef.current, thisInstanceRef.current).get(
+          String(ptyId),
+        )?.files;
         if (a.status === "blocked") {
           // Blocked is not an ending — the agent is waiting on the user and the
           // run continues. Keep what it said and mark that it asked, so that if
-          // the user walks away instead of answering, closing the tab can settle
-          // it as "blocked" rather than the flatter "stopped".
+          // the user walks away instead of answering, the run settles as
+          // "blocked" rather than the flatter "stopped".
           if (runId)
             updateTaskRun(runId, {
               summary: a.summary,
@@ -1672,11 +1867,15 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               files,
               askedForUser: true,
             });
-          setActiveTabId(tab.id);
+          // A detached run does not steal the window — the toast App raised
+          // said what happened, and the Tasks row now says "Needs you" with the
+          // terminal one click away.
+          if (tab) setActiveTabId(tab.id);
+          else updateMicroRuns((runs) => patchRun(runs, ptyId, { blocked: true }));
         } else {
           if (runId)
             recordTaskEnd(runId, { status: "done", summary: a.summary, url: a.url, files });
-          finishMicroTask(tab);
+          finishMicroTask(ptyId, tab?.id);
         }
         return;
       }
@@ -1711,7 +1910,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     };
     window.addEventListener("canopy:agent-action", onAction);
     return () => window.removeEventListener("canopy:agent-action", onAction);
-  }, [project.id, openPreview, addTerminal, restartRun, finishMicroTask]);
+  }, [project.id, openPreview, addTerminal, restartRun, finishMicroTask, updateMicroRuns]);
 
   // A browser-control op (canopy_browser_*): pick the preview tab it targets —
   // by origin when it names a URL, else the active/first preview tab, creating
@@ -2075,15 +2274,20 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     () => tabs.filter((t): t is TermSubTab => t.type === "terminal" && Boolean(t.run)),
     [tabs],
   );
+  // Every pty this project owns. Detached micro-task runs are in here too, and
+  // have to be: this set is what filters the global hook stream down to ours,
+  // and a run with no tab would otherwise have no state, no last step, and no
+  // session to forget when it ends.
   const ptyIds = useMemo(
     () =>
-      new Set(
-        tabs
+      new Set([
+        ...tabs
           .filter((t): t is TermSubTab => t.type === "terminal")
           .map((t) => t.ptyId)
           .filter((id): id is number => id != null),
-      ),
-    [tabs],
+        ...microRuns.map((r) => r.ptyId),
+      ]),
+    [tabs, microRuns],
   );
   const projectStats = stats; // already filtered to this project's ptys at the door
   // Hooks are global, so the raw stream carries every agent on the machine.
@@ -2182,6 +2386,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       // which for a feature whose whole point is reclaiming it would be a
       // strange thing to skip. closeTab already knows how to end each kind.
       if (ok) for (const t of [...tabsRef.current]) closeTabRef.current(t.id);
+      // Detached runs have no tab to close, and no way home either: a
+      // micro-task session is never restored (resuming a finished job re-runs
+      // it), so a task in flight when the project goes to sleep ends the same
+      // way its tab-bound cousin just did — stopped, and recorded as such.
+      if (ok) for (const r of [...microRunsRef.current]) stopMicroRunRef.current(r.ptyId);
       window.dispatchEvent(
         new CustomEvent(HIBERNATED_EVENT, { detail: { projectId: project.id, ok } }),
       );
@@ -2562,43 +2771,81 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // terminal whose PTY tree contains an agent process, then match by cwd.
   /** Focus the tab a given pty is running in, and flash it so the eye lands
    *  on which of several near-identical tabs just became active. */
-  const jumpToPty = useCallback((ptyId: number) => {
-    const target = tabsRef.current.find(
-      (t): t is TermSubTab => t.type === "terminal" && t.ptyId === ptyId,
-    );
-    if (!target) return;
-    setActiveTabId(target.id);
-    setFlashTabId(target.id);
-    window.setTimeout(() => setFlashTabId((c) => (c === target.id ? null : c)), 1200);
-    setTimeout(() => termHandles.current.get(target.id)?.focus(), 50);
-  }, []);
+  const jumpToPty = useCallback(
+    (ptyId: number) => {
+      const target = tabsRef.current.find(
+        (t): t is TermSubTab => t.type === "terminal" && t.ptyId === ptyId,
+      );
+      // A detached micro-task has no tab to jump to — open one onto it, so a
+      // row in the Agents panel is never a click that does nothing.
+      if (!target) {
+        if (findRun(microRunsRef.current, ptyId)) showMicroRun(ptyId);
+        return;
+      }
+      setActiveTabId(target.id);
+      setFlashTabId(target.id);
+      window.setTimeout(() => setFlashTabId((c) => (c === target.id ? null : c)), 1200);
+      setTimeout(() => termHandles.current.get(target.id)?.focus(), 50);
+    },
+    [showMicroRun],
+  );
+
+  /** The terminal a pending card came from, as a pty and (when there is one) the
+   *  tab showing it. Order matters: the event's own pty stamp is an identity,
+   *  and a detached micro-task's pty has to be checked against it *before* any
+   *  cwd guessing — otherwise a permission prompt raised by a task with no tab
+   *  falls through to "some terminal in the same directory", and the keystroke
+   *  that answers it lands in another agent's session. */
+  const pendingTerminal = useCallback(
+    (item: PendingItem): { ptyId: number; tabId?: string } | null => {
+      const termTabs = tabsRef.current.filter((t): t is TermSubTab => t.type === "terminal");
+      const byPty = termTabs.find((t) => t.ptyId != null && t.ptyId === item.pty);
+      if (byPty?.ptyId != null) return { ptyId: byPty.ptyId, tabId: byPty.id };
+      const detached = findRun(microRunsRef.current, item.pty);
+      if (detached) return { ptyId: detached.ptyId };
+      const byCwd = termTabs.find((t) => item.cwd === t.cwd || item.cwd.startsWith(t.cwd + "/"));
+      return byCwd?.ptyId != null ? { ptyId: byCwd.ptyId, tabId: byCwd.id } : null;
+    },
+    [],
+  );
+
+  /** Put the terminal a card came from in front — opening one onto a detached
+   *  run if that is where it came from. */
+  const revealPending = useCallback(
+    (found: { ptyId: number; tabId?: string }) => {
+      if (!found.tabId) {
+        showMicroRun(found.ptyId);
+        return;
+      }
+      const tabId = found.tabId;
+      setActiveTabId(tabId);
+      setTimeout(() => termHandles.current.get(tabId)?.focus(), 50);
+    },
+    [showMicroRun],
+  );
 
   const jumpToTerminal = useCallback(
     (item: PendingItem) => {
-      const termTabs = tabsRef.current.filter(
-        (t): t is TermSubTab => t.type === "terminal",
-      );
+      const found = pendingTerminal(item);
+      if (found) {
+        revealPending(found);
+        return;
+      }
+      // Nothing matched by pty, by run, or by directory: fall back to an agent
+      // terminal in this project, which is where an unstamped event (a CLI whose
+      // hooks can't carry the pty) most likely came from.
+      const termTabs = tabsRef.current.filter((t): t is TermSubTab => t.type === "terminal");
       const agentPtyIds = new Set(
         stats.filter((s) => identifyAgent(s.agent_hint)).map((s) => s.id),
       );
       const target =
-        // The event's own pty stamp is an identity, not a guess — prefer it.
-        termTabs.find((t) => t.ptyId != null && t.ptyId === item.pty) ??
-        termTabs.find(
-          (t) =>
-            t.ptyId != null &&
-            agentPtyIds.has(t.ptyId) &&
-            (item.cwd === t.cwd || item.cwd.startsWith(t.cwd + "/")),
-        ) ??
-        termTabs.find((t) => t.ptyId != null && agentPtyIds.has(t.ptyId)) ??
-        termTabs.find((t) => item.cwd === t.cwd || item.cwd.startsWith(t.cwd + "/")) ??
-        termTabs[0];
+        termTabs.find((t) => t.ptyId != null && agentPtyIds.has(t.ptyId)) ?? termTabs[0];
       if (target) {
         setActiveTabId(target.id);
         setTimeout(() => termHandles.current.get(target.id)?.focus(), 50);
       }
     },
-    [stats],
+    [stats, pendingTerminal, revealPending],
   );
 
   // Answer a questionnaire straight from the panel by synthesising the
@@ -2615,13 +2862,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // is right there if a key mis-lands (best-effort, by design).
   const answerQuestions = useCallback(
     (item: PendingItem, selections: number[][]) => {
-      const termTabs = tabsRef.current.filter(
-        (t): t is TermSubTab => t.type === "terminal",
-      );
-      const target =
-        termTabs.find((t) => t.ptyId != null && t.ptyId === item.pty) ??
-        termTabs.find((t) => item.cwd === t.cwd || item.cwd.startsWith(t.cwd + "/"));
-      if (target?.ptyId == null) {
+      const found = pendingTerminal(item);
+      if (!found) {
         onNotice("Can't find the terminal this question came from — answer there.");
         return;
       }
@@ -2630,11 +2872,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       // (the CLI records "declined"), so the panel routes those to the terminal
       // and never calls this — the guard just makes that invariant explicit.
       if ((item.questions?.length ?? 0) > 1) {
-        setActiveTabId(target.id);
-        setTimeout(() => termHandles.current.get(target.id)?.focus(), 50);
+        revealPending(found);
         return;
       }
-      const ptyId = target.ptyId;
+      const ptyId = found.ptyId;
       let delay = 0;
       const press = (keys: string) => {
         const at = delay;
@@ -2646,10 +2887,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         press("\r"); // confirm the single-page answer
       }
       onDismissPending(item.key);
-      setActiveTabId(target.id);
-      setTimeout(() => termHandles.current.get(target.id)?.focus(), 50);
+      revealPending(found);
     },
-    [onNotice, onDismissPending],
+    [onNotice, onDismissPending, pendingTerminal, revealPending],
   );
 
   // Respond to a permission prompt straight from the panel by synthesising the
@@ -2659,17 +2899,12 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // path as answerQuestion, so it inherits the same terminal-focus behaviour.
   const respondPermission = useCallback(
     (item: PendingItem, decision: "approve" | "deny") => {
-      const termTabs = tabsRef.current.filter(
-        (t): t is TermSubTab => t.type === "terminal",
-      );
-      const target =
-        termTabs.find((t) => t.ptyId != null && t.ptyId === item.pty) ??
-        termTabs.find((t) => item.cwd === t.cwd || item.cwd.startsWith(t.cwd + "/"));
-      if (target?.ptyId == null) {
+      const found = pendingTerminal(item);
+      if (!found) {
         onNotice("Can't find the terminal this prompt came from — answer there.");
         return;
       }
-      const ptyId = target.ptyId;
+      const ptyId = found.ptyId;
       if (decision === "approve") {
         void ipc.ptyWrite(ptyId, "1");
         setTimeout(() => void ipc.ptyWrite(ptyId, "\r"), 150);
@@ -2677,10 +2912,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         void ipc.ptyWrite(ptyId, "\x1b");
       }
       onDismissPending(item.key);
-      setActiveTabId(target.id);
-      setTimeout(() => termHandles.current.get(target.id)?.focus(), 50);
+      revealPending(found);
     },
-    [onNotice, onDismissPending],
+    [onNotice, onDismissPending, pendingTerminal, revealPending],
   );
 
   // Looking at the terminal clears its *calm* cards — a "finished" notice has
@@ -2922,11 +3156,27 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     },
     [isAgentTab, liveSessionByPty, wsDigests, busyPtyIds],
   );
-  // Micro-task tabs, for the Tasks panel's Running list. Same state resolution
-  // as the tab dots so the two never disagree.
+  // Everything the Tasks panel's Running list shows: the tasks running detached
+  // (the usual case — no tab, this row is where they live) and the ones that
+  // kept a tab because their agent can't report its own ending. Same state
+  // resolution as the tab dots, so a task that does have a tab never disagrees
+  // with it. Re-derived on `now` so the "· 2m" ages while you watch it.
   const runningMicro: RunningMicroTask[] = useMemo(
-    () =>
-      tabs
+    () => [
+      ...microRuns.map((r) => {
+        const sid = liveSessionByPty.get(r.ptyId);
+        const state = (sid ? wsDigests.find((d) => d.session_id === sid)?.state : undefined) ?? "idle";
+        return {
+          ptyId: r.ptyId,
+          title: r.label,
+          state,
+          icon: r.icon,
+          note: runNote(r, state, lastStepFor(projectEvents, r.ptyId), microClock),
+          blocked: Boolean(r.blocked) || state === "waiting",
+          watching: Boolean(r.viewTabId),
+        };
+      }),
+      ...tabs
         .filter((t): t is TermSubTab => t.type === "terminal" && Boolean(t.micro))
         .map((t) => ({
           tabId: t.id,
@@ -2934,7 +3184,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           state: tabState(t),
           icon: t.icon,
         })),
-    [tabs, tabState],
+    ],
+    [microRuns, tabs, tabState, liveSessionByPty, wsDigests, projectEvents, microClock],
   );
   const stripTabs = useMemo(
     () => tabs.filter((t) => t.type !== "terminal" || !t.run),
@@ -4607,8 +4858,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           components={components.map((c) => ({ label: c.label, path: c.path }))}
           running={runningMicro}
           seed={taskSeed}
-          onFocus={setActiveTabId}
-          onStop={closeTab}
+          onShow={(t) => (t.ptyId != null ? showMicroRun(t.ptyId) : t.tabId && setActiveTabId(t.tabId))}
+          onStop={(t) => (t.ptyId != null ? stopMicroRun(t.ptyId) : t.tabId && closeTab(t.tabId))}
           onRunCustom={(task: CustomMicroTask, dir: string, query: string) =>
             void startMicroTask(customTaskDef(task), { dir }, query)
           }

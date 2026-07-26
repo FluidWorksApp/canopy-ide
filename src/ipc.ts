@@ -59,6 +59,23 @@ export const ptyKillAll = () => invoke<void>("pty_kill_all");
 export const ptySetTitle = (id: number, title: string) =>
   gone(invoke<void>("pty_set_title", { id, title }));
 
+/** Spawn a PTY with no tab attached to it: a micro-task's agent, which runs its
+ *  one job and reports through canopy_job_done. Nothing is announced, so no tab
+ *  opens; the Tasks panel watches it by pty id, and `ptyAttach` is how the user
+ *  looks at it if they want to. `command` runs as the shell's argument, so the
+ *  PTY exits when the agent does. */
+export const ptySpawnDetached = (opts: {
+  cwd?: string;
+  command: string;
+  env?: [string, string][];
+}) => invoke<SpawnResult>("pty_spawn_detached", opts);
+
+/** The tail of a PTY's raw output, escape sequences and all — the transcript of
+ *  a run with no xterm buffer to read. Feed it through renderPtyText (ptyText.ts)
+ *  to get something a human can read. */
+export const ptyOutput = (id: number, max?: number) =>
+  invoke<string | null>("pty_output", { id, max }).catch(() => null);
+
 /** Attach to a PTY that already exists (spawned headless from the remote
  *  portal). Streams the scrollback snapshot first, then live output — the same
  *  byte contract as ptySpawn's onData, but no ack/backpressure: a headless PTY

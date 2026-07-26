@@ -7,6 +7,7 @@
 // the optional extra context — and the directory, when the project has more
 // than one component — then hands off to ProjectView's startMicroTask.
 import { useEffect, useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   EFFECT_HEADING,
   MICRO_TASKS,
@@ -18,11 +19,22 @@ import { getSettings, updateSettings } from "../settings";
 import { completedTaskRuns, TASK_HISTORY_EVENT, type TaskRun } from "../taskHistory";
 import { PlayIcon, StopIcon, TrashIcon } from "./icons";
 
+/** A task in flight. Detached runs (the usual kind) carry a `ptyId` and no tab —
+ *  this row is the only place they appear, so it has to say what a tab would
+ *  have: what it's doing, whether it needs you, and how to look at it. A run
+ *  that kept its tab (an agent that can't report its own ending) carries a
+ *  `tabId` instead and is focused rather than attached to. */
 export interface RunningMicroTask {
-  tabId: string;
+  tabId?: string;
+  ptyId?: number;
   title: string;
   state: "working" | "waiting" | "idle" | "ended";
   icon?: string;
+  /** One line under the title: the last tool it used, or that it needs you. */
+  note?: string;
+  blocked?: boolean;
+  /** A terminal is already open on this run. */
+  watching?: boolean;
 }
 
 interface TasksPanelProps {
@@ -33,10 +45,10 @@ interface TasksPanelProps {
    *  decides which of the two opens. The nonce distinguishes two seeds with
    *  identical text, so the composer re-opens each time. */
   seed?: { brief: string; mode?: "save" | "once"; nonce: number } | null;
-  /** Bring the task's terminal tab forward. */
-  onFocus: (tabId: string) => void;
-  /** Close the task's tab (kills its agent; the session is forgotten). */
-  onStop: (tabId: string) => void;
+  /** Look at the task: focus its tab, or open a terminal onto a detached run. */
+  onShow: (task: RunningMicroTask) => void;
+  /** Call the task off (kills its agent; the session is forgotten). */
+  onStop: (task: RunningMicroTask) => void;
   /** Launch a custom task in `dir` with the user's extra context. */
   onRunCustom: (task: CustomMicroTask, dir: string, query: string) => void;
   /** Run a brief once, without adding it to the list. */
@@ -56,7 +68,7 @@ export function TasksPanel({
   components,
   running,
   seed,
-  onFocus,
+  onShow,
   onStop,
   onRunCustom,
   onRunOneOff,
@@ -250,17 +262,34 @@ export function TasksPanel({
             <span className="badge">{running.length}</span>
           </div>
           {running.map((r) => (
-            <div className="task-row" key={r.tabId}>
+            <div
+              className={`task-row task-row-running${r.blocked ? " task-row-blocked" : ""}`}
+              key={r.tabId ?? `pty:${r.ptyId}`}
+            >
               <span className={`agent-state-dot st-${r.state}`} title={r.state} />
+              {/* The whole row opens the run: a task with no tab needs one
+                  obvious way in, and "where is it?" is the first thing anyone
+                  asks about work that isn't on screen. */}
               <span
                 className="task-label task-label-link"
-                title="Show this task's terminal"
-                onClick={() => onFocus(r.tabId)}
+                title={
+                  r.watching
+                    ? "Show the terminal you have open on this task"
+                    : r.blocked
+                      ? "This task is waiting on you — open its terminal to answer"
+                      : "Watch this task's terminal"
+                }
+                onClick={() => onShow(r)}
               >
                 {r.icon ? `${r.icon} ` : ""}
                 {r.title}
+                {r.note && <span className="task-note-inline">{r.note}</span>}
               </span>
-              <button className="btn-icon" title="Stop and close" onClick={() => onStop(r.tabId)}>
+              <button
+                className="btn-icon"
+                title="Stop this task"
+                onClick={() => onStop(r)}
+              >
                 <StopIcon size={12} />
               </button>
             </div>
@@ -282,10 +311,13 @@ export function TasksPanel({
               ⤢
             </button>
           </div>
-          {/* The last few, as a way in. Everything else is a click away — the
-              panel is not the place to page through a hundred finished jobs. */}
+          {/* The last few with what they reported — a task that ran unwatched
+              has nowhere else to say it, and "3 blocking, 2 nits" in the panel
+              is the whole point of having sent it off. Everything else is a
+              click away; the panel is not the place to page through a hundred
+              finished jobs. */}
           {done.slice(0, 3).map((r) => (
-            <div className="task-row" key={r.id}>
+            <div className="task-row task-row-done" key={r.id}>
               <span className={`task-done-dot st-${r.status}`} title={r.status} />
               <span
                 className="task-label task-label-link"
@@ -294,7 +326,17 @@ export function TasksPanel({
               >
                 {r.icon ? `${r.icon} ` : ""}
                 {r.label}
+                {r.summary && <span className="task-note-inline">{r.summary}</span>}
               </span>
+              {r.url && (
+                <button
+                  className="btn-icon"
+                  title={`Open ${r.url}`}
+                  onClick={() => void openUrl(r.url as string)}
+                >
+                  ↗
+                </button>
+              )}
             </div>
           ))}
         </>

@@ -3724,6 +3724,34 @@ body.dragging-tab * {
   font-size: 10px;
 }
 
+/* A task with no tab says everything about itself here: what it is doing under
+   its name while it runs, what it reported once it's done. Two lines, so the
+   row stops being a bare label and starts being the surface. */
+.task-row-running,
+.task-row-done {
+  align-items: flex-start;
+}
+.task-row-running .agent-state-dot,
+.task-row-done .task-done-dot {
+  margin-top: 5px;
+}
+.task-note-inline {
+  display: block;
+  color: var(--text-dim);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-label-link:hover .task-note-inline {
+  text-decoration: none;
+}
+/* The one state that needs a human. Marked on the row rather than shouted in a
+   toast: the task is still running, it just can't finish without you. */
+.task-row-blocked .task-note-inline {
+  color: var(--warn, #e0af68);
+}
+
 /* Outcome dot on a finished run. Deliberately not .agent-state-dot: these are
    terminal states, so none of them pulse, and "done" earns a solid colour where
    an idle live agent only gets grey. */
