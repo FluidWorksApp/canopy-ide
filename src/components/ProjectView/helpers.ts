@@ -213,7 +213,8 @@ export interface ProjectViewProps {
   relay: RelayHandle;
 }
 
-/** One tab as canopy_editor_state describes it. */
+/** One tab as canopy_editor_state describes it: enough for an agent to know
+ *  what the user has in front of them, without shipping the tab's contents. */
 export function describeTab(tab: SubTab | undefined) {
   if (!tab) return null;
   switch (tab.type) {

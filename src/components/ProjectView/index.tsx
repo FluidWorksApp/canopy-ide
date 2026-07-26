@@ -120,6 +120,7 @@ import { useCliLauncher } from "./hooks/useCliLauncher";
 import {
   ago,
   describeTab,
+  previewLabel,
   tabDisplayLabel,
   tabId,
   type SideTab,
@@ -141,7 +142,8 @@ import {
   type PreviewSubTab,
   type RailChip,
   type ProjectViewProps,
-} from "./types";
+} from "./helpers";
+export { tabDisplayLabel, previewLabel };
 export type {
   SideTab,
   SubTab,
@@ -164,7 +166,14 @@ export type {
 
 const decoder = new TextDecoder();
 
-/** Endpoints a shell is actually serving, offered where you are looking. */
+/** Endpoints a shell is actually serving, offered where you are looking.
+ *
+ *  The ports are already known — `lsof` collects them for the resource
+ *  breakdown — but they were only ever shown in side panels, so starting a dev
+ *  server still meant reading its banner and retyping the URL. Rendered as an
+ *  overlay rather than a bar above the grid on purpose: the terminal's size is
+ *  what the pty is told, and anything that changes its height risks the
+ *  wrap-at-the-wrong-column class of bug. An absolute chip changes nothing. */
 function TermPorts({
   ptyId,
   stats,
@@ -229,7 +238,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const [shareProjectMenuOpen, setShareProjectMenuOpen] = useState(false);
   const [shellMenuOpen, setShellMenuOpen] = useState(false);
   const [runMenuOpen, setRunMenuOpen] = useState(false);
-  const { installed, prereqs, installedRef, cliUpdates, refreshInstalled, refreshUpdates } = useCliLauncher();
+  const { installed, prereqs, getInstalled, cliUpdates, refreshInstalled, refreshUpdates } = useCliLauncher();
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
   const [palette, setPalette] = useState<PaletteMode | null>(null);
   // When set, the whole project's file surface (tree, quick-open, search, new
@@ -865,7 +874,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       // The chosen agent, else the preference if it is installed, else the
       // first installed CLI. Never a hardcoded name, and never one that
       // isn't on the machine.
-      const installedClis = AGENT_CLIS.filter((c) => installedRef.current[c.bin]);
+      const installedClis = AGENT_CLIS.filter((c) => getInstalled()[c.bin]);
       const preferred = getSettings().defaultAgent;
       const agent =
         agentId ||
@@ -911,7 +920,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         onNotice(`Couldn't start work on ${ticket.id}: ${String(err)}`);
       }
     },
-    [ticketRepo, addTerminal, onNotice, installedRef],
+    [ticketRepo, addTerminal, onNotice, getInstalled],
   );
 
   /** Check out a PR's head branch in a worktree (reusing one already on it)
@@ -926,7 +935,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const startPrAgent = useCallback(
     async (mode: "review" | "resolve", repo: string, pr: ipc.PrInfo, agentId?: string) => {
       const noun = mode === "resolve" ? "conflict resolution on" : "a review of";
-      const installedClis = AGENT_CLIS.filter((c) => installedRef.current[c.bin]);
+      const installedClis = AGENT_CLIS.filter((c) => getInstalled()[c.bin]);
       const preferred = getSettings().defaultAgent;
       const agent =
         agentId ||
@@ -977,7 +986,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         );
       }
     },
-    [addTerminal, onNotice, installedRef],
+    [addTerminal, onNotice, getInstalled],
   );
   const startPrReview = useCallback(
     (repo: string, pr: ipc.PrInfo, agentId?: string) => startPrAgent("review", repo, pr, agentId),
@@ -1159,7 +1168,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
    *  shape as startTicketWork/startPrAgent. */
   const startAgentInDir = useCallback(
     (dir: string, agentId: string | undefined, seed: string, title: string) => {
-      const installedClis = AGENT_CLIS.filter((c) => installedRef.current[c.bin]);
+      const installedClis = AGENT_CLIS.filter((c) => getInstalled()[c.bin]);
       const preferred = getSettings().defaultAgent;
       const agent =
         agentId ||
@@ -1182,7 +1191,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         }, 2500);
       }
     },
-    [addTerminal, onNotice, installedRef],
+    [addTerminal, onNotice, getInstalled],
   );
 
   /** Launch a micro-task: a one-shot agent seeded with the task's brief plus
@@ -1193,7 +1202,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
    *  still work via the protocol's printed-fallback ending, minus auto-close. */
   const startMicroTask = useCallback(
     <P,>(def: MicroTaskDef<P>, payload: P, userQuery: string) => {
-      const installedClis = AGENT_CLIS.filter((c) => installedRef.current[c.bin]);
+      const installedClis = AGENT_CLIS.filter((c) => getInstalled()[c.bin]);
       if (installedClis.length === 0) {
         onNotice("Running a task needs an agent CLI — install one in Settings → Agents.");
         return;
@@ -1245,7 +1254,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         }, 2500);
       }
     },
-    [addTerminal, patchTabRaw, onNotice, project.id, installedRef],
+    [addTerminal, patchTabRaw, onNotice, project.id, getInstalled],
   );
 
   /** Run a brief that was composed on the spot (a diff surface's "ask about
@@ -1374,11 +1383,6 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     },
     [],
   );
-
-  // Opening a project deliberately opens nothing: the empty state is the
-  // launcher, so you pick the shell or agent you actually want rather than
-  // being handed a shell you didn't ask for.
-
 
   // Looking at a tab is what marks it read. As an effect rather than something
   // hung off the tab's onClick, so every route in — clicking, Ctrl+Tab cycling,
