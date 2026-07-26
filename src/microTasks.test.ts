@@ -204,6 +204,41 @@ describe("MICRO_TASKS", () => {
   });
 });
 
+describe("PR task tracking", () => {
+  const pr = {
+    number: 12,
+    title: "Tighten the parser",
+    url: "https://github.com/o/r/pull/12",
+    branch: "fix/parser",
+    base: "main",
+    mine: true,
+  } as never;
+
+  it("puts the PR's URL in every brief — that is how the tab finds its own runs", () => {
+    // PrView tracks what is running against a PR by matching the run log's
+    // recorded brief against pr.url. A new PR task that forgets the URL would
+    // launch fine and then be invisible on the tab that launched it.
+    const briefs = [
+      reviewPrTask,
+      addressPrCommentsTask,
+      reviewMapTask,
+      draftFindingsTask,
+      selfReviewPrTask,
+      fixCiTask,
+      runItReviewTask,
+      followUpsTask,
+    ].map((t) => [t.id, t.buildContext({ repo: "/repo", pr }, "")] as const);
+    for (const [id, brief] of briefs)
+      expect(brief, `${id} does not name the PR's URL`).toContain("https://github.com/o/r/pull/12");
+    expect(
+      applySuggestionTask.buildContext(
+        { repo: "/repo", pr, path: "src/a.ts", line: 4, suggestion: "x", threadId: "T_1" },
+        "",
+      ),
+    ).toContain("https://github.com/o/r/pull/12");
+  });
+});
+
 describe("PR tasks that report back through a file", () => {
   const pr = {
     number: 12,

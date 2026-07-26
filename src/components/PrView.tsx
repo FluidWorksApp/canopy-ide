@@ -24,6 +24,7 @@ import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { AgentsIcon, TeamIcon } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
 import {
+  MICRO_TASKS,
   addressPrCommentsTask,
   applySuggestionTask,
   draftFindingsTask,
@@ -37,6 +38,7 @@ import {
   type MicroTaskDef,
 } from "../microTasks";
 import { rowFor, subscribe as subscribeToPrs } from "../prWatchStore";
+import { TASK_HISTORY_EVENT, taskRuns, type TaskRun } from "../taskHistory";
 import {
   actionable,
   fileNote,
@@ -46,6 +48,7 @@ import {
   threadSuggestion,
   threadsByPath,
   verdicts,
+  type MoveId,
   type NextMove,
 } from "../prReview";
 import {
@@ -237,6 +240,10 @@ export function PrView({
   const [deltaOn, setDeltaOn] = useState(false);
   const [deltaPatch, setDeltaPatch] = useState<string | null>(null);
   const [loop, setLoop] = useState<PrLoop>(() => loadLoop(repo, pr.number));
+  /** Tasks running against THIS pull request, read off the run log rather than
+   *  remembered locally: a click on a CTA and a launch from the Agent menu both
+   *  land there, and it survives the tab being closed and reopened. */
+  const [running, setRunning] = useState<TaskRun[]>([]);
 
   useEscape(
     () => {
@@ -320,6 +327,72 @@ export function PrView({
     };
   }, [repo, pr.number, refreshConv]);
 
+  useEffect(() => {
+    const read = () =>
+      setRunning(
+        taskRuns().filter((r) => r.status === "running" && r.brief.includes(pr.url)),
+      );
+    read();
+    window.addEventListener(TASK_HISTORY_EVENT, read);
+    // The log is written by the launcher and by job_done; the event covers both,
+    // and the interval only keeps the elapsed counter honest.
+    const tick = window.setInterval(read, 1000);
+    return () => {
+      window.removeEventListener(TASK_HISTORY_EVENT, read);
+      window.clearInterval(tick);
+    };
+  }, [pr.url]);
+
+  /** Tasks we've just dispatched, before the launcher has written them to the
+   *  run log. An isolated task builds a worktree first, which can take seconds —
+   *  and a button that does nothing for seconds is a button that looks broken. */
+  const [pending, setPending] = useState<Record<string, number>>({});
+  const isRunning = (taskId: string) => running.some((r) => r.taskId === taskId);
+  const isBusyTask = (taskId: string) => isRunning(taskId) || pending[taskId] != null;
+
+  /** Every task launch on this tab goes through here. */
+  const launch = useCallback(
+    <P,>(def: MicroTaskDef<P>, payload: P, query = "") => {
+      if (!onMicroTask) return;
+      setPending((p) => ({ ...p, [def.id]: Date.now() }));
+      onMicroTask(def, payload, query);
+      onNotice(`${def.label}: an agent is starting — watch it under "Running now".`);
+    },
+    [onMicroTask, onNotice],
+  );
+
+  // Clear a pending marker once the run log shows it, or if it never appears
+  // (the launcher refused: no CLI installed, worktree failed) so the button
+  // comes back rather than sitting disabled forever.
+  useEffect(() => {
+    const ids = Object.keys(pending);
+    if (!ids.length) return;
+    const now = Date.now();
+    const stale = ids.filter(
+      (id) => running.some((r) => r.taskId === id) || now - pending[id] > 30_000,
+    );
+    if (!stale.length) return;
+    setPending((p) => {
+      const next = { ...p };
+      for (const id of stale) delete next[id];
+      return next;
+    });
+  }, [running, pending]);
+  const MOVE_TASK: Partial<Record<MoveId, string>> = {
+    "self-review": selfReviewPrTask.id,
+    "fix-ci": fixCiTask.id,
+    "review-it": draftFindingsTask.id,
+    "address-comments": addressPrCommentsTask.id,
+  };
+  const moveRunning = (m: NextMove) => {
+    const id = MOVE_TASK[m.id];
+    return !!id && isBusyTask(id);
+  };
+  const elapsed = (r: TaskRun) => {
+    const s = Math.max(0, Math.round((Date.now() - r.startedAt) / 1000));
+    return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+  };
+
   const persist = useCallback((next: PrLoop) => {
     setLoop(saveLoop(next));
     return next;
@@ -361,7 +434,7 @@ export function PrView({
         onNotice(gate.reason ?? "Nothing to address right now.");
         return;
       }
-      onMicroTask(addressPrCommentsTask, { repo, pr }, "");
+      launch(addressPrCommentsTask, { repo, pr });
       persist({
         ...beginRound(loop, gate.ids, conv?.head_sha ?? ""),
         auto: armed || loop.auto,
@@ -435,7 +508,7 @@ export function PrView({
       if (fresh.length && loop.auto) {
         const g = roundGate(pr, c, loop);
         if (g.ok) {
-          onMicroTask?.(addressPrCommentsTask, { repo, pr }, "");
+          launch(addressPrCommentsTask, { repo, pr });
           persist(beginRound(loop, g.ids, c.head_sha));
           onNotice(`Round ${loop.cycle + 1}: ${g.ids.length} new comment(s) came back — agent is on it.`);
           return;
@@ -658,13 +731,13 @@ export function PrView({
   const dispatchMove = (m: NextMove, e: React.MouseEvent) => {
     switch (m.id) {
       case "self-review":
-        onMicroTask?.(selfReviewPrTask, { repo, pr }, "");
+        launch(selfReviewPrTask, { repo, pr });
         break;
       case "mark-ready":
         void ready();
         break;
       case "fix-ci":
-        onMicroTask?.(fixCiTask, { repo, pr }, "");
+        launch(fixCiTask, { repo, pr });
         break;
       case "update-branch":
         void runAction("Update branch", () => ipc.ghPrUpdateBranch(repo, pr.number));
@@ -676,7 +749,7 @@ export function PrView({
         startRound(true);
         break;
       case "review-it":
-        onMicroTask?.(draftFindingsTask, { repo, pr }, "");
+        launch(draftFindingsTask, { repo, pr });
         break;
       case "request-review":
         // The real event: useContextMenu calls preventDefault on it, so a
@@ -850,33 +923,38 @@ export function PrView({
         label: reviewMapTask.label,
         icon: <span className="ctx-glyph">{reviewMapTask.icon}</span>,
         hint: "risk-ranked, nothing posted",
-        onClick: () => onMicroTask(reviewMapTask, { repo, pr }, ""),
+        disabled: isBusyTask(reviewMapTask.id),
+        onClick: () => launch(reviewMapTask, { repo, pr }),
       });
       items.push({
         label: draftFindingsTask.label,
         icon: <span className="ctx-glyph">{draftFindingsTask.icon}</span>,
         hint: "staged for you to vet",
-        onClick: () => onMicroTask(draftFindingsTask, { repo, pr }, ""),
+        disabled: isBusyTask(draftFindingsTask.id),
+        onClick: () => launch(draftFindingsTask, { repo, pr }),
       });
       items.push({
         label: runItReviewTask.label,
         icon: <span className="ctx-glyph">{runItReviewTask.icon}</span>,
         hint: "starts it and takes screenshots",
-        onClick: () => onMicroTask(runItReviewTask, { repo, pr }, ""),
+        disabled: isBusyTask(runItReviewTask.id),
+        onClick: () => launch(runItReviewTask, { repo, pr }),
       });
       items.push({ label: "Act on it", separator: true });
       items.push({
         label: reviewPrTask.label,
         icon: <span className="ctx-glyph">{reviewPrTask.icon}</span>,
         hint: "posts only what's required",
-        onClick: () => onMicroTask(reviewPrTask, { repo, pr }, ""),
+        disabled: isBusyTask(reviewPrTask.id),
+        onClick: () => launch(reviewPrTask, { repo, pr }),
       });
       if (pr.state === "OPEN") {
         items.push({
           label: selfReviewPrTask.label,
           icon: <span className="ctx-glyph">{selfReviewPrTask.icon}</span>,
           hint: "private pass, posts nothing",
-          onClick: () => onMicroTask(selfReviewPrTask, { repo, pr }, ""),
+          disabled: isBusyTask(selfReviewPrTask.id),
+        onClick: () => launch(selfReviewPrTask, { repo, pr }),
         });
         items.push({
           label: act?.count
@@ -892,13 +970,15 @@ export function PrView({
             label: fixCiTask.label,
             icon: <span className="ctx-glyph">{fixCiTask.icon}</span>,
             hint: "reads the failing logs first",
-            onClick: () => onMicroTask(fixCiTask, { repo, pr }, ""),
+            disabled: isBusyTask(fixCiTask.id),
+            onClick: () => launch(fixCiTask, { repo, pr }),
           });
         items.push({
           label: followUpsTask.label,
           icon: <span className="ctx-glyph">{followUpsTask.icon}</span>,
           hint: "out-of-scope comments become issues",
-          onClick: () => onMicroTask(followUpsTask, { repo, pr }, ""),
+          disabled: isBusyTask(followUpsTask.id),
+        onClick: () => launch(followUpsTask, { repo, pr }),
         });
       }
     }
@@ -1021,11 +1101,14 @@ export function PrView({
                 className="btn-mini"
                 title="Apply the suggested change in a worktree, run the tests, and push"
                 onClick={() =>
-                  onMicroTask(
-                    applySuggestionTask,
-                    { repo, pr, path: t.path, line: t.line, suggestion, threadId: t.id },
-                    "",
-                  )
+                  launch(applySuggestionTask, {
+                    repo,
+                    pr,
+                    path: t.path,
+                    line: t.line,
+                    suggestion,
+                    threadId: t.id,
+                  })
                 }
               >
                 Apply suggestion
@@ -1226,16 +1309,21 @@ export function PrView({
           <span className="pr-next-label" title={move.hint}>
             {move.label}
           </span>
-          {move.action && (
-            <button
-              className="btn-mini btn-accent"
-              disabled={busy}
-              title={move.hint}
-              onClick={(e) => dispatchMove(move, e)}
-            >
-              {move.action}
-            </button>
-          )}
+          {move.action &&
+            (moveRunning(move) ? (
+              <span className="pr-next-running">
+                <span className="pr-run-dot" /> working on it…
+              </span>
+            ) : (
+              <button
+                className="btn-mini btn-accent"
+                disabled={busy}
+                title={move.hint}
+                onClick={(e) => dispatchMove(move, e)}
+              >
+                {move.action}
+              </button>
+            ))}
           {loop.status === "waiting" && loop.auto && (
             <span className="pr-next-note">watching for new comments</span>
           )}
@@ -1269,10 +1357,24 @@ export function PrView({
             )}
             {!mapHtml && onMicroTask && (
               <div className="pr-map-cta">
-                <button className="btn-mini" onClick={() => onMicroTask(reviewMapTask, { repo, pr }, "")}>
-                  {reviewMapTask.icon} Map this change for me
+                <button
+                  className="btn-mini"
+                  disabled={isRunning(reviewMapTask.id)}
+                  onClick={() => launch(reviewMapTask, { repo, pr })}
+                >
+                  {isRunning(reviewMapTask.id) ? (
+                    <>
+                      <span className="pr-run-dot" /> Reading the change…
+                    </>
+                  ) : (
+                    <>{reviewMapTask.icon} Map this change for me</>
+                  )}
                 </button>
-                <span className="pr-files-note">risk-ranked, nothing posted</span>
+                <span className="pr-files-note">
+                  {isRunning(reviewMapTask.id)
+                    ? "an agent is on it — the map lands here when it's done"
+                    : "risk-ranked, nothing posted"}
+                </span>
               </div>
             )}
           </div>
@@ -1342,6 +1444,40 @@ export function PrView({
                     </div>
                   )}
                 </div>
+
+                {(running.length > 0 || Object.keys(pending).length > 0) && (
+                  <div className="pr-rail-section pr-rail-running">
+                    <div className="pr-rail-title">
+                      Running now
+                      <span className="pr-thread-tag">
+                        {running.length + Object.keys(pending).filter((id) => !isRunning(id)).length}
+                      </span>
+                    </div>
+                    {Object.keys(pending)
+                      .filter((id) => !isRunning(id))
+                      .map((id) => (
+                        <div key={`pending-${id}`} className="pr-run-row">
+                          <span className="pr-run-dot" />
+                          <span className="pr-run-label">
+                            {MICRO_TASKS.find((t) => t.id === id)?.label ?? id}
+                          </span>
+                          <span className="pr-run-elapsed">starting…</span>
+                        </div>
+                      ))}
+                    {running.map((r) => (
+                      <div key={r.id} className="pr-run-row">
+                        <span className="pr-run-dot" />
+                        <span className="pr-run-label">
+                          {r.icon} {r.label}
+                        </span>
+                        <span className="pr-run-elapsed">{elapsed(r)}</span>
+                      </div>
+                    ))}
+                    <div className="pr-rail-empty">
+                      Its terminal is in this project's Tasks panel; it closes itself when done.
+                    </div>
+                  </div>
+                )}
 
                 <div className="pr-rail-section">
                   <div className="pr-rail-title">
@@ -1417,7 +1553,7 @@ export function PrView({
                       {onMicroTask && (
                         <button
                           className="btn-mini"
-                          onClick={() => onMicroTask(fixCiTask, { repo, pr }, "")}
+                          onClick={() => launch(fixCiTask, { repo, pr })}
                         >
                           Fix CI
                         </button>

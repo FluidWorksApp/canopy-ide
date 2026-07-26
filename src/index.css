@@ -10885,3 +10885,55 @@ a.btn-mini {
   .hib-thawed,
   .hib-lifting { opacity: 0; transition: opacity var(--dur-med) linear; }
 }
+
+/* ---------- "something is running against this PR" ---------- */
+
+.pr-rail-running { border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.pr-run-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  font-size: 11px;
+}
+.pr-run-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pr-run-elapsed {
+  margin-left: auto;
+  font-family: var(--mono, monospace);
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+/* The one moving thing on the page: a task is either running or it isn't, and
+   a static label can't tell you which. */
+.pr-run-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pr-run-pulse 1.4s ease-in-out infinite;
+}
+@keyframes pr-run-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pr-run-dot { animation: none; opacity: 0.9; }
+}
+
+/* The panel's two actions are a pair — one floating between the title and the
+   other read as decoration nobody could explain. */
+.side-panel-head .task-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.pr-next-running {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: var(--fg-dim);
+}
