@@ -1,11 +1,12 @@
 // Multi-root lazy file tree. Directories load on expand via the Rust core;
 // fs:change events refresh affected directories (debounced).
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
 import type { Notify } from "../types";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { useEscape } from "../useEscape";
 import { fileIconUrl } from "./fileIcons";
+import { ChevronIcon } from "./icons";
 
 interface FileTreeProps {
   roots: string[];
@@ -36,6 +37,11 @@ interface DirState {
   entries: ipc.DirEntry[] | null;
   expanded: boolean;
 }
+
+// Stable DOM id for a row, so the tree container can point
+// aria-activedescendant at the cursor row. A path can hold any character, so
+// encode it rather than interpolate it raw into an id.
+const rowId = (path: string) => `tree-row-${encodeURIComponent(path)}`;
 
 // Standard IDE-style yellow folder (VS Code-like), inline SVG.
 function FolderIcon({ open }: { open: boolean }) {
@@ -148,6 +154,34 @@ export function FileTree({
   const dirsRef = useRef(dirs);
   dirsRef.current = dirs;
 
+  // Keyboard cursor — the row arrow keys move through. Distinct from
+  // `selectedPath` (the open file): the cursor can sit on a folder, and moving
+  // it must not open anything. Null until the list is focused.
+  const [cursor, setCursor] = useState<string | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  // Visible rows top-to-bottom — exactly what renderDir paints, flattened so
+  // the arrow keys can index into it. Rebuilt from the same lazy `dirs` state,
+  // so a folder that hasn't been expanded contributes nothing (its children
+  // aren't loaded, and aren't on screen). `parent` powers ArrowLeft's jump-out.
+  const flat = useMemo(() => {
+    const out: { path: string; isDir: boolean; parent: string | null }[] = [];
+    // `parent` is the row a child hangs off — its containing directory, so
+    // ArrowLeft can jump out to it. It's null for a root's direct entries: the
+    // root itself is not a navigable row here (rendered separately, or hidden),
+    // so there's nowhere above them to jump to.
+    const walk = (dirPath: string, parent: string | null) => {
+      const state = dirs[dirPath];
+      if (!state?.expanded || !state.entries) return;
+      for (const entry of state.entries) {
+        out.push({ path: entry.path, isDir: entry.is_dir, parent });
+        if (entry.is_dir) walk(entry.path, entry.path);
+      }
+    };
+    for (const root of roots) walk(root, null);
+    return out;
+  }, [dirs, roots]);
+
   const loadGit = useCallback(async (root: string) => {
     try {
       const status = await ipc.gitStatus(root);
@@ -214,6 +248,84 @@ export function FileTree({
       }
     },
     [loadDir],
+  );
+
+  // Scroll a cursor row back into view by hand. NOT scrollIntoView: that walks
+  // up to the nearest scrollable ancestor and can move the whole app window
+  // (the bug that prompted keyboard nav). We adjust the scroll container's
+  // scrollTop directly, with a small margin, and only when the row is clipped.
+  //
+  // Finding the container: .file-tree carries `overflow-y: auto` but is
+  // `flex: 1` with no fixed height, so it grows to its content and never
+  // scrolls — the element that actually scrolls is the outer .components-panel.
+  // So we can't stop at the first `overflow: auto` ancestor; we must find one
+  // that is genuinely scrollable (scrollHeight > clientHeight).
+  const reveal = useCallback((path: string) => {
+    const list = listRef.current;
+    if (!list) return;
+    const row = list.querySelector<HTMLElement>(`[data-tree-path="${CSS.escape(path)}"]`);
+    if (!row) return;
+    let box: HTMLElement | null = list;
+    while (box) {
+      const oy = getComputedStyle(box).overflowY;
+      const scrollable = (oy === "auto" || oy === "scroll") && box.scrollHeight > box.clientHeight;
+      if (scrollable) break;
+      box = box.parentElement;
+    }
+    if (!box) return;
+    const rowTop = row.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop;
+    const rowBottom = rowTop + row.offsetHeight;
+    if (rowTop < box.scrollTop) box.scrollTop = rowTop - 4;
+    else if (rowBottom > box.scrollTop + box.clientHeight)
+      box.scrollTop = rowBottom - box.clientHeight + 4;
+  }, []);
+
+  const moveCursor = useCallback(
+    (path: string) => {
+      setCursor(path);
+      reveal(path);
+    },
+    [reveal],
+  );
+
+  const onKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      const keys = ["ArrowDown", "ArrowUp", "ArrowRight", "ArrowLeft", "Home", "End", "Enter", " "];
+      if (!keys.includes(e.key)) return;
+      // Both: preventDefault stops the panel scrolling, stopPropagation keeps
+      // the app-level key handlers (tab cycling, etc.) out of it while the tree
+      // has focus.
+      e.preventDefault();
+      e.stopPropagation();
+      if (flat.length === 0) return;
+
+      const i = flat.findIndex((r) => r.path === cursor);
+      const cur = i >= 0 ? flat[i] : null;
+
+      if (e.key === "ArrowDown") return moveCursor(flat[Math.min(flat.length - 1, i + 1)].path);
+      if (e.key === "ArrowUp") return moveCursor(flat[i <= 0 ? 0 : i - 1].path);
+      if (e.key === "Home") return moveCursor(flat[0].path);
+      if (e.key === "End") return moveCursor(flat[flat.length - 1].path);
+      if (!cur) return moveCursor(flat[0].path);
+
+      const state = dirsRef.current[cur.path];
+      const open = cur.isDir && Boolean(state?.expanded && state.entries);
+
+      if (e.key === "ArrowRight") {
+        if (cur.isDir && !open) toggleDir(cur.path);
+        else if (open && state?.entries?.length) moveCursor(state.entries[0].path);
+        return;
+      }
+      if (e.key === "ArrowLeft") {
+        if (open) toggleDir(cur.path);
+        else if (cur.parent) moveCursor(cur.parent);
+        return;
+      }
+      // Enter / Space
+      if (cur.isDir) toggleDir(cur.path);
+      else onOpenFile(cur.path);
+    },
+    [flat, cursor, moveCursor, toggleDir, onOpenFile],
   );
 
   // Auto-expand roots on first appearance + load their git status.
@@ -332,18 +444,27 @@ export function FileTree({
       return (
         <div key={entry.path} className={depth > 0 ? "tree-indent" : undefined}>
           <div
+            data-tree-path={entry.path}
+            id={rowId(entry.path)}
+            role="treeitem"
+            aria-selected={entry.path === cursor}
+            aria-expanded={entry.is_dir ? expanded : undefined}
             className={`tree-row ${changedPaths.has(entry.path) ? "tree-changed" : ""} ${
               !entry.is_dir && entry.path === selectedPath ? "tree-row-selected" : ""
-            } ${gitClass(entry.path, entry.is_dir)}`}
-            onClick={() =>
-              entry.is_dir ? toggleDir(entry.path) : onOpenFile(entry.path)
-            }
+            } ${entry.path === cursor ? "tree-row-cursor" : ""} ${gitClass(entry.path, entry.is_dir)}`}
+            onClick={() => {
+              // Keep mouse and keyboard in agreement: a click parks the cursor
+              // where you clicked, so arrowing continues from there.
+              setCursor(entry.path);
+              if (entry.is_dir) toggleDir(entry.path);
+              else onOpenFile(entry.path);
+            }}
             onContextMenu={(e) => {
               if (!readOnly) open(e, itemsFor(entry.path, entry.is_dir, entry.name));
             }}
           >
             <span className={`tree-chevron ${entry.is_dir && expanded ? "tree-chevron-open" : ""}`}>
-              {entry.is_dir ? "▸" : ""}
+              {entry.is_dir ? <ChevronIcon /> : null}
             </span>
             <span className="tree-file-icon">
               {entry.is_dir ? <FolderIcon open={expanded} /> : <FileIcon name={entry.name} />}
@@ -361,7 +482,28 @@ export function FileTree({
 
   return (
     <div
+      ref={listRef}
       className="file-tree"
+      tabIndex={0}
+      role="tree"
+      aria-label={`${roots[0]?.split("/").pop() ?? "Project"} files`}
+      // Focus stays on the container; this tells assistive tech which row the
+      // cursor is on, so arrowing announces the row it lands on.
+      aria-activedescendant={cursor ? rowId(cursor) : undefined}
+      onKeyDown={onKeyDown}
+      // First focus with no cursor yet lands on the top row, so arrow keys have
+      // somewhere to start.
+      onFocus={() => {
+        if (cursor == null && flat.length > 0) setCursor(flat[0].path);
+      }}
+      // Drop the cursor when focus leaves this tree entirely. ProjectView mounts
+      // one FileTree per component, each with its own cursor; without this,
+      // every tree that had ever been focused kept showing a highlighted row, so
+      // several "cursors" appeared at once. Ignore blurs into our own descendants
+      // (the rename prompt input, the context menu) — those aren't leaving.
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setCursor(null);
+      }}
       // Blank space below the tree still belongs to the first root.
       onContextMenu={(e) => !readOnly && roots[0] && open(e, emptyItems(roots[0]))}
     >
