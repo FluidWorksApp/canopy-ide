@@ -1004,47 +1004,6 @@ export default function App() {
     prWatch.setPaths(watchedPaths);
   }, [watchedPaths]);
 
-  // A PR clicked in the inbox that belongs to another project: switch to it,
-  // then hand the open over — the same two-step the phone's pty:spawned takes,
-  // for the same reason (a project that isn't open has no ProjectView listening
-  // yet, so the dispatch has to wait for the mount).
-  useEffect(() => {
-    const onElsewhere = (e: Event) => {
-      const d = (e as CustomEvent).detail as { repo?: string; pr?: ipc.PrInfo };
-      if (!d?.repo || !d.pr) return;
-      const norm = (p: string) => p.replace(/\/+$/, "");
-      const target = norm(d.repo);
-      let projectId: string | undefined;
-      let bestLen = -1;
-      for (const p of wsRef.current.projects) {
-        for (const comp of p.components) {
-          const r = norm(comp.path);
-          if (r && (target === r || target.startsWith(r + "/") || r.startsWith(target + "/")) && r.length > bestLen) {
-            bestLen = r.length;
-            projectId = p.id;
-          }
-        }
-      }
-      if (!projectId) {
-        notify("That pull request's checkout isn't in any project any more.", "warn");
-        return;
-      }
-      void openForActionRef.current(projectId).then(() => {
-        // Same timer rationale as the pty:spawned route below: a just-opened
-        // ProjectView has to mount and register its listener first.
-        window.setTimeout(
-          () =>
-            window.dispatchEvent(
-              new CustomEvent("canopy:open-pr", { detail: { projectId, repo: d.repo, pr: d.pr } }),
-            ),
-          80,
-        );
-      });
-    };
-    window.addEventListener("canopy:open-pr-elsewhere", onElsewhere);
-    return () => window.removeEventListener("canopy:open-pr-elsewhere", onElsewhere);
-  }, [notify]);
-
   // A PTY opened from the phone (spawn_headless emits pty:spawned). Route it to
   // the project whose component path most-specifically contains its cwd, open
   // that project, and hand the tab to its ProjectView. The desktop mirrors the
