@@ -173,8 +173,10 @@ export interface Settings {
   /** How many agent terminals to keep live per project before auto-hibernation
    *  starts reclaiming the stalest idle ones. */
   maxLiveAgents: number;
-  /** Micro-tasks the user wrote themselves (Tasks panel). App-wide: a task
-   *  like "changelog entry" is about how the user works, not about one repo. */
+  /** Where the user's own micro-tasks used to live, back when they were
+   *  app-wide. They belong to a project now (`Project.customTasks`), and
+   *  adoptLegacyCustomTasks() empties this on first launch. Kept so that
+   *  migration has something to read; nothing writes tasks here any more. */
   customMicroTasks: CustomMicroTask[];
   /** canopy_* MCP tools the user switched off (Settings → Agents). Stored as
    *  the exceptions, not the whole set, so a tool added in a later version is

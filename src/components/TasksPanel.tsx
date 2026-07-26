@@ -1,7 +1,7 @@
 // Tasks sidebar section: the home of micro-tasks. Four parts — the micro-task
 // tabs running right now (focus / stop), the ones that have finished (a count
 // and the last few, opening the full history tab), the tasks the user wrote
-// themselves (run / edit / delete, stored in settings), and the built-ins,
+// themselves (run / edit / delete, stored on the project), and the built-ins,
 // listed so they're discoverable but run from their own surface (Raise PR lives
 // on a branch tab, where its payload comes from). Running a custom task asks for
 // the optional extra context — and the directory, when the project has more
@@ -15,7 +15,6 @@ import {
   type TaskEffect,
 } from "../microTasks";
 import { BUILT_IN_HEADING, CUSTOM_HEADING } from "../taskMenu";
-import { getSettings, updateSettings } from "../settings";
 import { completedTaskRuns, TASK_HISTORY_EVENT, type TaskRun } from "../taskHistory";
 import { PlayIcon, StopIcon, TrashIcon } from "./icons";
 
@@ -55,6 +54,11 @@ interface TasksPanelProps {
   onRunOneOff: (brief: string, dir: string) => void;
   /** Open the completed-tasks tab — the full searchable history. */
   onOpenHistory: () => void;
+  /** The tasks this project keeps. Owned by the project, so editing one is a
+   *  workspace save, not a settings write — and a task written here doesn't
+   *  turn up in a project it makes no sense in. */
+  custom: CustomMicroTask[];
+  onSaveCustom: (next: CustomMicroTask[]) => void;
   /** Scopes the Completed count to this project's runs. */
   projectId: string;
 }
@@ -73,9 +77,10 @@ export function TasksPanel({
   onRunCustom,
   onRunOneOff,
   onOpenHistory,
+  custom,
+  onSaveCustom,
   projectId,
 }: TasksPanelProps) {
-  const [custom, setCustom] = useState<CustomMicroTask[]>(() => getSettings().customMicroTasks);
   const [draft, setDraft] = useState<Draft | null>(null);
   /** The one-off composer's brief while it's open, or null when it's shut. A
    *  task nobody is keeping still deserves the same box to write it in. */
@@ -121,10 +126,7 @@ export function TasksPanel({
   const [runQuery, setRunQuery] = useState("");
   const [runDir, setRunDir] = useState("");
 
-  const save = (next: CustomMicroTask[]) => {
-    setCustom(next);
-    updateSettings({ customMicroTasks: next });
-  };
+  const save = onSaveCustom;
 
   const submitDraft = () => {
     if (!draft || !draft.label.trim() || !draft.brief.trim()) return;

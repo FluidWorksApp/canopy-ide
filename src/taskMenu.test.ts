@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BUILT_IN_HEADING, CUSTOM_HEADING, taskGroups, taskMenuItem } from "./taskMenu";
 import { MICRO_TASKS, type CustomMicroTask } from "./microTasks";
-import { updateSettings } from "./settings";
 
 const saved: CustomMicroTask = {
   id: "abc",
@@ -40,11 +39,10 @@ describe("taskGroups", () => {
     expect(run).toHaveBeenCalled();
   });
 
-  it("reads saved tasks at build time, so a just-saved one is there", () => {
+  it("lists the project's own saved tasks, and none when it has none", () => {
     expect(taskGroups({ onRunSaved: () => {} }).custom).toEqual([]);
-    updateSettings({ customMicroTasks: [saved] });
     const onRunSaved = vi.fn();
-    const { custom } = taskGroups({ onRunSaved });
+    const { custom } = taskGroups({ saved: [saved], onRunSaved });
     expect(custom.map((c) => c.label)).toEqual(["Prod DB Backup"]);
     custom[0].run?.();
     expect(onRunSaved).toHaveBeenCalledWith(saved);
@@ -62,8 +60,7 @@ describe("taskMenuItem", () => {
     }).submenu ?? [];
 
   it("offers both composers, then segregates the two groups", () => {
-    updateSettings({ customMicroTasks: [saved] });
-    const items = menu();
+    const items = menu({ saved: [saved] });
     expect(items[0].label).toBe("New Task…");
     expect(items[1].label).toContain("One-off task…");
     const headings = items.filter((i) => i.separator).map((i) => i.label);

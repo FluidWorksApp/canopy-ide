@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  adoptLegacyCustomTasks,
   AGENT_CLIS,
   agentForBin,
   agentForPkg,
@@ -15,8 +16,9 @@ import {
   startCommand,
   updateCommand,
 } from "./projects";
-import { updateSettings } from "./settings";
-import type { CustomAgentCli } from "./projects";
+import { getSettings, updateSettings } from "./settings";
+import type { CustomMicroTask } from "./microTasks";
+import type { CustomAgentCli, Project, WorkspaceState } from "./projects";
 
 /** Point a registry entry at a different binary, as Settings → Agents does. */
 const rebind = (bins: Record<string, string>) => {
@@ -365,5 +367,59 @@ describe("SHELL_PATTERN", () => {
   it("does not match a non-shell", () => {
     expect(SHELL_PATTERN.test("node")).toBe(false);
     expect(SHELL_PATTERN.test("zshfoo")).toBe(false);
+  });
+});
+
+describe("adoptLegacyCustomTasks", () => {
+  const task: CustomMicroTask = {
+    id: "abc",
+    label: "Prod DB Backup",
+    icon: "◆",
+    placeholder: "",
+    brief: "Back the database up.",
+  };
+  const project = (id: string): Project => ({ id, name: id, components: [] });
+  const ws = (over: Partial<WorkspaceState> = {}): WorkspaceState => ({
+    projects: [project("p1"), project("p2")],
+    openIds: ["p1", "p2"],
+    activeId: "p2",
+    ...over,
+  });
+
+  afterEach(() => updateSettings({ customMicroTasks: [] }));
+
+  it("leaves the workspace untouched when there is nothing to move", () => {
+    const before = ws();
+    expect(adoptLegacyCustomTasks(before)).toBe(before);
+  });
+
+  it("hands the old app-wide tasks to the active project, and only that one", () => {
+    updateSettings({ customMicroTasks: [task] });
+    const after = adoptLegacyCustomTasks(ws());
+    expect(after.projects.find((p) => p.id === "p2")?.customTasks).toEqual([task]);
+    expect(after.projects.find((p) => p.id === "p1")?.customTasks).toBeUndefined();
+    // Emptied, so the next launch has nothing left to adopt.
+    expect(getSettings().customMicroTasks).toEqual([]);
+  });
+
+  it("falls back to an open project when activeId is stale", () => {
+    updateSettings({ customMicroTasks: [task] });
+    const after = adoptLegacyCustomTasks(ws({ activeId: "gone", openIds: ["p1"] }));
+    expect(after.projects.find((p) => p.id === "p1")?.customTasks).toEqual([task]);
+  });
+
+  it("keeps the tasks in settings when there is no project to give them to", () => {
+    updateSettings({ customMicroTasks: [task] });
+    const empty = ws({ projects: [], openIds: [], activeId: null });
+    expect(adoptLegacyCustomTasks(empty)).toBe(empty);
+    expect(getSettings().customMicroTasks).toEqual([task]);
+  });
+
+  it("appends rather than replacing tasks the project already has", () => {
+    updateSettings({ customMicroTasks: [task] });
+    const mine: CustomMicroTask = { ...task, id: "own", label: "Mine" };
+    const state = ws({ projects: [{ ...project("p2"), customTasks: [mine] }] });
+    const after = adoptLegacyCustomTasks(state);
+    expect(after.projects[0].customTasks).toEqual([mine, task]);
   });
 });

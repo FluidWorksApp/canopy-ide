@@ -6,7 +6,6 @@
 // ready-made MenuItem from ProjectView, which owns the launcher.
 import type { MenuItem } from "./components/ContextMenu";
 import { MICRO_TASKS, type CustomMicroTask } from "./microTasks";
-import { getSettings } from "./settings";
 
 /** One runnable row. `run` absent means this surface can't supply the task's
  *  payload — the row is still listed, because a built-in that disappears when
@@ -36,11 +35,12 @@ export const ONE_OFF_HEADING = "One-off task";
  *  unrunnable, carrying its `surfaceNote` so the row says where it does run. */
 export function taskGroups(o: {
   builtIns?: TaskChoice[];
+  /** The project's own custom tasks — passed in rather than read here, because
+   *  they belong to the project this menu was opened in. */
+  saved?: CustomMicroTask[];
   onRunSaved: (task: CustomMicroTask) => void;
 }): TaskGroups {
-  // Read at build time — the menu is built on the right-click, so a task saved
-  // a moment ago in the Tasks panel is already here.
-  const saved = getSettings().customMicroTasks;
+  const saved = o.saved ?? [];
   const offered = o.builtIns ?? [];
   const taken = new Set(offered.map((b) => b.id));
   return {
@@ -68,6 +68,8 @@ export interface TaskMenuOptions {
   seed: string;
   /** Ready-to-run built-ins that make sense on this row, in menu order. */
   runnable?: TaskChoice[];
+  /** This project's custom tasks. */
+  saved?: CustomMicroTask[];
   onNewTask: (brief: string) => void;
   /** Compose and run a one-off about this row — nothing saved to the registry. */
   onOneOff: (brief: string) => void;
@@ -75,7 +77,11 @@ export interface TaskMenuOptions {
 }
 
 export function taskMenuItem(o: TaskMenuOptions): MenuItem {
-  const { custom, builtIn } = taskGroups({ builtIns: o.runnable, onRunSaved: o.onRunSaved });
+  const { custom, builtIn } = taskGroups({
+    builtIns: o.runnable,
+    saved: o.saved,
+    onRunSaved: o.onRunSaved,
+  });
   const row = (c: TaskChoice): MenuItem => ({
     label: `${c.icon ?? "◆"} ${c.label}`,
     onClick: c.run,
