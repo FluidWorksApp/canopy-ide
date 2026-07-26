@@ -395,11 +395,9 @@ export function GitPanel({
             className={`git-tab ${section === s ? "git-tab-on" : ""}`}
             onClick={() => setSection(s)}
           >
-            {s === "loose"
-                  ? "Loose ends"
-                  : s === "worktrees" && worktrees.length > 1
-                    ? `Worktrees (${worktrees.length})`
-                  : s[0].toUpperCase() + s.slice(1)}
+            {/* Names only. A count in a tab label is a number you can't act on,
+                and it shifts the tabs sideways as it changes. */}
+            {s === "loose" ? "Loose ends" : s[0].toUpperCase() + s.slice(1)}
           </button>
         ))}
       </div>
