@@ -202,6 +202,31 @@ describe("MICRO_TASKS", () => {
     expect(new Set(MICRO_TASKS.map((t) => t.id)).size).toBe(MICRO_TASKS.length);
     for (const t of MICRO_TASKS) expect(t.surfaceNote).toBeTruthy();
   });
+
+  it("says what each one does and what it does it to", () => {
+    // The list is grouped by `effect` and read by `blurb`. A task without both
+    // lands in the panel as a bare name among nine others, which is exactly the
+    // confusion this replaced — so it fails here instead.
+    for (const t of MICRO_TASKS) {
+      expect(t.blurb, `${t.id} has no blurb`).toBeTruthy();
+      expect(t.blurb!.length, `${t.id}'s blurb is too long for one line`).toBeLessThan(80);
+      expect(["reads", "posts", "pushes"], `${t.id} has no effect`).toContain(t.effect);
+    }
+  });
+
+  it("does not call a task that pushes a task that only reads", () => {
+    // The grouping is a promise about consequence; these are the three that
+    // change the branch, and the isolation flag is the independent evidence.
+    const pushes = MICRO_TASKS.filter((t) => t.effect === "pushes").map((t) => t.id);
+    expect(pushes).toEqual(["address-pr-comments", "pr-fix-ci"]);
+    for (const t of MICRO_TASKS.filter((x) => x.effect === "pushes"))
+      expect(t.isolation?.kind, `${t.id} edits code, so it needs its own worktree`).toBe(
+        "pr-worktree",
+      );
+    // Nothing that only reads may carry a brief that posts a review.
+    for (const t of MICRO_TASKS.filter((x) => x.effect === "reads"))
+      expect(t.id).not.toBe("review-pr");
+  });
 });
 
 describe("PR tasks that report back through a file", () => {

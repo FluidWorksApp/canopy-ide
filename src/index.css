@@ -10856,3 +10856,29 @@ a.btn-mini {
   .hib-thawed,
   .hib-lifting { opacity: 0; transition: opacity var(--dur-med) linear; }
 }
+
+/* ---------- built-in task list, grouped by consequence ---------- */
+
+.task-effect-group { margin-bottom: 6px; }
+.task-effect-head {
+  padding: 5px 10px 2px;
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+/* The only colour in the list is the one that says "this writes something". */
+.task-effect-head.is-posts { color: var(--warn); }
+.task-effect-head.is-pushes { color: var(--danger); }
+
+.task-row-built-in {
+  display: grid;
+  grid-template-columns: 16px minmax(0, auto) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 10px;
+}
+.task-blurb {
+  font-size: 10px;
+  color: var(--fg-dim);
+  line-height: 1.35;
+  grid-column: 2 / -1;
+}
