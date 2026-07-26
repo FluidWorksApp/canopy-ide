@@ -6202,6 +6202,19 @@ body.dragging-tab * {
 }
 .prs-row-stat { white-space: nowrap; }
 
+/* The other projects' queues: a line you can act on, not a list you scroll. */
+.prs-elsewhere {
+  margin: 6px 10px 0;
+  padding: 5px 8px;
+  border: 1px dashed var(--border);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  font-size: 10px;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.prs-elsewhere:hover { color: var(--fg); border-color: var(--accent); }
+
 .pr-file.is-viewed .pr-file-path { opacity: 0.6; }
 .pr-file-viewed {
   display: flex;

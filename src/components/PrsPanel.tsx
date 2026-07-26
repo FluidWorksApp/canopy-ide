@@ -36,9 +36,24 @@ const LANE_TONE: Record<Lane, string> = {
 export function PrsPanel({ localRepos, onOpen, onOpenElsewhere, projectFor }: PrsPanelProps) {
   const { rows, fetchedMs, errors, remaining, nextIn, busy, viewer } = usePrWatch();
   const [mineOnly, setMineOnly] = useState(false);
+  // Centralized polling, project-level surfacing. One loop asks about every
+  // open project (switching projects is then instant and costs nothing), but
+  // what you SEE is the project you are in: a single list mixing eight repos is
+  // a stream to scroll, not a queue to work. "All" is a deliberate choice, not
+  // the default you land in.
+  const [allProjects, setAllProjects] = useState(false);
   const [collapsed, setCollapsed] = useState<Set<Lane>>(new Set());
 
-  const shown = useMemo(() => (mineOnly ? rows.filter((r) => r.mine) : rows), [rows, mineOnly]);
+  const mine = useMemo(
+    () => rows.filter((r) => localRepos.includes(r.repo)),
+    [rows, localRepos],
+  );
+  const elsewhere = rows.length - mine.length;
+  const scoped = allProjects ? rows : mine;
+  const shown = useMemo(
+    () => (mineOnly ? scoped.filter((r) => r.mine) : scoped),
+    [scoped, mineOnly],
+  );
   const groups = useMemo(() => lanes(shown), [shown]);
   const errorList = Object.entries(errors);
 
@@ -53,6 +68,17 @@ export function PrsPanel({ localRepos, onOpen, onOpenElsewhere, projectFor }: Pr
       <div className="side-panel-head">
         <span>Pull requests</span>
         <span className="prs-head-actions">
+          <button
+            className={`btn-mini ${allProjects ? "btn-accent" : ""}`}
+            title={
+              allProjects
+                ? "Show only this project's pull requests"
+                : "Show every open project's pull requests"
+            }
+            onClick={() => setAllProjects((v) => !v)}
+          >
+            {allProjects ? "all projects" : "this project"}
+          </button>
           <button
             className={`btn-mini ${mineOnly ? "btn-accent" : ""}`}
             title={mineOnly ? "Show everyone's" : "Show only mine"}
@@ -87,11 +113,13 @@ export function PrsPanel({ localRepos, onOpen, onOpenElsewhere, projectFor }: Pr
         </div>
       )}
 
-      {rows.length === 0 && (
+      {shown.length === 0 && (
         <div className="prs-empty">
-          {fetchedMs
-            ? "No open pull requests in the projects you have open."
-            : "Looking for pull requests across your open projects…"}
+          {!fetchedMs
+            ? "Looking for pull requests…"
+            : allProjects
+              ? "No open pull requests in the projects you have open."
+              : "No open pull requests in this project."}
         </div>
       )}
 
@@ -147,6 +175,14 @@ export function PrsPanel({ localRepos, onOpen, onOpenElsewhere, projectFor }: Pr
           </div>
         );
       })}
+
+      {/* Cross-project urgency is worth knowing about; it just isn't worth
+          living in this list. One line, and you opt in. */}
+      {!allProjects && elsewhere > 0 && (
+        <div className="prs-elsewhere" onClick={() => setAllProjects(true)}>
+          {elsewhere} more in other projects — show all
+        </div>
+      )}
     </div>
   );
 }

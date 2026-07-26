@@ -792,9 +792,15 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [componentKey]);
 
-  // The rail badge counts PRs waiting on this user anywhere, not only here —
-  // one subscription to the shared watcher, no fetch of its own.
-  const prsBadge = needsYouCount(usePrWatch().rows);
+  // The rail badge counts what THIS project's panel would show — the badge and
+  // the list must agree, or the badge is just noise you can't clear from here.
+  // Other projects' queues are one line at the bottom of the panel, not a
+  // number on a rail you're looking at while working somewhere else.
+  const prsRows = usePrWatch().rows;
+  const prsBadge = useMemo(
+    () => needsYouCount(prsRows.filter((r) => repoPaths.includes(r.repo))),
+    [prsRows, repoPaths],
+  );
 
   // A PR from another project, after App has switched to us.
   useEffect(() => {

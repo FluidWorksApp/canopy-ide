@@ -39,6 +39,7 @@ import {
 import { rowFor, subscribe as subscribeToPrs } from "../prWatchStore";
 import {
   actionable,
+  fileNote,
   isNit,
   nextMove,
   roleFor,
@@ -1484,7 +1485,7 @@ export function PrView({
               </div>
               {open &&
                 (f.binary ? (
-                  <div className="pr-file-note">Binary file — not shown.</div>
+                  <div className="pr-file-note">{fileNote(f.patch) ?? "Binary file — not shown."}</div>
                 ) : f.changed > RENDER_CAP ? (
                   <div className="pr-file-note">
                     {f.changed.toLocaleString()} changed lines — too large to render inline.{" "}
