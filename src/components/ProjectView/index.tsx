@@ -21,7 +21,7 @@ import { getCaret, subscribeCaret } from "../../editorState";
 import { GuestSession, OwnerSession } from "../../collab";
 import { CollabView } from "../CollabView";
 import { SharedProjectView } from "../SharedProjectView";
-import type { AgentCli, Project } from "../../projects";
+import type { AgentCli } from "../../projects";
 import {
   AGENT_CLIS,
   binName,
@@ -44,7 +44,7 @@ import {
   StopIcon,
   TerminalIcon,
 } from "../icons";
-import type { AgentEventEntry, OpenFile, Notify, RelayHandle } from "../../types";
+import type { OpenFile } from "../../types";
 import {
   derivePending,
   eventPtyId,
@@ -93,7 +93,7 @@ import { ReviewView, type ReviewPayload } from "../ReviewView";
 import { BranchView } from "../BranchView";
 import { AgentWorkspaceView } from "../AgentWorkspaceView";
 import { PreviewView } from "../PreviewView";
-import type { PreviewAnnotation, PreviewServer } from "../../preview";
+import type { PreviewServer } from "../../preview";
 import { dispatchBrowserOp } from "../../previewAgent";
 import { serverForUrl } from "../../preview";
 import { ticketBranch, ticketContext, ticketWorktree } from "../../trackers";
@@ -122,7 +122,6 @@ import {
   describeTab,
   tabDisplayLabel,
   tabId,
-  previewLabel,
   type SideTab,
   type SubTab,
   type DocSubTab,
@@ -912,7 +911,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         onNotice(`Couldn't start work on ${ticket.id}: ${String(err)}`);
       }
     },
-    [ticketRepo, addTerminal, onNotice],
+    [ticketRepo, addTerminal, onNotice, installedRef],
   );
 
   /** Check out a PR's head branch in a worktree (reusing one already on it)
@@ -978,7 +977,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         );
       }
     },
-    [addTerminal, onNotice],
+    [addTerminal, onNotice, installedRef],
   );
   const startPrReview = useCallback(
     (repo: string, pr: ipc.PrInfo, agentId?: string) => startPrAgent("review", repo, pr, agentId),
@@ -1183,7 +1182,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         }, 2500);
       }
     },
-    [addTerminal, onNotice],
+    [addTerminal, onNotice, installedRef],
   );
 
   /** Launch a micro-task: a one-shot agent seeded with the task's brief plus
@@ -1246,7 +1245,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         }, 2500);
       }
     },
-    [addTerminal, patchTabRaw, onNotice, project.id],
+    [addTerminal, patchTabRaw, onNotice, project.id, installedRef],
   );
 
   /** Run a brief that was composed on the spot (a diff surface's "ask about
