@@ -31,7 +31,6 @@ interface GitPanelProps {
   visible: boolean;
   components: { label: string; path: string }[];
   /** Open a file's diff in the main area. */
-  onOpenDiff: (repo: string, file: ipc.FileChange) => void;
   /** Open a pull request in the main area. */
   /** Open a branch's work in the main area. */
   onOpenBranch: (repo: string, branch: ipc.BranchWork) => void;
@@ -60,14 +59,13 @@ interface GitPanelProps {
   ) => MenuItem;
 }
 
-type Section = "changes" | "branches" | "worktrees" | "loose" | "history";
+type Section = "branches" | "worktrees" | "loose" | "history";
 
 
 
 export function GitPanel({
   visible,
   components,
-  onOpenDiff,
   onOpenCommit,
   onOpenBranch,
   onOpenTerminal,
@@ -83,8 +81,7 @@ export function GitPanel({
   const [log, setLog] = useState<ipc.CommitInfo[]>([]);
   const [worktrees, setWorktrees] = useState<ipc.WorktreeInfo[]>([]);
   const [wtBranch, setWtBranch] = useState("");
-  const [section, setSection] = useState<Section>("changes");
-  const [message, setMessage] = useState("");
+  const [section, setSection] = useState<Section>("branches");
   const [busy, setBusy] = useState<string | null>(null);
   const [branchFilter, setBranchFilter] = useState("");
   const [confirm, setConfirm] = useState<
@@ -176,42 +173,6 @@ export function GitPanel({
    *  reappears where it was, with the error surfaced. No busy spinner: the
    *  point is that the click feels instant. `to` is the bucket the file moves
    *  to, or null when it leaves the working tree entirely (discard/untracked). */
-  const optimisticFile = (
-    path: string,
-    to: "staged" | "unstaged" | null,
-    fn: () => Promise<unknown>,
-  ) => {
-    setStatus((prev) => {
-      if (!prev) return prev;
-      const source = [
-        ...prev.conflicted,
-        ...prev.staged,
-        ...prev.unstaged,
-        ...prev.untracked,
-      ].find((f) => f.path === path);
-      const without = (arr: ipc.FileChange[]) => arr.filter((f) => f.path !== path);
-      const next: ipc.RepoStatus = {
-        ...prev,
-        staged: without(prev.staged),
-        unstaged: without(prev.unstaged),
-        untracked: without(prev.untracked),
-        conflicted: without(prev.conflicted),
-      };
-      if (source && to === "staged") next.staged = [...next.staged, { ...source, staged: true }];
-      if (source && to === "unstaged")
-        next.unstaged = [...next.unstaged, { ...source, staged: false }];
-      return next;
-    });
-    void fn()
-      .then((out) => {
-        // git's own first line of output — a result, not a fault.
-      if (typeof out === "string" && out.trim())
-        onNotice(out.trim().split("\n")[0], "success");
-      })
-      .catch((err) => onNotice(String(err), "error"))
-      // Reconcile on success (confirm) and failure (revert) alike.
-      .finally(() => void refresh());
-  };
 
 
   // Right-click menus. Each is one plain-language label per real git/gh command,
@@ -355,58 +316,6 @@ export function GitPanel({
     );
   }
 
-  const allChanged = status
-    ? [...status.conflicted, ...status.staged, ...status.unstaged, ...status.untracked]
-    : [];
-  const stagedCount = status?.staged.length ?? 0;
-
-  const fileRow = (f: ipc.FileChange, kind: "staged" | "unstaged" | "untracked" | "conflicted") => (
-    <div
-      key={`${kind}:${f.path}`}
-      className={`git-file git-file-${kind}`}
-      title={`${f.status.trim() || "??"} ${f.path}`}
-      onClick={() => repo && onOpenDiff(repo, f)}
-    >
-      <span className="git-file-status">{f.status.trim() || "??"}</span>
-      <span className="git-file-name">{f.path.split("/").pop()}</span>
-      <span className="git-file-dir">{f.path.split("/").slice(0, -1).join("/")}</span>
-      <span className="git-file-actions" onClick={(e) => e.stopPropagation()}>
-        {kind === "staged" ? (
-          <button
-            className="icon-btn"
-            title="Unstage"
-            onClick={() => repo && optimisticFile(f.path, "unstaged", () => ipc.gitUnstage(repo, [f.path]))}
-          >
-            −
-          </button>
-        ) : (
-          <>
-            {kind !== "untracked" && (
-              <button
-                className="icon-btn icon-btn-danger"
-                title="Discard changes (cannot be undone)"
-                onClick={() =>
-                  setConfirm({
-                    text: `Discard all changes to ${f.path}? This cannot be undone.`,
-                    run: () => repo && optimisticFile(f.path, null, () => ipc.gitDiscard(repo, [f.path])),
-                  })
-                }
-              >
-                ⨯
-              </button>
-            )}
-            <button
-              className="icon-btn"
-              title="Stage"
-              onClick={() => repo && optimisticFile(f.path, "staged", () => ipc.gitStage(repo, [f.path]))}
-            >
-              +
-            </button>
-          </>
-        )}
-      </span>
-    </div>
-  );
 
   return (
     <div className="side-panel git-panel">
@@ -442,7 +351,7 @@ export function GitPanel({
               ? "detached HEAD — checkout a branch to commit"
               : `branch${status?.upstream ? ` · tracking ${status.upstream}` : " · no upstream"}`
           }
-          onClick={() => setSection(section === "branches" ? "changes" : "branches")}
+          onClick={() => setSection("branches")}
         >
           {status?.detached ? "⚠ detached" : `⎇ ${status?.branch ?? "—"}`}
         </button>
@@ -480,15 +389,13 @@ export function GitPanel({
       </div>
 
       <div className="git-tabs">
-        {(["changes", "branches", "worktrees", "loose", "history"] as Section[]).map((s) => (
+        {(["branches", "worktrees", "loose", "history"] as Section[]).map((s) => (
           <button
             key={s}
             className={`git-tab ${section === s ? "git-tab-on" : ""}`}
             onClick={() => setSection(s)}
           >
-            {s === "changes" && allChanged.length > 0
-              ? `Changes (${allChanged.length})`
-              : s === "loose"
+            {s === "loose"
                   ? "Loose ends"
                   : s === "worktrees" && worktrees.length > 1
                     ? `Worktrees (${worktrees.length})`
@@ -498,104 +405,6 @@ export function GitPanel({
       </div>
 
       {busy && <div className="git-busy">{busy}…</div>}
-
-      {section === "changes" && status && (
-        <div className="git-scroll">
-          {/* Commit box first: it's the thing you came here to do. */}
-          <div className="git-commit-box">
-            <textarea
-              className="git-commit-msg"
-              placeholder={stagedCount > 0 ? `Commit message (${stagedCount} staged)` : "Stage files to commit"}
-              value={message}
-              rows={3}
-              onChange={(e) => setMessage(e.target.value)}
-              onKeyDown={(e) => {
-                if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && stagedCount > 0) {
-                  e.preventDefault();
-                  void act("commit", async () => {
-                    const r = await ipc.gitCommit(repo!, message, false);
-                    setMessage("");
-                    return r;
-                  });
-                }
-              }}
-            />
-            <div className="git-commit-actions">
-              <button
-                className="btn btn-accent"
-                disabled={stagedCount === 0 || !message.trim() || busy != null}
-                title="Commit staged changes (Cmd+Enter)"
-                onClick={() =>
-                  void act("commit", async () => {
-                    const r = await ipc.gitCommit(repo!, message, false);
-                    setMessage("");
-                    return r;
-                  })
-                }
-              >
-                Commit {stagedCount > 0 ? stagedCount : ""}
-              </button>
-              {status.unstaged.length + status.untracked.length > 0 && (
-                <button
-                  className="btn-mini"
-                  onClick={() =>
-                    repo &&
-                    void act("stage all", () =>
-                      ipc.gitStage(repo, [
-                        ...status.unstaged.map((f) => f.path),
-                        ...status.untracked.map((f) => f.path),
-                      ]),
-                    )
-                  }
-                >
-                  Stage all
-                </button>
-              )}
-            </div>
-          </div>
-
-          {status.conflicted.length > 0 && (
-            <>
-              <div className="git-section-head git-section-conflict">
-                Conflicts ({status.conflicted.length}) — resolve before committing
-              </div>
-              {status.conflicted.map((f) => fileRow(f, "conflicted"))}
-            </>
-          )}
-          {status.staged.length > 0 && (
-            <>
-              <div className="git-section-head">
-                Staged ({status.staged.length})
-                <button
-                  className="btn-mini"
-                  onClick={() =>
-                    repo &&
-                    void act("unstage all", () =>
-                      ipc.gitUnstage(repo, status.staged.map((f) => f.path)),
-                    )
-                  }
-                >
-                  Unstage all
-                </button>
-              </div>
-              {status.staged.map((f) => fileRow(f, "staged"))}
-            </>
-          )}
-          {status.unstaged.length > 0 && (
-            <>
-              <div className="git-section-head">Changes ({status.unstaged.length})</div>
-              {status.unstaged.map((f) => fileRow(f, "unstaged"))}
-            </>
-          )}
-          {status.untracked.length > 0 && (
-            <>
-              <div className="git-section-head">Untracked ({status.untracked.length})</div>
-              {status.untracked.map((f) => fileRow(f, "untracked"))}
-            </>
-          )}
-          {allChanged.length === 0 && <div className="tree-empty">Working tree clean.</div>}
-        </div>
-      )}
 
       {section === "branches" && (
         <div className="git-scroll">

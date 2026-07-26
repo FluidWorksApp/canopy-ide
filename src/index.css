@@ -11226,3 +11226,15 @@ a.btn-mini {
   font-size: 10px;
   color: var(--fg-dim);
 }
+
+/* The commit box now sits inside a repo's group in the Changes panel, so it
+   needs the group's margins rather than the Git panel's full-width ones. */
+.change-commit-box { padding: 6px 10px 8px; }
+/* Per-file stage toggle: hidden until the row is under the pointer, like the
+   other row affordances, so a list of forty files stays a list of filenames. */
+.change-stage {
+  margin-left: auto;
+  visibility: hidden;
+  min-width: 20px;
+}
+.change-row:hover .change-stage { visibility: visible; }

@@ -2,7 +2,7 @@
 // component they live in. Git is the source of truth — not the raw fs watcher —
 // so this list already excludes everything in .gitignore (build output, object
 // files, editor temp files) and reflects real staged/unstaged/untracked state.
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import type { FileChange } from "../ipc";
 
 export interface ChangeGroup {
@@ -33,7 +33,18 @@ interface ChangesPanelProps {
   onSaveCollab?: (path: string) => void;
   /** "Ask an agent about these changes" control, shown when the tree isn't clean. */
   agentBar?: ReactNode;
+  /** Stage or unstage one file. Given together with `onCommit`, the list stops
+   *  being a read-only view and becomes the place you actually commit from. */
+  onStage?: (repo: string, paths: string[]) => void;
+  onUnstage?: (repo: string, paths: string[]) => void;
+  /** Commit what's staged in one repo. Resolves so the box can clear itself. */
+  onCommit?: (repo: string, message: string) => Promise<unknown>;
 }
+
+/** Staged / not-yet-staged within one repo group. Conflicted files are neither:
+ *  they have to be resolved before they can be committed at all. */
+const stagedIn = (g: ChangeGroup) => g.files.filter((f) => f.staged && !f.conflicted).length;
+const unstagedIn = (g: ChangeGroup) => g.files.filter((f) => !f.staged && !f.conflicted);
 
 const kindClass = (f: FileChange) =>
   f.conflicted ? "conflicted" : f.untracked ? "untracked" : f.staged ? "staged" : "unstaged";
@@ -55,7 +66,25 @@ export function ChangesPanel({
   onOpenCollab,
   onSaveCollab,
   agentBar,
+  onStage,
+  onUnstage,
+  onCommit,
 }: ChangesPanelProps) {
+  /** One message per repo: a project with two components has two working trees
+   *  and two commits to write, and sharing one box between them would put the
+   *  wrong message on whichever you pressed second. */
+  const [messages, setMessages] = useState<Record<string, string>>({});
+  const [committing, setCommitting] = useState<string | null>(null);
+  const setMessage = (repo: string, text: string) =>
+    setMessages((m) => ({ ...m, [repo]: text }));
+  const commit = (repo: string) => {
+    const text = (messages[repo] ?? "").trim();
+    if (!text || !onCommit) return;
+    setCommitting(repo);
+    void Promise.resolve(onCommit(repo, text))
+      .then(() => setMessage(repo, ""))
+      .finally(() => setCommitting(null));
+  };
   const total = groups.reduce((n, g) => n + g.files.length, 0);
   // Only files with unsaved live edits — a shared-but-untouched file isn't a
   // change worth listing.
@@ -113,6 +142,63 @@ export function ChangesPanel({
             <div className="git-section-head change-group-head">
               {g.component} ({g.files.length})
             </div>
+            {/* Commit lives with the files it commits. This is the only commit
+                box in the app now — the Git panel's copy of this list is gone,
+                and a list you can't act on is a list you have to leave. */}
+            {onCommit && (
+              <div className="git-commit-box change-commit-box">
+                <textarea
+                  className="git-commit-msg"
+                  rows={2}
+                  placeholder={
+                    stagedIn(g) > 0
+                      ? `Commit message (${stagedIn(g)} staged)`
+                      : "Stage files to commit"
+                  }
+                  value={messages[g.repo] ?? ""}
+                  onChange={(e) => setMessage(g.repo, e.target.value)}
+                  onKeyDown={(e) => {
+                    if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && stagedIn(g) > 0)
+                      commit(g.repo);
+                  }}
+                />
+                <div className="git-commit-actions">
+                  <button
+                    className="btn btn-accent"
+                    disabled={
+                      stagedIn(g) === 0 ||
+                      !(messages[g.repo] ?? "").trim() ||
+                      committing === g.repo
+                    }
+                    title="Commit staged changes (Cmd+Enter)"
+                    onClick={() => commit(g.repo)}
+                  >
+                    Commit {stagedIn(g) > 0 ? stagedIn(g) : ""}
+                  </button>
+                  {unstagedIn(g).length > 0 && onStage && (
+                    <button
+                      className="btn-mini"
+                      onClick={() => onStage(g.repo, unstagedIn(g).map((f) => f.path))}
+                    >
+                      Stage all
+                    </button>
+                  )}
+                  {stagedIn(g) > 0 && onUnstage && (
+                    <button
+                      className="btn-mini"
+                      onClick={() =>
+                        onUnstage(
+                          g.repo,
+                          g.files.filter((f) => f.staged).map((f) => f.path),
+                        )
+                      }
+                    >
+                      Unstage all
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
             {g.files.map((f) => (
               <div
                 key={f.path}
@@ -123,6 +209,19 @@ export function ChangesPanel({
                 <span className={`change-kind change-${kindClass(f)}`}>{badge(f)}</span>
                 <span className="change-name">{f.path.split("/").pop()}</span>
                 <span className="change-dir">{f.path.split("/").slice(0, -1).join("/")}</span>
+                {(onStage || onUnstage) && !f.conflicted && (
+                  <button
+                    className="btn-mini change-stage"
+                    title={f.staged ? "Unstage this file" : "Stage this file"}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (f.staged) onUnstage?.(g.repo, [f.path]);
+                      else onStage?.(g.repo, [f.path]);
+                    }}
+                  >
+                    {f.staged ? "−" : "+"}
+                  </button>
+                )}
               </div>
             ))}
           </div>
