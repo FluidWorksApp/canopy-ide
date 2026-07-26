@@ -10768,6 +10768,14 @@ a.btn-mini {
   animation: hib-turn 2.4s linear infinite;
 }
 
+/* The handover from freezing to asleep: the workspace behind has already been
+   swapped for the wake screen, so lifting the frost cross-fades the two cards
+   rather than popping one in. */
+.hib-lifting {
+  animation: hib-thaw-out 420ms var(--ease-out) forwards;
+  pointer-events: none;
+}
+
 /* ---- the thaw: the frost lifts off a workspace that is already back ---- */
 
 .hib-thawed {
@@ -10829,6 +10837,7 @@ a.btn-mini {
 
 @media (prefers-reduced-motion: reduce) {
   .hib-freezing .hib-frost,
+  .hib-lifting,
   .hib-card,
   .hib-crystal,
   .hib-flake-freeze g path,
@@ -10843,6 +10852,7 @@ a.btn-mini {
   }
   /* Without the draw, the crystal must simply be there. */
   .hib-flake-freeze g path { stroke-dashoffset: 0; }
-  /* The thaw still has to end with the frost gone. */
-  .hib-thawed { opacity: 0; transition: opacity var(--dur-med) linear; }
+  /* Both handovers still have to end with the frost gone. */
+  .hib-thawed,
+  .hib-lifting { opacity: 0; transition: opacity var(--dur-med) linear; }
 }
