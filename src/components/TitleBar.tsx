@@ -141,12 +141,12 @@ function TitleBarImpl({
               ])
             }
             title={
-              (asleep ? "Hibernating — open it to wake it\n\n" : "") +
+              (asleep ? "Hibernating — open its tab to wake it\n\n" : "") +
               p.components.map((c) => c.path).join("\n")
             }
           >
             {asleep && (
-              <span className="project-tab-frost" title="Hibernating — right-click to wake it">
+              <span className="project-tab-frost" title="Hibernating — open its tab to wake it">
                 <FrostIcon size={12} />
               </span>
             )}

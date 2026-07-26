@@ -35,7 +35,7 @@ export function Welcome({ projects, hibernated, onOpen, onNew, onDelete }: Welco
                 <span className="welcome-project-name">
                   {p.name}
                   {p.id in hibernated && (
-                    <span className="hib-chip" title="Hibernating — open it to wake it">
+                    <span className="hib-chip" title="Hibernating — opens on its wake screen">
                       <FrostIcon size={10} /> hibernating
                     </span>
                   )}

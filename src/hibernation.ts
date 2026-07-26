@@ -8,8 +8,9 @@
 // Hibernating is the space-saving middle ground between "leave it open" and
 // "close it": everything the project had on screen — its tabs, its open files,
 // its terminals and the agent conversations running in them — is written down,
-// the project is closed (so its PTYs, language servers and Monaco models all
-// go), and reopening it offers the whole arrangement back in one click.
+// and everything it was holding is given back (PTYs, language servers, Monaco
+// models, file watchers). Its tab stays where it was, so the project is still
+// one click away, and that click offers the whole arrangement back.
 //
 // The snapshot lives in localStorage rather than the workspace file for the
 // same reason terminalMemory does: it is a record of a session's shape, not

@@ -85,12 +85,15 @@ const ago = (ms: number) => {
 interface FreezeOverlayProps {
   project: Project;
   snapshot: ProjectSnapshot | null;
+  /** The workspace behind has been put away and the wake screen has taken its
+   *  place underneath — lift the frost off so the two cards cross-fade. */
+  leaving?: boolean;
 }
 
 /** Shown over the live project for the beat between "Hibernate" and the
- *  project closing: the workspace behind it frosts over and everything it was
- *  holding is named as it is put away. */
-export function FreezeOverlay({ project, snapshot }: FreezeOverlayProps) {
+ *  workspace going away: it frosts over and everything it was holding is named
+ *  as it is put away. */
+export function FreezeOverlay({ project, snapshot, leaving }: FreezeOverlayProps) {
   const s = snapshotSummary(snapshot);
   const parts = [
     s.agents && `${s.agents} agent session${s.agents === 1 ? "" : "s"}`,
@@ -99,7 +102,11 @@ export function FreezeOverlay({ project, snapshot }: FreezeOverlayProps) {
     s.views && `${s.views} view${s.views === 1 ? "" : "s"}`,
   ].filter(Boolean) as string[];
   return (
-    <div className="hib hib-freezing" role="status" aria-live="polite">
+    <div
+      className={`hib hib-freezing ${leaving ? "hib-lifting" : ""}`}
+      role="status"
+      aria-live="polite"
+    >
       <div className="hib-frost" />
       <Crystals />
       <div className="hib-card hib-card-freeze">

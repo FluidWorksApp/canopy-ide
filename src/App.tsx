@@ -386,9 +386,12 @@ export default function App() {
   const updateRef = useRef<(patch: Partial<WorkspaceState>) => void>(() => {});
 
   // Load persisted workspace; re-register watchers/scopes for open projects.
+  // A tab that was asleep when the app last quit comes back asleep — and a
+  // sleeping project watches nothing, so it registers nothing until it wakes.
   useEffect(() => {
     void loadWorkspace().then(async (state) => {
       for (const id of state.openIds) {
+        if (isHibernating(id)) continue;
         const project = state.projects.find((p) => p.id === id);
         for (const c of project?.components ?? []) {
           await ipc.workspaceAdd(c.path).catch(() => {});
@@ -748,8 +751,12 @@ export default function App() {
       const project = wsRef.current.projects.find((p) => p.id === id);
       if (!project) return;
       if (!wsRef.current.openIds.includes(id)) {
-        for (const c of project.components) {
-          await ipc.workspaceAdd(c.path).catch((e) => console.warn("scope add failed", e));
+        // Nothing to watch while it sleeps: opening a hibernating project lands
+        // on the wake screen, and waking is what registers its paths.
+        if (!isHibernating(id)) {
+          for (const c of project.components) {
+            await ipc.workspaceAdd(c.path).catch((e) => console.warn("scope add failed", e));
+          }
         }
         update({ openIds: [...wsRef.current.openIds, id], activeId: id });
       } else {
@@ -759,40 +766,57 @@ export default function App() {
     [update],
   );
 
+  /** Give back the OS-level resources one project holds — file watchers, scopes,
+   *  language servers — for every component path no *awake* project still needs.
+   *  Shared by closing a project and by putting one to sleep, which differ only
+   *  in whether the tab goes with it. A sleeping project is not counted as a
+   *  user of its paths: it registered none. */
+  const releaseProject = useCallback(async (id: string, keepIds: string[]) => {
+    const state = wsRef.current;
+    const project = state.projects.find((p) => p.id === id);
+    const stillUsed = new Set(
+      keepIds.flatMap(
+        (x) => state.projects.find((p) => p.id === x)?.components.map((c) => c.path) ?? [],
+      ),
+    );
+    for (const c of project?.components ?? []) {
+      if (!stillUsed.has(c.path)) {
+        await ipc.workspaceRemove(c.path).catch(() => {});
+        await stopWorkspaceServers(c.path);
+      }
+    }
+  }, []);
+  const releaseProjectRef = useRef(releaseProject);
+  releaseProjectRef.current = releaseProject;
+
   const closeProject = useCallback(
     async (id: string) => {
       const state = wsRef.current;
-      const project = state.projects.find((p) => p.id === id);
       const openIds = state.openIds.filter((x) => x !== id);
-      // Drop watchers/scopes not used by any other open project.
-      const stillUsed = new Set(
-        openIds.flatMap(
-          (x) => state.projects.find((p) => p.id === x)?.components.map((c) => c.path) ?? [],
-        ),
+      await releaseProject(
+        id,
+        openIds.filter((x) => !isHibernating(x)),
       );
-      for (const c of project?.components ?? []) {
-        if (!stillUsed.has(c.path)) {
-          await ipc.workspaceRemove(c.path).catch(() => {});
-          await stopWorkspaceServers(c.path);
-        }
-      }
       update({
         openIds,
         activeId: state.activeId === id ? (openIds[openIds.length - 1] ?? null) : state.activeId,
       });
     },
-    [update],
+    [update, releaseProject],
   );
   closeProjectRef.current = closeProject;
   openProjectRef.current = openProject;
   updateRef.current = update;
 
   // ---------- hibernation ----------
-  // Sleep is a third state between open and closed: the project's whole
-  // arrangement is written down, then it is genuinely closed — PTYs, agents,
-  // language servers and editor models all go — and opening it again offers
-  // the arrangement back. The snapshot store is the only marker; see
-  // hibernation.ts for why nothing else records "asleep".
+  // Sleep is a third state between open and closed. The project's whole
+  // arrangement is written down and everything it was holding is given back —
+  // PTYs, agents, language servers, editor models, file watchers — but its tab
+  // stays exactly where it was, frosted over: hibernating is a state a project
+  // is *in*, not a way of closing it, and a tab that vanished would make it
+  // look like one. Clicking the tab lands on the wake screen. The snapshot
+  // store is the only marker; see hibernation.ts for why nothing else records
+  // "asleep".
   const [hibernated, setHibernated] = useState<Record<string, ProjectSnapshot>>(() =>
     hibernatedProjects(),
   );
@@ -802,10 +826,14 @@ export default function App() {
     return () => window.removeEventListener(HIBERNATION_CHANGE_EVENT, sync);
   }, []);
   // The project frosting over right now, and the snapshot it produced (shown
-  // as the frost forms, so you see what is being put away).
-  const [freezing, setFreezing] = useState<{ id: string; snapshot: ProjectSnapshot | null } | null>(
-    null,
-  );
+  // as the frost forms, so you see what is being put away). `leaving` is the
+  // handover: the frost lifts while the wake screen takes its place underneath,
+  // so the two cards cross-fade instead of one popping in.
+  const [freezing, setFreezing] = useState<{
+    id: string;
+    snapshot: ProjectSnapshot | null;
+    leaving?: boolean;
+  } | null>(null);
   // Projects being woken: the snapshot handed to their ProjectView, plus how
   // far through rebuilding it is. The frost stays on top until it's done.
   const [waking, setWaking] = useState<
@@ -834,11 +862,21 @@ export default function App() {
           return;
         }
         setFreezing({ id, snapshot: hibernationOf(id) });
-        // Let the frost finish forming before the project goes.
+        // Let the frost finish forming first. Only then does the view behind it
+        // swap to the wake screen — keeping the ProjectView mounted until now is
+        // what lets its own teardown run (models disposed, shares ended, PTYs
+        // killed as each terminal unmounts) instead of being dropped mid-flight.
         window.setTimeout(() => {
-          setFreezing(null);
-          void closeProjectRef.current(id);
-          notify(`${project.name} is hibernating — open it to wake it.`, "success");
+          setFreezing((f) => (f?.id === id ? { ...f, leaving: true } : f));
+          void releaseProjectRef.current(
+            id,
+            wsRef.current.openIds.filter((x) => x !== id && !isHibernating(x)),
+          );
+          notify(
+            `${project.name} is hibernating — its tab is still there, wake it when you need it.`,
+            "success",
+          );
+          window.setTimeout(() => setFreezing((f) => (f?.id === id ? null : f)), 420);
         }, 1100);
       };
       const onSnapshot = (e: Event) => {
@@ -861,6 +899,11 @@ export default function App() {
   const wakeProject = useCallback((id: string) => {
     const snapshot = hibernationOf(id);
     if (!snapshot) return;
+    // Its paths went back when it fell asleep; the tree, the search and the
+    // change feed all need them again before the first tab reopens.
+    for (const c of wsRef.current.projects.find((p) => p.id === id)?.components ?? []) {
+      void ipc.workspaceAdd(c.path).catch(() => {});
+    }
     const steps = wakeSteps(snapshot);
     setWaking((prev) => ({
       ...prev,
@@ -947,13 +990,16 @@ export default function App() {
   // these paths onto their repo toplevels and de-duplicates, so passing raw
   // component paths (and re-passing them on every workspace edit) is cheap; the
   // store drops identical sets before they reach IPC.
+  // A hibernating project keeps its tab but is not "what the user is working
+  // on" by any measure that matters here: nothing in it is running, and its
+  // PRs can wait until it is woken.
   const watchedPaths = useMemo(() => {
     const open = new Set(ws.openIds ?? []);
     return ws.projects
-      .filter((p) => open.has(p.id))
+      .filter((p) => open.has(p.id) && !hibernated[p.id])
       .flatMap((p) => p.components.map((c) => c.path))
       .sort();
-  }, [ws.projects, ws.openIds]);
+  }, [ws.projects, ws.openIds, hibernated]);
   useEffect(() => {
     prWatch.setPaths(watchedPaths);
   }, [watchedPaths]);
@@ -1388,6 +1434,14 @@ export default function App() {
   const freezingProject = freezing
     ? (ws.projects.find((p) => p.id === freezing.id) ?? null)
     : null;
+  /** Whether a project's tab shows the wake screen instead of a workspace. It
+   *  is asleep and not being woken — except during the freeze itself, where the
+   *  ProjectView stays mounted behind the frost until it has finished putting
+   *  itself away. */
+  const showsWakeScreen = (id: string) =>
+    Boolean(hibernated[id]) &&
+    !waking[id] &&
+    !(freezing?.id === id && !freezing.leaving);
   // Project tabs are draggable; their order is the workspace's own, so it
   // persists with everything else in the workspace file.
   const tabDrag = useTabDrag(ws.openIds, (openIds) => update({ openIds }));
@@ -1445,7 +1499,7 @@ export default function App() {
         {/* A project that is asleep and not being woken has no ProjectView at
             all — that is the saving. It's the frost, and a button. */}
         {openProjects
-          .filter((p) => hibernated[p.id] && !waking[p.id])
+          .filter((p) => showsWakeScreen(p.id))
           .map((p) => (
             <div
               key={p.id}
@@ -1462,7 +1516,7 @@ export default function App() {
             </div>
           ))}
         {openProjects
-          .filter((p) => !hibernated[p.id] || waking[p.id])
+          .filter((p) => !showsWakeScreen(p.id))
           .map((p) => (
             <ProjectView
               key={p.id}
@@ -1500,7 +1554,11 @@ export default function App() {
             rebuilds underneath and only then dissolves. */}
         {freezing && freezingProject && (
           <div className="hib-layer">
-            <FreezeOverlay project={freezingProject} snapshot={freezing.snapshot} />
+            <FreezeOverlay
+              project={freezingProject}
+              snapshot={freezing.snapshot}
+              leaving={Boolean(freezing.leaving)}
+            />
           </div>
         )}
         {Object.entries(waking).map(([id, w]) => {
