@@ -37,6 +37,27 @@ interface DirState {
   expanded: boolean;
 }
 
+// Disclosure chevron — a hairline stroked "›" that rotates 90° to point down
+// when the folder opens (rotation lives on .tree-chevron-open). Replaces the
+// solid ▸ glyph with the thinner, rounded caret the design uses.
+function Chevron() {
+  return (
+    <svg
+      width="10"
+      height="10"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M9 5l7 7-7 7" />
+    </svg>
+  );
+}
+
 // Standard IDE-style yellow folder (VS Code-like), inline SVG.
 function FolderIcon({ open }: { open: boolean }) {
   return (
@@ -449,7 +470,7 @@ export function FileTree({
             }}
           >
             <span className={`tree-chevron ${entry.is_dir && expanded ? "tree-chevron-open" : ""}`}>
-              {entry.is_dir ? "▸" : ""}
+              {entry.is_dir ? <Chevron /> : null}
             </span>
             <span className="tree-file-icon">
               {entry.is_dir ? <FolderIcon open={expanded} /> : <FileIcon name={entry.name} />}

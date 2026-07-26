@@ -1996,8 +1996,10 @@ body,
   width: 11px;
   flex: 0 0 11px;
   color: var(--text-dim);
-  font-size: 9px;
-  text-align: center;
+  /* Centers the 10×10 SVG caret so it rotates about its own middle. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   /* Rotates in place when the directory opens, rather than swapping glyphs. */
   transition: transform var(--dur-fast) var(--ease-out);
 }
