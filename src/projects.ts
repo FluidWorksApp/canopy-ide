@@ -159,7 +159,13 @@ export interface AgentCli {
   /** Fallback glyph for the terminal tab strip; the menu uses the brand SVG
    *  registered under the same `id` in components/icons.tsx. */
   icon: string;
-  install: string;
+  /**
+   * One-click install command, when there is a package Canopy knows how to
+   * fetch. Absent for an entry the user added themselves: nothing here knows
+   * where an in-house CLI comes from, so the launcher must say "not found"
+   * rather than offer an install that cannot exist.
+   */
+  install?: string;
   /**
    * Packages that ship this CLI, as the resolver reports them (see
    * agentid.rs): `npm:<name>` from the nearest package.json, `brew:<formula>`
@@ -194,6 +200,12 @@ export interface AgentCli {
    *  registry, and nagging someone to overwrite a sanctioned enterprise build
    *  with a public release is worse than showing no version at all. */
   rebound?: boolean;
+
+  /** True for an entry the user added rather than one Canopy ships (see
+   *  CustomAgentCli). Read where "we know nothing else about this CLI" changes
+   *  what a surface may claim — there is no installer to offer and no vendor
+   *  whose logo it could wear. */
+  custom?: boolean;
 
   /**
    * Command that starts the CLI with an opening prompt already in hand.
@@ -368,6 +380,167 @@ const EXTRA_AGENT_BINS = ["gemini", "goose", "copilot", "cursor-agent", "qwen", 
 export const binName = (bin: string) =>
   (bin.split(/[/\\]/).pop() ?? bin).replace(/\.exe$/i, "").toLowerCase();
 
+// ---------- CLIs the user adds ----------
+
+/**
+ * An agent CLI Canopy ships no knowledge of, described by the person running it
+ * — an in-house tool, or a vendor we haven't got to yet.
+ *
+ * Deliberately a much smaller shape than the entries above, because everything
+ * missing from it is something that cannot be discovered and must not be
+ * invented. No `install` (there is no package we know how to fetch), no
+ * `latestUrl` or `pkgs` (no registry to ask, so no version badge and no
+ * package-identity rung), and no hook or MCP wiring at all — those are
+ * per-vendor config formats, one arm each in agents.rs, and a wrong guess
+ * writes into someone's real config file.
+ *
+ * What is left is exactly what only the user can state: what to run, what to
+ * call it, and the two argument shapes worth knowing. So a custom CLI launches,
+ * is recognised while it runs, and resumes if they say how — and its state
+ * reaches the Agents rail only once its own hooks point at the bridge file,
+ * which stays a thing they do rather than a thing we pretend to have done.
+ */
+export interface CustomAgentCli {
+  /** Stable registry id, assigned when the entry is first named and never
+   *  rewritten afterwards — `defaultAgent` and every recorded task run refer to
+   *  a CLI by id, so a rename must not orphan them. */
+  id: string;
+  name: string;
+  /** The executable: a command name on PATH, or a full path. */
+  bin: string;
+  /**
+   * Arguments that reopen a session, `{id}` marking where the session id goes
+   * — `--resume {id}`, `threads continue {id}`. Blank when the CLI can't do it,
+   * which is the honest answer: see AgentCli.resume for why a guessed flag is
+   * worse than offering nothing.
+   */
+  resumeArgs?: string;
+  /**
+   * Arguments that start it with an opening prompt, `{prompt}` marking the
+   * text. Blank means Canopy launches it bare and types the prompt in once the
+   * TUI is up — slower, but it works everywhere.
+   */
+  promptArgs?: string;
+}
+
+/** Ids nothing may take: the built-ins, and the bare binaries that already name
+ *  themselves. Two entries answering to one id makes identification a coin
+ *  toss, and the loser is whichever the user actually launched. */
+export function agentIdTaken(id: string): boolean {
+  return BUILTIN_AGENT_CLIS.some((d) => d.id === id) || EXTRA_AGENT_BINS.includes(id);
+}
+
+/**
+ * A registry id for a newly added custom CLI, slugged from its name and
+ * uniquified against everything already registered.
+ *
+ * Slugged rather than opaque so that a CLI whose hooks the user wires by hand
+ * can report `agent: "<id>"` and land on their own entry — the same rung that
+ * names an enterprise build today (see agentIdentity.ts).
+ */
+export function newCustomCliId(name: string, existing: string[]): string {
+  const base =
+    name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "cli";
+  let id = base;
+  for (let n = 2; agentIdTaken(id) || existing.includes(id); n++) id = `${base}-${n}`;
+  return id;
+}
+
+/**
+ * Put `value` where `token` says, or on the end when the template never
+ * mentions it.
+ *
+ * Appending rather than rejecting, because `--resume` typed on its own plainly
+ * means "the id goes after this" — and the alternative is building `acme
+ * --resume` with no id at all, which is precisely the silent failure every
+ * `resume` entry above is documented against: a *fresh* session, started while
+ * the UI says the conversation was restored.
+ */
+function expandArgs(template: string, token: string, value: string): string {
+  const t = template.trim();
+  return (t.includes(token) ? t.replaceAll(token, value) : `${t} ${value}`).trim();
+}
+
+/** A value that names arguments rather than one executable. `acme run agent`
+ *  probes as a single file of that name — so it reports "not found" with
+ *  nothing to say why — and would be launched the same way. A path may hold
+ *  spaces (`/opt/Acme CLI/agent`); a bare name that does is arguments. */
+export const namesArguments = (value: string) =>
+  !!value && !/[/\\]/.test(value) && /\s/.test(value);
+
+/**
+ * Why a custom entry can't be registered, or null when it can. `earlier` is the
+ * entries above it in the list — first one wins, so editing a row can only ever
+ * invalidate itself.
+ *
+ * Only two rules, and both are about what the field has to be rather than what
+ * the CLI does: whether the value is one executable, and whether something else
+ * already answers to that name. Nothing here can tell you the binary is really
+ * an agent, or that the resume flag is right — running an unknown CLI to find
+ * out is not a thing a settings field may do, and a guess would be worse than
+ * the "✗ not found" the PATH probe gives honestly.
+ *
+ * A built-in's binary is refused because that entry already launches it and
+ * would then be identified as this one. The bare-binary list (gemini, droid, …)
+ * is deliberately NOT refused: those name themselves precisely because Canopy
+ * ships no launcher for them, so adding one is the point.
+ */
+export function customCliIssue(
+  entry: CustomAgentCli,
+  earlier: CustomAgentCli[],
+): "arguments" | "duplicate" | null {
+  const bin = entry.bin.trim();
+  if (!bin) return null;
+  if (namesArguments(bin)) return "arguments";
+  const name = binName(bin);
+  const clash =
+    BUILTIN_AGENT_CLIS.some((d) => d.bin === name) ||
+    earlier.some((o) => o.bin.trim() && binName(o.bin) === name);
+  return clash ? "duplicate" : null;
+}
+
+/** The user's own entries, as registry definitions. */
+export function customCliDefs(): AgentCliDef[] {
+  const all = getSettings().customClis;
+  return all.flatMap((c, i): AgentCliDef[] => {
+    const id = c.id.trim();
+    const bin = c.bin.trim();
+    // A half-filled or unusable row never reaches the registry: the settings
+    // list keeps the draft so it can be finished, but a launcher entry that
+    // runs nothing — or that steals another entry's identity — is worse than no
+    // entry at all.
+    if (!id || !bin || customCliIssue(c, all.slice(0, i))) return [];
+    const name = c.name.trim() || binName(bin);
+    const resumeArgs = c.resumeArgs?.trim();
+    const promptArgs = c.promptArgs?.trim();
+    return [
+      {
+        id,
+        name,
+        bin,
+        // No brand mark exists for a CLI we've never heard of — AgentIcon falls
+        // back to a terminal glyph, and this is the tab strip's fallback: the
+        // initial, which at least tells two custom entries apart.
+        icon: (name[0] ?? "▷").toUpperCase(),
+        custom: true,
+        resume: resumeArgs
+          ? (sessionId, b) => `${b} ${expandArgs(resumeArgs, "{id}", sessionId)}`
+          : undefined,
+        prompt: promptArgs
+          ? (text, b) => `${b} ${expandArgs(promptArgs, "{prompt}", shellQuote(text))}`
+          : undefined,
+      },
+    ];
+  });
+}
+
+/** Every entry as authored — what Canopy ships, then what the user added.
+ *  Read this rather than BUILTIN_AGENT_CLIS anywhere the answer has to include
+ *  a CLI Canopy has no knowledge of. */
+export function agentCliDefs(): AgentCliDef[] {
+  return [...BUILTIN_AGENT_CLIS, ...customCliDefs()];
+}
+
 /** Bind a definition to the binary this machine actually has. */
 function bindCli(def: AgentCliDef, bin: string): AgentCli {
   const { resume, prompt, ...rest } = def;
@@ -398,6 +571,21 @@ export const AGENT_CLIS: AgentCli[] = [];
  *  new binary rather than waiting for an unrelated state change. */
 export const AGENT_CLIS_CHANGED_EVENT = "canopy:agentClis";
 
+/** Fired when an installer or updater finishes, so every launcher re-probes.
+ *
+ *  A window event rather than a call, because what changed is a property of the
+ *  machine and every open project shows its own launcher: installing Amp from
+ *  one project used to leave every other project's card saying "install" until
+ *  that view was remounted, which reads as the install having failed. */
+export const CLI_INSTALLS_CHANGED_EVENT = "canopy:cliInstalls";
+
+/** Announce that what's on PATH may have changed (see the event above). */
+export function announceCliInstallsChanged(): void {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(CLI_INSTALLS_CHANGED_EVENT));
+  }
+}
+
 /** Re-resolve the registry against the current settings. Called at boot and
  *  whenever an override is edited. */
 export function refreshAgentClis(): void {
@@ -405,7 +593,7 @@ export function refreshAgentClis(): void {
   AGENT_CLIS.splice(
     0,
     AGENT_CLIS.length,
-    ...BUILTIN_AGENT_CLIS.map((d) => bindCli(d, overrides[d.id]?.trim() || d.bin)),
+    ...agentCliDefs().map((d) => bindCli(d, overrides[d.id]?.trim() || d.bin)),
   );
   if (typeof window !== "undefined") {
     window.dispatchEvent(new CustomEvent(AGENT_CLIS_CHANGED_EVENT));
@@ -427,6 +615,10 @@ refreshAgentClis();
  *  set still carries the stock command. */
 export function agentForBin(bin: string): string | undefined {
   const name = binName(bin);
+  // A CLI the user added by hand outranks the bare-binary list: if they have
+  // told us what `droid` is on this machine, that is what it is.
+  const custom = AGENT_CLIS.find((c) => c.custom && binName(c.bin) === name);
+  if (custom) return custom.id;
   if (EXTRA_AGENT_BINS.includes(name)) return name;
   const hit =
     AGENT_CLIS.find((c) => binName(c.bin) === name) ??
@@ -680,7 +872,7 @@ export function resumeSessionId(command: string | null | undefined): string | nu
   const cmd = (command ?? "").trim();
   if (!cmd) return null;
   const SENTINEL = "__CANOPY_SID__";
-  const templates = BUILTIN_AGENT_CLIS.flatMap((d) => {
+  const templates = agentCliDefs().flatMap((d) => {
     const bins = new Set([AGENT_CLIS.find((c) => c.id === d.id)?.bin ?? d.bin, d.bin]);
     // Each spelling as written *and* as quoted: a path with a space in it goes
     // to the shell quoted, so that is the form a remembered resume command
