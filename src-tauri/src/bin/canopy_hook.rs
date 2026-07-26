@@ -766,6 +766,40 @@ fn mcp_main() {
         let Some(id) = msg.get("id").cloned() else {
             continue;
         };
+        // A tool call can legitimately block for minutes — canopy_wait_for
+        // holds its socket for the whole wait, canopy_ask_user for the user's
+        // think time. Answering it inline would leave every later request
+        // unread in the pipe behind it, so a `wait` for a server that is slow
+        // to boot also stalls the `server_output` call sent to find out why.
+        // Each gets its own thread instead; ids let replies land out of order,
+        // and write_message keeps stdout one-message-at-a-time.
+        if msg.get("method").and_then(|m| m.as_str()) == Some("tools/call") {
+            let out = out.clone();
+            std::thread::spawn(move || {
+                let name = msg
+                    .pointer("/params/name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let args = msg
+                    .pointer("/params/arguments")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                let reply = match call_tool(name, &args) {
+                    Ok(output) => rpc_ok(id, output.into_result(name)),
+                    // Tool failures are results with isError, not protocol
+                    // errors — the agent reads them and adapts.
+                    Err(text) => rpc_ok(
+                        id,
+                        serde_json::json!({
+                            "content": [{ "type": "text", "text": text }],
+                            "isError": true,
+                        }),
+                    ),
+                };
+                write_message(&out, &reply);
+            });
+            continue;
+        }
         let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
         let reply = match method {
             "initialize" => {
@@ -854,28 +888,6 @@ fn mcp_main() {
                 match prompt_get(name) {
                     Ok(result) => rpc_ok(id, result),
                     Err(e) => rpc_err(id, -32602, &e),
-                }
-            }
-            "tools/call" => {
-                let name = msg
-                    .pointer("/params/name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let args = msg
-                    .pointer("/params/arguments")
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!({}));
-                match call_tool(name, &args) {
-                    Ok(output) => rpc_ok(id, output.into_result(name)),
-                    // Tool failures are results with isError, not protocol
-                    // errors — the agent reads them and adapts.
-                    Err(text) => rpc_ok(
-                        id,
-                        serde_json::json!({
-                            "content": [{ "type": "text", "text": text }],
-                            "isError": true,
-                        }),
-                    ),
                 }
             }
             _ => serde_json::json!({
