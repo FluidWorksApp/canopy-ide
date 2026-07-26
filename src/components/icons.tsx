@@ -456,6 +456,107 @@ export function TeamIcon({ size = 14, className }: IconProps) {
   );
 }
 
+// ---------- instruction kinds ----------
+// What a file *is*, where the brand mark says who reads it. One silhouette per
+// kind, distinct at 14px, because these sit in a list where every row is a
+// filename and the shape is the only thing that separates a skill from a rule.
+
+/** A plain instructions file — CLAUDE.md, AGENTS.md. */
+export function DocumentIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.7}>
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z" />
+      <path d="M14 3v5h5" />
+      <path d="M8.5 13h7M8.5 16.5h4.5" />
+    </svg>
+  );
+}
+
+/** A rule: a constraint that holds, so a shield with a check. */
+export function RuleIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.7}>
+      <path d="M12 3 5 6v5.4c0 4.2 2.9 7.9 7 9.6 4.1-1.7 7-5.4 7-9.6V6Z" />
+      <path d="m9 12 2.2 2.2L15 10.4" />
+    </svg>
+  );
+}
+
+/** A skill: the sparkle every tool uses for "loaded when the work calls for it". */
+export function SkillIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.6}>
+      <path d="M10 3.5 11.6 8 16 9.6 11.6 11.2 10 15.7 8.4 11.2 4 9.6 8.4 8Z" />
+      <path d="M17.5 14.2 18.3 16.4 20.5 17.2 18.3 18 17.5 20.2 16.7 18 14.5 17.2 16.7 16.4Z" />
+    </svg>
+  );
+}
+
+/** A subagent: something delegated to, so a small machine. */
+export function SubagentIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.7}>
+      <rect x="4" y="8" width="16" height="11" rx="3" />
+      <path d="M12 4.8V8" />
+      <circle cx="12" cy="3.6" r="1.1" fill="currentColor" stroke="none" />
+      <circle cx="9.2" cy="13.2" r="1" fill="currentColor" stroke="none" />
+      <circle cx="14.8" cy="13.2" r="1" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+/** A slash command: the slash you type to reach it. */
+export function SlashCommandIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.7}>
+      <rect x="3.5" y="4.5" width="17" height="15" rx="3" />
+      <path d="M14 8.5 10 15.5" />
+    </svg>
+  );
+}
+
+/** An output style: a painter's palette. */
+export function StyleIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.7}>
+      <path d="M12 3.2a8.8 8.8 0 1 0 0 17.6 2.3 2.3 0 0 0 1.8-3.8 2.3 2.3 0 0 1 1.8-3.8h1.9a3.3 3.3 0 0 0 3.3-3.3c0-3.7-3.9-6.7-8.8-6.7Z" />
+      <circle cx="7.6" cy="12.4" r="1" fill="currentColor" stroke="none" />
+      <circle cx="9.4" cy="8.4" r="1" fill="currentColor" stroke="none" />
+      <circle cx="14" cy="7.6" r="1" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+const KIND_ICONS: Record<string, (p: IconProps) => ReactElement> = {
+  instructions: DocumentIcon,
+  rule: RuleIcon,
+  skill: SkillIcon,
+  subagent: SubagentIcon,
+  command: SlashCommandIcon,
+  style: StyleIcon,
+};
+
+/** An instruction file's kind mark, falling back to a plain document for a kind
+ *  the backend grows before this map does. */
+export function InstructionKindIcon({ kind, size = 14, className }: IconProps & { kind: string }) {
+  const Kind = KIND_ICONS[kind] ?? DocumentIcon;
+  return <Kind size={size} className={className} />;
+}
+
+/** Two arrows passing each other: work traded between sessions on this machine.
+ *  Deliberately not LiveShareIcon's broadcast arcs — those mean sharing with
+ *  other people, and shared context never leaves this project. */
+export function ExchangeIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.8}>
+      <path d="M4 9h13" />
+      <path d="m14 6 3 3-3 3" />
+      <path d="M20 15H7" />
+      <path d="m10 12-3 3 3 3" />
+    </svg>
+  );
+}
+
 // Broadcast/live: a solid core with signal arcs, for sharing a file or project
 // live with the team.
 export function LiveShareIcon({ size = 14, className }: IconProps) {

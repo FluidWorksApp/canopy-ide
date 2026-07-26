@@ -21,7 +21,7 @@ import {
   type InstructionDoc,
 } from "../instructionDoc";
 import type { Notify } from "../types";
-import { TrashIcon } from "./icons";
+import { AgentIcon, BRAND_ICONS, InstructionKindIcon, TrashIcon } from "./icons";
 
 /** Display names for agents Canopy doesn't ship a launcher for. Their files
  *  still turn up on disk — a `.cursor/rules` or a `.windsurfrules` is worth
@@ -55,6 +55,51 @@ const KIND_LABEL: Record<string, string> = {
   style: "output style",
 };
 
+/** Plural headings for the sub-groups inside each group, in the order they read
+ *  best: the always-on files first, the on-demand packs after. A kind missing
+ *  from here still gets a heading — see `kindTitle`. */
+const KIND_ORDER = ["instructions", "rule", "skill", "subagent", "command", "style"];
+const KIND_PLURAL: Record<string, string> = {
+  instructions: "Instructions",
+  rule: "Rules",
+  skill: "Skills",
+  subagent: "Subagents",
+  command: "Commands",
+  style: "Output styles",
+};
+const kindTitle = (kind: string) => KIND_PLURAL[kind] ?? `${KIND_LABEL[kind] ?? kind}s`;
+const kindRank = (kind: string) => {
+  const i = KIND_ORDER.indexOf(kind);
+  return i === -1 ? KIND_ORDER.length : i;
+};
+
+/** One agent's mark. A brand logo where the vendor has one; otherwise a
+ *  two-letter monogram, because eight identical fallback glyphs would say less
+ *  than the text chips they replaced. */
+function AgentMark({ id, size = 13 }: { id: string; size?: number }) {
+  const name = agentName(id);
+  if (BRAND_ICONS[id])
+    return (
+      <span className="instr-mark" title={name}>
+        <AgentIcon id={id} size={size} />
+      </span>
+    );
+  return (
+    <span className="instr-mark instr-mark-mono" title={name}>
+      {name.slice(0, 2)}
+    </span>
+  );
+}
+
+/** Split a label into the part that identifies the file and the path leading to
+ *  it, so the name can carry the row and the path can recede. */
+function splitLabel(label: string): { name: string; dir: string } {
+  const i = label.lastIndexOf("/");
+  return i === -1
+    ? { name: label, dir: "" }
+    : { name: label.slice(i + 1), dir: label.slice(0, i + 1) };
+}
+
 /** Three groups, by how far the file reaches rather than by which CLI reads it:
  *  the question you open this to answer is "what is being fed to agents here?",
  *  and the agent chips on each row answer the follow-up. */
@@ -83,6 +128,13 @@ function template(f: ipc.InstructionFile): string {
   return `# ${name}\n\n## Commands\n\n- \n\n## Conventions\n\n- \n`;
 }
 
+/** A row is one line: what it is, what it's called, and who reads it.
+ *
+ *  The leading mark carries most of the load. A file only one CLI reads *is*
+ *  that CLI's — `~/.claude/CLAUDE.md` is Claude's, and its logo says so faster
+ *  than the word "Claude" ever did. A file several read has no owner to show,
+ *  so it gets the shape of its kind instead and its readers ride along on the
+ *  right. Either way the row is a mark and a name, not four runs of text. */
 function Row({
   file: f,
   selected,
@@ -95,35 +147,97 @@ function Row({
   showRoot: boolean;
   onSelect: (path: string) => void;
 }) {
+  const { name, dir } = splitLabel(f.label);
+  // A pack names itself in its frontmatter; anything else is named by where it
+  // lives, so that path stays on the row rather than retreating to the tooltip.
+  const titled = f.title != null && f.title !== "";
+  const sole = f.agents.length === 1 ? f.agents[0] : null;
+  const readers = f.agents.map(agentName).join(", ");
   return (
     <div
       className={`instr-row ${selected ? "is-sel" : ""} ${f.exists ? "" : "is-missing"}`}
-      title={f.description ?? f.path}
+      title={`${f.path}\n${KIND_LABEL[f.kind] ?? f.kind} · read by ${readers}${
+        f.description ? `\n\n${f.description}` : ""
+      }`}
       onClick={() => onSelect(f.path)}
     >
-      <div className="instr-row-main">
-        <span className="instr-row-label">{f.title ?? f.label}</span>
-        {!f.exists && <span className="instr-missing">not created</span>}
-      </div>
-      <div className="instr-row-sub">
-        <span className="instr-kind">{KIND_LABEL[f.kind] ?? f.kind}</span>
-        {showRoot && f.root !== "" && (
-          <span className="instr-root">{f.root.split("/").filter(Boolean).pop()}</span>
-        )}
-        {/* Two chips, then a count: AGENTS.md is read by a dozen tools, and at
-            this width a third chip only pushed the "+N" off the edge. */}
-        {f.agents.slice(0, 2).map((a) => (
-          <span className="instr-chip" key={a}>
-            {agentName(a)}
-          </span>
-        ))}
-        {f.agents.length > 2 && (
-          <span className="instr-chip instr-chip-more" title={f.agents.map(agentName).join(", ")}>
-            +{f.agents.length - 2}
-          </span>
-        )}
-      </div>
+      <span className="instr-row-icon">
+        {sole ? <AgentMark id={sole} size={14} /> : <InstructionKindIcon kind={f.kind} size={14} />}
+      </span>
+      <span className="instr-row-label">{titled ? f.title : name}</span>
+      {!titled && dir !== "" && <span className="instr-row-dir">{dir}</span>}
+      {showRoot && f.root !== "" && (
+        <span className="instr-root">{f.root.split("/").filter(Boolean).pop()}</span>
+      )}
+      {!f.exists && <span className="instr-missing">not created</span>}
+      {/* Only when there's something the leading mark didn't already say: a
+          sole reader is the icon on the left, and repeating it here is noise. */}
+      {f.agents.length > 1 && (
+        <span className="instr-row-agents" title={`Read by ${readers}`}>
+          {f.agents.slice(0, 3).map((a) => (
+            <AgentMark key={a} id={a} />
+          ))}
+          {f.agents.length > 3 && <span className="instr-chip-more">+{f.agents.length - 3}</span>}
+        </span>
+      )}
     </div>
+  );
+}
+
+/** A run of rows, split by kind and sorted by name.
+ *
+ *  This is the second level of the outline: the group says how far these files
+ *  reach, the heading here says what they are, and only then does a row have to
+ *  carry anything. A run holding one kind skips the heading — it would repeat
+ *  what the group title already said — and its rows sit flush instead, so an
+ *  indent always means there is a heading above it. */
+function KindSections({
+  rows,
+  selected,
+  ambiguous,
+  onSelect,
+}: {
+  rows: ipc.InstructionFile[];
+  selected: string | null;
+  ambiguous: Set<string>;
+  onSelect: (path: string) => void;
+}) {
+  const kinds = [...new Set(rows.map((f) => f.kind))].sort((a, b) => kindRank(a) - kindRank(b));
+  const headed = kinds.length > 1;
+  return (
+    <>
+      {kinds.map((kind) => {
+        const inKind = rows
+          .filter((f) => f.kind === kind)
+          .sort((a, b) =>
+            (a.title ?? a.label).localeCompare(b.title ?? b.label, undefined, {
+              sensitivity: "base",
+            }),
+          );
+        return (
+          <div key={kind}>
+            {headed && (
+              <div className="instr-kind-head">
+                <InstructionKindIcon kind={kind} size={12} />
+                {kindTitle(kind)}
+                <span className="instr-kind-count">{inKind.length}</span>
+              </div>
+            )}
+            <div className={`instr-rows ${headed ? "is-nested" : ""}`}>
+              {inKind.map((f) => (
+                <Row
+                  key={f.path}
+                  file={f}
+                  selected={f.path === selected}
+                  showRoot={ambiguous.has(f.title ?? f.label)}
+                  onSelect={onSelect}
+                />
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </>
   );
 }
 
@@ -457,20 +571,19 @@ export function InstructionsView({
             const searching = query.trim() !== "";
             const othersOpen = searching || openOthers[g.id] === true;
             return (
-              <div key={g.id}>
-                <div className="ticket-state-head" title={g.note}>
-                  {g.title}
+              <div className="instr-group" key={g.id}>
+                <div className="instr-group-head" title={g.note}>
+                  <span>{g.title}</span>
                   {present.length > 0 && <span className="badge">{present.length}</span>}
                 </div>
-                {present.map((f) => (
-                  <Row
-                    key={f.path}
-                    file={f}
-                    selected={f.path === selected}
-                    showRoot={ambiguous.has(f.title ?? f.label)}
-                    onSelect={select}
-                  />
-                ))}
+                {/* Split again by kind, so "Skills & subagents" isn't one run of
+                    eleven identical-looking lines. */}
+                <KindSections
+                  rows={present}
+                  selected={selected}
+                  ambiguous={ambiguous}
+                  onSelect={select}
+                />
                 {present.length === 0 && !othersOpen && (
                   <div className="instr-none">None here yet</div>
                 )}
@@ -489,16 +602,19 @@ export function InstructionsView({
                     <span className="badge">{others.length}</span>
                   </div>
                 )}
-                {othersOpen &&
-                  others.map((f) => (
-                    <Row
-                      key={f.path}
-                      file={f}
-                      selected={f.path === selected}
-                      showRoot={ambiguous.has(f.title ?? f.label)}
+                {othersOpen && (
+                  // Sectioned the same way as the files that do exist: the
+                  // drawer holds several kinds at once, and an uncreated skill
+                  // and an uncreated rule are not the same offer.
+                  <div className="instr-drawer">
+                    <KindSections
+                      rows={others}
+                      selected={selected}
+                      ambiguous={ambiguous}
                       onSelect={select}
                     />
-                  ))}
+                  </div>
+                )}
               </div>
             );
           })
@@ -519,11 +635,21 @@ export function InstructionsView({
           <>
             <div className="instr-doc-head">
               <div className="instr-doc-title">
+                <InstructionKindIcon kind={current.kind} size={15} />
                 <span>{current.label}</span>
+                <span className="instr-kind">{KIND_LABEL[current.kind] ?? current.kind}</span>
                 {dirty && <span className="instr-dot" title="Unsaved changes" />}
               </div>
               <div className="instr-doc-meta">
-                <span>Read by {current.agents.map(agentName).join(", ")}</span>
+                <span className="instr-doc-read">
+                  Read by
+                  {current.agents.map((a) => (
+                    <span className="instr-read-agent" key={a}>
+                      <AgentMark id={a} size={12} />
+                      {agentName(a)}
+                    </span>
+                  ))}
+                </span>
                 <span className="status-spacer" />
                 <button
                   className={`btn ${rawMode ? "btn-accent" : ""}`}
