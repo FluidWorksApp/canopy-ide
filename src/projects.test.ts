@@ -3,7 +3,9 @@ import {
   AGENT_CLIS,
   agentForBin,
   agentForPkg,
+  agentIdTaken,
   BUILTIN_AGENT_CLIS,
+  newCustomCliId,
   refreshAgentClis,
   restoreCommand,
   resumeSessionId,
@@ -13,6 +15,7 @@ import {
   updateCommand,
 } from "./projects";
 import { updateSettings } from "./settings";
+import type { CustomAgentCli } from "./projects";
 
 /** Point a registry entry at a different binary, as Settings → Agents does. */
 const rebind = (bins: Record<string, string>) => {
@@ -20,7 +23,16 @@ const rebind = (bins: Record<string, string>) => {
   refreshAgentClis();
 };
 
-afterEach(() => rebind({}));
+/** Add CLIs of the user's own, as Settings → Agents → Other CLIs does. */
+const addClis = (clis: CustomAgentCli[]) => {
+  updateSettings({ customClis: clis });
+  refreshAgentClis();
+};
+
+afterEach(() => {
+  updateSettings({ cliBins: {}, customClis: [] });
+  refreshAgentClis();
+});
 
 describe("shellQuote", () => {
   it("wraps in single quotes", () => {
@@ -226,6 +238,93 @@ describe("binary overrides", () => {
     rebind({ claude: "   " });
     expect(AGENT_CLIS.find((c) => c.id === "claude")?.bin).toBe("claude");
     expect(AGENT_CLIS.find((c) => c.id === "claude")?.rebound).toBe(false);
+  });
+});
+
+describe("custom CLIs", () => {
+  const acme: CustomAgentCli = {
+    id: "acme-agent",
+    name: "Acme Agent",
+    bin: "acme-agent",
+    resumeArgs: "--resume {id}",
+    promptArgs: "{prompt}",
+  };
+
+  it("joins the registry and launches, resumes and prompts by the user's syntax", () => {
+    addClis([acme]);
+    expect(startCommand("acme-agent", "fix it")).toEqual({
+      command: "acme-agent 'fix it'",
+      typePrompt: false,
+    });
+    expect(restoreCommand("acme-agent", "SID42")).toBe("acme-agent --resume SID42");
+    expect(resumeSessionId("acme-agent --resume SID42")).toBe("SID42");
+  });
+
+  it("appends the value when the template doesn't say where it goes", () => {
+    // Typing `--resume` plainly means "the id goes after this". Building
+    // `acme-agent --resume` with no id is the silent failure: a fresh session,
+    // started while the UI says the conversation was restored.
+    addClis([{ ...acme, resumeArgs: "sessions continue", promptArgs: "--task" }]);
+    expect(restoreCommand("acme-agent", "SID42")).toBe("acme-agent sessions continue SID42");
+    expect(startCommand("acme-agent", "fix it")).toEqual({
+      command: "acme-agent --task 'fix it'",
+      typePrompt: false,
+    });
+  });
+
+  it("offers no resume and types the prompt in when the user left those blank", () => {
+    addClis([{ id: "acme-agent", name: "Acme Agent", bin: "acme-agent" }]);
+    expect(restoreCommand("acme-agent", "SID42")).toBeNull();
+    expect(startCommand("acme-agent", "fix it")).toEqual({
+      command: "acme-agent",
+      typePrompt: true,
+    });
+  });
+
+  it("quotes a prompt and a path with a space, like any other entry", () => {
+    addClis([{ ...acme, bin: "/opt/Acme CLI/agent" }]);
+    expect(startCommand("acme-agent", "it's broken")).toEqual({
+      command: "'/opt/Acme CLI/agent' 'it'\\''s broken'",
+      typePrompt: false,
+    });
+    expect(resumeSessionId(restoreCommand("acme-agent", "SID42"))).toBe("SID42");
+  });
+
+  it("is identified by its binary, including as a full path", () => {
+    addClis([{ ...acme, bin: "/opt/acme/bin/acme-agent" }]);
+    expect(agentForBin("acme-agent")).toBe("acme-agent");
+    expect(agentForBin("/opt/acme/bin/acme-agent")).toBe("acme-agent");
+    // A near-miss is still no brand.
+    expect(agentForBin("acme-agent-utils")).toBeUndefined();
+  });
+
+  it("outranks the bare-binary list when the user claims that name", () => {
+    // `droid` names itself today; a user who says what droid is here wins.
+    addClis([{ id: "acme-agent", name: "Acme Agent", bin: "droid" }]);
+    expect(agentForBin("droid")).toBe("acme-agent");
+  });
+
+  it("has no installer, so nothing can offer to install it", () => {
+    addClis([acme]);
+    const cli = AGENT_CLIS.find((c) => c.id === "acme-agent");
+    expect(cli?.custom).toBe(true);
+    expect(cli?.install).toBeUndefined();
+    expect(updateCommand(cli!)).toBeUndefined();
+  });
+
+  it("keeps a half-filled row out of the registry", () => {
+    addClis([{ id: "", name: "", bin: "" }, { id: "acme-agent", name: "Acme", bin: "" }]);
+    expect(AGENT_CLIS.some((c) => c.custom)).toBe(false);
+  });
+
+  it("never lets a custom entry take a built-in id", () => {
+    expect(agentIdTaken("claude")).toBe(true);
+    expect(agentIdTaken("gemini")).toBe(true);
+    expect(newCustomCliId("Claude", [])).toBe("claude-2");
+    expect(newCustomCliId("Acme Agent!", [])).toBe("acme-agent");
+    expect(newCustomCliId("Acme Agent", ["acme-agent"])).toBe("acme-agent-2");
+    // A name with nothing sluggable still has to produce an id.
+    expect(newCustomCliId("!!!", [])).toBe("cli");
   });
 });
 

@@ -10269,6 +10269,40 @@ a.btn-mini {
   color: var(--danger, #e06c75);
 }
 
+/* A user-added CLI is four fields, not one, so it gets a bordered block rather
+   than another row in the grid above — the two lists are different things and
+   a shared alignment would say they were the same. */
+.cli-customs {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.cli-custom {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.cli-custom-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 100px auto;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The optional half: two equal boxes under the row they qualify. */
+.cli-custom-args {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+}
+
 .tool-groups {
   display: flex;
   flex-direction: column;
