@@ -57,11 +57,12 @@ interface AgentWorkspaceViewProps {
    *  banner. The standalone agent tab omits it (the tab closes itself). */
   onClose?: () => void;
   /** Run a one-shot task on what this agent produced: push its branch and open
-   *  the PR, review the PR that came out of it, or any task the user saved.
-   *  Separate from onMessageAgent — a task is a fresh ephemeral agent, not a
-   *  message to this one. */
+   *  the PR, review the PR that came out of it, address the comments that PR
+   *  came back with, or any task the user saved. Separate from onMessageAgent —
+   *  a task is a fresh ephemeral agent, not a message to this one. */
   onRaisePrTask?: (branch: string, worktree: string | null) => void;
   onReviewPrTask?: (pr: ipc.PrInfo) => void;
+  onAddressPrCommentsTask?: (pr: ipc.PrInfo) => void;
   onRunSavedTask?: (task: CustomMicroTask, dir: string) => void;
 }
 
@@ -343,6 +344,7 @@ export function AgentWorkspaceView({
   onClose,
   onRaisePrTask,
   onReviewPrTask,
+  onAddressPrCommentsTask,
   onRunSavedTask,
 }: AgentWorkspaceViewProps) {
   const [taskMenu, setTaskMenu] = useState(false);
@@ -843,7 +845,7 @@ export function AgentWorkspaceView({
           {/* Hand this agent's output to a fresh one-shot agent: raise the PR
               for the branch it built, review the PR that came out of it, or run
               any task you've saved — in this workspace's directory. */}
-          {(onRaisePrTask || onReviewPrTask || onRunSavedTask) && (
+          {(onRaisePrTask || onReviewPrTask || onAddressPrCommentsTask || onRunSavedTask) && (
             <div className="review-send">
               <button
                 className="btn"
@@ -874,6 +876,17 @@ export function AgentWorkspaceView({
                       }}
                     >
                       ⌕ Review PR #{pr.number}
+                    </button>
+                  )}
+                  {onAddressPrCommentsTask && pr && (
+                    <button
+                      className="cli-menu-item"
+                      onClick={() => {
+                        setTaskMenu(false);
+                        onAddressPrCommentsTask(pr);
+                      }}
+                    >
+                      ↩ Address comments on #{pr.number}
                     </button>
                   )}
                   {onRunSavedTask && savedTasks.length > 0 && (

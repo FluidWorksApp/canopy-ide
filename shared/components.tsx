@@ -79,12 +79,18 @@ export function AgentCard({
 }) {
   const clickable = !!onOpen
   const m = agentMeta(row.agent)
-  const stateLabel = row.live ? STATE_LABEL[row.state] ?? row.state : 'idle'
+  // A terminal has no hook behind it, so "idle"/"working" would be a guess.
+  // Say what it is instead, and show its title where a prompt would go.
+  const stateLabel = row.terminal
+    ? 'terminal'
+    : row.live
+      ? STATE_LABEL[row.state] ?? row.state
+      : 'idle'
   return (
     <button
       className={`card agent state-${row.state} ${row.live ? 'on' : 'off'} ${
         row.needsYou ? 'attn' : ''
-      }`}
+      } ${row.terminal ? 'term-row' : ''}`}
       style={{ ['--i' as string]: index, ['--hue' as string]: m.hue }}
       onClick={onOpen}
       disabled={!clickable}
@@ -96,17 +102,21 @@ export function AgentCard({
           <span className="agent-name">{m.label}</span>
           {row.branch && (
             <span className="chip mono branch">
-              <IconBranch s={12} /> {row.branch}
+              <IconBranch s={12} /> <span className="chip-t">{row.branch}</span>
             </span>
           )}
           <span className={`annun ${row.needsYou ? 'warn' : `s-${row.live ? row.state : 'idle'}`}`}>
-            <StatusDot state={row.live ? row.state : 'idle'} />
+            {!row.terminal && <StatusDot state={row.live ? row.state : 'idle'} />}
             {stateLabel}
           </span>
           {trailing}
           {clickable && <IconChevron s={17} className="chev" />}
         </div>
-        {row.lastPrompt && <div className="agent-prompt">{row.lastPrompt}</div>}
+        {row.lastPrompt ? (
+          <div className="agent-prompt">{row.lastPrompt}</div>
+        ) : row.title ? (
+          <div className="agent-prompt mono">{row.title}</div>
+        ) : null}
         <div className="agent-meta">
           {row.cwd && (
             <Telem icon={<IconFolder s={13} />}>{basename(row.cwd)}</Telem>

@@ -54,12 +54,14 @@ import {
   type PendingItem,
 } from "../../notifications";
 import {
+  addressPrCommentsTask,
   customTaskDef,
   microTaskProtocol,
   raisePrTask,
   reviewPrTask,
   type CustomMicroTask,
   type MicroTaskDef,
+  type MicroTaskEnv,
 } from "../../microTasks";
 import { TasksPanel, type RunningMicroTask } from "../TasksPanel";
 import { TaskHistoryView } from "../TaskHistoryView";
@@ -1201,7 +1203,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
    *  the only CLI with the MCP registration — over the default agent; others
    *  still work via the protocol's printed-fallback ending, minus auto-close. */
   const startMicroTask = useCallback(
-    <P,>(def: MicroTaskDef<P>, payload: P, userQuery: string) => {
+    async <P,>(def: MicroTaskDef<P>, payload: P, userQuery: string) => {
       const installedClis = AGENT_CLIS.filter((c) => getInstalled()[c.bin]);
       if (installedClis.length === 0) {
         onNotice("Running a task needs an agent CLI — install one in Settings → Agents.");
@@ -1214,13 +1216,41 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         installedClis[0]
       )?.id;
       const cli = AGENT_CLIS.find((c) => c.id === agent);
-      const seed = `${def.buildContext(payload, userQuery)} ${microTaskProtocol()}`;
-      const start = agent ? startCommand(agent, seed) : null;
-      if (!cli || !start) {
+      if (!cli || !agent) {
         onNotice(`No agent CLI installed to run "${def.label}".`);
         return;
       }
-      const dir = def.cwd(payload);
+      // A task that edits files gets the PR's branch in a worktree of its own,
+      // same deal as startPrAgent: reuse the worktree already holding it, else
+      // make a throwaway the brief tells the agent to remove. If that fails we
+      // stop rather than fall back to the shared checkout — the agent would
+      // commit onto whatever branch happens to be sitting there.
+      let dir = def.cwd(payload);
+      let env: MicroTaskEnv | undefined;
+      if (def.isolation) {
+        const { repo, pr } = def.isolation.target(payload);
+        try {
+          const worktrees = await ipc.gitWorktrees(repo).catch(() => [] as ipc.WorktreeInfo[]);
+          const existing = prWorktree(pr, worktrees);
+          const path = existing?.path ?? `${repo}-wt-pr-${pr.number}`;
+          if (!existing) await ipc.gitWorktreeAddPr(repo, path, pr.number, pr.branch);
+          dir = path;
+          env = existing ? undefined : { cleanup: { repo, worktree: path } };
+        } catch (err) {
+          onNotice(
+            `Couldn't check PR #${pr.number} out for "${def.label}": ${String(err)}. ` +
+              `If it's from a private fork you can't fetch, click Checkout first.`,
+            "error",
+          );
+          return;
+        }
+      }
+      const seed = `${def.buildContext(payload, userQuery, env)} ${microTaskProtocol()}`;
+      const start = startCommand(agent, seed);
+      if (!start) {
+        onNotice(`No agent CLI installed to run "${def.label}".`);
+        return;
+      }
       const id = addTerminal(
         dir,
         `CANOPY_MICRO_TASK=1 ${start.command}`,
@@ -1240,7 +1270,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         cwd: dir,
         projectId: project.id,
         projectName: project.name,
-        brief: def.buildContext(payload, userQuery),
+        brief: def.buildContext(payload, userQuery, env),
       });
       patchTabRaw(id, { micro: { taskId: def.id, runId } } as Partial<SubTab>);
       if (start.typePrompt) {
@@ -1262,7 +1292,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
    *  the registry. The context builder already folded the user's words in. */
   const runAdhocTask = useCallback(
     (label: string, brief: string, dir: string) => {
-      startMicroTask(
+      void startMicroTask(
         customTaskDef({ id: label.toLowerCase().replace(/\s+/g, "-"), label, icon: "◆", placeholder: "", brief }),
         { dir },
         "",
@@ -2381,7 +2411,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         seed,
         runnable,
         onNewTask: seedTaskFrom,
-        onRunSaved: (t) => startMicroTask(customTaskDef(t), { dir: roots[0] ?? "" }, ""),
+        onRunSaved: (t) => void startMicroTask(customTaskDef(t), { dir: roots[0] ?? "" }, ""),
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [seedTaskFrom, startMicroTask, roots[0]],
@@ -2901,7 +2931,17 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                   {
                     label: `Review PR #${tab.pr.number}`,
                     icon: reviewPrTask.icon,
-                    run: () => startMicroTask(reviewPrTask, { repo: tab.repo, pr: tab.pr }, ""),
+                    run: () => void startMicroTask(reviewPrTask, { repo: tab.repo, pr: tab.pr }, ""),
+                  },
+                  {
+                    label: `Address comments on #${tab.pr.number}`,
+                    icon: addressPrCommentsTask.icon,
+                    run: () =>
+                      void startMicroTask(
+                        addressPrCommentsTask,
+                        { repo: tab.repo, pr: tab.pr },
+                        "",
+                      ),
                   },
                 ]),
               ]
@@ -2916,7 +2956,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                             label: `Raise PR for ${tab.branch.branch}`,
                             icon: raisePrTask.icon,
                             run: () =>
-                              startMicroTask(
+                              void startMicroTask(
                                 raisePrTask,
                                 {
                                   repo: tab.repo,
@@ -3059,15 +3099,21 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             onRaisePrTask={
               tab.repo
                 ? (branch, worktree) =>
-                    startMicroTask(raisePrTask, { repo: tab.repo as string, branch, worktree }, "")
+                    void startMicroTask(raisePrTask, { repo: tab.repo as string, branch, worktree }, "")
                 : undefined
             }
             onReviewPrTask={
               tab.repo
-                ? (pr) => startMicroTask(reviewPrTask, { repo: tab.repo as string, pr }, "")
+                ? (pr) => void startMicroTask(reviewPrTask, { repo: tab.repo as string, pr }, "")
                 : undefined
             }
-            onRunSavedTask={(task, dir) => startMicroTask(customTaskDef(task), { dir }, "")}
+            onAddressPrCommentsTask={
+              tab.repo
+                ? (pr) =>
+                    void startMicroTask(addressPrCommentsTask, { repo: tab.repo as string, pr }, "")
+                : undefined
+            }
+            onRunSavedTask={(task, dir) => void startMicroTask(customTaskDef(task), { dir }, "")}
           />
         );
       case "commit":
@@ -3686,7 +3732,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                       onRaisePrTask={
                         agentTermWs.repo
                           ? (branch, worktree) =>
-                              startMicroTask(
+                              void startMicroTask(
                                 raisePrTask,
                                 { repo: agentTermWs.repo as string, branch, worktree },
                                 "",
@@ -3696,15 +3742,25 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                       onReviewPrTask={
                         agentTermWs.repo
                           ? (pr) =>
-                              startMicroTask(
+                              void startMicroTask(
                                 reviewPrTask,
                                 { repo: agentTermWs.repo as string, pr },
                                 "",
                               )
                           : undefined
                       }
+                      onAddressPrCommentsTask={
+                        agentTermWs.repo
+                          ? (pr) =>
+                              void startMicroTask(
+                                addressPrCommentsTask,
+                                { repo: agentTermWs.repo as string, pr },
+                                "",
+                              )
+                          : undefined
+                      }
                       onRunSavedTask={(task, dir) =>
-                        startMicroTask(customTaskDef(task), { dir }, "")
+                        void startMicroTask(customTaskDef(task), { dir }, "")
                       }
                     />
                   )}
@@ -3987,7 +4043,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                     {
                       label: `Raise PR for ${branch}`,
                       icon: raisePrTask.icon,
-                      run: () => startMicroTask(raisePrTask, { repo, branch, worktree }, ""),
+                      run: () => void startMicroTask(raisePrTask, { repo, branch, worktree }, ""),
                     },
                   ],
             )
@@ -3997,7 +4053,12 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               {
                 label: `Review PR #${pr.number}`,
                 icon: reviewPrTask.icon,
-                run: () => startMicroTask(reviewPrTask, { repo, pr }, ""),
+                run: () => void startMicroTask(reviewPrTask, { repo, pr }, ""),
+              },
+              {
+                label: `Address comments on #${pr.number}`,
+                icon: addressPrCommentsTask.icon,
+                run: () => void startMicroTask(addressPrCommentsTask, { repo, pr }, ""),
               },
             ])
           }
@@ -4060,7 +4121,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onFocus={setActiveTabId}
           onStop={closeTab}
           onRunCustom={(task: CustomMicroTask, dir: string, query: string) =>
-            startMicroTask(customTaskDef(task), { dir }, query)
+            void startMicroTask(customTaskDef(task), { dir }, query)
           }
           onOpenHistory={openTaskHistory}
           projectId={project.id}
