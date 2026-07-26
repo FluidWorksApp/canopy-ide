@@ -5921,6 +5921,80 @@ body.dragging-tab * {
 .pr-map .markdown-body { font-size: 12px; }
 .pr-map-cta { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 
+/* ---------- PR inbox (rail panel, every open project) ---------- */
+
+.prs-panel { padding-bottom: 10px; }
+.prs-head-actions { display: flex; align-items: center; gap: 4px; }
+
+/* Provenance, always visible: a list that quietly goes stale is worse than no
+   list, so it says when it was last true and when it will be again. */
+.prs-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0 10px 6px;
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+
+.prs-errors { padding: 0 10px 6px; }
+.prs-error { font-size: 10px; color: var(--danger); line-height: 1.4; }
+.prs-empty { padding: 8px 10px; font-size: 11px; color: var(--fg-dim); line-height: 1.5; }
+
+.prs-lane { margin-bottom: 2px; }
+.prs-lane-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  cursor: pointer;
+  user-select: none;
+}
+.prs-lane-head:hover { color: var(--fg); }
+.prs-lane-count { margin-left: auto; opacity: 0.7; }
+.prs-lane-chevron { width: 8px; }
+/* The lane's edge carries its urgency, so a row needs no colour of its own. */
+.prs-lane.is-urgent .prs-lane-head { color: var(--accent); }
+.prs-lane.is-bad .prs-lane-head { color: var(--danger); }
+.prs-lane.is-ok .prs-lane-head { color: var(--ok); }
+.prs-lane.is-dim .prs-lane-head { opacity: 0.6; }
+
+.prs-row {
+  display: grid;
+  grid-template-columns: 14px auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px 5px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+}
+.prs-row:hover { background: var(--bg-alt); border-left-color: var(--border); }
+.prs-row-num { font-family: var(--mono, monospace); font-size: 10px; color: var(--fg-dim); }
+.prs-row-title {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.prs-row-state { font-size: 9px; white-space: nowrap; }
+.prs-row-state.tone-bad { color: var(--danger); }
+.prs-row-state.tone-ok { color: var(--ok); }
+.prs-row-state.tone-warn { color: var(--warn); }
+.prs-row-state.tone-dim { color: var(--fg-dim); }
+.prs-row-sub {
+  grid-column: 3 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+.prs-row-stat { white-space: nowrap; }
+
 .pr-file.is-viewed .pr-file-path { opacity: 0.6; }
 .pr-file-viewed {
   display: flex;

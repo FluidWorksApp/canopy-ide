@@ -882,6 +882,69 @@ export const ghPrFailingLogs = (repo: string, number: number) =>
 export const ghPrDiffSince = (repo: string, baseSha: string, headSha: string) =>
   invoke<string>("gh_pr_diff_since", { repo, baseSha, headSha });
 
+// ---------- cross-project PR watcher ----------
+
+/** One row of the PR inbox. Everything here comes from the batched query, so a
+ *  row renders without a second call. */
+export interface PrRow {
+  /** Local checkout this PR belongs to — what a click opens. */
+  repo: string;
+  nwo: string;
+  number: number;
+  title: string;
+  author: string;
+  url: string;
+  branch: string;
+  base: string;
+  draft: boolean;
+  created: string;
+  updated: string;
+  additions: number;
+  deletions: number;
+  mergeable: string;
+  review_decision: string;
+  checks: string;
+  comments: number;
+  threads: number;
+  /** Waiting on the signed-in user's review. */
+  requested_from_me: boolean;
+  mine: boolean;
+}
+
+export interface PrSnapshot {
+  repo: string;
+  nwo: string;
+  rows: PrRow[];
+  viewer: string;
+  fetched_ms: number;
+}
+
+/** What a whole pass cost and what failed. */
+export interface PrTick {
+  fetched_ms: number;
+  repos: number;
+  requests: number;
+  cost: number;
+  remaining: number;
+  reset_at: string;
+  errors: Record<string, string>;
+  next_in: number;
+}
+
+/** Declare which repos are worth watching, and whether the user is looking.
+ *  The backend owns the schedule — see src-tauri/src/prwatch.rs. */
+export const prWatchSet = (paths: string[], focused: boolean) =>
+  invoke<void>("pr_watch_set", { paths, focused });
+/** Wake the poller (the panel's ↻). Never runs a pass of its own. */
+export const prWatchNow = () => invoke<void>("pr_watch_now");
+/** A repo's rows changed. Unchanged repos emit nothing at all. */
+export const onPrSnapshot = (cb: (s: PrSnapshot) => void): Promise<UnlistenFn> =>
+  listen<PrSnapshot>("prs:snapshot", (e) => cb(e.payload));
+export const onPrTick = (cb: (t: PrTick) => void): Promise<UnlistenFn> =>
+  listen<PrTick>("prs:tick", (e) => cb(e.payload));
+export const onPrNext = (cb: (seconds: number) => void): Promise<UnlistenFn> =>
+  listen<number>("prs:next", (e) => cb(e.payload));
+
 // ---------- cross-session context ----------
 
 export interface SessionDigest {

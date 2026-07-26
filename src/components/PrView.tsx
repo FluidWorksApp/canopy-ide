@@ -36,6 +36,7 @@ import {
   selfReviewPrTask,
   type MicroTaskDef,
 } from "../microTasks";
+import { rowFor, subscribe as subscribeToPrs } from "../prWatchStore";
 import {
   actionable,
   isNit,
@@ -114,10 +115,12 @@ const AUTO_EXPAND_BUDGET = 1200; // total auto-opened lines on a big PR
 const HIGHLIGHT_MAX = 800; // syntax-highlight only files at/under this many lines
 const RENDER_CAP = 4000; // never inline-render a file bigger than this
 
-/** How often to look for a post-back while a round is waiting. Only ever runs
- *  for a PR whose loop is armed, and only while the window is focused — a
- *  background tab polling GitHub every minute is how you burn a rate limit. */
-const WATCH_MS = 60_000;
+/** Safety net only: the cross-project poller is what normally wakes the loop
+ *  (see the watcher effect). This covers a PR whose repo nothing is watching —
+ *  its project was closed while the tab stayed open — and is deliberately slow,
+ *  because a background tab polling GitHub every minute is how a rate limit
+ *  gets burned. */
+const WATCH_FALLBACK_MS = 5 * 60_000;
 
 interface FilePatch {
   path: string;
@@ -400,6 +403,13 @@ export function PrView({
   // The watcher: while a round is waiting, look for a post-back. The trigger is
   // a comment id we've never handled — `updatedAt` moves on our own pushes too,
   // so time is not a signal and ids are.
+  //
+  // What *wakes* it is the cross-project poller (prwatch.rs → prWatchStore),
+  // which already asks GitHub about this repo on a schedule: when its row's
+  // `updatedAt` moves, something happened here worth a conversation refetch.
+  // That replaces a per-tab interval — ten open PR tabs used to mean ten timers
+  // all polling the same repos. The slow interval below is only a safety net for
+  // a PR whose repo the poller isn't watching (its project was closed).
   useEffect(() => {
     if (loop.status !== "waiting" && loop.status !== "ready") return;
     let live = true;
@@ -425,9 +435,17 @@ export function PrView({
         persist(markReady(loop));
       }
     };
-    const id = window.setInterval(() => void tick(), WATCH_MS);
+    let lastUpdated = rowFor(repo, pr.number)?.updated ?? "";
+    const unsubscribe = subscribeToPrs(() => {
+      const row = rowFor(repo, pr.number);
+      if (!row || row.updated === lastUpdated) return;
+      lastUpdated = row.updated;
+      void tick();
+    });
+    const id = window.setInterval(() => void tick(), WATCH_FALLBACK_MS);
     return () => {
       live = false;
+      unsubscribe();
       window.clearInterval(id);
     };
   }, [loop, pr, repo, refreshConv, onMicroTask, persist, onNotice]);

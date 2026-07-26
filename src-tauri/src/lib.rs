@@ -16,6 +16,7 @@ mod instructions;
 mod lsp;
 mod portal;
 mod preview;
+mod prwatch;
 mod pty;
 mod punch;
 mod relay;
@@ -299,6 +300,7 @@ pub fn run() {
         .manage(context::ContextBridge::default())
         .manage(agents::StatsCache::default())
         .manage(tunnel::TunnelManager::default())
+        .manage(prwatch::PrWatcher::default())
         .manage(dictation::DictationManager::default())
         .manage(cli::pending_from_env())
         .setup(|app| {
@@ -441,6 +443,8 @@ pub fn run() {
             git::gh_pr_auto_merge,
             git::gh_pr_failing_logs,
             git::gh_pr_diff_since,
+            prwatch::pr_watch_set,
+            prwatch::pr_watch_now,
             git::gh_issue_list,
             git::linear_issues,
             fsx::git_status,
@@ -516,6 +520,8 @@ pub fn run() {
                 app.state::<preview::PreviewManager>().shutdown_all();
                 // ... and any public-link tunnel process.
                 app.state::<tunnel::TunnelManager>().kill_all();
+                // ... and stop polling GitHub for pull requests.
+                app.state::<prwatch::PrWatcher>().shutdown();
             }
         });
 }
