@@ -724,11 +724,23 @@ body,
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 5px 10px 2px;
+  gap: 6px;
+  /* A subtly raised bar so the project root reads as a header above the tree
+     rather than blending into the panel. Kept tight — same row height as
+     before, just a soft tinted background with squircle corners. */
+  margin: 1px 6px;
+  padding: 1px 8px;
+  background: color-mix(in srgb, var(--bg-raised) 55%, transparent);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: var(--accent);
+}
+
+.component-header:hover {
+  background: var(--bg-raised);
 }
 
 .component-header .btn-icon {
@@ -2162,7 +2174,11 @@ body,
   corner-shape: squircle;
   transition:
     background var(--dur-fast) var(--ease-out),
-    color var(--dur-fast) var(--ease-out);
+    color var(--dur-fast) var(--ease-out),
+    /* Git status lands a beat after the rows do (it's a slower call than
+       reading the directory), so ignored rows dim slightly late — ease the
+       opacity change so it reads as intentional, not a pop. */
+    opacity var(--dur-fast) var(--ease-out);
 }
 
 .tree-row:hover {
@@ -2180,11 +2196,18 @@ body,
   font-weight: 550;
 }
 
-/* Keyboard cursor: an inset accent ring, not a fill — so a row that is BOTH
-   the open file (accent-soft wash) and under the cursor reads as both at once,
-   and the cursor stays legible on a plain unselected row too. */
+/* Keyboard cursor: an inset accent ring, kept on box-shadow (not background) so
+   a row that is BOTH the open file (accent-soft wash) and under the cursor reads
+   as both at once. On a plain, unselected row the ring alone reads as a hollow
+   outline, so those rows also take a whisper of accent fill — enough to feel
+   like a solid highlight without competing with the selected wash. */
 .tree-row-cursor {
   box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.tree-row-cursor:not(.tree-row-selected),
+.tree-row-cursor:not(.tree-row-selected):hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
 .tree-changed .tree-file {
@@ -2207,28 +2230,59 @@ body,
    from rather than off arbitrary whitespace. */
 .tree-indent {
   margin-left: 17px;
-  border-left: 1px solid var(--border);
+  /* A hairline guide, dimmed below the panel's own borders — on a deep tree a
+     full-strength line at every level reads as a hard ladder. It brightens to
+     the accent while its subtree holds the cursor (see below), so the active
+     path is easy to trace back to its parent. */
+  border-left: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   padding-left: 2px;
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+
+/* Trace the active branch: the indent guide wrapping the cursor row's subtree
+   picks up a faint accent, so the eye can follow a nested file back to the
+   folder it lives in. :has keeps this pure-CSS — no per-row bookkeeping. */
+.tree-indent:has(> .tree-row-cursor) {
+  border-left-color: color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
 .tree-chevron {
   width: 11px;
   flex: 0 0 11px;
-  color: var(--text-dim);
+  /* Faint at rest so a column of carets doesn't compete with the file names;
+     it lifts to full dim-grey when the row is hovered or under the cursor (see
+     below), which is when the disclosure affordance actually matters. */
+  color: var(--text-faint);
   /* Centers the 10×10 SVG caret so it rotates about its own middle. */
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  /* Rotates in place when the directory opens, rather than swapping glyphs. */
-  transition: transform var(--dur-fast) var(--ease-out);
+  /* Rotates in place when the directory opens, rather than swapping glyphs;
+     colour eases on the same beat as the row background. */
+  transition:
+    transform var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.tree-row:hover .tree-chevron,
+.tree-row-cursor .tree-chevron,
+.tree-chevron-open {
+  color: var(--text-dim);
 }
 
 .tree-chevron-open {
   transform: rotate(90deg);
 }
 
+/* In a component-section header the chevron sits beside the accent-coloured
+   title, so let it take the header's colour rather than the tree's dim grey. */
+.component-header .tree-chevron {
+  color: inherit;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .tree-chevron {
+  .tree-chevron,
+  .tree-indent {
     transition: none;
   }
 }
@@ -10849,4 +10903,180 @@ a.btn-mini {
   .hib-flake-freeze g path { stroke-dashoffset: 0; }
   /* The thaw still has to end with the frost gone. */
   .hib-thawed { opacity: 0; transition: opacity var(--dur-med) linear; }
+}
+
+/* ---------- Tooltip ---------- */
+/* Hover tooltip on the overlay surface (src/components/Tooltip.tsx). The bubble
+   reveals via a per-side keyframe whose animation-delay IS the hover delay; the
+   arrow offset is written imperatively by the component. Values follow the
+   design handoff — all tokens, no hardcoded hex/ms. */
+
+.cnp-tooltip-wrap {
+  position: relative;
+  display: inline-flex;
+  vertical-align: middle;
+}
+
+.cnp-tooltip {
+  position: absolute;
+  z-index: 500;
+  pointer-events: none;
+  width: max-content;
+  max-width: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 10px;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  /* The inset hairline is what keeps it from looking flat on the overlay. */
+  box-shadow: var(--shadow-2), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  color: var(--text);
+  text-align: left;
+}
+
+/* Card density: a body and/or meta line is present. */
+.cnp-tooltip-card {
+  padding: 9px 11px;
+  border-radius: var(--r-md);
+}
+
+/* ---- Per-side anchoring, offsets, and reveal ---- */
+.cnp-tooltip[data-side="top"] {
+  bottom: 100%;
+  left: 50%;
+  margin-bottom: 10px;
+  transform-origin: 50% 100%;
+  animation: cnp-tip-top var(--dur-pop) var(--ease-out) both;
+}
+.cnp-tooltip[data-side="bottom"] {
+  top: 100%;
+  left: 50%;
+  margin-top: 10px;
+  transform-origin: 50% 0%;
+  animation: cnp-tip-bottom var(--dur-pop) var(--ease-out) both;
+}
+.cnp-tooltip[data-side="left"] {
+  right: 100%;
+  top: 50%;
+  margin-right: 10px;
+  transform-origin: 100% 50%;
+  animation: cnp-tip-left var(--dur-pop) var(--ease-out) both;
+}
+.cnp-tooltip[data-side="right"] {
+  left: 100%;
+  top: 50%;
+  margin-left: 10px;
+  transform-origin: 0% 50%;
+  animation: cnp-tip-right var(--dur-pop) var(--ease-out) both;
+}
+
+/* REST is the side's centering transform; the keyframe animates in from a
+   small offset + scale. */
+@keyframes cnp-tip-top {
+  from { opacity: 0; transform: translateX(-50%) translateY(6px) scale(0.98); }
+  to   { opacity: 1; transform: translateX(-50%) scale(1); }
+}
+@keyframes cnp-tip-bottom {
+  from { opacity: 0; transform: translateX(-50%) translateY(-6px) scale(0.98); }
+  to   { opacity: 1; transform: translateX(-50%) scale(1); }
+}
+@keyframes cnp-tip-left {
+  from { opacity: 0; transform: translateY(-50%) translateX(6px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(-50%) scale(1); }
+}
+@keyframes cnp-tip-right {
+  from { opacity: 0; transform: translateY(-50%) translateX(-6px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(-50%) scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cnp-tooltip { animation-duration: 1ms; }
+  .cnp-tooltip-hint { animation-duration: 1ms; }
+}
+
+/* ---- Arrow: a 9×9 square, two bordered edges showing past the bubble ---- */
+.cnp-tooltip-arrow {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  background: var(--bg-overlay);
+  border-right: 1px solid var(--border-strong);
+  border-bottom: 1px solid var(--border-strong);
+}
+.cnp-tooltip[data-side="top"] .cnp-tooltip-arrow {
+  bottom: -5.5px;
+  transform: rotate(45deg);
+}
+.cnp-tooltip[data-side="bottom"] .cnp-tooltip-arrow {
+  top: -5.5px;
+  transform: rotate(225deg);
+}
+.cnp-tooltip[data-side="left"] .cnp-tooltip-arrow {
+  right: -5.5px;
+  transform: rotate(-45deg);
+}
+.cnp-tooltip[data-side="right"] .cnp-tooltip-arrow {
+  left: -5.5px;
+  transform: rotate(135deg);
+}
+
+/* ---- Rows ---- */
+.cnp-tooltip-row {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  position: relative;
+}
+.cnp-tooltip-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  align-self: center;
+}
+.cnp-tooltip-label {
+  flex: 1;
+  font-weight: 600;
+  line-height: var(--lh-tight);
+}
+.cnp-tooltip-accent .cnp-tooltip-label {
+  color: var(--accent);
+}
+.cnp-tooltip-hint {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  white-space: nowrap;
+  /* Lands a beat behind the bubble; delay set inline (base delay + 80ms). */
+  animation: cnp-tip-hint var(--dur-med) var(--ease-out) both;
+}
+@keyframes cnp-tip-hint {
+  from { opacity: 0; transform: translateY(-2px); }
+  to   { opacity: 1; transform: none; }
+}
+.cnp-tooltip-body {
+  color: var(--text-dim);
+  line-height: var(--lh-ui);
+  text-wrap: pretty;
+}
+.cnp-tooltip-meta {
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  white-space: pre-wrap;
 }

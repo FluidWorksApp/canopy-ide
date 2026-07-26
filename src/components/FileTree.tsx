@@ -6,6 +6,7 @@ import type { Notify } from "../types";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { useEscape } from "../useEscape";
 import { fileIconUrl } from "./fileIcons";
+import { ChevronIcon } from "./icons";
 
 interface FileTreeProps {
   roots: string[];
@@ -37,26 +38,10 @@ interface DirState {
   expanded: boolean;
 }
 
-// Disclosure chevron — a hairline stroked "›" that rotates 90° to point down
-// when the folder opens (rotation lives on .tree-chevron-open). Replaces the
-// solid ▸ glyph with the thinner, rounded caret the design uses.
-function Chevron() {
-  return (
-    <svg
-      width="10"
-      height="10"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2.2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M9 5l7 7-7 7" />
-    </svg>
-  );
-}
+// Stable DOM id for a row, so the tree container can point
+// aria-activedescendant at the cursor row. A path can hold any character, so
+// encode it rather than interpolate it raw into an id.
+const rowId = (path: string) => `tree-row-${encodeURIComponent(path)}`;
 
 // Standard IDE-style yellow folder (VS Code-like), inline SVG.
 function FolderIcon({ open }: { open: boolean }) {
@@ -268,9 +253,13 @@ export function FileTree({
   // Scroll a cursor row back into view by hand. NOT scrollIntoView: that walks
   // up to the nearest scrollable ancestor and can move the whole app window
   // (the bug that prompted keyboard nav). We adjust the scroll container's
-  // scrollTop directly, with a small margin, and only when the row is actually
-  // clipped. The container is whichever ancestor scrolls — .file-tree itself,
-  // or the .components-panel it sits in.
+  // scrollTop directly, with a small margin, and only when the row is clipped.
+  //
+  // Finding the container: .file-tree carries `overflow-y: auto` but is
+  // `flex: 1` with no fixed height, so it grows to its content and never
+  // scrolls — the element that actually scrolls is the outer .components-panel.
+  // So we can't stop at the first `overflow: auto` ancestor; we must find one
+  // that is genuinely scrollable (scrollHeight > clientHeight).
   const reveal = useCallback((path: string) => {
     const list = listRef.current;
     if (!list) return;
@@ -279,7 +268,8 @@ export function FileTree({
     let box: HTMLElement | null = list;
     while (box) {
       const oy = getComputedStyle(box).overflowY;
-      if (oy === "auto" || oy === "scroll") break;
+      const scrollable = (oy === "auto" || oy === "scroll") && box.scrollHeight > box.clientHeight;
+      if (scrollable) break;
       box = box.parentElement;
     }
     if (!box) return;
@@ -455,6 +445,10 @@ export function FileTree({
         <div key={entry.path} className={depth > 0 ? "tree-indent" : undefined}>
           <div
             data-tree-path={entry.path}
+            id={rowId(entry.path)}
+            role="treeitem"
+            aria-selected={entry.path === cursor}
+            aria-expanded={entry.is_dir ? expanded : undefined}
             className={`tree-row ${changedPaths.has(entry.path) ? "tree-changed" : ""} ${
               !entry.is_dir && entry.path === selectedPath ? "tree-row-selected" : ""
             } ${entry.path === cursor ? "tree-row-cursor" : ""} ${gitClass(entry.path, entry.is_dir)}`}
@@ -470,7 +464,7 @@ export function FileTree({
             }}
           >
             <span className={`tree-chevron ${entry.is_dir && expanded ? "tree-chevron-open" : ""}`}>
-              {entry.is_dir ? <Chevron /> : null}
+              {entry.is_dir ? <ChevronIcon /> : null}
             </span>
             <span className="tree-file-icon">
               {entry.is_dir ? <FolderIcon open={expanded} /> : <FileIcon name={entry.name} />}
@@ -493,6 +487,9 @@ export function FileTree({
       tabIndex={0}
       role="tree"
       aria-label={`${roots[0]?.split("/").pop() ?? "Project"} files`}
+      // Focus stays on the container; this tells assistive tech which row the
+      // cursor is on, so arrowing announces the row it lands on.
+      aria-activedescendant={cursor ? rowId(cursor) : undefined}
       onKeyDown={onKeyDown}
       // First focus with no cursor yet lands on the top row, so arrow keys have
       // somewhere to start.

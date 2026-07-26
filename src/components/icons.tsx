@@ -44,6 +44,17 @@ export function FrostIcon({ size = 12, className }: IconProps) {
   );
 }
 
+// Disclosure caret — a hairline stroked "›". Rotate it 90° (via a class on the
+// wrapping element) to point down when the section/folder is open. Shared by
+// the file tree rows and the component-section headers so they read the same.
+export function ChevronIcon({ size = 10, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={2.2}>
+      <path d="M9 5l7 7-7 7" />
+    </svg>
+  );
+}
+
 // Close cross for tab/pill dismiss slots — replaces the bare ✕ glyph.
 export function CloseIcon({ size = 12, className }: IconProps) {
   return (

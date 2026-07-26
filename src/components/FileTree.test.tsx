@@ -62,6 +62,20 @@ describe("FileTree keyboard navigation", () => {
     expect(rowOf("src")).toHaveClass("tree-row-cursor");
   });
 
+  it("exposes rows as treeitems and points aria-activedescendant at the cursor", async () => {
+    await renderTree();
+    const srcRow = rowOf("src");
+    expect(srcRow).toHaveAttribute("role", "treeitem");
+    expect(srcRow).toHaveAttribute("aria-expanded", "false"); // collapsed folder
+    expect(rowOf("README.md")).not.toHaveAttribute("aria-expanded"); // files have none
+    act(() => tree().focus());
+    // Container keeps focus; activedescendant tracks the cursor row's id.
+    expect(tree().getAttribute("aria-activedescendant")).toBe(srcRow.id);
+    expect(srcRow).toHaveAttribute("aria-selected", "true");
+    await userEvent.keyboard("{ArrowDown}");
+    expect(tree().getAttribute("aria-activedescendant")).toBe(rowOf("README.md").id);
+  });
+
   it("moves the cursor with ArrowDown / ArrowUp", async () => {
     await renderTree();
     act(() => tree().focus());
