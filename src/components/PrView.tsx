@@ -9,8 +9,9 @@ import "@git-diff-view/react/styles/diff-view.css";
 import * as ipc from "../ipc";
 import { renderMarkdown } from "../markdown";
 import type { Notify, RelayHandle } from "../types";
-import { AgentLaunchButton } from "./AgentLaunchButton";
-import { TeamIcon } from "./icons";
+import { agentMenuItems } from "../agentMenu";
+import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
+import { AgentsIcon, TeamIcon } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
 import {
   addressPrCommentsTask,
@@ -18,7 +19,6 @@ import {
   type MicroTaskDef,
   type ReviewPrPayload,
 } from "../microTasks";
-import { MicroTaskButton } from "./MicroTaskButton";
 // NB: PR diffs arrive as real patches from `gh pr diff`, so they go straight
 // into the renderer. Working-tree diffs (components/DiffView.tsx) have to build
 // their patch first — see the note there about Monaco's diff not computing.
@@ -149,7 +149,11 @@ export function PrView({
     confirm != null || mergeConfirm != null || closeConfirm,
   );
   const [done, setDone] = useState<string | null>(null);
-  const [askOpen, setAskOpen] = useState(false);
+  // Two dropdowns, both ContextMenu-driven: the agent menu and the overflow.
+  // Using the shared menu (rather than another hand-rolled popover) is what
+  // lets them carry submenus, hints and a danger row without new markup.
+  const agentMenu = useContextMenu();
+  const moreMenu = useContextMenu();
 
   // Teammates a review request can go to (everyone but us).
   const teammates =
@@ -160,7 +164,6 @@ export function PrView({
   /** Send the PR to a teammate over the relay; their Canopy opens it natively
    *  by matching this repo's origin URL against their local checkouts. */
   const requestReview = async (memberId: string, memberName: string) => {
-    setAskOpen(false);
     try {
       const remote = await ipc.gitRemoteUrl(repo);
       if (!remote) {
@@ -298,12 +301,171 @@ export function PrView({
     });
   const allOpen = files.length > 0 && expanded.size === files.length;
 
+  const conflicting = pr.mergeable === "CONFLICTING";
+  /** Approved, green, and no conflicts — the one state where Merge is the
+   *  obvious next move, and the only one where it wears the accent. */
+  const mergeReady =
+    pr.review_decision === "APPROVED" && !conflicting && pr.checks !== "FAIL";
+
+  /** Everything an agent can do with this PR, in one menu: the one-shot tasks
+   *  first (they need nothing from you but a click), then handing it to an
+   *  agent in a worktree. Built at open time so a newly-started agent is in the
+   *  list. When the PR conflicts, resolving them replaces reviewing — there is
+   *  no point reviewing a diff git can't even merge. */
+  const openAgentMenu = (e: React.MouseEvent) => {
+    const items: MenuItem[] = [];
+    if (onMicroTask && !conflicting) {
+      items.push({ label: "One-shot tasks", separator: true });
+      items.push({
+        label: reviewPrTask.label,
+        icon: <span className="ctx-glyph">{reviewPrTask.icon}</span>,
+        hint: "posts only what's required",
+        onClick: () => onMicroTask(reviewPrTask, { repo, pr }, ""),
+      });
+      if (pr.state === "OPEN")
+        items.push({
+          label: addressPrCommentsTask.label,
+          icon: <span className="ctx-glyph">{addressPrCommentsTask.icon}</span>,
+          hint: "validates each one first",
+          onClick: () => onMicroTask(addressPrCommentsTask, { repo, pr }, ""),
+        });
+    }
+    items.push(
+      ...agentMenuItems({
+        targets: agentTargets,
+        installed,
+        newLabel: conflicting
+          ? `Resolve conflicts in ${pr.branch}`
+          : `Review ${pr.branch} in a worktree`,
+        onSend: conflicting ? onSendResolve : onSendToAgent,
+        onStart: conflicting ? onStartResolve : onStartReview,
+      }),
+    );
+    agentMenu.open(e, items);
+  };
+
+  /** The long tail: real actions, just not ones worth a permanent button. */
+  const openMoreMenu = (e: React.MouseEvent) => {
+    const items: MenuItem[] = [
+      {
+        label: "Check out locally",
+        hint: "switches branch",
+        onClick: () =>
+          void ipc
+            .ghPrCheckout(repo, pr.number)
+            .then(onNotice)
+            .catch((err) => onNotice(String(err), "error")),
+      },
+      {
+        label: "Open on GitHub",
+        onClick: () =>
+          void import("@tauri-apps/plugin-opener").then(({ openUrl }) => openUrl(pr.url)),
+      },
+    ];
+    if (teammates.length > 0)
+      items.push({
+        label: "Request review",
+        icon: <TeamIcon size={14} />,
+        submenu: teammates.map((m) => ({
+          label: m.name,
+          onClick: () => void requestReview(m.id, m.name),
+        })),
+      });
+    if (pr.state === "OPEN")
+      items.push(
+        { separator: true },
+        {
+          label: "Close without merging",
+          danger: true,
+          disabled: busy,
+          onClick: () => setCloseConfirm(true),
+        },
+      );
+    moreMenu.open(e, items);
+  };
+
   return (
     <div className="pr-view">
+      {agentMenu.menu && (
+        <ContextMenu
+          x={agentMenu.menu.x}
+          y={agentMenu.menu.y}
+          items={agentMenu.menu.items}
+          onClose={agentMenu.close}
+        />
+      )}
+      {moreMenu.menu && (
+        <ContextMenu
+          x={moreMenu.menu.x}
+          y={moreMenu.menu.y}
+          items={moreMenu.menu.items}
+          onClose={moreMenu.close}
+        />
+      )}
       <div className="pr-head">
-        <div className="pr-title">
-          <span className="pr-num">#{pr.number}</span>
-          {pr.title}
+        {/* Two rows, and only two: what this PR is, and what you can do about
+            it. The actions are three controls that don't multiply — everything
+            an agent can do lives behind Agent ▾, everything rare behind ⋯ — so
+            shipping another task doesn't add another button to this row. */}
+        <div className="pr-titlebar">
+          <div className="pr-title">
+            <span className="pr-num">#{pr.number}</span>
+            {pr.title}
+          </div>
+          <div className="pr-actions">
+            <button
+              className="btn-mini"
+              title="Hand this PR to an agent — a one-shot task, or an agent in a worktree"
+              onClick={openAgentMenu}
+            >
+              <AgentsIcon size={11} /> Agent ▾
+            </button>
+            {pr.draft && pr.state === "OPEN" && (
+              <button
+                className="btn-mini btn-accent"
+                title="Take this PR out of draft so it can be reviewed and merged"
+                disabled={busy}
+                onClick={() => void ready()}
+              >
+                Mark ready
+              </button>
+            )}
+            {!pr.draft && pr.state === "OPEN" && (
+              <div className="cli-menu-anchor">
+                <button
+                  className={`btn-mini ${mergeReady ? "btn-accent" : ""}`}
+                  title={
+                    mergeReady
+                      ? "Merge this PR on GitHub"
+                      : "Merge this PR on GitHub — it isn't approved and green yet"
+                  }
+                  disabled={busy}
+                  onClick={() => setMergeOpen((v) => !v)}
+                >
+                  Merge ▾
+                </button>
+                {mergeOpen && (
+                  <div className="cli-menu" onMouseLeave={() => setMergeOpen(false)}>
+                    {(["squash", "merge", "rebase"] as MergeMethod[]).map((m) => (
+                      <div
+                        key={m}
+                        className="cli-item"
+                        onClick={() => {
+                          setMergeOpen(false);
+                          setMergeConfirm(m);
+                        }}
+                      >
+                        <span>{MERGE_LABEL[m]}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            <button className="btn-mini" title="More actions" onClick={openMoreMenu}>
+              ⋯
+            </button>
+          </div>
         </div>
         <div className="pr-sub">
           <span>
@@ -316,6 +478,7 @@ export function PrView({
           )}
           <span className="pr-stat pr-add">+{pr.additions}</span>
           <span className="pr-stat pr-del">−{pr.deletions}</span>
+          {pr.draft && <span className="pr-decision">draft</span>}
           {pr.review_decision && <span className="pr-decision">{pr.review_decision.toLowerCase().replace("_", " ")}</span>}
           {pr.checks && (
             <span
@@ -326,138 +489,6 @@ export function PrView({
             </span>
           )}
           {pr.mergeable === "CONFLICTING" && <span className="pr-checks pr-bad">conflicts</span>}
-          <span className="git-spacer" />
-          <button className="btn-mini" onClick={() => setSplit((v) => !v)}>
-            {split ? "Unified" : "Split"}
-          </button>
-          <button
-            className="btn-mini"
-            title="Check this PR out locally (git switches branch)"
-            onClick={() =>
-              void ipc
-                .ghPrCheckout(repo, pr.number)
-                .then(onNotice)
-                .catch((e) => onNotice(String(e), "error"))
-            }
-          >
-            Checkout
-          </button>
-          {/* Hand the PR to an agent — the same block the ticket tab uses:
-              checks the branch out in a worktree and starts the agent there.
-              When the PR conflicts, the same control instead offers to resolve
-              the conflicts (merge base in, fix markers, commit, push). */}
-          {pr.mergeable === "CONFLICTING" ? (
-            <AgentLaunchButton
-              variant="mini"
-              label="Resolve conflicts"
-              agentTargets={agentTargets}
-              installed={installed}
-              newAgentLabel={`New agent in ${pr.branch}`}
-              onStart={onStartResolve}
-              onSend={onSendResolve}
-            />
-          ) : (
-            <AgentLaunchButton
-              variant="mini"
-              label="Review"
-              agentTargets={agentTargets}
-              installed={installed}
-              newAgentLabel={`New agent in ${pr.branch}`}
-              onStart={onStartReview}
-              onSend={onSendToAgent}
-            />
-          )}
-          {pr.mergeable !== "CONFLICTING" && onMicroTask && (
-            <MicroTaskButton
-              task={reviewPrTask}
-              payload={{ repo, pr }}
-              title="One-shot review: an agent reads the PR via gh, posts only what's genuinely required (nits marked as nits), approves it if nothing is, and its terminal closes itself"
-              onLaunch={onMicroTask}
-            />
-          )}
-          {/* The other half of the loop: take the comments the PR came back
-              with and work through them — in a worktree of its own, since
-              unlike Review this one edits files and pushes. */}
-          {pr.state === "OPEN" && onMicroTask && (
-            <MicroTaskButton
-              task={addressPrCommentsTask}
-              payload={{ repo, pr }}
-              title="One-shot: an agent checks the branch out in its own worktree, validates each review comment against the actual code before acting on it, fixes what holds up, replies to what doesn't, and pushes"
-              onLaunch={onMicroTask}
-            />
-          )}
-          {pr.draft && pr.state === "OPEN" && (
-            <button
-              className="btn-mini"
-              title="Take this PR out of draft so it can be reviewed and merged"
-              disabled={busy}
-              onClick={() => void ready()}
-            >
-              Mark ready
-            </button>
-          )}
-          {!pr.draft && pr.state === "OPEN" && (
-            <div className="cli-menu-anchor">
-              <button
-                className={`btn-mini ${pr.review_decision === "APPROVED" && pr.mergeable !== "CONFLICTING" && pr.checks !== "FAIL" ? "btn-accent" : ""}`}
-                title="Merge this PR on GitHub"
-                disabled={busy}
-                onClick={() => setMergeOpen((v) => !v)}
-              >
-                Merge ▾
-              </button>
-              {mergeOpen && (
-                <div className="cli-menu" onMouseLeave={() => setMergeOpen(false)}>
-                  {(["squash", "merge", "rebase"] as MergeMethod[]).map((m) => (
-                    <div
-                      key={m}
-                      className="cli-item"
-                      onClick={() => {
-                        setMergeOpen(false);
-                        setMergeConfirm(m);
-                      }}
-                    >
-                      <span>{MERGE_LABEL[m]}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-          {pr.state === "OPEN" && (
-            <button
-              className="btn-mini"
-              title="Close this PR without merging"
-              disabled={busy}
-              onClick={() => setCloseConfirm(true)}
-            >
-              Close
-            </button>
-          )}
-          {teammates.length > 0 && (
-            <div className="cli-menu-anchor">
-              <button
-                className="btn-mini"
-                title="Ask a teammate on the relay to review — opens the PR in their Canopy"
-                onClick={() => setAskOpen((v) => !v)}
-              >
-                <TeamIcon size={11} /> Request review ▾
-              </button>
-              {askOpen && (
-                <div className="cli-menu" onMouseLeave={() => setAskOpen(false)}>
-                  {teammates.map((m) => (
-                    <div
-                      key={m.id}
-                      className="cli-item"
-                      onClick={() => void requestReview(m.id, m.name)}
-                    >
-                      <span>{m.name}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
         </div>
       </div>
 
@@ -483,6 +514,16 @@ export function PrView({
               <span className="pr-files-note">large diff — files collapsed for speed</span>
             )}
             <span className="git-spacer" />
+            {/* Both diff controls live on the diff, not up in the header: this
+                is the bar they act on, and it keeps the header to actions that
+                change the PR rather than how you're looking at it. */}
+            <button
+              className="btn-mini"
+              title={split ? "Show one column" : "Show old and new side by side"}
+              onClick={() => setSplit((v) => !v)}
+            >
+              {split ? "Unified" : "Split"}
+            </button>
             <button
               className="btn-mini"
               onClick={() =>
