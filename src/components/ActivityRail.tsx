@@ -5,6 +5,7 @@ import {
   FilesIcon,
   GitBranchIcon,
   IssueIcon,
+  PullRequestIcon,
   SettingsIcon,
   SidebarIcon,
   TasksIcon,
@@ -32,6 +33,7 @@ const RAIL_GROUPS: { name: string; tabs: RailTab[] }[] = [
     tabs: [
       { key: "changes", Icon: DiffIcon, title: "Session changes" },
       { key: "git", Icon: GitBranchIcon, title: "Git — branches, commits, worktrees, PRs" },
+      { key: "prs", Icon: PullRequestIcon, title: "Pull requests — every open project, one list" },
       { key: "trackers", Icon: IssueIcon, title: "Issues — GitHub, Linear, …" },
     ],
   },
@@ -47,45 +49,83 @@ const RAIL_GROUPS: { name: string; tabs: RailTab[] }[] = [
 
 interface ActivityRailProps {
   sideTab: SideTab;
-  collapsed: boolean;
+  /** The panel is showing — by hover or by pin. Drives the active marker. */
+  open: boolean;
+  /** Latched open by a click or Cmd+B, so it outlives the pointer. */
+  pinned: boolean;
   changeBadge: number;
+  /** PRs waiting on this user, across every open project. */
+  prsBadge: number;
   tasksBadge: number;
   pendingCount: number;
   urgentCount: number;
   teamBadge: number;
   relayRole: "off" | "host" | "client";
   onSelectTab: (tab: SideTab) => void;
+  onHoverTab: (tab: SideTab) => void;
+  /** The pointer left an icon before the dwell elapsed — abandon the pending
+   *  open. Does not disturb a panel that is already out. */
+  onHoverCancel: () => void;
+  /** `prompt` retracts on a short clock instead of the full grace period —
+   *  for when the pointer is demonstrably done with the tabs. */
+  onHoverLeave: (prompt?: boolean) => void;
   onOpenSettings: () => void;
   onToggleSidebar: () => void;
 }
 
 function ActivityRailImpl({
   sideTab,
-  collapsed,
+  open,
+  pinned,
   changeBadge,
+  prsBadge,
   tasksBadge,
   pendingCount,
   urgentCount,
   teamBadge,
   relayRole,
   onSelectTab,
+  onHoverTab,
+  onHoverCancel,
+  onHoverLeave,
   onOpenSettings,
   onToggleSidebar,
 }: ActivityRailProps) {
   return (
-    <div className="rail">
+    // Leaving the rail starts the retract clock; the panel itself cancels it
+    // when the pointer arrives there. The two are edge-to-edge, so there is no
+    // dead gap between them to fall through.
+    <div className="rail" onMouseLeave={() => onHoverLeave()}>
       {RAIL_GROUPS.map((group) => (
         <div className="rail-group" key={group.name} role="group" aria-label={group.name}>
           {group.tabs.map((t) => (
             <button
               key={t.key}
-              className={`rail-btn ${!collapsed && sideTab === t.key ? "rail-btn-active" : ""}`}
-              title={`${group.name} — ${t.title}`}
+              className={`rail-btn ${open && sideTab === t.key ? "rail-btn-active" : ""} ${
+                pinned && sideTab === t.key ? "rail-btn-pinned" : ""
+              }`}
+              /* No `title`. Hovering these now slides the panel out, and the
+                 native tooltip fires on the same gesture — it lands on top of
+                 the thing it was describing, a second later and less useful,
+                 because the panel's own header already says what it is. The
+                 label survives for screen readers, which get no panel. */
+              aria-label={`${group.name} — ${t.title}`}
               onClick={() => onSelectTab(t.key)}
+              /* The dwell is armed on the icon and disarmed the moment the
+                 pointer leaves it. Without the leave half, the gap between rail
+                 groups — which belongs to no button — would let a pointer that
+                 has already moved on still trip the timer it left behind. */
+              onMouseEnter={() => onHoverTab(t.key)}
+              onMouseLeave={onHoverCancel}
+              onFocus={() => onHoverTab(t.key)}
+              onBlur={onHoverCancel}
             >
               <t.Icon size={22} />
               {t.key === "changes" && changeBadge > 0 && (
                 <span className="rail-badge">{Math.min(changeBadge, 99)}</span>
+              )}
+              {t.key === "prs" && prsBadge > 0 && (
+                <span className="rail-badge rail-badge-urgent">{Math.min(prsBadge, 99)}</span>
               )}
               {t.key === "tasks" && tasksBadge > 0 && (
                 <span className="rail-badge">{Math.min(tasksBadge, 99)}</span>
@@ -109,24 +149,30 @@ function ActivityRailImpl({
         </div>
       ))}
       <div className="rail-spacer" />
+      {/* These two keep their tooltips — they open no panel, so the tooltip is
+          still the only thing that names them. Reaching either one means you
+          have left the tabs, so it starts the retract: the panel is on its way
+          out before the tooltip appears where the panel used to be. */}
       <button
         className="rail-btn"
         title="Settings (Cmd+,)"
         onClick={onOpenSettings}
+        onMouseEnter={() => onHoverLeave(true)}
       >
         <SettingsIcon size={22} />
       </button>
       <button
-        className="rail-btn"
-        title="Toggle sidebar (Cmd+B)"
+        className={`rail-btn ${pinned ? "rail-btn-pinned" : ""}`}
+        title={pinned ? "Unpin sidebar (Cmd+B)" : "Pin sidebar open (Cmd+B)"}
         onClick={onToggleSidebar}
+        onMouseEnter={() => onHoverLeave(true)}
       >
-        <SidebarIcon size={22} collapsed={collapsed} />
+        <SidebarIcon size={22} collapsed={!pinned} />
       </button>
     </div>
   );
 }
 
-// Memoized: the rail only re-renders when a badge, the active tab, the
-// collapsed state, or the relay role changes — not on every ProjectView tick.
+// Memoized: the rail only re-renders when a badge, the active tab, the open or
+// pinned state, or the relay role changes — not on every ProjectView tick.
 export const ActivityRail = memo(ActivityRailImpl);

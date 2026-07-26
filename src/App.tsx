@@ -18,6 +18,7 @@ import { derivePending, pendingForRoots } from "./notifications";
 import { runUiOp } from "./agentOps";
 import { getSettings, THEME_CHANGE_EVENT } from "./settings";
 import { useTabDrag } from "./tabDrag";
+import * as prWatch from "./prWatchStore";
 import { CollabManager, safeName } from "./collab";
 import { ProjectView } from "./components/ProjectView";
 import { TitleBar } from "./components/TitleBar";
@@ -30,6 +31,7 @@ import {
   clearHibernation,
   hibernatedProjects,
   hibernationOf,
+  isHibernating,
   wakeSteps,
   HIBERNATE_EVENT,
   HIBERNATED_EVENT,
@@ -374,6 +376,12 @@ export default function App() {
   // menu handler is registered before these are defined
   const closeProjectRef = useRef<(id: string) => Promise<void>>(async () => {});
   const openProjectRef = useRef<(id: string) => Promise<void>>(async () => {});
+  /** Open a project because something wants to happen *in* it — an agent
+   *  action, a PR handed over from the inbox, a PTY spawned from the phone.
+   *  Unlike a plain open, this wakes a hibernating project: there is no
+   *  ProjectView behind the frost to receive the event, and dropping it
+   *  silently is worse than deciding the project is needed now. */
+  const openForActionRef = useRef<(id: string) => Promise<void>>(async () => {});
   const saveProjectRef = useRef<(p: Project) => Promise<void>>(async () => {});
   const updateRef = useRef<(patch: Partial<WorkspaceState>) => void>(() => {});
 
@@ -869,6 +877,14 @@ export default function App() {
     clearHibernation(id);
   }, []);
 
+  openForActionRef.current = useCallback(
+    async (id: string) => {
+      await openProjectRef.current(id);
+      if (isHibernating(id)) wakeProject(id);
+    },
+    [wakeProject],
+  );
+
   const restoreStep = useCallback(
     (id: string, done: number, total: number, label: string) =>
       setWaking((prev) =>
@@ -925,6 +941,64 @@ export default function App() {
     [notify],
   );
 
+  // Tell the PR watcher which repos matter: every component of every OPEN
+  // project. Closed projects are not polled — the point of one poller is that
+  // its budget goes on what the user is actually working on. The backend folds
+  // these paths onto their repo toplevels and de-duplicates, so passing raw
+  // component paths (and re-passing them on every workspace edit) is cheap; the
+  // store drops identical sets before they reach IPC.
+  const watchedPaths = useMemo(() => {
+    const open = new Set(ws.openIds ?? []);
+    return ws.projects
+      .filter((p) => open.has(p.id))
+      .flatMap((p) => p.components.map((c) => c.path))
+      .sort();
+  }, [ws.projects, ws.openIds]);
+  useEffect(() => {
+    prWatch.setPaths(watchedPaths);
+  }, [watchedPaths]);
+
+  // A PR clicked in the inbox that belongs to another project: switch to it,
+  // then hand the open over — the same two-step the phone's pty:spawned takes,
+  // for the same reason (a project that isn't open has no ProjectView listening
+  // yet, so the dispatch has to wait for the mount).
+  useEffect(() => {
+    const onElsewhere = (e: Event) => {
+      const d = (e as CustomEvent).detail as { repo?: string; pr?: ipc.PrInfo };
+      if (!d?.repo || !d.pr) return;
+      const norm = (p: string) => p.replace(/\/+$/, "");
+      const target = norm(d.repo);
+      let projectId: string | undefined;
+      let bestLen = -1;
+      for (const p of wsRef.current.projects) {
+        for (const comp of p.components) {
+          const r = norm(comp.path);
+          if (r && (target === r || target.startsWith(r + "/") || r.startsWith(target + "/")) && r.length > bestLen) {
+            bestLen = r.length;
+            projectId = p.id;
+          }
+        }
+      }
+      if (!projectId) {
+        notify("That pull request's checkout isn't in any project any more.", "warn");
+        return;
+      }
+      void openForActionRef.current(projectId).then(() => {
+        // Same timer rationale as the pty:spawned route below: a just-opened
+        // ProjectView has to mount and register its listener first.
+        window.setTimeout(
+          () =>
+            window.dispatchEvent(
+              new CustomEvent("canopy:open-pr", { detail: { projectId, repo: d.repo, pr: d.pr } }),
+            ),
+          80,
+        );
+      });
+    };
+    window.addEventListener("canopy:open-pr-elsewhere", onElsewhere);
+    return () => window.removeEventListener("canopy:open-pr-elsewhere", onElsewhere);
+  }, [notify]);
+
   // A PTY opened from the phone (spawn_headless emits pty:spawned). Route it to
   // the project whose component path most-specifically contains its cwd, open
   // that project, and hand the tab to its ProjectView. The desktop mirrors the
@@ -956,7 +1030,7 @@ export default function App() {
           notify(`A remote agent started in ${e.cwd}, outside any project.`, "info");
           return;
         }
-        await openProjectRef.current(projectId);
+        await openForActionRef.current(projectId);
         // A beat so a not-yet-open project's ProjectView mounts and registers
         // its listener before the event fires; attachTerminal is idempotent by
         // pty id, so a redundant dispatch just re-focuses the tab. A timer, not
@@ -1044,7 +1118,7 @@ export default function App() {
           notify("An agent asked to act, but its directory isn't in any open project.", "info");
           return;
         }
-        await openProjectRef.current(projectId);
+        await openForActionRef.current(projectId);
         // Timer, not rAF — see the attach-terminal dispatch above.
         window.setTimeout(
           () =>
@@ -1094,7 +1168,7 @@ export default function App() {
           );
           return;
         }
-        await openProjectRef.current(projectId);
+        await openForActionRef.current(projectId);
         // Timer, not rAF: rAF starves while the window is occluded, which held
         // the agent's request open until the bridge's timeout even though the
         // op would have run fine — the whole preview pipeline (React commits,

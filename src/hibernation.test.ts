@@ -112,7 +112,7 @@ describe("buildSnapshot", () => {
       ],
       activeTabId: "f-/repo/b.ts",
       sideTab: "files",
-      collapsed: false,
+      sidePinned: false,
       worktree: null,
       now: 1_700_000_000_000,
     });
@@ -126,7 +126,7 @@ describe("buildSnapshot", () => {
       tabs: [term({ id: "micro", command: "claude", micro: { taskId: "x" } })],
       activeTabId: "micro",
       sideTab: "agents",
-      collapsed: true,
+      sidePinned: true,
       worktree: { repo: "/repo", path: "/repo-wt-fix", branch: "fix" },
     });
     expect(snap.activeIndex).toBeNull();
@@ -176,7 +176,7 @@ describe("snapshotSummary + wakeSteps", () => {
     ],
     activeTabId: "a",
     sideTab: "files",
-    collapsed: false,
+    sidePinned: false,
     worktree: null,
     sessionFor: () => "sess-1",
   });
@@ -214,7 +214,7 @@ describe("the store", () => {
       tabs: [fileTab("/repo/a.ts")],
       activeTabId: null,
       sideTab: "files",
-      collapsed: false,
+      sidePinned: false,
       worktree: null,
     });
 

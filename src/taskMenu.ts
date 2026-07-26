@@ -29,6 +29,7 @@ export interface TaskGroups {
 
 export const CUSTOM_HEADING = "Custom tasks";
 export const BUILT_IN_HEADING = "Built-in tasks";
+export const ONE_OFF_HEADING = "One-off task";
 
 /** Build both groups for a surface. `builtIns` is what this surface can
  *  actually run (a PR tab knows its PR); every other built-in is listed

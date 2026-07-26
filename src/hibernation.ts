@@ -72,7 +72,9 @@ export interface ProjectSnapshot {
   /** Index into `tabs` of the tab that was in front; null when none was. */
   activeIndex: number | null;
   sideTab: SideTab;
-  collapsed: boolean;
+  /** The side panel was pinned out (the Cmd+B latch), rather than merely being
+   *  hovered when the project went to sleep. */
+  sidePinned: boolean;
   /** The worktree the project's file surface was pointed at, if any. */
   worktree: { repo: string; path: string; branch: string } | null;
 }
@@ -189,7 +191,7 @@ export function buildSnapshot(opts: {
   tabs: SubTab[];
   activeTabId: string | null;
   sideTab: SideTab;
-  collapsed: boolean;
+  sidePinned: boolean;
   worktree: { repo: string; path: string; branch: string } | null;
   sessionFor?: (ptyId: number) => string | undefined;
   now?: number;
@@ -202,7 +204,7 @@ export function buildSnapshot(opts: {
     tabs: snapshotTabs(kept, opts.sessionFor),
     activeIndex: activeIndex < 0 ? null : activeIndex,
     sideTab: opts.sideTab,
-    collapsed: opts.collapsed,
+    sidePinned: opts.sidePinned,
     worktree: opts.worktree,
   };
 }

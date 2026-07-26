@@ -33,7 +33,7 @@ const snapshot = buildSnapshot({
   tabs,
   activeTabId: "a",
   sideTab: "files",
-  collapsed: false,
+  sidePinned: false,
   worktree: null,
   sessionFor: () => "sess-1",
 });
