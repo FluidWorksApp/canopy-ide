@@ -8848,6 +8848,57 @@ a.btn-mini {
   min-width: 160px;
 }
 
+/* ---------- one-off task composer (Run task ▾) ----------
+   A brief is prose, so it gets a prose-shaped box. The menu is sized by its
+   longest task label, which says nothing about how wide a brief wants to be —
+   hence an explicit width here rather than 100%. */
+.oneoff {
+  width: 340px;
+  padding: 2px 6px 6px;
+}
+
+.oneoff-input {
+  display: block;
+  width: 100%;
+  min-height: 68px;
+  max-height: 40vh;
+  padding: 7px 9px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  resize: vertical;
+}
+.oneoff-input::placeholder {
+  color: var(--text-faint);
+}
+.oneoff-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+.oneoff-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 7px;
+}
+
+.oneoff-hint {
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+.oneoff-hint kbd {
+  font: inherit;
+  color: var(--text-dim);
+}
+
 .rail-conn {
   position: absolute;
   /* Bottom-right so it never collides with the team count badge (top-right). */
