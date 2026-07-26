@@ -443,6 +443,7 @@ pub fn run() {
             git::gh_pr_auto_merge,
             git::gh_pr_failing_logs,
             git::gh_pr_diff_since,
+            git::gh_pr_reviewer_candidates,
             prwatch::pr_watch_set,
             prwatch::pr_watch_now,
             git::gh_issue_list,

@@ -879,6 +879,9 @@ export const ghPrAutoMerge = (
 /** Tail of the failing checks' logs — "" when nothing is failing. */
 export const ghPrFailingLogs = (repo: string, number: number) =>
   invoke<string>("gh_pr_failing_logs", { repo, number });
+/** Logins with access to the repo — who "Ask for review" can offer. */
+export const ghPrReviewerCandidates = (repo: string) =>
+  invoke<string[]>("gh_pr_reviewer_candidates", { repo });
 export const ghPrDiffSince = (repo: string, baseSha: string, headSha: string) =>
   invoke<string>("gh_pr_diff_since", { repo, baseSha, headSha });
 

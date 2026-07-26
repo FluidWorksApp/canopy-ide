@@ -475,18 +475,36 @@ pub(crate) fn run_net(cmd: &mut Command) -> Result<String, String> {
     use std::process::Stdio;
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+
+    // Drain both pipes on their own threads for the whole life of the child,
+    // rather than reading them once it has exited. A pipe holds ~64KB before
+    // the writer blocks, so a command whose output is bigger than that — a PR
+    // diff is routinely 100KB+ — would fill it, block forever in write(), never
+    // exit, and be reported as "timed out after 120s" while `gh` sat there with
+    // more to say. The reader threads end at EOF, which is the child exiting.
+    let mut so = child.stdout.take();
+    let mut se = child.stderr.take();
+    let out_thread = std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(o) = so.as_mut() {
+            let _ = o.read_to_string(&mut buf);
+        }
+        buf
+    });
+    let err_thread = std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(e) = se.as_mut() {
+            let _ = e.read_to_string(&mut buf);
+        }
+        buf
+    });
+
     let start = std::time::Instant::now();
     loop {
         match child.try_wait().map_err(|e| e.to_string())? {
             Some(status) => {
-                let mut out = String::new();
-                let mut err = String::new();
-                if let Some(mut o) = child.stdout.take() {
-                    let _ = o.read_to_string(&mut out);
-                }
-                if let Some(mut e) = child.stderr.take() {
-                    let _ = e.read_to_string(&mut err);
-                }
+                let out = out_thread.join().unwrap_or_default();
+                let err = err_thread.join().unwrap_or_default();
                 // git reports progress on stderr even on success, so merge.
                 return if status.success() {
                     Ok(format!("{out}{err}").trim().to_string())
@@ -500,6 +518,9 @@ pub(crate) fn run_net(cmd: &mut Command) -> Result<String, String> {
                 if start.elapsed().as_secs() > NET_TIMEOUT_SECS {
                     let _ = child.kill();
                     let _ = child.wait();
+                    // Killing the child closes the pipes, so the readers end.
+                    let _ = out_thread.join();
+                    let _ = err_thread.join();
                     return Err(format!(
                         "timed out after {NET_TIMEOUT_SECS}s — remote unreachable, or it wants credentials this app can't prompt for"
                     ));
@@ -1620,6 +1641,34 @@ pub async fn gh_pr_request_review(
         "Asked {} to review #{number}",
         reviewers.join(", ")
     ))
+}
+
+/// Logins worth offering as reviewers: everyone with access to the repository.
+/// Without this "Ask for review" can only re-request people who already
+/// reviewed, which on a PR nobody has looked at yet is an empty menu.
+#[tauri::command]
+pub async fn gh_pr_reviewer_candidates(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+) -> Result<Vec<String>, String> {
+    let top = repo_path(&state, &repo)?;
+    let (owner, name) = gh_nwo(&top)?;
+    let mut cmd = gh_in(&top);
+    cmd.args([
+        "api",
+        "--paginate",
+        "--jq",
+        ".[].login",
+        &format!("repos/{owner}/{name}/collaborators?per_page=100"),
+    ]);
+    // Listing collaborators needs push access; on a repo where we don't have it
+    // an empty list is the honest answer, not an error the user can act on.
+    let out = run_net(&mut cmd).unwrap_or_default();
+    Ok(out
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
 }
 
 /// Hand the landing decision to GitHub: it merges when the branch-protection
@@ -3541,6 +3590,36 @@ index 333..444 100644
         assert_eq!(rollup_state("PENDING"), "PENDING");
         assert_eq!(rollup_state("EXPECTED"), "PENDING");
         assert_eq!(rollup_state(""), "");
+    }
+
+    /// The regression this file's history most needs: a command whose output is
+    /// bigger than a pipe buffer used to deadlock — the child blocked in write,
+    /// never exited, and the user was told "timed out after 120s" 120 seconds
+    /// later. Any PR diff over ~64KB hit it.
+    #[cfg(unix)]
+    #[test]
+    fn run_net_reads_output_larger_than_a_pipe_buffer() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args([
+            "-c",
+            "yes 0123456789abcdefghijklmnopqrstuvwxyz | head -c 200000",
+        ]);
+        let started = std::time::Instant::now();
+        let out = run_net(&mut cmd).expect("a large stdout is read, not timed out");
+        assert!(out.len() > 190_000, "only got {} bytes", out.len());
+        assert!(
+            started.elapsed().as_secs() < 20,
+            "took {}s — that is the deadlock, not slowness",
+            started.elapsed().as_secs()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_net_still_reports_failure_output() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "echo trouble >&2; exit 3"]);
+        assert_eq!(run_net(&mut cmd).unwrap_err(), "trouble");
     }
 
     #[test]

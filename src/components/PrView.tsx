@@ -231,6 +231,8 @@ export function PrView({
   const [replyTo, setReplyTo] = useState<string | null>(null);
   const [replyText, setReplyText] = useState("");
   const [logs, setLogs] = useState<string | null>(null);
+  /** People who could be asked to review — loaded only when that's the move. */
+  const [candidates, setCandidates] = useState<string[] | null>(null);
   const [map, setMap] = useState<string | null>(null);
   const [deltaOn, setDeltaOn] = useState(false);
   const [deltaPatch, setDeltaPatch] = useState<string | null>(null);
@@ -347,6 +349,15 @@ export function PrView({
     (armed: boolean) => {
       if (!onMicroTask) return;
       if (!gate.ok) {
+        // Nothing to address *yet* is not a refusal: arm the loop and the
+        // watcher starts round one the moment review comments land. Every other
+        // reason (a red build, conflicts, a round already running) is a real
+        // no, and says so.
+        if (gate.reason === "no comments to address" && pr.state === "OPEN") {
+          persist({ ...loop, auto: true });
+          onNotice("Armed — a round starts by itself when review comments arrive.");
+          return;
+        }
         onNotice(gate.reason ?? "Nothing to address right now.");
         return;
       }
@@ -412,7 +423,9 @@ export function PrView({
   // all polling the same repos. The slow interval below is only a safety net for
   // a PR whose repo the poller isn't watching (its project was closed).
   useEffect(() => {
-    if (loop.status !== "waiting" && loop.status !== "ready") return;
+    // Armed-but-idle counts: that is the whole point of arming it before the
+    // first comment exists.
+    if (!loop.auto && loop.status !== "waiting" && loop.status !== "ready") return;
     let live = true;
     const tick = async () => {
       if (!live || document.visibilityState !== "visible") return;
@@ -450,6 +463,16 @@ export function PrView({
       window.clearInterval(id);
     };
   }, [loop, pr, repo, refreshConv, onMicroTask, persist, onNotice]);
+
+  // Only fetched when it's the move being offered: one API call, and only for
+  // the PR where the answer is about to be shown.
+  useEffect(() => {
+    if (move.id !== "request-review" || candidates !== null) return;
+    void ipc
+      .ghPrReviewerCandidates(repo)
+      .then(setCandidates)
+      .catch(() => setCandidates([]));
+  }, [move.id, candidates, repo]);
 
   // A round whose agent vanished (crashed CLI, closed tab, slept machine) is not
   // "running" — say so rather than leaving a spinner forever.
@@ -632,7 +655,7 @@ export function PrView({
     setTimeout(() => fileRefs.current.get(path)?.scrollIntoView({ block: "start" }), 60);
   };
 
-  const dispatchMove = (m: NextMove) => {
+  const dispatchMove = (m: NextMove, e: React.MouseEvent) => {
     switch (m.id) {
       case "self-review":
         onMicroTask?.(selfReviewPrTask, { repo, pr }, "");
@@ -656,10 +679,9 @@ export function PrView({
         onMicroTask?.(draftFindingsTask, { repo, pr }, "");
         break;
       case "request-review":
-        moreMenu.open(
-          { clientX: window.innerWidth / 2, clientY: 80 } as unknown as React.MouseEvent,
-          reviewerItems(),
-        );
+        // The real event: useContextMenu calls preventDefault on it, so a
+        // hand-made {clientX, clientY} threw and the button did nothing.
+        moreMenu.open(e, reviewerItems());
         break;
       case "merge":
         setMergeOpen(true);
@@ -783,6 +805,24 @@ export function PrView({
         label: `Re-request ${login}`,
         onClick: () => void runAction("Request review", () => ipc.ghPrRequestReview(repo, pr.number, [login])),
       });
+    // Everyone else with access. On a PR nobody has looked at yet — which is
+    // exactly when you press "Ask for review" — `past` is empty, so without
+    // these the menu had nothing in it.
+    const asked = new Set(past);
+    const others = (candidates ?? []).filter(
+      (l) => l !== conv?.viewer && l !== pr.author && !asked.has(l),
+    );
+    if (others.length) {
+      if (items.length) items.push({ separator: true });
+      for (const login of others.slice(0, 15))
+        items.push({
+          label: login,
+          onClick: () =>
+            void runAction("Request review", () => ipc.ghPrRequestReview(repo, pr.number, [login])),
+        });
+    } else if (candidates === null) {
+      items.push({ label: "Looking up who can review…", disabled: true });
+    }
     if (teammates.length > 0)
       items.push({
         label: "Ask a teammate over the relay",
@@ -1191,7 +1231,7 @@ export function PrView({
               className="btn-mini btn-accent"
               disabled={busy}
               title={move.hint}
-              onClick={() => dispatchMove(move)}
+              onClick={(e) => dispatchMove(move, e)}
             >
               {move.action}
             </button>
@@ -1330,11 +1370,21 @@ export function PrView({
                     <div className="pr-thread-actions">
                       <button
                         className="btn-mini btn-accent"
-                        disabled={!gate.ok || busy}
-                        title={gate.reason}
+                        disabled={busy || loop.status === "working"}
+                        title={
+                          gate.ok
+                            ? "Hand the open comments to an agent"
+                            : gate.reason === "no comments to address"
+                              ? "Nothing to address yet — arm it and a round starts when comments arrive"
+                              : gate.reason
+                        }
                         onClick={() => startRound(true)}
                       >
-                        {loop.rounds.length ? "Next round" : "Start loop"}
+                        {loop.rounds.length
+                          ? "Next round"
+                          : gate.ok
+                            ? "Start loop"
+                            : "Watch for comments"}
                       </button>
                       {loop.auto && (
                         <button
