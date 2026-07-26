@@ -5,6 +5,7 @@ import {
   FilesIcon,
   GitBranchIcon,
   IssueIcon,
+  PullRequestIcon,
   SettingsIcon,
   SidebarIcon,
   TasksIcon,
@@ -32,6 +33,7 @@ const RAIL_GROUPS: { name: string; tabs: RailTab[] }[] = [
     tabs: [
       { key: "changes", Icon: DiffIcon, title: "Session changes" },
       { key: "git", Icon: GitBranchIcon, title: "Git — branches, commits, worktrees, PRs" },
+      { key: "prs", Icon: PullRequestIcon, title: "Pull requests — every open project, one list" },
       { key: "trackers", Icon: IssueIcon, title: "Issues — GitHub, Linear, …" },
     ],
   },
@@ -52,6 +54,8 @@ interface ActivityRailProps {
   /** Latched open by a click or Cmd+B, so it outlives the pointer. */
   pinned: boolean;
   changeBadge: number;
+  /** PRs waiting on this user, across every open project. */
+  prsBadge: number;
   tasksBadge: number;
   pendingCount: number;
   urgentCount: number;
@@ -74,6 +78,7 @@ function ActivityRailImpl({
   open,
   pinned,
   changeBadge,
+  prsBadge,
   tasksBadge,
   pendingCount,
   urgentCount,
@@ -118,6 +123,9 @@ function ActivityRailImpl({
               <t.Icon size={22} />
               {t.key === "changes" && changeBadge > 0 && (
                 <span className="rail-badge">{Math.min(changeBadge, 99)}</span>
+              )}
+              {t.key === "prs" && prsBadge > 0 && (
+                <span className="rail-badge rail-badge-urgent">{Math.min(prsBadge, 99)}</span>
               )}
               {t.key === "tasks" && tasksBadge > 0 && (
                 <span className="rail-badge">{Math.min(tasksBadge, 99)}</span>

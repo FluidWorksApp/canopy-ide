@@ -239,6 +239,264 @@ export const addressPrCommentsTask: MicroTaskDef<AddressPrCommentsPayload> = {
   },
 };
 
+// ---------- PR tasks whose output the tab reads back ----------
+//
+// A micro-task's terminal closes itself, so anything it produces for the page
+// has to be written down. These write one file under `.canopy/` in the repo —
+// inside the workspace, because fs_read_file only reads registered roots — and
+// the brief keeps it out of git via .git/info/exclude rather than touching the
+// repo's own .gitignore.
+
+/** Where a PR task leaves something for the tab to render. */
+export const prArtifactPath = (
+  repo: string,
+  number: number,
+  kind: "map" | "findings" = "map",
+): string =>
+  `${repo}/.canopy/pr-${number}-${kind}.${kind === "findings" ? "json" : "md"}`;
+
+/** One line the briefs share: make the directory, keep it out of git. */
+const artifactPreamble = (path: string): string =>
+  `Write your output to \`${path}\` (\`mkdir -p\` its directory first, and make sure \`.canopy/\` is ` +
+  `in \`.git/info/exclude\` — append it if missing — so this never shows up as a repo change). `;
+
+/** Read the change and rank it: what it does, which files carry the risk, and
+ *  the handful of things a reviewer should actually look at. Posts nothing —
+ *  this is the "brief me before I read 600 lines" pass, and cutting reviewer
+ *  load is what it is for. */
+export const reviewMapTask: MicroTaskDef<ReviewPrPayload> = {
+  id: "pr-review-map",
+  label: "Review map",
+  icon: "◎",
+  placeholder: "Anything to pay attention to…",
+  surfaceNote: "on a PR tab",
+  cwd: (p) => p.repo,
+  buildContext(p, userQuery) {
+    const n = p.pr.number;
+    const query = oneLine(userQuery);
+    return oneLine(
+      `Map pull request #${n}: "${p.pr.title}" (${p.pr.url}) for a human who is about to review it. ` +
+        `Read it without checking anything out — other agents share this checkout: \`gh pr view ${n}\`, ` +
+        `\`gh pr diff ${n}\`, and the surrounding code here for context. ` +
+        artifactPreamble(prArtifactPath(p.repo, n, "map")) +
+        `Structure it exactly like this, in GitHub-flavoured markdown, and keep the whole thing under ` +
+        `250 words. "## What it does" — two or three sentences describing the change as it is in the ` +
+        `diff, not as the description claims. "## Risk" — a list of the changed files that carry real ` +
+        `risk, each with one clause saying why (a behaviour change, a shared signature, a migration, ` +
+        `an unguarded path); leave out the files that are noise. "## Look at" — at most three specific ` +
+        `things worth a human's attention, each naming a file and line. "## Claims to check" — any ` +
+        `statement in the PR description or a commit message that the diff does not obviously support. ` +
+        `Do not review the code, do not post anything to GitHub, and change no files except the map. ` +
+        `Make the canopy_job_done summary the one-line version of "What it does".` +
+        (query ? ` The user adds: "${query}".` : ""),
+    );
+  },
+};
+
+/** The reviewer's pass, but nothing is posted: findings land as JSON the tab
+ *  turns into draft inline comments the human keeps, edits or drops. This is the
+ *  shape that stops an agent's guesses becoming public review noise. */
+export const draftFindingsTask: MicroTaskDef<ReviewPrPayload> = {
+  id: "pr-draft-findings",
+  label: "Draft findings",
+  icon: "✎",
+  placeholder: "Anything to focus on…",
+  surfaceNote: "on a PR tab",
+  cwd: (p) => p.repo,
+  buildContext(p, userQuery) {
+    const n = p.pr.number;
+    const query = oneLine(userQuery);
+    return oneLine(
+      `Find what is wrong with pull request #${n}: "${p.pr.title}" (${p.pr.url}), as inline review ` +
+        `comments a human will vet before any of it is posted. Read it via \`gh pr view ${n}\` and ` +
+        `\`gh pr diff ${n}\` plus the surrounding code — do not check anything out, other agents share ` +
+        `this checkout, and post nothing to GitHub. ` +
+        artifactPreamble(prArtifactPath(p.repo, n, "findings")) +
+        `The file must be exactly this JSON and nothing else: ` +
+        `{"findings":[{"path":"src/x.ts","line":42,"side":"RIGHT","severity":"blocking","body":"…"}]} ` +
+        `— \`line\` is a line number in the NEW file for side "RIGHT" (use "LEFT" and the old line only ` +
+        `when the problem is a deletion), and \`severity\` is "blocking" or "nit". ` +
+        `Be skeptical of the PR and equally skeptical of yourself: the title, the description, the ` +
+        `commit messages and the code comments are claims about the change, not the change. Check each ` +
+        `against the lines the diff adds, and read the callers and callees of anything it touches. ` +
+        `A finding is "blocking" only if it is a correctness bug, data loss, a security hole, a broken ` +
+        `API contract or migration, a regression the tests would not catch, or logic that plainly needs ` +
+        `a test and has none — and every one must name the concrete failure: the input or state, and ` +
+        `what goes wrong. If you cannot state that, it is not a finding: leave it out. Everything else ` +
+        `is "nit" and its body must start with "Nit: ". Aim for few and certain rather than many: five ` +
+        `findings is a lot, and an empty array is a perfectly good answer. ` +
+        `Make the canopy_job_done summary "<b> blocking, <n> nits".` +
+        (query ? ` The user adds: "${query}".` : ""),
+    );
+  },
+};
+
+/** The author's private pass before humans look. Same lens as the review, no
+ *  audience: findings go in the same JSON the tab reads, and the point is to fix
+ *  them before a reviewer ever spends a round on them. */
+export const selfReviewPrTask: MicroTaskDef<ReviewPrPayload> = {
+  id: "pr-self-review",
+  label: "Self-review",
+  icon: "◍",
+  placeholder: "Anything you're unsure about…",
+  surfaceNote: "on a PR tab",
+  cwd: (p) => p.repo,
+  buildContext(p, userQuery) {
+    const n = p.pr.number;
+    const query = oneLine(userQuery);
+    return oneLine(
+      `Review pull request #${n}: "${p.pr.title}" (${p.pr.url}) as its author would want it reviewed ` +
+        `before anyone else sees it. Nothing you find goes to GitHub — post no comments, no review, and ` +
+        `change no code. Read it via \`gh pr diff ${n}\` and the surrounding code; do not check anything ` +
+        `out. ` +
+        artifactPreamble(prArtifactPath(p.repo, n, "findings")) +
+        `Use exactly this JSON: {"findings":[{"path":"…","line":42,"side":"RIGHT","severity":"blocking",` +
+        `"body":"…"}]}. Hold the same bar a good reviewer would: correctness, edge cases, a test that ` +
+        `should exist, a stale comment or doc left describing the old behaviour, a debug leftover, a ` +
+        `TODO that should be a ticket, a claim in the PR description the diff doesn't support. Name the ` +
+        `concrete failure in every blocking finding; anything cosmetic is "nit". ` +
+        `Make the canopy_job_done summary "<b> to fix before review, <n> nits".` +
+        (query ? ` The user adds: "${query}".` : ""),
+    );
+  },
+};
+
+/** Green-keeper: the failing checks, read and fixed. Edits code, so it runs in
+ *  the PR's own worktree like addressing comments does. */
+export const fixCiTask: MicroTaskDef<ReviewPrPayload> = {
+  id: "pr-fix-ci",
+  label: "Fix CI",
+  icon: "⚒",
+  placeholder: "Which check to start with…",
+  surfaceNote: "on a PR tab",
+  cwd: (p) => p.repo,
+  isolation: { kind: "pr-worktree", target: (p) => ({ repo: p.repo, pr: p.pr }) },
+  buildContext(p, userQuery, env) {
+    const n = p.pr.number;
+    const query = oneLine(userQuery);
+    return oneLine(
+      `Make the failing checks on pull request #${n}: "${p.pr.title}" (${p.pr.url}) pass. Its branch ` +
+        `${p.pr.branch} is checked out in this worktree. ` +
+        `Start from the evidence, not a guess: \`gh pr checks ${n}\` for what is red, then ` +
+        `\`gh run view <run-id> --log-failed\` for each failing run's actual output. Reproduce the ` +
+        `failure locally with the project's own command before changing anything — a check that fails ` +
+        `in CI and passes here is telling you something about the environment, and the fix is different. ` +
+        `Fix the cause, not the symptom: do not delete, skip, or loosen a test, do not raise a timeout ` +
+        `to make a flake pass, and do not silence a type error with a cast or an ignore comment. If the ` +
+        `failure is a genuine flake or an infrastructure problem, change nothing, say so, and re-run it ` +
+        `(\`gh run rerun --failed\`). When the project's build and tests are green locally, commit with a ` +
+        `message naming what broke and push so the checks re-run. Never force-push, never rebase, never ` +
+        `amend someone else's commit, and do not merge. Pass the PR's URL to canopy_job_done with a ` +
+        `summary of what was broken and what fixed it.` +
+        (query ? ` The user adds: "${query}".` : "") +
+        (env?.cleanup ? cleanupLine(env.cleanup.repo, env.cleanup.worktree) : ""),
+    );
+  },
+};
+
+export interface ApplySuggestionPayload extends ReviewPrPayload {
+  path: string;
+  line: number;
+  suggestion: string;
+  threadId: string;
+}
+
+/** Apply a reviewer's suggested change. GitHub's "Commit suggestion" button has
+ *  no API — but the replacement text is in the comment body and the branch is
+ *  right here, so we apply it, prove it, and push. */
+export const applySuggestionTask: MicroTaskDef<ApplySuggestionPayload> = {
+  id: "pr-apply-suggestion",
+  label: "Apply suggestion",
+  icon: "⇥",
+  placeholder: "Anything to watch for…",
+  surfaceNote: "on a PR comment",
+  cwd: (p) => p.repo,
+  isolation: { kind: "pr-worktree", target: (p) => ({ repo: p.repo, pr: p.pr }) },
+  buildContext(p, userQuery, env) {
+    const n = p.pr.number;
+    const query = oneLine(userQuery);
+    return oneLine(
+      `A reviewer suggested a change on pull request #${n} (${p.pr.url}) at ${p.path}:${p.line}. Its ` +
+        `branch ${p.pr.branch} is checked out in this worktree. The suggested replacement for that ` +
+        `line (or line range) is, between the markers: <<<SUGGESTION ${oneLine(p.suggestion)} ` +
+        `SUGGESTION>>>. Open ${p.path} and read what is there now — the suggestion was written against ` +
+        `the diff and the file may have moved on. Apply it if it still makes sense, adjusting ` +
+        `indentation to match the file; if the code has changed enough that it no longer applies, ` +
+        `change nothing and say so. Then verify: run the project's build and tests, and if the ` +
+        `suggestion touches behaviour, satisfy yourself with a test or a short repro that it is right — ` +
+        `a suggestion is a proposal, not an instruction. When green, commit with a message crediting the ` +
+        `suggestion and push. Reply on the thread saying it is applied (or why it isn't) with ` +
+        `\`gh api repos/{owner}/{repo}/pulls/${n}/comments\` replies, and do not resolve the thread or ` +
+        `merge — that stays with the human. Pass the PR's URL to canopy_job_done.` +
+        (query ? ` The user adds: "${query}".` : "") +
+        (env?.cleanup ? cleanupLine(env.cleanup.repo, env.cleanup.worktree) : ""),
+    );
+  },
+};
+
+/** Run the branch and look at it. The thing no hosted reviewer can do: start the
+ *  project, drive the changed screen, and come back with pictures. */
+export const runItReviewTask: MicroTaskDef<ReviewPrPayload> = {
+  id: "pr-run-it",
+  label: "Run it & look",
+  icon: "▶",
+  placeholder: "Which screen or flow to exercise…",
+  surfaceNote: "on a PR tab",
+  cwd: (p) => p.repo,
+  isolation: { kind: "pr-worktree", target: (p) => ({ repo: p.repo, pr: p.pr }) },
+  buildContext(p, userQuery, env) {
+    const n = p.pr.number;
+    const query = oneLine(userQuery);
+    return oneLine(
+      `Exercise pull request #${n}: "${p.pr.title}" (${p.pr.url}) as a user would, and report what you ` +
+        `saw. Its branch ${p.pr.branch} is checked out in this worktree — this is the review no hosted ` +
+        `tool can do, so spend the effort on running it rather than re-reading the diff. ` +
+        `Read \`gh pr diff ${n}\` only far enough to know which screens or endpoints the change touches. ` +
+        `Install dependencies if they're missing, then start the project's dev server with ` +
+        `canopy_start_server and wait for it with canopy_wait_for. Drive the changed surface with ` +
+        `canopy_browser_navigate / canopy_browser_click / canopy_browser_type, and take ` +
+        `canopy_screenshot of each state that matters — how it LOOKS is the point, and a DOM snapshot ` +
+        `cannot see overlap, contrast or a layout that has collapsed. Check canopy_browser_console for ` +
+        `errors and warnings the change introduced. Also run the project's own tests if it has them. ` +
+        `Then stop the server with canopy_stop_server. Report only what you observed, with the ` +
+        `screenshots you took: what works, what looks wrong, what you could not reach. Post nothing to ` +
+        `GitHub and change no code. Make the canopy_job_done summary your verdict in one line.` +
+        (query ? ` The user adds: "${query}".` : "") +
+        (env?.cleanup ? cleanupLine(env.cleanup.repo, env.cleanup.worktree) : ""),
+    );
+  },
+};
+
+/** The tail nobody gets to: comments that are legitimate but out of scope. They
+ *  become issues so the PR can land without swallowing them. */
+export const followUpsTask: MicroTaskDef<ReviewPrPayload> = {
+  id: "pr-follow-ups",
+  label: "Spin off follow-ups",
+  icon: "⤴",
+  placeholder: "Which ones to spin off…",
+  surfaceNote: "on a PR tab",
+  cwd: (p) => p.repo,
+  buildContext(p, userQuery) {
+    const n = p.pr.number;
+    const query = oneLine(userQuery);
+    return oneLine(
+      `Turn the out-of-scope review comments on pull request #${n}: "${p.pr.title}" (${p.pr.url}) into ` +
+        `issues so the PR can land without losing them. Collect the conversation with ` +
+        `\`gh pr view ${n} --comments\` and the inline threads with ` +
+        `\`gh api repos/{owner}/{repo}/pulls/${n}/comments\`; skip resolved and outdated threads. ` +
+        `A comment belongs in a follow-up only if it is legitimate AND outside this PR's stated scope — ` +
+        `a pre-existing problem the diff merely exposed, a refactor the reviewer wants next, a missing ` +
+        `test for code this PR didn't touch. Anything the PR itself should fix is not a follow-up: ` +
+        `leave it alone. Check for an existing issue first (\`gh issue list --search\`) and do not open a ` +
+        `duplicate. For each one, open an issue with \`gh issue create\` whose body quotes the comment, ` +
+        `links back to the thread, and says in one line what "done" would look like; then reply on that ` +
+        `thread with the issue link so the reviewer knows where it went. Change no code and do not ` +
+        `resolve any thread. Pass the list of issue URLs to canopy_job_done.` +
+        (query ? ` The user adds: "${query}".` : ""),
+    );
+  },
+};
+
 /** Every built-in micro-task a CTA can launch. These are surface-bound: their
  *  payload comes from where the button lives (see each task's surfaceNote),
  *  which is why the Tasks panel lists them read-only — run them from there. */
@@ -246,6 +504,12 @@ export const MICRO_TASKS: MicroTaskDef<never>[] = [
   raisePrTask as MicroTaskDef<never>,
   reviewPrTask as MicroTaskDef<never>,
   addressPrCommentsTask as MicroTaskDef<never>,
+  reviewMapTask as MicroTaskDef<never>,
+  draftFindingsTask as MicroTaskDef<never>,
+  selfReviewPrTask as MicroTaskDef<never>,
+  fixCiTask as MicroTaskDef<never>,
+  runItReviewTask as MicroTaskDef<never>,
+  followUpsTask as MicroTaskDef<never>,
 ];
 
 /** A task the user wrote themselves (Tasks panel → New task). Stored in

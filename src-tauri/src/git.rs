@@ -13,7 +13,8 @@
 //!     honest outcome.
 
 use crate::winproc::NoConsoleWindow;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tauri::State;
@@ -1017,6 +1018,622 @@ pub async fn gh_pr_ready(
     cmd.args(["pr", "ready", &number.to_string()]);
     run_net(&mut cmd)?;
     Ok(format!("#{number} is ready for review"))
+}
+
+// ---------- pull request conversation (gh api graphql) ----------
+//
+// Review threads — the inline comments, and the only place resolved/outdated
+// live — are not in GitHub's REST API at all, and `gh` has no command for them
+// (cli/cli#12419). So everything below is `gh api graphql`, which still rides
+// the CLI's stored auth: we never hold a token.
+//
+// One composite query per refresh: body, conversation, reviews, threads, files
+// and the check rollup together. It runs independently of `gh_pr_diff`, so the
+// conversation paints while a large patch is still being parsed.
+
+#[derive(Serialize, Clone, Default)]
+pub struct PrComment {
+    /// GraphQL node id — what a reply or a resolve is addressed to.
+    pub id: String,
+    pub author: String,
+    pub body: String,
+    pub created: String,
+    pub url: String,
+    /// Authored by the signed-in user.
+    pub mine: bool,
+    /// OWNER / MEMBER / COLLABORATOR / CONTRIBUTOR / NONE. Gates whose words an
+    /// agent is allowed to act on — see the trust note in the module docs.
+    pub association: String,
+}
+
+#[derive(Serialize, Clone, Default)]
+pub struct PrReviewSummary {
+    pub id: String,
+    pub author: String,
+    pub body: String,
+    /// APPROVED / CHANGES_REQUESTED / COMMENTED / DISMISSED / PENDING.
+    pub state: String,
+    pub submitted: String,
+    pub url: String,
+    pub mine: bool,
+    pub association: String,
+    /// The head commit this review was submitted against — the anchor for
+    /// "what changed since I last looked".
+    pub commit: String,
+}
+
+#[derive(Serialize, Clone, Default)]
+pub struct PrThread {
+    pub id: String,
+    pub path: String,
+    /// Line in the file as of the PR head; 0 when GitHub reports none (an
+    /// outdated thread whose line no longer exists).
+    pub line: u32,
+    pub start_line: u32,
+    /// LEFT or RIGHT — which side of the diff the thread hangs off.
+    pub side: String,
+    pub resolved: bool,
+    pub outdated: bool,
+    pub comments: Vec<PrComment>,
+}
+
+#[derive(Serialize, Clone, Default)]
+pub struct PrFileState {
+    pub path: String,
+    /// GitHub's own per-file checkbox (VIEWED), shared with the web UI.
+    pub viewed: bool,
+    pub additions: u32,
+    pub deletions: u32,
+}
+
+#[derive(Serialize, Clone, Default)]
+pub struct PrConversation {
+    /// The PR's GraphQL node id, needed by every mutation below.
+    pub node_id: String,
+    pub body: String,
+    pub head_sha: String,
+    /// The signed-in login, so the UI can tell your own words from everyone's.
+    pub viewer: String,
+    pub review_decision: String,
+    pub mergeable: String,
+    /// Live rollup: PASS / FAIL / PENDING / "" — the same vocabulary as PrInfo,
+    /// but current rather than whatever the PR list saw when the tab opened.
+    pub checks: String,
+    pub auto_merge: bool,
+    pub draft: bool,
+    pub comments: Vec<PrComment>,
+    pub reviews: Vec<PrReviewSummary>,
+    pub threads: Vec<PrThread>,
+    pub files: Vec<PrFileState>,
+    /// Head sha of your most recent submitted review, for the delta toggle.
+    pub my_last_review_sha: String,
+}
+
+const PR_CONVERSATION_QUERY: &str = r#"
+query($owner:String!,$name:String!,$number:Int!){
+  viewer{ login }
+  repository(owner:$owner,name:$name){
+    pullRequest(number:$number){
+      id body isDraft mergeable reviewDecision
+      headRefOid
+      autoMergeRequest{ enabledAt }
+      comments(first:100){nodes{ id author{login} body createdAt url viewerDidAuthor authorAssociation }}
+      reviews(first:50){nodes{ id author{login} body state submittedAt url viewerDidAuthor authorAssociation commit{oid} }}
+      reviewThreads(first:100){nodes{
+        id isResolved isOutdated path line startLine diffSide
+        comments(first:50){nodes{ id author{login} body createdAt url viewerDidAuthor authorAssociation }}
+      }}
+      files(first:100){nodes{ path viewerViewedState additions deletions }}
+      commits(last:1){nodes{commit{ statusCheckRollup{ state } }}}
+    }
+  }
+}"#;
+
+/// `owner` and `name` for the repo `gh` resolves in this checkout.
+fn gh_nwo(top: &Path) -> Result<(String, String), String> {
+    let mut cmd = gh_in(top);
+    cmd.args([
+        "repo",
+        "view",
+        "--json",
+        "nameWithOwner",
+        "--jq",
+        ".nameWithOwner",
+    ]);
+    let nwo = run_net(&mut cmd)?;
+    let nwo = nwo.trim();
+    let (owner, name) = nwo
+        .split_once('/')
+        .ok_or_else(|| format!("couldn't read owner/name from {nwo:?}"))?;
+    Ok((owner.to_string(), name.to_string()))
+}
+
+/// Run a GraphQL document with typed variables and return `data`. `-F` sends
+/// numbers and booleans as themselves (`-f` would stringify them, which the
+/// schema rejects for Int!).
+fn gh_graphql(top: &Path, query: &str, vars: &[(&str, String)]) -> Result<Value, String> {
+    let mut cmd = gh_in(top);
+    cmd.args(["api", "graphql", "-f", &format!("query={query}")]);
+    for (k, v) in vars {
+        cmd.args(["-F", &format!("{k}={v}")]);
+    }
+    graphql_data(run_net(&mut cmd)?)
+}
+
+/// A GraphQL document that names its own targets, run with no repo context —
+/// what the cross-project PR watcher uses, since one document covers many
+/// repositories and none of them is "the" current one.
+pub(crate) fn gh_graphql_anywhere(query: &str) -> Result<Value, String> {
+    let mut cmd = gh_anywhere();
+    cmd.args(["api", "graphql", "-f", &format!("query={query}")]);
+    graphql_data(run_net(&mut cmd)?)
+}
+
+/// `data` out of a GraphQL response, or the errors as a message. A 200 with an
+/// `errors` array is the normal failure shape, so it can't be ignored.
+fn graphql_data(out: String) -> Result<Value, String> {
+    let v: Value =
+        serde_json::from_str(&out).map_err(|e| format!("gh returned unexpected output: {e}"))?;
+    if let Some(errors) = v.get("errors").and_then(|e| e.as_array()) {
+        if !errors.is_empty() {
+            let msg = errors
+                .iter()
+                .filter_map(|e| e["message"].as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(if msg.is_empty() {
+                "GitHub rejected the request".into()
+            } else {
+                msg
+            });
+        }
+    }
+    Ok(v.get("data").cloned().unwrap_or(Value::Null))
+}
+
+/// The repo toplevel for a component path, scope-checked. The PR watcher uses it
+/// to fold many component paths onto the repos they actually live in.
+pub(crate) fn gh_repo_toplevel(
+    state: &State<'_, WorkspaceManager>,
+    path: &str,
+) -> Result<PathBuf, String> {
+    repo_path(state, path)
+}
+
+/// `owner/name` for an already-validated repo path. Resolved once per repo by
+/// the watcher and cached — this is a subprocess, and it never changes.
+pub(crate) fn gh_nwo_of(repo: &str) -> Result<String, String> {
+    let (owner, name) = gh_nwo(Path::new(repo))?;
+    Ok(format!("{owner}/{name}"))
+}
+
+fn s(v: &Value) -> String {
+    v.as_str().unwrap_or("").to_string()
+}
+
+fn parse_comment(c: &Value) -> PrComment {
+    PrComment {
+        id: s(&c["id"]),
+        author: s(&c["author"]["login"]),
+        body: s(&c["body"]),
+        created: s(&c["createdAt"]),
+        url: s(&c["url"]),
+        mine: c["viewerDidAuthor"].as_bool().unwrap_or(false),
+        association: s(&c["authorAssociation"]),
+    }
+}
+
+fn nodes<'a>(v: &'a Value, key: &str) -> &'a [Value] {
+    v[key]["nodes"].as_array().map(|a| &a[..]).unwrap_or(&[])
+}
+
+/// GraphQL's check state vocabulary, collapsed onto PrInfo's.
+pub(crate) fn rollup_state(state: &str) -> String {
+    match state {
+        "SUCCESS" => "PASS",
+        "FAILURE" | "ERROR" => "FAIL",
+        "PENDING" | "EXPECTED" => "PENDING",
+        _ => "",
+    }
+    .to_string()
+}
+
+#[tauri::command]
+pub async fn gh_pr_conversation(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    number: u32,
+) -> Result<PrConversation, String> {
+    let top = repo_path(&state, &repo)?;
+    let (owner, name) = gh_nwo(&top)?;
+    let data = gh_graphql(
+        &top,
+        PR_CONVERSATION_QUERY,
+        &[
+            ("owner", owner),
+            ("name", name),
+            ("number", number.to_string()),
+        ],
+    )?;
+    parse_conversation(&data, number)
+}
+
+/// The query's `data` shaped into what the tab renders. Split from the command
+/// so the parsing — the part that breaks when GitHub renames a field — is
+/// testable without a network round trip.
+fn parse_conversation(data: &Value, number: u32) -> Result<PrConversation, String> {
+    let pr = &data["repository"]["pullRequest"];
+    if pr.is_null() {
+        return Err(format!("#{number} not found on this repository"));
+    }
+    let viewer = s(&data["viewer"]["login"]);
+
+    let comments = nodes(pr, "comments").iter().map(parse_comment).collect();
+    let reviews: Vec<PrReviewSummary> = nodes(pr, "reviews")
+        .iter()
+        .map(|r| PrReviewSummary {
+            id: s(&r["id"]),
+            author: s(&r["author"]["login"]),
+            body: s(&r["body"]),
+            state: s(&r["state"]),
+            submitted: s(&r["submittedAt"]),
+            url: s(&r["url"]),
+            mine: r["viewerDidAuthor"].as_bool().unwrap_or(false),
+            association: s(&r["authorAssociation"]),
+            commit: s(&r["commit"]["oid"]),
+        })
+        .collect();
+    let threads = nodes(pr, "reviewThreads")
+        .iter()
+        .map(|t| PrThread {
+            id: s(&t["id"]),
+            path: s(&t["path"]),
+            line: t["line"].as_u64().unwrap_or(0) as u32,
+            start_line: t["startLine"].as_u64().unwrap_or(0) as u32,
+            side: s(&t["diffSide"]),
+            resolved: t["isResolved"].as_bool().unwrap_or(false),
+            outdated: t["isOutdated"].as_bool().unwrap_or(false),
+            comments: nodes(t, "comments").iter().map(parse_comment).collect(),
+        })
+        .collect();
+    let files = nodes(pr, "files")
+        .iter()
+        .map(|f| PrFileState {
+            path: s(&f["path"]),
+            viewed: s(&f["viewerViewedState"]) == "VIEWED",
+            additions: f["additions"].as_u64().unwrap_or(0) as u32,
+            deletions: f["deletions"].as_u64().unwrap_or(0) as u32,
+        })
+        .collect();
+    // Your latest *submitted* review anchors the delta view; a PENDING one has
+    // no commit to compare against.
+    let my_last_review_sha = reviews
+        .iter()
+        .filter(|r| r.mine && r.state != "PENDING" && !r.commit.is_empty())
+        .max_by(|a, b| a.submitted.cmp(&b.submitted))
+        .map(|r| r.commit.clone())
+        .unwrap_or_default();
+    let checks = nodes(pr, "commits")
+        .first()
+        .map(|c| rollup_state(&s(&c["commit"]["statusCheckRollup"]["state"])))
+        .unwrap_or_default();
+
+    Ok(PrConversation {
+        node_id: s(&pr["id"]),
+        body: s(&pr["body"]),
+        head_sha: s(&pr["headRefOid"]),
+        viewer,
+        review_decision: s(&pr["reviewDecision"]),
+        mergeable: s(&pr["mergeable"]),
+        checks,
+        auto_merge: !pr["autoMergeRequest"].is_null(),
+        draft: pr["isDraft"].as_bool().unwrap_or(false),
+        comments,
+        reviews,
+        threads,
+        files,
+        my_last_review_sha,
+    })
+}
+
+/// Reply on an existing review thread. Outward-facing, so the UI asks first.
+#[tauri::command]
+pub async fn gh_pr_thread_reply(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    thread_id: String,
+    body: String,
+) -> Result<String, String> {
+    if body.trim().is_empty() {
+        return Err("a reply needs a body".into());
+    }
+    let top = repo_path(&state, &repo)?;
+    gh_graphql(
+        &top,
+        "mutation($t:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$t,body:$b}){comment{id}}}",
+        &[("t", thread_id), ("b", body)],
+    )?;
+    Ok("Replied".into())
+}
+
+/// Resolve or reopen a thread. Needs Contents: read+write on a fine-grained
+/// token; a classic `gh auth login` scope already covers it.
+#[tauri::command]
+pub async fn gh_pr_thread_resolved(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    thread_id: String,
+    resolved: bool,
+) -> Result<String, String> {
+    let top = repo_path(&state, &repo)?;
+    let q = if resolved {
+        "mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{id isResolved}}}"
+    } else {
+        "mutation($t:ID!){unresolveReviewThread(input:{threadId:$t}){thread{id isResolved}}}"
+    };
+    gh_graphql(&top, q, &[("t", thread_id)])?;
+    Ok(if resolved { "Resolved" } else { "Reopened" }.into())
+}
+
+/// GitHub's per-file "viewed" checkbox. Shared with the web UI, so ticking a
+/// file here is still ticked when the same PR is opened in a browser.
+#[tauri::command]
+pub async fn gh_pr_file_viewed(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    pr_id: String,
+    path: String,
+    viewed: bool,
+) -> Result<(), String> {
+    let top = repo_path(&state, &repo)?;
+    let q = if viewed {
+        "mutation($p:ID!,$f:String!){markFileAsViewed(input:{pullRequestId:$p,path:$f}){clientMutationId}}"
+    } else {
+        "mutation($p:ID!,$f:String!){unmarkFileAsViewed(input:{pullRequestId:$p,path:$f}){clientMutationId}}"
+    };
+    gh_graphql(&top, q, &[("p", pr_id), ("f", path)])?;
+    Ok(())
+}
+
+/// One inline comment in a review that hasn't been posted yet.
+#[derive(Deserialize, Clone)]
+pub struct DraftThread {
+    pub path: String,
+    pub line: u32,
+    pub start_line: Option<u32>,
+    /// LEFT or RIGHT.
+    pub side: String,
+    pub body: String,
+}
+
+/// Submit a review with its inline comments as ONE review — the pending-review
+/// model. `gh pr review` can only post a body, so this is the mutation route.
+/// Every bit of it is outward-facing: the UI confirms before calling.
+#[tauri::command]
+pub async fn gh_pr_review_batch(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    pr_id: String,
+    event: String,
+    body: Option<String>,
+    threads: Vec<DraftThread>,
+) -> Result<String, String> {
+    let ev = match event.as_str() {
+        "approve" => "APPROVE",
+        "comment" => "COMMENT",
+        "request-changes" => "REQUEST_CHANGES",
+        other => return Err(format!("unsupported review action: {other}")),
+    };
+    let body = body.unwrap_or_default();
+    if ev != "APPROVE" && body.trim().is_empty() && threads.is_empty() {
+        return Err("a comment is required for this review action".into());
+    }
+    let top = repo_path(&state, &repo)?;
+    let thread_json: Vec<Value> = threads
+        .iter()
+        .map(|t| {
+            let mut o = serde_json::Map::new();
+            o.insert("path".into(), Value::String(t.path.clone()));
+            o.insert("line".into(), Value::from(t.line));
+            o.insert("side".into(), Value::String(t.side.clone()));
+            if let Some(start) = t.start_line.filter(|s| *s > 0 && *s < t.line) {
+                o.insert("startLine".into(), Value::from(start));
+                o.insert("startSide".into(), Value::String(t.side.clone()));
+            }
+            o.insert("body".into(), Value::String(t.body.clone()));
+            Value::Object(o)
+        })
+        .collect();
+    gh_graphql(
+        &top,
+        "mutation($p:ID!,$e:PullRequestReviewEvent!,$b:String,$t:[DraftPullRequestReviewThread!]){\
+         addPullRequestReview(input:{pullRequestId:$p,event:$e,body:$b,threads:$t}){pullRequestReview{url}}}",
+        &[
+            ("p", pr_id),
+            ("e", ev.to_string()),
+            ("b", body),
+            ("t", serde_json::to_string(&thread_json).unwrap_or_else(|_| "[]".into())),
+        ],
+    )?;
+    let n = threads.len();
+    Ok(match ev {
+        "APPROVE" => format!("Approved{}", count_suffix(n)),
+        "REQUEST_CHANGES" => format!("Requested changes{}", count_suffix(n)),
+        _ => format!("Review posted{}", count_suffix(n)),
+    })
+}
+
+fn count_suffix(n: usize) -> String {
+    match n {
+        0 => String::new(),
+        1 => " with 1 inline comment".into(),
+        n => format!(" with {n} inline comments"),
+    }
+}
+
+/// Bring the base branch into the PR — the trivial half of "it conflicts",
+/// which GitHub can do server-side without an agent or a checkout.
+#[tauri::command]
+pub async fn gh_pr_update_branch(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    number: u32,
+) -> Result<String, String> {
+    let top = repo_path(&state, &repo)?;
+    let mut cmd = gh_in(&top);
+    cmd.args(["pr", "update-branch", &number.to_string()]);
+    run_net(&mut cmd)?;
+    Ok(format!("#{number} updated from its base"))
+}
+
+/// Ask for review. Empty `reviewers` re-requests from whoever already reviewed,
+/// which is what an author wants after pushing a round of fixes.
+#[tauri::command]
+pub async fn gh_pr_request_review(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    number: u32,
+    reviewers: Vec<String>,
+) -> Result<String, String> {
+    if reviewers.is_empty() {
+        return Err("no reviewer to ask".into());
+    }
+    let top = repo_path(&state, &repo)?;
+    let mut cmd = gh_in(&top);
+    cmd.args(["pr", "edit", &number.to_string()]);
+    for r in &reviewers {
+        cmd.args(["--add-reviewer", r]);
+    }
+    run_net(&mut cmd)?;
+    Ok(format!(
+        "Asked {} to review #{number}",
+        reviewers.join(", ")
+    ))
+}
+
+/// Hand the landing decision to GitHub: it merges when the branch-protection
+/// conditions are met, so nothing here has to poll or judge readiness.
+#[tauri::command]
+pub async fn gh_pr_auto_merge(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    number: u32,
+    method: String,
+    enable: bool,
+) -> Result<String, String> {
+    let top = repo_path(&state, &repo)?;
+    let flag = match method.as_str() {
+        "squash" => "--squash",
+        "merge" => "--merge",
+        "rebase" => "--rebase",
+        other => return Err(format!("unsupported merge method: {other}")),
+    };
+    let mut cmd = gh_in(&top);
+    if enable {
+        cmd.args(["pr", "merge", &number.to_string(), "--auto", flag]);
+    } else {
+        cmd.args(["pr", "merge", &number.to_string(), "--disable-auto"]);
+    }
+    run_net(&mut cmd)?;
+    Ok(if enable {
+        format!("#{number} will merge automatically once its checks and reviews pass")
+    } else {
+        format!("Auto-merge off for #{number}")
+    })
+}
+
+/// The tail of the failing checks' logs — the input an agent needs to fix CI,
+/// and the thing you'd otherwise open a browser for. Capped: a failed run's log
+/// can be megabytes, and only the end of it says what broke.
+#[tauri::command]
+pub async fn gh_pr_failing_logs(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    number: u32,
+) -> Result<String, String> {
+    let top = repo_path(&state, &repo)?;
+    let mut cmd = gh_in(&top);
+    cmd.args([
+        "pr",
+        "checks",
+        &number.to_string(),
+        "--json",
+        "name,state,link",
+    ]);
+    let out = run_net(&mut cmd)?;
+    let v: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
+    let failed: Vec<&Value> = v
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|c| {
+                    matches!(
+                        c["state"].as_str().unwrap_or(""),
+                        "FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED"
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if failed.is_empty() {
+        return Ok(String::new());
+    }
+    let mut report = String::new();
+    for c in failed.iter().take(3) {
+        let name = s(&c["name"]);
+        let link = s(&c["link"]);
+        report.push_str(&format!("=== {name} ({link})\n"));
+        // The run id is the numeric segment after /runs/ in the check's link.
+        let run_id = link
+            .split("/runs/")
+            .nth(1)
+            .and_then(|rest| rest.split('/').next())
+            .unwrap_or("")
+            .to_string();
+        if run_id.is_empty() {
+            report.push_str("(no run id in this check's link — open it on GitHub)\n\n");
+            continue;
+        }
+        let mut logs = gh_in(&top);
+        logs.args(["run", "view", &run_id, "--log-failed"]);
+        match run_net(&mut logs) {
+            Ok(text) => {
+                let tail: Vec<&str> = text.lines().rev().take(120).collect();
+                for line in tail.into_iter().rev() {
+                    report.push_str(line);
+                    report.push('\n');
+                }
+            }
+            Err(e) => report.push_str(&format!("(couldn't read the log: {e})\n")),
+        }
+        report.push('\n');
+    }
+    Ok(report)
+}
+
+/// The diff between two commits of this PR — "what changed since I last
+/// reviewed". Served by GitHub's compare API so it works whether or not the
+/// branch is fetched locally.
+#[tauri::command]
+pub async fn gh_pr_diff_since(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    base_sha: String,
+    head_sha: String,
+) -> Result<String, String> {
+    if base_sha.is_empty() || head_sha.is_empty() {
+        return Err("need two commits to compare".into());
+    }
+    let top = repo_path(&state, &repo)?;
+    let (owner, name) = gh_nwo(&top)?;
+    let mut cmd = gh_in(&top);
+    cmd.args([
+        "api",
+        "-H",
+        "Accept: application/vnd.github.v3.diff",
+        &format!("repos/{owner}/{name}/compare/{base_sha}...{head_sha}"),
+    ]);
+    run_net(&mut cmd)
 }
 
 // ---------- worktrees ----------
@@ -2701,5 +3318,124 @@ index 333..444 100644
         let (state, summary) = roll_up_checks(&rollup);
         assert_eq!(state, "PASS");
         assert_eq!(summary, "3/3 checks passed");
+    }
+
+    /// A response shaped like the real one, so the field names the query depends
+    /// on are pinned: if GitHub renames one, this fails instead of the tab
+    /// silently rendering an empty conversation.
+    fn conversation_fixture() -> Value {
+        json!({
+          "viewer": { "login": "me" },
+          "repository": { "pullRequest": {
+            "id": "PR_kw1",
+            "body": "## What\nA thing.",
+            "isDraft": false,
+            "mergeable": "MERGEABLE",
+            "reviewDecision": "CHANGES_REQUESTED",
+            "headRefOid": "headsha",
+            "autoMergeRequest": null,
+            "comments": { "nodes": [
+              { "id": "IC_1", "author": { "login": "alice" }, "body": "ship it?",
+                "createdAt": "2026-07-01T10:00:00Z", "url": "u1",
+                "viewerDidAuthor": false, "authorAssociation": "COLLABORATOR" }
+            ]},
+            "reviews": { "nodes": [
+              { "id": "PRR_1", "author": { "login": "alice" }, "body": "one thing",
+                "state": "CHANGES_REQUESTED", "submittedAt": "2026-07-01T11:00:00Z", "url": "u2",
+                "viewerDidAuthor": false, "authorAssociation": "COLLABORATOR",
+                "commit": { "oid": "sha1" } },
+              { "id": "PRR_2", "author": { "login": "me" }, "body": "looks fine",
+                "state": "COMMENTED", "submittedAt": "2026-07-02T11:00:00Z", "url": "u3",
+                "viewerDidAuthor": true, "authorAssociation": "OWNER",
+                "commit": { "oid": "sha2" } },
+              { "id": "PRR_3", "author": { "login": "me" }, "body": "wip",
+                "state": "PENDING", "submittedAt": null, "url": "u4",
+                "viewerDidAuthor": true, "authorAssociation": "OWNER",
+                "commit": { "oid": "sha3" } }
+            ]},
+            "reviewThreads": { "nodes": [
+              { "id": "PRRT_1", "isResolved": false, "isOutdated": true,
+                "path": "src/a.ts", "line": 12, "startLine": null, "diffSide": "RIGHT",
+                "comments": { "nodes": [
+                  { "id": "PRRC_1", "author": { "login": "alice" }, "body": "leaks",
+                    "createdAt": "2026-07-01T10:30:00Z", "url": "u5",
+                    "viewerDidAuthor": false, "authorAssociation": "COLLABORATOR" }
+                ]}},
+              { "id": "PRRT_2", "isResolved": true, "isOutdated": false,
+                "path": "src/b.ts", "line": null, "startLine": null, "diffSide": "LEFT",
+                "comments": { "nodes": [] }}
+            ]},
+            "files": { "nodes": [
+              { "path": "src/a.ts", "viewerViewedState": "VIEWED", "additions": 4, "deletions": 1 },
+              { "path": "src/b.ts", "viewerViewedState": "UNVIEWED", "additions": 0, "deletions": 2 }
+            ]},
+            "commits": { "nodes": [
+              { "commit": { "statusCheckRollup": { "state": "FAILURE" } } }
+            ]}
+          }}
+        })
+    }
+
+    #[test]
+    fn parse_conversation_reads_every_comment_kind() {
+        let c = parse_conversation(&conversation_fixture(), 1).expect("parses");
+        assert_eq!(c.node_id, "PR_kw1");
+        assert_eq!(c.viewer, "me");
+        assert_eq!(c.head_sha, "headsha");
+        assert_eq!(c.review_decision, "CHANGES_REQUESTED");
+        assert!(!c.auto_merge);
+        assert_eq!(c.comments.len(), 1);
+        assert_eq!(c.comments[0].association, "COLLABORATOR");
+        assert!(!c.comments[0].mine);
+        assert_eq!(c.reviews.len(), 3);
+        assert_eq!(c.threads.len(), 2);
+        assert_eq!(c.threads[0].line, 12);
+        assert!(c.threads[0].outdated && !c.threads[0].resolved);
+        // A thread whose line is gone reports 0 rather than failing to parse —
+        // the UI lists those in the rail instead of anchoring them in the diff.
+        assert_eq!(c.threads[1].line, 0);
+        assert_eq!(c.files.len(), 2);
+        assert!(c.files[0].viewed);
+        assert!(!c.files[1].viewed);
+    }
+
+    #[test]
+    fn parse_conversation_takes_my_latest_submitted_review_as_the_delta_anchor() {
+        let c = parse_conversation(&conversation_fixture(), 1).expect("parses");
+        // sha2 is mine and submitted; sha1 is someone else's and sha3 is a
+        // PENDING review, which has nothing to compare against.
+        assert_eq!(c.my_last_review_sha, "sha2");
+    }
+
+    #[test]
+    fn parse_conversation_uses_the_live_check_rollup() {
+        let c = parse_conversation(&conversation_fixture(), 1).expect("parses");
+        assert_eq!(c.checks, "FAIL");
+    }
+
+    #[test]
+    fn parse_conversation_errors_when_the_pr_is_missing() {
+        let empty = json!({ "viewer": { "login": "me" }, "repository": { "pullRequest": null } });
+        let err = parse_conversation(&empty, 42)
+            .err()
+            .expect("no PR, no parse");
+        assert!(err.contains("#42"));
+    }
+
+    #[test]
+    fn rollup_state_collapses_graphql_states_onto_prinfo_vocabulary() {
+        assert_eq!(rollup_state("SUCCESS"), "PASS");
+        assert_eq!(rollup_state("FAILURE"), "FAIL");
+        assert_eq!(rollup_state("ERROR"), "FAIL");
+        assert_eq!(rollup_state("PENDING"), "PENDING");
+        assert_eq!(rollup_state("EXPECTED"), "PENDING");
+        assert_eq!(rollup_state(""), "");
+    }
+
+    #[test]
+    fn review_count_suffix_reads_naturally() {
+        assert_eq!(count_suffix(0), "");
+        assert_eq!(count_suffix(1), " with 1 inline comment");
+        assert_eq!(count_suffix(4), " with 4 inline comments");
     }
 }

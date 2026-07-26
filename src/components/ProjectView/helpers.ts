@@ -4,7 +4,7 @@ import type { ReviewPayload } from "../ReviewView";
 import type { PreviewAnnotation } from "../../preview";
 import type { Project } from "../../projects";
 
-export type SideTab = "files" | "changes" | "git" | "trackers" | "tasks" | "agents" | "team";
+export type SideTab = "files" | "changes" | "git" | "prs" | "trackers" | "tasks" | "agents" | "team";
 
 export interface TermSubTab {
   id: string;
