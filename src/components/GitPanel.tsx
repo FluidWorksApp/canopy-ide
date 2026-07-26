@@ -7,12 +7,9 @@ import * as ipc from "../ipc";
 import type { Notify } from "../types";
 import { useEscape } from "../useEscape";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
-import { CheckIcon, FailIcon, RestartIcon } from "./icons";
+import { RestartIcon } from "./icons";
 import { LooseEnds } from "./LooseEnds";
 
-/** Open a URL in the user's real browser (PR pages, GitHub links). */
-const openExternal = (url: string) =>
-  void import("@tauri-apps/plugin-opener").then(({ openUrl }) => openUrl(url));
 
 /** The integration branches a right-click must never offer to delete. The Rust
  *  core is the real guard (it also knows this repo's actual base); this is only
@@ -36,7 +33,6 @@ interface GitPanelProps {
   /** Open a file's diff in the main area. */
   onOpenDiff: (repo: string, file: ipc.FileChange) => void;
   /** Open a pull request in the main area. */
-  onOpenPr: (repo: string, pr: ipc.PrInfo) => void;
   /** Open a branch's work in the main area. */
   onOpenBranch: (repo: string, branch: ipc.BranchWork) => void;
   /** Open a commit in the main area. */
@@ -62,35 +58,16 @@ interface GitPanelProps {
     worktree: string | null,
     merged: boolean,
   ) => MenuItem;
-  prTaskMenu?: (repo: string, pr: ipc.PrInfo) => MenuItem;
 }
 
-type Section = "changes" | "branches" | "worktrees" | "loose" | "history" | "prs";
+type Section = "changes" | "branches" | "worktrees" | "loose" | "history";
 
-/** Compact relative age for an ISO 8601 timestamp (e.g. gh's createdAt). */
-const ago = (iso?: string) => {
-  if (!iso) return "";
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return "";
-  const d = Math.max(0, Math.floor((Date.now() - t) / 1000));
-  if (d < 60) return "just now";
-  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
-  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
-  return `${Math.floor(d / 86400)}d ago`;
-};
 
-/** Full local date & time for an ISO 8601 timestamp — the exact moment raised. */
-const absTime = (iso?: string) => {
-  if (!iso) return "";
-  const t = Date.parse(iso);
-  return Number.isNaN(t) ? "" : new Date(t).toLocaleString();
-};
 
 export function GitPanel({
   visible,
   components,
   onOpenDiff,
-  onOpenPr,
   onOpenCommit,
   onOpenBranch,
   onOpenTerminal,
@@ -98,17 +75,14 @@ export function GitPanel({
   onUseWorktree,
   onNotice,
   branchTaskMenu,
-  prTaskMenu,
 }: GitPanelProps) {
   const [repos, setRepos] = useState<ipc.RepoInfo[]>([]);
   const [repo, setRepo] = useState<string | null>(null);
   const [status, setStatus] = useState<ipc.RepoStatus | null>(null);
   const [branches, setBranches] = useState<ipc.BranchInfo[]>([]);
   const [log, setLog] = useState<ipc.CommitInfo[]>([]);
-  const [prs, setPrs] = useState<ipc.PrInfo[]>([]);
   const [worktrees, setWorktrees] = useState<ipc.WorktreeInfo[]>([]);
   const [wtBranch, setWtBranch] = useState("");
-  const [hasGh, setHasGh] = useState(false);
   const [section, setSection] = useState<Section>("changes");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
@@ -131,7 +105,6 @@ export function GitPanel({
         setRepo((cur) => (cur && r.some((x) => x.path === cur) ? cur : (r[0]?.path ?? null)));
       })
       .catch(() => setRepos([]));
-    void ipc.ghAvailable().then(setHasGh);
   }, [key]);
 
   const refresh = useCallback(async () => {
@@ -157,21 +130,7 @@ export function GitPanel({
     };
   }, [repo, refresh, visible]);
 
-  const loadPrs = useCallback(async () => {
-    if (!repo || !hasGh) return;
-    setBusy("prs");
-    try {
-      setPrs(await ipc.ghPrList(repo));
-    } catch (err) {
-      onNotice(String(err), "error");
-    } finally {
-      setBusy(null);
-    }
-  }, [repo, hasGh, onNotice]);
 
-  useEffect(() => {
-    if (section === "prs") void loadPrs();
-  }, [section, loadPrs]);
 
   // Worktrees are loaded on demand, never polled: listing them costs one
   // `git status` per worktree to get dirty counts, and a repo can easily have
@@ -254,23 +213,6 @@ export function GitPanel({
       .finally(() => void refresh());
   };
 
-  /** Close a PR (optionally deleting its branch) and drop it from the list. */
-  const closePr = async (pr: ipc.PrInfo, deleteBranch: boolean) => {
-    if (!repo) return;
-    setBusy("prs");
-    try {
-      const msg = await ipc.ghPrClose(repo, pr.number, deleteBranch);
-      onNotice(msg, "success");
-      setPrs((cur) => cur.filter((p) => p.number !== pr.number));
-      // Deleting the branch may have switched HEAD — refresh the branch view too.
-      if (deleteBranch) await refresh();
-    } catch (err) {
-      onNotice(String(err), "error");
-      await loadPrs();
-    } finally {
-      setBusy(null);
-    }
-  };
 
   // Right-click menus. Each is one plain-language label per real git/gh command,
   // with the command itself shown as a dimmed hint — the point is that a casual
@@ -399,41 +341,6 @@ export function GitPanel({
     return items;
   };
 
-  const prMenu = (pr: ipc.PrInfo): MenuItem[] => [
-    { label: "Open pull request", onClick: () => repo && onOpenPr(repo, pr) },
-    { label: "View on GitHub", onClick: () => openExternal(pr.url) },
-    { label: "Copy link", onClick: () => void navigator.clipboard.writeText(pr.url) },
-    ...(prTaskMenu && repo ? [prTaskMenu(repo, pr)] : []),
-    { separator: true },
-    {
-      label: "Check out this PR",
-      hint: "gh pr checkout",
-      onClick: () => repo && void act("pr checkout", () => ipc.ghPrCheckout(repo, pr.number)),
-    },
-    { separator: true },
-    {
-      label: "Close pull request",
-      hint: "gh pr close",
-      danger: true,
-      onClick: () =>
-        setConfirm({
-          text: `Close pull request #${pr.number}?\n\nIt won't be merged. The branch ${pr.branch} is kept, so you can reopen the PR later.`,
-          okLabel: "Close PR",
-          run: () => void closePr(pr, false),
-        }),
-    },
-    {
-      label: "Close and delete branch",
-      hint: "gh pr close --delete-branch",
-      danger: true,
-      onClick: () =>
-        setConfirm({
-          text: `Close #${pr.number} and delete its branch ${pr.branch}?\n\nThe PR closes without merging and the branch is deleted locally and on GitHub. This throws the work away and cannot be undone.`,
-          okLabel: "Close & delete",
-          run: () => void closePr(pr, true),
-        }),
-    },
-  ];
 
   if (repos.length === 0) {
     return (
@@ -573,7 +480,7 @@ export function GitPanel({
       </div>
 
       <div className="git-tabs">
-        {(["changes", "branches", "worktrees", "loose", "history", "prs"] as Section[]).map((s) => (
+        {(["changes", "branches", "worktrees", "loose", "history"] as Section[]).map((s) => (
           <button
             key={s}
             className={`git-tab ${section === s ? "git-tab-on" : ""}`}
@@ -581,9 +488,7 @@ export function GitPanel({
           >
             {s === "changes" && allChanged.length > 0
               ? `Changes (${allChanged.length})`
-              : s === "prs"
-                ? "PRs"
-                : s === "loose"
+              : s === "loose"
                   ? "Loose ends"
                   : s === "worktrees" && worktrees.length > 1
                     ? `Worktrees (${worktrees.length})`
@@ -940,76 +845,6 @@ export function GitPanel({
         </div>
       )}
 
-      {section === "prs" && (
-        <div className="git-scroll">
-          {!hasGh ? (
-            <div className="tree-empty">
-              Pull requests need the GitHub CLI. Install it with <code>brew install gh</code>, then
-              run <code>gh auth login</code> in a terminal.
-            </div>
-          ) : prs.length === 0 && busy !== "prs" ? (
-            <div className="tree-empty">No open pull requests.</div>
-          ) : (
-            prs.map((pr) => (
-              <div
-                key={pr.number}
-                className="git-pr-row"
-                title={`${pr.branch} → ${pr.base}\n${pr.url}`}
-                onClick={() => repo && onOpenPr(repo, pr)}
-                onContextMenu={(e) => ctx.open(e, prMenu(pr))}
-              >
-                <span className="git-pr-num">#{pr.number}</span>
-                <div className="git-pr-main">
-                  <span className="git-pr-title">
-                    {pr.draft && <span className="git-pr-draft">draft</span>}
-                    {pr.title}
-                  </span>
-                  <span className="git-pr-refs">
-                    <code>{pr.branch}</code> → <code>{pr.base}</code>
-                    {pr.created && (
-                      <span className="git-pr-age" title={absTime(pr.created)}>
-                        · opened {ago(pr.created)}
-                      </span>
-                    )}
-                    {pr.checks === "PASS" && (
-                      <span className="git-pr-checks git-pr-ok" title={pr.checks_summary}>
-                        · checks passed
-                      </span>
-                    )}
-                    {pr.checks === "FAIL" && (
-                      <span className="git-pr-checks git-pr-bad" title={pr.checks_summary}>
-                        · checks failed
-                      </span>
-                    )}
-                    {pr.checks === "PENDING" && (
-                      <span className="git-pr-checks git-pr-pending" title={pr.checks_summary}>
-                        · checks running
-                      </span>
-                    )}
-                    {pr.mergeable === "CONFLICTING" && (
-                      <span className="git-pr-checks git-pr-bad">· conflicts</span>
-                    )}
-                    {pr.review_decision === "APPROVED" &&
-                      pr.mergeable !== "CONFLICTING" &&
-                      pr.checks !== "FAIL" && (
-                        <span className="git-pr-mergeable">· approved, ready to merge</span>
-                      )}
-                  </span>
-                </div>
-                <span className="git-pr-meta">
-                  {pr.review_decision === "APPROVED" && (
-                    <CheckIcon size={11} className="git-pr-approved" />
-                  )}
-                  {pr.review_decision === "CHANGES_REQUESTED" && (
-                    <FailIcon size={11} className="git-pr-changes" />
-                  )}
-                  <span className="git-pr-author">{pr.mine ? "you" : pr.author}</span>
-                </span>
-              </div>
-            ))
-          )}
-        </div>
-      )}
 
       {/* Discarding work is unrecoverable — never do it on a single click. */}
       {confirm && (

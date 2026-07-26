@@ -4500,7 +4500,6 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             setSideTab("files");
           }}
           onOpenDiff={(_repo, f) => void openFile(f.abs, { diff: true })}
-          onOpenPr={(repo, pr) => openPr(repo, pr)}
           onOpenCommit={openCommit}
           onOpenBranch={openBranch}
           onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
@@ -4519,22 +4518,6 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                     },
                   ],
             )
-          }
-          prTaskMenu={(repo, pr) =>
-            taskMenu(`About PR #${pr.number} "${pr.title}" (${pr.url}): `, [
-              {
-                id: reviewPrTask.id,
-                label: `Review PR #${pr.number}`,
-                icon: reviewPrTask.icon,
-                run: () => void startMicroTask(reviewPrTask, { repo, pr }, ""),
-              },
-              {
-                id: addressPrCommentsTask.id,
-                label: `Address comments on #${pr.number}`,
-                icon: addressPrCommentsTask.icon,
-                run: () => void startMicroTask(addressPrCommentsTask, { repo, pr }, ""),
-              },
-            ])
           }
         />
       ))}

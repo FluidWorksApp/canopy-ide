@@ -92,15 +92,21 @@ export function PrsPanel({ localRepos, onOpen, onOpenElsewhere, projectFor }: Pr
         </span>
       </div>
 
-      {/* One line of provenance: when this was last true, and what the next
-          check costs. A list that silently goes stale is worse than no list. */}
-      <div className="prs-meta">
-        <span title={fetchedMs ? new Date(fetchedMs).toLocaleString() : undefined}>
-          checked {since(fetchedMs)}
-        </span>
-        {nextIn > 0 && <span>· next in {nextIn < 120 ? `${nextIn}s` : `${Math.round(nextIn / 60)}m`}</span>}
-        {remaining > 0 && <span title="GraphQL points left this hour">· {remaining} left</span>}
-        {viewer && <span>· as {viewer}</span>}
+      {/* Provenance, not news: a list that silently goes stale is worse than no
+          list, but nobody needs to read this twice. It stays one dim line, and
+          the numbers only a debugger wants live in its tooltip. */}
+      <div
+        className="prs-meta"
+        title={[
+          fetchedMs ? `Last checked ${new Date(fetchedMs).toLocaleString()}` : "",
+          remaining > 0 ? `${remaining} GraphQL points left this hour` : "",
+          viewer ? `Signed in as ${viewer}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n")}
+      >
+        checked {since(fetchedMs)}
+        {nextIn > 0 && ` · next in ${nextIn < 120 ? `${nextIn}s` : `${Math.round(nextIn / 60)}m`}`}
       </div>
 
       {errorList.length > 0 && (
@@ -139,7 +145,7 @@ export function PrsPanel({ localRepos, onOpen, onOpenElsewhere, projectFor }: Pr
               }
             >
               <span className="prs-lane-chevron">{isCollapsed ? "▸" : "▾"}</span>
-              <span>{LANE_LABEL[lane]}</span>
+              <span className="prs-lane-name">{LANE_LABEL[lane]}</span>
               <span className="prs-lane-count">{laneRows.length}</span>
             </div>
             {!isCollapsed &&
