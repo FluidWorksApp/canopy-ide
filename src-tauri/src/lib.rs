@@ -358,6 +358,8 @@ pub fn run() {
             crash::report_crash,
             crash::send_crash,
             crash::take_pending_crash,
+            crash::crash_issue_draft,
+            crash::file_crash_issue,
             cli::cli_take_pending_open,
             cli::cli_install_shim,
             pty::pty_spawn,

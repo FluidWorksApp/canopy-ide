@@ -469,7 +469,7 @@ pub async fn git_commit(
 
 // ---------- remotes ----------
 
-fn run_net(cmd: &mut Command) -> Result<String, String> {
+pub(crate) fn run_net(cmd: &mut Command) -> Result<String, String> {
     use std::io::Read;
     use std::process::Stdio;
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -799,6 +799,16 @@ fn gh_in(repo: &Path) -> Command {
     let mut cmd = Command::new(gh_bin());
     cmd.env("GH_PROMPT_DISABLED", "1");
     cmd.current_dir(repo);
+    cmd.no_console_window();
+    cmd
+}
+
+/// `gh` with no repo context, for calls that name their target with `--repo
+/// OWNER/NAME`. Crash reports use this: they go to Canopy's own tracker and
+/// must not inherit whatever repo the user happens to have open.
+pub(crate) fn gh_anywhere() -> Command {
+    let mut cmd = Command::new(gh_bin());
+    cmd.env("GH_PROMPT_DISABLED", "1");
     cmd.no_console_window();
     cmd
 }

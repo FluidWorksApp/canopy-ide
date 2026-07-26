@@ -7349,6 +7349,11 @@ textarea,
 .crash-report-note {
   font-size: 12px;
   color: var(--text-dim);
+  line-height: 1.45;
+}
+.crash-report-note code {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
 }
 .crash-report-done {
   font-size: 12px;
@@ -7358,6 +7363,43 @@ textarea,
 .crash-report-err {
   font-size: 12px;
   color: var(--danger);
+}
+/* Two routes out of a crash sit side by side; buttons shouldn't stretch. */
+.crash-report-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+/* The consent step needs room to actually read the issue before publishing it,
+   so the preview claims more width than the compact offer it replaces. */
+.crash-report-preview {
+  max-width: 640px;
+  width: 100%;
+}
+.crash-report-subject {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.crash-report-body {
+  width: 100%;
+  min-height: 200px;
+  resize: vertical;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  background: var(--bg-raised);
+  color: var(--text);
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.crash-report-body:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
 }
 
 /* Per-row forget: stays out of the way until the row is hovered. */
