@@ -16,8 +16,9 @@ export function prWorktree(
 
 /** When an agent runs in a throwaway worktree we created for it, tell it to
  *  tear that worktree down as its last step. `git -C <repo>` runs from the main
- *  checkout, so removal works even though the agent's own cwd is the worktree. */
-function cleanupLine(repo: string, worktree: string): string {
+ *  checkout, so removal works even though the agent's own cwd is the worktree.
+ *  Shared with the micro-tasks that ask for the same isolation (microTasks.ts). */
+export function cleanupLine(repo: string, worktree: string): string {
   return (
     ` This worktree was created just for this task — when you're finished, remove it as your last step: ` +
     `\`git -C "${repo}" worktree remove --force "${worktree}"\`.`

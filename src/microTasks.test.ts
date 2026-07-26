@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  addressPrCommentsTask,
   customTaskDef,
   microTaskProtocol,
   oneLine,
   raisePrTask,
   reviewPrTask,
+  MICRO_TASKS,
   type RaisePrPayload,
 } from "./microTasks";
 import { isStopFor } from "./notifications";
@@ -44,6 +46,19 @@ describe("raisePrTask.buildContext", () => {
     expect(ctx).toContain("canopy_job_done");
   });
 
+  it("hunts down the PR template and fills it without inventing evidence", () => {
+    const ctx = raisePrTask.buildContext(payload(), "");
+    expect(ctx).toContain(".github/pull_request_template.md");
+    expect(ctx).toContain("PULL_REQUEST_TEMPLATE");
+    expect(ctx).toContain("prefer the nearest one");
+    expect(ctx).toContain("keeping every heading and its order");
+    expect(ctx).toContain("N/A —");
+    expect(ctx).toContain("never invent tests");
+    // A one-line --body would flatten the template it just went to find.
+    expect(ctx).toContain("--body-file");
+    expect(ctx).toContain("gh pr list --state merged");
+  });
+
   it("omits the user-adds clause when nothing was typed", () => {
     expect(raisePrTask.buildContext(payload(), "")).not.toContain("The user adds");
     expect(raisePrTask.buildContext(payload(), "   ")).not.toContain("The user adds");
@@ -58,16 +73,117 @@ describe("raisePrTask.buildContext", () => {
 describe("reviewPrTask.buildContext", () => {
   const pr = { number: 42, title: "Fix the flux", url: "https://x/pr/42" } as ipc.PrInfo;
 
-  it("reads via gh, posts a comment, never approves or checks out", () => {
+  it("reads via gh without checking out, and reports through job_done", () => {
     const ctx = reviewPrTask.buildContext({ repo: "/repo", pr }, "focus on the parser");
     expect(ctx).not.toMatch(/[\r\n]/);
     expect(ctx).toContain("gh pr view 42");
     expect(ctx).toContain("gh pr diff 42");
-    expect(ctx).toContain("gh pr review 42 --comment");
-    expect(ctx).toContain("Do not approve");
     expect(ctx).toContain("canopy_job_done");
     expect(ctx).toContain('The user adds: "focus on the parser"');
     expect(reviewPrTask.cwd({ repo: "/repo", pr })).toBe("/repo");
+    expect(reviewPrTask.isolation).toBeUndefined();
+  });
+
+  it("treats the PR's own words — and code comments — as claims to check", () => {
+    const ctx = reviewPrTask.buildContext({ repo: "/repo", pr }, "");
+    expect(ctx).toContain("Be skeptical");
+    expect(ctx).toContain("claims about the change, not the change");
+    expect(ctx).toContain("callers and callees");
+  });
+
+  it("sets a high bar for findings and demotes the rest to nits", () => {
+    const ctx = reviewPrTask.buildContext({ repo: "/repo", pr }, "");
+    expect(ctx).toContain("name the file and line and state the concrete failure");
+    expect(ctx).toContain("it is not a finding");
+    expect(ctx).toContain('prefix it "Nit:"');
+    expect(ctx).toContain("never let one hold the PR up");
+    expect(ctx).toContain("do not pad the review");
+  });
+
+  it("approves when nothing is required, comments when something is, merges never", () => {
+    const ctx = reviewPrTask.buildContext({ repo: "/repo", pr }, "");
+    expect(ctx).toContain("gh pr review 42 --approve");
+    expect(ctx).toContain("gh pr review 42 --comment");
+    expect(ctx).toContain("Never merge the PR");
+    expect(ctx).toContain("never use --request-changes");
+    expect(ctx).not.toContain("your own account's");
+  });
+
+  it("routes an approval around GitHub's own-PR refusal", () => {
+    const mine = reviewPrTask.buildContext({ repo: "/repo", pr: { ...pr, mine: true } }, "");
+    expect(mine).toContain("GitHub will refuse `--approve`");
+    expect(mine).toContain("post that same body with `--comment` instead");
+  });
+});
+
+describe("addressPrCommentsTask", () => {
+  const pr = {
+    number: 42,
+    title: "Fix the flux",
+    url: "https://x/pr/42",
+    branch: "fix/flux",
+  } as ipc.PrInfo;
+  const ctx = (query = "") => addressPrCommentsTask.buildContext({ repo: "/repo", pr }, query);
+
+  it("collects the live threads and stays on one line", () => {
+    const c = ctx("only the ones from Sam");
+    expect(c).not.toMatch(/[\r\n]/);
+    expect(c).toContain("gh pr view 42 --comments");
+    expect(c).toContain("pulls/42/comments");
+    expect(c).toContain("skip outdated and already-resolved");
+    expect(c).toContain('The user adds: "only the ones from Sam"');
+  });
+
+  it("validates each comment against the code, not the comment", () => {
+    const c = ctx();
+    expect(c).toContain("a hypothesis, not an instruction");
+    expect(c).toContain("read what is there now at HEAD");
+    expect(c).toContain("comments in code go stale, the code is the truth");
+    expect(c).toContain("callers and callees");
+    expect(c).toContain("fails before your change and passes after it");
+    expect(c).toContain("only for comments you have proved correct");
+  });
+
+  it("fixes the cause everywhere, and pushes back in writing where it doesn't", () => {
+    const c = ctx();
+    expect(c).toContain("Fix the cause rather than the line that was pointed at");
+    expect(c).toContain("everywhere else the same problem exists");
+    expect(c).toContain("change nothing and reply on that thread with the evidence");
+    expect(c).toContain("do not widen the PR");
+  });
+
+  it("pushes when green but never rewrites history or merges", () => {
+    const c = ctx();
+    expect(c).toContain("run the project's build and tests");
+    expect(c).toContain("push so the PR updates");
+    expect(c).toContain("Never force-push");
+    expect(c).toContain("do not resolve threads or merge the PR");
+  });
+
+  it("runs in a worktree of its own and tears down a throwaway one", () => {
+    expect(addressPrCommentsTask.isolation?.target({ repo: "/repo", pr })).toEqual({
+      repo: "/repo",
+      pr,
+    });
+    const disposable = addressPrCommentsTask.buildContext({ repo: "/repo", pr }, "", {
+      cleanup: { repo: "/repo", worktree: "/repo-wt-pr-42" },
+    });
+    expect(disposable).toContain("worktree remove --force");
+    expect(disposable).toContain("/repo-wt-pr-42");
+    expect(disposable).not.toMatch(/[\r\n]/);
+    // Reusing a worktree that was already there means no teardown line.
+    expect(ctx()).not.toContain("worktree remove");
+  });
+});
+
+describe("MICRO_TASKS", () => {
+  it("registers every built-in with a unique id and a surface to run from", () => {
+    expect(MICRO_TASKS.map((t) => t.id)).toEqual([
+      "raise-pr",
+      "review-pr",
+      "address-pr-comments",
+    ]);
+    for (const t of MICRO_TASKS) expect(t.surfaceNote).toBeTruthy();
   });
 });
 
