@@ -1470,6 +1470,11 @@ body,
   padding: 2px 8px;
   margin-top: 6px;
   cursor: pointer;
+  /* A label is a label: let a toolbar scroll or overflow before a two-word
+     button breaks across two lines. Wrapping is what turned the PR header into
+     a staircase — flex shrinks each item to its longest word, so every button
+     ended up a different height. */
+  white-space: nowrap;
 }
 
 .btn-mini:hover {
@@ -5640,13 +5645,46 @@ body.dragging-tab * {
   background: var(--bg-alt);
 }
 
-.pr-title { font-size: 15px; color: var(--text); }
+/* Title left, actions right, on one line. The actions never shrink and never
+   wrap; the title gives up the room instead, since half a title still tells you
+   which PR you're on while half a button label tells you nothing. */
+.pr-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.pr-title {
+  font-size: 15px;
+  color: var(--text);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .pr-num { color: var(--accent); margin-right: 8px; }
 
+.pr-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+/* These sit on the title's baseline, not below it — the 6px lift .btn-mini
+   carries for the panel rows it was written for is what staggered them. */
+.pr-actions .btn-mini,
+.pr-files-bar .btn-mini {
+  margin-top: 0;
+}
+
+/* Metadata and state, never actions: one dim line that may wrap freely. What
+   tells you it isn't a toolbar is that nothing in it is clickable. */
 .pr-sub {
   display: flex;
   align-items: center;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 4px 8px;
   margin-top: 5px;
   font-size: 11px;
   color: var(--text-dim);
@@ -5657,24 +5695,30 @@ body.dragging-tab * {
 .pr-add { color: var(--ok); }
 .pr-del { color: var(--danger); }
 
+/* State chips read as state, not as controls: filled and borderless, where a
+   button in this view is outlined. Same size and baseline as the line they sit
+   on, so the row stays one line of text with colour in it. */
 .pr-decision {
-  padding: 1px 5px;
+  padding: 1px 6px;
   border-radius: var(--r-xs);
   corner-shape: squircle;
-  border: 1px solid var(--border);
+  background: var(--bg-raised);
   font-size: 10px;
+  white-space: nowrap;
+  cursor: default;
 }
 
 .pr-checks {
-  padding: 1px 5px;
+  padding: 1px 6px;
   border-radius: var(--r-xs);
   corner-shape: squircle;
   font-size: 10px;
+  white-space: nowrap;
   cursor: default;
 }
-.pr-checks.pr-ok { color: var(--ok); border: 1px solid var(--ok); }
-.pr-checks.pr-bad { color: var(--danger); border: 1px solid var(--danger); }
-.pr-checks.pr-pending { color: var(--warn); border: 1px solid var(--warn); }
+.pr-checks.pr-ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.pr-checks.pr-bad { color: var(--danger); background: color-mix(in srgb, var(--danger) 14%, transparent); }
+.pr-checks.pr-pending { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
 
 .confirm-warn {
   color: var(--danger);
@@ -6172,6 +6216,14 @@ textarea,
   height: 15px;
   align-items: center;
   justify-content: center;
+}
+
+/* A task's own glyph (⌕, ↩, ⇈) standing in for an icon component — sized to
+   the SVG marks around it so a menu of both doesn't jitter. */
+.ctx-glyph {
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-dim);
 }
 
 .ctx-label {
