@@ -6202,6 +6202,19 @@ body.dragging-tab * {
 }
 .prs-row-stat { white-space: nowrap; }
 
+/* The other projects' queues: a line you can act on, not a list you scroll. */
+.prs-elsewhere {
+  margin: 6px 10px 0;
+  padding: 5px 8px;
+  border: 1px dashed var(--border);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  font-size: 10px;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.prs-elsewhere:hover { color: var(--fg); border-color: var(--accent); }
+
 .pr-file.is-viewed .pr-file-path { opacity: 0.6; }
 .pr-file-viewed {
   display: flex;
@@ -10267,6 +10280,50 @@ a.btn-mini {
 
 .cli-bin-missing {
   color: var(--danger, #e06c75);
+}
+
+/* A user-added CLI is four fields, not one, so it gets a bordered block rather
+   than another row in the grid above — the two lists are different things and
+   a shared alignment would say they were the same. */
+.cli-customs {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.cli-custom {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.cli-custom-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 100px auto;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The optional half: two equal boxes under the row they qualify. */
+.cli-custom-args {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.cli-custom-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.cli-custom-hint code {
+  font-family: var(--font-mono);
+  color: var(--text);
 }
 
 .tool-groups {

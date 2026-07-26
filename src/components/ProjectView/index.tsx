@@ -25,6 +25,7 @@ import { SharedProjectView } from "../SharedProjectView";
 import type { AgentCli } from "../../projects";
 import {
   AGENT_CLIS,
+  announceCliInstallsChanged,
   binName,
   SHELL_PATTERN,
   currentPlatform,
@@ -791,9 +792,15 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [componentKey]);
 
-  // The rail badge counts PRs waiting on this user anywhere, not only here —
-  // one subscription to the shared watcher, no fetch of its own.
-  const prsBadge = needsYouCount(usePrWatch().rows);
+  // The rail badge counts what THIS project's panel would show — the badge and
+  // the list must agree, or the badge is just noise you can't clear from here.
+  // Other projects' queues are one line at the bottom of the panel, not a
+  // number on a rail you're looking at while working somewhere else.
+  const prsRows = usePrWatch().rows;
+  const prsBadge = useMemo(
+    () => needsYouCount(prsRows.filter((r) => repoPaths.includes(r.repo))),
+    [prsRows, repoPaths],
+  );
 
   // A PR from another project, after App has switched to us.
   useEffect(() => {
@@ -2742,11 +2749,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       // the just-launched row is actually in view.
       setSideTab("agents");
       setPinned(true);
-    } else if (cli.rebound) {
-      // The vendor's installer would install the vendor's binary, which an
-      // override pointing somewhere else can never be satisfied by — so the
-      // "install" offer would repeat forever, which is the loop rebinding
-      // exists to end. Send them to the setting that is actually wrong.
+    } else if (cli.rebound || !cli.install) {
+      // Two cases, one answer: an override points somewhere the vendor's
+      // installer can never satisfy, and a custom entry has no installer at all
+      // — so an "install" offer would repeat forever, which is the loop these
+      // settings exist to end. Send them to the setting that is actually wrong.
       onNotice(
         `${cli.name} is set to \`${cli.bin}\`, which isn't on this machine — check Settings → Agents.`,
       );
@@ -2765,6 +2772,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     // Route to the command matched to the install source (e.g. `brew upgrade`);
     // fall back to the CLI's own updater when the source is a plain registry.
     const cmd = cliUpdates[cli.bin]?.updateCmd ?? updateCommand(cli);
+    // Nothing to run: an entry with neither an updater nor an installer (a
+    // custom CLI) never badges an update in the first place, so this is the
+    // belt to that brace rather than a state a user can reach.
+    if (!cmd) return;
     addTerminal(cwd, cmd, `update ${cli.name}`, "⬆", true);
   }, [cliUpdates, addTerminal]);
 
@@ -3845,15 +3856,19 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                     patchTab(tab.id, { exited: true, exitCode: code, ptyId: null });
                     // An installer or updater finishing is the moment
                     // "install" labels and update badges go stale — re-probe
-                    // right now, not on a timer.
+                    // right now, not on a timer. Announced rather than
+                    // refreshed in place: what changed is on this machine, and
+                    // every open project draws its own launcher from its own
+                    // probe, so the other tabs must hear about it too.
                     if (
                       tab.command?.startsWith("brew upgrade ") ||
                       AGENT_CLIS.some(
-                        (c) => c.install === tab.command || updateCommand(c) === tab.command,
+                        (c) =>
+                          c.install != null &&
+                          (c.install === tab.command || updateCommand(c) === tab.command),
                       )
                     ) {
-                      refreshInstalled();
-                      refreshUpdates();
+                      announceCliInstallsChanged();
                     }
                   } else closeTab(tab.id);
                 }}
@@ -3933,11 +3948,22 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                   key={cli.id}
                   className="launch-card"
                   onClick={() => launchCli(cli)}
-                  title={installed[cli.bin] ? cli.bin : `not installed — runs: ${cli.install}`}
+                  title={
+                    installed[cli.bin]
+                      ? cli.bin
+                      : cli.install
+                        ? `not installed — runs: ${cli.install}`
+                        : `${cli.bin} isn't on this machine — check Settings → Agents`
+                  }
                 >
                   <AgentIcon id={cli.id} size={26} />
                   <span>{cli.name}</span>
-                  {!installed[cli.bin] && <span className="launch-install">install</span>}
+                  {/* An entry with no installer can only say what's true: the
+                      binary isn't there. Offering "install" would be a button
+                      that cannot work. */}
+                  {!installed[cli.bin] && (
+                    <span className="launch-install">{cli.install ? "install" : "not found"}</span>
+                  )}
                   {installed[cli.bin] && cliUpdates[cli.bin]?.hasUpdate && (
                     <span
                       className="launch-update"

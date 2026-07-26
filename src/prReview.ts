@@ -220,3 +220,14 @@ export function verdicts(conv: ipc.PrConversation): ipc.PrReviewSummary[] {
     .filter((r) => r.state !== "PENDING" && (r.body.trim() !== "" || r.state !== "COMMENTED"))
     .sort((a, b) => (a.submitted < b.submitted ? 1 : -1));
 }
+
+/** The reason a file has no hunks, when a reassembled patch carries one.
+ *
+ *  A patch stitched from `pulls/{n}/files` (git.rs `assemble_patch`, used when
+ *  GitHub refuses a 20k-line combined diff) marks files it couldn't inline the
+ *  same way git marks a binary — so without this they would all read "Binary
+ *  file", which is a lie about a 4,000-line lockfile. */
+export function fileNote(patch: string): string | null {
+  const m = /^\((GitHub didn't include|\d+ more file)[^\n]*\)$/m.exec(patch);
+  return m ? m[0].slice(1, -1) : null;
+}

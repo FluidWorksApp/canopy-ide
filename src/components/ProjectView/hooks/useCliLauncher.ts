@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AGENT_CLIS_CHANGED_EVENT,
+  CLI_INSTALLS_CHANGED_EVENT,
   checkCliUpdates,
   checkInstalledClis,
   checkInstalledPrereqs,
@@ -41,17 +42,23 @@ export function useCliLauncher() {
     refreshUpdates();
   }, [refreshInstalled, refreshUpdates]);
 
-  // Rebinding a CLI to the binary this machine actually has (Settings → Agents)
-  // changes what there is to probe. Without this, the row that sent the user to
-  // Settings in the first place goes on offering to install until the launcher
-  // is reopened — which reads as the setting not having worked.
+  // Two machine-wide changes, one response. Rebinding a CLI to the binary this
+  // machine actually has (Settings → Agents) changes what there is to probe;
+  // an install or update run finishing changes the answer. Without this, the
+  // row that sent the user to Settings — or the card they just installed from
+  // another project — goes on offering to install until the launcher is
+  // reopened, which reads as the thing they did not having worked.
   useEffect(() => {
     const onChanged = () => {
       refreshInstalled();
       refreshUpdates();
     };
     window.addEventListener(AGENT_CLIS_CHANGED_EVENT, onChanged);
-    return () => window.removeEventListener(AGENT_CLIS_CHANGED_EVENT, onChanged);
+    window.addEventListener(CLI_INSTALLS_CHANGED_EVENT, onChanged);
+    return () => {
+      window.removeEventListener(AGENT_CLIS_CHANGED_EVENT, onChanged);
+      window.removeEventListener(CLI_INSTALLS_CHANGED_EVENT, onChanged);
+    };
   }, [refreshInstalled, refreshUpdates]);
 
   return { installed, prereqs, getInstalled, cliUpdates, refreshInstalled, refreshUpdates };

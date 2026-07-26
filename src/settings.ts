@@ -1,5 +1,8 @@
 // Small persistent settings, stored in localStorage. Keep this flat and cheap.
 import type { CustomMicroTask } from "./microTasks";
+// Type-only, so the projects.ts ↔ settings.ts pair stays a compile-time cycle
+// and never a runtime one.
+import type { CustomAgentCli } from "./projects";
 
 export type Theme = "auto" | "default" | "gotham" | "daylight" | "custom";
 
@@ -152,6 +155,11 @@ export interface Settings {
    *  a launch command, and a multi-token value would break both `command -v`
    *  and the basename match that recognises the CLI once it is running. */
   cliBins: Record<string, string>;
+  /** Agent CLIs Canopy ships no entry for, described by the user (Settings →
+   *  Agents). Machine-wide for the same reason as `cliBins`: an in-house agent
+   *  is a property of the workstation, not of one repo. See CustomAgentCli for
+   *  what an entry can and deliberately cannot say. */
+  customClis: CustomAgentCli[];
   /** Display name on the team relay, remembered from the last host/join. */
   relayName: string;
   /** Last relay address joined, prefilled on the next join. */
@@ -216,6 +224,7 @@ const DEFAULTS: Settings = {
   ptyHighWater: 2 * 1024 * 1024,
   defaultAgent: "claude",
   cliBins: {},
+  customClis: [],
   relayName: "",
   relayAddr: "",
   autoHibernate: false,

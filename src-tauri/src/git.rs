@@ -878,6 +878,11 @@ pub async fn gh_pr_list(
         .unwrap_or_default())
 }
 
+/// Files reassembled from the per-file endpoint before we stop. A PR touching
+/// more than this is not being read in one sitting, and every extra page is
+/// another request.
+const MAX_PATCH_FILES: usize = 400;
+
 #[tauri::command]
 pub async fn gh_pr_diff(
     state: State<'_, WorkspaceManager>,
@@ -887,7 +892,113 @@ pub async fn gh_pr_diff(
     let top = repo_path(&state, &repo)?;
     let mut cmd = gh_in(&top);
     cmd.args(["pr", "diff", &number.to_string()]);
-    run_net(&mut cmd)
+    match run_net(&mut cmd) {
+        Ok(diff) => Ok(diff),
+        // GitHub refuses to render one combined diff past 20,000 lines (HTTP
+        // 406, `diff too_large`) — and a release PR is exactly the one you most
+        // want to read. The same patches are still served per file, so fall
+        // back to those and stitch them into the patch the view already parses.
+        Err(e) if is_diff_too_large(&e) => pr_files_patch(&top, number),
+        Err(e) => Err(e),
+    }
+}
+
+/// The 406 GitHub returns for an oversized combined diff, in the shapes `gh`
+/// passes it through as.
+fn is_diff_too_large(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    e.contains("too_large")
+        || e.contains("exceeded the maximum number of lines")
+        || (e.contains("406") && e.contains("diff"))
+}
+
+/// Rebuild a unified patch out of `pulls/{n}/files`. `--paginate` walks the
+/// pages and the jq filter emits one compact object per line, which is stable
+/// across gh versions in a way `--slurp` is not.
+fn pr_files_patch(top: &Path, number: u32) -> Result<String, String> {
+    let (owner, name) = gh_nwo(top)?;
+    let mut cmd = gh_in(top);
+    cmd.args([
+        "api",
+        "--paginate",
+        "--jq",
+        ".[] | @json",
+        &format!("repos/{owner}/{name}/pulls/{number}/files?per_page=100"),
+    ]);
+    Ok(assemble_patch(&run_net(&mut cmd)?))
+}
+
+/// One JSON object per line (GitHub's per-file entries) → a unified patch.
+///
+/// The hunks are GitHub's own, so what comes out is the same text `gh pr diff`
+/// would have produced; only the headers are reconstructed. Files whose patch
+/// GitHub omits — binaries, and single files too large to inline — keep their
+/// header and say why, so they are still listed rather than silently missing.
+fn assemble_patch(lines: &str) -> String {
+    let mut out = String::new();
+    let mut files = 0usize;
+    let mut skipped = 0usize;
+    for line in lines.lines().filter(|l| !l.trim().is_empty()) {
+        let Ok(f) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let path = s(&f["filename"]);
+        if path.is_empty() {
+            continue;
+        }
+        if files >= MAX_PATCH_FILES {
+            skipped += 1;
+            continue;
+        }
+        files += 1;
+        let status = s(&f["status"]);
+        let old = match status.as_str() {
+            "added" => "/dev/null".to_string(),
+            "renamed" => format!("a/{}", s(&f["previous_filename"])),
+            _ => format!("a/{path}"),
+        };
+        let new = if status == "removed" {
+            "/dev/null".to_string()
+        } else {
+            format!("b/{path}")
+        };
+        let from = if status == "renamed" {
+            s(&f["previous_filename"])
+        } else {
+            path.clone()
+        };
+        out.push_str(&format!("diff --git a/{from} b/{path}\n"));
+        match f["patch"].as_str() {
+            Some(patch) => {
+                out.push_str(&format!("--- {old}\n+++ {new}\n"));
+                out.push_str(patch.trim_end_matches('\n'));
+                out.push('\n');
+            }
+            // No patch field: a binary, or a file GitHub decided is too big to
+            // inline. The first line is the one the view already recognises as
+            // binary; the second explains the other case in the file's own card.
+            None => {
+                let changes = f["changes"].as_u64().unwrap_or(0);
+                if changes == 0 {
+                    out.push_str(&format!("Binary files a/{path} and b/{path} differ\n"));
+                } else {
+                    out.push_str(&format!(
+                        "Binary files a/{path} and b/{path} differ\n\
+                         (GitHub didn't include this file's patch — {changes} changed lines. \
+                         Open it on GitHub.)\n"
+                    ));
+                }
+            }
+        }
+    }
+    if skipped > 0 {
+        out.push_str(&format!(
+            "diff --git a/… b/…\nBinary files a/… and b/… differ\n\
+             ({skipped} more file(s) not shown — this pull request touches more than \
+             {MAX_PATCH_FILES}.)\n"
+        ));
+    }
+    out
 }
 
 #[tauri::command]
@@ -3430,6 +3541,76 @@ index 333..444 100644
         assert_eq!(rollup_state("PENDING"), "PENDING");
         assert_eq!(rollup_state("EXPECTED"), "PENDING");
         assert_eq!(rollup_state(""), "");
+    }
+
+    #[test]
+    fn recognises_githubs_oversized_diff_refusal() {
+        // The shapes gh passes the 406 through as; a release PR hits this, and
+        // it must not read as "no diff".
+        assert!(is_diff_too_large(
+            "could not find pull request diff: HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)"
+        ));
+        assert!(is_diff_too_large("PullRequest.diff too_large"));
+        assert!(!is_diff_too_large("HTTP 404: Not Found"));
+        assert!(!is_diff_too_large("could not find pull request"));
+    }
+
+    fn files_payload() -> String {
+        [
+            r#"{"filename":"src/a.ts","status":"modified","changes":3,"patch":"@@ -1,2 +1,3 @@\n a\n+b"}"#,
+            r#"{"filename":"src/new.ts","status":"added","changes":1,"patch":"@@ -0,0 +1 @@\n+hello"}"#,
+            r#"{"filename":"src/gone.ts","status":"removed","changes":1,"patch":"@@ -1 +0,0 @@\n-bye"}"#,
+            r#"{"filename":"src/now.ts","previous_filename":"src/was.ts","status":"renamed","changes":1,"patch":"@@ -1 +1 @@\n-x\n+y"}"#,
+            r#"{"filename":"logo.png","status":"modified","changes":0}"#,
+            r#"{"filename":"pnpm-lock.yaml","status":"modified","changes":4211}"#,
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn assemble_patch_rebuilds_headers_git_can_be_parsed_from() {
+        let patch = assemble_patch(&files_payload());
+        // The view splits on `diff --git`, so every file must carry one.
+        assert_eq!(patch.matches("diff --git ").count(), 6);
+        assert!(
+            patch.contains("diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@")
+        );
+        // Added and removed files point at /dev/null on the side that has no
+        // content, the way git writes them.
+        assert!(patch.contains("--- /dev/null\n+++ b/src/new.ts"));
+        assert!(patch.contains("--- a/src/gone.ts\n+++ /dev/null"));
+        // A rename names both ends.
+        assert!(patch.contains("diff --git a/src/was.ts b/src/now.ts"));
+    }
+
+    #[test]
+    fn assemble_patch_explains_the_files_github_would_not_inline() {
+        let patch = assemble_patch(&files_payload());
+        // A real binary says only that.
+        assert!(patch.contains("Binary files a/logo.png and b/logo.png differ"));
+        // A file with changes but no patch is not a binary, and says so — the
+        // frontend surfaces this line instead of claiming "binary".
+        assert!(patch.contains("4211 changed lines"));
+        assert!(patch.contains("GitHub didn't include this file's patch"));
+    }
+
+    #[test]
+    fn assemble_patch_survives_junk_and_says_when_it_stopped() {
+        // A blank line and an unparseable one are skipped, not fatal.
+        let mixed = format!("\n{{not json\n{}", files_payload());
+        assert_eq!(assemble_patch(&mixed).matches("diff --git ").count(), 6);
+
+        let many: Vec<String> = (0..MAX_PATCH_FILES + 5)
+            .map(|i| format!(r#"{{"filename":"f{i}.ts","status":"modified","changes":1,"patch":"@@ -1 +1 @@\n-a\n+b"}}"#))
+            .collect();
+        let patch = assemble_patch(&many.join("\n"));
+        assert!(patch.contains("5 more file(s) not shown"));
+    }
+
+    #[test]
+    fn assemble_patch_of_nothing_is_nothing() {
+        assert_eq!(assemble_patch(""), "");
+        assert_eq!(assemble_patch("\n\n"), "");
     }
 
     #[test]
