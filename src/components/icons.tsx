@@ -30,6 +30,20 @@ export function PlayIcon({ size = 14, className }: IconProps) {
   );
 }
 
+/** Snowflake: a project that is hibernating. An SVG rather than the ❄ glyph
+ *  because the glyph renders as a colour emoji on macOS at tab size, which
+ *  can't take the row's colour and reads as a sticker on a 34px bar. */
+export function FrostIcon({ size = 12, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.7}>
+      <path d="M12 2v20M4.2 6.5l15.6 9M19.8 6.5l-15.6 9" />
+      <path d="M9.6 4.4 12 6.8l2.4-2.4M14.4 19.6 12 17.2l-2.4 2.4" />
+      <path d="M4.6 10.2 5.5 7l3.2.6M19.4 13.8l-.9 3.2-3.2-.6" />
+      <path d="M15.3 7.6 18.5 7l.9 3.2M8.7 16.4 5.5 17l-.9-3.2" />
+    </svg>
+  );
+}
+
 // Close cross for tab/pill dismiss slots — replaces the bare ✕ glyph.
 export function CloseIcon({ size = 12, className }: IconProps) {
   return (

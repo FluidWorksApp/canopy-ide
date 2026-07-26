@@ -106,6 +106,15 @@ import { fileDiffContext, reviewContext, sessionChangesContext } from "../../dif
 import { AgentQueryBar } from "../AgentQueryBar";
 import { forgetSessions, markRestored, restorableFrom, type Restorable } from "../../restorable";
 import {
+  buildSnapshot,
+  terminalLaunch,
+  wakeSteps,
+  writeHibernation,
+  HIBERNATE_EVENT,
+  HIBERNATED_EVENT,
+  type SnapshotTab,
+} from "../../hibernation";
+import {
   forgetTerminals,
   rememberTerminals,
   rememberedTerminals,
@@ -237,7 +246,7 @@ function TermPorts({
   );
 }
 
-export function ProjectView({ project, visible, zen, events, hookPath, allProjects, dismissedPending, onDismissPending, onEdit, onNotice, onShareContext, relay }: ProjectViewProps) {
+export function ProjectView({ project, visible, zen, events, hookPath, allProjects, dismissedPending, onDismissPending, onEdit, onNotice, onShareContext, relay, restore, onRestoreStep, onRestored }: ProjectViewProps) {
   const [sideTab, setSideTab] = useState<SideTab>("files");
   // Monaco's caret, for the context snapshot. Subscribed rather than passed
   // down: the editor sits several components below, and this is read-only.
@@ -2049,6 +2058,179 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   liveSessionIdsRef.current = liveSessionIds;
   const liveSessionByPtyRef = useRef(liveSessionByPty);
   liveSessionByPtyRef.current = liveSessionByPty;
+
+  // ---------- hibernation ----------
+  // Sits here rather than up with the other tab plumbing because a snapshot is
+  // only worth taking once it can name the conversation live in each terminal
+  // (liveSessionByPty, just above) — that binding is what brings an agent back
+  // mid-thought instead of at a fresh prompt.
+
+  const snapshotState = useRef({
+    activeTabId,
+    sideTab,
+    collapsed,
+    worktreeEnv,
+  });
+  snapshotState.current = { activeTabId, sideTab, collapsed, worktreeEnv };
+
+  useEffect(() => {
+    const onHibernate = (e: Event) => {
+      const d = (e as CustomEvent).detail as { projectId?: string } | null;
+      if (d?.projectId !== project.id) return;
+      const { activeTabId: active, sideTab: side, collapsed: shut, worktreeEnv: wt } =
+        snapshotState.current;
+      const snap = buildSnapshot({
+        tabs: tabsRef.current,
+        activeTabId: active,
+        sideTab: side,
+        collapsed: shut,
+        worktree: wt,
+        sessionFor: (pty) => liveSessionByPtyRef.current.get(pty),
+      });
+      // App waits for this before closing the project: a snapshot that could
+      // not be stored must leave the project open, because closing it would
+      // throw the work away rather than put it away.
+      const ok = writeHibernation(project.id, snap);
+      // Put the workspace down properly rather than letting the unmount do it.
+      // Unmounting kills the PTYs but nothing else: the editor models, the
+      // diff baselines and any live share would all be left holding memory,
+      // which for a feature whose whole point is reclaiming it would be a
+      // strange thing to skip. closeTab already knows how to end each kind.
+      if (ok) for (const t of [...tabsRef.current]) closeTabRef.current(t.id);
+      window.dispatchEvent(
+        new CustomEvent(HIBERNATED_EVENT, { detail: { projectId: project.id, ok } }),
+      );
+    };
+    window.addEventListener(HIBERNATE_EVENT, onHibernate);
+    return () => window.removeEventListener(HIBERNATE_EVENT, onHibernate);
+  }, [project.id]);
+
+  /** Rebuild one snapshotted tab and answer with its id, so the tab that was in
+   *  front can be found again once the whole strip is back. */
+  const restoreTab = useCallback(
+    async (t: SnapshotTab): Promise<string | null> => {
+      const push = (tab: SubTab) => {
+        setTabs((prev) => [...prev, tab]);
+        return tab.id;
+      };
+      switch (t.kind) {
+        case "terminal": {
+          // A headless PTY from the phone outlived hibernation — we never
+          // spawned it, so we never killed it. Reattach when it is still there;
+          // otherwise there is nothing to attach to and the tab is dropped.
+          if (t.attachId != null) {
+            if (!statsRef.current.some((s) => s.id === t.attachId)) return null;
+            return push({
+              id: tabId(),
+              type: "terminal",
+              cwd: t.cwd,
+              title: t.title,
+              ptyId: t.attachId,
+              attachId: t.attachId,
+              icon: t.icon ?? "📱",
+            });
+          }
+          const { command } = terminalLaunch(t);
+          return addTerminal(t.cwd, command, t.title, t.icon, t.run);
+        }
+        case "file": {
+          await openFileRef.current(t.path, { diff: t.view === "diff" });
+          // openFile appends through setTabs, which React commits after the
+          // current task — so yield before reading the strip back. A file that
+          // no longer exists on disk simply never appears, and is skipped.
+          await new Promise((r) => window.setTimeout(r, 0));
+          const tab = tabsRef.current.find(
+            (x) => x.type === "file" && x.file.path === t.path,
+          );
+          if (tab && t.view !== "diff") patchFile(t.path, { view: t.view });
+          return tab?.id ?? null;
+        }
+        case "preview":
+          return push({ id: tabId(), type: "preview", url: t.url, annotations: [] });
+        case "pr":
+          return push({ id: tabId(), type: "pr", repo: t.repo, pr: t.pr });
+        case "ticket":
+          return push({ id: tabId(), type: "ticket", ticket: t.ticket, source: t.source });
+        case "commit":
+          return push({
+            id: tabId(),
+            type: "commit",
+            repo: t.repo,
+            hash: t.hash,
+            short: t.short,
+            subject: t.subject,
+          });
+        case "branch":
+          return push({ id: tabId(), type: "branch", repo: t.repo, branch: t.branch });
+        case "review":
+          return push({ id: tabId(), type: "review", review: t.review });
+        case "agent":
+          return push({
+            id: tabId(),
+            type: "agent",
+            repo: t.repo,
+            agent: t.agent,
+            cwd: t.cwd,
+            sessionId: t.sessionId,
+            digest: t.digest,
+          });
+        case "task-history":
+          return push({ id: tabId(), type: "task-history" });
+        case "instructions":
+          return push({ id: tabId(), type: "instructions", focus: t.focus });
+        case "chat":
+          return push({ id: tabId(), type: "chat", peer: t.peer, name: t.name });
+      }
+    },
+    [addTerminal, patchFile],
+  );
+
+  // Wake: rebuild the workspace step by step while the frost (rendered by App,
+  // above this view) stays put. In snapshot order, so the strip comes back
+  // left-to-right as it was, and paced — eight PTYs spawned in the same frame
+  // is a stall the user watches, and each one wants its own beat on screen.
+  const restoring = useRef(false);
+  const restoreStepRef = useRef(onRestoreStep);
+  restoreStepRef.current = onRestoreStep;
+  const restoredRef = useRef(onRestored);
+  restoredRef.current = onRestored;
+  useEffect(() => {
+    if (!restore || restoring.current) return;
+    restoring.current = true;
+    let cancelled = false;
+    const wait = (ms: number) => new Promise((r) => window.setTimeout(r, ms));
+    void (async () => {
+      const steps = wakeSteps(restore);
+      restoreStepRef.current?.(0, steps.length, steps[0]?.label ?? "Ready");
+      if (restore.worktree) setWorktreeEnv(restore.worktree);
+      setSideTab(restore.sideTab);
+      setCollapsed(restore.collapsed);
+      const ids: (string | null)[] = [];
+      for (const [i, step] of steps.entries()) {
+        if (cancelled) return;
+        let id: string | null = null;
+        try {
+          id = await restoreTab(step.tab);
+        } catch (err) {
+          // One tab that can't come back (a deleted file, a dead attach) must
+          // never strand the rest of the workspace asleep.
+          console.warn("restore failed", step.label, err);
+        }
+        ids.push(id);
+        // A terminal has a PTY to spawn; a document tab is a render. Pace them
+        // differently so a workspace of files doesn't crawl.
+        await wait(step.tab.kind === "terminal" ? 260 : 90);
+        if (cancelled) return;
+        restoreStepRef.current?.(i + 1, steps.length, steps[i + 1]?.label ?? "Ready");
+      }
+      const front = restore.activeIndex != null ? ids[restore.activeIndex] : null;
+      if (front) setActiveTabId(front);
+      restoredRef.current?.();
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [restore, restoreTab]);
 
   // Deliver a message (a workspace review, today) to the agent that owns a
   // session: typed into its live PTY when it has one, else the session is

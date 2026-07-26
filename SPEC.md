@@ -89,6 +89,12 @@ Opening a file picks a renderer by type; raw-source view is always available as 
 - Files open as **sub-tabs within the project**, next to its terminal sub-tabs.
   Terminals stay mounted (TUIs keep running) while browsing files or projects.
 - Side panel per project: Components (labeled trees), Changes, Agents.
+- **Hibernation** (right-click a project tab): the project's whole arrangement —
+  tabs, open files, terminals, and the agent conversation live in each one — is
+  snapshotted, and the project is then genuinely closed, so its PTYs, agents,
+  language servers and editor models are all reclaimed. Opening it again lands
+  on a wake screen; waking rebuilds the workspace step by step underneath the
+  frost, resuming each agent by session id rather than starting it fresh.
 
 ### 6. Agent CLI launcher
 - The new-terminal menu lists popular agent CLIs (Claude Code, Codex, Amp, Aider,

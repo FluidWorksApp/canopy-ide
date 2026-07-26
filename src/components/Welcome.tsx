@@ -1,15 +1,19 @@
 // Shown when no project is open. Projects are the entry point — no terminal,
 // no editor until one is opened.
+import { FrostIcon } from "./icons";
 import type { Project } from "../projects";
 
 interface WelcomeProps {
   projects: Project[];
+  /** Projects that are asleep: opening one lands on the wake screen, with
+   *  everything it had open waiting behind it. */
+  hibernated: Record<string, unknown>;
   onOpen: (id: string) => void;
   onNew: () => void;
   onDelete: (id: string) => void;
 }
 
-export function Welcome({ projects, onOpen, onNew, onDelete }: WelcomeProps) {
+export function Welcome({ projects, hibernated, onOpen, onNew, onDelete }: WelcomeProps) {
   return (
     <div className="welcome">
       <h1>Canopy</h1>
@@ -28,7 +32,14 @@ export function Welcome({ projects, onOpen, onNew, onDelete }: WelcomeProps) {
           {projects.map((p) => (
             <div key={p.id} className="welcome-project" onClick={() => onOpen(p.id)}>
               <div className="welcome-project-main">
-                <span className="welcome-project-name">{p.name}</span>
+                <span className="welcome-project-name">
+                  {p.name}
+                  {p.id in hibernated && (
+                    <span className="hib-chip" title="Hibernating — open it to wake it">
+                      <FrostIcon size={10} /> hibernating
+                    </span>
+                  )}
+                </span>
                 <span className="welcome-project-dirs">
                   {p.components.map((c) => c.label).join(" · ")}
                 </span>

@@ -9890,3 +9890,384 @@ a.btn-mini {
   white-space: nowrap;
   flex: 1;
 }
+
+/* ---------- hibernation ----------
+   A project asleep, and the two animations either side of it. Both faces are
+   full-cover layers over the project area (never a route the app navigates to)
+   which is what lets the wake keep the frost on screen while the real
+   workspace rebuilds underneath it: nothing blanks, nothing jumps, and the
+   project fades in already finished. */
+
+.hib-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+}
+
+.hib {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+/* The ice itself: a cold wash over whatever is behind, blurred just past
+   legibility so the shape of the workspace still reads through it. */
+.hib-frost {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(120% 85% at 50% -10%, color-mix(in srgb, var(--cyan) 14%, transparent), transparent 62%),
+    radial-gradient(95% 70% at 15% 110%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 66%),
+    color-mix(in srgb, var(--bg-deep) 84%, transparent);
+  backdrop-filter: blur(16px) saturate(0.55) brightness(0.82);
+  -webkit-backdrop-filter: blur(16px) saturate(0.55) brightness(0.82);
+}
+
+.hib-freezing .hib-frost {
+  animation: hib-frost-in 900ms var(--ease-out) both;
+}
+
+@keyframes hib-frost-in {
+  from { opacity: 0; transform: scale(1.05); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* Ambient crystals drifting through the cold. Decorative only. */
+.hib-crystals {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.hib-crystal {
+  position: absolute;
+  color: color-mix(in srgb, var(--cyan) 55%, transparent);
+  animation-name: hib-drift;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+@keyframes hib-drift {
+  0% { transform: translate3d(0, -30px, 0) rotate(0deg); opacity: 0; }
+  12% { opacity: 0.75; }
+  88% { opacity: 0.6; }
+  100% { transform: translate3d(18px, 60vh, 0) rotate(240deg); opacity: 0; }
+}
+
+/* ---- the card ---- */
+
+.hib-card {
+  position: relative;
+  z-index: 1;
+  width: min(560px, 82%);
+  max-height: 82%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-6) var(--sp-5) var(--sp-5);
+  text-align: center;
+  background: color-mix(in srgb, var(--bg-raised) 72%, transparent);
+  border: 1px solid color-mix(in srgb, var(--cyan) 22%, var(--border));
+  border-radius: var(--r-lg);
+  corner-shape: squircle;
+  box-shadow: var(--shadow-3);
+  animation: hib-card-in 520ms var(--ease-out) both;
+}
+
+@keyframes hib-card-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+
+.hib-title {
+  margin: 0;
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.hib-sub {
+  margin: 0;
+  max-width: 46ch;
+  font-size: var(--fs-md);
+  line-height: var(--lh-ui);
+  color: var(--text-dim);
+}
+
+.hib-empty { color: var(--text-faint); }
+
+/* ---- the snowflake ---- */
+
+.hib-flake {
+  width: 84px;
+  height: 84px;
+  color: var(--cyan);
+  filter: drop-shadow(0 0 14px color-mix(in srgb, var(--cyan) 45%, transparent));
+}
+
+/* Freezing: the crystal draws itself arm by arm as the project is put away. */
+.hib-flake-freeze g path {
+  stroke-dasharray: 46;
+  stroke-dashoffset: 46;
+  animation: hib-draw 820ms var(--ease-out) forwards;
+}
+
+@keyframes hib-draw {
+  to { stroke-dashoffset: 0; }
+}
+
+/* Asleep: a slow turn and a breathing glow — alive, but only just. */
+.hib-flake-idle {
+  animation: hib-turn 72s linear infinite, hib-breathe 4.5s ease-in-out infinite;
+}
+
+@keyframes hib-turn {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes hib-breathe {
+  0%, 100% { filter: drop-shadow(0 0 10px color-mix(in srgb, var(--cyan) 30%, transparent)); opacity: 0.85; }
+  50% { filter: drop-shadow(0 0 26px color-mix(in srgb, var(--cyan) 60%, transparent)); opacity: 1; }
+}
+
+/* Waking: the crystal spins up, warms and melts away as the work comes back. */
+.hib-flake-melting {
+  animation: hib-melt 1500ms var(--ease-out) forwards, hib-spin-up 1500ms var(--ease-out) forwards;
+}
+
+@keyframes hib-melt {
+  0% { color: var(--cyan); opacity: 1; }
+  60% { color: var(--accent); }
+  100% { color: var(--warn); opacity: 0.35; filter: drop-shadow(0 0 22px color-mix(in srgb, var(--warn) 40%, transparent)); }
+}
+
+@keyframes hib-spin-up {
+  0% { transform: rotate(0deg) scale(1); }
+  100% { transform: rotate(200deg) scale(0.72); }
+}
+
+/* ---- what's inside ---- */
+
+.hib-stats {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-1);
+}
+
+.hib-stat {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 12px;
+  background: color-mix(in srgb, var(--cyan) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--cyan) 20%, transparent);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+}
+
+.hib-stat-n {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--cyan);
+}
+
+.hib-stat-label {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+
+/* ---- the actions ---- */
+
+.hib-wake {
+  margin-top: var(--sp-2);
+  padding: 10px 20px;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  animation: hib-invite 3.4s ease-in-out infinite;
+}
+
+@keyframes hib-invite {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); }
+  55% { box-shadow: 0 0 0 12px transparent; }
+}
+
+.hib-discard {
+  background: none;
+  border: none;
+  padding: 2px 4px;
+  font-size: var(--fs-sm);
+  color: var(--text-faint);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.hib-discard:hover { color: var(--text-dim); }
+
+/* ---- waking: the checklist that ticks itself off ---- */
+
+.hib-progress {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-height: 0;
+}
+
+.hib-bar {
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--border-strong) 70%, transparent);
+  overflow: hidden;
+}
+
+.hib-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--cyan), var(--accent));
+  transition: width 320ms var(--ease-out);
+}
+
+.hib-count {
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.hib-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* The list is a ticker, not a document: fade its ends rather than showing a
+     hard cut where the scroll starts and stops. */
+  mask-image: linear-gradient(180deg, transparent, #000 12px, #000 calc(100% - 12px), transparent);
+}
+
+.hib-step {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: 3px 6px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  font-size: var(--fs-sm);
+  transition: color var(--dur-med) var(--ease-out), background var(--dur-med) var(--ease-out);
+}
+
+.hib-step-mark {
+  width: 12px;
+  flex: none;
+  text-align: center;
+}
+
+.hib-step-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hib-step-done { color: var(--text-dim); }
+.hib-step-done .hib-step-mark { color: var(--ok); }
+.hib-step-pending { color: var(--text-faint); }
+
+.hib-step-current {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.hib-step-current .hib-step-mark {
+  color: var(--cyan);
+  display: inline-block;
+  animation: hib-turn 2.4s linear infinite;
+}
+
+/* ---- the thaw: the frost lifts off a workspace that is already back ---- */
+
+.hib-thawed {
+  animation: hib-thaw-out 880ms var(--ease-out) forwards;
+  pointer-events: none;
+}
+
+@keyframes hib-thaw-out {
+  0% { opacity: 1; }
+  100% { opacity: 0; transform: scale(1.03); }
+}
+
+.hib-thawed .hib-frost {
+  animation: hib-frost-out 880ms var(--ease-out) forwards;
+}
+
+@keyframes hib-frost-out {
+  to { backdrop-filter: blur(0) saturate(1) brightness(1); -webkit-backdrop-filter: blur(0) saturate(1) brightness(1); }
+}
+
+/* ---- asleep, seen from elsewhere ---- */
+
+/* A sleeping project's pill: dimmed, frost-tinted, and carrying the crystal
+   ahead of its name so the state reads without a hover or a click. */
+.project-tab-asleep {
+  color: color-mix(in srgb, var(--cyan) 45%, var(--text-dim));
+  background: color-mix(in srgb, var(--cyan) 7%, transparent);
+  border-color: color-mix(in srgb, var(--cyan) 18%, transparent);
+}
+
+.project-tab-asleep:hover,
+.project-tab-asleep.project-tab-active {
+  color: color-mix(in srgb, var(--cyan) 30%, var(--text));
+  background: color-mix(in srgb, var(--cyan) 12%, var(--bg-raised));
+  border-color: color-mix(in srgb, var(--cyan) 32%, transparent);
+}
+
+.project-tab-frost {
+  display: inline-flex;
+  align-items: center;
+  color: var(--cyan);
+  animation: hib-breathe 4.5s ease-in-out infinite;
+}
+
+.hib-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--cyan);
+  border: 1px solid color-mix(in srgb, var(--cyan) 55%, transparent);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  padding: 0 6px;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hib-freezing .hib-frost,
+  .hib-card,
+  .hib-crystal,
+  .hib-flake-freeze g path,
+  .hib-flake-idle,
+  .hib-flake-melting,
+  .hib-wake,
+  .hib-step-current .hib-step-mark,
+  .hib-thawed,
+  .hib-thawed .hib-frost,
+  .project-tab-frost {
+    animation: none;
+  }
+  /* Without the draw, the crystal must simply be there. */
+  .hib-flake-freeze g path { stroke-dashoffset: 0; }
+  /* The thaw still has to end with the frost gone. */
+  .hib-thawed { opacity: 0; transition: opacity var(--dur-med) linear; }
+}
