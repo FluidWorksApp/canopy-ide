@@ -42,6 +42,7 @@ pub fn pending_from_env() -> PendingOpen {
 }
 
 /// Second-instance argv, forwarded by the single-instance plugin.
+#[cfg_attr(debug_assertions, allow(dead_code))]
 pub fn open_forwarded(app: &AppHandle, argv: Vec<String>, cwd: String) {
     if let Some(dir) = dir_from_args(argv, Path::new(&cwd)) {
         let _ = app.emit("cli-open", dir);
