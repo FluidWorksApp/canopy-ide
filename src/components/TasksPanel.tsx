@@ -8,8 +8,10 @@
 // than one component — then hands off to ProjectView's startMicroTask.
 import { useEffect, useState } from "react";
 import {
+  EFFECT_HEADING,
   MICRO_TASKS,
   type CustomMicroTask,
+  type TaskEffect,
 } from "../microTasks";
 import { BUILT_IN_HEADING, CUSTOM_HEADING } from "../taskMenu";
 import { getSettings, updateSettings } from "../settings";
@@ -393,19 +395,31 @@ export function TasksPanel({
         custom.map(runRow)
       )}
 
+      {/* Grouped by what each one DOES, not by what it is called: four of these
+          are some flavour of "review", and the difference that matters is
+          whether anything leaves your machine. The surface note moves into the
+          tooltip — it read as information but was "on a PR tab" seven times. */}
       <div className="ticket-state-head">{BUILT_IN_HEADING}</div>
-      {MICRO_TASKS.map((t) => (
-        <div className="task-row" key={t.id}>
-          <span className="task-icon">{t.icon}</span>
-          <span
-            className="task-label task-label-dim"
-            title={`Runs from its own surface — ${t.surfaceNote ?? "see its tab"}, which supplies what it works on`}
-          >
-            {t.label}
-          </span>
-          {t.surfaceNote && <span className="task-note">{t.surfaceNote}</span>}
-        </div>
-      ))}
+      {(["reads", "posts", "pushes"] as TaskEffect[]).map((effect) => {
+        const group = MICRO_TASKS.filter((t) => (t.effect ?? "reads") === effect);
+        if (!group.length) return null;
+        return (
+          <div className="task-effect-group" key={effect}>
+            <div className={`task-effect-head is-${effect}`}>{EFFECT_HEADING[effect]}</div>
+            {group.map((t) => (
+              <div
+                className="task-row task-row-built-in"
+                key={t.id}
+                title={`Runs from its own surface — ${t.surfaceNote ?? "see its tab"}, which supplies what it works on`}
+              >
+                <span className="task-icon">{t.icon}</span>
+                <span className="task-label task-label-dim">{t.label}</span>
+                {t.blurb && <span className="task-blurb">{t.blurb}</span>}
+              </div>
+            ))}
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -39,6 +39,7 @@ import {
 import {
   AgentIcon,
   CheckIcon,
+  ChevronIcon,
   FailIcon,
   LiveDot,
   PlayIcon,
@@ -4353,7 +4354,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 onClick={() => setOpenSections((prev) => ({ ...prev, [c.path]: !sectionOpen(c.path) }))}
                 onContextMenu={(e) => compMenu.open(e, launcherItems(c.path))}
               >
-                <span className="tree-chevron">{sectionOpen(c.path) ? "▾" : "▸"}</span>
+                <span className={`tree-chevron ${sectionOpen(c.path) ? "tree-chevron-open" : ""}`}>
+                  <ChevronIcon />
+                </span>
                 <span className="component-title">{c.label}</span>
                 <span className="component-actions">
                   <button

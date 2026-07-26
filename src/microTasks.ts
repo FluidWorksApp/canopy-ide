@@ -42,9 +42,25 @@ export interface MicroTaskDef<P> {
   /** For the Tasks panel's built-in list: where this task's button lives.
    *  Built-ins run from their surface, which is what supplies the payload. */
   surfaceNote?: string;
+  /** One line: what this actually does. Four of these are called some variant
+   *  of "review" and a label alone cannot tell them apart. */
+  blurb?: string;
+  /** What it does to the world — the question a list of names hides, and the
+   *  one worth grouping by: `reads` leaves no trace, `posts` writes something
+   *  public under your name, `pushes` changes code on the branch. */
+  effect?: TaskEffect;
   /** Set by tasks that mutate files; the launcher prepares the checkout. */
   isolation?: PrWorktreeIsolation<P>;
 }
+
+export type TaskEffect = "reads" | "posts" | "pushes";
+
+/** Headings for the three, phrased as consequences rather than categories. */
+export const EFFECT_HEADING: Record<TaskEffect, string> = {
+  reads: "Reads only — nothing is posted",
+  posts: "Posts to GitHub under your name",
+  pushes: "Changes code and pushes",
+};
 
 /** PTY prompts must be one line — a newline submits early. Same contract every
  *  context builder honors; this makes it structural for micro-task briefs. */
@@ -83,6 +99,8 @@ export const raisePrTask: MicroTaskDef<RaisePrPayload> = {
   label: "Raise PR",
   icon: "⇈",
   placeholder: "Anything the PR should mention…",
+  blurb: "Opens the PR, filling in whatever template the repo asks for.",
+  effect: "posts",
   surfaceNote: "on a branch tab",
   cwd: (p) => p.worktree ?? p.repo,
   buildContext(p, userQuery) {
@@ -133,6 +151,8 @@ export const reviewPrTask: MicroTaskDef<ReviewPrPayload> = {
   label: "Review PR",
   icon: "⌕",
   placeholder: "Anything to focus the review on…",
+  blurb: "Reviews it and posts the verdict — approves, or lists what's blocking.",
+  effect: "posts",
   surfaceNote: "on a PR tab",
   cwd: (p) => p.repo,
   buildContext(p, userQuery) {
@@ -194,6 +214,8 @@ export const addressPrCommentsTask: MicroTaskDef<AddressPrCommentsPayload> = {
   label: "Address comments",
   icon: "↩",
   placeholder: "Which comments to focus on…",
+  blurb: "Validates each comment, fixes the cause, replies, and pushes.",
+  effect: "pushes",
   surfaceNote: "on a PR tab",
   cwd: (p) => p.repo,
   isolation: { kind: "pr-worktree", target: (p) => ({ repo: p.repo, pr: p.pr }) },
@@ -269,6 +291,8 @@ export const reviewMapTask: MicroTaskDef<ReviewPrPayload> = {
   label: "Review map",
   icon: "◎",
   placeholder: "Anything to pay attention to…",
+  blurb: "Ranks the risk and names the few things worth your attention.",
+  effect: "reads",
   surfaceNote: "on a PR tab",
   cwd: (p) => p.repo,
   buildContext(p, userQuery) {
@@ -301,6 +325,8 @@ export const draftFindingsTask: MicroTaskDef<ReviewPrPayload> = {
   label: "Draft findings",
   icon: "✎",
   placeholder: "Anything to focus on…",
+  blurb: "Finds problems and stages them as draft comments for you to vet.",
+  effect: "reads",
   surfaceNote: "on a PR tab",
   cwd: (p) => p.repo,
   buildContext(p, userQuery) {
@@ -339,6 +365,8 @@ export const selfReviewPrTask: MicroTaskDef<ReviewPrPayload> = {
   label: "Self-review",
   icon: "◍",
   placeholder: "Anything you're unsure about…",
+  blurb: "Reviews your own PR privately, before anyone else sees it.",
+  effect: "reads",
   surfaceNote: "on a PR tab",
   cwd: (p) => p.repo,
   buildContext(p, userQuery) {
@@ -368,6 +396,8 @@ export const fixCiTask: MicroTaskDef<ReviewPrPayload> = {
   label: "Fix CI",
   icon: "⚒",
   placeholder: "Which check to start with…",
+  blurb: "Reads the failing logs, fixes the cause, pushes when it's green.",
+  effect: "pushes",
   surfaceNote: "on a PR tab",
   cwd: (p) => p.repo,
   isolation: { kind: "pr-worktree", target: (p) => ({ repo: p.repo, pr: p.pr }) },
@@ -409,6 +439,8 @@ export const applySuggestionTask: MicroTaskDef<ApplySuggestionPayload> = {
   label: "Apply suggestion",
   icon: "⇥",
   placeholder: "Anything to watch for…",
+  blurb: "Applies a reviewer's suggested change, proves it, and pushes.",
+  effect: "pushes",
   surfaceNote: "on a PR comment",
   cwd: (p) => p.repo,
   isolation: { kind: "pr-worktree", target: (p) => ({ repo: p.repo, pr: p.pr }) },
@@ -441,6 +473,8 @@ export const runItReviewTask: MicroTaskDef<ReviewPrPayload> = {
   label: "Run it & look",
   icon: "▶",
   placeholder: "Which screen or flow to exercise…",
+  blurb: "Starts the app on the PR's branch and reports what it saw.",
+  effect: "reads",
   surfaceNote: "on a PR tab",
   cwd: (p) => p.repo,
   isolation: { kind: "pr-worktree", target: (p) => ({ repo: p.repo, pr: p.pr }) },
@@ -474,6 +508,8 @@ export const followUpsTask: MicroTaskDef<ReviewPrPayload> = {
   label: "Spin off follow-ups",
   icon: "⤴",
   placeholder: "Which ones to spin off…",
+  blurb: "Turns out-of-scope comments into issues and links them back.",
+  effect: "posts",
   surfaceNote: "on a PR tab",
   cwd: (p) => p.repo,
   buildContext(p, userQuery) {
