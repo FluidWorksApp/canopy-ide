@@ -617,7 +617,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
               <>
                 <Item
                   name="Crash reporting"
-                  desc="Off by default. When on, a crashed panel — or a native crash found on the next launch — offers to send an anonymous report: the error and stack, app version and your OS. Nothing else, and never without a click."
+                  desc="A crashed panel always offers to file a GitHub issue — public, under your own account, and shown to you in full before anything is sent. This setting governs the other route: an anonymous email to the maintainers with no name attached, which is also what a native crash found on the next launch uses. Either way the report is the error and stack, app version and your OS, and nothing else."
                 >
                   <label className="set-inline-check">
                     <input
