@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   addressPrCommentsTask,
+  adhocLabel,
+  adhocTaskDef,
   customTaskDef,
   microTaskProtocol,
   oneLine,
@@ -227,6 +229,42 @@ describe("customTaskDef", () => {
 
   it("omits the user-adds clause when nothing was typed", () => {
     expect(customTaskDef(custom).buildContext({ dir: "/p" }, "")).not.toContain("The user adds");
+  });
+});
+
+describe("adhocLabel", () => {
+  it("names a one-off after the head of its brief, cut on a word", () => {
+    expect(adhocLabel("Bump the changelog")).toBe("Bump the changelog");
+    expect(adhocLabel("Bump the changelog for the release and tag it")).toBe(
+      "Bump the changelog for the…",
+    );
+    // No word boundary to cut on early enough: cut anyway rather than run long.
+    expect(adhocLabel(`${"x".repeat(40)} tail`)).toBe(`${"x".repeat(32)}…`);
+    expect(adhocLabel("   ")).toBe("One-off task");
+  });
+});
+
+describe("adhocTaskDef", () => {
+  it("runs the typed brief once, in the given directory, saving nothing", () => {
+    const def = adhocTaskDef("Bump the changelog\nand tag it.");
+    expect(def.id).toBe("adhoc");
+    expect(def.label).toBe("Bump the changelog and tag it.");
+    expect(def.cwd({ dir: "/proj" })).toBe("/proj");
+    const ctx = def.buildContext({ dir: "/proj" }, "");
+    expect(ctx).toBe("Bump the changelog and tag it.");
+    expect(ctx).not.toMatch(/[\r\n]/);
+    // Not in the registry: a one-off is never listed, only run.
+    expect(MICRO_TASKS.map((t) => t.id)).not.toContain(def.id);
+  });
+
+  it("takes a caller's label when the surface has a better one", () => {
+    expect(adhocTaskDef("some long brief about a diff", "Changes").label).toBe("Changes");
+  });
+
+  it("still folds in extra context the launcher passes", () => {
+    expect(adhocTaskDef("Bump the changelog").buildContext({ dir: "/p" }, "and tag it")).toContain(
+      'The user adds: "and tag it"',
+    );
   });
 });
 

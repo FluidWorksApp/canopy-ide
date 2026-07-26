@@ -15,7 +15,13 @@ import { STATE_META, lastHumanPrompt } from "./AgentsPanel";
 import { AgentIcon, GitBranchIcon, RestartIcon } from "./icons";
 import { sessionCost } from "../pricing";
 import { getSettings } from "../settings";
-import type { CustomMicroTask } from "../microTasks";
+import {
+  addressPrCommentsTask,
+  raisePrTask,
+  reviewPrTask,
+  type CustomMicroTask,
+} from "../microTasks";
+import { BUILT_IN_HEADING, CUSTOM_HEADING, type TaskChoice } from "../taskMenu";
 
 const fmtCost = (n: number) => (n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`);
 /** Tokens Canopy sent the model — fresh input plus both cache legs. */
@@ -64,6 +70,8 @@ interface AgentWorkspaceViewProps {
   onReviewPrTask?: (pr: ipc.PrInfo) => void;
   onAddressPrCommentsTask?: (pr: ipc.PrInfo) => void;
   onRunSavedTask?: (task: CustomMicroTask, dir: string) => void;
+  /** Run a brief typed right here, once, saving nothing. */
+  onRunOneOff?: (brief: string, dir: string) => void;
 }
 
 /** A review comment the user attached to a diff line, held as a draft until
@@ -346,8 +354,12 @@ export function AgentWorkspaceView({
   onReviewPrTask,
   onAddressPrCommentsTask,
   onRunSavedTask,
+  onRunOneOff,
 }: AgentWorkspaceViewProps) {
   const [taskMenu, setTaskMenu] = useState(false);
+  /** The one-off brief being typed in the Run task menu, or null when that row
+   *  is still just a row. */
+  const [oneOff, setOneOff] = useState<string | null>(null);
   // Read when the menu opens rather than held in state: tasks are saved in
   // another panel, and a stale list here would be the first thing you'd notice.
   const savedTasks = useMemo(
@@ -800,6 +812,45 @@ export function AgentWorkspaceView({
     </div>
   );
 
+  // The built-in half of the Run task menu. Every task is listed whether or not
+  // this workspace can run it — one that vanishes when it doesn't apply reads
+  // as a missing feature — so an unrunnable one carries the reason instead of a
+  // handler. Which is also the answer to "why is Review PR greyed out": the
+  // branch hasn't got a PR yet.
+  const raiseWhy = pr
+    ? `PR #${pr.number} is already open`
+    : !ws?.branch
+      ? "this workspace has no branch"
+      : ws.on_base
+        ? `on ${ws.branch}, the base branch`
+        : "no repo here";
+  const builtInChoices: TaskChoice[] = [
+    {
+      id: raisePrTask.id,
+      label: ws?.branch && !ws.on_base && !pr ? `Raise PR for ${ws.branch}` : raisePrTask.label,
+      icon: raisePrTask.icon,
+      note: raiseWhy,
+      run:
+        onRaisePrTask && ws?.branch && !ws.on_base && !pr
+          ? () => onRaisePrTask(ws.branch as string, ws.isolated ? ws.workdir : null)
+          : undefined,
+    },
+    {
+      id: reviewPrTask.id,
+      label: pr ? `Review PR #${pr.number}` : reviewPrTask.label,
+      icon: reviewPrTask.icon,
+      note: "no PR from this branch yet",
+      run: onReviewPrTask && pr ? () => onReviewPrTask(pr) : undefined,
+    },
+    {
+      id: addressPrCommentsTask.id,
+      label: pr ? `Address comments on #${pr.number}` : addressPrCommentsTask.label,
+      icon: addressPrCommentsTask.icon,
+      note: "no PR from this branch yet",
+      run: onAddressPrCommentsTask && pr ? () => onAddressPrCommentsTask(pr) : undefined,
+    },
+  ];
+
   return (
     <div className="ticket-view">
       {/* One banner for the whole workspace: identity, branch, where it's
@@ -842,10 +893,17 @@ export function AgentWorkspaceView({
               New shell in worktree
             </button>
           )}
-          {/* Hand this agent's output to a fresh one-shot agent: raise the PR
-              for the branch it built, review the PR that came out of it, or run
-              any task you've saved — in this workspace's directory. */}
-          {(onRaisePrTask || onReviewPrTask || onAddressPrCommentsTask || onRunSavedTask) && (
+          {/* Hand this agent's output to a fresh one-shot agent: a one-off you
+              type here, any task you've saved, or a built-in — raise the PR for
+              the branch it built, review the PR that came out of it, address the
+              comments that came back. All in this workspace's directory. Both
+              groups are always listed, unavailable built-ins included with the
+              reason: a menu that hides them just looks empty. */}
+          {(onRaisePrTask ||
+            onReviewPrTask ||
+            onAddressPrCommentsTask ||
+            onRunSavedTask ||
+            onRunOneOff) && (
             <div className="review-send">
               <button
                 className="btn"
@@ -855,63 +913,70 @@ export function AgentWorkspaceView({
                 Run task ▾
               </button>
               {taskMenu && (
-                <div className="cli-menu review-menu" onMouseLeave={() => setTaskMenu(false)}>
-                  {onRaisePrTask && ws?.branch && !ws.on_base && !pr && (
-                    <button
-                      className="cli-menu-item"
-                      onClick={() => {
-                        setTaskMenu(false);
-                        onRaisePrTask(ws.branch as string, ws.isolated ? ws.workdir : null);
-                      }}
-                    >
-                      ⇈ Raise PR for {ws.branch}
-                    </button>
-                  )}
-                  {onReviewPrTask && pr && (
-                    <button
-                      className="cli-menu-item"
-                      onClick={() => {
-                        setTaskMenu(false);
-                        onReviewPrTask(pr);
-                      }}
-                    >
-                      ⌕ Review PR #{pr.number}
-                    </button>
-                  )}
-                  {onAddressPrCommentsTask && pr && (
-                    <button
-                      className="cli-menu-item"
-                      onClick={() => {
-                        setTaskMenu(false);
-                        onAddressPrCommentsTask(pr);
-                      }}
-                    >
-                      ↩ Address comments on #{pr.number}
-                    </button>
-                  )}
-                  {onRunSavedTask && savedTasks.length > 0 && (
-                    <>
-                      <div className="cli-menu-label">Saved tasks</div>
-                      {savedTasks.map((t) => (
-                        <button
-                          key={t.id}
-                          className="cli-menu-item"
-                          title={t.brief}
-                          onClick={() => {
+                <div
+                  className="cli-menu review-menu"
+                  // Don't pull the menu away from someone typing a brief in it.
+                  onMouseLeave={() => oneOff == null && setTaskMenu(false)}
+                >
+                  {onRunOneOff &&
+                    (oneOff == null ? (
+                      <button className="cli-menu-item" onClick={() => setOneOff("")}>
+                        ⚡ One-off task…
+                      </button>
+                    ) : (
+                      <input
+                        autoFocus
+                        className="agent-query-input"
+                        placeholder="The job — runs once, then closes. Nothing is saved."
+                        value={oneOff}
+                        onChange={(e) => setOneOff(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && oneOff.trim()) {
                             setTaskMenu(false);
-                            onRunSavedTask(t, ws?.workdir ?? cwd);
-                          }}
-                        >
-                          {t.icon || "◆"} {t.label}
-                        </button>
-                      ))}
-                    </>
-                  )}
-                  {savedTasks.length === 0 && !pr && (!ws?.branch || ws.on_base) && (
-                    <button className="cli-menu-item" disabled>
-                      Nothing to run here yet
+                            setOneOff(null);
+                            onRunOneOff(oneOff.trim(), ws?.workdir ?? cwd);
+                          }
+                          if (e.key === "Escape") setOneOff(null);
+                        }}
+                      />
+                    ))}
+                  <div className="cli-menu-label">{CUSTOM_HEADING}</div>
+                  {savedTasks.length === 0 ? (
+                    <button className="cli-menu-item" disabled title="Write one in the Tasks panel">
+                      None saved yet
                     </button>
+                  ) : (
+                    savedTasks.map((t) => (
+                      <button
+                        key={t.id}
+                        className="cli-menu-item"
+                        title={t.brief}
+                        disabled={!onRunSavedTask}
+                        onClick={() => {
+                          setTaskMenu(false);
+                          onRunSavedTask?.(t, ws?.workdir ?? cwd);
+                        }}
+                      >
+                        {t.icon || "◆"} {t.label}
+                      </button>
+                    ))
                   )}
+                  <div className="cli-menu-label">{BUILT_IN_HEADING}</div>
+                  {builtInChoices.map((c) => (
+                    <button
+                      key={c.id}
+                      className="cli-menu-item"
+                      title={c.note}
+                      disabled={!c.run}
+                      onClick={() => {
+                        setTaskMenu(false);
+                        c.run?.();
+                      }}
+                    >
+                      {c.icon} {c.label}
+                      {!c.run && c.note && <span className="cli-menu-why">{c.note}</span>}
+                    </button>
+                  ))}
                 </div>
               )}
             </div>
