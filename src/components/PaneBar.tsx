@@ -20,35 +20,9 @@ import type {
   TermSubTab,
   RailChip,
 } from "./ProjectView";
+import { tabDisplayLabel, previewLabel } from "./ProjectView";
 
 export type { SubTab, RailChip };
-
-// ── Label helpers ────────────────────────────────────────────────────────────
-
-function tabDisplayLabel(t: SubTab): string {
-  switch (t.type) {
-    case "terminal": return t.customTitle ?? t.title;
-    case "file": return t.file.name;
-    case "pr": return `#${t.pr.number} ${t.pr.title}`;
-    case "ticket": return `${t.ticket.id} ${t.ticket.title}`;
-    case "commit": return `${t.short} ${t.subject}`;
-    case "branch": return t.branch.branch;
-    case "agent": return `${t.agent} · ${t.digest?.branch ?? t.cwd.split("/").filter(Boolean).pop() ?? t.agent}`;
-    case "chat": return t.name;
-    case "collab": return t.name;
-    case "review": return t.review.title;
-    case "task-history": return "Completed tasks";
-    case "instructions": return "Agent instructions";
-    case "shared-project": return t.name;
-    case "preview": return previewLabel(t.url);
-  }
-}
-
-function previewLabel(url: string): string {
-  if (!url) return "Preview";
-  try { const u = new URL(url); return `${u.host}${u.pathname === "/" ? "" : u.pathname}`; }
-  catch { return url; }
-}
 
 function tabTitle(tab: SubTab): string {
   switch (tab.type) {
