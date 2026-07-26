@@ -90,6 +90,9 @@ import { StatusBar } from "../StatusBar";
 import { Palette, type PaletteMode } from "../Palette";
 import { GitPanel } from "../GitPanel";
 import { TicketsPanel, type AgentTarget } from "../TicketsPanel";
+import { PrsPanel } from "../PrsPanel";
+import { needsYouCount } from "../../prInbox";
+import { usePrWatch } from "../../usePrWatch";
 import { TicketView } from "../TicketView";
 import { CommitView } from "../CommitView";
 import { ReviewView, type ReviewPayload } from "../ReviewView";
@@ -715,6 +718,42 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     },
     [onNotice, openPr, openReview, relay],
   );
+
+  // Repo toplevels for this project's components, resolved once per component
+  // set: the PR inbox needs them to tell one of this project's PRs (open it
+  // here) from another project's (ask App to switch first).
+  const [repoPaths, setRepoPaths] = useState<string[]>([]);
+  const componentKey = project.components.map((c) => c.path).join("|");
+  useEffect(() => {
+    let live = true;
+    void ipc
+      .gitRepos(project.components.map((c) => [c.label, c.path] as [string, string]))
+      .then((repos) => live && setRepoPaths(repos.map((r) => r.path)))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [componentKey]);
+
+  // The rail badge counts PRs waiting on this user anywhere, not only here —
+  // one subscription to the shared watcher, no fetch of its own.
+  const prsBadge = needsYouCount(usePrWatch().rows);
+
+  // A PR from another project, after App has switched to us.
+  useEffect(() => {
+    const onOpenElsewhere = (e: Event) => {
+      const d = (e as CustomEvent).detail as {
+        projectId?: string;
+        repo?: string;
+        pr?: ipc.PrInfo;
+      };
+      if (!d?.repo || !d.pr || (d.projectId && d.projectId !== project.id)) return;
+      openPr(d.repo, d.pr);
+    };
+    window.addEventListener("canopy:open-pr", onOpenElsewhere);
+    return () => window.removeEventListener("canopy:open-pr", onOpenElsewhere);
+  }, [project.id, openPr]);
 
   // Session digests + this launch's tag, so the "Agent Workspace" overlay can
   // resolve the agent behind the active terminal the same way AgentsPanel does
@@ -4108,6 +4147,18 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           }
         />
       ))}
+      {sidePane("prs", () => (
+        <PrsPanel
+          localRepos={repoPaths}
+          projectFor={(repo) => (repoPaths.includes(repo) ? project.name : undefined)}
+          onOpen={(repo, pr) => openPr(repo, pr)}
+          onOpenElsewhere={(repo, pr) =>
+            window.dispatchEvent(
+              new CustomEvent("canopy:open-pr-elsewhere", { detail: { repo, pr } }),
+            )
+          }
+        />
+      ))}
       {sidePane("trackers", () => (
         <TicketsPanel
           components={project.components.map((c) => ({ label: c.label, path: c.path }))}
@@ -4185,6 +4236,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             sideTab={sideTab}
             collapsed={collapsed}
             changeBadge={changeCount + collabEditedCount}
+            prsBadge={prsBadge}
             tasksBadge={runningMicro.length}
             pendingCount={pending.length}
             urgentCount={urgentPending.length}

@@ -1157,7 +1157,21 @@ fn gh_graphql(top: &Path, query: &str, vars: &[(&str, String)]) -> Result<Value,
     for (k, v) in vars {
         cmd.args(["-F", &format!("{k}={v}")]);
     }
-    let out = run_net(&mut cmd)?;
+    graphql_data(run_net(&mut cmd)?)
+}
+
+/// A GraphQL document that names its own targets, run with no repo context —
+/// what the cross-project PR watcher uses, since one document covers many
+/// repositories and none of them is "the" current one.
+pub(crate) fn gh_graphql_anywhere(query: &str) -> Result<Value, String> {
+    let mut cmd = gh_anywhere();
+    cmd.args(["api", "graphql", "-f", &format!("query={query}")]);
+    graphql_data(run_net(&mut cmd)?)
+}
+
+/// `data` out of a GraphQL response, or the errors as a message. A 200 with an
+/// `errors` array is the normal failure shape, so it can't be ignored.
+fn graphql_data(out: String) -> Result<Value, String> {
     let v: Value =
         serde_json::from_str(&out).map_err(|e| format!("gh returned unexpected output: {e}"))?;
     if let Some(errors) = v.get("errors").and_then(|e| e.as_array()) {
@@ -1175,6 +1189,22 @@ fn gh_graphql(top: &Path, query: &str, vars: &[(&str, String)]) -> Result<Value,
         }
     }
     Ok(v.get("data").cloned().unwrap_or(Value::Null))
+}
+
+/// The repo toplevel for a component path, scope-checked. The PR watcher uses it
+/// to fold many component paths onto the repos they actually live in.
+pub(crate) fn gh_repo_toplevel(
+    state: &State<'_, WorkspaceManager>,
+    path: &str,
+) -> Result<PathBuf, String> {
+    repo_path(state, path)
+}
+
+/// `owner/name` for an already-validated repo path. Resolved once per repo by
+/// the watcher and cached — this is a subprocess, and it never changes.
+pub(crate) fn gh_nwo_of(repo: &str) -> Result<String, String> {
+    let (owner, name) = gh_nwo(Path::new(repo))?;
+    Ok(format!("{owner}/{name}"))
 }
 
 fn s(v: &Value) -> String {
@@ -1198,7 +1228,7 @@ fn nodes<'a>(v: &'a Value, key: &str) -> &'a [Value] {
 }
 
 /// GraphQL's check state vocabulary, collapsed onto PrInfo's.
-fn rollup_state(state: &str) -> String {
+pub(crate) fn rollup_state(state: &str) -> String {
     match state {
         "SUCCESS" => "PASS",
         "FAILURE" | "ERROR" => "FAIL",
