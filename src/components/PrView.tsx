@@ -12,7 +12,12 @@ import type { Notify, RelayHandle } from "../types";
 import { AgentLaunchButton } from "./AgentLaunchButton";
 import { TeamIcon } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
-import { reviewPrTask, type MicroTaskDef, type ReviewPrPayload } from "../microTasks";
+import {
+  addressPrCommentsTask,
+  reviewPrTask,
+  type MicroTaskDef,
+  type ReviewPrPayload,
+} from "../microTasks";
 import { MicroTaskButton } from "./MicroTaskButton";
 // NB: PR diffs arrive as real patches from `gh pr diff`, so they go straight
 // into the renderer. Working-tree diffs (components/DiffView.tsx) have to build
@@ -36,8 +41,9 @@ interface PrViewProps {
   onStartResolve: (agentId: string) => void;
   /** Hand conflict resolution to an already-running agent. */
   onSendResolve: (target: AgentTarget) => void;
-  /** Launch the one-shot Review PR micro-task (reads via gh, posts a review
-   *  comment, reports, closes itself) — the ephemeral cousin of Review above. */
+  /** Launch a one-shot PR micro-task — review it, or address the comments it
+   *  came back with. Both take the same payload; the ephemeral cousins of
+   *  Review above, each reporting and closing its own terminal. */
   onMicroTask?: (task: MicroTaskDef<ReviewPrPayload>, payload: ReviewPrPayload, query: string) => void;
 }
 
@@ -365,7 +371,18 @@ export function PrView({
             <MicroTaskButton
               task={reviewPrTask}
               payload={{ repo, pr }}
-              title="One-shot review: an agent reads the PR via gh, posts its findings as a review comment, and its terminal closes itself"
+              title="One-shot review: an agent reads the PR via gh, posts only what's genuinely required (nits marked as nits), approves it if nothing is, and its terminal closes itself"
+              onLaunch={onMicroTask}
+            />
+          )}
+          {/* The other half of the loop: take the comments the PR came back
+              with and work through them — in a worktree of its own, since
+              unlike Review this one edits files and pushes. */}
+          {pr.state === "OPEN" && onMicroTask && (
+            <MicroTaskButton
+              task={addressPrCommentsTask}
+              payload={{ repo, pr }}
+              title="One-shot: an agent checks the branch out in its own worktree, validates each review comment against the actual code before acting on it, fixes what holds up, replies to what doesn't, and pushes"
               onLaunch={onMicroTask}
             />
           )}
