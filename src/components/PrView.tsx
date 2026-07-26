@@ -39,6 +39,7 @@ import {
 } from "../microTasks";
 import { rowFor, subscribe as subscribeToPrs } from "../prWatchStore";
 import { TASK_HISTORY_EVENT, taskRuns, type TaskRun } from "../taskHistory";
+import { repoLabel } from "../prs";
 import {
   actionable,
   fileNote,
@@ -227,6 +228,10 @@ export function PrView({
   // Its own request, independent of the patch, so it paints while a 28k-line
   // diff is still being parsed.
   const [conv, setConv] = useState<ipc.PrConversation | null>(null);
+  /** owner/name for the header. Several projects open means several PR tabs,
+   *  and "#843" alone doesn't say which repo's #843. Resolved from the origin
+   *  URL once per repo; the folder name stands in until it arrives. */
+  const [repoName, setRepoName] = useState(() => repoLabel("", repo));
   const [convError, setConvError] = useState<string | null>(null);
   /** The body read the old way, when the conversation query couldn't be run. */
   const [bodyFallback, setBodyFallback] = useState("");
@@ -282,6 +287,18 @@ export function PrView({
       onNotice(String(err), "error");
     }
   };
+
+  useEffect(() => {
+    let live = true;
+    setRepoName(repoLabel("", repo));
+    void ipc
+      .gitRemoteUrl(repo)
+      .then((url) => live && setRepoName(repoLabel(url, repo)))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [repo]);
 
   const refreshConv = useCallback(async () => {
     try {
@@ -755,9 +772,6 @@ export function PrView({
         // The real event: useContextMenu calls preventDefault on it, so a
         // hand-made {clientX, clientY} threw and the button did nothing.
         moreMenu.open(e, reviewerItems());
-        break;
-      case "merge":
-        setMergeOpen(true);
         break;
       default:
         break;
@@ -1268,6 +1282,11 @@ export function PrView({
           </div>
         </div>
         <div className="pr-sub">
+          {repoName && (
+            <span className="pr-repo" title={repo}>
+              {repoName}
+            </span>
+          )}
           <span>
             {pr.author} wants to merge <code>{pr.branch}</code> → <code>{pr.base}</code>
           </span>

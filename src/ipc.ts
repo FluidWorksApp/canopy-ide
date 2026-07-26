@@ -579,8 +579,10 @@ export const gitStage = (repo: string, paths: string[]) =>
   invoke<void>("git_stage", { repo, paths });
 export const gitUnstage = (repo: string, paths: string[]) =>
   invoke<void>("git_unstage", { repo, paths });
-export const gitDiscard = (repo: string, paths: string[]) =>
-  invoke<void>("git_discard", { repo, paths });
+/** Throw away changes: tracked paths are restored from HEAD (staged or not),
+ *  untracked ones are deleted. Unrecoverable — confirm before calling. */
+export const gitDiscard = (repo: string, tracked: string[], untracked: string[]) =>
+  invoke<void>("git_discard", { repo, tracked, untracked });
 export const gitCommit = (repo: string, message: string, amend = false) =>
   invoke<string>("git_commit", { repo, message, amend });
 export const gitFetch = (repo: string) => invoke<string>("git_fetch", { repo });

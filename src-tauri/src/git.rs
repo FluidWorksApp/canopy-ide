@@ -432,20 +432,37 @@ pub async fn git_unstage(
 
 /// Throw away working-tree changes. Destructive and unrecoverable — the UI must
 /// confirm before calling this.
+///
+/// The two lists are different jobs and git has no single command for both.
+/// `tracked` is restored from HEAD, which also clears anything staged for those
+/// paths, so one Discard means the same thing whether the change was staged or
+/// not. `untracked` has no HEAD to restore from — the only way to discard a
+/// file git has never seen is to delete it, which is what `clean` does, and it
+/// touches nothing tracked even if a caller mixes the lists up.
 #[tauri::command]
 pub async fn git_discard(
     state: State<'_, WorkspaceManager>,
     repo: String,
-    paths: Vec<String>,
+    tracked: Vec<String>,
+    untracked: Vec<String>,
 ) -> Result<(), String> {
     let top = repo_path(&state, &repo)?;
-    if paths.is_empty() {
-        return Ok(());
+    if !tracked.is_empty() {
+        let mut cmd = git(&top);
+        // `--` so a path that looks like a flag can't become one.
+        cmd.args(["checkout", "HEAD", "--"]);
+        cmd.args(&tracked);
+        run(&mut cmd)?;
     }
-    let mut cmd = git(&top);
-    cmd.args(["checkout", "--"]);
-    cmd.args(&paths);
-    run(&mut cmd).map(|_| ())
+    if !untracked.is_empty() {
+        let mut cmd = git(&top);
+        // -d for a directory the file is the only thing in; -f because clean
+        // refuses to do anything without it.
+        cmd.args(["clean", "-f", "-d", "--"]);
+        cmd.args(&untracked);
+        run(&mut cmd)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]

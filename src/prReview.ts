@@ -200,11 +200,16 @@ export function nextMove(
       action: "Review the delta",
     };
 
+  // No action of its own: merging is the header's Merge ▾, which is where the
+  // method (squash / merge commit / rebase) is chosen. A second Merge button
+  // down here only ever opened that same menu — a button on the left that
+  // answers on the right. This line says the state; the header does the deed.
   if (decision === "APPROVED" && checks !== "FAIL" && !conflicting)
     return {
       id: "merge",
-      label: opts.autoMerge ? "Approved and green — auto-merge is armed" : "Approved and green — ready to land",
-      action: opts.autoMerge ? undefined : "Merge",
+      label: opts.autoMerge
+        ? "Approved and green — auto-merge is armed"
+        : "Approved and green — ready to land, with Merge above",
     };
 
   if (role === "author" && (decision === "" || decision === "REVIEW_REQUIRED"))

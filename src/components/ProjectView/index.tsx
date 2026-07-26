@@ -16,7 +16,7 @@ import {
 } from "react";
 import { Panel, PanelGroup } from "react-resizable-panels";
 import * as ipc from "../../ipc";
-import { getSettings } from "../../settings";
+import { getSettings, SETTINGS_CHANGE_EVENT } from "../../settings";
 import { modelFor, monaco, languageForPath } from "../../monaco-setup";
 import { getCaret, subscribeCaret } from "../../editorState";
 import { GuestSession, OwnerSession } from "../../collab";
@@ -170,6 +170,7 @@ import {
   type PreviewSubTab,
   type RailChip,
   type ProjectViewProps,
+  sidebarPrefs,
 } from "./helpers";
 export { tabDisplayLabel, previewLabel };
 export type {
@@ -288,6 +289,15 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // that the debounce below retracts. Either one shows it.
   const [pinned, setPinned] = useState(false);
   const [peeking, setPeeking] = useState(false);
+  /** How the user wants the panel to behave (Settings → Appearance). Held in
+   *  state rather than read inline: these decide what effects are registered,
+   *  and a change has to take hold without reopening the project. */
+  const [sidePrefs, setSidePrefs] = useState(sidebarPrefs);
+  useEffect(() => {
+    const refresh = () => setSidePrefs(sidebarPrefs());
+    window.addEventListener(SETTINGS_CHANGE_EVENT, refresh);
+    return () => window.removeEventListener(SETTINGS_CHANGE_EVENT, refresh);
+  }, []);
   const [sideWidth, setSideWidth] = useState(SIDE_DEFAULT_W);
   const sideWidthRef = useRef(SIDE_DEFAULT_W);
   const sideOpen = !zen && (pinned || peeking);
@@ -2661,7 +2671,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
    *  business swapping it — a peek is transient, a pin is a choice. */
   const hoverSideTab = useCallback(
     (tab: SideTab) => {
-      if (pinned) return;
+      // Off by default (Appearance → "Hover to view"): a panel that comes out
+      // because you passed an icon on your way somewhere else is a panel you
+      // didn't ask for. With it off the rail opens on click only.
+      if (pinned || !sidePrefs.hover) return;
       cancelPeekClose();
       cancelPeekOpen();
       openTimer.current = window.setTimeout(() => {
@@ -2670,7 +2683,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         setPeeking(true);
       }, HOVER_INTENT_MS);
     },
-    [cancelPeekClose, cancelPeekOpen, pinned],
+    [cancelPeekClose, cancelPeekOpen, pinned, sidePrefs.hover],
   );
   const leaveSideHover = useCallback(
     (prompt?: boolean) => {
@@ -2691,10 +2704,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
    *  On pointerdown, not click: waiting for mouseup leaves the panel sitting
    *  over whatever you are in the middle of pressing. */
   useEffect(() => {
-    if (!sideOpen) return;
+    // Appearance → "Click outside to close". On by default, and off is a real
+    // choice once the panel is docked: a pane that isn't covering anything has
+    // no reason to close because you clicked in the editor.
+    if (!sideOpen || !sidePrefs.clickOutsideCloses) return;
     const onDown = (e: PointerEvent) => {
       const target = e.target;
-      if (target instanceof Element && target.closest(".side-peek, .rail")) return;
+      if (target instanceof Element && target.closest(".side-peek, .side-dock, .rail")) return;
       cancelPeekOpen();
       cancelPeekClose();
       setPeeking(false);
@@ -2702,7 +2718,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     };
     window.addEventListener("pointerdown", onDown, true);
     return () => window.removeEventListener("pointerdown", onDown, true);
-  }, [sideOpen, cancelPeekOpen, cancelPeekClose]);
+  }, [sideOpen, cancelPeekOpen, cancelPeekClose, sidePrefs.clickOutsideCloses]);
 
   // Click is the latch: it pins the panel open so it survives the pointer
   // leaving. Clicking the pinned tab again puts it away.
@@ -4782,6 +4798,16 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               .then(() => refreshChanges())
               .catch((err) => onNotice(String(err), "error"))
           }
+          onDiscard={(repo, file) =>
+            void ipc
+              .gitDiscard(
+                repo,
+                file.untracked ? [] : [file.path],
+                file.untracked ? [file.path] : [],
+              )
+              .then(() => refreshChanges())
+              .catch((err) => onNotice(String(err), "error"))
+          }
           onCommit={(repo, message) =>
             ipc
               .gitCommit(repo, message, false)
@@ -4913,6 +4939,28 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             onToggleSidebar={toggleSidebar}
           />
         )}
+        {/* Docked (Appearance → "Sidebar as overlay", off): the panel takes a
+            column of its own and the main area moves over for it, instead of
+            floating above it. It costs a reflow of the main area every time it
+            opens — which is what re-wraps the terminals in it — so it is the
+            non-default, but it's the right trade for anyone who wants the panel
+            up while they work. Same `sidePanel` element either way; only one of
+            the two branches renders it. */}
+        {!zen && !sidePrefs.overlay && (
+          <div
+            className={`side-dock ${sideOpen ? "open" : ""}`}
+            // Collapsed to nothing rather than unmounted, for the same reason
+            // the overlay slides out of frame instead of leaving: a panel that
+            // unmounts re-fetches on the way back, and the trackers panel
+            // mounting means a round trip to GitHub before it can paint.
+            style={{ width: sideOpen ? sideWidth : 0 }}
+            onMouseEnter={cancelPeekClose}
+            onMouseLeave={() => schedulePeekClose()}
+          >
+            {sidePanel}
+            <div className="side-peek-grip" onPointerDown={startSideResize} />
+          </div>
+        )}
         {/* The PanelGroup renders in every mode on purpose. Swapping mainArea
             between a bare child and a <Panel> changes its element type, which
             unmounts the subtree — and Term's cleanup kills the PTY. Toggling
@@ -4928,7 +4976,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             a terminal never re-wraps because you glanced at the file tree.
             Always mounted, slid out of frame when closed, for the same reason
             the panes inside it are display-toggled. */}
-        {!zen && (
+        {!zen && sidePrefs.overlay && (
           <div className="side-peek-layer">
             <div
               className={`side-peek ${sideOpen ? "open" : ""}`}

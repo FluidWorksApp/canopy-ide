@@ -3,6 +3,7 @@ import type { AgentEventEntry, OpenFile, Notify, RelayHandle } from "../../types
 import type { ReviewPayload } from "../ReviewView";
 import type { PreviewAnnotation } from "../../preview";
 import type { Project } from "../../projects";
+import { getSettings } from "../../settings";
 
 export type SideTab = "files" | "changes" | "git" | "prs" | "trackers" | "tasks" | "agents" | "team";
 
@@ -192,6 +193,18 @@ export interface RailChip {
   action?: React.ReactNode;
   onSelect: () => void;
   onClose: () => void;
+}
+
+/** The side panel's three behaviour settings, read together — they're one
+ *  decision about one panel, and reading them in three places invites two of
+ *  them to disagree about which render they came from. */
+export function sidebarPrefs() {
+  const s = getSettings();
+  return {
+    hover: s.sidebarHover,
+    clickOutsideCloses: s.sidebarClickOutsideCloses,
+    overlay: s.sidebarOverlay,
+  };
 }
 
 export interface ProjectViewProps {
