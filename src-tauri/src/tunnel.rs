@@ -221,7 +221,7 @@ fn launch(
     let open = Arc::new(AtomicUsize::new(2));
     let tail = Arc::new(Mutex::new(Vec::<String>::new()));
 
-    let mut spawn_reader = |stream: Option<Box<dyn Read + Send>>| {
+    let spawn_reader = |stream: Option<Box<dyn Read + Send>>| {
         let Some(stream) = stream else {
             open.fetch_sub(1, Ordering::SeqCst);
             return;
