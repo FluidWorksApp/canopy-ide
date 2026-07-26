@@ -2,6 +2,7 @@
 // cost. Token/model data comes from Claude Code session transcripts (path
 // arrives via hook events); cost is an estimate from a static pricing map.
 import { useEffect, useRef, useState } from "react";
+import { fmtTokens } from "../format";
 import * as ipc from "../ipc";
 import { estimateCost, sessionCost } from "../pricing";
 import { StatsPanel } from "./StatsPanel";
@@ -17,9 +18,6 @@ const fmtMem = (bytes: number) =>
  *  projects) shows the right model/tokens instantly from cache while the
  *  fresh poll runs, instead of carrying the previous tab's numbers. */
 const TRANSCRIPT_STATS = new Map<string, ipc.ClaudeSessionStats>();
-
-const fmtTokens = (n: number) =>
-  n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}k` : `${n}`;
 
 /** What `/model` in Claude Code accepts — aliases resolve to the CLI's own
  *  latest models, so this list doesn't go stale with each release. */
@@ -438,8 +436,8 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
           className="status-item"
           title={`in ${stats.input_tokens.toLocaleString()} · out ${stats.output_tokens.toLocaleString()} · cache read ${stats.cache_read_tokens.toLocaleString()} · ${stats.turns} turns`}
         >
-          ↑{fmtTokens(stats.input_tokens + stats.cache_creation_tokens)} ↓
-          {fmtTokens(stats.output_tokens)}
+          ↑{fmtTokens(stats.input_tokens + stats.cache_creation_tokens, true)} ↓
+          {fmtTokens(stats.output_tokens, true)}
         </span>
       )}
       {cost != null && (

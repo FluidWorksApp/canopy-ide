@@ -4,26 +4,67 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
-import { restoreCommand } from "../projects";
+import { AGENT_CLIS, restoreCommand } from "../projects";
 import { identifyAgent, observeForLearning } from "../agentIdentity";
+import { effectiveState, silenceLabel } from "../agentState";
 import { forgetSessions, restorableFrom } from "../restorable";
 import { AgentIcon, DiffIcon, MoonIcon, RestartIcon, TerminalIcon, TrashIcon } from "./icons";
 import type { PendingItem } from "../notifications";
 
 /** Colour + label for the lifecycle dot on a running-agent row. `working` is
  *  the only state that pulses — a moving dot in a column of still ones is
- *  where the eye lands first. */
+ *  where the eye lands first. `stale` is what `working` decays into when
+ *  nothing corroborates it (see agentState.ts): pointedly not `idle`, because
+ *  a session that stopped telling us anything has not told us it finished. */
 export const STATE_META: Record<string, { cls: string; label: string }> = {
   working: { cls: "st-working", label: "working" },
   waiting: { cls: "st-waiting", label: "waiting on you" },
   idle: { cls: "st-idle", label: "idle — finished a turn" },
   ended: { cls: "st-ended", label: "session ended" },
+  stale: { cls: "st-stale", label: "no signal — may have stopped" },
 };
 
 /** CLIs whose approval prompt is a numbered/Escape menu we can drive by
  *  synthesising keystrokes. Anything else gets "answer in terminal" instead of
  *  buttons that might type into the wrong UI. */
 const KEYSTROKE_APPROVAL_AGENTS = new Set(["claude", "codex"]);
+
+/** Every CLI with an auto-setup arm, in the order the integrations list shows
+ *  them. Mirrors SUPPORTED_AGENTS in agents.rs. */
+const AGENT_LABELS = [
+  { id: "claude", label: "Claude Code" },
+  { id: "codex", label: "Codex" },
+  { id: "agy", label: "Antigravity" },
+  { id: "aider", label: "Aider" },
+  { id: "opencode", label: "OpenCode" },
+  { id: "omp", label: "oh-my-pi" },
+  { id: "amp", label: "Amp" },
+];
+
+const HEALTH_TONE: Record<string, string> = {
+  ours: "hs-ok",
+  missing: "hs-warn",
+  foreign: "hs-warn",
+  unreadable: "hs-warn",
+  unsupported: "hs-none",
+};
+
+/** Spelled out because "foreign" and "unsupported" look like problems and only
+ *  one of them is. */
+const HEALTH_HELP: Record<string, Record<string, string>> = {
+  hooks: {
+    ours: "This CLI's config points its events at Canopy",
+    missing: "No Canopy hooks in this CLI's config — nothing will stream in",
+  },
+  mcp: {
+    ours: "The Canopy MCP server is registered for this CLI",
+    missing: "Not registered — this CLI's agents can't ask the IDE for context",
+    foreign:
+      "An MCP server named 'canopy' exists here that Canopy didn't write. It is left alone — rename or remove it, then set up again.",
+    unreadable: "This CLI's MCP config exists but can't be parsed",
+    unsupported: "This CLI has no MCP configuration Canopy can write",
+  },
+};
 
 interface AgentsPanelProps {
   /** False while another side tab is in front. The panel stays mounted (so
@@ -76,6 +117,11 @@ interface AgentsPanelProps {
   onRestore?: (cwd: string, cmd: string, title: string, agentId: string) => void;
   /** Toasts for background actions (auto-hibernation) the user didn't click. */
   onNotice?: (msg: string) => void;
+  /** Open the agent-instructions tab, optionally on one file. */
+  onOpenInstructions?: (focus?: string) => void;
+  /** Which agent CLIs are on PATH, keyed by bin — decides which instruction
+   *  formats are worth listing when the file doesn't exist yet. */
+  installed?: Record<string, boolean>;
 }
 
 /** Compact relative age; the panel is narrow and "3h" beats a timestamp. */
@@ -131,23 +177,47 @@ function Section({
   count,
   tone,
   action,
+  collapseKey,
   children,
 }: {
   title: string;
   count?: number;
   tone?: "urgent" | "quiet";
   action?: React.ReactNode;
+  /** Set to make the section collapsible. It starts collapsed, and the choice
+   *  is remembered under this key — a panel section you closed should stay
+   *  closed the next time you open the project. */
+  collapseKey?: string;
   children: React.ReactNode;
 }) {
+  const [open, setOpen] = useState(
+    () => collapseKey != null && localStorage.getItem(`canopy.section.${collapseKey}`) === "1",
+  );
+  const toggle = () => {
+    if (collapseKey == null) return;
+    setOpen((v) => {
+      localStorage.setItem(`canopy.section.${collapseKey}`, v ? "0" : "1");
+      return !v;
+    });
+  };
+  const collapsible = collapseKey != null;
   return (
     <div className={`ap-section ${tone ? `ap-section-${tone}` : ""}`}>
-      <div className="ap-head">
+      <div
+        className={`ap-head ${collapsible ? "ap-head-toggle" : ""}`}
+        onClick={collapsible ? toggle : undefined}
+      >
+        {collapsible && (
+          <span className="tree-chevron">{open ? "▾" : "▸"}</span>
+        )}
         <span className="ap-title">{title}</span>
         {count != null && count > 0 && <span className="badge">{count}</span>}
         <span className="ap-head-spacer" />
-        {action}
+        {/* Actions live inside the header, so their clicks must not also
+            toggle it. */}
+        {action && <span onClick={(e) => e.stopPropagation()}>{action}</span>}
       </div>
-      <div className="ap-body">{children}</div>
+      {(!collapsible || open) && <div className="ap-body">{children}</div>}
     </div>
   );
 }
@@ -171,12 +241,68 @@ export function AgentsPanel({
   onRestore,
   onRespond,
   onNotice,
+  onOpenInstructions,
+  installed = {},
 }: AgentsPanelProps) {
+  // Instruction files: scanned once when the panel comes into view, and again
+  // when the project's roots change. It's a bounded filesystem walk, but it is
+  // still a walk — so nothing runs while another side tab is in front, and the
+  // dependency is the roots' *contents*, not the array: ProjectView rebuilds
+  // that array every render, and keying on its identity would re-walk the
+  // filesystem on every agent event that ticks the view. Same idiom as the
+  // termSessions effect below.
+  // null until the first scan lands (and again if it fails) — an empty array
+  // would render "no instruction files yet", which is a claim, not a wait.
+  const [instructionFiles, setInstructionFiles] = useState<ipc.InstructionFile[] | null>(null);
+  const [instructionsFailed, setInstructionsFailed] = useState(false);
+  const rootsKey = roots.join("\n");
+  useEffect(() => {
+    if (!visible || rootsKey === "") return;
+    let live = true;
+    void ipc
+      .instructionsScan(rootsKey.split("\n"))
+      .then((fs) => {
+        if (!live) return;
+        setInstructionFiles(fs);
+        setInstructionsFailed(false);
+      })
+      .catch(() => live && setInstructionsFailed(true));
+    return () => {
+      live = false;
+    };
+  }, [visible, rootsKey]);
+
+  /** What to show in a panel this narrow: the files that exist, plus — for the
+   *  CLIs actually installed here — the top-level ones that don't yet, since
+   *  "you have no CLAUDE.md" is the most useful thing this list can tell you. */
+  const headlineInstructions = useMemo(() => {
+    const files = instructionFiles ?? [];
+    const installedIds = new Set(
+      AGENT_CLIS.filter((c) => installed[c.bin]).map((c) => c.id),
+    );
+    const exists = files.filter((f) => f.exists && f.kind === "instructions");
+    const missing = files.filter(
+      (f) =>
+        !f.exists &&
+        f.kind === "instructions" &&
+        f.scope === "project" &&
+        f.agents.some((a) => installedIds.has(a)),
+    );
+    return { rows: [...exists, ...missing], live: exists.length };
+  }, [instructionFiles, installed]);
   const [showHookHelp, setShowHookHelp] = useState(false);
   const [setupResult, setSetupResult] = useState<string | null>(null);
-  // null while we haven't checked yet — the nudge stays hidden until we know,
-  // so it never flashes the wrong message. See the effect keyed on noHookSignal.
-  const [hooksInstalled, setHooksInstalled] = useState<boolean | null>(null);
+  // Which of the running CLIs have no hooks — not a single boolean over all of
+  // them. `every` called a mixed roster (claude hooked, aider not) uninstalled
+  // and told the user nothing was streaming when most of it was, then re-ran
+  // setup across the lot; `some` would have under-reported the same way. null
+  // while we haven't checked, so the nudge never flashes the wrong message.
+  const [unhooked, setUnhooked] = useState<string[] | null>(null);
+  // Per-CLI integration state, so "why is this agent silent?" has an answer in
+  // the panel rather than in a config file the user has to go and read.
+  const [health, setHealth] = useState<ipc.IntegrationHealth[]>([]);
+  const refreshHealth = () =>
+    ipc.agentIntegrationHealth().then(setHealth).catch(() => {});
   // Dismissing the "restart to stream" hint sticks across panels and launches:
   // once you know the agents just predate the hooks, you don't need telling in
   // every project. The genuine "not set up" nudge ignores this and always shows.
@@ -284,13 +410,34 @@ export function AgentsPanel({
     return () => un?.();
   }, [visible]);
 
-  const autoSetup = async (agent: string) => {
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      setSetupResult(await invoke<string>("setup_agent_hooks", { agent }));
-    } catch (err) {
-      setSetupResult(String(err));
-    }
+  // Read the integrations when the help panel opens (that's the only place
+  // they're shown) and whenever the startup pass reports in, so a repair that
+  // happened while the panel was open is reflected without a manual refresh.
+  useEffect(() => {
+    if (!showHookHelp) return;
+    void refreshHealth();
+    let un: (() => void) | undefined;
+    void ipc.onIntegrationHealth((r) => setHealth(r.agents)).then((u) => {
+      un = u;
+    });
+    return () => un?.();
+  }, [showHookHelp]);
+
+  // allSettled, not all: one CLI whose config can't be written must not erase
+  // the report for the others. `Promise.all` rejected on the first failure and
+  // showed that error alone, so a single unparseable registry made a setup that
+  // wired up three CLIs look like it had done nothing at all.
+  const autoSetup = async (agents: string | string[]) => {
+    const ids = Array.isArray(agents) ? agents : [agents];
+    const results = await Promise.allSettled(ids.map((agent) => ipc.setupAgentHooks(agent)));
+    setSetupResult(
+      results
+        .map((r, i) =>
+          r.status === "fulfilled" ? r.value.summary : `${ids[i]}: ${String(r.reason)}`,
+        )
+        .join("\n"),
+    );
+    void refreshHealth();
   };
 
   // One row per terminal session, named after the agent running inside it.
@@ -364,6 +511,19 @@ export function AgentsPanel({
   // leave the panel silently blind.
   const noHookSignal =
     agentSessions.length > 0 && agentSessions.every((x) => !x.digest);
+  // Only offer setup for CLIs whose configuration Canopy knows how to edit.
+  // Unknown agents remain visible, but we must not imply they have a safe
+  // one-click integration path.
+  const setupAgents = useMemo(
+    () =>
+      [...new Set(agentSessions.map((x) => x.agent?.id).filter((id): id is string => !!id))].filter(
+        (id) => AGENT_LABELS.some((a) => a.id === id),
+      ),
+    [agentSessions],
+  );
+  // The dependency the effect below actually reads. Hoisted so the array holds
+  // a value rather than an expression over one, which is what lint can check.
+  const setupKey = setupAgents.join(",");
 
   // No digest could mean hooks aren't installed OR that these agents were
   // started before they were — opposite fixes. Ask the backend which it is, so
@@ -371,12 +531,19 @@ export function AgentsPanel({
   // says "restart to stream". Re-checked whenever the silence appears (e.g.
   // right after a one-click setup), never polled.
   useEffect(() => {
-    if (!noHookSignal) {
-      setHooksInstalled(null);
+    if (!noHookSignal || setupAgents.length === 0) {
+      setUnhooked(null);
       return;
     }
-    void ipc.agentHooksInstalled("claude").then(setHooksInstalled).catch(() => {});
-  }, [noHookSignal, setupResult]);
+    void Promise.all(
+      setupAgents.map(async (agent) => ({ agent, ok: await ipc.agentHooksInstalled(agent) })),
+    )
+      .then((rows) => setUnhooked(rows.filter((r) => !r.ok).map((r) => r.agent)))
+      // Back to "don't know" rather than leaving the last answer up: a
+      // transient IPC failure must not keep a banner on screen that describes
+      // a state we can no longer confirm.
+      .catch(() => setUnhooked(null));
+  }, [noHookSignal, setupKey, setupResult]);
 
   // Hibernate an agent: kill its terminal to reclaim the memory, keeping the
   // session digest (which is already the restore record) so the row reappears
@@ -415,9 +582,23 @@ export function AgentsPanel({
     const runaway =
       s.total_cpu > settings.runawayCpuPercent ||
       s.total_mem_bytes > settings.runawayMemBytes;
-    // Lifecycle dot: only for agent rows the hook stream has spoken for.
-    const st = agent && digest?.state ? STATE_META[digest.state] : undefined;
+    // Lifecycle dot: only for agent rows the hook stream has spoken for, and
+    // only believed as far as the session's own activity backs it up — a CLI
+    // that stops without a Stop event leaves "working" behind forever.
+    const shown = effectiveState({
+      state: digest?.state,
+      updated: digest?.updated,
+      cpu: s.total_cpu,
+      now: Date.now() / 1000,
+    });
+    const st = agent && shown ? STATE_META[shown] : undefined;
+    const stTitle =
+      shown === "stale"
+        ? `No hook events for ${silenceLabel(digest?.updated, Date.now() / 1000)} and no CPU — this agent may have stopped without telling Canopy`
+        : st?.label;
     // Only reclaim an agent that has finished — never one mid-turn or blocked.
+    // `stale` is not finished: it is an agent we have lost track of, and
+    // killing its terminal on a guess is not a trade worth making.
     const canHibernate =
       !!agent && (digest?.state === "idle" || digest?.state === "ended");
     // What the human last asked for. The highest-signal line about a session:
@@ -449,7 +630,7 @@ export function AgentsPanel({
         <div className="agent-main">
           {/* Lifecycle at a glance: green pulse = working, amber = waiting on
               you, grey = idle, faded = ended. */}
-          {st && <span className={`agent-state-dot ${st.cls}`} title={st.label} />}
+          {st && <span className={`agent-state-dot ${st.cls}`} title={stTitle} />}
           {/* The CLI's own mark, not its name in bold — the panel is a column
               of near-identical rows and a glyph reads faster than a word. */}
           {/* No id means we can see the program but cannot name whose it
@@ -762,6 +943,54 @@ export function AgentsPanel({
           ))}
         </>
       )}
+      {/* What every agent here reads before it sees any code. A count and the
+          headline files; the tab is where they're actually edited. */}
+      <Section
+        title="Instructions"
+        // The count is what the list below shows — the instruction files in
+        // effect. Counting every scanned file put "143" (mostly global skills)
+        // over a list of four.
+        count={headlineInstructions.live}
+        // Collapsed until asked for: instruction files change rarely, and this
+        // list sat between the pending questions and the running agents — the
+        // two things the panel exists for.
+        collapseKey="instructions"
+        action={
+          <button
+            className="btn-icon"
+            title="Open all agent instructions — CLAUDE.md, AGENTS.md, skills, subagents"
+            onClick={() => onOpenInstructions?.()}
+          >
+            ⤢
+          </button>
+        }
+      >
+        {instructionsFailed ? (
+          <div className="tree-empty">Couldn't look for instruction files.</div>
+        ) : instructionFiles === null ? (
+          <div className="tree-empty">Looking…</div>
+        ) : headlineInstructions.rows.length === 0 ? (
+          <div className="tree-empty">
+            No instruction files yet. Agents here start with nothing but your prompt —
+            open this to write the first one.
+          </div>
+        ) : (
+          headlineInstructions.rows.slice(0, 6).map((f) => (
+            <div className="task-row" key={f.path}>
+              <span className={`instr-row-mark ${f.exists ? "" : "is-missing"}`} />
+              <span
+                className={`task-label task-label-link ${f.exists ? "" : "task-label-dim"}`}
+                title={`${f.path}\nRead by ${f.agents.join(", ")}`}
+                onClick={() => onOpenInstructions?.(f.path)}
+              >
+                {f.title ?? f.label}
+              </span>
+              {!f.exists && <span className="task-note">create</span>}
+            </div>
+          ))
+        )}
+      </Section>
+
       {/* Shared context — opt-in, and always inspectable. */}
       <div className="side-panel-head">
         <span>Shared context</span>
@@ -835,14 +1064,15 @@ export function AgentsPanel({
       >
 
       {/* Hooks genuinely absent — offer the one-click setup. */}
-      {noHookSignal && !showHookHelp && hooksInstalled === false && (
+      {noHookSignal && !showHookHelp && unhooked !== null && unhooked.length > 0 && (
         <div className="hook-nudge">
           <span>
-            Agents are running, but no events are streaming in — questions,
-            tasks and tokens won't show until hooks are set up.
+            No events are streaming in from{" "}
+            {unhooked.map((id) => AGENT_LABELS.find((a) => a.id === id)?.label ?? id).join(", ")} —
+            questions, tasks and tokens won't show until hooks are set up.
           </span>
-          <button className="btn btn-accent" onClick={() => void autoSetup("claude")}>
-            Set up Claude Code hooks
+          <button className="btn btn-accent" onClick={() => void autoSetup(unhooked)}>
+            Set up agent integrations
           </button>
           {setupResult && <p className="hook-result">{setupResult}</p>}
         </div>
@@ -851,7 +1081,7 @@ export function AgentsPanel({
       {/* Hooks are installed; these agents just predate them. Say the thing that
           actually fixes it (restart) instead of the setup button, and let it be
           dismissed — otherwise it nags in every project forever. */}
-      {noHookSignal && !showHookHelp && hooksInstalled === true && !hintDismissed && (
+      {noHookSignal && !showHookHelp && unhooked?.length === 0 && !hintDismissed && (
         <div className="hook-nudge">
           <span>
             Hooks are set up, but these agents started before that — restart one
@@ -866,27 +1096,45 @@ export function AgentsPanel({
       {showHookHelp && hookPath && (
         <div className="hook-help">
           <p>Stream tool-use events from agent CLIs into this panel:</p>
-          {/* One button per CLI with an auto-setup arm — every CLI whose
+          {/* One row per CLI with an auto-setup arm — every CLI whose
               integration surface supports it (see docs/agent-parity.md).
-              setup_agent_hooks in agents.rs is the registry for these. */}
-          <div className="hook-setup-row">
-            {[
-              { id: "claude", label: "Claude Code" },
-              { id: "codex", label: "Codex" },
-              { id: "agy", label: "Antigravity" },
-              { id: "aider", label: "Aider" },
-              { id: "opencode", label: "OpenCode" },
-              { id: "omp", label: "oh-my-pi" },
-              { id: "amp", label: "Amp" },
-            ].map((a) => (
-              <button
-                key={a.id}
-                className="btn btn-accent"
-                onClick={() => void autoSetup(a.id)}
-              >
-                {a.label}
-              </button>
-            ))}
+              SUPPORTED_AGENTS in agents.rs is the registry for these.
+              Each row states what is actually on disk: a registration that
+              silently failed used to be invisible here, which is how one
+              survived unnoticed until a user asked why an agent was quiet. */}
+          <div className="hook-setup-list">
+            {AGENT_LABELS.map((a) => {
+              const h = health.find((x) => x.agent === a.id);
+              return (
+                <div key={a.id} className="hook-setup-row">
+                  <span className="hook-setup-name">{a.label}</span>
+                  {h && !h.cli_installed && (
+                    <span className="hook-setup-state" title="This CLI isn't on your PATH">
+                      not installed
+                    </span>
+                  )}
+                  {h?.cli_installed && (
+                    <>
+                      <span
+                        className={`hook-setup-state ${HEALTH_TONE[h.hooks] ?? ""}`}
+                        title={HEALTH_HELP.hooks[h.hooks] ?? h.hooks}
+                      >
+                        hooks {h.hooks}
+                      </span>
+                      <span
+                        className={`hook-setup-state ${HEALTH_TONE[h.mcp] ?? ""}`}
+                        title={HEALTH_HELP.mcp[h.mcp] ?? h.mcp}
+                      >
+                        MCP {h.mcp}
+                      </span>
+                    </>
+                  )}
+                  <button className="btn btn-accent" onClick={() => void autoSetup(a.id)}>
+                    Set up
+                  </button>
+                </div>
+              );
+            })}
           </div>
           {setupResult && <p className="hook-result">{setupResult}</p>}
           <p>

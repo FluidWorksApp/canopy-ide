@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, useEffect, useState } from "react";
 import { CloseIcon } from "./icons";
 import type { Project } from "../projects";
 import type { TabDrag } from "../tabDrag";
@@ -10,6 +10,41 @@ import type { TabDrag } from "../tabDrag";
 // class is simply absent — nothing changes there.
 const IS_MAC =
   typeof navigator !== "undefined" && navigator.platform.toUpperCase().includes("MAC");
+
+/** True while the window is in macOS fullscreen, where the traffic lights are
+ *  hidden and the space reserved for them would read as a dead gap. There's no
+ *  dedicated fullscreen event, but every enter/exit resizes the window, so
+ *  onResized is the reliable trigger. Always false off macOS and outside
+ *  Tauri, where the import throws and the class is never applied anyway. */
+function useMacFullscreen(): boolean {
+  const [full, setFull] = useState(false);
+  useEffect(() => {
+    if (!IS_MAC) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const win = getCurrentWindow();
+        const sync = async () => {
+          const v = await win.isFullscreen();
+          if (!cancelled) setFull(v);
+        };
+        await sync();
+        const off = await win.onResized(() => void sync());
+        if (cancelled) off();
+        else unlisten = off;
+      } catch {
+        // Not under Tauri (browser dev) — stay false.
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+  return full;
+}
 
 interface TitleBarProps {
   openProjects: Project[];
@@ -45,13 +80,16 @@ function TitleBarImpl({
   onNewProject,
   onManageProjects,
 }: TitleBarProps) {
+  const fullscreen = useMacFullscreen();
   return (
     // data-tauri-drag-region makes the bar background draggable (like grabbing
     // a native titlebar). Tauri checks the mousedown target, so interactive
     // children (pills, buttons) — which are the target, not this div — still
     // register clicks normally without opting out.
     <div
-      className={`titlebar ${IS_MAC ? "titlebar-overlay" : ""}`}
+      className={`titlebar ${IS_MAC ? "titlebar-overlay" : ""} ${
+        IS_MAC && fullscreen ? "titlebar-fullscreen" : ""
+      }`}
       data-tauri-drag-region
     >
       {/* The strip around the pills is draggable too — the pills/badges/close

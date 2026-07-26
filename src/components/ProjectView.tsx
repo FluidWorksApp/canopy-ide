@@ -24,6 +24,8 @@ import { SharedProjectView } from "./SharedProjectView";
 import type { AgentCli, Project } from "../projects";
 import {
   AGENT_CLIS,
+  AGENT_CLIS_CHANGED_EVENT,
+  binName,
   SHELL_PATTERN,
   checkCliUpdates,
   checkInstalledClis,
@@ -32,6 +34,7 @@ import {
   PREREQS,
   restoreCommand,
   resumeSessionId,
+  shellBin,
   startCommand,
   updateCommand,
 } from "../projects";
@@ -64,6 +67,15 @@ import {
   type MicroTaskDef,
 } from "../microTasks";
 import { TasksPanel, type RunningMicroTask } from "./TasksPanel";
+import { TaskHistoryView } from "./TaskHistoryView";
+import { InstructionsView } from "./InstructionsView";
+import {
+  endAbandonedRun,
+  recordTaskEnd,
+  recordTaskStart,
+  updateTaskRun,
+  type TaskRun,
+} from "../taskHistory";
 import { taskMenuItem } from "../taskMenu";
 import { viewerKindFor } from "./viewers";
 import { ensureLanguageServer } from "../lsp/client";
@@ -142,8 +154,10 @@ export interface TermSubTab {
   notice?: string;
   unread?: boolean;
   /** An ephemeral micro-task tab: closed and its session forgotten once the
-   *  agent calls canopy_job_done (or the user closes it). Never restored. */
-  micro?: { taskId: string };
+   *  agent calls canopy_job_done (or the user closes it). Never restored.
+   *  `runId` keys this run's entry in the task history — the record outlives
+   *  the tab, which is the point. */
+  micro?: { taskId: string; runId?: string };
 }
 
 export interface FileSubTab {
@@ -205,6 +219,22 @@ export interface AgentSubTab {
   ptyId?: number;
 }
 
+/** Every micro-task that has finished, with what it reported and the tail of
+ *  its terminal. One per project — opening it twice just focuses the first. */
+export interface TaskHistorySubTab {
+  id: string;
+  type: "task-history";
+}
+
+/** The instruction files every agent reads before it sees any code — the
+ *  project's, the user's own, and the skill and subagent packs. One per
+ *  project; `focus` is the file a panel row asked it to open on. */
+export interface InstructionsSubTab {
+  id: string;
+  type: "instructions";
+  focus?: string;
+}
+
 export interface ChatSubTab {
   id: string;
   type: "chat";
@@ -258,6 +288,8 @@ export type SubTab =
   | BranchSubTab
   | ReviewSubTab
   | AgentSubTab
+  | TaskHistorySubTab
+  | InstructionsSubTab
   | ChatSubTab;
 
 /** Every tab that isn't a terminal — the "document" tabs, rendered together
@@ -290,6 +322,10 @@ function describeTab(tab: SubTab | undefined) {
       return { kind: "branch", label: tab.branch.branch };
     case "agent":
       return { kind: "agent", label: tab.agent, cwd: tab.cwd, ptyId: tab.ptyId ?? null };
+    case "task-history":
+      return { kind: "task-history", label: "Completed tasks" };
+    case "instructions":
+      return { kind: "instructions", label: "Agent instructions" };
     default:
       return { kind: tab.type };
   }
@@ -338,6 +374,10 @@ function tabDisplayLabel(t: SubTab): string {
       return t.name;
     case "review":
       return t.review.title;
+    case "task-history":
+      return "Completed tasks";
+    case "instructions":
+      return "Agent instructions";
     case "shared-project":
       return t.name;
     case "preview":
@@ -950,6 +990,12 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const [wsDigests, setWsDigests] = useState<ipc.SessionDigest[]>([]);
   const [thisInstance, setThisInstance] = useState<string | null>(null);
   const [wsDrawerOpen, setWsDrawerOpen] = useState(false);
+  // Mirrored for the agent-action handler, which is mounted once and must not
+  // re-subscribe every time a digest poll lands.
+  const wsDigestsRef = useRef(wsDigests);
+  wsDigestsRef.current = wsDigests;
+  const thisInstanceRef = useRef(thisInstance);
+  thisInstanceRef.current = thisInstance;
   useEffect(() => {
     void ipc.instanceId().then(setThisInstance).catch(() => {});
   }, []);
@@ -1000,9 +1046,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // state. Snapshotted on change rather than on unmount: a crash or a force
   // quit never runs cleanup, and those are precisely the cases this exists
   // for.
+  // Micro-task tabs are excluded: they're one-shot and ephemeral, so
+  // "reopen it" would re-run a task that already finished.
   useEffect(() => {
     const open: RememberedTerminal[] = tabs
-      .filter((t): t is TermSubTab => t.type === "terminal" && !t.exited)
+      .filter((t): t is TermSubTab => t.type === "terminal" && !t.exited && !t.micro)
       .map((t) => ({
         cwd: t.cwd,
         command: t.command,
@@ -1016,7 +1064,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const [remembered, setRemembered] = useState<RememberedTerminal[]>([]);
   useEffect(() => {
     if (tabs.length > 0 || !visible) return;
-    setRemembered(rememberedTerminals(project.id));
+    // The command marker drops micro-tasks snapshotted before they were
+    // excluded above — they'd otherwise sit in the list until overwritten.
+    setRemembered(
+      rememberedTerminals(project.id).filter(
+        (t) => !(t.command ?? "").includes("CANOPY_MICRO_TASK="),
+      ),
+    );
   }, [tabs.length, visible, project.id]);
 
   // A terminal running `claude` or `omp` is an agent, not a shell — listing it
@@ -1318,6 +1372,33 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     [patchTabRaw],
   );
 
+  /** Open the completed-tasks tab, or focus it if it's already up. Only ever
+   *  one — it's a view of a single app-wide log, so a second would be a copy. */
+  const openTaskHistory = useCallback(() => {
+    const existing = tabsRef.current.find((t) => t.type === "task-history");
+    if (existing) {
+      setActiveTabId(existing.id);
+      return;
+    }
+    const id = tabId();
+    setTabs((prev) => [...prev, { id, type: "task-history" }]);
+    setActiveTabId(id);
+  }, []);
+
+  /** Open the agent-instructions tab, focused on one file when a panel row
+   *  asked for it. One per project, like the history tab. */
+  const openInstructions = useCallback((focus?: string) => {
+    const existing = tabsRef.current.find((t) => t.type === "instructions");
+    if (existing) {
+      if (focus) patchTabRaw(existing.id, { focus } as Partial<SubTab>);
+      setActiveTabId(existing.id);
+      return;
+    }
+    const id = tabId();
+    setTabs((prev) => [...prev, { id, type: "instructions", focus }]);
+    setActiveTabId(id);
+  }, [patchTabRaw]);
+
   /** Open an issue as its own tab, reusing one already open for it. */
   const openTicket = useCallback(
     (ticket: ipc.TicketInfo, source: string) => {
@@ -1418,7 +1499,21 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         def.icon,
       );
       if (!id) return;
-      patchTabRaw(id, { micro: { taskId: def.id } } as Partial<SubTab>);
+      // Logged at launch, not at completion: a task that is stopped, or whose
+      // agent dies without ever reporting, still has to leave a trace — and the
+      // brief is only in hand here. The protocol is stripped back off; it is the
+      // same boilerplate on every run and pure noise in the history.
+      const runId = recordTaskStart({
+        taskId: def.id,
+        label: def.label,
+        icon: def.icon,
+        agent: cli.id,
+        cwd: dir,
+        projectId: project.id,
+        projectName: project.name,
+        brief: def.buildContext(payload, userQuery),
+      });
+      patchTabRaw(id, { micro: { taskId: def.id, runId } } as Partial<SubTab>);
       if (start.typePrompt) {
         setTimeout(() => {
           const pty = tabsRef.current.find(
@@ -1430,7 +1525,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         }, 2500);
       }
     },
-    [addTerminal, patchTabRaw, onNotice],
+    [addTerminal, patchTabRaw, onNotice, project.id],
   );
 
   /** Run a brief that was composed on the spot (a diff surface's "ask about
@@ -1452,7 +1547,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
    *  so the tool result and last words land — with a timer as backstop for a
    *  broken hook. Keyed by pty id; sid is captured at job_done time because the
    *  event stream goes quiet once the PTY dies. */
-  const microFinish = useRef(new Map<number, { sid?: string; since: number; timer: number }>());
+  const microFinish = useRef(
+    new Map<number, { tabId: string; sid?: string; since: number; timer: number }>(),
+  );
 
   const reapMicroTask = useCallback((ptyId: number) => {
     const entry = microFinish.current.get(ptyId);
@@ -1468,6 +1565,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       // resurface in restorables.
       if (sid) setTimeout(() => void ipc.sessionForget(sid).catch(() => {}), 500);
     });
+    // The promise is that the terminal closes itself, so don't leave that to
+    // pty:exit alone: a CLI that wedges on its way out never reaches EOF, and
+    // the finished task would sit there for good. A clean exit closes the tab
+    // long before this fires, and closing an already-closed tab is a no-op.
+    setTimeout(() => closeTabRef.current(entry.tabId), 4000);
   }, []);
 
   const finishMicroTask = useCallback(
@@ -1477,6 +1579,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       if (microFinish.current.has(ptyId)) return;
       const timer = window.setTimeout(() => reapMicroTask(ptyId), 10_000);
       microFinish.current.set(ptyId, {
+        tabId: tab.id,
         sid: liveSessionByPtyRef.current.get(ptyId),
         since: Date.now(),
         timer,
@@ -1573,6 +1676,19 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   useEffect(() => {
     refreshInstalled();
     refreshUpdates();
+  }, [refreshInstalled, refreshUpdates]);
+
+  // Rebinding a CLI to the binary this machine actually has (Settings → Agents)
+  // changes what there is to probe. Without this, the row that sent the user to
+  // Settings in the first place goes on offering to install until the launcher
+  // is reopened — which reads as the setting not having worked.
+  useEffect(() => {
+    const onChanged = () => {
+      refreshInstalled();
+      refreshUpdates();
+    };
+    window.addEventListener(AGENT_CLIS_CHANGED_EVENT, onChanged);
+    return () => window.removeEventListener(AGENT_CLIS_CHANGED_EVENT, onChanged);
   }, [refreshInstalled, refreshUpdates]);
 
   // Looking at a tab is what marks it read. As an effect rather than something
@@ -1700,8 +1816,33 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           (t): t is TermSubTab => t.type === "terminal" && a.ptyId != null && t.ptyId === a.ptyId,
         );
         if (!tab || !tab.micro) return;
-        if (a.status === "blocked") setActiveTabId(tab.id);
-        else finishMicroTask(tab);
+        const runId = tab.micro.runId;
+        // Files the session touched, when a hook wrote a digest for it — the
+        // same pty→digest binding the Agents panel uses.
+        const files =
+          tab.ptyId != null
+            ? digestBySurface(wsDigestsRef.current, thisInstanceRef.current).get(
+                String(tab.ptyId),
+              )?.files
+            : undefined;
+        if (a.status === "blocked") {
+          // Blocked is not an ending — the agent is waiting on the user and the
+          // run continues. Keep what it said and mark that it asked, so that if
+          // the user walks away instead of answering, closing the tab can settle
+          // it as "blocked" rather than the flatter "stopped".
+          if (runId)
+            updateTaskRun(runId, {
+              summary: a.summary,
+              url: a.url,
+              files,
+              askedForUser: true,
+            });
+          setActiveTabId(tab.id);
+        } else {
+          if (runId)
+            recordTaskEnd(runId, { status: "done", summary: a.summary, url: a.url, files });
+          finishMicroTask(tab);
+        }
         return;
       }
       if (d?.projectId !== project.id) return;
@@ -1796,6 +1937,20 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   }, []);
 
   const closeTab = useCallback((id: string) => {
+    // The last moment the terminal's scrollback exists: the handle goes on the
+    // next line and the buffer dies with the unmount. Both endings pass through
+    // here — job_done's self-close and the user closing the tab — so capturing
+    // once here covers a finished task and an abandoned one alike. recordTaskEnd
+    // ignores a run that already settled, so "stopped" can't clobber "done".
+    const closingTab = tabsRef.current.find((t) => t.id === id);
+    if (closingTab?.type === "terminal" && closingTab.micro?.runId) {
+      const runId = closingTab.micro.runId;
+      const output = termHandles.current.get(id)?.captureText(8000) || undefined;
+      if (output) updateTaskRun(runId, { output });
+      // A no-op for a run that already reported done; otherwise it settles as
+      // "blocked" if the agent had asked for the user, else "stopped".
+      endAbandonedRun(runId, output);
+    }
     termHandles.current.delete(id);
     setTabs((prev) => {
       const closing = prev.find((t) => t.id === id);
@@ -2157,7 +2312,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       agentId?: string;
       cwd: string;
       text: string;
-    }): Promise<{ delivered: boolean; note: string }> => {
+    }): Promise<{ delivered: boolean; note: string; ptyId?: number }> => {
       const { sessionId, cwd, text } = opts;
       const agentId = opts.agentId ?? "agent";
       const alive = (pty: number | null | undefined): pty is number =>
@@ -2171,13 +2326,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       // 1) The workspace's own terminal, if it's still live.
       if (alive(opts.ptyId)) {
         typeInto(opts.ptyId);
-        return { delivered: true, note: `Sent to ${agentId}.` };
+        return { delivered: true, note: `Sent to ${agentId}.`, ptyId: opts.ptyId };
       }
       // 2) Any live terminal running this session (it may have moved tabs).
       const moved = sessionId ? livePtyForSession() : undefined;
       if (moved != null) {
         typeInto(moved);
-        return { delivered: true, note: `Sent to ${agentId}.` };
+        return { delivered: true, note: `Sent to ${agentId}.`, ptyId: moved };
       }
       // 3) Ended: resume, wait for the session to report a PTY, then deliver.
       if (!sessionId) {
@@ -2195,7 +2350,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           // A moment past first paint before pasting into the resumed TUI.
           await new Promise((r) => setTimeout(r, 800));
           typeInto(back);
-          return { delivered: true, note: `Resumed ${agentId} and sent the comments.` };
+          return {
+            delivered: true,
+            note: `Resumed ${agentId} and sent the comments.`,
+            ptyId: back,
+          };
         }
       }
       return {
@@ -2452,17 +2611,25 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     const cwd = at ?? componentsRef.current[0]?.path;
     if (!cwd) return;
     if (installed[cli.bin]) {
-      addTerminal(cwd, cli.bin, cli.name, cli.icon);
+      addTerminal(cwd, shellBin(cli.bin), cli.name, cli.icon);
       // Surface the new agent where it lives: the Agents section, expanded so
       // the just-launched row is actually in view.
       setSideTab("agents");
       setCollapsed(false);
+    } else if (cli.rebound) {
+      // The vendor's installer would install the vendor's binary, which an
+      // override pointing somewhere else can never be satisfied by — so the
+      // "install" offer would repeat forever, which is the loop rebinding
+      // exists to end. Send them to the setting that is actually wrong.
+      onNotice(
+        `${cli.name} is set to \`${cli.bin}\`, which isn't on this machine — check Settings → Agents.`,
+      );
     } else {
       // A run tab, so the installer exits when done — and that exit is the
       // signal to re-probe (see onExited below). No timers, no staleness.
       addTerminal(cwd, cli.install, `install ${cli.name}`, "⬇", true);
     }
-  }, [installed, addTerminal]);
+  }, [installed, addTerminal, onNotice]);
 
   /** Run `cli`'s updater in a run tab. Its exit re-probes versions (see
    *  onExited), so the badge clears the moment the update lands — no timers. */
@@ -2782,10 +2949,17 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       // when the agent was typed by hand into a plain shell), then the launch
       // command as a fallback.
       const procs = projectStats.find((s) => s.id === t.ptyId)?.procs ?? [];
+      // Folded through binName on both sides: an override can be a full path
+      // while a process table reports a basename, and an exact fold is what
+      // keeps `amp` from matching a process called `ramp`.
       const byProc = AGENT_CLIS.find((c) =>
-        procs.some((p) => p.name === c.bin || p.cmd.split(" ")[0]?.endsWith(c.bin)),
+        procs.some(
+          (p) => binName(p.name) === binName(c.bin) || binName(p.cmd.split(" ")[0] ?? "") === binName(c.bin),
+        ),
       );
-      const byCommand = AGENT_CLIS.find((c) => (t.command ?? "").startsWith(c.bin));
+      // Via the registry id, so a terminal remembered from before a rebind —
+      // still carrying the vendor's name — keeps its agent and its icon.
+      const byCommand = AGENT_CLIS.find((c) => c.id === agentIdForCommand(t.command));
       return {
         tabId: t.id,
         title: t.customTitle ?? t.title,
@@ -2925,9 +3099,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           const stat = projectStats.find((s) => s.id === activeTab.ptyId);
           const procs = stat?.procs ?? [];
           const byProc = AGENT_CLIS.find((c) =>
-            procs.some((p) => p.name === c.bin || p.cmd.split(" ")[0]?.endsWith(c.bin)),
+            procs.some(
+              (p) =>
+                binName(p.name) === binName(c.bin) ||
+                binName(p.cmd.split(" ")[0] ?? "") === binName(c.bin),
+            ),
           );
-          const byCommand = AGENT_CLIS.find((c) => (activeTab.command ?? "").startsWith(c.bin));
+          const byCommand = AGENT_CLIS.find((c) => c.id === agentIdForCommand(activeTab.command));
           const agent = (byProc ?? byCommand)?.id ?? "agent";
           // The live session cwd — the same source the Agents panel keys off,
           // so the overlay and a panel-opened tab resolve the same workspace.
@@ -3184,6 +3362,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 text,
               })
             }
+            onFocusAgent={jumpToPty}
             onRaisePrTask={
               tab.repo
                 ? (branch, worktree) =>
@@ -3234,28 +3413,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             review={tab.review}
             agentBar={
               <AgentQueryBar
-                agentTargets={agentTargets}
-                installed={installed}
-                newAgentLabel="New agent in this project"
-                label="Send to agent"
                 placeholder="Ask an agent to review this…"
-                onSend={(target, query) =>
-                  void writeReviewPatch(tab.review).then((path) => {
-                    if (path) sendTicketToAgent(target, reviewContext(tab.review, path, query));
-                  })
-                }
-                onStart={(agentId, query) =>
-                  void writeReviewPatch(tab.review).then((path) => {
-                    const dir = componentsRef.current[0]?.path;
-                    if (!path || !dir) return;
-                    startAgentInDir(
-                      dir,
-                      agentId,
-                      reviewContext(tab.review, path, query),
-                      `Review ${tab.review.branch}`,
-                    );
-                  })
-                }
                 onRunTask={(query) =>
                   void writeReviewPatch(tab.review).then((path) => {
                     const dir = componentsRef.current[0]?.path;
@@ -3292,6 +3450,31 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               }
               startAgentInDir(dir, agentId, text, "Preview feedback");
             }}
+            onNotice={onNotice}
+          />
+        );
+      case "task-history":
+        return (
+          <TaskHistoryView
+            projectId={project.id}
+            projectName={project.name}
+            // Re-runs the stored brief rather than the task definition: a
+            // built-in's payload came from the surface it was clicked on
+            // (a branch tab, a PR), which is long gone — but the brief that
+            // payload produced was recorded, and it says everything.
+            onRunAgain={(run: TaskRun) =>
+              runAdhocTask(run.label, run.brief, run.cwd)
+            }
+            onOpenFile={(path) => void openFile(path)}
+          />
+        );
+      case "instructions":
+        return (
+          <InstructionsView
+            roots={roots}
+            installed={installed}
+            focus={tab.focus}
+            active={tab.id === activeTabId && visible}
             onNotice={onNotice}
           />
         );
@@ -3337,23 +3520,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             onCloseDiff={() => patchFile(tab.file.path, { view: "source", diffOriginal: null })}
             diffAgentBar={
               <AgentQueryBar
-                agentTargets={agentTargets}
-                installed={installed}
-                newAgentLabel="New agent in this project"
                 placeholder="Ask an agent about this file's changes…"
-                onSend={(target, query) =>
-                  sendTicketToAgent(target, fileDiffContext(tab.file.path, query))
-                }
-                onStart={(agentId, query) => {
-                  const dir = repoForFile(tab.file.path);
-                  if (!dir) return onNotice("No git repository in this project.");
-                  startAgentInDir(
-                    dir,
-                    agentId,
-                    fileDiffContext(tab.file.path, query),
-                    tab.file.name,
-                  );
-                }}
                 onRunTask={(query) => {
                   const dir = repoForFile(tab.file.path);
                   if (!dir) return onNotice("No git repository in this project.");
@@ -3700,7 +3867,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                       Agents — started fresh, no history to resume
                     </div>
                     {freshAgents.map((t, i) => {
-                      const cli = AGENT_CLIS.find((c) => (t.command ?? "").startsWith(c.bin));
+                      const cli = AGENT_CLIS.find((c) => c.id === agentIdForCommand(t.command));
                       return (
                         <div
                           key={`a-${t.cwd}-${i}`}
@@ -3821,6 +3988,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                           text,
                         })
                       }
+                      onFocusAgent={jumpToPty}
                       onClose={() => setWsDrawerOpen(false)}
                       onRaisePrTask={
                         agentTermWs.repo
@@ -4158,18 +4326,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           }
           agentBar={
             <AgentQueryBar
-              agentTargets={agentTargets}
-              installed={installed}
-              newAgentLabel="New agent in this project"
               placeholder="Ask an agent about these changes…"
-              onSend={(target, query) =>
-                sendTicketToAgent(target, sessionChangesContext(changeContextGroups(), query))
-              }
-              onStart={(agentId, query) => {
-                const dir = changeGroups[0]?.repo ?? componentsRef.current[0]?.path;
-                if (!dir) return onNotice("No git repository in this project.");
-                startAgentInDir(dir, agentId, sessionChangesContext(changeContextGroups(), query), "Changes");
-              }}
               onRunTask={(query) => {
                 const dir = changeGroups[0]?.repo ?? componentsRef.current[0]?.path;
                 if (!dir) return onNotice("No git repository in this project.");
@@ -4212,6 +4369,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onRunCustom={(task: CustomMicroTask, dir: string, query: string) =>
             startMicroTask(customTaskDef(task), { dir }, query)
           }
+          onOpenHistory={openTaskHistory}
+          projectId={project.id}
         />
       ))}
       {sidePane("agents", () => (
@@ -4236,6 +4395,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             addTerminal(cwd, cmd, title, AGENT_CLIS.find((c) => c.id === agentId)?.icon)
           }
           onNotice={onNotice}
+          onOpenInstructions={openInstructions}
+          installed={installed}
         />
       ))}
     </div>

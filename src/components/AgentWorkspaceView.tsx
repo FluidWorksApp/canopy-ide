@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { DiffView, DiffModeEnum, SplitSide } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import { createTwoFilesPatch } from "diff";
+import { fmtTokens } from "../format";
 import * as ipc from "../ipc";
 import type { Notify } from "../types";
 import { splitPatch } from "./PrView";
@@ -16,10 +17,6 @@ import { sessionCost } from "../pricing";
 import { getSettings } from "../settings";
 import type { CustomMicroTask } from "../microTasks";
 
-// Compact number formats for the header stats strip — matched to the status
-// tray so the same session reads the same everywhere.
-const fmtTokens = (n: number) =>
-  n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
 const fmtCost = (n: number) => (n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`);
 /** Tokens Canopy sent the model — fresh input plus both cache legs. */
 const sentTokens = (u: ipc.AgentSessionUsage) =>
@@ -49,7 +46,13 @@ interface AgentWorkspaceViewProps {
    *  live PTY, or resumed first if the session has ended. Absent (or a resolved
    *  `delivered:false`) means the review comments can't be sent, so the compose
    *  UI stays but "Send" reports why. */
-  onMessageAgent?: (text: string) => Promise<{ delivered: boolean; note: string }>;
+  onMessageAgent?: (
+    text: string,
+  ) => Promise<{ delivered: boolean; note: string; ptyId?: number | null }>;
+  /** Bring the agent's terminal to the front. Called after comments land, so
+   *  the review ends where the answer will appear rather than on the diff the
+   *  agent is about to change. */
+  onFocusAgent?: (ptyId: number) => void;
   /** When set, the header shows a close button — the overlay is the single
    *  banner. The standalone agent tab omits it (the tab closes itself). */
   onClose?: () => void;
@@ -229,19 +232,39 @@ function buildFileEdit(
 
 const sideName = (s: number) => (s === SplitSide.old ? "old" : "new");
 
+// Cheap deep-equality for polled payloads. The point isn't the comparison, it's
+// keeping the old object when nothing changed: a new identity re-renders the
+// diff below, and a rebuilt diff drops whatever comment was being written into
+// it. Both are small — a session's journal and the files it touched.
+export const sameJson = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+export const sameMap = (a: Map<string, string>, b: Map<string, string>) =>
+  a.size === b.size && [...b].every(([k, v]) => a.get(k) === v);
+
 // The inline composer the diff viewer drops on a line when you click the "+".
-// Deliberately tiny: a textarea, add/cancel, ⌘/Ctrl+Enter to add. It owns only
-// its own draft text; the saved comment lives in the workspace's state.
-function CommentComposer({
+// Deliberately tiny: a textarea, add/cancel, ⌘/Ctrl+Enter to add. The saved
+// comment lives in the workspace's state — and so does the half-typed one:
+// holding the draft here would lose it every time the agent under review
+// touched a file and the diff below rebuilt.
+export function CommentComposer({
+  text,
+  onText,
   onAdd,
   onCancel,
 }: {
+  text: string;
+  onText: (v: string) => void;
   onAdd: (body: string) => void;
   onCancel: () => void;
 }) {
-  const [text, setText] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => ref.current?.focus(), []);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.focus();
+    // Reopened on a restored draft: put the caret where they left off, not
+    // in front of their own sentence.
+    el.setSelectionRange(el.value.length, el.value.length);
+  }, []);
   const commit = () => {
     const b = text.trim();
     if (b) onAdd(b);
@@ -254,7 +277,7 @@ function CommentComposer({
         className="aw-cc-input"
         placeholder="Comment for the agent — ⌘⏎ to add"
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => onText(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
             e.preventDefault();
@@ -316,6 +339,7 @@ export function AgentWorkspaceView({
   onOpenTerminal,
   onNotice,
   onMessageAgent,
+  onFocusAgent,
   onClose,
   onRaisePrTask,
   onReviewPrTask,
@@ -365,6 +389,19 @@ export function AgentWorkspaceView({
       // storage full/blocked — the in-memory drafts still work this session.
     }
   }, [comments, commentsKey]);
+  // Half-typed comments, by line, held above the diff so a rebuild underneath
+  // can't take them. Cleared when the comment is added or the composer
+  // cancelled — a draft only outlives the widget, not the decision.
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const setDraft = (key: string, v: string) =>
+    setDrafts((prev) => ({ ...prev, [key]: v }));
+  const dropDraft = (key: string) =>
+    setDrafts((prev) => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
   const addComment = (c: Omit<DraftComment, "id" | "selected">) =>
     setComments((prev) => [
       ...prev,
@@ -399,13 +436,21 @@ export function AgentWorkspaceView({
     };
   }, [agent, cwd, sessionId, digest?.updated, tick]);
 
+  // Whose journal this is. Changing session is the one time the old edits must
+  // go immediately — a poll for the same session must not, or the diff below
+  // unmounts and takes any open comment composer with it.
+  useEffect(() => {
+    setEdits([]);
+  }, [repo, sessionId]);
   useEffect(() => {
     let live = true;
-    setEdits([]);
     if (!sessionId) return;
     void ipc
       .agentEdits(repo, sessionId)
-      .then((e) => live && setEdits(e))
+      // Replace on arrival, and only when it actually differs: the agent under
+      // review writes a file every few seconds, and a fresh array each poll
+      // would rebuild every DiffView beneath the review being written.
+      .then((e) => live && setEdits((prev) => (sameJson(prev, e) ? prev : e)))
       .catch(() => {});
     return () => {
       live = false;
@@ -421,7 +466,7 @@ export function AgentWorkspaceView({
     let live = true;
     const paths = [...new Set(edits.filter((e) => e.present).map((e) => e.path))];
     if (!paths.length) {
-      setFileContents(new Map());
+      setFileContents((prev) => (prev.size ? new Map() : prev));
       return;
     }
     const abs = (p: string) => (p.startsWith("/") ? p : repo ? `${repo}/${p}` : p);
@@ -437,7 +482,7 @@ export function AgentWorkspaceView({
       if (!live) return;
       const m = new Map<string, string>();
       for (const [p, c] of pairs) if (c != null) m.set(p, c);
-      setFileContents(m);
+      setFileContents((prev) => (sameMap(prev, m) ? prev : m));
     });
     return () => {
       live = false;
@@ -502,9 +547,13 @@ export function AgentWorkspaceView({
 
   // The heavy half, per pane, exactly like BranchView: uncommitted diffs run
   // in the agent's own worktree, the cumulative diff against base.
+  // Clearing belongs to the view changing, not to re-reading it: switching pane
+  // or branch shows something else, a poll shows the same thing again.
+  useEffect(() => {
+    setPatch(null);
+  }, [pane, ws?.branch, ws?.workdir, ws?.isolated]);
   useEffect(() => {
     let live = true;
-    setPatch(null);
     if (!repo || !ws?.branch || !pane) return;
     // The edits pane is journal-only — no git patch to fetch.
     if (pane === "edits") return;
@@ -516,7 +565,7 @@ export function AgentWorkspaceView({
         ws.isolated ? ws.workdir : null,
         pane === "uncommitted",
       )
-      .then((p) => live && setPatch(p))
+      .then((p) => live && setPatch((prev) => (prev?.patch === p.patch ? prev : p)))
       .catch((e) => live && onNotice(String(e), "error"));
     return () => {
       live = false;
@@ -615,8 +664,11 @@ export function AgentWorkspaceView({
             ? diffFile.getOldPlainLine(lineNumber)
             : diffFile.getNewPlainLine(lineNumber);
         const code = (lo?.value ?? "").toString();
+        const draftKey = `${diffKey}:${sideName(side)}:${lineNumber}`;
         return (
           <CommentComposer
+            text={drafts[draftKey] ?? ""}
+            onText={(v) => setDraft(draftKey, v)}
             onAdd={(body) => {
               addComment({
                 diffKey,
@@ -628,9 +680,13 @@ export function AgentWorkspaceView({
                 realLine,
                 body,
               });
+              dropDraft(draftKey);
               onClose();
             }}
-            onCancel={onClose}
+            onCancel={() => {
+              dropDraft(draftKey);
+              onClose();
+            }}
           />
         );
       },
@@ -680,6 +736,11 @@ export function AgentWorkspaceView({
           res.note || `Sent ${list.length} comment${list.length === 1 ? "" : "s"} to ${agent}.`,
           "success",
         );
+        // The review is over the moment it's delivered: get out of the way and
+        // put the agent that's now acting on it in front. Only on success —
+        // a failed send leaves the comments and the workspace where they were.
+        onClose?.();
+        if (res.ptyId != null) onFocusAgent?.(res.ptyId);
       } else {
         onNotice(res.note || "Couldn't reach the agent.", "warn");
       }

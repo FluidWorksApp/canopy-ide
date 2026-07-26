@@ -34,6 +34,7 @@ import { Welcome } from "./components/Welcome";
 import { shouldOnboard, markOnboarded } from "./onboarding";
 import { loadZoom, setZoom, applyZoom, STEP } from "./zoom";
 import { stopWorkspaceServers } from "./lsp/client";
+import { sweepStaleRuns } from "./taskHistory";
 import { checkForUpdateAnyChannel, installUpdate, type UpdateAvailability } from "./updater";
 
 /** Tell the hook helper which projects share context between their sessions.
@@ -116,6 +117,13 @@ export default function App() {
     } catch {
       // Notifications are a garnish — never fail anything over them.
     }
+  }, []);
+  // A micro-task in flight when Canopy last quit has no terminal to come back
+  // to — its tab is ephemeral and never restored — so it can never report.
+  // Settle those before anything new is recorded, or they stay "running"
+  // forever: hidden from the history tab, still holding one of its slots.
+  useEffect(() => {
+    sweepStaleRuns();
   }, []);
   // Successes and status lines are transient; a failure stays until it has
   // been read and dismissed.
@@ -557,15 +565,25 @@ export default function App() {
         }),
       ),
     ];
-    // Auto-inject agent hooks (idempotent) so tool events stream in without setup.
-    void import("@tauri-apps/api/core").then(({ invoke }) => {
-      // Every CLI with a setup arm (see setup_agent_hooks). Each is
-      // idempotent; ones whose CLI hasn't run yet fail quietly and succeed on
-      // a later launch.
-      for (const agent of ["claude", "codex", "agy", "aider", "opencode", "omp", "amp"]) {
-        void invoke("setup_agent_hooks", { agent }).catch(() => {});
-      }
-    });
+    // Agent integrations used to be re-injected from here — one fire-and-forget
+    // invoke per CLI, `.catch(() => {})` on each. That wrote into the config of
+    // CLIs the machine didn't have and, because every error was discarded, let
+    // a registration fail on every launch without a trace. The same work now
+    // runs in agents::heal_integrations at startup, where it can see what's
+    // installed and report what it did. Only failures are surfaced: a healthy
+    // launch has nothing to say, and a repair that worked is not news.
+    // The pass starts before this webview does, so the event can fire with
+    // nobody listening. Ask for the cached report too, and let whichever
+    // arrives first be the one that speaks — a report that exists to break a
+    // silence must not be lost to a race.
+    let reported = false;
+    const reportHealth = (report: ipc.HealthReport | null) => {
+      if (reported || !report || report.failed.length === 0) return;
+      reported = true;
+      notify(`Agent integration needs attention — ${report.failed.join("; ")}`, "warn");
+    };
+    subs.push(ipc.onIntegrationHealth(reportHealth));
+    void ipc.agentHealthReport().then(reportHealth).catch(() => {});
     // Focus mode is reachable two ways: the native menu accelerator, and a
     // webview key handler. Belt and braces — the accelerator is what the menu
     // advertises, but a native Cmd+Shift+Enter can be swallowed before it

@@ -12,6 +12,7 @@ mod dictation;
 mod dictation;
 mod fsx;
 mod git;
+mod instructions;
 mod lsp;
 mod portal;
 mod preview;
@@ -336,6 +337,12 @@ pub fn run() {
             if let Err(e) = agents::install_hook_helper() {
                 log::warn!("hook helper not installed: {e}");
             }
+            // Then re-apply the integrations this machine already opted into.
+            // Every launch is also every update, which is when a generated hook
+            // file goes stale or a newly shipped step (the MCP registration was
+            // one) is missing from a config set up by an older version. Off the
+            // main thread: it shells out to find the CLIs.
+            agents::heal_integrations(app.handle().clone());
             agents::start_monitor(app.handle().clone());
             agents::start_hook_bridge(app.handle().clone());
             context::start(app.handle().clone());
@@ -379,6 +386,9 @@ pub fn run() {
             fsx::fs_duplicate,
             fsx::workspace_export,
             fsx::workspace_import,
+            instructions::instructions_scan,
+            instructions::instructions_read,
+            instructions::instructions_write,
             git::git_repos,
             git::git_repo_status,
             git::git_branches,
@@ -433,6 +443,8 @@ pub fn run() {
             agents::cli_versions,
             agents::setup_agent_hooks,
             agents::agent_hooks_installed,
+            agents::agent_integration_health,
+            agents::agent_health_report,
             agents::claude_session_stats,
             agents::agent_usage,
             agents::hook_bridge_path,
