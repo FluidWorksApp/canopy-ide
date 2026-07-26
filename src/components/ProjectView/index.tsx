@@ -767,7 +767,15 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // (by PTY surface id). Polled while an agent terminal is open; idle otherwise.
   const [wsDigests, setWsDigests] = useState<ipc.SessionDigest[]>([]);
   const [thisInstance, setThisInstance] = useState<string | null>(null);
-  const [wsDrawerOpen, setWsDrawerOpen] = useState(false);
+  /** Which agent terminals have their workspace overlay open, by ptyId.
+   *
+   *  Per-terminal, not one global flag. Opening the workspace is a statement
+   *  about the agent you opened it on — with a single boolean, switching to
+   *  another agent's terminal found the overlay already up and silently
+   *  re-pointed at that agent, so you'd land on a workspace you never asked to
+   *  see, covering the terminal you did. A Set also means A stays open when you
+   *  duck over to B and come back. */
+  const [wsOpenPtys, setWsOpenPtys] = useState<ReadonlySet<number>>(new Set());
   // Mirrored for the agent-action handler, which is mounted once and must not
   // re-subscribe every time a digest poll lands.
   const wsDigestsRef = useRef(wsDigests);
@@ -3046,12 +3054,38 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           return { repo, agent, cwd, sessionId, digest, ptyId: activeTab.ptyId as number };
         })()
       : null;
-  // Close the overlay when its agent terminal is no longer front — key on the
-  // terminal (ptyId) so it survives a digestless agent, which has no session id.
-  const wsKey = agentTermWs ? String(agentTermWs.ptyId) : null;
+  // Derived, not stored: the overlay shows when the terminal in front is one you
+  // opened it on. Anything else in front — another agent, a file, no agent tab
+  // at all — and there is nothing to close, because it was never open for that.
+  const wsDrawerPty = agentTermWs?.ptyId ?? null;
+  const wsDrawerOpen = wsDrawerPty != null && wsOpenPtys.has(wsDrawerPty);
+  const setWsDrawerOpen = useCallback(
+    (open: boolean) => {
+      if (wsDrawerPty == null) return;
+      setWsOpenPtys((prev) => {
+        if (prev.has(wsDrawerPty) === open) return prev;
+        const next = new Set(prev);
+        if (open) next.add(wsDrawerPty);
+        else next.delete(wsDrawerPty);
+        return next;
+      });
+    },
+    [wsDrawerPty],
+  );
+  // Forget terminals that have gone away. PTY ids can be reused, and a stale
+  // entry would open the workspace unbidden on whatever inherits the number.
+  const liveTermPtys = useMemo(
+    () => tabs.filter((t): t is TermSubTab => t.type === "terminal").map((t) => t.ptyId),
+    [tabs],
+  );
   useEffect(() => {
-    if (!wsKey) setWsDrawerOpen(false);
-  }, [wsKey]);
+    setWsOpenPtys((prev) => {
+      if (prev.size === 0) return prev;
+      const live = new Set(liveTermPtys);
+      const next = new Set([...prev].filter((id) => live.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [liveTermPtys]);
   // Esc closes the overlay, matching every other overlay in the app.
   useEffect(() => {
     if (!wsDrawerOpen) return;
@@ -3060,7 +3094,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [wsDrawerOpen]);
+  }, [wsDrawerOpen, setWsDrawerOpen]);
 
   const peerMembers = useMemo(
     () => relay.status.members.filter((m) => m.id !== relay.status.self_id),
