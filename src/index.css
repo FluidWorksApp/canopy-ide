@@ -1903,16 +1903,11 @@ body,
   overflow-y: auto;
   flex: 1;
   padding: 4px 0;
+  /* No focus ring on the list itself — the cursor row (seeded to the top row
+     on focus) is the focus indicator, so a border around the whole panel would
+     just be noise in a narrow sidebar. Suppress the browser's default outline
+     for the same reason. */
   outline: none;
-  border-radius: var(--r-sm);
-  corner-shape: squircle;
-}
-
-/* Focus ring while the tree owns keyboard nav — the app's one ring rule.
-   Only on keyboard focus (:focus-visible), so a mouse click that parks the
-   cursor doesn't paint a ring around the whole panel. */
-.file-tree:focus-visible {
-  box-shadow: var(--ring);
 }
 
 .tree-root-header {
