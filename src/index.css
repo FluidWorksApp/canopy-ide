@@ -594,11 +594,14 @@ body,
   flex-direction: column;
 }
 
-/* The body row holds the rail and the resizable panel group. */
+/* The body row holds the rail and the resizable panel group. Also the
+   positioning context for the hover-out side panel, which floats over the
+   editor rather than taking a column of its own. */
 .project-body {
   flex: 1;
   min-height: 0;
   display: flex;
+  position: relative;
 }
 
 .project-body > *:not(.rail) {
@@ -849,6 +852,210 @@ body,
 
 .rail-spacer {
   flex: 1;
+}
+
+/* Pinned reads as "this one is latched", distinct from the wash a hovered peek
+   already paints. A dotted cap on the accent bar — nothing new in the rail's
+   vocabulary, just a mark on the one it already draws. */
+.rail-btn-pinned::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: 6px;
+  width: 3px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+/* ---------- hover-peek side panel ----------
+   The panel used to be a column in the PanelGroup, so opening it reflowed the
+   editor and re-wrapped every terminal. Now it floats: the layer spans the
+   content area to the right of the rail and clips the panel as it slides, so
+   the panel never rides over the rail on its way out. pointer-events are off on
+   the layer — only the panel itself is a target, and clicks anywhere else fall
+   through to the editor underneath. */
+.side-peek-layer {
+  position: absolute;
+  left: 54px; /* rail width */
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.side-peek {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+
+  /* Asymmetric motion, because the two directions mean different things.
+     Coming out is the answer to a deliberate hover, so it takes its time and
+     overshoots into place on a spring curve. Going away is cleanup — it should
+     be gone before you've finished looking elsewhere. */
+  --peek-in: 340ms;
+  --peek-out: 150ms;
+  --peek-spring: cubic-bezier(0.16, 1.03, 0.3, 1);
+  --peek-exit: cubic-bezier(0.55, 0, 1, 0.45);
+
+  /* Slid fully out of frame plus a little, so the shadow clears too. */
+  transform: translateX(calc(-100% - 48px));
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    transform var(--peek-out) var(--peek-exit),
+    /* Opacity has to HOLD while the sheet travels. Fading it in step with the
+       slide (or faster) dissolves the panel in place and the movement never
+       registers — it just looks like it blinked out. This curve keeps it near
+       opaque for most of the exit and drops it at the very end. */
+    opacity var(--peek-out) cubic-bezier(0.85, 0, 1, 1);
+}
+
+/* `transform: none`, not `translateX(0)`: a resolved transform makes the panel a
+   containing block for fixed-position descendants, which would re-anchor every
+   context menu and confirm dialog inside it. Only the closing animation — when
+   nothing is interactive anyway — carries a transform. */
+.side-peek.open {
+  transform: none;
+  opacity: 1;
+  pointer-events: auto;
+  transition:
+    transform var(--peek-in) var(--peek-spring),
+    opacity calc(var(--peek-in) * 0.5) var(--ease-out);
+}
+
+.side-peek-frost {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+
+  /* Tunable per theme — a white sheen is invisible on a light surface, and a
+     dark theme can't take the alpha a light one needs. The base is --bg-deep,
+     the rail's own colour, not the lighter --bg-alt the docked sidebar used:
+     an overlay sitting above the editor should read as darker than the surface
+     it covers, otherwise it looks like a wash rather than a pane in front. */
+  --glass-base: var(--bg-deep);
+  --glass-sheen: rgba(255, 255, 255, 0.08);
+  --glass-lip: rgba(255, 255, 255, 0.07);
+  --glass-tint: 82%;
+
+  background:
+    /* Specular streak down the leading edge — the highlight a real pane catches
+       where it meets the light. This is what stops the frost reading as flat
+       translucent grey. */
+    linear-gradient(
+      104deg,
+      var(--glass-sheen) 0%,
+      color-mix(in srgb, var(--glass-sheen) 35%, transparent) 26%,
+      transparent 58%
+    ),
+    /* The rail's aurora wash, carried across so panel and rail read as one
+       piece of glass rather than two surfaces butted together. Kept faint —
+       these are what were lifting the panel toward grey. */
+    radial-gradient(115% 42% at 0% 0%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 72%),
+    radial-gradient(120% 38% at 15% 100%, color-mix(in srgb, var(--cyan) 7%, transparent), transparent 74%),
+    color-mix(in srgb, var(--glass-base) var(--glass-tint), transparent);
+
+  /* Saturation is doing as much work as the blur: without it the editor behind
+     goes muddy grey and the panel looks like fog, not glass. */
+  backdrop-filter: blur(26px) saturate(185%);
+  -webkit-backdrop-filter: blur(26px) saturate(185%);
+  border-right: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+  box-shadow:
+    var(--shadow-3),
+    /* Lit lips on the top and leading edges, and a dark one trailing: three
+       hairlines are what give the sheet thickness. */
+    inset 0 1px 0 var(--glass-lip),
+    inset 1px 0 0 color-mix(in srgb, var(--glass-lip) 60%, transparent),
+    inset -1px 0 0 rgba(0, 0, 0, 0.16);
+
+  /* The frost thickens as it arrives, so the glass looks like it's forming
+     rather than being dragged in finished. On the way out it does NOT thin —
+     it holds full and snaps only once the sheet is off-frame. Thinning during
+     the exit is what made the close read as a dissolve instead of a slide. */
+  opacity: 0.55;
+  transition: opacity 0s linear var(--peek-out);
+}
+.side-peek.open .side-peek-frost {
+  opacity: 1;
+  transition: opacity var(--peek-in) var(--ease-out);
+}
+
+/* Daylight's surface is already bright, so the sheen has to be near-white to
+   register and the tint has to be heavier or the file tree loses its contrast
+   against a white editor behind it. */
+:root[data-theme="daylight"] .side-peek-frost {
+  --glass-base: var(--bg-alt);
+  --glass-sheen: rgba(255, 255, 255, 0.66);
+  --glass-lip: rgba(255, 255, 255, 0.85);
+  --glass-tint: 80%;
+  box-shadow:
+    var(--shadow-3),
+    inset 0 1px 0 var(--glass-lip),
+    inset 1px 0 0 color-mix(in srgb, var(--glass-lip) 60%, transparent),
+    inset -1px 0 0 rgba(28, 31, 38, 0.07);
+}
+
+/* The panel's own chrome goes transparent — the frost behind it is the surface
+   now. Backgrounds inside the panels (headers, selected rows) still read,
+   because they are color-mixed over it rather than replacing it.
+   Opacity only, never a transform: the panel's fixed-position context menus and
+   dialogs live in here, and a transform would re-anchor them. The short delay
+   lets the sheet arrive first and the contents settle into it. */
+.side-peek .sidebar {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  min-height: 0;
+  background: transparent;
+  opacity: 0;
+  /* Same reason as the frost: the contents ride the sheet out at full opacity
+     and only blank once it has left. Fading them first empties the pane while
+     it is still on screen, which is what looked like a missing animation. */
+  transition: opacity 0s linear var(--peek-out);
+}
+.side-peek.open .sidebar {
+  opacity: 1;
+  transition: opacity calc(var(--peek-in) * 0.55) var(--ease-out) 90ms;
+}
+
+/* Drag the right edge. Invisible until pointed at, like the PanelGroup handle
+   it replaces. */
+.side-peek-grip {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  bottom: 0;
+  right: -3px;
+  width: 7px;
+  cursor: col-resize;
+  background: transparent;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.side-peek-grip:hover {
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+/* A peek is pointer-driven; someone who has turned motion down still needs the
+   panel, just not the slide. */
+@media (prefers-reduced-motion: reduce) {
+  .side-peek,
+  .side-peek.open {
+    transform: none;
+    transition: opacity var(--dur-fast) linear;
+  }
+  .side-peek .sidebar,
+  .side-peek.open .sidebar,
+  .side-peek .side-peek-frost,
+  .side-peek.open .side-peek-frost {
+    transition: opacity var(--dur-fast) linear;
+  }
 }
 
 /* ---------- appearance panel ---------- */
@@ -8639,6 +8846,57 @@ a.btn-mini {
   top: 100%;
   z-index: 40;
   min-width: 160px;
+}
+
+/* ---------- one-off task composer (Run task ▾) ----------
+   A brief is prose, so it gets a prose-shaped box. The menu is sized by its
+   longest task label, which says nothing about how wide a brief wants to be —
+   hence an explicit width here rather than 100%. */
+.oneoff {
+  width: 340px;
+  padding: 2px 6px 6px;
+}
+
+.oneoff-input {
+  display: block;
+  width: 100%;
+  min-height: 68px;
+  max-height: 40vh;
+  padding: 7px 9px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  resize: vertical;
+}
+.oneoff-input::placeholder {
+  color: var(--text-faint);
+}
+.oneoff-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+.oneoff-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 7px;
+}
+
+.oneoff-hint {
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+.oneoff-hint kbd {
+  font: inherit;
+  color: var(--text-dim);
 }
 
 .rail-conn {

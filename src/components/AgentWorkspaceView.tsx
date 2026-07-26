@@ -21,7 +21,7 @@ import {
   reviewPrTask,
   type CustomMicroTask,
 } from "../microTasks";
-import { BUILT_IN_HEADING, CUSTOM_HEADING, type TaskChoice } from "../taskMenu";
+import { BUILT_IN_HEADING, CUSTOM_HEADING, ONE_OFF_HEADING, type TaskChoice } from "../taskMenu";
 
 const fmtCost = (n: number) => (n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`);
 /** Tokens Canopy sent the model — fresh input plus both cache legs. */
@@ -591,6 +591,15 @@ export function AgentWorkspaceView({
   const cost = usage ? sessionCost(usage) : null;
   const touched = ws?.touched?.length ? ws.touched : (digest?.files ?? []);
   const branchable = !!ws?.branch && !ws.detached && !ws.on_base;
+  /** Hand the typed brief to a fresh one-shot agent and put the menu away.
+   *  Shared by the Run button and the Enter key so the two can't drift. */
+  const runOneOff = () => {
+    const brief = oneOff?.trim();
+    if (!brief || !onRunOneOff) return;
+    setTaskMenu(false);
+    setOneOff(null);
+    onRunOneOff(brief, ws?.workdir ?? cwd);
+  };
   // Split once per patch, not per render: a fresh array each render would give
   // every DiffView a new `data` identity, which rebuilds its diff and resets any
   // open comment composer on the next digest poll.
@@ -924,21 +933,49 @@ export function AgentWorkspaceView({
                         ⚡ One-off task…
                       </button>
                     ) : (
-                      <input
-                        autoFocus
-                        className="agent-query-input"
-                        placeholder="The job — runs once, then closes. Nothing is saved."
-                        value={oneOff}
-                        onChange={(e) => setOneOff(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" && oneOff.trim()) {
-                            setTaskMenu(false);
-                            setOneOff(null);
-                            onRunOneOff(oneOff.trim(), ws?.workdir ?? cwd);
-                          }
-                          if (e.key === "Escape") setOneOff(null);
-                        }}
-                      />
+                      /* A brief is a sentence or three, not a search term. The
+                         single-line input this replaces was sized for a toolbar
+                         flex row, so in the menu it collapsed to its intrinsic
+                         width — narrower than its own placeholder, and it
+                         scrolled away everything you'd typed the moment the
+                         brief got long enough to be worth writing. */
+                      <div className="oneoff">
+                        <div className="cli-menu-label">{ONE_OFF_HEADING}</div>
+                        <textarea
+                          autoFocus
+                          className="oneoff-input"
+                          rows={3}
+                          placeholder={`What should this agent do?\nIt runs once in ${
+                            ws?.isolated && ws.branch ? ws.branch : "this workspace"
+                          }, then closes — nothing is saved.`}
+                          value={oneOff}
+                          onChange={(e) => setOneOff(e.target.value)}
+                          onKeyDown={(e) => {
+                            // Enter runs; Shift+Enter is the newline, now that
+                            // there are lines to break.
+                            if (e.key === "Enter" && !e.shiftKey) {
+                              e.preventDefault();
+                              if (oneOff.trim()) runOneOff();
+                            }
+                            if (e.key === "Escape") {
+                              e.stopPropagation();
+                              setOneOff(null);
+                            }
+                          }}
+                        />
+                        <div className="oneoff-actions">
+                          <span className="oneoff-hint">
+                            <kbd>↵</kbd> run · <kbd>⇧↵</kbd> new line · <kbd>esc</kbd> cancel
+                          </span>
+                          <button
+                            className="btn btn-accent"
+                            disabled={!oneOff.trim()}
+                            onClick={runOneOff}
+                          >
+                            Run
+                          </button>
+                        </div>
+                      </div>
                     ))}
                   <div className="cli-menu-label">{CUSTOM_HEADING}</div>
                   {savedTasks.length === 0 ? (
