@@ -4487,7 +4487,6 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             setWorktreeEnv({ repo, path, branch });
             setSideTab("files");
           }}
-          onOpenDiff={(_repo, f) => void openFile(f.abs, { diff: true })}
           onOpenCommit={openCommit}
           onOpenBranch={openBranch}
           onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
@@ -4517,6 +4516,30 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onRefresh={() => void refreshChanges()}
           collab={collabChanges}
           onOpenCollab={(p) => void openFile(p, { diff: true })}
+          onStage={(repo, paths) =>
+            void ipc
+              .gitStage(repo, paths)
+              .then(() => refreshChanges())
+              .catch((err) => onNotice(String(err), "error"))
+          }
+          onUnstage={(repo, paths) =>
+            void ipc
+              .gitUnstage(repo, paths)
+              .then(() => refreshChanges())
+              .catch((err) => onNotice(String(err), "error"))
+          }
+          onCommit={(repo, message) =>
+            ipc
+              .gitCommit(repo, message, false)
+              .then((msg) => {
+                onNotice(msg, "success");
+                void refreshChanges();
+              })
+              .catch((err) => {
+                onNotice(String(err), "error");
+                throw err;
+              })
+          }
           onSaveCollab={(p) =>
             void saveFile(p).then(() => {
               relay.collab.markOwnerSaved(p);
