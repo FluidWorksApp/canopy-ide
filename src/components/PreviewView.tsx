@@ -140,12 +140,47 @@ export function PreviewView({
   const pendingOps = useRef(new Map<number, { op: ipc.AgentBrowserOp; timer: number }>());
   const navWaiters = useRef<{ id: number; timer: number }[]>([]);
 
+  /** Whether this preview is actually painted right now. A background tab stays
+   *  laid out — that's what keeps snapshot and click honest (see hostStyle in
+   *  ProjectView) — but it isn't on screen, so the page's cursor choreography
+   *  is playing to nobody and the screenshot op has nothing to read. */
+  const painted = useCallback(
+    () =>
+      iframeRef.current?.checkVisibility?.({
+        visibilityProperty: true,
+        opacityProperty: true,
+      }) ?? true,
+    [],
+  );
+
+  // Where the keyboard was before an unwatched op ran. A click or a type ends
+  // with the page focusing the element it acted on, and focus inside an iframe
+  // is focus taken from whatever the user was typing in. Recorded before the op
+  // and given back after it — only if the iframe really did take it.
+  const focusBefore = useRef<HTMLElement | null>(null);
+
+  const restoreFocus = useCallback(() => {
+    const back = focusBefore.current;
+    focusBefore.current = null;
+    if (!back || !back.isConnected) return;
+    if (document.activeElement !== iframeRef.current) return;
+    back.focus();
+  }, []);
+
   const postAgentOp = useCallback(
     (op: ipc.AgentBrowserOp) => {
+      const bg = !painted();
+      if (bg) {
+        const active = document.activeElement;
+        focusBefore.current =
+          active instanceof HTMLElement && active !== iframeRef.current ? active : null;
+      }
       post({
         canopy: "agent",
         id: op.id,
         op: op.op,
+        // Unwatched: the page skips the animated cursor and answers at once.
+        bg,
         ref: op.ref ?? undefined,
         selector: op.selector ?? undefined,
         text: op.text ?? undefined,
@@ -158,8 +193,30 @@ export function PreviewView({
         max: op.max ?? undefined,
       });
     },
-    [post],
+    [post, painted],
   );
+
+  const navigate = useCallback(
+    (raw: string) => {
+      const target = normalize(raw);
+      if (!target) {
+        onNotice(`Not a URL: ${raw}`);
+        return;
+      }
+      setDraft(target);
+      onPatch({ url: target });
+      const p = proxyRef.current;
+      if (p && p.origin === originOf(target)) {
+        setFrameSrc(`http://127.0.0.1:${p.port}${restOf(target)}`);
+      }
+      // A different origin re-runs the proxy effect via the `origin` dep.
+    },
+    [onNotice, onPatch],
+  );
+
+  /** Consecutive off-origin redirects followed, so a redirect loop between two
+   *  hosts can't drive the tab forever. Reset by any page that loads. */
+  const redirects = useRef(0);
 
   // The picker inside the page talks postMessage; accept only messages from
   // our own iframe's window.
@@ -168,7 +225,19 @@ export function PreviewView({
       if (e.source !== iframeRef.current?.contentWindow) return;
       const d = e.data;
       if (!d || typeof d !== "object" || !("canopy" in d)) return;
+      if (d.canopy === "retarget" && typeof d.url === "string") {
+        // The page redirected off the proxied origin — most often a public host
+        // bumping http to https. The proxy can't serve another origin, so it
+        // handed us the destination: re-point the tab, which starts a proxy for
+        // the new origin and keeps the page annotatable and drivable. Bounded,
+        // because two hosts redirecting to each other would otherwise loop.
+        if (redirects.current++ < 5) navigate(d.url);
+        else onNotice(`${d.url} keeps redirecting — the preview stopped following it.`);
+        return;
+      }
       if (d.canopy === "ready") {
+        // A document that loads through the proxy ends the redirect chain.
+        redirects.current = 0;
         // Fresh document (first load or in-page navigation): restore mode and
         // the badges for annotations the tab still holds.
         post({ canopy: "mode", on: pickingRef.current });
@@ -199,6 +268,7 @@ export function PreviewView({
         if (p) {
           clearTimeout(p.timer);
           pendingOps.current.delete(d.id);
+          restoreFocus();
           // The page knows itself by its proxied address; agents must see the
           // real one, or they'd cite 127.0.0.1:<proxy> as the server's URL.
           let data = d.data;
@@ -219,25 +289,7 @@ export function PreviewView({
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [onPatch, post, postAgentOp, unproxied]);
-
-  const navigate = useCallback(
-    (raw: string) => {
-      const target = normalize(raw);
-      if (!target) {
-        onNotice(`Not a URL: ${raw}`);
-        return;
-      }
-      setDraft(target);
-      onPatch({ url: target });
-      const p = proxyRef.current;
-      if (p && p.origin === originOf(target)) {
-        setFrameSrc(`http://127.0.0.1:${p.port}${restOf(target)}`);
-      }
-      // A different origin re-runs the proxy effect via the `origin` dep.
-    },
-    [onNotice, onPatch],
-  );
+  }, [navigate, onNotice, onPatch, post, postAgentOp, restoreFocus, unproxied]);
 
   // Receive agent ops for this tab. Every op carries its own timer, which is
   // what guarantees the bridge always gets an answer — so unmounting flushes
@@ -271,31 +323,41 @@ export function PreviewView({
       // Pixels, not structure: the DOM snapshot can say a button exists, not
       // that it's sitting on top of the heading. Captured through the webview's
       // own snapshot API, cropped to this iframe's rect.
-      const rect = iframeRef.current?.getBoundingClientRect();
-      if (!rect || rect.width < 1 || rect.height < 1) {
-        void ipc.browserResult(
-          op.id,
-          false,
-          "The preview isn't visible on screen right now, so there's nothing to capture.",
-        );
-        return;
-      }
-      void ipc
-        .webviewSnapshot(rect.x, rect.y, rect.width, rect.height, op.max ?? undefined)
-        .then((image) =>
-          ipc.browserResult(op.id, true, {
-            image,
-            mimeType: "image/png",
-            url: urlRef.current,
-            width: Math.round(rect.width),
-            height: Math.round(rect.height),
-          }),
-        )
-        .catch((err) => ipc.browserResult(op.id, false, String(err)));
+      //
+      // Alone among the ops this one needs the tab actually in front — the
+      // snapshot reads the window's pixels, and a backgrounded preview is laid
+      // out but unpainted, so capturing its rect would return whatever tab IS
+      // in front. ProjectView brings the tab forward before dispatching a
+      // screenshot; the delay lets that paint land, and the visibility check
+      // catches the cases it can't fix (a hidden project, a minimized window).
+      setTimeout(() => {
+        const rect = iframeRef.current?.getBoundingClientRect();
+        if (!rect || !painted() || rect.width < 1 || rect.height < 1) {
+          void ipc.browserResult(
+            op.id,
+            false,
+            "The preview isn't visible on screen right now, so there's nothing to capture. The page itself is still there — canopy_browser_snapshot reads it without needing the window.",
+          );
+          return;
+        }
+        void ipc
+          .webviewSnapshot(rect.x, rect.y, rect.width, rect.height, op.max ?? undefined)
+          .then((image) =>
+            ipc.browserResult(op.id, true, {
+              image,
+              mimeType: "image/png",
+              url: urlRef.current,
+              width: Math.round(rect.width),
+              height: Math.round(rect.height),
+            }),
+          )
+          .catch((err) => ipc.browserResult(op.id, false, String(err)));
+      }, 60);
       return;
     }
     const timer = window.setTimeout(() => {
       pendingOps.current.delete(op.id);
+      restoreFocus();
       void ipc.browserResult(
         op.id,
         false,
@@ -345,10 +407,11 @@ export function PreviewView({
     );
 
   // ---------- empty tab: pick one of the project's own servers ----------
-  // No manual URL entry on purpose: the preview only opens servers Canopy can
-  // trace back to a component, so every annotation knows which codebase to
-  // change. A URL typed by hand would be an untethered page with no component
-  // link — exactly what this feature exists to avoid.
+  // The empty tab offers only servers Canopy can trace back to a component, so
+  // feedback marked on the page knows which codebase to change — that's the
+  // case this feature exists for, and it's what a fresh tab should suggest.
+  // Once a page is open the URL bar (and canopy_browser_navigate) will go
+  // anywhere, remote origins included; those pages just have no component link.
   if (!origin) {
     return (
       <div className="preview-empty">

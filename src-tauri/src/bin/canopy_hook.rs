@@ -1295,9 +1295,9 @@ fn tool_defs() -> serde_json::Value {
         },
         {
             "name": "canopy_open_preview",
-            "description": "Open a local URL in Canopy's preview browser for the user to look at and annotate. To drive the page yourself, use canopy_browser_navigate instead.",
+            "description": "Open a URL in Canopy's preview browser for the user to look at and annotate. To drive the page yourself, use canopy_browser_navigate instead.",
             "inputSchema": { "type": "object", "properties": {
-                "url": { "type": "string", "description": "A local http://localhost[:port][/path] URL" }
+                "url": { "type": "string", "description": "An http:// or https:// URL — a local server or a remote page" }
             }, "required": ["url"], "additionalProperties": false }
         },
         {
@@ -1326,9 +1326,9 @@ fn tool_defs() -> serde_json::Value {
         },
         {
             "name": "canopy_browser_navigate",
-            "description": "Load a local URL in Canopy's embedded preview (opening or reusing the tab), or move through history. Waits for the page; returns its final url and title.",
+            "description": "Load a URL in Canopy's embedded preview (opening or reusing the tab), or move through history. Local servers and remote pages both work. Waits for the page; returns its final url and title. The tab isn't brought to the front — it drives in the background, so keep using the other browser tools rather than assuming the user is watching.",
             "inputSchema": { "type": "object", "properties": {
-                "url": { "type": "string", "description": "A local http://localhost[:port][/path] URL — see canopy_project runServers" },
+                "url": { "type": "string", "description": "An http:// or https:// URL — a local server (see canopy_project runServers) or any remote page" },
                 "action": { "type": "string", "enum": ["back", "forward", "reload"], "description": "History move instead of a url" }
             }, "additionalProperties": false }
         },

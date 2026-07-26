@@ -11,6 +11,7 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type CSSProperties,
   type ReactNode,
 } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
@@ -168,6 +169,27 @@ export type {
 };
 
 const decoder = new TextDecoder();
+
+/** How a doc tab's host is hidden when it isn't the front tab.
+ *
+ *  `display: none` for everything, with one exception: a preview tab keeps its
+ *  box. A `display: none` iframe has no layout at all — every element in the
+ *  previewed page reports a zero rect — so a backgrounded preview would answer
+ *  canopy_browser_snapshot with an empty page and click the wrong coordinates.
+ *  `visibility: hidden` keeps the page laid out (and unpainted) so an agent can
+ *  drive it while the user works in another tab; absolute + no pointer events
+ *  keeps it out of the flow and out of the way of the tab that is in front. */
+function hostStyle(front: boolean, keepLaidOut: boolean): CSSProperties {
+  if (front) return { display: "block" };
+  if (!keepLaidOut) return { display: "none" };
+  return {
+    display: "block",
+    position: "absolute",
+    inset: 0,
+    visibility: "hidden",
+    pointerEvents: "none",
+  };
+}
 
 /** Endpoints a shell is actually serving, offered where you are looking.
  *
@@ -1602,11 +1624,18 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
 
   // A browser-control op (canopy_browser_*): pick the preview tab it targets —
   // by origin when it names a URL, else the active/first preview tab, creating
-  // one when navigation asks for a page and none is open — focus it (agent ops
-  // mount the view; the user watching the tab drive itself is the point), and
-  // hand the op to the PreviewView through the queueing bus. Everything else,
-  // including answering the bridge, happens in the view; only the no-tab case
-  // must answer here or the agent would wait out the bridge's timeout.
+  // one when navigation asks for a page and none is open — and hand the op to
+  // the PreviewView through the queueing bus. Everything else, including
+  // answering the bridge, happens in the view; only the no-tab case must answer
+  // here or the agent would wait out the bridge's timeout.
+  //
+  // The op does NOT steal the front tab. Opening the preview brings it forward
+  // once (that's the moment worth showing); after that an agent clicking and
+  // typing must not yank the user off the file they're editing every few
+  // seconds. An open preview tab stays laid out while it's in the background
+  // (see the doc-host styling below) so its page keeps real geometry and the
+  // ops that need it — snapshot, click — work unwatched. Screenshot is the one
+  // exception: it captures pixels off the window, so it has to be in front.
   useEffect(() => {
     const originOf = (u: string): string | null => {
       try {
@@ -1628,7 +1657,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         // A URL navigation can take over an empty (server-picker) preview tab.
         (op.op === "navigate" && op.url ? previews[0] : undefined);
       if (tab) {
-        setActiveTabId(tab.id);
+        if (op.op === "screenshot") setActiveTabId(tab.id);
         dispatchBrowserOp(tab.id, op);
       } else if (op.op === "navigate" && op.url) {
         dispatchBrowserOp(openPreview(op.url), op);
@@ -3449,7 +3478,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           <div
             key={tab.id}
             className="fill doc-host"
-            style={{ display: tab.id === activeTabId && visible ? "block" : "none" }}
+            style={hostStyle(tab.id === activeTabId && visible, tab.type === "preview")}
           >
             <ErrorBoundary label="this tab">{paneFor(tab)}</ErrorBoundary>
           </div>

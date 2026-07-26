@@ -528,10 +528,10 @@ async fn action(
             let Some(url) = act.url.as_deref() else {
                 return (StatusCode::BAD_REQUEST, "open_preview needs a url".into());
             };
-            if !is_local_http(url) {
+            if !is_previewable_http(url) {
                 return (
                     StatusCode::BAD_REQUEST,
-                    format!("{url} isn't a local http:// URL — the preview only opens servers running on this machine"),
+                    format!("{url} isn't an http:// or https:// URL — the preview opens web pages"),
                 );
             }
             let route = act.cwd.clone().unwrap_or_default();
@@ -749,11 +749,11 @@ async fn browser(
     // an immediate 4xx to correct against instead of a UI round-trip.
     match op.op.as_str() {
         "navigate" => match (&op.url, op.action.as_deref()) {
-            (Some(u), _) if !is_local_http(u) => {
+            (Some(u), _) if !is_previewable_http(u) => {
                 return (
-                        StatusCode::BAD_REQUEST,
-                        format!("{u} isn't a local http:// URL — the preview only opens servers running on this machine"),
-                    );
+                    StatusCode::BAD_REQUEST,
+                    format!("{u} isn't an http:// or https:// URL — the preview opens web pages"),
+                );
             }
             (Some(_), _) | (None, Some("back" | "forward" | "reload")) => {}
             _ => {
@@ -1235,8 +1235,14 @@ fn resolve_command(bridge: &ContextBridge, dir: &str, name: &str) -> Result<Stri
     ))
 }
 
-/// A URL the embedded preview will accept: http(s) on a loopback host.
-fn is_local_http(url: &str) -> bool {
+/// A URL the embedded preview will accept: any http(s) page with a host.
+///
+/// It used to be loopback-only, on the theory that a preview is a dev server.
+/// It isn't only that — a staging deployment, a hosted docs page, an API
+/// console are all things an agent is asked to open and look at — and the proxy
+/// serves a remote origin the same way it serves localhost. What stays out is
+/// the schemes that aren't a page: file://, data:, javascript:.
+fn is_previewable_http(url: &str) -> bool {
     let rest = match url
         .strip_prefix("http://")
         .or_else(|| url.strip_prefix("https://"))
@@ -1244,11 +1250,8 @@ fn is_local_http(url: &str) -> bool {
         Some(r) => r,
         None => return false,
     };
-    let host = rest.split(['/', ':', '?', '#']).next().unwrap_or("");
-    matches!(
-        host,
-        "localhost" | "127.0.0.1" | "0.0.0.0" | "[::1]" | "::1"
-    )
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !host.is_empty() && !host.starts_with(':')
 }
 
 #[derive(serde::Deserialize)]
