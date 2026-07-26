@@ -496,6 +496,14 @@ export function FileTree({
       onFocus={() => {
         if (cursor == null && flat.length > 0) setCursor(flat[0].path);
       }}
+      // Drop the cursor when focus leaves this tree entirely. ProjectView mounts
+      // one FileTree per component, each with its own cursor; without this,
+      // every tree that had ever been focused kept showing a highlighted row, so
+      // several "cursors" appeared at once. Ignore blurs into our own descendants
+      // (the rename prompt input, the context menu) — those aren't leaving.
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setCursor(null);
+      }}
       // Blank space below the tree still belongs to the first root.
       onContextMenu={(e) => !readOnly && roots[0] && open(e, emptyItems(roots[0]))}
     >

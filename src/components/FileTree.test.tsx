@@ -62,6 +62,17 @@ describe("FileTree keyboard navigation", () => {
     expect(rowOf("src")).toHaveClass("tree-row-cursor");
   });
 
+  it("clears the cursor when focus leaves the tree", async () => {
+    // ProjectView mounts one FileTree per component; each must drop its cursor
+    // on blur so only the focused tree shows a highlighted row.
+    await renderTree();
+    act(() => tree().focus());
+    expect(rowOf("src")).toHaveClass("tree-row-cursor");
+    act(() => tree().blur());
+    expect(rowOf("src")).not.toHaveClass("tree-row-cursor");
+    expect(tree().getAttribute("aria-activedescendant")).toBeNull();
+  });
+
   it("exposes rows as treeitems and points aria-activedescendant at the cursor", async () => {
     await renderTree();
     const srcRow = rowOf("src");
