@@ -1,4 +1,6 @@
-//! Preview proxy: the in-app browser's window onto a locally running server.
+//! Preview proxy: the in-app browser's window onto a web page — usually a
+//! server running on this machine, but any http(s) origin works, so a staging
+//! deployment or a public page can be previewed and driven the same way.
 //!
 //! The preview tab renders pages in an <iframe>, but a cross-origin iframe's
 //! DOM is sealed off from the app — no element picker, no annotation overlay.
@@ -11,9 +13,19 @@
 //! WebSocket upgrades (Vite/webpack HMR) are tunnelled as raw bytes: the
 //! client's own Sec-WebSocket-Key is forwarded upstream, so the upstream 101
 //! response is valid for the client verbatim and no frame parsing is needed.
+//! That splice is plaintext, so a wss:// upstream is refused rather than hung.
+//!
+//! Redirects are kept inside the proxy — same-origin ones rewritten to a path,
+//! cross-origin ones handed back to the app to re-point the tab — because a
+//! Location the iframe followed on its own would land on the real origin, where
+//! nothing is injected and the page can no longer be seen or driven.
 //!
 //! One proxy per target origin, bound to 127.0.0.1 on an ephemeral port,
 //! reused across tabs and torn down with the app.
+//!
+//! What the proxy does NOT carry across is the user's browser session: it holds
+//! no cookie jar of its own, so a remote page behind a login shows its logged-out
+//! self unless the iframe itself has cookies for the proxy origin.
 
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -38,8 +50,13 @@ const NET_LOG_CAP: usize = 300;
 struct ProxyCtx {
     /// Target origin, e.g. `http://localhost:5173` — scheme + authority only.
     origin: String,
-    /// Just the authority (`localhost:5173`), for Host headers and TCP dials.
+    /// Just the authority (`localhost:5173`), for the Host header.
     authority: String,
+    /// `host:port` for a raw TCP dial — the authority with a default port when
+    /// it has none (an external https origin usually does not spell out 443).
+    dial: String,
+    /// https upstream: reqwest handles it, the raw WebSocket splice cannot.
+    secure: bool,
     client: reqwest::Client,
     /// Rolling log of proxied requests — the proxy sees every request the page
     /// makes, so agents get a network tab without instrumenting the page.
@@ -104,18 +121,38 @@ pub struct PreviewInfo {
     pub origin: String,
 }
 
-/// `http://host:port[/...]` → (origin, authority). No url crate: the accepted
-/// shapes are narrow enough that trimming is clearer than a dependency.
+/// `http[s]://host[:port][/...]` → (origin, authority). No url crate: the
+/// accepted shapes are narrow enough that trimming is clearer than a dependency.
+/// https is accepted so the preview isn't limited to this machine — a staging
+/// deployment or any public page can be previewed and driven the same way.
 fn parse_target(target: &str) -> Result<(String, String), String> {
     let t = target.trim();
-    let rest = t
-        .strip_prefix("http://")
-        .ok_or("Preview targets must be http:// URLs on this machine")?;
+    let (scheme, rest) = match t.strip_prefix("http://") {
+        Some(r) => ("http", r),
+        None => match t.strip_prefix("https://") {
+            Some(r) => ("https", r),
+            None => return Err("Preview targets must be http:// or https:// URLs".into()),
+        },
+    };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("").to_string();
     if authority.is_empty() {
         return Err(format!("Not a valid URL: {t}"));
     }
-    Ok((format!("http://{authority}"), authority))
+    Ok((format!("{scheme}://{authority}"), authority))
+}
+
+/// `host:port` to dial for a raw TCP connection — the authority with the
+/// scheme's default port filled in, since a public URL usually omits it.
+fn dial_addr(origin: &str, authority: &str) -> String {
+    if authority.contains(':') && !authority.ends_with(']') {
+        return authority.to_string();
+    }
+    let port = if origin.starts_with("https://") {
+        443
+    } else {
+        80
+    };
+    format!("{authority}:{port}")
 }
 
 #[tauri::command]
@@ -140,6 +177,8 @@ pub async fn preview_start(
         .map_err(|e| e.to_string())?;
     let log: NetLog = Arc::default();
     let ctx = Arc::new(ProxyCtx {
+        dial: dial_addr(&origin, &authority),
+        secure: origin.starts_with("https://"),
         origin: origin.clone(),
         authority,
         client,
@@ -337,6 +376,32 @@ async fn forward_http(ctx: Arc<ProxyCtx>, req: Request) -> Result<Response, Stri
 
     let upstream = rb.send().await.map_err(|e| e.to_string())?;
     let status = upstream.status();
+
+    // A redirect must not take the iframe off the proxy — on the real origin
+    // the picker isn't injected, so the page can't be annotated or driven, and
+    // the app can't even see where it went. An absolute Location back to the
+    // same origin becomes a path, which the browser resolves against the proxy.
+    // A cross-origin one (the http → https bump every public host does) can't
+    // be served by this proxy at all, so it's answered with a stub that asks the
+    // app to re-point the tab; that starts a proxy for the new origin.
+    let mut rewritten_location: Option<String> = None;
+    if status.is_redirection() {
+        let loc = upstream
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        if let Some(loc) = loc {
+            let lower = loc.to_ascii_lowercase();
+            if lower.starts_with("http://") || lower.starts_with("https://") {
+                match same_origin_rest(&ctx.origin, &loc) {
+                    Some(rest) => rewritten_location = Some(rest),
+                    None => return Ok(retarget_page(&loc)),
+                }
+            }
+        }
+    }
+
     let mut builder = Response::builder().status(status.as_u16());
     let is_html = upstream
         .headers()
@@ -352,10 +417,14 @@ async fn forward_http(ctx: Arc<ProxyCtx>, req: Request) -> Result<Response, Stri
             || n == "content-security-policy-report-only"
             || n == "x-frame-options"
             || (is_html && n == "content-length")
+            || (n == "location" && rewritten_location.is_some())
         {
             continue;
         }
         builder = builder.header(name, value);
+    }
+    if let Some(loc) = rewritten_location {
+        builder = builder.header(header::LOCATION, loc);
     }
 
     if is_html {
@@ -366,6 +435,46 @@ async fn forward_http(ctx: Arc<ProxyCtx>, req: Request) -> Result<Response, Stri
     builder
         .body(Body::from_stream(upstream.bytes_stream()))
         .map_err(|e| e.to_string())
+}
+
+/// The path+query of an absolute `loc` that stays on `origin`, else None. The
+/// boundary check matters: `https://example.com` is a string prefix of
+/// `https://example.com.attacker.test`, and treating that as same-origin would
+/// forward the redirect to the wrong host.
+fn same_origin_rest(origin: &str, loc: &str) -> Option<String> {
+    let rest = loc
+        .get(..origin.len())
+        .filter(|head| head.eq_ignore_ascii_case(origin))
+        .map(|_| &loc[origin.len()..])?;
+    match rest.chars().next() {
+        None => Some("/".into()),
+        Some('/') | Some('?') | Some('#') => Some(rest.to_string()),
+        _ => None,
+    }
+}
+
+/// Answer for a redirect off this proxy's origin: a page whose only job is to
+/// tell the app where the previewed page went, so the tab can be re-pointed
+/// (a fresh proxy for the new origin) instead of escaping into a bare iframe.
+/// Readable on its own too, for the case where nothing is listening.
+fn retarget_page(url: &str) -> Response {
+    let esc = url
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    let js = serde_json::to_string(url).unwrap_or_else(|_| "\"\"".into());
+    let html = format!(
+        "<!doctype html><meta charset=\"utf-8\"><title>Redirecting…</title>\
+         <body style=\"margin:0;padding:24px;font:13px/1.6 system-ui,sans-serif;color:#888\">\
+         <p>This page redirected to <b>{esc}</b>. Following it…</p>\
+         <script>parent.postMessage({{canopy:\"retarget\",url:{js}}},\"*\")</script>"
+    );
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from(html))
+        .unwrap()
 }
 
 /// Add the picker <script> to an HTML document — right after <head> opens, so
@@ -411,6 +520,13 @@ fn inject_picker(bytes: &[u8]) -> Vec<u8> {
 /// is replayed back verbatim, then both sockets are spliced. The proxy never
 /// parses a WS frame, so any subprotocol (vite-hmr, socket.io, ...) survives.
 async fn tunnel_upgrade(ctx: Arc<ProxyCtx>, mut req: Request) -> Result<Response, String> {
+    // The splice below is plaintext bytes on a TcpStream, so a wss:// upstream
+    // is out of reach. Everything else about an https preview works; only the
+    // page's own WebSocket connections fail, and they fail loudly here rather
+    // than hanging.
+    if ctx.secure {
+        return Err("WebSocket upstreams over https aren't tunnelled by the preview proxy".into());
+    }
     let on_upgrade = req
         .extensions_mut()
         .remove::<hyper::upgrade::OnUpgrade>()
@@ -433,7 +549,7 @@ async fn tunnel_upgrade(ctx: Arc<ProxyCtx>, mut req: Request) -> Result<Response
     }
     head.push_str("\r\n");
 
-    let mut upstream = tokio::net::TcpStream::connect(&ctx.authority)
+    let mut upstream = tokio::net::TcpStream::connect(&ctx.dial)
         .await
         .map_err(|e| e.to_string())?;
     upstream
@@ -501,9 +617,53 @@ mod tests {
             parse_target(" http://127.0.0.1:3000/app?x=1 ").unwrap().0,
             "http://127.0.0.1:3000"
         );
-        assert!(parse_target("https://example.com").is_err());
+        assert_eq!(
+            parse_target("https://staging.example.com/app").unwrap(),
+            (
+                "https://staging.example.com".into(),
+                "staging.example.com".into()
+            )
+        );
         assert!(parse_target("localhost:3000").is_err());
+        assert!(parse_target("file:///tmp/x.html").is_err());
         assert!(parse_target("http://").is_err());
+    }
+
+    #[test]
+    fn dial_addr_fills_in_the_default_port() {
+        assert_eq!(
+            dial_addr("http://localhost:5173", "localhost:5173"),
+            "localhost:5173"
+        );
+        assert_eq!(
+            dial_addr("https://example.com", "example.com"),
+            "example.com:443"
+        );
+        assert_eq!(
+            dial_addr("http://example.com", "example.com"),
+            "example.com:80"
+        );
+        // IPv6 literal without a port keeps its brackets.
+        assert_eq!(dial_addr("http://[::1]", "[::1]"), "[::1]:80");
+        assert_eq!(dial_addr("http://[::1]:3000", "[::1]:3000"), "[::1]:3000");
+    }
+
+    #[test]
+    fn same_origin_rest_respects_the_origin_boundary() {
+        let origin = "https://example.com";
+        assert_eq!(
+            same_origin_rest(origin, "https://example.com/next?a=1").as_deref(),
+            Some("/next?a=1")
+        );
+        assert_eq!(
+            same_origin_rest(origin, "https://example.com").as_deref(),
+            Some("/")
+        );
+        // Same host, different scheme or port is a different origin.
+        assert!(same_origin_rest(origin, "http://example.com/x").is_none());
+        assert!(same_origin_rest(origin, "https://example.com:8443/x").is_none());
+        // The prefix trap: a longer hostname must not look like a path.
+        assert!(same_origin_rest(origin, "https://example.com.attacker.test/x").is_none());
     }
 
     #[test]
@@ -572,6 +732,8 @@ mod tests {
         let ctx = Arc::new(ProxyCtx {
             origin: format!("http://127.0.0.1:{upstream_port}"),
             authority: format!("127.0.0.1:{upstream_port}"),
+            dial: format!("127.0.0.1:{upstream_port}"),
+            secure: false,
             client: reqwest::Client::new(),
             log: NetLog::default(),
         });
@@ -613,5 +775,82 @@ mod tests {
         assert_eq!(log[1]["status"], 200);
         assert_eq!(log[2]["status"], 404);
         assert!(log[0]["ms"].is_u64());
+    }
+
+    /// A redirect must keep the iframe on the proxy: same-origin becomes a bare
+    /// path, and a redirect to another origin becomes the retarget stub instead
+    /// of a 302 that would send the tab off to an unproxied page.
+    #[tokio::test]
+    async fn redirects_stay_on_the_proxy() {
+        use axum::routing::get;
+
+        let upstream = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let upstream_port = upstream.local_addr().unwrap().port();
+        let origin = format!("http://127.0.0.1:{upstream_port}");
+        let here = origin.clone();
+        let app = Router::new()
+            .route(
+                "/same",
+                get(move || {
+                    let to = format!("{here}/landed?a=1");
+                    async move {
+                        Response::builder()
+                            .status(302)
+                            .header("location", to)
+                            .body(Body::empty())
+                            .unwrap()
+                    }
+                }),
+            )
+            .route(
+                "/away",
+                get(|| async {
+                    Response::builder()
+                        .status(301)
+                        .header("location", "https://elsewhere.example/x?y=2")
+                        .body(Body::empty())
+                        .unwrap()
+                }),
+            );
+        tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
+
+        let ctx = Arc::new(ProxyCtx {
+            dial: format!("127.0.0.1:{upstream_port}"),
+            secure: false,
+            origin,
+            authority: format!("127.0.0.1:{upstream_port}"),
+            client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap(),
+            log: NetLog::default(),
+        });
+        let proxy = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let proxy_port = proxy.local_addr().unwrap().port();
+        let router = Router::new().fallback(proxy_handler).with_state(ctx);
+        tokio::spawn(async move { axum::serve(proxy, router).await.unwrap() });
+
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let base = format!("http://127.0.0.1:{proxy_port}");
+
+        let same = client.get(format!("{base}/same")).send().await.unwrap();
+        assert_eq!(same.status(), 302);
+        assert_eq!(same.headers()["location"], "/landed?a=1");
+
+        let away = client.get(format!("{base}/away")).send().await.unwrap();
+        assert_eq!(away.status(), 200);
+        let body = away.text().await.unwrap();
+        assert!(body.contains("retarget"), "no retarget stub: {body}");
+        assert!(
+            body.contains(r#"url:"https://elsewhere.example/x?y=2""#),
+            "destination not passed to the app: {body}"
+        );
     }
 }
