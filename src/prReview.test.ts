@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   actionable,
+  fileNote,
   isNit,
   isTrusted,
   nextMove,
@@ -263,5 +264,28 @@ describe("verdicts", () => {
       }),
     );
     expect(list.map((r) => r.id)).toEqual(["R_new", "R_old"]);
+  });
+});
+
+describe("fileNote", () => {
+  it("reads the reason a reassembled patch couldn't inline a file", () => {
+    const patch =
+      "diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml\n" +
+      "Binary files a/pnpm-lock.yaml and b/pnpm-lock.yaml differ\n" +
+      "(GitHub didn't include this file's patch — 4211 changed lines. Open it on GitHub.)\n";
+    expect(fileNote(patch)).toBe(
+      "GitHub didn't include this file's patch — 4211 changed lines. Open it on GitHub.",
+    );
+  });
+
+  it("reads the truncation notice", () => {
+    expect(fileNote("(12 more file(s) not shown — this pull request touches more than 400.)")).toBe(
+      "12 more file(s) not shown — this pull request touches more than 400.",
+    );
+  });
+
+  it("says nothing for a real binary or a normal patch", () => {
+    expect(fileNote("Binary files a/logo.png and b/logo.png differ")).toBeNull();
+    expect(fileNote("@@ -1,2 +1,3 @@\n+const x = 1;")).toBeNull();
   });
 });
