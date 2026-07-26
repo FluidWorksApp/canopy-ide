@@ -22,6 +22,22 @@ import * as prWatch from "./prWatchStore";
 import { CollabManager, safeName } from "./collab";
 import { ProjectView } from "./components/ProjectView";
 import { TitleBar } from "./components/TitleBar";
+import {
+  FreezeOverlay,
+  HibernationView,
+  type WakeProgress,
+} from "./components/HibernationView";
+import {
+  clearHibernation,
+  hibernatedProjects,
+  hibernationOf,
+  isHibernating,
+  wakeSteps,
+  HIBERNATE_EVENT,
+  HIBERNATED_EVENT,
+  HIBERNATION_CHANGE_EVENT,
+  type ProjectSnapshot,
+} from "./hibernation";
 import { UpdateToast, NoticeToast } from "./components/Toast";
 import { ProjectDialog } from "./components/ProjectDialog";
 import { ProjectManager } from "./components/ProjectManager";
@@ -360,6 +376,12 @@ export default function App() {
   // menu handler is registered before these are defined
   const closeProjectRef = useRef<(id: string) => Promise<void>>(async () => {});
   const openProjectRef = useRef<(id: string) => Promise<void>>(async () => {});
+  /** Open a project because something wants to happen *in* it — an agent
+   *  action, a PR handed over from the inbox, a PTY spawned from the phone.
+   *  Unlike a plain open, this wakes a hibernating project: there is no
+   *  ProjectView behind the frost to receive the event, and dropping it
+   *  silently is worse than deciding the project is needed now. */
+  const openForActionRef = useRef<(id: string) => Promise<void>>(async () => {});
   const saveProjectRef = useRef<(p: Project) => Promise<void>>(async () => {});
   const updateRef = useRef<(patch: Partial<WorkspaceState>) => void>(() => {});
 
@@ -765,6 +787,160 @@ export default function App() {
   openProjectRef.current = openProject;
   updateRef.current = update;
 
+  // ---------- hibernation ----------
+  // Sleep is a third state between open and closed: the project's whole
+  // arrangement is written down, then it is genuinely closed — PTYs, agents,
+  // language servers and editor models all go — and opening it again offers
+  // the arrangement back. The snapshot store is the only marker; see
+  // hibernation.ts for why nothing else records "asleep".
+  const [hibernated, setHibernated] = useState<Record<string, ProjectSnapshot>>(() =>
+    hibernatedProjects(),
+  );
+  useEffect(() => {
+    const sync = () => setHibernated(hibernatedProjects());
+    window.addEventListener(HIBERNATION_CHANGE_EVENT, sync);
+    return () => window.removeEventListener(HIBERNATION_CHANGE_EVENT, sync);
+  }, []);
+  // The project frosting over right now, and the snapshot it produced (shown
+  // as the frost forms, so you see what is being put away).
+  const [freezing, setFreezing] = useState<{ id: string; snapshot: ProjectSnapshot | null } | null>(
+    null,
+  );
+  // Projects being woken: the snapshot handed to their ProjectView, plus how
+  // far through rebuilding it is. The frost stays on top until it's done.
+  const [waking, setWaking] = useState<
+    Record<string, { snapshot: ProjectSnapshot; progress: WakeProgress }>
+  >({});
+
+  const hibernateProject = useCallback(
+    (id: string) => {
+      const state = wsRef.current;
+      const project = state.projects.find((p) => p.id === id);
+      if (!project || !state.openIds.includes(id)) return;
+      // Freeze what you're looking at: a background project asked to sleep
+      // comes to the front first, so the animation isn't happening off screen.
+      if (state.activeId !== id) update({ activeId: id });
+      setFreezing({ id, snapshot: null });
+      let settled = false;
+      let timer = 0;
+      const finish = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener(HIBERNATED_EVENT, onSnapshot);
+        window.clearTimeout(timer);
+        if (!ok) {
+          setFreezing(null);
+          notify(`Couldn't snapshot ${project.name}, so it stays open.`, "error");
+          return;
+        }
+        setFreezing({ id, snapshot: hibernationOf(id) });
+        // Let the frost finish forming before the project goes.
+        window.setTimeout(() => {
+          setFreezing(null);
+          void closeProjectRef.current(id);
+          notify(`${project.name} is hibernating — open it to wake it.`, "success");
+        }, 1100);
+      };
+      const onSnapshot = (e: Event) => {
+        const d = (e as CustomEvent).detail as { projectId?: string; ok?: boolean } | null;
+        if (d?.projectId !== id) return;
+        finish(Boolean(d.ok));
+      };
+      window.addEventListener(HIBERNATED_EVENT, onSnapshot);
+      // The view answers synchronously; the timeout only covers a project whose
+      // view somehow isn't mounted, and it leaves the project open.
+      timer = window.setTimeout(() => finish(false), 2500);
+      window.dispatchEvent(new CustomEvent(HIBERNATE_EVENT, { detail: { projectId: id } }));
+    },
+    [notify, update],
+  );
+
+  /** Hand the snapshot to a freshly mounted ProjectView and let it rebuild
+   *  underneath the wake screen. Clearing the store is what mounts the view —
+   *  the project stops being asleep the moment its restore begins. */
+  const wakeProject = useCallback((id: string) => {
+    const snapshot = hibernationOf(id);
+    if (!snapshot) return;
+    const steps = wakeSteps(snapshot);
+    setWaking((prev) => ({
+      ...prev,
+      [id]: {
+        snapshot,
+        progress: {
+          done: 0,
+          total: steps.length,
+          label: steps[0]?.label ?? "Ready",
+          finished: false,
+        },
+      },
+    }));
+    clearHibernation(id);
+  }, []);
+
+  openForActionRef.current = useCallback(
+    async (id: string) => {
+      await openProjectRef.current(id);
+      if (isHibernating(id)) wakeProject(id);
+    },
+    [wakeProject],
+  );
+
+  const restoreStep = useCallback(
+    (id: string, done: number, total: number, label: string) =>
+      setWaking((prev) =>
+        prev[id]
+          ? { ...prev, [id]: { ...prev[id], progress: { done, total, label, finished: false } } }
+          : prev,
+      ),
+    [],
+  );
+
+  const restoreDone = useCallback((id: string) => {
+    setWaking((prev) =>
+      prev[id]
+        ? {
+            ...prev,
+            [id]: {
+              ...prev[id],
+              progress: { ...prev[id].progress, done: prev[id].progress.total, finished: true },
+            },
+          }
+        : prev,
+    );
+    // The thaw: the frost dissolves off the finished workspace, then unmounts.
+    window.setTimeout(
+      () =>
+        setWaking((prev) => {
+          if (!prev[id]) return prev;
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        }),
+      900,
+    );
+  }, []);
+
+  // A project closed mid-wake never reports finishing (its view is gone), so
+  // drop it here rather than leaving a wake screen that can never end — it
+  // would come back the moment the project was reopened.
+  useEffect(() => {
+    setWaking((prev) => {
+      const live = Object.keys(prev).filter((id) => ws.openIds.includes(id));
+      if (live.length === Object.keys(prev).length) return prev;
+      return Object.fromEntries(live.map((id) => [id, prev[id]]));
+    });
+  }, [ws.openIds]);
+
+  /** Throw a snapshot away and open the project empty — the escape hatch for a
+   *  workspace you no longer want back. */
+  const discardHibernation = useCallback(
+    (id: string) => {
+      clearHibernation(id);
+      notify("Snapshot discarded — the project opens empty.");
+    },
+    [notify],
+  );
+
   // Tell the PR watcher which repos matter: every component of every OPEN
   // project. Closed projects are not polled — the point of one poller is that
   // its budget goes on what the user is actually working on. The backend folds
@@ -807,7 +983,7 @@ export default function App() {
         notify("That pull request's checkout isn't in any project any more.", "warn");
         return;
       }
-      void openProjectRef.current(projectId).then(() => {
+      void openForActionRef.current(projectId).then(() => {
         // Same timer rationale as the pty:spawned route below: a just-opened
         // ProjectView has to mount and register its listener first.
         window.setTimeout(
@@ -854,7 +1030,7 @@ export default function App() {
           notify(`A remote agent started in ${e.cwd}, outside any project.`, "info");
           return;
         }
-        await openProjectRef.current(projectId);
+        await openForActionRef.current(projectId);
         // A beat so a not-yet-open project's ProjectView mounts and registers
         // its listener before the event fires; attachTerminal is idempotent by
         // pty id, so a redundant dispatch just re-focuses the tab. A timer, not
@@ -942,7 +1118,7 @@ export default function App() {
           notify("An agent asked to act, but its directory isn't in any open project.", "info");
           return;
         }
-        await openProjectRef.current(projectId);
+        await openForActionRef.current(projectId);
         // Timer, not rAF — see the attach-terminal dispatch above.
         window.setTimeout(
           () =>
@@ -992,7 +1168,7 @@ export default function App() {
           );
           return;
         }
-        await openProjectRef.current(projectId);
+        await openForActionRef.current(projectId);
         // Timer, not rAF: rAF starves while the window is occluded, which held
         // the agent's request open until the bridge's timeout even though the
         // op would have run fine — the whole preview pipeline (React commits,
@@ -1112,6 +1288,7 @@ export default function App() {
     notify("Collaboration ended.");
   }, [notify]);
   const newProject = useCallback(() => setDialog({ mode: "new" }), []);
+  const editProject = useCallback((p: Project) => setDialog({ mode: "edit", project: p }), []);
   const openManager = useCallback(() => setManager(true), []);
 
   // Update-toast handlers.
@@ -1206,6 +1383,11 @@ export default function App() {
     () => derivePending(agentEvents).filter((i) => !dismissedPending.has(i.key)),
     [agentEvents, dismissedPending],
   );
+  // Resolved rather than asserted: a project can be deleted from the manager
+  // while its frost is still forming.
+  const freezingProject = freezing
+    ? (ws.projects.find((p) => p.id === freezing.id) ?? null)
+    : null;
   // Project tabs are draggable; their order is the workspace's own, so it
   // persists with everything else in the workspace file.
   const tabDrag = useTabDrag(ws.openIds, (openIds) => update({ openIds }));
@@ -1236,8 +1418,12 @@ export default function App() {
         collabActive={collabTick >= 0 && (collab.current?.activeCount ?? 0) > 0}
         tabDragId={tabDrag.dragId}
         tabDragItemProps={tabDrag.itemProps}
+        hibernated={hibernated}
         onSelectProject={selectProject}
         onCloseProject={handleCloseProject}
+        onHibernateProject={hibernateProject}
+        onWakeProject={wakeProject}
+        onEditProject={editProject}
         onStopCollab={stopCollab}
         onNewProject={newProject}
         onManageProjects={openManager}
@@ -1247,6 +1433,7 @@ export default function App() {
         {openProjects.length === 0 && (
           <Welcome
             projects={ws.projects}
+            hibernated={hibernated}
             onOpen={(id) => void openProject(id)}
             onNew={() => setDialog({ mode: "new" })}
             onDelete={(id) => {
@@ -1255,34 +1442,76 @@ export default function App() {
             }}
           />
         )}
-        {openProjects.map((p) => (
-          <ProjectView
-            key={p.id}
-            project={p}
-            visible={p.id === ws.activeId}
-            zen={zen}
-            allProjects={openProjects.map((x) => ({
-              name: x.name,
-              roots: x.components.map((c) => c.path),
-            }))}
-            events={agentEvents}
-            hookPath={hookPath}
-            relay={relay}
-            dismissedPending={dismissedPending}
-            onDismissPending={(key) =>
-              // Bail unchanged when already dismissed: the auto-clear effect
-              // fires per render, and a fresh Set each time would loop it.
-              setDismissedPending((prev) =>
-                prev.has(key) ? prev : new Set(prev).add(key),
-              )
-            }
-            onEdit={() => setDialog({ mode: "edit", project: p })}
-            onNotice={notify}
-            onShareContext={(on) =>
-              void saveProject({ ...p, shareContext: on })
-            }
-          />
-        ))}
+        {/* A project that is asleep and not being woken has no ProjectView at
+            all — that is the saving. It's the frost, and a button. */}
+        {openProjects
+          .filter((p) => hibernated[p.id] && !waking[p.id])
+          .map((p) => (
+            <div
+              key={p.id}
+              className="project-view"
+              style={{ display: p.id === ws.activeId ? "flex" : "none" }}
+            >
+              <HibernationView
+                project={p}
+                snapshot={hibernated[p.id]}
+                progress={null}
+                onWake={() => wakeProject(p.id)}
+                onDiscard={() => discardHibernation(p.id)}
+              />
+            </div>
+          ))}
+        {openProjects
+          .filter((p) => !hibernated[p.id] || waking[p.id])
+          .map((p) => (
+            <ProjectView
+              key={p.id}
+              project={p}
+              visible={p.id === ws.activeId}
+              restore={waking[p.id]?.snapshot ?? null}
+              onRestoreStep={(done, total, label) => restoreStep(p.id, done, total, label)}
+              onRestored={() => restoreDone(p.id)}
+              zen={zen}
+              allProjects={openProjects.map((x) => ({
+                name: x.name,
+                roots: x.components.map((c) => c.path),
+              }))}
+              events={agentEvents}
+              hookPath={hookPath}
+              relay={relay}
+              dismissedPending={dismissedPending}
+              onDismissPending={(key) =>
+                // Bail unchanged when already dismissed: the auto-clear effect
+                // fires per render, and a fresh Set each time would loop it.
+                setDismissedPending((prev) =>
+                  prev.has(key) ? prev : new Set(prev).add(key),
+                )
+              }
+              onEdit={() => setDialog({ mode: "edit", project: p })}
+              onNotice={notify}
+              onShareContext={(on) =>
+                void saveProject({ ...p, shareContext: on })
+              }
+            />
+          ))}
+
+        {/* The frost, layered over the project area. Going to sleep it forms
+            over the live workspace; waking, it stays put while the workspace
+            rebuilds underneath and only then dissolves. */}
+        {freezing && freezingProject && (
+          <div className="hib-layer">
+            <FreezeOverlay project={freezingProject} snapshot={freezing.snapshot} />
+          </div>
+        )}
+        {Object.entries(waking).map(([id, w]) => {
+          const project = ws.projects.find((p) => p.id === id);
+          if (!project || id !== ws.activeId) return null;
+          return (
+            <div key={id} className="hib-layer">
+              <HibernationView project={project} snapshot={w.snapshot} progress={w.progress} />
+            </div>
+          );
+        })}
       </div>
 
       {updateAvail && (
@@ -1303,6 +1532,9 @@ export default function App() {
         <ProjectManager
           projects={ws.projects}
           openIds={ws.openIds}
+          hibernated={hibernated}
+          onHibernate={hibernateProject}
+          onWake={wakeProject}
           onOpen={(id) => void openProject(id)}
           onNew={() => {
             setManager(false);

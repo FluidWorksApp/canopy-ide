@@ -211,6 +211,13 @@ export interface ProjectViewProps {
   onShareContext: (on: boolean) => void;
   /** App-wide team relay — same handle in every project. */
   relay: RelayHandle;
+  /** A hibernated workspace to rebuild, handed over when the user wakes the
+   *  project. Null in the ordinary case. The frost stays on screen (App renders
+   *  it above this view) until `onRestored` fires. */
+  restore?: import("../../hibernation").ProjectSnapshot | null;
+  /** Progress of that rebuild, so the wake screen can tick the steps off. */
+  onRestoreStep?: (done: number, total: number, label: string) => void;
+  onRestored?: () => void;
 }
 
 /** One tab as canopy_editor_state describes it: enough for an agent to know
