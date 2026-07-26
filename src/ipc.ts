@@ -781,6 +781,107 @@ export const ghPrClose = (repo: string, number: number, deleteBranch = false) =>
 export const ghPrReady = (repo: string, number: number) =>
   invoke<string>("gh_pr_ready", { repo, number });
 
+// ---------- PR conversation (review threads, comments, reviews) ----------
+
+export interface PrComment {
+  /** GraphQL node id — what a reply or resolve is addressed to. */
+  id: string;
+  author: string;
+  body: string;
+  created: string;
+  url: string;
+  mine: boolean;
+  /** OWNER / MEMBER / COLLABORATOR / CONTRIBUTOR / NONE. */
+  association: string;
+}
+
+export interface PrReviewSummary extends PrComment {
+  /** APPROVED / CHANGES_REQUESTED / COMMENTED / DISMISSED / PENDING. */
+  state: string;
+  submitted: string;
+  /** Head commit the review was submitted against. */
+  commit: string;
+}
+
+export interface PrThread {
+  id: string;
+  path: string;
+  line: number;
+  start_line: number;
+  /** LEFT or RIGHT. */
+  side: string;
+  resolved: boolean;
+  outdated: boolean;
+  comments: PrComment[];
+}
+
+export interface PrFileState {
+  path: string;
+  viewed: boolean;
+  additions: number;
+  deletions: number;
+}
+
+export interface PrConversation {
+  node_id: string;
+  body: string;
+  head_sha: string;
+  viewer: string;
+  review_decision: string;
+  mergeable: string;
+  /** Live rollup in PrInfo's vocabulary: PASS / FAIL / PENDING / "". */
+  checks: string;
+  auto_merge: boolean;
+  draft: boolean;
+  comments: PrComment[];
+  reviews: PrReviewSummary[];
+  threads: PrThread[];
+  files: PrFileState[];
+  my_last_review_sha: string;
+}
+
+/** One inline comment of a review that hasn't been posted yet. */
+export interface DraftThread {
+  path: string;
+  line: number;
+  start_line?: number;
+  side: "LEFT" | "RIGHT";
+  body: string;
+}
+
+/** Everything the PR tab needs about the conversation, in one GraphQL call. */
+export const ghPrConversation = (repo: string, number: number) =>
+  invoke<PrConversation>("gh_pr_conversation", { repo, number });
+export const ghPrThreadReply = (repo: string, threadId: string, body: string) =>
+  invoke<string>("gh_pr_thread_reply", { repo, threadId, body });
+export const ghPrThreadResolved = (repo: string, threadId: string, resolved: boolean) =>
+  invoke<string>("gh_pr_thread_resolved", { repo, threadId, resolved });
+export const ghPrFileViewed = (repo: string, prId: string, path: string, viewed: boolean) =>
+  invoke<void>("gh_pr_file_viewed", { repo, prId, path, viewed });
+/** Submit a review and all its inline comments as one review. */
+export const ghPrReviewBatch = (
+  repo: string,
+  prId: string,
+  event: "approve" | "comment" | "request-changes",
+  body: string,
+  threads: DraftThread[],
+) => invoke<string>("gh_pr_review_batch", { repo, prId, event, body, threads });
+export const ghPrUpdateBranch = (repo: string, number: number) =>
+  invoke<string>("gh_pr_update_branch", { repo, number });
+export const ghPrRequestReview = (repo: string, number: number, reviewers: string[]) =>
+  invoke<string>("gh_pr_request_review", { repo, number, reviewers });
+export const ghPrAutoMerge = (
+  repo: string,
+  number: number,
+  method: "squash" | "merge" | "rebase",
+  enable: boolean,
+) => invoke<string>("gh_pr_auto_merge", { repo, number, method, enable });
+/** Tail of the failing checks' logs — "" when nothing is failing. */
+export const ghPrFailingLogs = (repo: string, number: number) =>
+  invoke<string>("gh_pr_failing_logs", { repo, number });
+export const ghPrDiffSince = (repo: string, baseSha: string, headSha: string) =>
+  invoke<string>("gh_pr_diff_since", { repo, baseSha, headSha });
+
 // ---------- cross-session context ----------
 
 export interface SessionDigest {

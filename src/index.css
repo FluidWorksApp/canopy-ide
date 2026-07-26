@@ -5746,6 +5746,192 @@ body.dragging-tab * {
 .pr-description.markdown-body > :first-child { margin-top: 0; }
 .pr-description.markdown-body > :last-child { margin-bottom: 0; }
 
+/* The next move: one derived sentence and the button that does it. Sits under
+   the identity row so the first thing read is what needs to happen, not the
+   diff. Urgent (blocking) wears the accent border; everything else is quiet. */
+.pr-next {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--border);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  background: var(--bg-alt);
+  font-size: 11px;
+}
+.pr-next.is-urgent { border-left-color: var(--accent); }
+.pr-next-label { color: var(--fg); }
+.pr-next-note { color: var(--fg-dim); font-size: 10px; }
+
+/* Description and conversation side by side; the diff below stays full width,
+   because a diff read in a 60%-width column is a worse diff. Collapses to one
+   column when the tab is narrow (a pinned side panel does that). */
+.pr-overview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 12px;
+  align-items: start;
+}
+.pr-overview-main { min-width: 0; }
+@media (max-width: 1100px) {
+  .pr-overview { grid-template-columns: minmax(0, 1fr); }
+}
+
+.pr-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  margin-bottom: 12px;
+}
+.pr-rail-section {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  background: var(--bg-alt);
+  padding: 8px 10px;
+}
+.pr-rail-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  margin-bottom: 6px;
+}
+.pr-rail-title .btn-mini { margin-left: auto; }
+.pr-rail-empty { color: var(--fg-dim); font-size: 11px; line-height: 1.5; }
+.pr-rail-row { display: flex; align-items: center; gap: 6px; }
+
+.pr-comment-row { padding: 5px 0; border-top: 1px solid var(--border); }
+.pr-comment-row:first-of-type { border-top: none; }
+.pr-comment-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+.pr-comment-author { color: var(--fg); font-weight: 600; }
+.pr-comment-when { cursor: default; }
+.pr-comment-body.markdown-body { font-size: 12px; }
+.pr-comment-body.markdown-body > :first-child { margin-top: 2px; }
+.pr-comment-body.markdown-body > :last-child { margin-bottom: 0; }
+.pr-comment-body.markdown-body pre { max-height: 200px; overflow: auto; }
+
+/* A verdict is the most load-bearing thing on the page when it exists, so it
+   gets a coloured edge rather than being another grey card. */
+.pr-verdict {
+  border-left: 2px solid var(--border);
+  padding-left: 7px;
+  margin-bottom: 6px;
+}
+.pr-verdict.is-bad { border-left-color: var(--danger); }
+.pr-verdict.is-ok { border-left-color: var(--ok); }
+
+.pr-thread {
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  padding: 6px 8px;
+  margin: 6px 0;
+  background: var(--bg);
+}
+.pr-thread.is-resolved { opacity: 0.55; }
+.pr-thread.is-outdated .pr-thread-where { text-decoration: line-through; }
+.pr-thread-head { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
+.pr-thread-where {
+  font-family: var(--mono, monospace);
+  font-size: 10px;
+  color: var(--accent);
+  cursor: pointer;
+}
+.pr-thread-where:hover { text-decoration: underline; }
+.pr-thread-tag {
+  padding: 0 5px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  background: var(--bg-raised);
+  color: var(--fg-dim);
+  font-size: 9px;
+  white-space: nowrap;
+}
+.pr-thread-tag.is-blocking {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+.pr-thread-more { font-size: 10px; color: var(--fg-dim); }
+.pr-thread-actions { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.pr-reply { margin-top: 4px; }
+
+/* A draft comment has not been posted and must never look like one that has. */
+.pr-draft {
+  border: 1px dashed var(--accent);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  padding: 6px 8px;
+  margin: 6px 0;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.pr-drafts { max-height: 220px; overflow-y: auto; margin-bottom: 6px; }
+.pr-blocking-check {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+
+/* Threads and drafts rendered inside the diff, on the line they belong to. */
+.pr-line-extend,
+.pr-line-composer {
+  padding: 4px 10px;
+  background: var(--bg-alt);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.pr-line-extend .pr-thread { margin: 4px 0; }
+
+.pr-round { padding: 4px 0; border-top: 1px solid var(--border); font-size: 11px; }
+.pr-round:first-of-type { border-top: none; }
+.pr-round-n { font-family: var(--mono, monospace); color: var(--fg-dim); margin-right: 6px; }
+.pr-round-took { color: var(--fg-dim); font-size: 10px; margin-left: 6px; }
+.pr-round-summary { color: var(--fg-dim); font-size: 11px; margin-top: 2px; line-height: 1.4; }
+
+.pr-logs {
+  max-height: 220px;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  font-family: var(--mono, monospace);
+  font-size: 10px;
+  white-space: pre-wrap;
+  color: var(--fg-dim);
+}
+
+.pr-map .markdown-body { font-size: 12px; }
+.pr-map-cta { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+
+.pr-file.is-viewed .pr-file-path { opacity: 0.6; }
+.pr-file-viewed {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  font-size: 10px;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+
 .pr-file {
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
