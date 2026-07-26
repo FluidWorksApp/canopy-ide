@@ -220,6 +220,7 @@ export function TasksPanel({
     <div className="side-panel">
       <div className="side-panel-head">
         <span>Tasks</span>
+        <span className="task-head-actions">
         <button
           className="btn-icon"
           title="Run a one-off task — type the job, it runs once, nothing is saved"
@@ -241,6 +242,7 @@ export function TasksPanel({
         >
           ＋
         </button>
+        </span>
       </div>
 
       {running.length > 0 && (

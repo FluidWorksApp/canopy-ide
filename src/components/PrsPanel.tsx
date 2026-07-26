@@ -14,14 +14,11 @@ import { usePrWatch } from "../usePrWatch";
 import { PullRequestIcon } from "./icons";
 
 interface PrsPanelProps {
-  /** Repo paths belonging to the project in front, so a row can be opened here
-   *  rather than by routing through App. */
+  /** This project's repos. The panel shows these and nothing else — a PR queue
+   *  that spans projects is a stream to scroll, not a queue to work. */
   localRepos: string[];
-  /** Open a PR that lives in this project. */
   onOpen: (repo: string, pr: ipc.PrInfo) => void;
-  /** Open a PR that belongs to another project — App switches, then opens. */
-  onOpenElsewhere: (repo: string, pr: ipc.PrInfo) => void;
-  /** Project names by repo path, for the row's second line. */
+  /** Repo path → the label to show on the row's second line. */
   projectFor: (repo: string) => string | undefined;
 }
 
@@ -33,23 +30,18 @@ const LANE_TONE: Record<Lane, string> = {
   draft: "is-dim",
 };
 
-export function PrsPanel({ localRepos, onOpen, onOpenElsewhere, projectFor }: PrsPanelProps) {
+export function PrsPanel({ localRepos, onOpen, projectFor }: PrsPanelProps) {
   const { rows, fetchedMs, errors, remaining, nextIn, busy, viewer } = usePrWatch();
   const [mineOnly, setMineOnly] = useState(false);
-  // Centralized polling, project-level surfacing. One loop asks about every
-  // open project (switching projects is then instant and costs nothing), but
-  // what you SEE is the project you are in: a single list mixing eight repos is
-  // a stream to scroll, not a queue to work. "All" is a deliberate choice, not
-  // the default you land in.
-  const [allProjects, setAllProjects] = useState(false);
   const [collapsed, setCollapsed] = useState<Set<Lane>>(new Set());
 
-  const mine = useMemo(
+  // This project's, always. There is no cross-project view and no toggle for
+  // one: the panel answers "what needs me here", and a list that answers it for
+  // somewhere else is noise you have to filter by eye every time you read it.
+  const scoped = useMemo(
     () => rows.filter((r) => localRepos.includes(r.repo)),
     [rows, localRepos],
   );
-  const elsewhere = rows.length - mine.length;
-  const scoped = allProjects ? rows : mine;
   const shown = useMemo(
     () => (mineOnly ? scoped.filter((r) => r.mine) : scoped),
     [scoped, mineOnly],
@@ -57,28 +49,13 @@ export function PrsPanel({ localRepos, onOpen, onOpenElsewhere, projectFor }: Pr
   const groups = useMemo(() => lanes(shown), [shown]);
   const errorList = Object.entries(errors);
 
-  const open = (row: ipc.PrRow) => {
-    const pr = toPrInfo(row);
-    if (localRepos.includes(row.repo)) onOpen(row.repo, pr);
-    else onOpenElsewhere(row.repo, pr);
-  };
+  const open = (row: ipc.PrRow) => onOpen(row.repo, toPrInfo(row));
 
   return (
     <div className="prs-panel">
       <div className="side-panel-head">
         <span>Pull requests</span>
         <span className="prs-head-actions">
-          <button
-            className={`btn-mini ${allProjects ? "btn-accent" : ""}`}
-            title={
-              allProjects
-                ? "Show only this project's pull requests"
-                : "Show every open project's pull requests"
-            }
-            onClick={() => setAllProjects((v) => !v)}
-          >
-            {allProjects ? "all projects" : "this project"}
-          </button>
           <button
             className={`btn-mini ${mineOnly ? "btn-accent" : ""}`}
             title={mineOnly ? "Show everyone's" : "Show only mine"}
@@ -92,15 +69,21 @@ export function PrsPanel({ localRepos, onOpen, onOpenElsewhere, projectFor }: Pr
         </span>
       </div>
 
-      {/* One line of provenance: when this was last true, and what the next
-          check costs. A list that silently goes stale is worse than no list. */}
-      <div className="prs-meta">
-        <span title={fetchedMs ? new Date(fetchedMs).toLocaleString() : undefined}>
-          checked {since(fetchedMs)}
-        </span>
-        {nextIn > 0 && <span>· next in {nextIn < 120 ? `${nextIn}s` : `${Math.round(nextIn / 60)}m`}</span>}
-        {remaining > 0 && <span title="GraphQL points left this hour">· {remaining} left</span>}
-        {viewer && <span>· as {viewer}</span>}
+      {/* Provenance, not news: a list that silently goes stale is worse than no
+          list, but nobody needs to read this twice. It stays one dim line, and
+          the numbers only a debugger wants live in its tooltip. */}
+      <div
+        className="prs-meta"
+        title={[
+          fetchedMs ? `Last checked ${new Date(fetchedMs).toLocaleString()}` : "",
+          remaining > 0 ? `${remaining} GraphQL points left this hour` : "",
+          viewer ? `Signed in as ${viewer}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n")}
+      >
+        checked {since(fetchedMs)}
+        {nextIn > 0 && ` · next in ${nextIn < 120 ? `${nextIn}s` : `${Math.round(nextIn / 60)}m`}`}
       </div>
 
       {errorList.length > 0 && (
@@ -115,11 +98,7 @@ export function PrsPanel({ localRepos, onOpen, onOpenElsewhere, projectFor }: Pr
 
       {shown.length === 0 && (
         <div className="prs-empty">
-          {!fetchedMs
-            ? "Looking for pull requests…"
-            : allProjects
-              ? "No open pull requests in the projects you have open."
-              : "No open pull requests in this project."}
+          {fetchedMs ? "No open pull requests in this project." : "Looking for pull requests…"}
         </div>
       )}
 
@@ -139,7 +118,7 @@ export function PrsPanel({ localRepos, onOpen, onOpenElsewhere, projectFor }: Pr
               }
             >
               <span className="prs-lane-chevron">{isCollapsed ? "▸" : "▾"}</span>
-              <span>{LANE_LABEL[lane]}</span>
+              <span className="prs-lane-name">{LANE_LABEL[lane]}</span>
               <span className="prs-lane-count">{laneRows.length}</span>
             </div>
             {!isCollapsed &&
@@ -176,13 +155,6 @@ export function PrsPanel({ localRepos, onOpen, onOpenElsewhere, projectFor }: Pr
         );
       })}
 
-      {/* Cross-project urgency is worth knowing about; it just isn't worth
-          living in this list. One line, and you opt in. */}
-      {!allProjects && elsewhere > 0 && (
-        <div className="prs-elsewhere" onClick={() => setAllProjects(true)}>
-          {elsewhere} more in other projects — show all
-        </div>
-      )}
     </div>
   );
 }

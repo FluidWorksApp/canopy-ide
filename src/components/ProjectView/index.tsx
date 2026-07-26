@@ -803,21 +803,6 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     [prsRows, repoPaths],
   );
 
-  // A PR from another project, after App has switched to us.
-  useEffect(() => {
-    const onOpenElsewhere = (e: Event) => {
-      const d = (e as CustomEvent).detail as {
-        projectId?: string;
-        repo?: string;
-        pr?: ipc.PrInfo;
-      };
-      if (!d?.repo || !d.pr || (d.projectId && d.projectId !== project.id)) return;
-      openPr(d.repo, d.pr);
-    };
-    window.addEventListener("canopy:open-pr", onOpenElsewhere);
-    return () => window.removeEventListener("canopy:open-pr", onOpenElsewhere);
-  }, [project.id, openPr]);
-
   // Session digests + this launch's tag, so the "Agent Workspace" overlay can
   // resolve the agent behind the active terminal the same way AgentsPanel does
   // (by PTY surface id). Polled while an agent terminal is open; idle otherwise.
@@ -4503,7 +4488,6 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             setSideTab("files");
           }}
           onOpenDiff={(_repo, f) => void openFile(f.abs, { diff: true })}
-          onOpenPr={(repo, pr) => openPr(repo, pr)}
           onOpenCommit={openCommit}
           onOpenBranch={openBranch}
           onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
@@ -4522,22 +4506,6 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                     },
                   ],
             )
-          }
-          prTaskMenu={(repo, pr) =>
-            taskMenu(`About PR #${pr.number} "${pr.title}" (${pr.url}): `, [
-              {
-                id: reviewPrTask.id,
-                label: `Review PR #${pr.number}`,
-                icon: reviewPrTask.icon,
-                run: () => void startMicroTask(reviewPrTask, { repo, pr }, ""),
-              },
-              {
-                id: addressPrCommentsTask.id,
-                label: `Address comments on #${pr.number}`,
-                icon: addressPrCommentsTask.icon,
-                run: () => void startMicroTask(addressPrCommentsTask, { repo, pr }, ""),
-              },
-            ])
           }
         />
       ))}
@@ -4572,11 +4540,6 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           localRepos={repoPaths}
           projectFor={(repo) => (repoPaths.includes(repo) ? project.name : undefined)}
           onOpen={(repo, pr) => openPr(repo, pr)}
-          onOpenElsewhere={(repo, pr) =>
-            window.dispatchEvent(
-              new CustomEvent("canopy:open-pr-elsewhere", { detail: { repo, pr } }),
-            )
-          }
         />
       ))}
       {sidePane("trackers", () => (

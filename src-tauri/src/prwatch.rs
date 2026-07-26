@@ -1,10 +1,15 @@
-//! One poller for every project's pull requests.
+//! One poller for the active project's pull requests.
 //!
-//! The naive version of a cross-project PR inbox is a `setInterval` per panel
-//! calling `gh pr list` per repo — a process per repo per tick, a `gh api user`
-//! for the viewer's login inside each one (see `gh_pr_list`), and all of it
-//! still running when the window is in the background. With five projects open
-//! that is 10+ subprocesses a minute for a list nobody is looking at.
+//! The naive version is a `setInterval` per panel calling `gh pr list` per repo
+//! — a process per repo per tick, a `gh api user` for the viewer's login inside
+//! each one (see `gh_pr_list`), and all of it still running when the window is
+//! in the background. For a project of four components that is 8+ subprocesses
+//! a minute for a list nobody is looking at.
+//!
+//! The frontend declares the active project's repos and nothing else: the panel
+//! and the rail badge are project-scoped, so polling the other open projects
+//! would be asking GitHub about rows nobody can see. Switching projects swaps
+//! the set and wakes the loop, so the new rows land in a beat.
 //!
 //! So the work happens once, here, and the answer is broadcast:
 //!

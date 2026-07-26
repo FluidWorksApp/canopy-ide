@@ -3712,8 +3712,10 @@ body.dragging-tab * {
 .task-label-link {
   cursor: pointer;
 }
+/* No underline: the whole row already lights up on hover, and a second
+   affordance on top of that reads as a web link in a list of app rows. */
 .task-label-link:hover {
-  text-decoration: underline;
+  color: var(--fg);
 }
 .task-label-dim {
   color: var(--text-dim);
@@ -6207,50 +6209,75 @@ body.dragging-tab * {
 /* Provenance, always visible: a list that quietly goes stale is worse than no
    list, so it says when it was last true and when it will be again. */
 .prs-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  padding: 0 10px 6px;
-  font-size: 10px;
+  padding: 0 10px 8px;
+  font-size: 9px;
   color: var(--fg-dim);
+  opacity: 0.6;
+  cursor: default;
 }
 
 .prs-errors { padding: 0 10px 6px; }
 .prs-error { font-size: 10px; color: var(--danger); line-height: 1.4; }
 .prs-empty { padding: 8px 10px; font-size: 11px; color: var(--fg-dim); line-height: 1.5; }
 
-.prs-lane { margin-bottom: 2px; }
+/* Each lane is a block you can see the edges of: a rule above it, air around
+   its heading, and a heading that stays put while its rows scroll under it.
+   Without those three the panel reads as one undifferentiated list. */
+.prs-lane { margin-bottom: 10px; }
+.prs-lane + .prs-lane { border-top: 1px solid var(--border); padding-top: 2px; }
+
 .prs-lane-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 4px 10px;
+  gap: 6px;
+  padding: 7px 10px 5px;
+  background: var(--bg);
   font-size: 10px;
-  letter-spacing: 0.04em;
+  font-weight: 600;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--fg-dim);
   cursor: pointer;
   user-select: none;
 }
-.prs-lane-head:hover { color: var(--fg); }
-.prs-lane-count { margin-left: auto; opacity: 0.7; }
-.prs-lane-chevron { width: 8px; }
-/* The lane's edge carries its urgency, so a row needs no colour of its own. */
+.prs-lane-head:hover .prs-lane-name { color: var(--fg); }
+.prs-lane-chevron { width: 8px; opacity: 0.7; }
+.prs-lane-count {
+  margin-left: auto;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--bg-raised);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+/* Colour marks the lane, once, on its heading — and faintly on the rows that
+   belong to it, so a row is never orphaned from the group it was read under. */
 .prs-lane.is-urgent .prs-lane-head { color: var(--accent); }
+.prs-lane.is-urgent .prs-lane-count { background: color-mix(in srgb, var(--accent) 22%, transparent); }
 .prs-lane.is-bad .prs-lane-head { color: var(--danger); }
+.prs-lane.is-bad .prs-lane-count { background: color-mix(in srgb, var(--danger) 18%, transparent); }
 .prs-lane.is-ok .prs-lane-head { color: var(--ok); }
-.prs-lane.is-dim .prs-lane-head { opacity: 0.6; }
+.prs-lane.is-dim .prs-lane-head { opacity: 0.55; }
 
 .prs-row {
   display: grid;
   grid-template-columns: 14px auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 5px;
-  padding: 4px 10px 5px;
+  padding: 5px 10px 6px;
   cursor: pointer;
   border-left: 2px solid transparent;
 }
-.prs-row:hover { background: var(--bg-alt); border-left-color: var(--border); }
+.prs-lane.is-urgent .prs-row { border-left-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+.prs-lane.is-bad .prs-row { border-left-color: color-mix(in srgb, var(--danger) 30%, transparent); }
+.prs-row:hover { background: var(--bg-alt); }
+.prs-lane.is-urgent .prs-row:hover { border-left-color: var(--accent); }
+.prs-lane.is-bad .prs-row:hover { border-left-color: var(--danger); }
+
 .prs-row-num { font-family: var(--mono, monospace); font-size: 10px; color: var(--fg-dim); }
 .prs-row-title {
   font-size: 12px;
@@ -6268,23 +6295,13 @@ body.dragging-tab * {
   display: flex;
   flex-wrap: wrap;
   gap: 3px;
+  margin-top: 1px;
   font-size: 10px;
   color: var(--fg-dim);
+  opacity: 0.8;
 }
 .prs-row-stat { white-space: nowrap; }
 
-/* The other projects' queues: a line you can act on, not a list you scroll. */
-.prs-elsewhere {
-  margin: 6px 10px 0;
-  padding: 5px 8px;
-  border: 1px dashed var(--border);
-  border-radius: var(--r-xs);
-  corner-shape: squircle;
-  font-size: 10px;
-  color: var(--fg-dim);
-  cursor: pointer;
-}
-.prs-elsewhere:hover { color: var(--fg); border-color: var(--accent); }
 
 .pr-file.is-viewed .pr-file-path { opacity: 0.6; }
 .pr-file-viewed {
@@ -11128,4 +11145,56 @@ a.btn-mini {
   color: var(--text-faint);
   font-variant-numeric: tabular-nums;
   white-space: pre-wrap;
+}
+
+/* ---------- "something is running against this PR" ---------- */
+
+.pr-rail-running { border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.pr-run-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  font-size: 11px;
+}
+.pr-run-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pr-run-elapsed {
+  margin-left: auto;
+  font-family: var(--mono, monospace);
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+/* The one moving thing on the page: a task is either running or it isn't, and
+   a static label can't tell you which. */
+.pr-run-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pr-run-pulse 1.4s ease-in-out infinite;
+}
+@keyframes pr-run-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pr-run-dot { animation: none; opacity: 0.9; }
+}
+
+/* The panel's two actions are a pair — one floating between the title and the
+   other read as decoration nobody could explain. */
+.side-panel-head .task-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.pr-next-running {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: var(--fg-dim);
 }
