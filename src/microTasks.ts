@@ -560,6 +560,12 @@ export interface CustomMicroTask {
   brief: string;
 }
 
+/** Fired when the saved list changes, so every project's Tasks panel re-reads
+ *  it. Custom tasks are app-wide, but each project keeps its own panel mounted
+ *  once opened — without this, a task written in one project stays invisible to
+ *  the others until the app restarts, which reads as project-level storage. */
+export const CUSTOM_TASKS_EVENT = "canopy:custom-tasks";
+
 /** Adapt a user-written task to the MicroTaskDef the launcher runs. The
  *  payload is just the directory the Tasks panel resolved for it. */
 export function customTaskDef(c: CustomMicroTask): MicroTaskDef<{ dir: string }> {

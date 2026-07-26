@@ -9,6 +9,7 @@
 import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
+  CUSTOM_TASKS_EVENT,
   EFFECT_HEADING,
   MICRO_TASKS,
   type CustomMicroTask,
@@ -121,9 +122,19 @@ export function TasksPanel({
   const [runQuery, setRunQuery] = useState("");
   const [runDir, setRunDir] = useState("");
 
+  // Saved tasks belong to the user, not to a project, so a task written here
+  // has to appear in every other project's panel too — and those panels stay
+  // mounted behind the one in front, holding whatever list they read at mount.
+  useEffect(() => {
+    const refresh = () => setCustom(getSettings().customMicroTasks);
+    window.addEventListener(CUSTOM_TASKS_EVENT, refresh);
+    return () => window.removeEventListener(CUSTOM_TASKS_EVENT, refresh);
+  }, []);
+
   const save = (next: CustomMicroTask[]) => {
     setCustom(next);
     updateSettings({ customMicroTasks: next });
+    window.dispatchEvent(new Event(CUSTOM_TASKS_EVENT));
   };
 
   const submitDraft = () => {
