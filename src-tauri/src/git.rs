@@ -1475,7 +1475,10 @@ pub async fn gh_pr_request_review(
         cmd.args(["--add-reviewer", r]);
     }
     run_net(&mut cmd)?;
-    Ok(format!("Asked {} to review #{number}", reviewers.join(", ")))
+    Ok(format!(
+        "Asked {} to review #{number}",
+        reviewers.join(", ")
+    ))
 }
 
 /// Hand the landing decision to GitHub: it merges when the branch-protection
@@ -3383,7 +3386,9 @@ index 333..444 100644
     #[test]
     fn parse_conversation_errors_when_the_pr_is_missing() {
         let empty = json!({ "viewer": { "login": "me" }, "repository": { "pullRequest": null } });
-        let err = parse_conversation(&empty, 42).err().expect("no PR, no parse");
+        let err = parse_conversation(&empty, 42)
+            .err()
+            .expect("no PR, no parse");
         assert!(err.contains("#42"));
     }
 
