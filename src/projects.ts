@@ -461,15 +461,55 @@ function expandArgs(template: string, token: string, value: string): string {
   return (t.includes(token) ? t.replaceAll(token, value) : `${t} ${value}`).trim();
 }
 
+/** A value that names arguments rather than one executable. `acme run agent`
+ *  probes as a single file of that name — so it reports "not found" with
+ *  nothing to say why — and would be launched the same way. A path may hold
+ *  spaces (`/opt/Acme CLI/agent`); a bare name that does is arguments. */
+export const namesArguments = (value: string) =>
+  !!value && !/[/\\]/.test(value) && /\s/.test(value);
+
+/**
+ * Why a custom entry can't be registered, or null when it can. `earlier` is the
+ * entries above it in the list — first one wins, so editing a row can only ever
+ * invalidate itself.
+ *
+ * Only two rules, and both are about what the field has to be rather than what
+ * the CLI does: whether the value is one executable, and whether something else
+ * already answers to that name. Nothing here can tell you the binary is really
+ * an agent, or that the resume flag is right — running an unknown CLI to find
+ * out is not a thing a settings field may do, and a guess would be worse than
+ * the "✗ not found" the PATH probe gives honestly.
+ *
+ * A built-in's binary is refused because that entry already launches it and
+ * would then be identified as this one. The bare-binary list (gemini, droid, …)
+ * is deliberately NOT refused: those name themselves precisely because Canopy
+ * ships no launcher for them, so adding one is the point.
+ */
+export function customCliIssue(
+  entry: CustomAgentCli,
+  earlier: CustomAgentCli[],
+): "arguments" | "duplicate" | null {
+  const bin = entry.bin.trim();
+  if (!bin) return null;
+  if (namesArguments(bin)) return "arguments";
+  const name = binName(bin);
+  const clash =
+    BUILTIN_AGENT_CLIS.some((d) => d.bin === name) ||
+    earlier.some((o) => o.bin.trim() && binName(o.bin) === name);
+  return clash ? "duplicate" : null;
+}
+
 /** The user's own entries, as registry definitions. */
 export function customCliDefs(): AgentCliDef[] {
-  return getSettings().customClis.flatMap((c): AgentCliDef[] => {
+  const all = getSettings().customClis;
+  return all.flatMap((c, i): AgentCliDef[] => {
     const id = c.id.trim();
     const bin = c.bin.trim();
-    // A half-filled row never reaches the registry: the settings list keeps the
-    // draft so it can be finished, but a launcher entry that runs nothing is
-    // worse than no entry at all.
-    if (!id || !bin) return [];
+    // A half-filled or unusable row never reaches the registry: the settings
+    // list keeps the draft so it can be finished, but a launcher entry that
+    // runs nothing — or that steals another entry's identity — is worse than no
+    // entry at all.
+    if (!id || !bin || customCliIssue(c, all.slice(0, i))) return [];
     const name = c.name.trim() || binName(bin);
     const resumeArgs = c.resumeArgs?.trim();
     const promptArgs = c.promptArgs?.trim();

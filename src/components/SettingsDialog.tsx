@@ -24,8 +24,11 @@ import { availableMonoFonts, fontLabel, fontStack } from "../fonts";
 import { AgentIcon, TrackerIcon } from "./icons";
 import {
   AGENT_CLIS,
+  binName,
   BUILTIN_AGENT_CLIS,
   currentPlatform,
+  customCliIssue,
+  namesArguments,
   newCustomCliId,
   refreshAgentClis,
   type AgentCliDef,
@@ -99,13 +102,6 @@ function Item({
     </div>
   );
 }
-
-/** A value that names arguments rather than one executable. `acme run claude`
- *  would be probed as a single executable of that name, so it reports ✗ with
- *  nothing to say why — and would be launched the same way. A path may hold
- *  spaces (`/opt/Acme CLI/claude`); a bare name that does is arguments. */
-const namesArguments = (typed: string) =>
-  !!typed && !/[/\\]/.test(typed) && /\s/.test(typed);
 
 /**
  * Point a registry entry at the binary this machine actually has.
@@ -280,8 +276,10 @@ function CustomClis({
     <div className="cli-customs">
       {rows.map((c, i) => {
         const bin = c.bin.trim();
-        const bad = namesArguments(bin);
-        const state = bad || !bin ? undefined : found[bin];
+        // The registry's own rule, asked rather than re-implemented: a row this
+        // marks is a row that won't be registered, so the two can't disagree.
+        const issue = customCliIssue(c, rows.slice(0, i));
+        const state = issue || !bin ? undefined : found[bin];
         return (
           <div key={c.id || `draft-${i}`} className="cli-custom">
             <div className="cli-custom-head">
@@ -306,25 +304,29 @@ function CustomClis({
                 onBlur={(e) => commit(rows.map((o, n) => (n === i ? { ...o, bin: e.target.value.trim() } : o)))}
               />
               <span
-                className={`cli-bin-state ${state === false || bad ? "cli-bin-missing" : ""}`}
+                className={`cli-bin-state ${state === false || issue ? "cli-bin-missing" : ""}`}
                 title={
-                  bad
+                  issue === "arguments"
                     ? "This field names one executable — a path or a command name, with no arguments"
-                    : state === false
-                      ? `Nothing named ${bin} on your PATH`
-                      : bin
+                    : issue === "duplicate"
+                      ? `Another entry already launches ${binName(bin)}, so this one isn't registered`
+                      : state === false
+                        ? `Nothing named ${bin} on your PATH`
+                        : bin
                 }
               >
                 {/* Shorter than the binaries list says it, because here the
                     column has a Remove button after it to stay clear of; the
                     full sentence is the tooltip. */}
-                {bad
+                {issue === "arguments"
                   ? "✗ not a command"
-                  : state === undefined
-                    ? ""
-                    : state
-                      ? "✓ found"
-                      : "✗ not found"}
+                  : issue === "duplicate"
+                    ? "✗ in use"
+                    : state === undefined
+                      ? ""
+                      : state
+                        ? "✓ found"
+                        : "✗ not found"}
               </span>
               <button
                 className="btn btn-small"
@@ -361,6 +363,15 @@ function CustomClis({
           </div>
         );
       })}
+      {/* The placeholders name the two tokens, but a placeholder is gone the
+          moment you type — so the list says it once, where a row being edited
+          can still be seen. */}
+      {rows.length > 0 && (
+        <div className="cli-custom-hint">
+          <code>{"{id}"}</code> the session id · <code>{"{prompt}"}</code> your text · omit
+          either and it's appended
+        </div>
+      )}
       <button
         className="btn btn-small"
         onClick={() => commit([...rows, { id: "", name: "", bin: "" }])}

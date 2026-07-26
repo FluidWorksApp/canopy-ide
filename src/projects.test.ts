@@ -5,6 +5,7 @@ import {
   agentForPkg,
   agentIdTaken,
   BUILTIN_AGENT_CLIS,
+  customCliIssue,
   newCustomCliId,
   refreshAgentClis,
   restoreCommand,
@@ -310,6 +311,32 @@ describe("custom CLIs", () => {
     expect(cli?.custom).toBe(true);
     expect(cli?.install).toBeUndefined();
     expect(updateCommand(cli!)).toBeUndefined();
+  });
+
+  it("refuses a command line, and keeps it out of the registry", () => {
+    // `acme run agent` probes as one file of that name and would launch the
+    // same way — the marker and the registry have to agree about that.
+    expect(customCliIssue({ ...acme, bin: "acme run agent" }, [])).toBe("arguments");
+    expect(customCliIssue({ ...acme, bin: "/opt/Acme CLI/agent" }, [])).toBeNull();
+    addClis([{ ...acme, bin: "acme run agent" }]);
+    expect(AGENT_CLIS.some((c) => c.custom)).toBe(false);
+  });
+
+  it("refuses a binary a built-in already launches, but not a bare-binary agent", () => {
+    expect(customCliIssue({ ...acme, bin: "claude" }, [])).toBe("duplicate");
+    // `droid` names itself only because Canopy ships no launcher for it, so
+    // adding one is the point rather than a clash.
+    expect(customCliIssue({ ...acme, bin: "droid" }, [])).toBeNull();
+  });
+
+  it("refuses the second entry to claim a binary, never the first", () => {
+    const first: CustomAgentCli = { id: "one", name: "One", bin: "acme-agent" };
+    expect(customCliIssue(first, [])).toBeNull();
+    expect(customCliIssue({ id: "two", name: "Two", bin: "acme-agent" }, [first])).toBe(
+      "duplicate",
+    );
+    addClis([first, { id: "two", name: "Two", bin: "acme-agent" }]);
+    expect(AGENT_CLIS.filter((c) => c.custom).map((c) => c.id)).toEqual(["one"]);
   });
 
   it("keeps a half-filled row out of the registry", () => {
