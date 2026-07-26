@@ -452,7 +452,40 @@ pub fn pty_spawn(
         high_water,
         run_command,
         Some(on_data),
+        None,
     )
+}
+
+/// Spawn a PTY that no tab owns, for a micro-task: the agent runs its one job in
+/// the background and reports through `canopy_job_done`, so the Tasks panel is
+/// the only surface it needs. Deliberately *not* `spawn_headless`, which
+/// announces itself with `pty:spawned` — the desktop answers that by opening a
+/// tab, which is the thing a micro-task is trying not to be.
+///
+/// `command` runs as the shell's argument (login + interactive, so the user's
+/// PATH is there) and the shell exits with it, so the agent quitting settles the
+/// run on its own. `env` is stamped onto the child rather than written as a
+/// `VAR=1 cmd` prefix, which only a Bourne shell would understand.
+#[tauri::command]
+pub fn pty_spawn_detached(
+    app: AppHandle,
+    state: State<'_, PtyManager>,
+    cwd: Option<String>,
+    command: String,
+    env: Option<Vec<(String, String)>>,
+) -> Result<SpawnResult, String> {
+    state.spawn(app, 120, 40, cwd, None, None, Some(command), None, env)
+}
+
+/// The tail of a PTY's output, for a run nobody is watching: a micro-task's
+/// transcript has to be read off the session itself, there being no xterm buffer
+/// to capture from. Raw bytes as the terminal emitted them (escape sequences and
+/// all) — the caller replays them through a terminal parser to get text.
+#[tauri::command]
+pub fn pty_output(state: State<'_, PtyManager>, id: u32, max: Option<usize>) -> Option<String> {
+    state
+        .scrollback_tail(id, max.unwrap_or(64 * 1024))
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
 }
 
 impl PtyManager {
@@ -465,7 +498,7 @@ impl PtyManager {
         cwd: Option<String>,
         command: Option<String>,
     ) -> Result<u32, String> {
-        let res = self.spawn(app.clone(), 120, 32, cwd, None, None, None, None)?;
+        let res = self.spawn(app.clone(), 120, 32, cwd, None, None, None, None, None)?;
         if let Some(cmd) = command {
             let cmd = cmd.trim();
             if !cmd.is_empty() {
@@ -507,6 +540,7 @@ impl PtyManager {
         high_water: Option<usize>,
         run_command: Option<String>,
         on_data: Option<Channel<InvokeResponseBody>>,
+        extra_env: Option<Vec<(String, String)>>,
     ) -> Result<SpawnResult, String> {
         let state = self;
         // Clamp for the same reason pty_resize does: a terminal spawned into a
@@ -548,6 +582,11 @@ impl PtyManager {
                 #[cfg(unix)]
                 cmd.args(["-l"]);
             }
+        }
+        // The caller's own variables go on first, so Canopy's identity vars below
+        // always win however a caller spells them.
+        for (k, v) in extra_env.unwrap_or_default() {
+            cmd.env(k, v);
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
@@ -986,6 +1025,101 @@ mod tests {
         let seen = wait_for(&pm, id, "REGRESS_MARKER", Duration::from_secs(8));
         let _ = pm.kill(id);
         assert!(seen, "headless PTY output never reached the scrollback");
+    }
+
+    // A micro-task's PTY has no tab and no WebView channel, so the two things it
+    // depends on are exactly these: the command runs with the env it was given
+    // (CANOPY_MICRO_TASK is what marks the session one-shot), and its output is
+    // readable afterwards from the session itself — that read is the only
+    // transcript a task nobody watched ever gets.
+    #[test]
+    fn detached_spawn_carries_env_and_its_output_is_readable() {
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let res = pm
+            .spawn(
+                app.handle().clone(),
+                120,
+                40,
+                Some("/tmp".into()),
+                None,
+                None,
+                // Prints, then stays up — an agent's shape, and the state the
+                // tail is read in: a session that has exited is already gone
+                // from the manager, scrollback and all.
+                Some("echo DETACHED_$CANOPY_MICRO_TASK; sleep 20".into()),
+                None,
+                Some(vec![("CANOPY_MICRO_TASK".into(), "1".into())]),
+            )
+            .expect("spawn");
+        let seen = wait_for(&pm, res.id, "DETACHED_1", Duration::from_secs(8));
+        let tail = pm
+            .scrollback_tail(res.id, 64 * 1024)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
+        let _ = pm.kill(res.id);
+        assert!(seen, "detached PTY never ran its command with the given env");
+        assert!(tail.contains("DETACHED_1"), "tail was: {tail}");
+    }
+
+    // The question detaching a micro-task raises: an agent nobody is watching
+    // may run for an hour and print megabytes, and it must not stall or die for
+    // want of a viewer. A WebView-backed PTY applies backpressure and stops
+    // reading once DEFAULT_HIGH_WATER (2MB) is outstanding and unacked; a
+    // detached one has no acker, so that path must stay switched off for the
+    // whole life of the run — not just at the start.
+    //
+    // Long by nature (a minute of real output), so it is not in the default run.
+    // `cargo test -- --ignored detached_long_run` when the spawn path changes.
+    #[test]
+    #[ignore = "takes ~70s: a minute of real PTY output"]
+    fn detached_long_run_keeps_streaming_past_the_high_water_mark() {
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        // ~8KB every 100ms — past 2MB outstanding inside half a minute, which
+        // is where a backpressured PTY would go quiet and the agent would wedge.
+        let res = pm
+            .spawn(
+                app.handle().clone(),
+                120,
+                40,
+                Some("/tmp".into()),
+                None,
+                None,
+                Some(
+                    "i=0; while [ $i -lt 600 ]; do i=$((i+1)); \
+                     printf 'LINE_%s_%s\\n' $i \"$(head -c 8000 < /dev/zero | tr '\\0' 'x')\"; \
+                     sleep 0.1; done"
+                        .into(),
+                ),
+                None,
+                Some(vec![("CANOPY_MICRO_TASK".into(), "1".into())]),
+            )
+            .expect("spawn");
+
+        // Marker N is printed at roughly N/10 seconds in. Each wait starts from
+        // now, so a stall anywhere along the way fails the step it stalled in
+        // rather than being absorbed by an earlier one's slack.
+        for (marker, secs) in [("LINE_50_", 15), ("LINE_250_", 30), ("LINE_550_", 40)] {
+            assert!(
+                wait_for(&pm, res.id, marker, Duration::from_secs(secs)),
+                "detached PTY stopped producing output before {marker} \
+                 (~{} bytes in)",
+                marker.trim_start_matches("LINE_").trim_end_matches('_'),
+            );
+        }
+        // Still readable at the end: this is what a finished task's transcript
+        // is built from, and the ring keeps the tail rather than the head.
+        let tail = pm
+            .scrollback_tail(res.id, 8 * 1024)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
+        let _ = pm.kill(res.id);
+        assert!(
+            tail.contains("LINE_5"),
+            "the tail should be recent output, got {} bytes",
+            tail.len(),
+        );
     }
 
     // Regression: input written to a PTY reaches the child (the desktop + remote

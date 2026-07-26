@@ -200,6 +200,29 @@ export function isStopFor(raw: string, pty: number): boolean {
   }
 }
 
+/** The last tool a terminal's agent finished using, from its PostToolUse hooks —
+ *  "Bash", "Edit", "WebFetch". The only live progress signal a detached
+ *  micro-task has: with no tab to glance at, "Bash · 2m" in the Tasks panel is
+ *  the difference between a task working and a task wedged. */
+export function lastStepFor(events: AgentEventEntry[], pty: number): string | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    try {
+      const parsed = JSON.parse(events[i].raw) as {
+        canopy_pty?: unknown;
+        hook_event_name?: unknown;
+        tool_name?: unknown;
+      };
+      if (parsed.canopy_pty !== pty) continue;
+      if (parsed.hook_event_name !== "PostToolUse") continue;
+      const tool = String(parsed.tool_name ?? "").trim();
+      if (tool) return tool;
+    } catch {
+      // a malformed line is not worth failing the whole scan over
+    }
+  }
+  return undefined;
+}
+
 export function eventCwd(raw: string): string {
   try {
     return String((JSON.parse(raw) as { cwd?: unknown }).cwd ?? "");
