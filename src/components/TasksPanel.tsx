@@ -11,6 +11,7 @@ import {
   MICRO_TASKS,
   type CustomMicroTask,
 } from "../microTasks";
+import { BUILT_IN_HEADING, CUSTOM_HEADING } from "../taskMenu";
 import { getSettings, updateSettings } from "../settings";
 import { completedTaskRuns, TASK_HISTORY_EVENT, type TaskRun } from "../taskHistory";
 import { PlayIcon, StopIcon, TrashIcon } from "./icons";
@@ -25,16 +26,19 @@ export interface RunningMicroTask {
 interface TasksPanelProps {
   components: { label: string; path: string }[];
   running: RunningMicroTask[];
-  /** Prefill for the create form — set when the user right-clicks selected
-   *  terminal text → "New task from selection". The nonce distinguishes two
-   *  seeds with identical text, so the form re-opens each time. */
-  seed?: { brief: string; nonce: number } | null;
+  /** Prefill for a composer — set when the user right-clicks selected terminal
+   *  text → "New Task…" (mode "save") or "One-off task…" (mode "once"), which
+   *  decides which of the two opens. The nonce distinguishes two seeds with
+   *  identical text, so the composer re-opens each time. */
+  seed?: { brief: string; mode?: "save" | "once"; nonce: number } | null;
   /** Bring the task's terminal tab forward. */
   onFocus: (tabId: string) => void;
   /** Close the task's tab (kills its agent; the session is forgotten). */
   onStop: (tabId: string) => void;
   /** Launch a custom task in `dir` with the user's extra context. */
   onRunCustom: (task: CustomMicroTask, dir: string, query: string) => void;
+  /** Run a brief once, without adding it to the list. */
+  onRunOneOff: (brief: string, dir: string) => void;
   /** Open the completed-tasks tab — the full searchable history. */
   onOpenHistory: () => void;
   /** Scopes the Completed count to this project's runs. */
@@ -53,11 +57,16 @@ export function TasksPanel({
   onFocus,
   onStop,
   onRunCustom,
+  onRunOneOff,
   onOpenHistory,
   projectId,
 }: TasksPanelProps) {
   const [custom, setCustom] = useState<CustomMicroTask[]>(() => getSettings().customMicroTasks);
   const [draft, setDraft] = useState<Draft | null>(null);
+  /** The one-off composer's brief while it's open, or null when it's shut. A
+   *  task nobody is keeping still deserves the same box to write it in. */
+  const [oneOff, setOneOff] = useState<string | null>(null);
+  const [oneOffDir, setOneOffDir] = useState("");
   // A task finishing has to move the count here even though the panel didn't
   // do anything — the whole lifecycle happens in a tab the user has left.
   // Scoped to this project, like the tab it opens: a count in a project's
@@ -70,14 +79,29 @@ export function TasksPanel({
     return () => window.removeEventListener(TASK_HISTORY_EVENT, refresh);
   }, [projectId]);
 
-  // A seed from "New task from selection" opens the create form with the
-  // selected text as the brief; the user names it and tweaks from there. Also
-  // fires on first mount — the panel mounts lazily, often *because* the seed
-  // just flipped the rail to Tasks.
+  // A seed from a right-click opens the composer it asked for, with the clicked
+  // subject as the brief: the create form (the user names it and tweaks from
+  // there) or the one-off box. Also fires on first mount — the panel mounts
+  // lazily, often *because* the seed just flipped the rail to Tasks.
   useEffect(() => {
-    if (seed) setDraft({ ...emptyDraft(), brief: seed.brief });
+    if (!seed) return;
+    if (seed.mode === "once") {
+      setDraft(null);
+      setOneOffDir(components[0]?.path ?? "");
+      setOneOff(seed.brief);
+    } else {
+      setOneOff(null);
+      setDraft({ ...emptyDraft(), brief: seed.brief });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seed?.nonce]);
+
+  const runOneOff = () => {
+    const brief = (oneOff ?? "").trim();
+    if (!brief) return;
+    onRunOneOff(brief, oneOffDir || (components[0]?.path ?? ""));
+    setOneOff(null);
+  };
   /** Which task row has its run controls (context + dir) expanded. */
   const [runOpen, setRunOpen] = useState<string | null>(null);
   const [runQuery, setRunQuery] = useState("");
@@ -196,8 +220,22 @@ export function TasksPanel({
         <span>Tasks</span>
         <button
           className="btn-icon"
+          title="Run a one-off task — type the job, it runs once, nothing is saved"
+          onClick={() => {
+            setOneOff((v) => (v == null ? "" : null));
+            setOneOffDir(components[0]?.path ?? "");
+            setDraft(null);
+          }}
+        >
+          ⚡
+        </button>
+        <button
+          className="btn-icon"
           title="New task"
-          onClick={() => setDraft(draft && !draft.id ? null : emptyDraft())}
+          onClick={() => {
+            setDraft(draft && !draft.id ? null : emptyDraft());
+            setOneOff(null);
+          }}
         >
           ＋
         </button>
@@ -298,20 +336,62 @@ export function TasksPanel({
         </div>
       )}
 
+      {oneOff != null && (
+        <div className="task-edit-form">
+          <textarea
+            autoFocus
+            className="task-brief-input"
+            placeholder="The job, in your words. It runs once, reports, and its terminal closes — nothing is saved to the list."
+            rows={4}
+            value={oneOff}
+            onChange={(e) => setOneOff(e.target.value)}
+            onKeyDown={(e) => {
+              // ⌘/Ctrl+Enter submits; plain Enter is a newline, since a brief
+              // typed here is usually a paragraph rather than a line.
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) runOneOff();
+              if (e.key === "Escape") setOneOff(null);
+            }}
+          />
+          {components.length > 1 && (
+            <select
+              className="task-run-dir"
+              value={oneOffDir}
+              onChange={(e) => setOneOffDir(e.target.value)}
+              title="Where the agent runs"
+            >
+              {components.map((c) => (
+                <option key={c.path} value={c.path}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+          )}
+          <div className="confirm-actions">
+            <button className="btn" onClick={() => setOneOff(null)}>
+              Cancel
+            </button>
+            <button className="btn btn-accent" disabled={!oneOff.trim()} onClick={runOneOff}>
+              Run once
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="ticket-state-head">
-        Your tasks
+        {CUSTOM_HEADING}
         <span className="badge">{custom.length}</span>
       </div>
       {custom.length === 0 && !draft ? (
         <div className="tree-empty">
           One-shot jobs an agent runs and reports back on — the terminal closes
-          itself when the job is done. Create one with ＋.
+          itself when the job is done. Create one with ＋, or run one without
+          keeping it with ⚡.
         </div>
       ) : (
         custom.map(runRow)
       )}
 
-      <div className="ticket-state-head">Built-in</div>
+      <div className="ticket-state-head">{BUILT_IN_HEADING}</div>
       {MICRO_TASKS.map((t) => (
         <div className="task-row" key={t.id}>
           <span className="task-icon">{t.icon}</span>

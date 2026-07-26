@@ -1534,12 +1534,19 @@ body,
 .cli-menu-item:disabled:hover {
   background: transparent;
 }
-/* Section label inside a popover ("Saved tasks"), not a target. */
+/* Section label inside a popover ("Custom tasks"), not a target. */
 .cli-menu-label {
   padding: 6px 10px 2px;
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+/* Why a listed row can't run here ("no PR from this branch yet"), trailing its
+   label. The row stays listed, so the task is still discoverable. */
+.cli-menu-why {
+  margin-left: 8px;
+  font-size: 10px;
   color: var(--text-dim);
 }
 

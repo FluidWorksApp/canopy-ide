@@ -60,6 +60,7 @@ import {
 } from "../notifications";
 import {
   addressPrCommentsTask,
+  adhocTaskDef,
   customTaskDef,
   microTaskProtocol,
   raisePrTask,
@@ -78,7 +79,7 @@ import {
   updateTaskRun,
   type TaskRun,
 } from "../taskHistory";
-import { taskMenuItem } from "../taskMenu";
+import { taskMenuItem, type TaskChoice } from "../taskMenu";
 import { viewerKindFor } from "./viewers";
 import { ensureLanguageServer } from "../lsp/client";
 import { Term, type TermHandle } from "./Term";
@@ -1559,15 +1560,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   );
 
   /** Run a brief that was composed on the spot (a diff surface's "ask about
-   *  this" box) as a one-shot task — same lifecycle as a saved one, no entry in
-   *  the registry. The context builder already folded the user's words in. */
+   *  this" box, the Tasks panel's one-off composer) as a one-shot task — same
+   *  lifecycle as a saved one, no entry in the registry. The context builder
+   *  already folded the user's words in, so nothing more is passed. A label is
+   *  only given where the surface has a better one than the brief's own head. */
   const runAdhocTask = useCallback(
-    (label: string, brief: string, dir: string) => {
-      void startMicroTask(
-        customTaskDef({ id: label.toLowerCase().replace(/\s+/g, "-"), label, icon: "◆", placeholder: "", brief }),
-        { dir },
-        "",
-      );
+    (brief: string, dir: string, label?: string) => {
+      void startMicroTask(adhocTaskDef(brief, label), { dir }, "");
     },
     [startMicroTask],
   );
@@ -2699,29 +2698,40 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const compMenu = useContextMenu();
   const tabMenu = useContextMenu();
   const termMenu = useContextMenu();
-  /** Prefill for the Tasks panel's create form — set when the user makes a
-   *  task out of something they're looking at (selected terminal text, a file
-   *  in the tree, a tab). The nonce re-opens the form even for the same seed
-   *  twice. */
-  const [taskSeed, setTaskSeed] = useState<{ brief: string; nonce: number } | null>(null);
-  const seedTaskFrom = useCallback((brief: string) => {
+  /** Prefill for the Tasks panel's composer — set when the user makes a task
+   *  out of something they're looking at (selected terminal text, a file in the
+   *  tree, a tab). `mode` picks which composer opens: the full create form, or
+   *  the one-off box that runs the brief and saves nothing. The nonce re-opens
+   *  it even for the same seed twice. */
+  const [taskSeed, setTaskSeed] = useState<{
+    brief: string;
+    mode: "save" | "once";
+    nonce: number;
+  } | null>(null);
+  const openTaskComposer = useCallback((brief: string, mode: "save" | "once") => {
     setCollapsed(false);
     setSideTab("tasks");
-    setTaskSeed((prev) => ({ brief, nonce: (prev?.nonce ?? 0) + 1 }));
+    setTaskSeed((prev) => ({ brief, mode, nonce: (prev?.nonce ?? 0) + 1 }));
   }, []);
+  const seedTaskFrom = useCallback(
+    (brief: string) => openTaskComposer(brief, "save"),
+    [openTaskComposer],
+  );
   /** The "Tasks ▸" submenu for a right-clicked row, wherever it lives: write a
-   *  new task about it, then run one on it. The surfaces stay ignorant of the
-   *  task registry — they ask for the item and splice it into their menu. */
+   *  new task about it, run a one-off about it, then the two groups of tasks.
+   *  The surfaces stay ignorant of the task registry — they ask for the item
+   *  and splice it into their menu. */
   const taskMenu = useCallback(
-    (seed: string, runnable?: { label: string; icon?: string; run: () => void }[]) =>
+    (seed: string, runnable?: TaskChoice[]) =>
       taskMenuItem({
         seed,
         runnable,
         onNewTask: seedTaskFrom,
+        onOneOff: (brief) => openTaskComposer(brief, "once"),
         onRunSaved: (t) => void startMicroTask(customTaskDef(t), { dir: roots[0] ?? "" }, ""),
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [seedTaskFrom, startMicroTask, roots[0]],
+    [seedTaskFrom, openTaskComposer, startMicroTask, roots[0]],
   );
 
   const submitRootCreate = async () => {
@@ -3236,11 +3246,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             ? [
                 taskMenu(`About PR #${tab.pr.number} "${tab.pr.title}" (${tab.pr.url}): `, [
                   {
+                    id: reviewPrTask.id,
                     label: `Review PR #${tab.pr.number}`,
                     icon: reviewPrTask.icon,
                     run: () => void startMicroTask(reviewPrTask, { repo: tab.repo, pr: tab.pr }, ""),
                   },
                   {
+                    id: addressPrCommentsTask.id,
                     label: `Address comments on #${tab.pr.number}`,
                     icon: addressPrCommentsTask.icon,
                     run: () =>
@@ -3260,6 +3272,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                       ? undefined
                       : [
                           {
+                            id: raisePrTask.id,
                             label: `Raise PR for ${tab.branch.branch}`,
                             icon: raisePrTask.icon,
                             run: () =>
@@ -3421,6 +3434,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 : undefined
             }
             onRunSavedTask={(task, dir) => void startMicroTask(customTaskDef(task), { dir }, "")}
+            onRunOneOff={(brief, dir) => runAdhocTask(brief, dir)}
           />
         );
       case "commit":
@@ -3465,9 +3479,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                     const dir = componentsRef.current[0]?.path;
                     if (!path || !dir) return;
                     runAdhocTask(
-                      `Review ${tab.review.branch}`,
                       reviewContext(tab.review, path, query),
                       dir,
+                      `Review ${tab.review.branch}`,
                     );
                   })
                 }
@@ -3509,7 +3523,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             // (a branch tab, a PR), which is long gone — but the brief that
             // payload produced was recorded, and it says everything.
             onRunAgain={(run: TaskRun) =>
-              runAdhocTask(run.label, run.brief, run.cwd)
+              runAdhocTask(run.brief, run.cwd, run.label)
             }
             onOpenFile={(path) => void openFile(path)}
           />
@@ -3570,7 +3584,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 onRunTask={(query) => {
                   const dir = repoForFile(tab.file.path);
                   if (!dir) return onNotice("No git repository in this project.");
-                  runAdhocTask(tab.file.name, fileDiffContext(tab.file.path, query), dir);
+                  runAdhocTask(fileDiffContext(tab.file.path, query), dir, tab.file.name);
                 }}
               />
             }
@@ -4069,6 +4083,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                       onRunSavedTask={(task, dir) =>
                         void startMicroTask(customTaskDef(task), { dir }, "")
                       }
+                      onRunOneOff={(brief, dir) => runAdhocTask(brief, dir)}
                     />
                   )}
                 </div>
@@ -4348,6 +4363,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 ? undefined
                 : [
                     {
+                      id: raisePrTask.id,
                       label: `Raise PR for ${branch}`,
                       icon: raisePrTask.icon,
                       run: () => void startMicroTask(raisePrTask, { repo, branch, worktree }, ""),
@@ -4358,11 +4374,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           prTaskMenu={(repo, pr) =>
             taskMenu(`About PR #${pr.number} "${pr.title}" (${pr.url}): `, [
               {
+                id: reviewPrTask.id,
                 label: `Review PR #${pr.number}`,
                 icon: reviewPrTask.icon,
                 run: () => void startMicroTask(reviewPrTask, { repo, pr }, ""),
               },
               {
+                id: addressPrCommentsTask.id,
                 label: `Address comments on #${pr.number}`,
                 icon: addressPrCommentsTask.icon,
                 run: () => void startMicroTask(addressPrCommentsTask, { repo, pr }, ""),
@@ -4391,7 +4409,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               onRunTask={(query) => {
                 const dir = changeGroups[0]?.repo ?? componentsRef.current[0]?.path;
                 if (!dir) return onNotice("No git repository in this project.");
-                runAdhocTask("Changes", sessionChangesContext(changeContextGroups(), query), dir);
+                runAdhocTask(sessionChangesContext(changeContextGroups(), query), dir, "Changes");
               }}
             />
           }
@@ -4430,6 +4448,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onRunCustom={(task: CustomMicroTask, dir: string, query: string) =>
             void startMicroTask(customTaskDef(task), { dir }, query)
           }
+          onRunOneOff={(brief: string, dir: string) => runAdhocTask(brief, dir)}
           onOpenHistory={openTaskHistory}
           projectId={project.id}
         />

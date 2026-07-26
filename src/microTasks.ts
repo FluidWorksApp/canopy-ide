@@ -275,3 +275,37 @@ export function customTaskDef(c: CustomMicroTask): MicroTaskDef<{ dir: string }>
     },
   };
 }
+
+export const ADHOC_TASK_ID = "adhoc";
+
+/** A name for a task nobody named: the head of the brief, cut on a word so the
+ *  tab title and the history row still say what the thing was. Saved tasks have
+ *  a label because the user typed one; a one-off never gets asked. */
+export function adhocLabel(brief: string): string {
+  const job = oneLine(brief);
+  if (!job) return "One-off task";
+  if (job.length <= 32) return job;
+  const cut = job.slice(0, 32);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > 12 ? cut.slice(0, space) : cut).replace(/[\s,.;:—-]+$/, "")}…`;
+}
+
+/** A task the user typed once and doesn't want to keep. Identical to a saved
+ *  task at run time — same launcher, same completion protocol, same ephemeral
+ *  tab — the only difference being that there's no registry entry left behind
+ *  to run it again. This is the escape hatch that stops the task list filling
+ *  up with one-shot jobs nobody will run twice. */
+export function adhocTaskDef(brief: string, label?: string): MicroTaskDef<{ dir: string }> {
+  const job = oneLine(brief);
+  return {
+    id: ADHOC_TASK_ID,
+    label: label ?? adhocLabel(job),
+    icon: "⚡",
+    placeholder: "",
+    cwd: (p) => p.dir,
+    buildContext: (_p, userQuery) => {
+      const query = oneLine(userQuery);
+      return job + (query ? ` The user adds: "${query}".` : "");
+    },
+  };
+}
