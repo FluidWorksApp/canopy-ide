@@ -51,3 +51,8 @@ pnpm-lock.yaml
 src-tauri/onnxruntime/*.dylib
 src-tauri/onnxruntime/*.so
 src-tauri/onnxruntime/*.dll
+
+# Where PR tasks leave what the PR tab reads back (review maps, draft findings).
+# Inside the workspace because fs_read_file only reads registered roots; never
+# part of the repo. See prArtifactPath in src/microTasks.ts.
+.canopy/

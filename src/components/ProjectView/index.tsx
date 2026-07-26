@@ -11,25 +11,23 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type CSSProperties,
   type ReactNode,
 } from "react";
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import * as ipc from "../ipc";
-import { getSettings } from "../settings";
-import { modelFor, monaco, languageForPath } from "../monaco-setup";
-import { getCaret, subscribeCaret } from "../editorState";
-import { GuestSession, OwnerSession } from "../collab";
-import { CollabView } from "./CollabView";
-import { SharedProjectView } from "./SharedProjectView";
-import type { AgentCli, Project } from "../projects";
+import { Panel, PanelGroup } from "react-resizable-panels";
+import * as ipc from "../../ipc";
+import { getSettings } from "../../settings";
+import { modelFor, monaco, languageForPath } from "../../monaco-setup";
+import { getCaret, subscribeCaret } from "../../editorState";
+import { GuestSession, OwnerSession } from "../../collab";
+import { CollabView } from "../CollabView";
+import { SharedProjectView } from "../SharedProjectView";
+import type { AgentCli } from "../../projects";
 import {
   AGENT_CLIS,
-  AGENT_CLIS_CHANGED_EVENT,
+  announceCliInstallsChanged,
   binName,
   SHELL_PATTERN,
-  checkCliUpdates,
-  checkInstalledClis,
-  checkInstalledPrereqs,
   currentPlatform,
   PREREQS,
   restoreCommand,
@@ -37,8 +35,7 @@ import {
   shellBin,
   startCommand,
   updateCommand,
-} from "../projects";
-import type { CliUpdate } from "../projects";
+} from "../../projects";
 import {
   AgentIcon,
   CheckIcon,
@@ -48,8 +45,8 @@ import {
   RestartIcon,
   StopIcon,
   TerminalIcon,
-} from "./icons";
-import type { AgentEventEntry, OpenFile, Notify, RelayHandle } from "../types";
+} from "../icons";
+import type { OpenFile } from "../../types";
 import {
   derivePending,
   eventPtyId,
@@ -57,360 +54,155 @@ import {
   isStopFor,
   pendingForRoots,
   type PendingItem,
-} from "../notifications";
+} from "../../notifications";
 import {
+  addressPrCommentsTask,
+  adhocTaskDef,
   customTaskDef,
   microTaskProtocol,
   raisePrTask,
   reviewPrTask,
   type CustomMicroTask,
   type MicroTaskDef,
-} from "../microTasks";
-import { TasksPanel, type RunningMicroTask } from "./TasksPanel";
-import { TaskHistoryView } from "./TaskHistoryView";
-import { InstructionsView } from "./InstructionsView";
+  type MicroTaskEnv,
+} from "../../microTasks";
+import { TasksPanel, type RunningMicroTask } from "../TasksPanel";
+import { TaskHistoryView } from "../TaskHistoryView";
+import { InstructionsView } from "../InstructionsView";
 import {
   endAbandonedRun,
   recordTaskEnd,
   recordTaskStart,
   updateTaskRun,
   type TaskRun,
-} from "../taskHistory";
-import { taskMenuItem } from "../taskMenu";
-import { viewerKindFor } from "./viewers";
-import { ensureLanguageServer } from "../lsp/client";
-import { Term, type TermHandle } from "./Term";
-import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
-import { FileTree } from "./FileTree";
-import { FileView } from "./FileView";
-import { ChangesPanel, type ChangeGroup } from "./ChangesPanel";
-import { useEscape } from "../useEscape";
-import { useTabDrag, applyOrder } from "../tabDrag";
-import { agentIdForCommand, identifyAgent } from "../agentIdentity";
-import { AgentsPanel, digestBySurface } from "./AgentsPanel";
-import { StatusBar } from "./StatusBar";
-import { Palette, type PaletteMode } from "./Palette";
-import { GitPanel } from "./GitPanel";
-import { TicketsPanel, type AgentTarget } from "./TicketsPanel";
-import { TicketView } from "./TicketView";
-import { CommitView } from "./CommitView";
-import { ReviewView, type ReviewPayload } from "./ReviewView";
-import { BranchView } from "./BranchView";
-import { AgentWorkspaceView } from "./AgentWorkspaceView";
-import { PreviewView } from "./PreviewView";
-import type { PreviewAnnotation, PreviewServer } from "../preview";
-import { dispatchBrowserOp } from "../previewAgent";
-import { serverForUrl } from "../preview";
-import { ticketBranch, ticketContext, ticketWorktree } from "../trackers";
-import { prConflictContext, prReviewContext, prWorktree } from "../prs";
-import { fileDiffContext, reviewContext, sessionChangesContext } from "../diffContext";
-import { AgentQueryBar } from "./AgentQueryBar";
-import { forgetSessions, markRestored, restorableFrom, type Restorable } from "../restorable";
+} from "../../taskHistory";
+import { taskMenuItem, type TaskChoice } from "../../taskMenu";
+import { viewerKindFor } from "../viewers";
+import { ensureLanguageServer } from "../../lsp/client";
+import { Term, type TermHandle } from "../Term";
+import { ContextMenu, useContextMenu, type MenuItem } from "../ContextMenu";
+import { FileTree } from "../FileTree";
+import { FileView } from "../FileView";
+import { ChangesPanel, type ChangeGroup } from "../ChangesPanel";
+import { useEscape } from "../../useEscape";
+import { useTabDrag, applyOrder } from "../../tabDrag";
+import { agentIdForCommand, identifyAgent } from "../../agentIdentity";
+import { AgentsPanel, digestBySurface } from "../AgentsPanel";
+import { StatusBar } from "../StatusBar";
+import { Palette, type PaletteMode } from "../Palette";
+import { GitPanel } from "../GitPanel";
+import { TicketsPanel, type AgentTarget } from "../TicketsPanel";
+import { PrsPanel } from "../PrsPanel";
+import { needsYouCount } from "../../prInbox";
+import { usePrWatch } from "../../usePrWatch";
+import { TicketView } from "../TicketView";
+import { CommitView } from "../CommitView";
+import { ReviewView, type ReviewPayload } from "../ReviewView";
+import { BranchView } from "../BranchView";
+import { AgentWorkspaceView } from "../AgentWorkspaceView";
+import { PreviewView } from "../PreviewView";
+import type { PreviewServer } from "../../preview";
+import { dispatchBrowserOp } from "../../previewAgent";
+import { serverForUrl } from "../../preview";
+import { ticketBranch, ticketContext, ticketWorktree } from "../../trackers";
+import { prConflictContext, prReviewContext, prWorktree } from "../../prs";
+import { fileDiffContext, reviewContext, sessionChangesContext } from "../../diffContext";
+import { AgentQueryBar } from "../AgentQueryBar";
+import { forgetSessions, markRestored, restorableFrom, type Restorable } from "../../restorable";
+import {
+  buildSnapshot,
+  terminalLaunch,
+  wakeSteps,
+  writeHibernation,
+  HIBERNATE_EVENT,
+  HIBERNATED_EVENT,
+  type SnapshotTab,
+} from "../../hibernation";
 import {
   forgetTerminals,
   rememberTerminals,
   rememberedTerminals,
   type RememberedTerminal,
-} from "../terminalMemory";
-import { PrView } from "./PrView";
-import { ErrorBoundary } from "./ErrorBoundary";
-import { TeamPanel } from "./TeamPanel";
-import { ChatView } from "./ChatView";
-import { Coachmark } from "./Coachmark";
-import { shouldShowTip, markTipSeen, type CoachTip } from "../coachmarks";
-import { ActivityRail } from "./ActivityRail";
-import { PaneBar } from "./PaneBar";
+} from "../../terminalMemory";
+import { PrView } from "../PrView";
+import { ErrorBoundary } from "../ErrorBoundary";
+import { TeamPanel } from "../TeamPanel";
+import { ChatView } from "../ChatView";
+import { Coachmark } from "../Coachmark";
+import { shouldShowTip, markTipSeen, type CoachTip } from "../../coachmarks";
+import { ActivityRail } from "../ActivityRail";
+import { PaneBar } from "../PaneBar";
+import { useCliLauncher } from "./hooks/useCliLauncher";
 
-export type SideTab = "files" | "changes" | "git" | "trackers" | "tasks" | "agents" | "team";
-
-export interface TermSubTab {
-  id: string;
-  type: "terminal";
-  cwd: string;
-  /** Auto title, tracked from the shell/OSC. Shown unless the user renamed. */
-  title: string;
-  /** User-set name (double-click the tab). Wins over `title` for display and
-   *  survives the shell repainting its own title; cleared by renaming to empty. */
-  customTitle?: string;
-  ptyId: number | null;
-  /** When set, this tab attaches to an already-running headless PTY (spawned
-   *  from the remote portal) instead of spawning its own. Closing it detaches;
-   *  the agent keeps running for the phone. */
-  attachId?: number;
-  command?: string;
-  icon?: string;
-  /** Launched from a component run command — lives in the run rail, not the
-   *  terminal strip. */
-  run?: boolean;
-  /** Run tabs outlive their process: a one-shot command (build, install) ends
-   *  on its own, and the tab stays so the output and exit status remain
-   *  readable. Undefined while still running. */
-  exitCode?: number | null;
-  exited?: boolean;
-  /** Bumped to force a fresh Term (and a fresh PTY) on re-run. */
-  epoch?: number;
-  /** The last thing this terminal asked attention for (OSC 9/99/777), and
-   *  whether it is still unread. Cleared when the tab is looked at. */
-  notice?: string;
-  unread?: boolean;
-  /** An ephemeral micro-task tab: closed and its session forgotten once the
-   *  agent calls canopy_job_done (or the user closes it). Never restored.
-   *  `runId` keys this run's entry in the task history — the record outlives
-   *  the tab, which is the point. */
-  micro?: { taskId: string; runId?: string };
-}
-
-export interface FileSubTab {
-  id: string;
-  type: "file";
-  file: OpenFile;
-}
-
-export interface TicketSubTab {
-  id: string;
-  type: "ticket";
-  ticket: ipc.TicketInfo;
-  source: string;
-}
-
-export interface BranchSubTab {
-  id: string;
-  type: "branch";
-  repo: string;
-  branch: ipc.BranchWork;
-}
-
-export interface CommitSubTab {
-  id: string;
-  type: "commit";
-  repo: string;
-  hash: string;
-  short: string;
-  subject: string;
-}
-
-export interface PrSubTab {
-  id: string;
-  type: "pr";
-  repo: string;
-  pr: ipc.PrInfo;
-}
-
-export interface ReviewSubTab {
-  id: string;
-  type: "review";
-  review: ReviewPayload;
-}
-
-/** An agent session's workspace: its branch, diffs, commits and PR. */
-export interface AgentSubTab {
-  id: string;
-  type: "agent";
-  /** Repo the agent's cwd matched; null renders the digest-only view. */
-  repo: string | null;
-  /** Authoritative agent id, from the live process tree. */
-  agent: string;
-  /** The agent's working directory — the git join is keyed off this. */
-  cwd: string;
-  /** Hook session id + digest when a hook CLI wrote one; enrichment only. */
-  sessionId?: string;
-  digest?: ipc.SessionDigest;
-  /** Live terminal hosting the session, for the jump-back button. */
-  ptyId?: number;
-}
-
-/** Every micro-task that has finished, with what it reported and the tail of
- *  its terminal. One per project — opening it twice just focuses the first. */
-export interface TaskHistorySubTab {
-  id: string;
-  type: "task-history";
-}
-
-/** The instruction files every agent reads before it sees any code — the
- *  project's, the user's own, and the skill and subagent packs. One per
- *  project; `focus` is the file a panel row asked it to open on. */
-export interface InstructionsSubTab {
-  id: string;
-  type: "instructions";
-  focus?: string;
-}
-
-export interface ChatSubTab {
-  id: string;
-  type: "chat";
-  /** Relay member id for a DM; null for the everyone channel. */
-  peer: string | null;
-  name: string;
-  /** A message arrived while the tab wasn't in front. */
-  unread?: boolean;
-}
-
-/** A file someone else owns, live. Distinct from FileSubTab because it has no
- *  path — that is the point, see docs/collab-editing.md §5. */
-export interface CollabSubTab {
-  id: string;
-  type: "collab";
-  doc: string;
-  name: string;
-  ownerName: string;
-}
-
-/** A whole project someone else shared, live: a browsable tree of their files,
- *  each opened on demand into a CollabSubTab. */
-export interface SharedProjectSubTab {
-  id: string;
-  type: "shared-project";
-  doc: string;
-  name: string;
-  ownerName: string;
-}
-
-/** An embedded browser onto a locally running server, with annotate mode.
- *  Navigation and collected annotations live on the tab so they survive
- *  switching away (the view, like every doc tab, unmounts when inactive). */
-export interface PreviewSubTab {
-  id: string;
-  type: "preview";
-  /** The previewed page's real URL ("" until the user picks a server). */
-  url: string;
-  annotations: PreviewAnnotation[];
-}
-
-export type SubTab =
-  | CollabSubTab
-  | SharedProjectSubTab
-  | PreviewSubTab
-  | TermSubTab
-  | FileSubTab
-  | PrSubTab
-  | TicketSubTab
-  | CommitSubTab
-  | BranchSubTab
-  | ReviewSubTab
-  | AgentSubTab
-  | TaskHistorySubTab
-  | InstructionsSubTab
-  | ChatSubTab;
-
-/** Every tab that isn't a terminal — the "document" tabs, rendered together
- *  below the terminals and display-toggled the same way. */
-type DocSubTab = Exclude<SubTab, TermSubTab>;
-
-/** One tab as canopy_editor_state describes it: enough for an agent to know
- *  what the user has in front of them, without shipping the tab's contents. */
-function describeTab(tab: SubTab | undefined) {
-  if (!tab) return null;
-  switch (tab.type) {
-    case "file":
-      return { kind: "file", path: tab.file.path, view: tab.file.view, dirty: tab.file.dirty };
-    case "terminal":
-      return {
-        kind: tab.run ? "run" : "terminal",
-        label: tab.customTitle ?? tab.title,
-        cwd: tab.cwd,
-        ptyId: tab.ptyId,
-      };
-    case "preview":
-      return { kind: "preview", url: tab.url || null };
-    case "ticket":
-      return { kind: "ticket", label: tab.ticket.title };
-    case "pr":
-      return { kind: "pr", label: `#${tab.pr.number} ${tab.pr.title}` };
-    case "commit":
-      return { kind: "commit", label: `${tab.short} ${tab.subject}` };
-    case "branch":
-      return { kind: "branch", label: tab.branch.branch };
-    case "agent":
-      return { kind: "agent", label: tab.agent, cwd: tab.cwd, ptyId: tab.ptyId ?? null };
-    case "task-history":
-      return { kind: "task-history", label: "Completed tasks" };
-    case "instructions":
-      return { kind: "instructions", label: "Agent instructions" };
-    default:
-      return { kind: tab.type };
-  }
-}
+import {
+  ago,
+  describeTab,
+  previewLabel,
+  tabDisplayLabel,
+  tabId,
+  type SideTab,
+  type SubTab,
+  type DocSubTab,
+  type TermSubTab,
+  type FileSubTab,
+  type TicketSubTab,
+  type BranchSubTab,
+  type CommitSubTab,
+  type PrSubTab,
+  type ReviewSubTab,
+  type AgentSubTab,
+  type TaskHistorySubTab,
+  type InstructionsSubTab,
+  type ChatSubTab,
+  type CollabSubTab,
+  type SharedProjectSubTab,
+  type PreviewSubTab,
+  type RailChip,
+  type ProjectViewProps,
+} from "./helpers";
+export { tabDisplayLabel, previewLabel };
+export type {
+  SideTab,
+  SubTab,
+  TermSubTab,
+  FileSubTab,
+  TicketSubTab,
+  BranchSubTab,
+  CommitSubTab,
+  PrSubTab,
+  ReviewSubTab,
+  AgentSubTab,
+  TaskHistorySubTab,
+  InstructionsSubTab,
+  ChatSubTab,
+  CollabSubTab,
+  SharedProjectSubTab,
+  PreviewSubTab,
+  RailChip,
+};
 
 const decoder = new TextDecoder();
 
-/** Compact relative age for a unix-seconds timestamp. */
-const ago = (secs?: number) => {
-  if (!secs) return "";
-  const d = Math.max(0, Math.floor(Date.now() / 1000) - secs);
-  if (d < 60) return "just now";
-  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
-  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
-  return `${Math.floor(d / 86400)}d ago`;
-};
-// Collision-proof ids: a module counter resets on hot-reload and produced
-// duplicate tab ids (closing one tab hit another).
-const tabId = () =>
-  typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-
-/** A one-line label for a tab, for the "all tabs" overflow menu. */
-function tabDisplayLabel(t: SubTab): string {
-  switch (t.type) {
-    case "terminal":
-      return t.customTitle ?? t.title;
-    case "file":
-      return t.file.name;
-    case "pr":
-      return `#${t.pr.number} ${t.pr.title}`;
-    case "ticket":
-      return `${t.ticket.id} ${t.ticket.title}`;
-    case "commit":
-      return `${t.short} ${t.subject}`;
-    case "branch":
-      return t.branch.branch;
-    case "agent":
-      return `${t.agent} · ${
-        t.digest?.branch ?? t.cwd.split("/").filter(Boolean).pop() ?? t.agent
-      }`;
-    case "chat":
-      return t.name;
-    case "collab":
-      return t.name;
-    case "review":
-      return t.review.title;
-    case "task-history":
-      return "Completed tasks";
-    case "instructions":
-      return "Agent instructions";
-    case "shared-project":
-      return t.name;
-    case "preview":
-      return previewLabel(t.url);
-  }
+/** How a doc tab's host is hidden when it isn't the front tab.
+ *
+ *  `display: none` for everything, with one exception: a preview tab keeps its
+ *  box. A `display: none` iframe has no layout at all — every element in the
+ *  previewed page reports a zero rect — so a backgrounded preview would answer
+ *  canopy_browser_snapshot with an empty page and click the wrong coordinates.
+ *  `visibility: hidden` keeps the page laid out (and unpainted) so an agent can
+ *  drive it while the user works in another tab; absolute + no pointer events
+ *  keeps it out of the flow and out of the way of the tab that is in front. */
+function hostStyle(front: boolean, keepLaidOut: boolean): CSSProperties {
+  if (front) return { display: "block" };
+  if (!keepLaidOut) return { display: "none" };
+  return {
+    display: "block",
+    position: "absolute",
+    inset: 0,
+    visibility: "hidden",
+    pointerEvents: "none",
+  };
 }
-
-/** host[/path] for the tab strip; the scheme is noise at that width. */
-function previewLabel(url: string): string {
-  if (!url) return "Preview";
-  try {
-    const u = new URL(url);
-    return `${u.host}${u.pathname === "/" ? "" : u.pathname}`;
-  } catch {
-    return url;
-  }
-}
-
-/** One entry in a right-hand rail (a shell or a running command). */
-export interface RailChip {
-  id: string;
-  active: boolean;
-  /** Extra state class for the chip (e.g. run-chip-live / -done / -failed). */
-  className?: string;
-  dot: React.ReactNode;
-  title: string;
-  tooltip: string;
-  /** Trailing control, e.g. a run's "re-run" button. */
-  action?: React.ReactNode;
-  onSelect: () => void;
-  onClose: () => void;
-}
-
 
 /** Endpoints a shell is actually serving, offered where you are looking.
  *
@@ -458,31 +250,36 @@ function TermPorts({
   );
 }
 
-interface ProjectViewProps {
-  project: Project;
-  visible: boolean;
-  zen: boolean;
-  events: AgentEventEntry[];
-  hookPath: string | null;
-  /** Every open project (name + roots) — the resource breakdown groups the
-   *  machine-wide session stats by project, which one project can't know. */
-  allProjects: { name: string; roots: string[] }[];
-  /** Pending-card keys the user dismissed (held app-wide so badges agree). */
-  dismissedPending: Set<string>;
-  onDismissPending: (key: string) => void;
-  onEdit: () => void;
-  onNotice: Notify;
-  onShareContext: (on: boolean) => void;
-  /** App-wide team relay — same handle in every project. */
-  relay: RelayHandle;
-}
+/** How long the pointer must rest ON a rail icon before its panel slides out —
+ *  and it has to be resting, not merely passing: leaving the icon cancels the
+ *  clock, so crossing the rail on the way elsewhere never opens anything.
+ *  Long enough to be a decision, short enough to still feel like hover. */
+const HOVER_INTENT_MS = 280;
+/** The grace period after the pointer leaves both rail and panel. Generous on
+ *  purpose: the gap between "reading the file tree" and "reaching for it again"
+ *  is longer than a menu's flyout delay. */
+const PEEK_CLOSE_MS = 1500;
+/** The pointer is still in the rail but has moved off the tabs — it has said
+ *  where it's going, so there is nothing left to wait for. Short enough that the
+ *  panel is gone before a tooltip can appear over where it was. */
+const PEEK_LEAVE_MS = 220;
+const SIDE_DEFAULT_W = 300;
+const SIDE_MIN_W = 200;
+const SIDE_MAX_W = 560;
 
-export function ProjectView({ project, visible, zen, events, hookPath, allProjects, dismissedPending, onDismissPending, onEdit, onNotice, onShareContext, relay }: ProjectViewProps) {
+export function ProjectView({ project, visible, zen, events, hookPath, allProjects, dismissedPending, onDismissPending, onEdit, onNotice, onShareContext, relay, restore, onRestoreStep, onRestored }: ProjectViewProps) {
   const [sideTab, setSideTab] = useState<SideTab>("files");
   // Monaco's caret, for the context snapshot. Subscribed rather than passed
   // down: the editor sits several components below, and this is read-only.
   const caret = useSyncExternalStore(subscribeCaret, getCaret);
-  const [collapsed, setCollapsed] = useState(false);
+  // The side panel is a hover overlay, not a docked column. `pinned` is the
+  // click/Cmd+B latch that keeps it out; `peeking` is the transient hover state
+  // that the debounce below retracts. Either one shows it.
+  const [pinned, setPinned] = useState(false);
+  const [peeking, setPeeking] = useState(false);
+  const [sideWidth, setSideWidth] = useState(SIDE_DEFAULT_W);
+  const sideWidthRef = useRef(SIDE_DEFAULT_W);
+  const sideOpen = !zen && (pinned || peeking);
   const [tabs, setTabs] = useState<SubTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   /** Briefly ringed after a jump — with several similar terminal tabs open,
@@ -503,13 +300,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const [shareProjectMenuOpen, setShareProjectMenuOpen] = useState(false);
   const [shellMenuOpen, setShellMenuOpen] = useState(false);
   const [runMenuOpen, setRunMenuOpen] = useState(false);
-  const [installed, setInstalled] = useState<Record<string, boolean>>({});
-  // Foundations (Git, Node/npm) the CLI installers depend on. Probed alongside
-  // the CLIs, so an install run tab's exit re-checks these too.
-  const [prereqs, setPrereqs] = useState<Record<string, boolean>>({});
-  const installedRef = useRef(installed);
-  installedRef.current = installed;
-  const [cliUpdates, setCliUpdates] = useState<Record<string, CliUpdate>>({});
+  const { installed, prereqs, getInstalled, cliUpdates, refreshInstalled, refreshUpdates } = useCliLauncher();
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
   const [palette, setPalette] = useState<PaletteMode | null>(null);
   // When set, the whole project's file surface (tree, quick-open, search, new
@@ -984,12 +775,56 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     [onNotice, openPr, openReview, relay],
   );
 
+  // Repo toplevels for this project's components, resolved once per component
+  // set: the PR inbox needs them to tell one of this project's PRs (open it
+  // here) from another project's (ask App to switch first).
+  const [repoPaths, setRepoPaths] = useState<string[]>([]);
+  const componentKey = project.components.map((c) => c.path).join("|");
+  useEffect(() => {
+    let live = true;
+    void ipc
+      .gitRepos(project.components.map((c) => [c.label, c.path] as [string, string]))
+      .then((repos) => live && setRepoPaths(repos.map((r) => r.path)))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [componentKey]);
+
+  // The rail badge counts PRs waiting on this user anywhere, not only here —
+  // one subscription to the shared watcher, no fetch of its own.
+  const prsBadge = needsYouCount(usePrWatch().rows);
+
+  // A PR from another project, after App has switched to us.
+  useEffect(() => {
+    const onOpenElsewhere = (e: Event) => {
+      const d = (e as CustomEvent).detail as {
+        projectId?: string;
+        repo?: string;
+        pr?: ipc.PrInfo;
+      };
+      if (!d?.repo || !d.pr || (d.projectId && d.projectId !== project.id)) return;
+      openPr(d.repo, d.pr);
+    };
+    window.addEventListener("canopy:open-pr", onOpenElsewhere);
+    return () => window.removeEventListener("canopy:open-pr", onOpenElsewhere);
+  }, [project.id, openPr]);
+
   // Session digests + this launch's tag, so the "Agent Workspace" overlay can
   // resolve the agent behind the active terminal the same way AgentsPanel does
   // (by PTY surface id). Polled while an agent terminal is open; idle otherwise.
   const [wsDigests, setWsDigests] = useState<ipc.SessionDigest[]>([]);
   const [thisInstance, setThisInstance] = useState<string | null>(null);
-  const [wsDrawerOpen, setWsDrawerOpen] = useState(false);
+  /** Which agent terminals have their workspace overlay open, by ptyId.
+   *
+   *  Per-terminal, not one global flag. Opening the workspace is a statement
+   *  about the agent you opened it on — with a single boolean, switching to
+   *  another agent's terminal found the overlay already up and silently
+   *  re-pointed at that agent, so you'd land on a workspace you never asked to
+   *  see, covering the terminal you did. A Set also means A stays open when you
+   *  duck over to B and come back. */
+  const [wsOpenPtys, setWsOpenPtys] = useState<ReadonlySet<number>>(new Set());
   // Mirrored for the agent-action handler, which is mounted once and must not
   // re-subscribe every time a digest poll lands.
   const wsDigestsRef = useRef(wsDigests);
@@ -1145,7 +980,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       // The chosen agent, else the preference if it is installed, else the
       // first installed CLI. Never a hardcoded name, and never one that
       // isn't on the machine.
-      const installedClis = AGENT_CLIS.filter((c) => installedRef.current[c.bin]);
+      const installedClis = AGENT_CLIS.filter((c) => getInstalled()[c.bin]);
       const preferred = getSettings().defaultAgent;
       const agent =
         agentId ||
@@ -1191,7 +1026,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         onNotice(`Couldn't start work on ${ticket.id}: ${String(err)}`);
       }
     },
-    [ticketRepo, addTerminal, onNotice],
+    [ticketRepo, addTerminal, onNotice, getInstalled],
   );
 
   /** Check out a PR's head branch in a worktree (reusing one already on it)
@@ -1206,7 +1041,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const startPrAgent = useCallback(
     async (mode: "review" | "resolve", repo: string, pr: ipc.PrInfo, agentId?: string) => {
       const noun = mode === "resolve" ? "conflict resolution on" : "a review of";
-      const installedClis = AGENT_CLIS.filter((c) => installedRef.current[c.bin]);
+      const installedClis = AGENT_CLIS.filter((c) => getInstalled()[c.bin]);
       const preferred = getSettings().defaultAgent;
       const agent =
         agentId ||
@@ -1257,7 +1092,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         );
       }
     },
-    [addTerminal, onNotice],
+    [addTerminal, onNotice, getInstalled],
   );
   const startPrReview = useCallback(
     (repo: string, pr: ipc.PrInfo, agentId?: string) => startPrAgent("review", repo, pr, agentId),
@@ -1439,7 +1274,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
    *  shape as startTicketWork/startPrAgent. */
   const startAgentInDir = useCallback(
     (dir: string, agentId: string | undefined, seed: string, title: string) => {
-      const installedClis = AGENT_CLIS.filter((c) => installedRef.current[c.bin]);
+      const installedClis = AGENT_CLIS.filter((c) => getInstalled()[c.bin]);
       const preferred = getSettings().defaultAgent;
       const agent =
         agentId ||
@@ -1462,7 +1297,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         }, 2500);
       }
     },
-    [addTerminal, onNotice],
+    [addTerminal, onNotice, getInstalled],
   );
 
   /** Launch a micro-task: a one-shot agent seeded with the task's brief plus
@@ -1472,8 +1307,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
    *  the only CLI with the MCP registration — over the default agent; others
    *  still work via the protocol's printed-fallback ending, minus auto-close. */
   const startMicroTask = useCallback(
-    <P,>(def: MicroTaskDef<P>, payload: P, userQuery: string) => {
-      const installedClis = AGENT_CLIS.filter((c) => installedRef.current[c.bin]);
+    async <P,>(def: MicroTaskDef<P>, payload: P, userQuery: string) => {
+      const installedClis = AGENT_CLIS.filter((c) => getInstalled()[c.bin]);
       if (installedClis.length === 0) {
         onNotice("Running a task needs an agent CLI — install one in Settings → Agents.");
         return;
@@ -1485,13 +1320,41 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         installedClis[0]
       )?.id;
       const cli = AGENT_CLIS.find((c) => c.id === agent);
-      const seed = `${def.buildContext(payload, userQuery)} ${microTaskProtocol()}`;
-      const start = agent ? startCommand(agent, seed) : null;
-      if (!cli || !start) {
+      if (!cli || !agent) {
         onNotice(`No agent CLI installed to run "${def.label}".`);
         return;
       }
-      const dir = def.cwd(payload);
+      // A task that edits files gets the PR's branch in a worktree of its own,
+      // same deal as startPrAgent: reuse the worktree already holding it, else
+      // make a throwaway the brief tells the agent to remove. If that fails we
+      // stop rather than fall back to the shared checkout — the agent would
+      // commit onto whatever branch happens to be sitting there.
+      let dir = def.cwd(payload);
+      let env: MicroTaskEnv | undefined;
+      if (def.isolation) {
+        const { repo, pr } = def.isolation.target(payload);
+        try {
+          const worktrees = await ipc.gitWorktrees(repo).catch(() => [] as ipc.WorktreeInfo[]);
+          const existing = prWorktree(pr, worktrees);
+          const path = existing?.path ?? `${repo}-wt-pr-${pr.number}`;
+          if (!existing) await ipc.gitWorktreeAddPr(repo, path, pr.number, pr.branch);
+          dir = path;
+          env = existing ? undefined : { cleanup: { repo, worktree: path } };
+        } catch (err) {
+          onNotice(
+            `Couldn't check PR #${pr.number} out for "${def.label}": ${String(err)}. ` +
+              `If it's from a private fork you can't fetch, click Checkout first.`,
+            "error",
+          );
+          return;
+        }
+      }
+      const seed = `${def.buildContext(payload, userQuery, env)} ${microTaskProtocol()}`;
+      const start = startCommand(agent, seed);
+      if (!start) {
+        onNotice(`No agent CLI installed to run "${def.label}".`);
+        return;
+      }
       const id = addTerminal(
         dir,
         `CANOPY_MICRO_TASK=1 ${start.command}`,
@@ -1511,7 +1374,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         cwd: dir,
         projectId: project.id,
         projectName: project.name,
-        brief: def.buildContext(payload, userQuery),
+        brief: def.buildContext(payload, userQuery, env),
       });
       patchTabRaw(id, { micro: { taskId: def.id, runId } } as Partial<SubTab>);
       if (start.typePrompt) {
@@ -1525,19 +1388,17 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         }, 2500);
       }
     },
-    [addTerminal, patchTabRaw, onNotice, project.id],
+    [addTerminal, patchTabRaw, onNotice, project.id, getInstalled],
   );
 
   /** Run a brief that was composed on the spot (a diff surface's "ask about
-   *  this" box) as a one-shot task — same lifecycle as a saved one, no entry in
-   *  the registry. The context builder already folded the user's words in. */
+   *  this" box, the Tasks panel's one-off composer) as a one-shot task — same
+   *  lifecycle as a saved one, no entry in the registry. The context builder
+   *  already folded the user's words in, so nothing more is passed. A label is
+   *  only given where the surface has a better one than the brief's own head. */
   const runAdhocTask = useCallback(
-    (label: string, brief: string, dir: string) => {
-      startMicroTask(
-        customTaskDef({ id: label.toLowerCase().replace(/\s+/g, "-"), label, icon: "◆", placeholder: "", brief }),
-        { dir },
-        "",
-      );
+    (brief: string, dir: string, label?: string) => {
+      void startMicroTask(adhocTaskDef(brief, label), { dir }, "");
     },
     [startMicroTask],
   );
@@ -1655,42 +1516,6 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     [],
   );
 
-  // Opening a project deliberately opens nothing: the empty state is the
-  // launcher, so you pick the shell or agent you actually want rather than
-  // being handed a shell you didn't ask for.
-
-  // Re-probed whenever it could have changed: an install run finishing, or
-  // the launcher opening. A one-shot probe at mount meant a finished install
-  // still showed — and re-ran — the installer on every click.
-  const refreshInstalled = useCallback(() => {
-    void checkInstalledClis().then(setInstalled);
-    void checkInstalledPrereqs().then(setPrereqs);
-  }, []);
-  // Version probing runs `<bin> --version` per CLI plus (at most 6-hourly) a
-  // registry fetch — slower than which_check, so it rides in the background
-  // and the launcher renders whatever the last probe knew.
-  const refreshUpdates = useCallback(
-    () => void checkCliUpdates().then(setCliUpdates),
-    [],
-  );
-  useEffect(() => {
-    refreshInstalled();
-    refreshUpdates();
-  }, [refreshInstalled, refreshUpdates]);
-
-  // Rebinding a CLI to the binary this machine actually has (Settings → Agents)
-  // changes what there is to probe. Without this, the row that sent the user to
-  // Settings in the first place goes on offering to install until the launcher
-  // is reopened — which reads as the setting not having worked.
-  useEffect(() => {
-    const onChanged = () => {
-      refreshInstalled();
-      refreshUpdates();
-    };
-    window.addEventListener(AGENT_CLIS_CHANGED_EVENT, onChanged);
-    return () => window.removeEventListener(AGENT_CLIS_CHANGED_EVENT, onChanged);
-  }, [refreshInstalled, refreshUpdates]);
-
   // Looking at a tab is what marks it read. As an effect rather than something
   // hung off the tab's onClick, so every route in — clicking, Ctrl+Tab cycling,
   // a jump from the agents panel, closing the tab in front of it — clears the
@@ -1725,7 +1550,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       const first = componentsRef.current[0];
       if (first) addTerminal(first.path);
     };
-    const toggleSidebarHandler = () => setCollapsed((v) => !v);
+    const toggleSidebarHandler = () => {
+      setPinned((v) => !v);
+      setPeeking(false);
+    };
     const quickOpen = () => setPalette("files");
     const findInFiles = () => setPalette("search");
     const cycleTabs = (dir: 1 | -1) => {
@@ -1880,11 +1708,18 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
 
   // A browser-control op (canopy_browser_*): pick the preview tab it targets —
   // by origin when it names a URL, else the active/first preview tab, creating
-  // one when navigation asks for a page and none is open — focus it (agent ops
-  // mount the view; the user watching the tab drive itself is the point), and
-  // hand the op to the PreviewView through the queueing bus. Everything else,
-  // including answering the bridge, happens in the view; only the no-tab case
-  // must answer here or the agent would wait out the bridge's timeout.
+  // one when navigation asks for a page and none is open — and hand the op to
+  // the PreviewView through the queueing bus. Everything else, including
+  // answering the bridge, happens in the view; only the no-tab case must answer
+  // here or the agent would wait out the bridge's timeout.
+  //
+  // The op does NOT steal the front tab. Opening the preview brings it forward
+  // once (that's the moment worth showing); after that an agent clicking and
+  // typing must not yank the user off the file they're editing every few
+  // seconds. An open preview tab stays laid out while it's in the background
+  // (see the doc-host styling below) so its page keeps real geometry and the
+  // ops that need it — snapshot, click — work unwatched. Screenshot is the one
+  // exception: it captures pixels off the window, so it has to be in front.
   useEffect(() => {
     const originOf = (u: string): string | null => {
       try {
@@ -1906,7 +1741,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         // A URL navigation can take over an empty (server-picker) preview tab.
         (op.op === "navigate" && op.url ? previews[0] : undefined);
       if (tab) {
-        setActiveTabId(tab.id);
+        if (op.op === "screenshot") setActiveTabId(tab.id);
         dispatchBrowserOp(tab.id, op);
       } else if (op.op === "navigate" && op.url) {
         dispatchBrowserOp(openPreview(op.url), op);
@@ -2299,6 +2134,182 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const liveSessionByPtyRef = useRef(liveSessionByPty);
   liveSessionByPtyRef.current = liveSessionByPty;
 
+  // ---------- hibernation ----------
+  // Sits here rather than up with the other tab plumbing because a snapshot is
+  // only worth taking once it can name the conversation live in each terminal
+  // (liveSessionByPty, just above) — that binding is what brings an agent back
+  // mid-thought instead of at a fresh prompt.
+
+  // `pinned`, not `peeking`: the latch is the user's standing decision about
+  // the side panel, where a peek is just where the pointer happened to be when
+  // the project was put to sleep.
+  const snapshotState = useRef({
+    activeTabId,
+    sideTab,
+    pinned,
+    worktreeEnv,
+  });
+  snapshotState.current = { activeTabId, sideTab, pinned, worktreeEnv };
+
+  useEffect(() => {
+    const onHibernate = (e: Event) => {
+      const d = (e as CustomEvent).detail as { projectId?: string } | null;
+      if (d?.projectId !== project.id) return;
+      const { activeTabId: active, sideTab: side, pinned: sideOut, worktreeEnv: wt } =
+        snapshotState.current;
+      const snap = buildSnapshot({
+        tabs: tabsRef.current,
+        activeTabId: active,
+        sideTab: side,
+        sidePinned: sideOut,
+        worktree: wt,
+        sessionFor: (pty) => liveSessionByPtyRef.current.get(pty),
+      });
+      // App waits for this before closing the project: a snapshot that could
+      // not be stored must leave the project open, because closing it would
+      // throw the work away rather than put it away.
+      const ok = writeHibernation(project.id, snap);
+      // Put the workspace down properly rather than letting the unmount do it.
+      // Unmounting kills the PTYs but nothing else: the editor models, the
+      // diff baselines and any live share would all be left holding memory,
+      // which for a feature whose whole point is reclaiming it would be a
+      // strange thing to skip. closeTab already knows how to end each kind.
+      if (ok) for (const t of [...tabsRef.current]) closeTabRef.current(t.id);
+      window.dispatchEvent(
+        new CustomEvent(HIBERNATED_EVENT, { detail: { projectId: project.id, ok } }),
+      );
+    };
+    window.addEventListener(HIBERNATE_EVENT, onHibernate);
+    return () => window.removeEventListener(HIBERNATE_EVENT, onHibernate);
+  }, [project.id]);
+
+  /** Rebuild one snapshotted tab and answer with its id, so the tab that was in
+   *  front can be found again once the whole strip is back. */
+  const restoreTab = useCallback(
+    async (t: SnapshotTab): Promise<string | null> => {
+      const push = (tab: SubTab) => {
+        setTabs((prev) => [...prev, tab]);
+        return tab.id;
+      };
+      switch (t.kind) {
+        case "terminal": {
+          // A headless PTY from the phone outlived hibernation — we never
+          // spawned it, so we never killed it. Reattach when it is still there;
+          // otherwise there is nothing to attach to and the tab is dropped.
+          if (t.attachId != null) {
+            if (!statsRef.current.some((s) => s.id === t.attachId)) return null;
+            return push({
+              id: tabId(),
+              type: "terminal",
+              cwd: t.cwd,
+              title: t.title,
+              ptyId: t.attachId,
+              attachId: t.attachId,
+              icon: t.icon ?? "📱",
+            });
+          }
+          const { command } = terminalLaunch(t);
+          return addTerminal(t.cwd, command, t.title, t.icon, t.run);
+        }
+        case "file": {
+          await openFileRef.current(t.path, { diff: t.view === "diff" });
+          // openFile appends through setTabs, which React commits after the
+          // current task — so yield before reading the strip back. A file that
+          // no longer exists on disk simply never appears, and is skipped.
+          await new Promise((r) => window.setTimeout(r, 0));
+          const tab = tabsRef.current.find(
+            (x) => x.type === "file" && x.file.path === t.path,
+          );
+          if (tab && t.view !== "diff") patchFile(t.path, { view: t.view });
+          return tab?.id ?? null;
+        }
+        case "preview":
+          return push({ id: tabId(), type: "preview", url: t.url, annotations: [] });
+        case "pr":
+          return push({ id: tabId(), type: "pr", repo: t.repo, pr: t.pr });
+        case "ticket":
+          return push({ id: tabId(), type: "ticket", ticket: t.ticket, source: t.source });
+        case "commit":
+          return push({
+            id: tabId(),
+            type: "commit",
+            repo: t.repo,
+            hash: t.hash,
+            short: t.short,
+            subject: t.subject,
+          });
+        case "branch":
+          return push({ id: tabId(), type: "branch", repo: t.repo, branch: t.branch });
+        case "review":
+          return push({ id: tabId(), type: "review", review: t.review });
+        case "agent":
+          return push({
+            id: tabId(),
+            type: "agent",
+            repo: t.repo,
+            agent: t.agent,
+            cwd: t.cwd,
+            sessionId: t.sessionId,
+            digest: t.digest,
+          });
+        case "task-history":
+          return push({ id: tabId(), type: "task-history" });
+        case "instructions":
+          return push({ id: tabId(), type: "instructions", focus: t.focus });
+        case "chat":
+          return push({ id: tabId(), type: "chat", peer: t.peer, name: t.name });
+      }
+    },
+    [addTerminal, patchFile],
+  );
+
+  // Wake: rebuild the workspace step by step while the frost (rendered by App,
+  // above this view) stays put. In snapshot order, so the strip comes back
+  // left-to-right as it was, and paced — eight PTYs spawned in the same frame
+  // is a stall the user watches, and each one wants its own beat on screen.
+  const restoring = useRef(false);
+  const restoreStepRef = useRef(onRestoreStep);
+  restoreStepRef.current = onRestoreStep;
+  const restoredRef = useRef(onRestored);
+  restoredRef.current = onRestored;
+  useEffect(() => {
+    if (!restore || restoring.current) return;
+    restoring.current = true;
+    let cancelled = false;
+    const wait = (ms: number) => new Promise((r) => window.setTimeout(r, ms));
+    void (async () => {
+      const steps = wakeSteps(restore);
+      restoreStepRef.current?.(0, steps.length, steps[0]?.label ?? "Ready");
+      if (restore.worktree) setWorktreeEnv(restore.worktree);
+      setSideTab(restore.sideTab);
+      setPinned(restore.sidePinned);
+      const ids: (string | null)[] = [];
+      for (const [i, step] of steps.entries()) {
+        if (cancelled) return;
+        let id: string | null = null;
+        try {
+          id = await restoreTab(step.tab);
+        } catch (err) {
+          // One tab that can't come back (a deleted file, a dead attach) must
+          // never strand the rest of the workspace asleep.
+          console.warn("restore failed", step.label, err);
+        }
+        ids.push(id);
+        // A terminal has a PTY to spawn; a document tab is a render. Pace them
+        // differently so a workspace of files doesn't crawl.
+        await wait(step.tab.kind === "terminal" ? 260 : 90);
+        if (cancelled) return;
+        restoreStepRef.current?.(i + 1, steps.length, steps[i + 1]?.label ?? "Ready");
+      }
+      const front = restore.activeIndex != null ? ids[restore.activeIndex] : null;
+      if (front) setActiveTabId(front);
+      restoredRef.current?.();
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [restore, restoreTab]);
+
   // Deliver a message (a workspace review, today) to the agent that owns a
   // session: typed into its live PTY when it has one, else the session is
   // resumed and the text delivered once it reports back. Best-effort — returns
@@ -2402,27 +2413,143 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     [pending],
   );
 
-  // Stable ActivityRail handlers. Identity only changes with collapsed/sideTab
+  // Stable ActivityRail handlers. Identity only changes with pinned/sideTab
   // (a user action), not on every render — so the memoized rail stays put while
   // terminals stream, agents tick, and stats update.
+  const openTimer = useRef<number | null>(null);
+  const closeTimer = useRef<number | null>(null);
+  const resizing = useRef(false);
+
+  const cancelPeekClose = useCallback(() => {
+    if (closeTimer.current !== null) {
+      window.clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+  }, []);
+  const schedulePeekClose = useCallback(
+    (delay = PEEK_CLOSE_MS) => {
+      cancelPeekClose();
+      // Not while a width drag is in flight: the pointer routinely leaves the
+      // panel mid-drag, and retracting it out from under the grip is maddening.
+      if (resizing.current) return;
+      closeTimer.current = window.setTimeout(() => {
+        closeTimer.current = null;
+        setPeeking(false);
+      }, delay);
+    },
+    [cancelPeekClose],
+  );
+  const cancelPeekOpen = useCallback(() => {
+    if (openTimer.current !== null) {
+      window.clearTimeout(openTimer.current);
+      openTimer.current = null;
+    }
+  }, []);
+  useEffect(() => () => {
+    if (openTimer.current !== null) window.clearTimeout(openTimer.current);
+    if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
+  }, []);
+
+  /** Hover-intent, not hover. A panel is only committed once the pointer has
+   *  settled on an icon — otherwise sweeping the rail on the way to Settings
+   *  would mount every panel behind it, and the trackers panel mounting means
+   *  a round trip to GitHub/Jira for a tab you never meant to open.
+   *
+   *  A pinned panel ignores hover entirely. Pinning says "keep THIS one out",
+   *  and a pointer drifting over the rail on its way somewhere else has no
+   *  business swapping it — a peek is transient, a pin is a choice. */
+  const hoverSideTab = useCallback(
+    (tab: SideTab) => {
+      if (pinned) return;
+      cancelPeekClose();
+      cancelPeekOpen();
+      openTimer.current = window.setTimeout(() => {
+        openTimer.current = null;
+        setSideTab(tab);
+        setPeeking(true);
+      }, HOVER_INTENT_MS);
+    },
+    [cancelPeekClose, cancelPeekOpen, pinned],
+  );
+  const leaveSideHover = useCallback(
+    (prompt?: boolean) => {
+      cancelPeekOpen();
+      schedulePeekClose(prompt ? PEEK_LEAVE_MS : PEEK_CLOSE_MS);
+    },
+    [cancelPeekOpen, schedulePeekClose],
+  );
+
+  /** A click anywhere else dismisses the panel on the spot — pinned included.
+   *  The panel covers the editor, so a click past it is someone reaching for
+   *  what's underneath; leaving it up to be clicked through twice is the one
+   *  thing an overlay must not do. The grace period is for a wandering pointer,
+   *  and a click says the pointer has arrived somewhere on purpose.
+   *
+   *  Clicks inside the panel or on the rail are exempt — the panel's own
+   *  context menus and dialogs are descendants of it, so they are covered too.
+   *  On pointerdown, not click: waiting for mouseup leaves the panel sitting
+   *  over whatever you are in the middle of pressing. */
+  useEffect(() => {
+    if (!sideOpen) return;
+    const onDown = (e: PointerEvent) => {
+      const target = e.target;
+      if (target instanceof Element && target.closest(".side-peek, .rail")) return;
+      cancelPeekOpen();
+      cancelPeekClose();
+      setPeeking(false);
+      setPinned(false);
+    };
+    window.addEventListener("pointerdown", onDown, true);
+    return () => window.removeEventListener("pointerdown", onDown, true);
+  }, [sideOpen, cancelPeekOpen, cancelPeekClose]);
+
+  // Click is the latch: it pins the panel open so it survives the pointer
+  // leaving. Clicking the pinned tab again puts it away.
   const selectSideTab = useCallback(
     (tab: SideTab) => {
-      if (collapsed) {
-        setCollapsed(false);
-        setSideTab(tab);
-      } else if (sideTab === tab) {
-        setCollapsed(true);
+      cancelPeekOpen();
+      cancelPeekClose();
+      if (pinned && sideTab === tab) {
+        setPinned(false);
+        setPeeking(false);
       } else {
         setSideTab(tab);
+        setPinned(true);
       }
     },
-    [collapsed, sideTab],
+    [cancelPeekClose, cancelPeekOpen, pinned, sideTab],
   );
   const openSettings = useCallback(
     () => window.dispatchEvent(new CustomEvent("canopy:open-settings")),
     [],
   );
-  const toggleSidebar = useCallback(() => setCollapsed((v) => !v), []);
+  const toggleSidebar = useCallback(() => {
+    cancelPeekOpen();
+    cancelPeekClose();
+    setPinned((v) => !v);
+    setPeeking(false);
+  }, [cancelPeekClose, cancelPeekOpen]);
+
+  /** Drag the panel's right edge. The overlay is out of flow, so the old
+   *  PanelGroup percentage no longer applies — the width is plain pixels. */
+  const startSideResize = useCallback((e: React.PointerEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sideWidthRef.current;
+    resizing.current = true;
+    const move = (ev: PointerEvent) => {
+      const w = Math.max(SIDE_MIN_W, Math.min(SIDE_MAX_W, startW + ev.clientX - startX));
+      sideWidthRef.current = w;
+      setSideWidth(w);
+    };
+    const up = () => {
+      resizing.current = false;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }, []);
 
   // Jump to the terminal running the agent that raised the item: prefer a
   // terminal whose PTY tree contains an agent process, then match by cwd.
@@ -2615,12 +2742,12 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       // Surface the new agent where it lives: the Agents section, expanded so
       // the just-launched row is actually in view.
       setSideTab("agents");
-      setCollapsed(false);
-    } else if (cli.rebound) {
-      // The vendor's installer would install the vendor's binary, which an
-      // override pointing somewhere else can never be satisfied by — so the
-      // "install" offer would repeat forever, which is the loop rebinding
-      // exists to end. Send them to the setting that is actually wrong.
+      setPinned(true);
+    } else if (cli.rebound || !cli.install) {
+      // Two cases, one answer: an override points somewhere the vendor's
+      // installer can never satisfy, and a custom entry has no installer at all
+      // — so an "install" offer would repeat forever, which is the loop these
+      // settings exist to end. Send them to the setting that is actually wrong.
       onNotice(
         `${cli.name} is set to \`${cli.bin}\`, which isn't on this machine — check Settings → Agents.`,
       );
@@ -2639,6 +2766,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     // Route to the command matched to the install source (e.g. `brew upgrade`);
     // fall back to the CLI's own updater when the source is a plain registry.
     const cmd = cliUpdates[cli.bin]?.updateCmd ?? updateCommand(cli);
+    // Nothing to run: an entry with neither an updater nor an installer (a
+    // custom CLI) never badges an update in the first place, so this is the
+    // belt to that brace rather than a state a user can reach.
+    if (!cmd) return;
     addTerminal(cwd, cmd, `update ${cli.name}`, "⬆", true);
   }, [cliUpdates, addTerminal]);
 
@@ -2669,29 +2800,40 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const compMenu = useContextMenu();
   const tabMenu = useContextMenu();
   const termMenu = useContextMenu();
-  /** Prefill for the Tasks panel's create form — set when the user makes a
-   *  task out of something they're looking at (selected terminal text, a file
-   *  in the tree, a tab). The nonce re-opens the form even for the same seed
-   *  twice. */
-  const [taskSeed, setTaskSeed] = useState<{ brief: string; nonce: number } | null>(null);
-  const seedTaskFrom = useCallback((brief: string) => {
-    setCollapsed(false);
+  /** Prefill for the Tasks panel's composer — set when the user makes a task
+   *  out of something they're looking at (selected terminal text, a file in the
+   *  tree, a tab). `mode` picks which composer opens: the full create form, or
+   *  the one-off box that runs the brief and saves nothing. The nonce re-opens
+   *  it even for the same seed twice. */
+  const [taskSeed, setTaskSeed] = useState<{
+    brief: string;
+    mode: "save" | "once";
+    nonce: number;
+  } | null>(null);
+  const openTaskComposer = useCallback((brief: string, mode: "save" | "once") => {
+    setPinned(true);
     setSideTab("tasks");
-    setTaskSeed((prev) => ({ brief, nonce: (prev?.nonce ?? 0) + 1 }));
+    setTaskSeed((prev) => ({ brief, mode, nonce: (prev?.nonce ?? 0) + 1 }));
   }, []);
+  const seedTaskFrom = useCallback(
+    (brief: string) => openTaskComposer(brief, "save"),
+    [openTaskComposer],
+  );
   /** The "Tasks ▸" submenu for a right-clicked row, wherever it lives: write a
-   *  new task about it, then run one on it. The surfaces stay ignorant of the
-   *  task registry — they ask for the item and splice it into their menu. */
+   *  new task about it, run a one-off about it, then the two groups of tasks.
+   *  The surfaces stay ignorant of the task registry — they ask for the item
+   *  and splice it into their menu. */
   const taskMenu = useCallback(
-    (seed: string, runnable?: { label: string; icon?: string; run: () => void }[]) =>
+    (seed: string, runnable?: TaskChoice[]) =>
       taskMenuItem({
         seed,
         runnable,
         onNewTask: seedTaskFrom,
-        onRunSaved: (t) => startMicroTask(customTaskDef(t), { dir: roots[0] ?? "" }, ""),
+        onOneOff: (brief) => openTaskComposer(brief, "once"),
+        onRunSaved: (t) => void startMicroTask(customTaskDef(t), { dir: roots[0] ?? "" }, ""),
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [seedTaskFrom, startMicroTask, roots[0]],
+    [seedTaskFrom, openTaskComposer, startMicroTask, roots[0]],
   );
 
   const submitRootCreate = async () => {
@@ -3141,12 +3283,38 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           return { repo, agent, cwd, sessionId, digest, ptyId: activeTab.ptyId as number };
         })()
       : null;
-  // Close the overlay when its agent terminal is no longer front — key on the
-  // terminal (ptyId) so it survives a digestless agent, which has no session id.
-  const wsKey = agentTermWs ? String(agentTermWs.ptyId) : null;
+  // Derived, not stored: the overlay shows when the terminal in front is one you
+  // opened it on. Anything else in front — another agent, a file, no agent tab
+  // at all — and there is nothing to close, because it was never open for that.
+  const wsDrawerPty = agentTermWs?.ptyId ?? null;
+  const wsDrawerOpen = wsDrawerPty != null && wsOpenPtys.has(wsDrawerPty);
+  const setWsDrawerOpen = useCallback(
+    (open: boolean) => {
+      if (wsDrawerPty == null) return;
+      setWsOpenPtys((prev) => {
+        if (prev.has(wsDrawerPty) === open) return prev;
+        const next = new Set(prev);
+        if (open) next.add(wsDrawerPty);
+        else next.delete(wsDrawerPty);
+        return next;
+      });
+    },
+    [wsDrawerPty],
+  );
+  // Forget terminals that have gone away. PTY ids can be reused, and a stale
+  // entry would open the workspace unbidden on whatever inherits the number.
+  const liveTermPtys = useMemo(
+    () => tabs.filter((t): t is TermSubTab => t.type === "terminal").map((t) => t.ptyId),
+    [tabs],
+  );
   useEffect(() => {
-    if (!wsKey) setWsDrawerOpen(false);
-  }, [wsKey]);
+    setWsOpenPtys((prev) => {
+      if (prev.size === 0) return prev;
+      const live = new Set(liveTermPtys);
+      const next = new Set([...prev].filter((id) => live.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [liveTermPtys]);
   // Esc closes the overlay, matching every other overlay in the app.
   useEffect(() => {
     if (!wsDrawerOpen) return;
@@ -3155,7 +3323,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [wsDrawerOpen]);
+  }, [wsDrawerOpen, setWsDrawerOpen]);
 
   const peerMembers = useMemo(
     () => relay.status.members.filter((m) => m.id !== relay.status.self_id),
@@ -3206,9 +3374,21 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             ? [
                 taskMenu(`About PR #${tab.pr.number} "${tab.pr.title}" (${tab.pr.url}): `, [
                   {
+                    id: reviewPrTask.id,
                     label: `Review PR #${tab.pr.number}`,
                     icon: reviewPrTask.icon,
-                    run: () => startMicroTask(reviewPrTask, { repo: tab.repo, pr: tab.pr }, ""),
+                    run: () => void startMicroTask(reviewPrTask, { repo: tab.repo, pr: tab.pr }, ""),
+                  },
+                  {
+                    id: addressPrCommentsTask.id,
+                    label: `Address comments on #${tab.pr.number}`,
+                    icon: addressPrCommentsTask.icon,
+                    run: () =>
+                      void startMicroTask(
+                        addressPrCommentsTask,
+                        { repo: tab.repo, pr: tab.pr },
+                        "",
+                      ),
                   },
                 ]),
               ]
@@ -3220,10 +3400,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                       ? undefined
                       : [
                           {
+                            id: raisePrTask.id,
                             label: `Raise PR for ${tab.branch.branch}`,
                             icon: raisePrTask.icon,
                             run: () =>
-                              startMicroTask(
+                              void startMicroTask(
                                 raisePrTask,
                                 {
                                   repo: tab.repo,
@@ -3366,15 +3547,22 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             onRaisePrTask={
               tab.repo
                 ? (branch, worktree) =>
-                    startMicroTask(raisePrTask, { repo: tab.repo as string, branch, worktree }, "")
+                    void startMicroTask(raisePrTask, { repo: tab.repo as string, branch, worktree }, "")
                 : undefined
             }
             onReviewPrTask={
               tab.repo
-                ? (pr) => startMicroTask(reviewPrTask, { repo: tab.repo as string, pr }, "")
+                ? (pr) => void startMicroTask(reviewPrTask, { repo: tab.repo as string, pr }, "")
                 : undefined
             }
-            onRunSavedTask={(task, dir) => startMicroTask(customTaskDef(task), { dir }, "")}
+            onAddressPrCommentsTask={
+              tab.repo
+                ? (pr) =>
+                    void startMicroTask(addressPrCommentsTask, { repo: tab.repo as string, pr }, "")
+                : undefined
+            }
+            onRunSavedTask={(task, dir) => void startMicroTask(customTaskDef(task), { dir }, "")}
+            onRunOneOff={(brief, dir) => runAdhocTask(brief, dir)}
           />
         );
       case "commit":
@@ -3419,9 +3607,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                     const dir = componentsRef.current[0]?.path;
                     if (!path || !dir) return;
                     runAdhocTask(
-                      `Review ${tab.review.branch}`,
                       reviewContext(tab.review, path, query),
                       dir,
+                      `Review ${tab.review.branch}`,
                     );
                   })
                 }
@@ -3463,7 +3651,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             // (a branch tab, a PR), which is long gone — but the brief that
             // payload produced was recorded, and it says everything.
             onRunAgain={(run: TaskRun) =>
-              runAdhocTask(run.label, run.brief, run.cwd)
+              runAdhocTask(run.brief, run.cwd, run.label)
             }
             onOpenFile={(path) => void openFile(path)}
           />
@@ -3524,7 +3712,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 onRunTask={(query) => {
                   const dir = repoForFile(tab.file.path);
                   if (!dir) return onNotice("No git repository in this project.");
-                  runAdhocTask(tab.file.name, fileDiffContext(tab.file.path, query), dir);
+                  runAdhocTask(fileDiffContext(tab.file.path, query), dir, tab.file.name);
                 }}
               />
             }
@@ -3662,15 +3850,19 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                     patchTab(tab.id, { exited: true, exitCode: code, ptyId: null });
                     // An installer or updater finishing is the moment
                     // "install" labels and update badges go stale — re-probe
-                    // right now, not on a timer.
+                    // right now, not on a timer. Announced rather than
+                    // refreshed in place: what changed is on this machine, and
+                    // every open project draws its own launcher from its own
+                    // probe, so the other tabs must hear about it too.
                     if (
                       tab.command?.startsWith("brew upgrade ") ||
                       AGENT_CLIS.some(
-                        (c) => c.install === tab.command || updateCommand(c) === tab.command,
+                        (c) =>
+                          c.install != null &&
+                          (c.install === tab.command || updateCommand(c) === tab.command),
                       )
                     ) {
-                      refreshInstalled();
-                      refreshUpdates();
+                      announceCliInstallsChanged();
                     }
                   } else closeTab(tab.id);
                 }}
@@ -3696,7 +3888,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           <div
             key={tab.id}
             className="fill doc-host"
-            style={{ display: tab.id === activeTabId && visible ? "block" : "none" }}
+            style={hostStyle(tab.id === activeTabId && visible, tab.type === "preview")}
           >
             <ErrorBoundary label="this tab">{paneFor(tab)}</ErrorBoundary>
           </div>
@@ -3750,11 +3942,22 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                   key={cli.id}
                   className="launch-card"
                   onClick={() => launchCli(cli)}
-                  title={installed[cli.bin] ? cli.bin : `not installed — runs: ${cli.install}`}
+                  title={
+                    installed[cli.bin]
+                      ? cli.bin
+                      : cli.install
+                        ? `not installed — runs: ${cli.install}`
+                        : `${cli.bin} isn't on this machine — check Settings → Agents`
+                  }
                 >
                   <AgentIcon id={cli.id} size={26} />
                   <span>{cli.name}</span>
-                  {!installed[cli.bin] && <span className="launch-install">install</span>}
+                  {/* An entry with no installer can only say what's true: the
+                      binary isn't there. Offering "install" would be a button
+                      that cannot work. */}
+                  {!installed[cli.bin] && (
+                    <span className="launch-install">{cli.install ? "install" : "not found"}</span>
+                  )}
                   {installed[cli.bin] && cliUpdates[cli.bin]?.hasUpdate && (
                     <span
                       className="launch-update"
@@ -3993,7 +4196,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                       onRaisePrTask={
                         agentTermWs.repo
                           ? (branch, worktree) =>
-                              startMicroTask(
+                              void startMicroTask(
                                 raisePrTask,
                                 { repo: agentTermWs.repo as string, branch, worktree },
                                 "",
@@ -4003,16 +4206,27 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                       onReviewPrTask={
                         agentTermWs.repo
                           ? (pr) =>
-                              startMicroTask(
+                              void startMicroTask(
                                 reviewPrTask,
                                 { repo: agentTermWs.repo as string, pr },
                                 "",
                               )
                           : undefined
                       }
-                      onRunSavedTask={(task, dir) =>
-                        startMicroTask(customTaskDef(task), { dir }, "")
+                      onAddressPrCommentsTask={
+                        agentTermWs.repo
+                          ? (pr) =>
+                              void startMicroTask(
+                                addressPrCommentsTask,
+                                { repo: agentTermWs.repo as string, pr },
+                                "",
+                              )
+                          : undefined
                       }
+                      onRunSavedTask={(task, dir) =>
+                        void startMicroTask(customTaskDef(task), { dir }, "")
+                      }
+                      onRunOneOff={(brief, dir) => runAdhocTask(brief, dir)}
                     />
                   )}
                 </div>
@@ -4271,7 +4485,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       ))}
       {sidePane("git", () => (
         <GitPanel
-          visible={sideTab === "git" && visible}
+          visible={sideTab === "git" && visible && sideOpen}
           components={project.components.map((c) => ({ label: c.label, path: c.path }))}
           activeWorktree={worktreeEnv?.path ?? null}
           onUseWorktree={(repo, path, branch) => {
@@ -4292,9 +4506,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 ? undefined
                 : [
                     {
+                      id: raisePrTask.id,
                       label: `Raise PR for ${branch}`,
                       icon: raisePrTask.icon,
-                      run: () => startMicroTask(raisePrTask, { repo, branch, worktree }, ""),
+                      run: () => void startMicroTask(raisePrTask, { repo, branch, worktree }, ""),
                     },
                   ],
             )
@@ -4302,9 +4517,16 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           prTaskMenu={(repo, pr) =>
             taskMenu(`About PR #${pr.number} "${pr.title}" (${pr.url}): `, [
               {
+                id: reviewPrTask.id,
                 label: `Review PR #${pr.number}`,
                 icon: reviewPrTask.icon,
-                run: () => startMicroTask(reviewPrTask, { repo, pr }, ""),
+                run: () => void startMicroTask(reviewPrTask, { repo, pr }, ""),
+              },
+              {
+                id: addressPrCommentsTask.id,
+                label: `Address comments on #${pr.number}`,
+                icon: addressPrCommentsTask.icon,
+                run: () => void startMicroTask(addressPrCommentsTask, { repo, pr }, ""),
               },
             ])
           }
@@ -4330,9 +4552,21 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               onRunTask={(query) => {
                 const dir = changeGroups[0]?.repo ?? componentsRef.current[0]?.path;
                 if (!dir) return onNotice("No git repository in this project.");
-                runAdhocTask("Changes", sessionChangesContext(changeContextGroups(), query), dir);
+                runAdhocTask(sessionChangesContext(changeContextGroups(), query), dir, "Changes");
               }}
             />
+          }
+        />
+      ))}
+      {sidePane("prs", () => (
+        <PrsPanel
+          localRepos={repoPaths}
+          projectFor={(repo) => (repoPaths.includes(repo) ? project.name : undefined)}
+          onOpen={(repo, pr) => openPr(repo, pr)}
+          onOpenElsewhere={(repo, pr) =>
+            window.dispatchEvent(
+              new CustomEvent("canopy:open-pr-elsewhere", { detail: { repo, pr } }),
+            )
           }
         />
       ))}
@@ -4367,15 +4601,16 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onFocus={setActiveTabId}
           onStop={closeTab}
           onRunCustom={(task: CustomMicroTask, dir: string, query: string) =>
-            startMicroTask(customTaskDef(task), { dir }, query)
+            void startMicroTask(customTaskDef(task), { dir }, query)
           }
+          onRunOneOff={(brief: string, dir: string) => runAdhocTask(brief, dir)}
           onOpenHistory={openTaskHistory}
           projectId={project.id}
         />
       ))}
       {sidePane("agents", () => (
         <AgentsPanel
-          visible={sideTab === "agents" && visible}
+          visible={sideTab === "agents" && visible && sideOpen}
           stats={projectStats}
           hookPath={hookPath}
           pending={pending}
@@ -4410,14 +4645,19 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         {!zen && (
           <ActivityRail
             sideTab={sideTab}
-            collapsed={collapsed}
+            open={sideOpen}
+            pinned={pinned}
             changeBadge={changeCount + collabEditedCount}
+            prsBadge={prsBadge}
             tasksBadge={runningMicro.length}
             pendingCount={pending.length}
             urgentCount={urgentPending.length}
             teamBadge={teamBadge}
             relayRole={relay.status.role}
             onSelectTab={selectSideTab}
+            onHoverTab={hoverSideTab}
+            onHoverCancel={cancelPeekOpen}
+            onHoverLeave={leaveSideHover}
             onOpenSettings={openSettings}
             onToggleSidebar={toggleSidebar}
           />
@@ -4428,18 +4668,36 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             focus mode would silently kill every terminal (and any agent running
             in one). Keeping the tree shape fixed keeps the PTYs alive. */}
         <PanelGroup direction="horizontal">
-          {!collapsed && !zen && (
-            <>
-              <Panel id="side" order={1} defaultSize={20} minSize={13} maxSize={40}>
-                {sidePanel}
-              </Panel>
-              <PanelResizeHandle className="resize-handle" />
-            </>
-          )}
           <Panel id="main" order={2}>
             {mainArea}
           </Panel>
         </PanelGroup>
+        {/* The side panel floats over the editor instead of displacing it: the
+            main area never reflows, so a peek costs nothing but a repaint — and
+            a terminal never re-wraps because you glanced at the file tree.
+            Always mounted, slid out of frame when closed, for the same reason
+            the panes inside it are display-toggled. */}
+        {!zen && (
+          <div className="side-peek-layer">
+            <div
+              className={`side-peek ${sideOpen ? "open" : ""}`}
+              style={{ width: sideWidth }}
+              onMouseEnter={cancelPeekClose}
+              onMouseLeave={() => schedulePeekClose()}
+            >
+              {/* The frost is its own layer, not a background on .side-peek.
+                  backdrop-filter makes an element a containing block for fixed
+                  descendants — with it on the wrapper, every context menu and
+                  confirm dialog inside the panel would anchor to the panel
+                  instead of the viewport. */}
+              <div className="side-peek-frost" />
+              {sidePanel}
+              {/* No title here either — a tooltip on the panel's own edge would
+                  cover the panel. The col-resize cursor is the affordance. */}
+              <div className="side-peek-grip" onPointerDown={startSideResize} />
+            </div>
+          </div>
+        )}
       </div>
       {/* Full-width, spanning rail + sidebar + main. Zen hides it via CSS. */}
       <StatusBar

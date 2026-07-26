@@ -781,6 +781,170 @@ export const ghPrClose = (repo: string, number: number, deleteBranch = false) =>
 export const ghPrReady = (repo: string, number: number) =>
   invoke<string>("gh_pr_ready", { repo, number });
 
+// ---------- PR conversation (review threads, comments, reviews) ----------
+
+export interface PrComment {
+  /** GraphQL node id — what a reply or resolve is addressed to. */
+  id: string;
+  author: string;
+  body: string;
+  created: string;
+  url: string;
+  mine: boolean;
+  /** OWNER / MEMBER / COLLABORATOR / CONTRIBUTOR / NONE. */
+  association: string;
+}
+
+export interface PrReviewSummary extends PrComment {
+  /** APPROVED / CHANGES_REQUESTED / COMMENTED / DISMISSED / PENDING. */
+  state: string;
+  submitted: string;
+  /** Head commit the review was submitted against. */
+  commit: string;
+}
+
+export interface PrThread {
+  id: string;
+  path: string;
+  line: number;
+  start_line: number;
+  /** LEFT or RIGHT. */
+  side: string;
+  resolved: boolean;
+  outdated: boolean;
+  comments: PrComment[];
+}
+
+export interface PrFileState {
+  path: string;
+  viewed: boolean;
+  additions: number;
+  deletions: number;
+}
+
+export interface PrConversation {
+  node_id: string;
+  body: string;
+  head_sha: string;
+  viewer: string;
+  review_decision: string;
+  mergeable: string;
+  /** Live rollup in PrInfo's vocabulary: PASS / FAIL / PENDING / "". */
+  checks: string;
+  auto_merge: boolean;
+  draft: boolean;
+  comments: PrComment[];
+  reviews: PrReviewSummary[];
+  threads: PrThread[];
+  files: PrFileState[];
+  my_last_review_sha: string;
+}
+
+/** One inline comment of a review that hasn't been posted yet. */
+export interface DraftThread {
+  path: string;
+  line: number;
+  start_line?: number;
+  side: "LEFT" | "RIGHT";
+  body: string;
+}
+
+/** Everything the PR tab needs about the conversation, in one GraphQL call. */
+export const ghPrConversation = (repo: string, number: number) =>
+  invoke<PrConversation>("gh_pr_conversation", { repo, number });
+export const ghPrThreadReply = (repo: string, threadId: string, body: string) =>
+  invoke<string>("gh_pr_thread_reply", { repo, threadId, body });
+export const ghPrThreadResolved = (repo: string, threadId: string, resolved: boolean) =>
+  invoke<string>("gh_pr_thread_resolved", { repo, threadId, resolved });
+export const ghPrFileViewed = (repo: string, prId: string, path: string, viewed: boolean) =>
+  invoke<void>("gh_pr_file_viewed", { repo, prId, path, viewed });
+/** Submit a review and all its inline comments as one review. */
+export const ghPrReviewBatch = (
+  repo: string,
+  prId: string,
+  event: "approve" | "comment" | "request-changes",
+  body: string,
+  threads: DraftThread[],
+) => invoke<string>("gh_pr_review_batch", { repo, prId, event, body, threads });
+export const ghPrUpdateBranch = (repo: string, number: number) =>
+  invoke<string>("gh_pr_update_branch", { repo, number });
+export const ghPrRequestReview = (repo: string, number: number, reviewers: string[]) =>
+  invoke<string>("gh_pr_request_review", { repo, number, reviewers });
+export const ghPrAutoMerge = (
+  repo: string,
+  number: number,
+  method: "squash" | "merge" | "rebase",
+  enable: boolean,
+) => invoke<string>("gh_pr_auto_merge", { repo, number, method, enable });
+/** Tail of the failing checks' logs — "" when nothing is failing. */
+export const ghPrFailingLogs = (repo: string, number: number) =>
+  invoke<string>("gh_pr_failing_logs", { repo, number });
+export const ghPrDiffSince = (repo: string, baseSha: string, headSha: string) =>
+  invoke<string>("gh_pr_diff_since", { repo, baseSha, headSha });
+
+// ---------- cross-project PR watcher ----------
+
+/** One row of the PR inbox. Everything here comes from the batched query, so a
+ *  row renders without a second call. */
+export interface PrRow {
+  /** Local checkout this PR belongs to — what a click opens. */
+  repo: string;
+  nwo: string;
+  number: number;
+  title: string;
+  author: string;
+  url: string;
+  branch: string;
+  base: string;
+  draft: boolean;
+  created: string;
+  updated: string;
+  additions: number;
+  deletions: number;
+  mergeable: string;
+  review_decision: string;
+  checks: string;
+  comments: number;
+  threads: number;
+  /** Waiting on the signed-in user's review. */
+  requested_from_me: boolean;
+  mine: boolean;
+}
+
+export interface PrSnapshot {
+  repo: string;
+  nwo: string;
+  rows: PrRow[];
+  viewer: string;
+  fetched_ms: number;
+}
+
+/** What a whole pass cost and what failed. */
+export interface PrTick {
+  fetched_ms: number;
+  repos: number;
+  requests: number;
+  cost: number;
+  remaining: number;
+  reset_at: string;
+  errors: Record<string, string>;
+  next_in: number;
+}
+
+/** Declare which repos are worth watching, and whether the user is looking.
+ *  The backend owns the schedule — see src-tauri/src/prwatch.rs. */
+export const prWatchSet = (paths: string[], focused: boolean) =>
+  invoke<void>("pr_watch_set", { paths, focused });
+/** Wake the poller (the panel's ↻). Never runs a pass of its own. */
+export const prWatchNow = () => invoke<void>("pr_watch_now");
+/** A repo's rows changed. Unchanged repos emit nothing at all. */
+export const onPrSnapshot = (cb: (s: PrSnapshot) => void): Promise<UnlistenFn> =>
+  listen<PrSnapshot>("prs:snapshot", (e) => cb(e.payload));
+export const onPrTick = (cb: (t: PrTick) => void): Promise<UnlistenFn> =>
+  listen<PrTick>("prs:tick", (e) => cb(e.payload));
+export const onPrNext = (cb: (seconds: number) => void): Promise<UnlistenFn> =>
+  listen<number>("prs:next", (e) => cb(e.payload));
+
 // ---------- cross-session context ----------
 
 export interface SessionDigest {

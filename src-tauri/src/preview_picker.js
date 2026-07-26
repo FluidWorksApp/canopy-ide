@@ -276,9 +276,14 @@
   var cursorEl = null;
   var cursorLabelEl = null;
   var cursorHideTimer = 0;
+  // Set per op by the parent: true when the preview tab is open but not the one
+  // in front, so nobody is watching this page. The choreography is for the
+  // user's benefit — with no user it's just a second of latency per op — so a
+  // background op behaves like reduced motion and fires immediately.
+  var unwatched = false;
 
   function reducedMotion() {
-    return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    return unwatched || !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
   }
 
   function ensureCursor() {
@@ -581,6 +586,7 @@
   }
 
   function onAgentMessage(d) {
+    unwatched = !!d.bg;
     var fail = function (err) {
       agentReply(d.id, false, String((err && err.message) || err));
     };

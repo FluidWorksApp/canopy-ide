@@ -110,6 +110,20 @@ button.card.on:active {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+}
+/* Name, branch, and state are all nowrap, so on a phone their combined
+ * min-content used to be wider than the screen — the card grew past the
+ * viewport and the whole page scrolled sideways. The branch is the one part
+ * that can be long and the one part that survives being cut, so it truncates
+ * and everything else keeps its size. */
+.agent-top .chip.branch {
+  min-width: 0;
+}
+.chip-t {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .agent-name {
   font-weight: 650;
@@ -185,6 +199,7 @@ button.card.on:active {
   white-space: nowrap;
 }
 .chip svg {
+  flex: none;
   opacity: 0.7;
 }
 .chip.branch {

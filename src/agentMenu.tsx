@@ -53,7 +53,14 @@ export function agentMenuItems(opts: {
     submenu: options.map((cli) => ({
       label: cli.name,
       icon: <AgentIcon id={cli.id} size={14} />,
-      hint: cli.id === preferred ? "default" : installed[cli.bin] ? undefined : "install",
+      hint:
+        cli.id === preferred
+          ? "default"
+          : installed[cli.bin]
+            ? undefined
+            : cli.install
+              ? "install"
+              : "not found",
       onClick: () => onStart(cli.id),
     })),
   });

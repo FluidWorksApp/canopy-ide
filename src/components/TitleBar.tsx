@@ -1,5 +1,6 @@
 import { memo, useEffect, useState } from "react";
-import { CloseIcon } from "./icons";
+import { CloseIcon, FrostIcon } from "./icons";
+import { ContextMenu, useContextMenu } from "./ContextMenu";
 import type { Project } from "../projects";
 import type { TabDrag } from "../tabDrag";
 
@@ -57,8 +58,14 @@ interface TitleBarProps {
   tabDragId: string | null;
   /** Returns pointer-event props for a draggable pill by project id. */
   tabDragItemProps: TabDrag["itemProps"];
+  /** Projects that are asleep — their pill wears the frost and the menu offers
+   *  to wake them rather than to put them under again. */
+  hibernated: Record<string, unknown>;
   onSelectProject: (id: string) => void;
   onCloseProject: (id: string) => void;
+  onHibernateProject: (id: string) => void;
+  onWakeProject: (id: string) => void;
+  onEditProject: (p: Project) => void;
   onStopCollab: () => void;
   onNewProject: () => void;
   onManageProjects: () => void;
@@ -74,13 +81,18 @@ function TitleBarImpl({
   collabActive,
   tabDragId,
   tabDragItemProps,
+  hibernated,
   onSelectProject,
   onCloseProject,
+  onHibernateProject,
+  onWakeProject,
+  onEditProject,
   onStopCollab,
   onNewProject,
   onManageProjects,
 }: TitleBarProps) {
   const fullscreen = useMacFullscreen();
+  const menu = useContextMenu();
   return (
     // data-tauri-drag-region makes the bar background draggable (like grabbing
     // a native titlebar). Tauri checks the mousedown target, so interactive
@@ -95,18 +107,54 @@ function TitleBarImpl({
       {/* The strip around the pills is draggable too — the pills/badges/close
           are their own click targets, so they still work. */}
       <div className="project-tabs" data-tauri-drag-region>
-        {openProjects.map((p) => (
+        {openProjects.map((p) => {
+          const asleep = p.id in hibernated;
+          return (
           <div
             key={p.id}
             className={`project-tab ${p.id === activeId ? "project-tab-active" : ""} ${
               p.id === tabDragId ? "tab-dragging" : ""
-            }`}
+            } ${asleep ? "project-tab-asleep" : ""}`}
             {...tabDragItemProps(p.id)}
             onClick={() => onSelectProject(p.id)}
-            title={p.components.map((c) => c.path).join("\n")}
+            onContextMenu={(e) =>
+              menu.open(e, [
+                { label: p.name, separator: true },
+                asleep
+                  ? {
+                      label: "Wake from hibernation",
+                      icon: "☀",
+                      onClick: () => {
+                        onSelectProject(p.id);
+                        onWakeProject(p.id);
+                      },
+                    }
+                  : {
+                      label: "Hibernate project",
+                      icon: <FrostIcon size={12} />,
+                      hint: "frees its terminals",
+                      onClick: () => onHibernateProject(p.id),
+                    },
+                { separator: true },
+                { label: "Edit project…", icon: "⚙", onClick: () => onEditProject(p) },
+                { label: "Close project", icon: "✕", onClick: () => onCloseProject(p.id) },
+              ])
+            }
+            title={
+              (asleep ? "Hibernating — open it to wake it\n\n" : "") +
+              p.components.map((c) => c.path).join("\n")
+            }
           >
+            {asleep && (
+              <span className="project-tab-frost" title="Hibernating — right-click to wake it">
+                <FrostIcon size={12} />
+              </span>
+            )}
             <span>{p.name}</span>
-            {pendingCount(p) > 0 && (
+            {/* Nothing is running in a sleeping project, so nothing there can
+                be waiting on you — its agents' last words are history, not a
+                queue. */}
+            {!asleep && pendingCount(p) > 0 && (
               <span className="badge badge-urgent" title="agent needs your input">
                 {pendingCount(p)}
               </span>
@@ -122,7 +170,8 @@ function TitleBarImpl({
               <CloseIcon size={12} />
             </span>
           </div>
-        ))}
+          );
+        })}
         <button className="btn-icon" title="New project" onClick={onNewProject}>
           ＋
         </button>
@@ -151,6 +200,14 @@ function TitleBarImpl({
       >
         Projects ▾
       </button>
+      {menu.menu && (
+        <ContextMenu
+          x={menu.menu.x}
+          y={menu.menu.y}
+          items={menu.menu.items}
+          onClose={menu.close}
+        />
+      )}
     </div>
   );
 }

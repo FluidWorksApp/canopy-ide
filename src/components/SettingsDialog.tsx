@@ -24,10 +24,15 @@ import { availableMonoFonts, fontLabel, fontStack } from "../fonts";
 import { AgentIcon, TrackerIcon } from "./icons";
 import {
   AGENT_CLIS,
+  binName,
   BUILTIN_AGENT_CLIS,
   currentPlatform,
+  customCliIssue,
+  namesArguments,
+  newCustomCliId,
   refreshAgentClis,
   type AgentCliDef,
+  type CustomAgentCli,
 } from "../projects";
 import { AGENT_TOOL_GROUPS, ALL_AGENT_TOOLS } from "../agentTools";
 
@@ -137,11 +142,8 @@ function AgentBinaries({
 
   const commit = (def: AgentCliDef, raw: string) => {
     const typed = raw.trim();
-    // A command line, not a command. `acme run claude` would be probed as a
-    // single executable of that name, so it reports ✗ with nothing to say why
-    // — and would be launched the same way. A path may hold spaces (`/opt/Acme
-    // CLI/claude`); a bare name that does is arguments.
-    if (typed && !/[/\\]/.test(typed) && /\s/.test(typed)) {
+    // A command line, not a command — see namesArguments.
+    if (namesArguments(typed)) {
       setDrafts((d) => ({ ...d, [def.id]: typed }));
       setRejected((r) => ({ ...r, [def.id]: true }));
       return;
@@ -209,6 +211,173 @@ function AgentBinaries({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/**
+ * Add an agent CLI Canopy ships no entry for.
+ *
+ * The four fields are the whole of what only the user can tell us: what to run,
+ * what to call it, and the two argument shapes worth knowing. Everything a
+ * built-in entry also carries — installer, registry, package identity, hook and
+ * MCP wiring — is absent by design rather than left blank for later, so this
+ * screen must not imply otherwise: what it buys is a launcher, a named terminal
+ * and (if they say how) resume.
+ *
+ * Rows are drafted locally and committed on blur, like the binaries list above:
+ * each commit re-resolves the registry and re-probes PATH, neither of which
+ * should happen per keystroke.
+ */
+function CustomClis({
+  value,
+  onChange,
+}: {
+  value: CustomAgentCli[];
+  onChange: (next: CustomAgentCli[]) => void;
+}) {
+  const [rows, setRows] = useState<CustomAgentCli[]>(() => value);
+  const [found, setFound] = useState<Record<string, boolean>>({});
+
+  // Keyed on the bins themselves: probing costs a login shell, and every other
+  // field on this row is irrelevant to whether the executable exists.
+  const binsKey = value.map((c) => c.bin.trim()).filter(Boolean).join("\n");
+  useEffect(() => {
+    const bins = binsKey.split("\n").filter(Boolean);
+    if (bins.length === 0) return;
+    void ipc.whichCheck(bins).then(setFound).catch(() => {});
+  }, [binsKey]);
+
+  const edit = (i: number, patch: Partial<CustomAgentCli>) =>
+    setRows((r) => r.map((c, n) => (n === i ? { ...c, ...patch } : c)));
+  const commit = (next: CustomAgentCli[]) => {
+    setRows(next);
+    onChange(next);
+  };
+
+  /** Name it, and — the first time only — give it its id. Renaming afterwards
+   *  leaves the id alone: it is what `defaultAgent` and every recorded task run
+   *  refer to, and rewriting it would silently strand them. */
+  const commitName = (i: number, raw: string) => {
+    const name = raw.trim();
+    const next = rows.map((c, n) =>
+      n === i
+        ? {
+            ...c,
+            name,
+            id: c.id || (name ? newCustomCliId(name, rows.map((o) => o.id)) : ""),
+          }
+        : c,
+    );
+    commit(next);
+  };
+
+  return (
+    <div className="cli-customs">
+      {rows.map((c, i) => {
+        const bin = c.bin.trim();
+        // The registry's own rule, asked rather than re-implemented: a row this
+        // marks is a row that won't be registered, so the two can't disagree.
+        const issue = customCliIssue(c, rows.slice(0, i));
+        const state = issue || !bin ? undefined : found[bin];
+        return (
+          <div key={c.id || `draft-${i}`} className="cli-custom">
+            <div className="cli-custom-head">
+              <input
+                className="cli-bin-input"
+                placeholder="Name"
+                title="What to call it — in the launcher, the ＋ menu and its terminal tab"
+                spellCheck={false}
+                value={c.name}
+                onChange={(e) => edit(i, { name: e.target.value })}
+                onBlur={(e) => commitName(i, e.target.value)}
+              />
+              <input
+                className="cli-bin-input"
+                placeholder="Command or path"
+                title="The executable to run — a command name on your PATH, or a full path"
+                spellCheck={false}
+                autoCapitalize="off"
+                autoCorrect="off"
+                value={c.bin}
+                onChange={(e) => edit(i, { bin: e.target.value })}
+                onBlur={(e) => commit(rows.map((o, n) => (n === i ? { ...o, bin: e.target.value.trim() } : o)))}
+              />
+              <span
+                className={`cli-bin-state ${state === false || issue ? "cli-bin-missing" : ""}`}
+                title={
+                  issue === "arguments"
+                    ? "This field names one executable — a path or a command name, with no arguments"
+                    : issue === "duplicate"
+                      ? `Another entry already launches ${binName(bin)}, so this one isn't registered`
+                      : state === false
+                        ? `Nothing named ${bin} on your PATH`
+                        : bin
+                }
+              >
+                {/* Shorter than the binaries list says it, because here the
+                    column has a Remove button after it to stay clear of; the
+                    full sentence is the tooltip. */}
+                {issue === "arguments"
+                  ? "✗ not a command"
+                  : issue === "duplicate"
+                    ? "✗ in use"
+                    : state === undefined
+                      ? ""
+                      : state
+                        ? "✓ found"
+                        : "✗ not found"}
+              </span>
+              <button
+                className="btn btn-small"
+                title={`Remove ${c.name || "this CLI"} from the launcher`}
+                onClick={() => commit(rows.filter((_, n) => n !== i))}
+              >
+                Remove
+              </button>
+            </div>
+            <div className="cli-custom-args">
+              <input
+                className="cli-bin-input"
+                placeholder="Resume args, e.g. --resume {id}"
+                spellCheck={false}
+                title="How this CLI reopens a session by id. Leave blank if it can't — a flag that doesn't exist starts a fresh session while Canopy says the conversation was restored."
+                value={c.resumeArgs ?? ""}
+                onChange={(e) => edit(i, { resumeArgs: e.target.value })}
+                onBlur={(e) =>
+                  commit(rows.map((o, n) => (n === i ? { ...o, resumeArgs: e.target.value.trim() } : o)))
+                }
+              />
+              <input
+                className="cli-bin-input"
+                placeholder="Prompt args, e.g. {prompt}"
+                spellCheck={false}
+                title="How this CLI takes an opening prompt and stays interactive. Leave blank to have Canopy launch it bare and type the prompt in instead."
+                value={c.promptArgs ?? ""}
+                onChange={(e) => edit(i, { promptArgs: e.target.value })}
+                onBlur={(e) =>
+                  commit(rows.map((o, n) => (n === i ? { ...o, promptArgs: e.target.value.trim() } : o)))
+                }
+              />
+            </div>
+          </div>
+        );
+      })}
+      {/* The placeholders name the two tokens, but a placeholder is gone the
+          moment you type — so the list says it once, where a row being edited
+          can still be seen. */}
+      {rows.length > 0 && (
+        <div className="cli-custom-hint">
+          <code>{"{id}"}</code> the session id · <code>{"{prompt}"}</code> your text · omit
+          either and it's appended
+        </div>
+      )}
+      <button
+        className="btn btn-small"
+        onClick={() => commit([...rows, { id: "", name: "", bin: "" }])}
+      >
+        ＋ Add a CLI
+      </button>
     </div>
   );
 }
@@ -400,7 +569,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 </Item>
                 <Item
                   name="CLI commands"
-                  desc="What each CLI is called on this machine. Leave blank unless yours was installed under another name or outside your PATH — an enterprise build of Claude Code shipped as `acme-claude`, say. Accepts a command or a full path; a name Canopy can't find is what makes a launcher row keep offering to install."
+                  desc="What each CLI is called here. Leave blank unless yours was renamed or lives off your PATH."
                 >
                   <AgentBinaries
                     value={s.cliBins}
@@ -408,6 +577,18 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                       patch({ cliBins });
                       // Re-resolve before anything re-renders: the launcher, the
                       // probes and the resume commands all read the registry.
+                      refreshAgentClis();
+                    }}
+                  />
+                </Item>
+                <Item
+                  name="Other CLIs"
+                  desc="Agents Canopy ships no entry for. Each one joins the launcher; no installer, and hooks stay yours to wire."
+                >
+                  <CustomClis
+                    value={s.customClis}
+                    onChange={(customClis) => {
+                      patch({ customClis });
                       refreshAgentClis();
                     }}
                   />
@@ -617,7 +798,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
               <>
                 <Item
                   name="Crash reporting"
-                  desc="Off by default. When on, a crashed panel — or a native crash found on the next launch — offers to send an anonymous report: the error and stack, app version and your OS. Nothing else, and never without a click."
+                  desc="A crashed panel always offers to file a GitHub issue — public, under your own account, and shown to you in full before anything is sent. This setting governs the other route: an anonymous email to the maintainers with no name attached, which is also what a native crash found on the next launch uses. Either way the report is the error and stack, app version and your OS, and nothing else."
                 >
                   <label className="set-inline-check">
                     <input
