@@ -160,12 +160,7 @@ export function PreviewView({
   // pushed from here — a pane drag moves this div without re-rendering it.
   useEffect(() => {
     if (!native) return;
-    registerBrowserView(tabId, () => {
-      const el = hostRef.current;
-      if (!el) return null;
-      const r = el.getBoundingClientRect();
-      return { x: r.x, y: r.y, width: r.width, height: r.height };
-    });
+    registerBrowserView(tabId, () => hostRef.current);
     return () => {
       forgetBrowserView(tabId);
       void ipc.browserClose(tabId);
