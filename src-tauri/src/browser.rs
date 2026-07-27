@@ -109,13 +109,20 @@ impl BrowserManager {
     }
 }
 
-fn webview(app: &tauri::AppHandle, tab_id: &str) -> Result<tauri::webview::Webview, String> {
+/// The child webview behind a browser tab. Every caller resolves through here —
+/// navigation, eval, snapshots — so that a failure can name the tab and the
+/// label it looked for. An agent handed a bare refusal cannot tell "that tab was
+/// closed" from "snapshots are broken", and will report the wrong one.
+pub(crate) fn webview<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    tab_id: &str,
+) -> Result<tauri::webview::Webview<R>, String> {
     let mgr = app.state::<BrowserManager>();
     let label = mgr
         .label(tab_id)
-        .ok_or_else(|| format!("no browser view for tab {tab_id}"))?;
+        .ok_or_else(|| format!("no browser view is open for tab {tab_id}"))?;
     app.get_webview(&label)
-        .ok_or_else(|| "the browser view is gone".to_string())
+        .ok_or_else(|| format!("the browser view for tab {tab_id} (webview {label}) is gone"))
 }
 
 /// Evaluate `code` in a browser view and hand back whatever it returned, JSON
@@ -543,5 +550,47 @@ mod tests {
         assert!(!previewable("javascript:alert(1)"));
         assert!(!previewable("data:text/html,<b>x"));
         assert!(!previewable("example.com"));
+    }
+
+    /// A tab's snapshot goes to the tab's own child webview, found by the label
+    /// the manager recorded — not to the window it happens to be sitting in.
+    #[test]
+    fn a_tab_resolves_to_its_own_child_webview() {
+        use tauri::{LogicalPosition, LogicalSize, WebviewUrl};
+
+        let app = tauri::test::mock_app();
+        app.handle().manage(BrowserManager::default());
+        tauri::WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
+            .build()
+            .unwrap();
+        let label = label_for("tab-1");
+        app.get_window("main")
+            .unwrap()
+            .add_child(
+                tauri::webview::WebviewBuilder::new(&label, WebviewUrl::default()),
+                LogicalPosition::new(0.0, 0.0),
+                LogicalSize::new(100.0, 100.0),
+            )
+            .unwrap();
+        app.state::<BrowserManager>().views.lock().unwrap().insert(
+            "tab-1".into(),
+            ViewState {
+                label: label.clone(),
+                visible: true,
+            },
+        );
+
+        assert_eq!(webview(app.handle(), "tab-1").unwrap().label(), label);
+    }
+
+    /// A refusal has to name the tab it failed on. An agent handed a bare
+    /// "snapshot refused" reports the wrong bug — which is how the window's own
+    /// resolution stayed broken for four merged PRs.
+    #[test]
+    fn a_missing_tab_says_which_tab() {
+        let app = tauri::test::mock_app();
+        app.handle().manage(BrowserManager::default());
+        let err = webview(app.handle(), "tab-gone").unwrap_err();
+        assert!(err.contains("tab-gone"), "{err}");
     }
 }

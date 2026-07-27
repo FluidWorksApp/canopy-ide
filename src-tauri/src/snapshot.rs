@@ -15,8 +15,26 @@
 //! iframe's rect in CSS pixels and the capture is cropped to it. Under the
 //! webview engine the page IS its own view, so there is nothing to crop to and
 //! nothing else in the frame — the whole child webview is the picture.
+//!
+//! Both resolve to a `Webview`, never a `WebviewWindow`. Tauri only calls a
+//! window a `WebviewWindow` while it hosts exactly one webview, so the app's own
+//! window stopped answering to that the moment a preview tab added a child —
+//! taking every capture of the app's UI with it, at exactly the moment an agent
+//! most wants to look at the screen. A snapshot only ever needed the webview.
 
 use tauri::Manager;
+
+/// The label Tauri gives the app's own window, and so its webview: the window in
+/// `tauri.conf.json` names none, and `main` is the default.
+const APP_WEBVIEW: &str = "main";
+
+/// The webview the app's UI runs in, child webviews or no child webviews.
+fn app_webview<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<tauri::webview::Webview<R>, String> {
+    app.get_webview(APP_WEBVIEW)
+        .ok_or_else(|| format!("cannot capture the app window: no webview {APP_WEBVIEW} is open"))
+}
 
 /// How a capture is encoded. An agent's screenshot is evidence and must be
 /// exact; the freeze-frame is a still shown under an overlay for a second, and
@@ -33,7 +51,7 @@ pub enum Encoding {
 /// model needs.
 #[tauri::command]
 pub async fn webview_snapshot(
-    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
     x: f64,
     y: f64,
     width: f64,
@@ -41,7 +59,7 @@ pub async fn webview_snapshot(
     max_width: Option<f64>,
 ) -> Result<String, String> {
     capture(
-        window.as_ref().clone(),
+        app_webview(&app)?,
         x,
         y,
         width,
@@ -61,10 +79,7 @@ pub async fn browser_snapshot(
     tab_id: String,
     max_width: Option<f64>,
 ) -> Result<String, String> {
-    let label = crate::browser::label_for(&tab_id);
-    let view = app
-        .get_webview(&label)
-        .ok_or_else(|| "that browser tab has no page open right now".to_string())?;
+    let view = crate::browser::webview(&app, &tab_id)?;
     let size = view
         .size()
         .map_err(|e| format!("cannot measure the browser view: {e}"))?;
@@ -98,10 +113,7 @@ pub async fn browser_frame(
     tab_id: String,
     max_width: Option<f64>,
 ) -> Result<String, String> {
-    let label = crate::browser::label_for(&tab_id);
-    let view = app
-        .get_webview(&label)
-        .ok_or_else(|| "no browser view".to_string())?;
+    let view = crate::browser::webview(&app, &tab_id)?;
     let size = view.size().map_err(|e| e.to_string())?;
     let scale = view.window().scale_factor().map_err(|e| e.to_string())?;
     capture(
@@ -231,4 +243,54 @@ async fn capture(
          canopy_browser_snapshot for the page's structure and text."
             .into(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tauri::{LogicalPosition, LogicalSize, WebviewUrl};
+
+    /// The app as it runs: one window, the UI's webview inside it.
+    fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
+        let app = tauri::test::mock_app();
+        tauri::WebviewWindowBuilder::new(&app, APP_WEBVIEW, WebviewUrl::default())
+            .build()
+            .unwrap();
+        app
+    }
+
+    /// And a preview tab open in it.
+    fn open_preview(app: &tauri::App<tauri::test::MockRuntime>, tab_id: &str) {
+        let window = app.get_window(APP_WEBVIEW).unwrap();
+        window
+            .add_child(
+                tauri::webview::WebviewBuilder::new(
+                    crate::browser::label_for(tab_id),
+                    WebviewUrl::default(),
+                ),
+                LogicalPosition::new(0.0, 0.0),
+                LogicalSize::new(100.0, 100.0),
+            )
+            .unwrap();
+    }
+
+    /// The regression this module's resolution exists to survive: a window that
+    /// hosts a child webview stops being a `WebviewWindow`, which is how the app
+    /// webview used to be resolved. `canopy_screenshot` died whenever a preview
+    /// tab was open — the one time an agent has most to look at.
+    #[test]
+    fn a_preview_tab_stops_the_window_resolving_as_a_webview_window() {
+        let app = mock_app();
+        assert!(app.get_webview_window(APP_WEBVIEW).is_some());
+        open_preview(&app, "tab-1");
+        assert!(app.get_webview_window(APP_WEBVIEW).is_none());
+    }
+
+    #[test]
+    fn the_app_webview_resolves_with_a_preview_tab_open() {
+        let app = mock_app();
+        open_preview(&app, "tab-1");
+        let view = app_webview(app.handle()).expect("app webview should resolve");
+        assert_eq!(view.label(), APP_WEBVIEW);
+    }
 }
