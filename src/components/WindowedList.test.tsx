@@ -44,4 +44,19 @@ describe("WindowedList", () => {
     expect(queryByTestId("row-100")).toBeTruthy();
     expect(queryByTestId("row-0")).toBeNull();
   });
+
+  it("never grows past its own height when scrolled far beyond it", () => {
+    // Scrolled a full panel-length past the end of this list. Unclamped, the
+    // top spacer kept growing with the scroll — the list inflated underneath
+    // the user exactly as fast as they scrolled, so the content below never
+    // arrived and the scroll read as stuck on blank space.
+    const { container, rerender } = render(<List />);
+    placeAt(container, -(items.length * ROW + 5000));
+    rerender(<List />);
+    const el = container.firstElementChild as HTMLElement;
+    const pad =
+      parseInt(el.style.paddingTop, 10) + parseInt(el.style.paddingBottom, 10);
+    expect(el.children.length).toBe(0);
+    expect(pad).toBe(items.length * ROW);
+  });
 });

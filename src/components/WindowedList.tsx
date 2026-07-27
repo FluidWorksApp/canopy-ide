@@ -49,7 +49,11 @@ export function WindowedList<T>({
     // spacers are padding, inside the box.
     const top = el.getBoundingClientRect().top;
     const pad = OVERSCAN * rh;
-    const start = Math.max(0, Math.floor((-top - pad) / rh));
+    // Clamped to the row count on BOTH ends. Unclamped, a list scrolled well
+    // past renders paddingTop beyond its own height — growing the scroll
+    // content underneath the user exactly as fast as they scroll toward what's
+    // below it, which reads as the scroll being stuck on endless blank space.
+    const start = Math.min(count, Math.max(0, Math.floor((-top - pad) / rh)));
     const end = Math.max(
       start,
       Math.min(count, Math.ceil((window.innerHeight + pad - top) / rh)),
