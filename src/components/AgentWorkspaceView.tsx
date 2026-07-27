@@ -14,7 +14,6 @@ import { splitPatch } from "./PrView";
 import { STATE_META, lastHumanPrompt } from "./AgentsPanel";
 import { AgentIcon, GitBranchIcon, RestartIcon } from "./icons";
 import { sessionCost } from "../pricing";
-import { getSettings } from "../settings";
 import {
   addressPrCommentsTask,
   raisePrTask,
@@ -70,6 +69,8 @@ interface AgentWorkspaceViewProps {
   onReviewPrTask?: (pr: ipc.PrInfo) => void;
   onAddressPrCommentsTask?: (pr: ipc.PrInfo) => void;
   onRunSavedTask?: (task: CustomMicroTask, dir: string) => void;
+  /** The project's own custom tasks, for the Run task menu. */
+  savedTasks?: CustomMicroTask[];
   /** Run a brief typed right here, once, saving nothing. */
   onRunOneOff?: (brief: string, dir: string) => void;
 }
@@ -354,18 +355,15 @@ export function AgentWorkspaceView({
   onReviewPrTask,
   onAddressPrCommentsTask,
   onRunSavedTask,
+  // The project's list, handed down: saving one in the Tasks panel updates the
+  // project, which re-renders this, so the menu can't go stale.
+  savedTasks = [],
   onRunOneOff,
 }: AgentWorkspaceViewProps) {
   const [taskMenu, setTaskMenu] = useState(false);
   /** The one-off brief being typed in the Run task menu, or null when that row
    *  is still just a row. */
   const [oneOff, setOneOff] = useState<string | null>(null);
-  // Read when the menu opens rather than held in state: tasks are saved in
-  // another panel, and a stale list here would be the first thing you'd notice.
-  const savedTasks = useMemo(
-    () => (taskMenu ? getSettings().customMicroTasks : []),
-    [taskMenu],
-  );
   const [ws, setWs] = useState<ipc.AgentWorkspace | null>(null);
   const [wsErr, setWsErr] = useState<string | null>(null);
   const [pane, setPane] = useState<Pane | null>(null);

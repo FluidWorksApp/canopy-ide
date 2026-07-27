@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { TasksPanel, type RunningMicroTask } from "./TasksPanel";
+import type { CustomMicroTask } from "../microTasks";
 
 // A micro-task runs with no tab now, so this panel is the whole of it: if a row
 // doesn't say what the task is doing, or its buttons act on the wrong run,
@@ -16,6 +17,8 @@ const panel = (over: Partial<React.ComponentProps<typeof TasksPanel>> = {}) => {
     onRunCustom: vi.fn(),
     onRunOneOff: vi.fn(),
     onOpenHistory: vi.fn(),
+    custom: [] as CustomMicroTask[],
+    onSaveCustom: vi.fn(),
     projectId: "p1",
     ...over,
   };
@@ -30,6 +33,32 @@ const detached: RunningMicroTask = {
   icon: "⌕",
   note: "Bash · 2m",
 };
+
+describe("the project's own tasks", () => {
+  const mine: CustomMicroTask = {
+    id: "abc",
+    label: "Prod DB Backup",
+    icon: "◆",
+    placeholder: "",
+    brief: "Back the database up.",
+  };
+
+  it("lists what this project was handed, not an app-wide list", () => {
+    panel({ custom: [mine] });
+    expect(screen.getByText("Prod DB Backup")).toBeTruthy();
+  });
+
+  it("shows none when this project has none, whatever its neighbours saved", () => {
+    panel({ custom: [] });
+    expect(screen.queryByText("Prod DB Backup")).toBeNull();
+  });
+
+  it("hands a delete back to the owner rather than writing settings", () => {
+    const props = panel({ custom: [mine] });
+    fireEvent.click(screen.getByTitle("Delete this task"));
+    expect(props.onSaveCustom).toHaveBeenCalledWith([]);
+  });
+});
 
 describe("the Running list", () => {
   it("shows a detached run with what it is doing, and opens it on click", () => {
@@ -64,6 +93,8 @@ describe("the Running list", () => {
         onRunCustom={vi.fn()}
         onRunOneOff={vi.fn()}
         onOpenHistory={vi.fn()}
+        custom={[]}
+        onSaveCustom={vi.fn()}
         projectId="p1"
       />,
     );
@@ -82,6 +113,8 @@ describe("the Running list", () => {
         onRunCustom={vi.fn()}
         onRunOneOff={vi.fn()}
         onOpenHistory={vi.fn()}
+        custom={[]}
+        onSaveCustom={vi.fn()}
         projectId="p1"
       />,
     );

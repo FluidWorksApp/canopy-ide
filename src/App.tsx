@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "./ipc";
 import {
+  adoptLegacyCustomTasks,
   emptyWorkspace,
   exportProject,
   exportWorkspace,
@@ -389,7 +390,11 @@ export default function App() {
   // A tab that was asleep when the app last quit comes back asleep — and a
   // sleeping project watches nothing, so it registers nothing until it wakes.
   useEffect(() => {
-    void loadWorkspace().then(async (state) => {
+    void loadWorkspace().then(async (loadedState) => {
+      // Custom tasks moved from settings onto the project; anything left in the
+      // old app-wide home is adopted here, once, before anything reads it.
+      const state = adoptLegacyCustomTasks(loadedState);
+      if (state !== loadedState) await saveWorkspace(state);
       for (const id of state.openIds) {
         if (isHibernating(id)) continue;
         const project = state.projects.find((p) => p.id === id);
@@ -1504,6 +1509,9 @@ export default function App() {
               onNotice={notify}
               onShareContext={(on) =>
                 void saveProject({ ...p, shareContext: on })
+              }
+              onSaveCustomTasks={(tasks) =>
+                void saveProject({ ...p, customTasks: tasks })
               }
             />
           ))}

@@ -209,6 +209,9 @@ export interface ProjectViewProps {
   onEdit: () => void;
   onNotice: Notify;
   onShareContext: (on: boolean) => void;
+  /** Persist this project's custom tasks — they live on the project record, so
+   *  writing one is a workspace save. */
+  onSaveCustomTasks: (tasks: import("../../microTasks").CustomMicroTask[]) => void;
   /** App-wide team relay — same handle in every project. */
   relay: RelayHandle;
   /** A hibernated workspace to rebuild, handed over when the user wakes the

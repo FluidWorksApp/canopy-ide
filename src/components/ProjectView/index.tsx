@@ -278,7 +278,7 @@ const SIDE_DEFAULT_W = 300;
 const SIDE_MIN_W = 200;
 const SIDE_MAX_W = 560;
 
-export function ProjectView({ project, visible, zen, events, hookPath, allProjects, dismissedPending, onDismissPending, onEdit, onNotice, onShareContext, relay, restore, onRestoreStep, onRestored }: ProjectViewProps) {
+export function ProjectView({ project, visible, zen, events, hookPath, allProjects, dismissedPending, onDismissPending, onEdit, onNotice, onShareContext, onSaveCustomTasks, relay, restore, onRestoreStep, onRestored }: ProjectViewProps) {
   const [sideTab, setSideTab] = useState<SideTab>("files");
   // Monaco's caret, for the context snapshot. Subscribed rather than passed
   // down: the editor sits several components below, and this is read-only.
@@ -3054,12 +3054,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       taskMenuItem({
         seed,
         runnable,
+        saved: project.customTasks ?? [],
         onNewTask: seedTaskFrom,
         onOneOff: (brief) => openTaskComposer(brief, "once"),
         onRunSaved: (t) => void startMicroTask(customTaskDef(t), { dir: roots[0] ?? "" }, ""),
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [seedTaskFrom, openTaskComposer, startMicroTask, roots[0]],
+    [seedTaskFrom, openTaskComposer, startMicroTask, roots[0], project.customTasks],
   );
 
   const submitRootCreate = async () => {
@@ -3805,6 +3806,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 : undefined
             }
             onRunSavedTask={(task, dir) => void startMicroTask(customTaskDef(task), { dir }, "")}
+            savedTasks={project.customTasks ?? []}
             onRunOneOff={(brief, dir) => runAdhocTask(brief, dir)}
           />
         );
@@ -4469,6 +4471,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                       onRunSavedTask={(task, dir) =>
                         void startMicroTask(customTaskDef(task), { dir }, "")
                       }
+                      savedTasks={project.customTasks ?? []}
                       onRunOneOff={(brief, dir) => runAdhocTask(brief, dir)}
                     />
                   )}
@@ -4851,6 +4854,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           }
           onRunOneOff={(brief: string, dir: string) => runAdhocTask(brief, dir)}
           onOpenHistory={openTaskHistory}
+          custom={project.customTasks ?? []}
+          onSaveCustom={onSaveCustomTasks}
           projectId={project.id}
         />
       ))}

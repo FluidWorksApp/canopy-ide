@@ -3,7 +3,8 @@
 // workspace (projects, which are open, which is active) persists via the Rust
 // core to ~/.canopy/projects.json.
 import { invoke } from "@tauri-apps/api/core";
-import { getSettings } from "./settings";
+import type { CustomMicroTask } from "./microTasks";
+import { getSettings, updateSettings } from "./settings";
 
 export interface RunCommand {
   name: string;
@@ -25,6 +26,12 @@ export interface Project {
    *  default: it puts one session's prompts into another's context, which is
    *  the user's call to make, not ours. */
   shareContext?: boolean;
+  /** Micro-tasks the user wrote themselves (Tasks panel). Per project, not
+   *  per app: a task is written against one codebase's conventions — "Prod DB
+   *  backup", "changelog entry" — and offering it in every other project is
+   *  offering a job that doesn't apply there. Lives on the project so it
+   *  travels with an exported project file. */
+  customTasks?: CustomMicroTask[];
 }
 
 export interface WorkspaceState {
@@ -54,6 +61,29 @@ export async function loadWorkspace(): Promise<WorkspaceState> {
     console.warn("workspace load failed", err);
   }
   return emptyWorkspace;
+}
+
+/** Custom tasks used to be app-wide, kept in settings. They're a project's
+ *  now, so anything left in the old home is handed to the project that was
+ *  active when the app last quit — the one it was almost certainly written in —
+ *  and the old key is emptied so this runs exactly once. Returns the state
+ *  unchanged (same object) when there's nothing to move, which is the case for
+ *  everyone after the first launch. */
+export function adoptLegacyCustomTasks(state: WorkspaceState): WorkspaceState {
+  const legacy = getSettings().customMicroTasks;
+  if (legacy.length === 0) return state;
+  // Whichever project the tasks land in has to be one that still exists; a
+  // stale activeId would otherwise drop them on the floor.
+  const has = (id: string | null) => Boolean(id && state.projects.some((p) => p.id === id));
+  const home = has(state.activeId)
+    ? state.activeId
+    : (state.openIds.find(has) ?? state.projects[0]?.id ?? null);
+  if (!home) return state;
+  const projects = state.projects.map((p) =>
+    p.id === home ? { ...p, customTasks: [...(p.customTasks ?? []), ...legacy] } : p,
+  );
+  updateSettings({ customMicroTasks: [] });
+  return { ...state, projects };
 }
 
 export async function saveWorkspace(state: WorkspaceState): Promise<void> {

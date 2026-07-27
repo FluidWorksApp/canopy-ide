@@ -1058,7 +1058,10 @@ mod tests {
             .map(|b| String::from_utf8_lossy(&b).into_owned())
             .unwrap_or_default();
         let _ = pm.kill(res.id);
-        assert!(seen, "detached PTY never ran its command with the given env");
+        assert!(
+            seen,
+            "detached PTY never ran its command with the given env"
+        );
         assert!(tail.contains("DETACHED_1"), "tail was: {tail}");
     }
 
