@@ -269,121 +269,154 @@ export const addressPrCommentsTask: MicroTaskDef<AddressPrCommentsPayload> = {
 // the brief keeps it out of git via .git/info/exclude rather than touching the
 // repo's own .gitignore.
 
+const ARTIFACT_EXT = { map: "md", findings: "json", progress: "txt" } as const;
+
 /** Where a PR task leaves something for the tab to render. */
+export type PrArtifact = keyof typeof ARTIFACT_EXT;
+
 export const prArtifactPath = (
   repo: string,
   number: number,
-  kind: "map" | "findings" = "map",
-): string =>
-  `${repo}/.canopy/pr-${number}-${kind}.${kind === "findings" ? "json" : "md"}`;
+  kind: PrArtifact = "map",
+): string => `${repo}/.canopy/pr-${number}-${kind}.${ARTIFACT_EXT[kind]}`;
+
+/** The Review task's milestones, in order.
+ *
+ *  A one-shot agent is a black box for however long it runs, and "an agent is on
+ *  it" is not progress — it says nothing at minute four that it didn't say at
+ *  second one. So the task reports: it appends a step's `id` to the progress
+ *  file as it finishes it, and the tab lights the milestone up. `owner: "app"`
+ *  marks the step the tab completes itself, after the agent's terminal is gone.
+ *
+ *  Two labels each, because a step reads differently depending on where it is:
+ *  the middle one is happening now, the ones behind it already happened. */
+export interface TaskStep {
+  id: string;
+  /** While it's the one in flight. */
+  doing: string;
+  /** Once it's behind you — a rail still reading "Reading the change" three
+   *  steps later reads as stuck. */
+  done: string;
+  /** "app" = the tab finishes this one, so the agent is never asked to. */
+  owner?: "app";
+}
+
+export const PR_REVIEW_STEPS: readonly TaskStep[] = [
+  { id: "read", doing: "Reading the change", done: "Read the change" },
+  { id: "map", doing: "Mapping the risk", done: "Mapped the risk" },
+  { id: "findings", doing: "Finding problems", done: "Found the problems" },
+  { id: "staged", doing: "Staging drafts", done: "Staged as drafts", owner: "app" },
+];
+
+/** Which milestones are finished, given what the agent has reported.
+ *
+ *  A high-water mark, not a set: these are stages of one pass, so reaching the
+ *  third means the first two happened whether or not the agent remembered to
+ *  say so. Reading it as a set produced rails with a later step ticked and
+ *  earlier ones blank — which describes nothing that can actually occur, and
+ *  read as a bug in the task rather than a missed line in a file.
+ *
+ *  Order comes from `steps`, so a line written twice, out of sequence, or
+ *  misspelled can't skew it; unknown lines are ignored rather than guessed at. */
+export function stepsDone(progress: string, steps: readonly TaskStep[]): string[] {
+  const seen = new Set(
+    progress
+      .split("\n")
+      .map((l) => l.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  let furthest = -1;
+  steps.forEach((s, i) => {
+    if (seen.has(s.id)) furthest = i;
+  });
+  return steps.slice(0, furthest + 1).map((s) => s.id);
+}
+
+/** The lines that make an agent report its milestones. Written as shell appends
+ *  rather than a tool call so every CLI can do it, with or without the MCP
+ *  bridge — and truncating first is what stops a re-run showing the previous
+ *  run's progress as already complete. */
+const progressProtocol = (path: string, steps: readonly TaskStep[]): string => {
+  const agentSteps = steps.filter((s) => s.owner !== "app");
+  return (
+    `Report your progress as you go — the user is watching a progress rail on the PR tab and it moves ` +
+    `only when you say so. Before anything else, start it empty: \`mkdir -p\` the directory and run ` +
+    `\`: > ${path}\`. Then, the moment you finish each of these, append its name on its own line ` +
+    `(\`printf '<name>\\n' >> ${path}\`), in this order: ` +
+    agentSteps.map((s) => `\`${s.id}\` once you have ${s.done.toLowerCase()}`).join(", ") +
+    `. Append one line each and never rewrite the file. Do this even for a step that turned up ` +
+    `nothing — a milestone that is skipped silently reads as a task that hung. `
+  );
+};
 
 /** One line the briefs share: make the directory, keep it out of git. */
 const artifactPreamble = (path: string): string =>
   `Write your output to \`${path}\` (\`mkdir -p\` its directory first, and make sure \`.canopy/\` is ` +
   `in \`.git/info/exclude\` — append it if missing — so this never shows up as a repo change). `;
 
-/** Read the change and rank it: what it does, which files carry the risk, and
- *  the handful of things a reviewer should actually look at. Posts nothing —
- *  this is the "brief me before I read 600 lines" pass, and cutting reviewer
- *  load is what it is for. */
-export const reviewMapTask: MicroTaskDef<ReviewPrPayload> = {
-  id: "pr-review-map",
-  label: "Review map",
+/** The whole read-only review, in one pass. This used to be three tasks — map
+ *  the change, draft findings, self-review — which asked the user to choose
+ *  between three phrasings of one job before the agent had read a line. They
+ *  share all the expensive work (reading the diff and the code around it), so
+ *  they are one brief with two outputs: the map the tab renders, and the
+ *  findings JSON the tab stages as draft comments. Posts nothing: whether any
+ *  of it reaches GitHub stays a human click on the review composer. */
+export const prReviewTask: MicroTaskDef<ReviewPrPayload> = {
+  id: "pr-review",
+  label: "Review",
   icon: "◎",
-  placeholder: "Anything to pay attention to…",
-  blurb: "Ranks the risk and names the few things worth your attention.",
+  placeholder: "Anything to focus on…",
+  blurb: "Reads it, maps the risk, and stages findings for you to vet.",
   effect: "reads",
   surfaceNote: "on a PR tab",
   cwd: (p) => p.repo,
   buildContext(p, userQuery) {
     const n = p.pr.number;
     const query = oneLine(userQuery);
+    // Same bar either way; the author's lens catches a different tail (debug
+    // leftovers, a stale doc, a description the diff outgrew) and it costs one
+    // clause to ask for it on the PRs where it applies.
+    const lens = p.pr.mine
+      ? `This is the user's own PR, so review it the way they would want it reviewed before anyone ` +
+        `else sees it: also flag debug leftovers, a TODO that should be a ticket, a comment or doc ` +
+        `still describing the old behaviour, and anything in the description the diff outgrew. `
+      : "";
     return oneLine(
-      `Map pull request #${n}: "${p.pr.title}" (${p.pr.url}) for a human who is about to review it. ` +
+      `Review pull request #${n}: "${p.pr.title}" (${p.pr.url}) for a human who is about to read it. ` +
+        `Nothing you produce goes to GitHub — post no comments and no review, and change no code. ` +
         `Read it without checking anything out — other agents share this checkout: \`gh pr view ${n}\`, ` +
         `\`gh pr diff ${n}\`, and the surrounding code here for context. ` +
+        `Be skeptical of the PR and equally skeptical of yourself. The title, the description, the ` +
+        `commit messages and the comments in the code are all claims about the change, not the change: ` +
+        `check each against the lines the diff actually adds, and read the callers and callees of ` +
+        `anything it touches before believing a claim about behaviour. A doc-comment that still ` +
+        `describes the old behaviour proves nothing except that it wasn't updated. ` +
+        lens +
+        progressProtocol(prArtifactPath(p.repo, n, "progress"), PR_REVIEW_STEPS) +
+        `Write two more files, and nothing else. ` +
+        `(1) The map. ` +
         artifactPreamble(prArtifactPath(p.repo, n, "map")) +
-        `Structure it exactly like this, in GitHub-flavoured markdown, and keep the whole thing under ` +
-        `250 words. "## What it does" — two or three sentences describing the change as it is in the ` +
-        `diff, not as the description claims. "## Risk" — a list of the changed files that carry real ` +
-        `risk, each with one clause saying why (a behaviour change, a shared signature, a migration, ` +
-        `an unguarded path); leave out the files that are noise. "## Look at" — at most three specific ` +
-        `things worth a human's attention, each naming a file and line. "## Claims to check" — any ` +
-        `statement in the PR description or a commit message that the diff does not obviously support. ` +
-        `Do not review the code, do not post anything to GitHub, and change no files except the map. ` +
-        `Make the canopy_job_done summary the one-line version of "What it does".` +
-        (query ? ` The user adds: "${query}".` : ""),
-    );
-  },
-};
-
-/** The reviewer's pass, but nothing is posted: findings land as JSON the tab
- *  turns into draft inline comments the human keeps, edits or drops. This is the
- *  shape that stops an agent's guesses becoming public review noise. */
-export const draftFindingsTask: MicroTaskDef<ReviewPrPayload> = {
-  id: "pr-draft-findings",
-  label: "Draft findings",
-  icon: "✎",
-  placeholder: "Anything to focus on…",
-  blurb: "Finds problems and stages them as draft comments for you to vet.",
-  effect: "reads",
-  surfaceNote: "on a PR tab",
-  cwd: (p) => p.repo,
-  buildContext(p, userQuery) {
-    const n = p.pr.number;
-    const query = oneLine(userQuery);
-    return oneLine(
-      `Find what is wrong with pull request #${n}: "${p.pr.title}" (${p.pr.url}), as inline review ` +
-        `comments a human will vet before any of it is posted. Read it via \`gh pr view ${n}\` and ` +
-        `\`gh pr diff ${n}\` plus the surrounding code — do not check anything out, other agents share ` +
-        `this checkout, and post nothing to GitHub. ` +
+        `Structure it exactly like this, in GitHub-flavoured markdown, under 250 words. ` +
+        `"## What it does" — two or three sentences describing the change as it is in the diff, not as ` +
+        `the description claims. "## Risk" — the changed files that carry real risk, each with one ` +
+        `clause saying why (a behaviour change, a shared signature, a migration, an unguarded path); ` +
+        `leave out the files that are noise. "## Look at" — at most three specific things worth a ` +
+        `human's attention, each naming a file and line. "## Claims to check" — any statement in the ` +
+        `description or a commit message the diff does not obviously support. ` +
+        `(2) The findings, as inline review comments the human will vet before any of it is posted. ` +
         artifactPreamble(prArtifactPath(p.repo, n, "findings")) +
-        `The file must be exactly this JSON and nothing else: ` +
+        `That file must be exactly this JSON and nothing else: ` +
         `{"findings":[{"path":"src/x.ts","line":42,"side":"RIGHT","severity":"blocking","body":"…"}]} ` +
         `— \`line\` is a line number in the NEW file for side "RIGHT" (use "LEFT" and the old line only ` +
-        `when the problem is a deletion), and \`severity\` is "blocking" or "nit". ` +
-        `Be skeptical of the PR and equally skeptical of yourself: the title, the description, the ` +
-        `commit messages and the code comments are claims about the change, not the change. Check each ` +
-        `against the lines the diff adds, and read the callers and callees of anything it touches. ` +
-        `A finding is "blocking" only if it is a correctness bug, data loss, a security hole, a broken ` +
-        `API contract or migration, a regression the tests would not catch, or logic that plainly needs ` +
-        `a test and has none — and every one must name the concrete failure: the input or state, and ` +
-        `what goes wrong. If you cannot state that, it is not a finding: leave it out. Everything else ` +
-        `is "nit" and its body must start with "Nit: ". Aim for few and certain rather than many: five ` +
-        `findings is a lot, and an empty array is a perfectly good answer. ` +
-        `Make the canopy_job_done summary "<b> blocking, <n> nits".` +
-        (query ? ` The user adds: "${query}".` : ""),
-    );
-  },
-};
-
-/** The author's private pass before humans look. Same lens as the review, no
- *  audience: findings go in the same JSON the tab reads, and the point is to fix
- *  them before a reviewer ever spends a round on them. */
-export const selfReviewPrTask: MicroTaskDef<ReviewPrPayload> = {
-  id: "pr-self-review",
-  label: "Self-review",
-  icon: "◍",
-  placeholder: "Anything you're unsure about…",
-  blurb: "Reviews your own PR privately, before anyone else sees it.",
-  effect: "reads",
-  surfaceNote: "on a PR tab",
-  cwd: (p) => p.repo,
-  buildContext(p, userQuery) {
-    const n = p.pr.number;
-    const query = oneLine(userQuery);
-    return oneLine(
-      `Review pull request #${n}: "${p.pr.title}" (${p.pr.url}) as its author would want it reviewed ` +
-        `before anyone else sees it. Nothing you find goes to GitHub — post no comments, no review, and ` +
-        `change no code. Read it via \`gh pr diff ${n}\` and the surrounding code; do not check anything ` +
-        `out. ` +
-        artifactPreamble(prArtifactPath(p.repo, n, "findings")) +
-        `Use exactly this JSON: {"findings":[{"path":"…","line":42,"side":"RIGHT","severity":"blocking",` +
-        `"body":"…"}]}. Hold the same bar a good reviewer would: correctness, edge cases, a test that ` +
-        `should exist, a stale comment or doc left describing the old behaviour, a debug leftover, a ` +
-        `TODO that should be a ticket, a claim in the PR description the diff doesn't support. Name the ` +
-        `concrete failure in every blocking finding; anything cosmetic is "nit". ` +
-        `Make the canopy_job_done summary "<b> to fix before review, <n> nits".` +
+        `when the problem is a deletion), and \`severity\` is "blocking" or "nit". A finding is ` +
+        `"blocking" only if it is a correctness bug, data loss, a security hole, a broken API contract ` +
+        `or migration, a regression the tests would not catch, or logic that plainly needs a test and ` +
+        `has none — and every one must name the concrete failure: the input or state, and what goes ` +
+        `wrong. If you cannot state that, it is not a finding: leave it out. Everything else is "nit" ` +
+        `and its body must start with "Nit: ". Aim for few and certain rather than many: five findings ` +
+        `is a lot, and an empty array is a perfectly good answer. ` +
+        `Make the canopy_job_done summary the one-line version of "What it does", then ` +
+        `"<b> blocking, <n> nits".` +
         (query ? ` The user adds: "${query}".` : ""),
     );
   },
@@ -540,9 +573,7 @@ export const MICRO_TASKS: MicroTaskDef<never>[] = [
   raisePrTask as MicroTaskDef<never>,
   reviewPrTask as MicroTaskDef<never>,
   addressPrCommentsTask as MicroTaskDef<never>,
-  reviewMapTask as MicroTaskDef<never>,
-  draftFindingsTask as MicroTaskDef<never>,
-  selfReviewPrTask as MicroTaskDef<never>,
+  prReviewTask as MicroTaskDef<never>,
   fixCiTask as MicroTaskDef<never>,
   runItReviewTask as MicroTaskDef<never>,
   followUpsTask as MicroTaskDef<never>,

@@ -5982,8 +5982,57 @@ body.dragging-tab * {
 /* These sit on the title's baseline, not below it — the 6px lift .btn-mini
    carries for the panel rows it was written for is what staggered them. */
 .pr-actions .btn-mini,
+.pr-next .btn-mini,
 .pr-files-bar .btn-mini {
   margin-top: 0;
+}
+
+/* Agent and Merge are the two things this page is for, and at .btn-mini's 11px
+   on a hairline border they read as annotations next to a 15px title — the same
+   weight as the ⋯ beside them, so nothing in the row claimed to matter. They get
+   a real button's presence; ⋯ gives its up in exchange, because an overflow menu
+   is not a peer of the two actions it's overflowing from. */
+.pr-actions .btn-mini {
+  padding: 4px 11px;
+  font-size: 12px;
+  border-color: var(--border-strong);
+  background: var(--bg-raised);
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+.pr-actions .btn-mini:hover {
+  background: var(--bg-overlay);
+  border-color: var(--accent);
+}
+.pr-actions .btn-accent:hover {
+  background: color-mix(in srgb, var(--accent) 88%, white);
+  border-color: transparent;
+}
+.pr-actions .pr-more {
+  padding: 4px 8px;
+  border-color: transparent;
+  background: none;
+  color: var(--text-dim);
+}
+.pr-actions .pr-more:hover {
+  background: var(--bg-raised);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+/* An agent working on this PR right now, on the button that launched it. */
+.pr-agent-live {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-left: 1px;
+  border-radius: 50%;
+  background: var(--ok);
+  animation: pr-run-pulse 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pr-agent-live { animation: none; }
 }
 
 /* Metadata and state, never actions: one dim line that may wrap freely. What
@@ -6054,9 +6103,67 @@ body.dragging-tab * {
 .pr-description.markdown-body > :first-child { margin-top: 0; }
 .pr-description.markdown-body > :last-child { margin-bottom: 0; }
 
+/* .markdown-body carries a 820px reading measure, which is right for prose and
+   wrong for a card: here the two are the same element, so the cap stopped the
+   card itself and left a dead band between it and the rail. The card takes the
+   column; the measure moves onto the paragraphs, where it was always aimed.
+   Headings, code and tables keep the full width — a wrapped line of code is
+   worse than a long one. */
+.pr-description.markdown-body,
+.pr-map .markdown-body {
+  max-width: none;
+}
+.pr-description.markdown-body > p,
+.pr-description.markdown-body > ul,
+.pr-description.markdown-body > ol,
+.pr-map .markdown-body > p,
+.pr-map .markdown-body > ul,
+.pr-map .markdown-body > ol {
+  max-width: 82ch;
+}
+
 /* The next move: one derived sentence and the button that does it. Sits under
    the identity row so the first thing read is what needs to happen, not the
    diff. Urgent (blocking) wears the accent border; everything else is quiet. */
+/* One row, one control height. Everything in the title row is a different
+   construction — a bordered group, a button, a menu anchor wrapping a button —
+   so left to their own content heights they line up by accident, which is to
+   say they don't. This is the height they all take. */
+.pr-titlebar {
+  --pr-ctl-h: 28px;
+}
+.pr-titlebar .pr-next,
+.pr-titlebar .pr-actions .btn-mini,
+.pr-titlebar .cli-menu-anchor {
+  min-height: var(--pr-ctl-h);
+}
+/* The Merge anchor is a positioning wrapper, not a layout box: as a block in a
+   flex row it sized to its content and let the button inside sit wherever. */
+.pr-titlebar .cli-menu-anchor {
+  display: flex;
+  align-items: center;
+}
+.pr-titlebar .cli-menu-anchor > .btn-mini {
+  min-height: var(--pr-ctl-h);
+}
+
+/* On the title's line, immediately left of Merge. It keeps its own margin for
+   any other place it's used, and gives it up here. The title is the only thing
+   in this row that shrinks, which is already how .pr-titlebar is meant to work:
+   half a title still tells you which PR you're on. */
+.pr-titlebar .pr-next {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-top: 0;
+  margin-left: auto;
+  padding: 3px 4px 3px 10px;
+}
+.pr-titlebar .pr-next .pr-next-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .pr-next {
   display: flex;
   align-items: center;
@@ -6178,15 +6285,101 @@ body.dragging-tab * {
 .pr-reply { margin-top: 4px; }
 
 /* A draft comment has not been posted and must never look like one that has. */
+/* Inline in the diff, on the line it's about. A dashed box on all four sides
+   read as an error state and, stacked, as noise; the job is only to say "this
+   one is yours and unsent", which one accent edge does quietly. */
 .pr-draft {
-  border: 1px dashed var(--accent);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
   border-radius: var(--r-xs);
   corner-shape: squircle;
   padding: 6px 8px;
   margin: 6px 0;
-  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
 }
-.pr-drafts { max-height: 220px; overflow-y: auto; margin-bottom: 6px; }
+.pr-drafts { margin-bottom: 6px; }
+
+/* The manifest in the composer: one line per finding, because the readable
+   copy is the one anchored to the code. Capped so a review with twenty of them
+   can't push the Approve button off the bottom of the tab. */
+.pr-draft-list {
+  max-height: 132px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.pr-draft-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-top: 1px solid var(--border);
+}
+.pr-draft-row:first-child { border-top: none; }
+/* Nothing in the diff to attach it to. It still posts, so it stays in the list
+   — it just can't promise you a line to look at. */
+.pr-draft-row.is-unplaced .pr-draft-where { color: var(--text-faint); }
+.pr-draft-row.is-unplaced .pr-draft-jump { cursor: default; }
+
+/* Where the manifest just sent you. */
+.pr-draft.is-flash {
+  border-left-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  transition: background var(--dur-med) var(--ease-out);
+}
+@media (prefers-reduced-motion: reduce) {
+  .pr-draft.is-flash { transition: none; }
+}
+.pr-draft-row .btn-mini { flex: 0 0 auto; opacity: 0; }
+.pr-draft-row:hover .btn-mini,
+.pr-draft-row .btn-mini:focus-visible { opacity: 1; }
+
+.pr-draft-jump {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 5px 2px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+/* Fixed width so the paths line up in a column — "blocking" is the long one,
+   and letting it size to content staggered every row it appeared on. */
+.pr-draft-sev {
+  flex: 0 0 auto;
+  width: 58px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+}
+.pr-draft-sev.is-blocking { color: var(--danger); }
+.pr-draft-where {
+  flex: 0 0 auto;
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.pr-draft-gist {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.pr-draft-jump:hover .pr-draft-where { color: var(--text); }
+.pr-draft-jump:hover .pr-draft-gist { color: var(--text-dim); }
 .pr-blocking-check {
   display: flex;
   align-items: center;
@@ -6228,6 +6421,308 @@ body.dragging-tab * {
 
 .pr-map .markdown-body { font-size: 12px; }
 .pr-map-cta { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+
+/* The review's other half, announced on the card that says a review ran. It is
+   the one thing on that card waiting on a decision, so it carries a tint and an
+   accent edge rather than sitting at the weight of body text — and escalates to
+   danger when something blocking is staged, because "2 blocking" and "3 nits"
+   are not the same news. */
+.pr-map-findings {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
+  border-left: 2px solid var(--warn);
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  color: var(--text-dim);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+.pr-map-findings:hover {
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  color: var(--text);
+}
+.pr-map-findings.is-blocking {
+  border-color: color-mix(in srgb, var(--danger) 30%, transparent);
+  border-left-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+.pr-map-findings.is-blocking:hover {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+.pr-map-findings.is-blocking .pr-run-dot.is-static { background: var(--danger); }
+.pr-map-findings strong { color: var(--text); font-weight: 600; }
+.pr-map-findings-go {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: 13px;
+  line-height: 1;
+}
+.pr-map-findings:hover .pr-map-findings-go { color: var(--text-dim); }
+.pr-run-dot.is-static { animation: none; background: var(--warn); }
+
+/* Staged, not posted — the only mark on a file row waiting on your decision. */
+.pr-thread-tag.is-draft {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 35%, transparent);
+}
+
+/* ---------- the floating agent action ---------- */
+
+/* Zero-height and sticky to the bottom of the diff scroller: it adds no layout,
+   can't lengthen the scroll, and stays put however far down the diff you are. */
+.pr-fab-dock {
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  justify-content: flex-end;
+  /* Not the default `stretch`: the dock is deliberately zero-height, and a
+     stretched flex item takes its container's cross size — which collapsed the
+     button to nothing, and left translateY(-100%) resolving against 0 so it
+     didn't lift either. The item has to keep its own content height. */
+  align-items: flex-start;
+  height: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+.pr-fab {
+  display: flex;
+  align-items: stretch;
+  pointer-events: auto;
+  /* A rounded rectangle, not a pill: it's a labelled two-part control, and the
+     full-round capsule read as a chip rather than a button. */
+  border-radius: var(--r-md);
+  corner-shape: squircle;
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: var(--shadow-2);
+  transform: translateY(calc(-100% - 14px));
+  transition: box-shadow var(--dur-fast) var(--ease-out);
+}
+.pr-fab:hover { box-shadow: var(--shadow-3); }
+.pr-fab button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 9px 16px;
+  cursor: pointer;
+  /* Only the outer corners. `border-radius: inherit` gave both halves the full
+     999px, so the caret read as a separate pill stuck onto the side of the
+     first one rather than the other half of one control. */
+  border-radius: 0;
+}
+.pr-fab > button:first-child {
+  border-top-left-radius: var(--r-md);
+  border-bottom-left-radius: var(--r-md);
+}
+.pr-fab > button:last-child {
+  border-top-right-radius: var(--r-md);
+  border-bottom-right-radius: var(--r-md);
+}
+.pr-fab button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--on-accent) 12%, transparent);
+}
+.pr-fab button:disabled { opacity: 0.75; cursor: default; }
+/* The caret half. A hairline divider rather than a gap, so the two read as one
+   control with a default rather than two buttons that happen to touch. */
+.pr-fab-main + .pr-fab-more {
+  padding: 9px 13px 9px 12px;
+  border-left: 1px solid color-mix(in srgb, var(--on-accent) 22%, transparent);
+}
+/* On the accent, a filled dot reads as a hole punched in the button. A ring
+   that thickens and thins carries the same "alive" signal without the void. */
+.pr-fab .pr-run-dot {
+  width: 8px;
+  height: 8px;
+  background: none;
+  border: 2px solid var(--on-accent);
+  opacity: 1;
+  animation: pr-fab-spin 1.1s ease-in-out infinite;
+}
+@keyframes pr-fab-spin {
+  0%, 100% { border-width: 2px; transform: scale(1); }
+  50% { border-width: 4px; transform: scale(0.82); }
+}
+.pr-fab .pr-agent-live { background: var(--on-accent); }
+@media (prefers-reduced-motion: reduce) {
+  .pr-fab .pr-run-dot { animation: none; }
+}
+
+/* ---------- agent-generated content ---------- */
+
+/* Everything on this page an agent wrote, and nothing a human did. The map and
+   the staged findings are opinions produced by a model — they read exactly like
+   the PR's own description otherwise, and "who claimed this" is the first thing
+   you need in order to weigh it. Hence a shared mark: the accent edge, the tint,
+   and a byline that names the author as a machine. */
+.is-agent-made {
+  border-left: 2px solid var(--magenta);
+  background: color-mix(in srgb, var(--magenta) 5%, var(--bg-alt));
+}
+.agent-byline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--magenta);
+}
+.agent-byline-note {
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-faint);
+}
+.agent-byline .git-spacer { flex: 1; }
+
+/* ---------- Micro-task progress rail ---------- */
+
+/* A one-shot agent's milestones. The card sits where the CTA that launched it
+   was, so the thing you pressed becomes the thing you watch — no jump, and
+   nowhere else to look. */
+/* In the PR header it's a band across a panel that already has a background,
+   so it drops the card treatment and keeps only the separation. */
+.pr-head .task-progress {
+  margin: 8px 0 0;
+  padding: 8px 0 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  background: none;
+}
+.pr-head .task-progress-head { margin-bottom: 7px; }
+
+.task-progress {
+  margin-bottom: 12px;
+  padding: 10px 12px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-raised);
+}
+.task-progress-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 9px;
+}
+.task-progress-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+.task-progress-time {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.task-bar {
+  position: relative;
+  height: 4px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--border) 85%, transparent);
+}
+.task-bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--p, 0%);
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--accent) 55%, transparent),
+    var(--accent)
+  );
+  transition: width var(--dur-med) var(--ease-out);
+}
+/* The segment being worked on: the bar can't fill into it (the step isn't done)
+   but it isn't idle either, so it sweeps. This is the only part of the rail that
+   moves without the agent saying anything. */
+.task-bar-live {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--p, 0%);
+  width: var(--seg, 25%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--accent) 50%, transparent),
+    transparent
+  );
+  animation: task-bar-sweep 1.6s ease-in-out infinite;
+}
+@keyframes task-bar-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+.task-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 9px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.task-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-faint);
+  transition: color var(--dur-med) var(--ease-out);
+}
+.task-step-dot {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  font-size: 8px;
+  line-height: 1;
+}
+.task-step.is-done { color: var(--text-dim); }
+.task-step.is-done .task-step-dot {
+  border-color: var(--ok);
+  background: var(--ok);
+  color: var(--on-accent);
+}
+.task-step.is-doing { color: var(--accent); }
+.task-step.is-doing .task-step-dot {
+  border-color: var(--accent);
+  animation: task-step-pulse 1.6s ease-in-out infinite;
+}
+@keyframes task-step-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 40%, transparent); }
+  50% { box-shadow: 0 0 0 4px transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .task-bar-fill { transition: none; }
+  .task-bar-live { animation: none; opacity: 0.55; }
+  .task-step.is-doing .task-step-dot { animation: none; }
+}
 
 /* ---------- PR inbox (rail panel, every open project) ---------- */
 
@@ -6431,10 +6926,40 @@ body.dragging-tab * {
 .pr-error { padding: 12px; font-size: 12px; color: var(--text-dim); }
 .pr-error { color: var(--danger); white-space: pre-wrap; }
 
+/* The composer sits over the end of the diff, so it should read as a layer on
+   top of the page rather than a wall the page stops at: translucent, blurred,
+   with a bright hairline catching the top edge the way a pane of glass does.
+   The blur is what makes it legible — dropping the opacity alone would leave
+   code showing through the text behind it. */
 .pr-review {
-  padding: 8px 14px;
-  border-top: 1px solid var(--border);
-  background: var(--bg-alt);
+  position: relative;
+  padding: 9px 14px 10px;
+  border-top: 1px solid color-mix(in srgb, var(--border-strong) 70%, transparent);
+  background: color-mix(in srgb, var(--bg-alt) 72%, transparent);
+  backdrop-filter: blur(18px) saturate(1.35);
+  -webkit-backdrop-filter: blur(18px) saturate(1.35);
+  box-shadow: 0 -8px 28px rgba(4, 6, 16, 0.34);
+}
+/* The lit edge. A separate layer so it stays a hairline at any zoom rather
+   than thickening with the border. */
+.pr-review::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--text) 16%, transparent) 22%,
+    color-mix(in srgb, var(--text) 16%, transparent) 78%,
+    transparent
+  );
+  pointer-events: none;
+}
+/* Inputs inside glass need their own surface or the blur shows through them
+   and the placeholder sits on top of moving code. */
+.pr-review .pr-comment {
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
 }
 
 .pr-comment {
@@ -6453,8 +6978,16 @@ body.dragging-tab * {
 
 .pr-review-actions {
   display: flex;
+  align-items: center;
   gap: 8px;
   margin-top: 6px;
+}
+
+/* What the buttons beside it are about to do with the staged findings. */
+.pr-verdict-hint {
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-dim);
 }
 
 .pr-done { color: var(--ok); font-size: 12px; }
@@ -10916,10 +11449,15 @@ a.btn-mini {
 
 /* A sleeping project's pill: dimmed, frost-tinted, and carrying the crystal
    ahead of its name so the state reads without a hover or a click. */
+/* Asleep, and it should look it. Five frozen projects rendered at nearly the
+   awake weight is five things competing with the one you're actually in — the
+   cyan reads as a highlight rather than as cold. Dulled here and lifted back on
+   hover, since the tab is still a live target. */
 .project-tab-asleep {
-  color: color-mix(in srgb, var(--cyan) 45%, var(--text-dim));
-  background: color-mix(in srgb, var(--cyan) 7%, transparent);
-  border-color: color-mix(in srgb, var(--cyan) 18%, transparent);
+  color: color-mix(in srgb, var(--cyan) 30%, var(--text-faint));
+  background: none;
+  border-color: color-mix(in srgb, var(--cyan) 10%, transparent);
+  opacity: 0.62;
 }
 
 .project-tab-asleep:hover,
@@ -10927,14 +11465,18 @@ a.btn-mini {
   color: color-mix(in srgb, var(--cyan) 30%, var(--text));
   background: color-mix(in srgb, var(--cyan) 12%, var(--bg-raised));
   border-color: color-mix(in srgb, var(--cyan) 32%, transparent);
+  opacity: 1;
 }
 
 .project-tab-frost {
   display: inline-flex;
   align-items: center;
   color: var(--cyan);
+  opacity: 0.75;
   animation: hib-breathe 4.5s ease-in-out infinite;
 }
+.project-tab-asleep:hover .project-tab-frost,
+.project-tab-asleep.project-tab-active .project-tab-frost { opacity: 1; }
 
 .hib-chip {
   display: inline-flex;

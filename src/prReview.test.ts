@@ -4,9 +4,14 @@ import {
   fileNote,
   isNit,
   isTrusted,
+  alreadyPosted,
+  fabAction,
   nextMove,
   parseSuggestions,
+  patchLines,
+  resolvePath,
   roleFor,
+  snapLine,
   threadSuggestion,
   threadsByPath,
   verdicts,
@@ -287,5 +292,147 @@ describe("fileNote", () => {
   it("says nothing for a real binary or a normal patch", () => {
     expect(fileNote("Binary files a/logo.png and b/logo.png differ")).toBeNull();
     expect(fileNote("@@ -1,2 +1,3 @@\n+const x = 1;")).toBeNull();
+  });
+});
+
+describe("placing a reported finding on a real line", () => {
+  // Two hunks, so the gap between them is a line the file has and the diff
+  // does not — which is exactly the case that used to render nothing.
+  const patch = [
+    "diff --git a/src/app.ts b/src/app.ts",
+    "--- a/src/app.ts",
+    "+++ b/src/app.ts",
+    "@@ -10,4 +10,5 @@",
+    " const a = 1;",
+    "-const b = 2;",
+    "+const b = 3;",
+    "+const c = 4;",
+    " const d = 5;",
+    "@@ -80,3 +81,3 @@",
+    " keep();",
+    "-drop();",
+    "+add();",
+  ].join("\n");
+
+  it("counts each side only where that side has a line", () => {
+    const { LEFT, RIGHT } = patchLines(patch);
+    // RIGHT: 10 (context), 11 + 12 (added), 13 (context), then 81, 82.
+    expect([...RIGHT].sort((a, b) => a - b)).toEqual([10, 11, 12, 13, 81, 82]);
+    // LEFT: 10 (context), 11 (removed), 12 (context), then 80, 81.
+    expect([...LEFT].sort((a, b) => a - b)).toEqual([10, 11, 12, 80, 81]);
+    // The gap is real: nothing renders line 40 on either side.
+    expect(RIGHT.has(40)).toBe(false);
+  });
+
+  it("survives a patch with no hunks at all", () => {
+    const { LEFT, RIGHT } = patchLines("Binary files a/logo.png and b/logo.png differ");
+    expect(LEFT.size).toBe(0);
+    expect(RIGHT.size).toBe(0);
+  });
+
+  const paths = ["src/app.ts", "packages/web/src/index.ts", "packages/api/src/index.ts"];
+
+  it("matches the path an agent reported against the diff's own paths", () => {
+    expect(resolvePath("src/app.ts", paths)).toBe("src/app.ts");
+    expect(resolvePath("b/src/app.ts", paths)).toBe("src/app.ts");
+    expect(resolvePath("./src/app.ts", paths)).toBe("src/app.ts");
+    // Reported relative to a package rather than the repo.
+    expect(resolvePath("web/src/index.ts", paths)).toBe("packages/web/src/index.ts");
+    // Bare filename, unambiguous.
+    expect(resolvePath("app.ts", paths)).toBe("src/app.ts");
+    // Bare filename, ambiguous — refuse rather than guess. Hanging a review
+    // comment on the wrong index.ts is worse than not hanging it at all.
+    expect(resolvePath("index.ts", paths)).toBeNull();
+    expect(resolvePath("nowhere.ts", paths)).toBeNull();
+    expect(resolvePath("  ", paths)).toBeNull();
+  });
+
+  it("snaps a near miss and refuses a wild one", () => {
+    const { RIGHT } = patchLines(patch);
+    expect(snapLine(11, RIGHT)).toBe(11);
+    // Off by two, both neighbours rendered — lands on the nearer one.
+    expect(snapLine(15, RIGHT)).toBe(13);
+    // Equidistant: take the earlier line, so the choice is at least stable.
+    expect(snapLine(47, RIGHT, 40)).toBe(13);
+    // Far from anything the diff renders: say so instead of dragging the
+    // comment to an unrelated part of the file.
+    expect(snapLine(400, RIGHT)).toBeNull();
+    expect(snapLine(11, new Set<number>())).toBeNull();
+  });
+});
+
+describe("fabAction", () => {
+  // Deliberately NOT nextMove: the floating button is the agent's, and
+  // nextMove's list includes moves no agent can make.
+  it("offers Review when nothing has judged the PR yet", () => {
+    expect(fabAction(pr(), conv(), { actionable: 0 })?.label).toBe("Review");
+  });
+
+  it("never offers to ask a human for a review", () => {
+    // The regression: the button read "Ask for review", which is a person's
+    // job, because it borrowed the next-move bar's answer wholesale.
+    const a = fabAction(pr({ mine: true }), conv({ review_decision: "" }), {
+      actionable: 0,
+    });
+    expect(a?.label).toBe("Review");
+    expect(a?.id).not.toBe("request-review");
+  });
+
+  it("puts a red build ahead of unanswered comments", () => {
+    const a = fabAction(pr(), conv({ checks: "FAIL" }), { actionable: 3 });
+    expect(a).toEqual({ id: "fix-ci", label: "Fix CI" });
+  });
+
+  it("counts the comments it offers to address, and gets the plural right", () => {
+    expect(fabAction(pr(), conv(), { actionable: 3 })?.label).toBe("Address 3 comments");
+    expect(fabAction(pr(), conv(), { actionable: 1 })?.label).toBe("Address 1 comment");
+  });
+
+  it("offers Merge only once GitHub says it can", () => {
+    expect(
+      fabAction(pr(), conv({ review_decision: "APPROVED" }), { actionable: 0 })?.id,
+    ).toBe("merge");
+    // Approved but conflicting is not mergeable, and must not say it is.
+    expect(
+      fabAction(pr(), conv({ review_decision: "APPROVED", mergeable: "CONFLICTING" }), {
+        actionable: 0,
+      })?.id,
+    ).not.toBe("merge");
+  });
+
+  it("offers nothing on a closed PR, or once it is approved and merged out", () => {
+    expect(fabAction(pr({ state: "MERGED" }), conv(), { actionable: 0 })).toBeNull();
+    // Changes requested: the ball is with the author's own edits, and none of
+    // the four fit — the button falls back to the plain agent menu.
+    expect(
+      fabAction(pr(), conv({ review_decision: "CHANGES_REQUESTED" }), { actionable: 0 }),
+    ).toBeNull();
+  });
+});
+
+describe("alreadyPosted", () => {
+  const t = (path: string, body: string) =>
+    ({ id: "t1", path, line: 9, side: "RIGHT", resolved: false, outdated: false,
+       comments: [{ id: "c1", body, author: "me", mine: true, association: "OWNER", created: "" }],
+     }) as unknown as ipc.PrThread;
+
+  it("matches a finding to the comment it became", () => {
+    // submit() adds the "Nit: " prefix on the way out, so the posted text is
+    // never byte-identical to what was staged.
+    const finding = { path: "src/app.ts", body: "the guard flipped from `a > 0` to `a === 0`" };
+    expect(alreadyPosted(finding, [t("src/app.ts", "Nit: the guard flipped from a > 0 to a === 0")])).toBe(true);
+  });
+
+  it("ignores line and directory drift but not the file", () => {
+    const finding = { path: "web/src/app.ts", body: "Nit: same text" };
+    expect(alreadyPosted(finding, [t("packages/web/src/app.ts", "same text")])).toBe(true);
+    expect(alreadyPosted(finding, [t("src/other.ts", "same text")])).toBe(false);
+  });
+
+  it("does not drop a finding that hasn't been posted", () => {
+    const finding = { path: "src/app.ts", body: "something nobody said yet" };
+    expect(alreadyPosted(finding, [t("src/app.ts", "Nit: an unrelated remark")])).toBe(false);
+    expect(alreadyPosted(finding, [])).toBe(false);
+    expect(alreadyPosted({ path: "src/app.ts", body: "   " }, [t("src/app.ts", "")])).toBe(false);
   });
 });
