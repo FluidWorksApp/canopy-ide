@@ -788,10 +788,34 @@ pub async fn git_commit(
 // ---------- remotes ----------
 
 pub(crate) fn run_net(cmd: &mut Command) -> Result<String, String> {
-    use std::io::Read;
+    run_net_with_input(cmd, None)
+}
+
+/// `run_net`, plus a request body on stdin. Its own writer thread for the same
+/// reason the readers have theirs: a body bigger than the pipe buffer blocks in
+/// write() until the child drains it, and the child can't drain while we're
+/// blocked. A review with a dozen findings clears 64KB easily.
+pub(crate) fn run_net_with_input(cmd: &mut Command, input: Option<&str>) -> Result<String, String> {
+    use std::io::{Read, Write};
     use std::process::Stdio;
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let in_thread = input.map(|body| {
+        let owned = body.to_string();
+        let mut si = child.stdin.take();
+        std::thread::spawn(move || {
+            if let Some(s) = si.as_mut() {
+                let _ = s.write_all(owned.as_bytes());
+            }
+            // Dropping it closes the pipe — without the EOF `gh` waits forever.
+            drop(si);
+        })
+    });
 
     // Drain both pipes on their own threads for the whole life of the child,
     // rather than reading them once it has exited. A pipe holds ~64KB before
@@ -820,6 +844,9 @@ pub(crate) fn run_net(cmd: &mut Command) -> Result<String, String> {
     loop {
         match child.try_wait().map_err(|e| e.to_string())? {
             Some(status) => {
+                if let Some(t) = in_thread {
+                    let _ = t.join();
+                }
                 let out = out_thread.join().unwrap_or_default();
                 let err = err_thread.join().unwrap_or_default();
                 // git reports progress on stderr even on success, so merge.
@@ -836,6 +863,9 @@ pub(crate) fn run_net(cmd: &mut Command) -> Result<String, String> {
                     let _ = child.kill();
                     let _ = child.wait();
                     // Killing the child closes the pipes, so the readers end.
+                    if let Some(t) = in_thread {
+                        let _ = t.join();
+                    }
                     let _ = out_thread.join();
                     let _ = err_thread.join();
                     return Err(format!(
@@ -1609,6 +1639,21 @@ fn gh_graphql(top: &Path, query: &str, vars: &[(&str, String)]) -> Result<Value,
     graphql_data(run_net(&mut cmd)?)
 }
 
+/// GraphQL whose variables aren't all scalars.
+///
+/// `-F` only types booleans, null, integers and `@file`; every other value it
+/// passes reaches GitHub as a **string**. For a `[DraftPullRequestReviewThread!]`
+/// that means the whole array arrives as one string and the mutation is rejected
+/// with "expected ... to be a key-value object" — which is why inline review
+/// comments could never post. There is no flag that fixes it: the body has to be
+/// real JSON, so it goes in on stdin via `--input -`.
+fn gh_graphql_json(top: &Path, query: &str, variables: Value) -> Result<Value, String> {
+    let body = serde_json::json!({ "query": query, "variables": variables }).to_string();
+    let mut cmd = gh_in(top);
+    cmd.args(["api", "graphql", "--input", "-"]);
+    graphql_data(run_net_with_input(&mut cmd, Some(&body))?)
+}
+
 /// A GraphQL document that names its own targets, run with no repo context —
 /// what the cross-project PR watcher uses, since one document covers many
 /// repositories and none of them is "the" current one.
@@ -1893,16 +1938,11 @@ pub async fn gh_pr_review_batch(
             Value::Object(o)
         })
         .collect();
-    gh_graphql(
+    gh_graphql_json(
         &top,
         "mutation($p:ID!,$e:PullRequestReviewEvent!,$b:String,$t:[DraftPullRequestReviewThread!]){\
          addPullRequestReview(input:{pullRequestId:$p,event:$e,body:$b,threads:$t}){pullRequestReview{url}}}",
-        &[
-            ("p", pr_id),
-            ("e", ev.to_string()),
-            ("b", body),
-            ("t", serde_json::to_string(&thread_json).unwrap_or_else(|_| "[]".into())),
-        ],
+        serde_json::json!({ "p": pr_id, "e": ev, "b": body, "t": thread_json }),
     )?;
     let n = threads.len();
     Ok(match ev {
@@ -2276,8 +2316,10 @@ pub async fn git_worktree_add(
 /// Fetch a PR's head and check it out in a fresh worktree, without touching the
 /// main checkout's current branch. `pull/<n>/head` is exposed for every PR —
 /// fork or not — so this reaches branches a plain `fetch` (origin's own branches
-/// only) can't. `-B` (re)points the PR's branch at the fetched head and checks
-/// it out in the worktree; the main checkout is never switched.
+/// only) can't. The worktree is detached at that head rather than on the PR's
+/// branch: git allows a branch in one worktree at a time, and the branch is
+/// routinely checked out in the main repo already. `branch` is still taken —
+/// it names what the agent pushes to (`HEAD:<branch>`) and is validated here.
 #[tauri::command]
 pub async fn git_worktree_add_pr(
     state: State<'_, WorkspaceManager>,
@@ -2293,15 +2335,26 @@ pub async fn git_worktree_add_pr(
     let mut fetch = git(&top);
     fetch.args(["fetch", "origin", &format!("pull/{number}/head")]);
     run_net(&mut fetch)?;
+    // Detached, not `-B <branch>`, for two reasons the old form got wrong.
+    //
+    // Git lets a branch be checked out in exactly one worktree, so `-B` failed
+    // outright — "already used by worktree" — whenever the PR's branch was
+    // checked out anywhere else, including the main checkout, which is the
+    // ordinary case for a PR you are working on. And `-B` force-moves the local
+    // branch to the fetched head, which silently discards local commits on it.
+    //
+    // At the same commit either way; the agent pushes with an explicit refspec
+    // (see detachedPushLine) instead of a bare `git push`.
     let mut add = git(&top);
     add.arg("worktree")
         .arg("add")
-        .arg("-B")
-        .arg(branch.trim())
+        .arg("--detach")
         .arg(&path)
         .arg("FETCH_HEAD");
     run(&mut add)?;
-    Ok(format!("Worktree created at {path}"))
+    Ok(format!(
+        "Worktree created at {path} (detached at #{number}'s head)"
+    ))
 }
 
 /// Remove a worktree. Destructive when it holds uncommitted work, so `force` is
@@ -3938,6 +3991,29 @@ index 333..444 100644
             "took {}s — that is the deadlock, not slowness",
             started.elapsed().as_secs()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_net_writes_a_body_bigger_than_a_pipe_buffer_to_stdin() {
+        // The mirror of the stdout test, and the same deadlock: a review with a
+        // dozen findings clears 64KB, and writing it inline would block in
+        // write() while the child waited for us to stop writing.
+        let body = "x".repeat(200_000);
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "wc -c"]);
+        let out = run_net_with_input(&mut cmd, Some(&body)).expect("a large stdin is written");
+        assert_eq!(out.trim(), "200000", "got {out:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_net_closes_stdin_so_a_reader_sees_eof() {
+        // Without the drop, `gh api --input -` reads forever and the review
+        // "times out" having never been sent.
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "cat"]);
+        assert_eq!(run_net_with_input(&mut cmd, Some("done")).unwrap(), "done");
     }
 
     #[cfg(unix)]

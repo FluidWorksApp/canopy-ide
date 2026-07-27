@@ -86,7 +86,12 @@ import {
   updateTaskRun,
   type TaskRun,
 } from "../../taskHistory";
-import { taskMenuItem, type TaskChoice } from "../../taskMenu";
+import {
+  hasTasksToList,
+  taskMenuItem,
+  taskMenuItems,
+  type TaskChoice,
+} from "../../taskMenu";
 import { viewerKindFor } from "../viewers";
 import {
   blockForOpen,
@@ -3514,6 +3519,24 @@ export const ProjectView = memo(function ProjectView({
    *  The surfaces stay ignorant of the task registry — they ask for the item
    *  and splice it into their menu. */
   const firstRoot = roots[0] ?? "";
+  /** The same rows as `taskMenu`, without the "Tasks ▸" hop — for a control
+   *  that is already the task menu. */
+  const taskRows = useCallback(
+    (seed: string, dir: string, runnable?: TaskChoice[]) =>
+      taskMenuItems({
+        seed,
+        runnable,
+        saved: project.customTasks ?? [],
+        onNewTask: seedTaskFrom,
+        onOneOff: (brief) => openTaskComposer(brief, "once"),
+        // In the directory the surface is about, not the first root: the bar
+        // sits on one repo's changes and that is where its tasks belong.
+        onRunSaved: (t) => void startMicroTask(customTaskDef(t), { dir }, ""),
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [seedTaskFrom, openTaskComposer, startMicroTask, project.customTasks],
+  );
+
   const taskMenu = useCallback(
     (seed: string, runnable?: TaskChoice[]) =>
       taskMenuItem({
@@ -4595,6 +4618,15 @@ export const ProjectView = memo(function ProjectView({
                     tab.file.name,
                   );
                 }}
+                tasks={
+                  hasTasksToList({ saved: project.customTasks })
+                    ? () =>
+                        taskRows(
+                          `About the changes in \`${tab.file.path}\`: `,
+                          repoForFile(tab.file.path) ?? "",
+                        )
+                    : undefined
+                }
               />
             }
           />
@@ -5569,6 +5601,15 @@ export const ProjectView = memo(function ProjectView({
                   "Changes",
                 );
               }}
+              tasks={
+                hasTasksToList({ saved: project.customTasks })
+                  ? () =>
+                      taskRows(
+                        "About the current changes: ",
+                        changeGroups[0]?.repo ?? componentsRef.current[0]?.path ?? "",
+                      )
+                  : undefined
+              }
             />
           }
         />

@@ -29,20 +29,21 @@ import { renderMarkdown } from "../markdown";
 import type { Notify, RelayHandle } from "../types";
 import { agentMenuItems } from "../agentMenu";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
-import { AgentsIcon, TeamIcon } from "./icons";
+import { AgentsIcon, ChevronIcon, TeamIcon } from "./icons";
+import { TaskProgress } from "./TaskProgress";
 import type { AgentTarget } from "./TicketsPanel";
 import {
   MICRO_TASKS,
+  PR_REVIEW_STEPS,
   addressPrCommentsTask,
   applySuggestionTask,
-  draftFindingsTask,
   fixCiTask,
   followUpsTask,
   prArtifactPath,
-  reviewMapTask,
-  reviewPrTask,
+  prReviewTask,
+  resolveConflictsTask,
   runItReviewTask,
-  selfReviewPrTask,
+  stepsDone,
   type MicroTaskDef,
 } from "../microTasks";
 import { rowFor, subscribe as subscribeToPrs } from "../prWatchStore";
@@ -50,10 +51,16 @@ import { TASK_HISTORY_EVENT, taskRuns, type TaskRun } from "../taskHistory";
 import { repoLabel } from "../prs";
 import {
   actionable,
+  alreadyPosted,
+  fabAction,
+  type FabActionId,
   fileNote,
   isNit,
   nextMove,
+  patchLines,
+  resolvePath,
   roleFor,
+  snapLine,
   threadSuggestion,
   threadsByPath,
   verdicts,
@@ -62,6 +69,7 @@ import {
 } from "../prReview";
 import {
   beginRound,
+  findingKey,
   finishRound,
   isLandable,
   isRoundStale,
@@ -69,6 +77,8 @@ import {
   markDone,
   markReady,
   newSinceHandled,
+  postedFindings,
+  rememberPosted,
   resetLoop,
   roundGate,
   saveLoop,
@@ -156,6 +166,10 @@ interface DraftComment {
   body: string;
   /** Nits are prefixed on submit and never read as blocking. */
   blocking: boolean;
+  /** Staged from a Review task rather than typed by the user. It posts under
+   *  their name either way, which is exactly why the tab has to keep saying
+   *  which of the two it is right up until they submit it. */
+  fromAgent?: boolean;
 }
 
 /** What a line's extension row is given: the threads that live on it plus any
@@ -279,6 +293,10 @@ export function PrView({
   /** The body read the old way, when the conversation query couldn't be run. */
   const [bodyFallback, setBodyFallback] = useState("");
   const [drafts, setDrafts] = useState<DraftComment[]>([]);
+  /** Which files' diffs are mounted. Declared up here, not beside the effect
+   *  that seeds it, because staging findings has to open the files they land
+   *  in — a draft comment inside a collapsed file is a comment nobody sees. */
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [logs, setLogs] = useState<string | null>(null);
   /** People who could be asked to review — loaded only when that's the move. */
   const [candidates, setCandidates] = useState<string[] | null>(null);
@@ -368,6 +386,85 @@ export function PrView({
     }
   }, [repo, pr.number]);
 
+  /** Findings already turned into drafts, so a second read doesn't stack them —
+   *  and a counter, because two findings can differ only in body. Both are per
+   *  PR, and both reset with everything else when the tab changes PR. */
+  const stagedKeys = useRef<Set<string>>(new Set());
+  const stageSeq = useRef(0);
+
+  /** Load the findings the Review task left behind and turn them into draft
+   *  comments. They are proposals: nothing is posted until the human submits the
+   *  review, and each one can be edited or dropped first.
+   *
+   *  This runs itself when the task finishes rather than waiting for a button.
+   *  A staging step the user has to know to press is a step where work an agent
+   *  already did sits in a file nobody opens. */
+  const stageFindings = useCallback(async () => {
+    // null means "there is no findings artifact", which is not the same as a
+    // run that found nothing: one says the task never got there, the other is a
+    // clean bill of health, and the rail has to tell them apart.
+    let raw: string;
+    try {
+      raw = await ipc.fsReadText(prArtifactPath(repo, pr.number, "findings"));
+    } catch {
+      return null;
+    }
+    let found: {
+      path: string;
+      line: number;
+      side?: string;
+      severity?: string;
+      body: string;
+    }[];
+    try {
+      const parsed = JSON.parse(raw) as { findings?: typeof found };
+      found = (parsed.findings ?? []).filter(
+        (f) => f.path && f.line > 0 && f.body?.trim(),
+      );
+    } catch {
+      onNotice(
+        "The agent's findings file isn't valid JSON — nothing staged.",
+        "error",
+      );
+      return null;
+    }
+    // Re-reading the same file (a second run, a re-opened tab) must not stack
+    // the same comment twice, so identity is the finding itself, not the read.
+    // The ledger is a ref and not the drafts list: dropping a finding you didn't
+    // agree with is a decision, and the next read must not undo it. `posted`
+    // outlives the tab for the same reason — nothing deletes the findings file
+    // when a review is submitted, so on the next mount every comment that is
+    // now a live thread on GitHub would be offered back as a fresh draft.
+    const key = findingKey;
+    const posted = postedFindings(repo, pr.number);
+    const fresh = found.filter(
+      (f) => !stagedKeys.current.has(key(f)) && !posted.has(key(f)),
+    );
+    if (!fresh.length) return 0;
+    for (const f of fresh) stagedKeys.current.add(key(f));
+    // A finding renders inline, at its line — which shows nothing at all if the
+    // file is one of the ones a big PR left collapsed. Open the ones we just
+    // put a comment in; leave the rest of the fold alone.
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      for (const f of fresh) next.add(f.path);
+      return next;
+    });
+    setDrafts((prev) => [
+      ...prev,
+      ...fresh.map((f, i) => ({
+        id: `finding-${pr.number}-${stageSeq.current++}-${i}`,
+        path: f.path,
+        line: f.line,
+        side: f.side === "LEFT" ? ("LEFT" as const) : ("RIGHT" as const),
+        body: f.body.trim(),
+        blocking: f.severity !== "nit",
+        fromAgent: true,
+      })),
+    ]);
+    return fresh.length;
+  }, [repo, pr.number, onNotice]);
+
   useEffect(() => {
     let live = true;
     setPatch(null);
@@ -377,21 +474,24 @@ export function PrView({
     setDrafts([]);
     setDeltaOn(false);
     setDeltaPatch(null);
+    stagedKeys.current = new Set();
     setLoop(loadLoop(repo, pr.number));
     void ipc
       .ghPrDiff(repo, pr.number)
       .then((d) => live && setPatch(d))
       .catch((e) => live && setError(String(e)));
     void refreshConv();
-    // A map left by an earlier run of the Review map task, if there is one.
+    // What an earlier Review left behind: the map the body renders, and the
+    // findings, staged as drafts again so re-opening the tab doesn't lose them.
     void ipc
       .fsReadText(prArtifactPath(repo, pr.number))
       .then((t) => live && setMap(t.trim() || null))
       .catch(() => {});
+    void stageFindings();
     return () => {
       live = false;
     };
-  }, [repo, pr.number, refreshConv]);
+  }, [repo, pr.number, refreshConv, stageFindings]);
 
   useEffect(() => {
     // The log is written by the launcher and by job_done; the event covers
@@ -413,6 +513,56 @@ export function PrView({
     return () => window.removeEventListener(TASK_HISTORY_EVENT, read);
   }, [pr.url]);
 
+  /** The Review task's terminal closes itself, so the moment it leaves the
+   *  running list is the only signal the tab gets that its two files are on
+   *  disk. Pick them up then: the map into the body, the findings into drafts.
+   *
+   *  `settling` keeps the rail up across the handoff. Reading the two files
+   *  takes a moment, and without it the rail vanished the instant the run ended
+   *  — a flash of the idle "Review this for me" button before the map appeared,
+   *  which reads as the review having failed. It also buys the last milestone
+   *  the second of screen time it earned. */
+  const [settling, setSettling] = useState(false);
+  const reviewWasRunning = useRef(false);
+  useEffect(() => {
+    const now = running.some((r) => r.taskId === prReviewTask.id);
+    const finished = reviewWasRunning.current && !now;
+    reviewWasRunning.current = now;
+    if (!finished) return;
+    setSettling(true);
+    const landed = Promise.all([
+      ipc
+        .fsReadText(prArtifactPath(repo, pr.number))
+        .then((t) => {
+          const body = t.trim();
+          setMap(body || null);
+          return !!body;
+        })
+        .catch(() => false),
+      stageFindings().then((n) => {
+        if (n)
+          onNotice(
+            `${n} finding(s) staged as draft comments — none posted yet.`,
+          );
+        return n;
+      }),
+    ]);
+    let timer = 0;
+    void landed.then(([mapLanded, staged]) => {
+      // Close the rail off against what actually reached disk, rather than
+      // appending "staged" because the run ended. Blind-appending is what put a
+      // lone green tick on the last milestone with the first three still blank
+      // — a run that had produced nothing claiming it had finished.
+      const done: string[] = [];
+      if (mapLanded || staged !== null) done.push("read");
+      if (mapLanded) done.push("map");
+      if (staged !== null) done.push("findings", "staged");
+      if (done.length) setSteps((prev) => [...new Set([...prev, ...done])]);
+      timer = window.setTimeout(() => setSettling(false), 900);
+    });
+    return () => window.clearTimeout(timer);
+  }, [running, repo, pr.number, stageFindings, onNotice]);
+
   /** Tasks we've just dispatched, before the launcher has written them to the
    *  run log. An isolated task builds a worktree first, which can take seconds —
    *  and a button that does nothing for seconds is a button that looks broken. */
@@ -422,14 +572,60 @@ export function PrView({
   const isBusyTask = (taskId: string) =>
     isRunning(taskId) || pending[taskId] != null;
 
+  /** Milestones the running Review has reported. Polled rather than pushed: the
+   *  agent appends to a file (every CLI can, with or without the MCP bridge), so
+   *  the tab has to look. Strictly gated on the task actually running — a poll
+   *  that outlives what it was watching is a tab that never goes quiet. */
+  const [steps, setSteps] = useState<string[]>([]);
+  /** What the progress file held when this run started. Until it changes, the
+   *  agent hasn't truncated it yet and the contents are the *previous* run's —
+   *  showing those would open a fresh review already at four-of-four. */
+  const progressBase = useRef<string | null>(null);
+  const reviewBusy = isBusyTask(prReviewTask.id);
+  useEffect(() => {
+    if (!reviewBusy) return;
+    let live = true;
+    const path = prArtifactPath(repo, pr.number, "progress");
+    const read = () =>
+      void ipc
+        .fsReadText(path)
+        .then((t) => {
+          if (!live) return;
+          if (progressBase.current === null) progressBase.current = t;
+          setSteps(
+            t === progressBase.current ? [] : stepsDone(t, PR_REVIEW_STEPS),
+          );
+        })
+        .catch(() => {
+          // No file yet is the normal first second of a run, not an error.
+          if (live && progressBase.current === null) progressBase.current = "";
+        });
+    read();
+    const tick = window.setInterval(read, 1200);
+    return () => {
+      live = false;
+      window.clearInterval(tick);
+    };
+  }, [reviewBusy, repo, pr.number]);
+
   /** Every task launch on this tab goes through here. */
   const launch = useCallback(
     <P,>(def: MicroTaskDef<P>, payload: P, query = "") => {
       if (!onMicroTask) return;
       setPending((p) => ({ ...p, [def.id]: Date.now() }));
+      // A new run starts the rail empty and re-arms the staleness guard, so the
+      // last run's milestones don't flash up before this agent has written one.
+      if (def.id === prReviewTask.id) {
+        setSteps([]);
+        progressBase.current = null;
+      }
       onMicroTask(def, payload, query);
+      // Review reports its milestones on this page, so pointing at the Running
+      // now panel would send you away from the thing that's actually showing.
       noticeRef.current(
-        `${def.label}: an agent is starting — watch it under "Running now".`,
+        def.id === prReviewTask.id
+          ? `${def.label}: an agent is starting — its progress is on this page.`
+          : `${def.label}: an agent is starting — watch it under "Running now".`,
       );
     },
     [onMicroTask],
@@ -463,15 +659,23 @@ export function PrView({
     return () => window.clearTimeout(t);
   }, [running, pending]);
   const MOVE_TASK: Partial<Record<MoveId, string>> = {
-    "self-review": selfReviewPrTask.id,
+    "self-review": prReviewTask.id,
     "fix-ci": fixCiTask.id,
-    "review-it": draftFindingsTask.id,
+    "review-it": prReviewTask.id,
     "address-comments": addressPrCommentsTask.id,
   };
   const moveRunning = (m: NextMove) => {
     const id = MOVE_TASK[m.id];
     return !!id && isBusyTask(id);
   };
+  // Undefined for the seconds between the click and the run log catching up:
+  // the rail is already up by then, and a counter that starts at 0s twice is
+  // worse than one that starts a moment late. Self-ticking, so the second hand
+  // re-renders one span rather than the tab.
+  const reviewRun = running.find((r) => r.taskId === prReviewTask.id);
+  const reviewElapsed = reviewRun ? (
+    <Elapsed startedAt={reviewRun.startedAt} />
+  ) : undefined;
 
   const persist = useCallback((next: PrLoop) => {
     setLoop(saveLoop(next));
@@ -495,6 +699,19 @@ export function PrView({
       }),
     [pr, conv, act, loop.status],
   );
+
+  /** The floating button's default action — its own four states, not the next
+   *  move bar's list. See fabAction() for why they are deliberately different. */
+  const fab = useMemo(
+    () => fabAction(pr, conv, { actionable: act?.count ?? 0 }),
+    [pr, conv, act?.count],
+  );
+
+  /** Moves whose button already exists two controls to the right. Now that the
+   *  next move shares the title row, rendering its action as well put Merge
+   *  beside Merge — the sentence is still worth saying, the second button is
+   *  not. The accent on the real one already marks it as the move. */
+  const movesOwnButton = move.id === "merge" || move.id === "mark-ready";
 
   // ---- the review loop ----------------------------------------------------
 
@@ -529,6 +746,62 @@ export function PrView({
     },
     [onMicroTask, gate, loop, conv, repo, pr, persist, onNotice],
   );
+
+  /** What the button says while its job runs — the job's own name, so a glance
+   *  still tells you which of the four you started. */
+  const FAB_BUSY: Record<FabActionId, string> = {
+    "resolve-conflicts": "Resolving…",
+    review: "Reviewing…",
+    address: "Addressing…",
+    "fix-ci": "Fixing CI…",
+    merge: "Merging…",
+  };
+
+  /** Running the floating button's default. Merge is the one that isn't an
+   *  agent task — it opens the same method menu the header's Merge does, since
+   *  choosing squash vs rebase stays a human decision. */
+  const fabBusy =
+    (fab?.id === "review" && isBusyTask(prReviewTask.id)) ||
+    (fab?.id === "fix-ci" && isBusyTask(fixCiTask.id)) ||
+    (fab?.id === "address" && isBusyTask(addressPrCommentsTask.id)) ||
+    (fab?.id === "resolve-conflicts" && isBusyTask(resolveConflictsTask.id));
+  const runFab = () => {
+    switch (fab?.id) {
+      case "resolve-conflicts":
+        launch(resolveConflictsTask, { repo, pr });
+        break;
+      case "review":
+        launch(prReviewTask, { repo, pr });
+        break;
+      case "address":
+        startRound(false);
+        break;
+      case "fix-ci":
+        launch(fixCiTask, { repo, pr });
+        break;
+      case "merge":
+        setMergeOpen(true);
+        break;
+    }
+  };
+
+  /** Drop staged findings the PR already carries as real comments.
+   *
+   *  The local ledger stops the ones this tab posted, but the findings file on
+   *  disk outlives any review submitted before that ledger existed, from another
+   *  machine, or after the browser store was cleared — and those came back as
+   *  drafts sitting directly under the identical posted thread. The conversation
+   *  is the source that always knows, so this runs whenever it refreshes, and
+   *  writes the matches to the ledger so the next mount skips the round trip. */
+  useEffect(() => {
+    const threads = conv?.threads;
+    if (!threads?.length || !drafts.length) return;
+    const gone = drafts.filter((d) => alreadyPosted(d, threads));
+    if (!gone.length) return;
+    rememberPosted(repo, pr.number, gone.map(findingKey));
+    const drop = new Set(gone.map((d) => d.id));
+    setDrafts((prev) => prev.filter((d) => !drop.has(d.id)));
+  }, [conv?.threads, drafts, repo, pr.number]);
 
   /** A round's agent reported in. job_done is broadcast globally with the PR's
    *  own URL (every PR brief passes it), so match on that rather than trying to
@@ -676,6 +949,10 @@ export function PrView({
       setDone(msg);
       onNotice(msg);
       setComment("");
+      // Written before the list is cleared, and only after the mutation came
+      // back clean: these are on GitHub now, so the findings file must never
+      // offer them again.
+      rememberPosted(repo, pr.number, drafts.map(findingKey));
       setDrafts([]);
       void refreshConv();
     } catch (err) {
@@ -806,51 +1083,6 @@ export function PrView({
     }
   };
 
-  /** Load the findings a review/self-review task left behind and turn them into
-   *  draft comments. They are proposals: nothing is posted until the human
-   *  submits the review, and each one can be edited or dropped first. */
-  const importFindings = async () => {
-    try {
-      const raw = await ipc.fsReadText(
-        prArtifactPath(repo, pr.number, "findings"),
-      );
-      const parsed = JSON.parse(raw) as {
-        findings?: {
-          path: string;
-          line: number;
-          side?: string;
-          severity?: string;
-          body: string;
-        }[];
-      };
-      const found = (parsed.findings ?? []).filter(
-        (f) => f.path && f.line > 0 && f.body?.trim(),
-      );
-      if (!found.length) {
-        onNotice("That findings file has nothing in it.");
-        return;
-      }
-      setDrafts((prev) => [
-        ...prev,
-        ...found.map((f, i) => ({
-          id: `imported-${Date.now()}-${i}`,
-          path: f.path,
-          line: f.line,
-          side: f.side === "LEFT" ? ("LEFT" as const) : ("RIGHT" as const),
-          body: f.body.trim(),
-          blocking: f.severity !== "nit",
-        })),
-      ]);
-      onNotice(
-        `${found.length} finding(s) staged as draft comments — none posted yet.`,
-      );
-    } catch {
-      onNotice(
-        "No findings file yet — run Draft findings or Self-review first.",
-      );
-    }
-  };
-
   const jumpToFile = useCallback((path: string) => {
     setExpanded((prev) => new Set(prev).add(path));
     // Let the diff mount before scrolling to it.
@@ -859,6 +1091,33 @@ export function PrView({
       60,
     );
   }, []);
+
+  /** Go to a staged finding where it lives — the comment itself, not the top of
+   *  the file it happens to be in. Scrolling to the file header and leaving you
+   *  to find the comment is what made these read as links that go nowhere. */
+  const jumpToDraft = (d: DraftComment) => {
+    const at = placed.get(d.id);
+    if (!at) {
+      onNotice(
+        `${d.path}:${d.line} isn't in this diff — the comment posts, but there's no line here to show it on.`,
+      );
+      return;
+    }
+    setExpanded((prev) => new Set(prev).add(at.path));
+    setTimeout(() => {
+      const el = document.querySelector<HTMLElement>(
+        `[data-draft-id="${CSS.escape(d.id)}"]`,
+      );
+      (el ?? fileRefs.current.get(at.path))?.scrollIntoView({
+        block: "center",
+        behavior: "smooth",
+      });
+      if (el) {
+        el.classList.add("is-flash");
+        setTimeout(() => el.classList.remove("is-flash"), 1200);
+      }
+    }, 80);
+  };
 
   const applySuggestion = useCallback(
     (t: ipc.PrThread, suggestion: string) =>
@@ -876,7 +1135,7 @@ export function PrView({
   const dispatchMove = (m: NextMove, e: React.MouseEvent) => {
     switch (m.id) {
       case "self-review":
-        launch(selfReviewPrTask, { repo, pr });
+        launch(prReviewTask, { repo, pr });
         break;
       case "mark-ready":
         void ready();
@@ -890,18 +1149,18 @@ export function PrView({
         );
         break;
       case "resolve-conflicts":
-        onStartResolve("claude");
+        launch(resolveConflictsTask, { repo, pr });
         break;
       case "address-comments":
         startRound(true);
         break;
       case "review-it":
-        launch(draftFindingsTask, { repo, pr });
+        launch(prReviewTask, { repo, pr });
         break;
       case "request-review":
         // The real event: useContextMenu calls preventDefault on it, so a
         // hand-made {clientX, clientY} threw and the button did nothing.
-        moreMenu.open(e, reviewerItems());
+        moreMenu.openUnder(e, reviewerItems());
         break;
       default:
         break;
@@ -957,6 +1216,42 @@ export function PrView({
     return m;
   }, [conv?.files]);
 
+  /** Where each draft actually lands in the rendered diff.
+   *
+   *  Resolved here and not when the finding is staged, for two reasons: the
+   *  findings can be read back before the patch has arrived, and the diff can
+   *  change under them (the delta toggle re-renders a different patch). A draft
+   *  whose file isn't in this diff at all gets `placed: null` and says so rather
+   *  than quietly rendering nowhere. */
+  const placed = useMemo(() => {
+    const paths = files.map((f) => f.path);
+    const lines = new Map<string, ReturnType<typeof patchLines>>();
+    const out = new Map<string, { path: string; line: number } | null>();
+    for (const d of drafts) {
+      const path = resolvePath(d.path, paths);
+      if (!path) {
+        out.set(d.id, null);
+        continue;
+      }
+      let present = lines.get(path);
+      if (!present) {
+        present = patchLines(files.find((f) => f.path === path)?.patch ?? "");
+        lines.set(path, present);
+      }
+      const line = snapLine(d.line, present[d.side]);
+      out.set(d.id, line == null ? null : { path, line });
+    }
+    return out;
+  }, [drafts, files]);
+
+  /** Findings the diff has no line for — the file isn't in it, or the line the
+   *  agent named is nowhere near one it renders. They'd be invisible otherwise:
+   *  still posted on submit, but never shown against any code. */
+  const unplaced = useMemo(
+    () => drafts.filter((d) => !placed.get(d.id)),
+    [drafts, placed],
+  );
+
   /** Line-anchored payloads for the diff renderer: threads and drafts keyed by
    *  the line they belong to, per file, per side. Built once per conversation
    *  change rather than scanned inside every file card's render. */
@@ -990,10 +1285,33 @@ export function PrView({
       put(t.path, t.side === "LEFT" ? "LEFT" : "RIGHT", t.line, (d) =>
         d.threads.push(t),
       );
-    for (const d of drafts)
-      put(d.path, d.side, d.line, (x) => x.drafts.push(d));
+    // The resolved location, not the reported one — that's the difference
+    // between a comment on the code and a comment nowhere.
+    for (const d of drafts) {
+      const at = placed.get(d.id);
+      if (at) put(at.path, d.side, at.line, (x) => x.drafts.push(d));
+    }
     return out;
-  }, [conv?.threads, drafts]);
+  }, [conv?.threads, drafts, placed]);
+
+  const blockingDrafts = useMemo(
+    () => drafts.filter((d) => d.blocking).length,
+    [drafts],
+  );
+
+  /** Which button gets the accent. Approve wore it unconditionally, which is
+   *  wrong the moment something blocking is staged — the emphasised action was
+   *  the one the findings say not to take. With nothing staged there is no
+   *  verdict to imply, so it falls back to Approve. */
+  const suggestedVerdict: Review =
+    drafts.length > 0 && blockingDrafts > 0 ? "request-changes" : "approve";
+
+  /** How many staged findings each file is holding, for the badge on its row. */
+  const draftsByPath = useMemo(() => {
+    const out = new Map<string, number>();
+    for (const d of drafts) out.set(d.path, (out.get(d.path) ?? 0) + 1);
+    return out;
+  }, [drafts]);
 
   /** Threads GitHub can't place any more (the line is gone) — they'd silently
    *  disappear if the rail didn't list them. */
@@ -1002,11 +1320,10 @@ export function PrView({
     [conv?.threads],
   );
 
-  // Which files' diffs are actually mounted. Small PRs open everything (it's
-  // cheap and you want to read it all); big PRs open only the small, human
-  // files up to a budget and leave lockfile-scale churn collapsed, so the tab
-  // paints instantly instead of blocking on a highlight of 28k lines.
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // Seed what's mounted. Small PRs open everything (it's cheap and you want to
+  // read it all); big PRs open only the small, human files up to a budget and
+  // leave lockfile-scale churn collapsed, so the tab paints instantly instead
+  // of blocking on a highlight of 28k lines.
   useEffect(() => {
     if (!files.length) {
       setExpanded(new Set());
@@ -1163,52 +1480,36 @@ export function PrView({
     return items;
   };
 
-  /** Everything an agent can do with this PR, in one menu: the one-shot tasks
-   *  first (they need nothing from you but a click), then handing it to an
-   *  agent in a worktree. Built at open time so a newly-started agent is in the
-   *  list. When the PR conflicts, resolving them replaces reviewing — there is
-   *  no point reviewing a diff git can't even merge. */
+  /** Everything an agent can do with this PR, in one flat menu: four one-shot
+   *  tasks that need nothing from you but a click, then handing it to an agent
+   *  in a worktree. Four, because everything read-only collapsed into Review —
+   *  mapping the change, finding problems and self-reviewing were one job wearing
+   *  three names, and asking which one you wanted was asking you to choose before
+   *  the agent had read a line. Built at open time so a newly-started agent is in
+   *  the list. When the PR conflicts, resolving them replaces reviewing — there
+   *  is no point reviewing a diff git can't even merge. */
   const openAgentMenu = (e: React.MouseEvent) => {
     const items: MenuItem[] = [];
+    // Conflicting: the only thing worth offering is the resolve. Everything
+    // else reads or edits a diff git cannot merge, and would be redone after.
+    if (onMicroTask && conflicting) {
+      items.push({
+        label: resolveConflictsTask.label,
+        icon: <span className="ctx-glyph">{resolveConflictsTask.icon}</span>,
+        hint: "merges the base in, keeps both sides",
+        disabled: isBusyTask(resolveConflictsTask.id),
+        onClick: () => launch(resolveConflictsTask, { repo, pr }),
+      });
+    }
     if (onMicroTask && !conflicting) {
-      items.push({ label: "Read it for me", separator: true });
       items.push({
-        label: reviewMapTask.label,
-        icon: <span className="ctx-glyph">{reviewMapTask.icon}</span>,
-        hint: "risk-ranked, nothing posted",
-        disabled: isBusyTask(reviewMapTask.id),
-        onClick: () => launch(reviewMapTask, { repo, pr }),
-      });
-      items.push({
-        label: draftFindingsTask.label,
-        icon: <span className="ctx-glyph">{draftFindingsTask.icon}</span>,
-        hint: "staged for you to vet",
-        disabled: isBusyTask(draftFindingsTask.id),
-        onClick: () => launch(draftFindingsTask, { repo, pr }),
-      });
-      items.push({
-        label: runItReviewTask.label,
-        icon: <span className="ctx-glyph">{runItReviewTask.icon}</span>,
-        hint: "starts it and takes screenshots",
-        disabled: isBusyTask(runItReviewTask.id),
-        onClick: () => launch(runItReviewTask, { repo, pr }),
-      });
-      items.push({ label: "Act on it", separator: true });
-      items.push({
-        label: reviewPrTask.label,
-        icon: <span className="ctx-glyph">{reviewPrTask.icon}</span>,
-        hint: "posts only what's required",
-        disabled: isBusyTask(reviewPrTask.id),
-        onClick: () => launch(reviewPrTask, { repo, pr }),
+        label: prReviewTask.label,
+        icon: <span className="ctx-glyph">{prReviewTask.icon}</span>,
+        hint: "stages drafts for you, posts nothing",
+        disabled: isBusyTask(prReviewTask.id),
+        onClick: () => launch(prReviewTask, { repo, pr }),
       });
       if (pr.state === "OPEN") {
-        items.push({
-          label: selfReviewPrTask.label,
-          icon: <span className="ctx-glyph">{selfReviewPrTask.icon}</span>,
-          hint: "private pass, posts nothing",
-          disabled: isBusyTask(selfReviewPrTask.id),
-          onClick: () => launch(selfReviewPrTask, { repo, pr }),
-        });
         items.push({
           label: act?.count
             ? `${addressPrCommentsTask.label} (${act.count})`
@@ -1226,14 +1527,14 @@ export function PrView({
             disabled: isBusyTask(fixCiTask.id),
             onClick: () => launch(fixCiTask, { repo, pr }),
           });
-        items.push({
-          label: followUpsTask.label,
-          icon: <span className="ctx-glyph">{followUpsTask.icon}</span>,
-          hint: "out-of-scope comments become issues",
-          disabled: isBusyTask(followUpsTask.id),
-          onClick: () => launch(followUpsTask, { repo, pr }),
-        });
       }
+      items.push({
+        label: runItReviewTask.label,
+        icon: <span className="ctx-glyph">{runItReviewTask.icon}</span>,
+        hint: "starts it and takes screenshots",
+        disabled: isBusyTask(runItReviewTask.id),
+        onClick: () => launch(runItReviewTask, { repo, pr }),
+      });
     }
     items.push(
       ...agentMenuItems({
@@ -1246,7 +1547,10 @@ export function PrView({
         onStart: conflicting ? onStartResolve : onStartReview,
       }),
     );
-    agentMenu.open(e, items);
+    // Opened from the floating button, which lives at the bottom of the window:
+    // hanging the panel below it would put it off-screen and leave the clamp to
+    // drag it back. It grows upward, which is what the ▴ on the caret promises.
+    agentMenu.openAbove(e, items);
   };
 
   /** The long tail: real actions, just not ones worth a permanent button. */
@@ -1283,6 +1587,15 @@ export function PrView({
           ),
       });
       items.push({ label: "Request review", submenu: reviewerItems() });
+      // Real, and rare: the tail of comments that are legitimate but out of
+      // scope. It earned a place, not a place in the primary list.
+      if (onMicroTask)
+        items.push({
+          label: followUpsTask.label,
+          hint: "out-of-scope comments become issues",
+          disabled: isBusyTask(followUpsTask.id),
+          onClick: () => launch(followUpsTask, { repo, pr }),
+        });
       items.push({
         label: conv?.auto_merge
           ? "Turn auto-merge off"
@@ -1312,7 +1625,21 @@ export function PrView({
           onClick: () => setCloseConfirm(true),
         },
       );
-    moreMenu.open(e, items);
+    moreMenu.openUnder(e, items);
+  };
+
+  // ---- pieces -------------------------------------------------------------
+
+  /** One line of a finding for the manifest: the "Nit: " prefix is already said
+   *  by the severity chip beside it, and markdown ticks read as noise at this
+   *  size. Trailing ellipsis only when something was actually cut. */
+  const gist = (body: string) => {
+    const flat = body
+      .replace(/^\s*nit:\s*/i, "")
+      .replace(/`/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    return flat.length > 120 ? `${flat.slice(0, 119).trimEnd()}…` : flat;
   };
 
   return (
@@ -1321,6 +1648,7 @@ export function PrView({
         <ContextMenu
           x={agentMenu.menu.x}
           y={agentMenu.menu.y}
+          above={agentMenu.menu.above}
           items={agentMenu.menu.items}
           onClose={agentMenu.close}
         />
@@ -1343,14 +1671,41 @@ export function PrView({
             <span className="pr-num">#{pr.number}</span>
             {pr.title}
           </div>
+          {/* The next move, on the title's line and immediately left of Merge.
+              A PR is always in one state that implies one action, and that
+              action belongs beside the other one you can take here — as its own
+              full-width row below, it pushed the diff down to say what the
+              empty half of this line had room for. */}
+          <div className={`pr-next ${move.urgent ? "is-urgent" : ""}`}>
+            <span className="pr-next-label" title={move.hint}>
+              {move.label}
+            </span>
+            {move.action &&
+              !movesOwnButton &&
+              (moveRunning(move) ? (
+                <span className="pr-next-running">
+                  <span className="pr-run-dot" /> working on it…
+                </span>
+              ) : (
+                <button
+                  className="btn-mini btn-accent"
+                  disabled={busy}
+                  title={move.hint}
+                  onClick={(e) => dispatchMove(move, e)}
+                >
+                  {move.action}
+                </button>
+              ))}
+            {loop.status === "waiting" && loop.auto && (
+              <span className="pr-next-note">watching for new comments</span>
+            )}
+            {loop.blockedReason && (
+              <span className="pr-next-note">{loop.blockedReason}</span>
+            )}
+          </div>
           <div className="pr-actions">
-            <button
-              className="btn-mini"
-              title="Hand this PR to an agent — a one-shot task, or an agent in a worktree"
-              onClick={openAgentMenu}
-            >
-              <AgentsIcon size={11} /> Agent ▾
-            </button>
+            {/* Agent used to sit here and now floats bottom-right, where it
+                follows you down the diff. Two of it would be one too many. */}
             {pr.draft && pr.state === "OPEN" && (
               <button
                 className="btn-mini btn-accent"
@@ -1399,7 +1754,7 @@ export function PrView({
               </div>
             )}
             <button
-              className="btn-mini"
+              className="btn-mini pr-more"
               title="More actions"
               onClick={openMoreMenu}
             >
@@ -1457,35 +1812,19 @@ export function PrView({
             <span className="pr-decision">auto-merge armed</span>
           )}
         </div>
-        {/* The next move. A PR is always in one state that implies one action;
-            naming it is what makes this tab a place you finish work rather than
-            a place you look at a diff. */}
-        <div className={`pr-next ${move.urgent ? "is-urgent" : ""}`}>
-          <span className="pr-next-label" title={move.hint}>
-            {move.label}
-          </span>
-          {move.action &&
-            (moveRunning(move) ? (
-              <span className="pr-next-running">
-                <span className="pr-run-dot" /> working on it…
-              </span>
-            ) : (
-              <button
-                className="btn-mini btn-accent"
-                disabled={busy}
-                title={move.hint}
-                onClick={(e) => dispatchMove(move, e)}
-              >
-                {move.action}
-              </button>
-            ))}
-          {loop.status === "waiting" && loop.auto && (
-            <span className="pr-next-note">watching for new comments</span>
-          )}
-          {loop.blockedReason && (
-            <span className="pr-next-note">{loop.blockedReason}</span>
-          )}
-        </div>
+        {/* In the header, not the body: the body scrolls, and a progress rail
+            you lose the moment you start reading the diff is a progress rail
+            for the thirty seconds you were not going to look away anyway. This
+            panel is pinned, so the run stays in sight for its whole life. */}
+        {(reviewBusy || settling) && (
+          <TaskProgress
+            steps={PR_REVIEW_STEPS}
+            done={steps}
+            active={reviewBusy}
+            title={reviewBusy ? "Reviewing this change" : "Review finished"}
+            elapsed={reviewElapsed}
+          />
+        )}
       </div>
 
       <div className="pr-body">
@@ -1498,44 +1837,63 @@ export function PrView({
               />
             )}
             {mapHtml && (
-              <div className="pr-description pr-map">
-                <div className="pr-rail-title">
+              <div className="pr-description pr-map is-agent-made">
+                {/* Named, not just styled. This is a model's reading of the
+                    diff sitting directly under the PR's own description, and
+                    the two must never be mistaken for each other. */}
+                <div className="pr-rail-title agent-byline">
+                  <AgentsIcon size={12} />
                   Review map
+                  <span className="agent-byline-note">written by an agent</span>
                   <button
                     className="btn-mini"
+                    disabled={reviewBusy}
                     title="Have an agent read it again"
-                    onClick={() =>
-                      onMicroTask?.(reviewMapTask, { repo, pr }, "")
-                    }
+                    onClick={() => launch(prReviewTask, { repo, pr })}
                   >
-                    Regenerate
+                    {reviewBusy ? "Reviewing…" : "Review again"}
                   </button>
                 </div>
                 <div
                   className="markdown-body"
                   dangerouslySetInnerHTML={{ __html: mapHtml }}
                 />
+                {/* Where the other half of the review went. Without this the
+                    findings are a surprise you meet by scrolling: staged, real,
+                    and unmentioned by the one card that says a review ran. */}
+                {drafts.length > 0 && (
+                  <button
+                    className={`pr-map-findings ${blockingDrafts > 0 ? "is-blocking" : ""}`}
+                    title="Jump to the first one"
+                    onClick={() => jumpToDraft(drafts[0])}
+                  >
+                    <span className="pr-run-dot is-static" />
+                    <strong>
+                      {drafts.length}{" "}
+                      {drafts.length === 1 ? "finding" : "findings"}
+                    </strong>{" "}
+                    staged as {drafts.length === 1 ? "a draft" : "drafts"}
+                    {blockingDrafts > 0 && `, ${blockingDrafts} blocking`}
+                    {unplaced.length > 0 && `, ${unplaced.length} off-diff`} —
+                    nothing posted
+                    <span className="pr-map-findings-go">›</span>
+                  </button>
+                )}
               </div>
             )}
-            {!mapHtml && onMicroTask && (
+            {!mapHtml && !reviewBusy && !settling && onMicroTask && (
               <div className="pr-map-cta">
+                {/* The one thing this empty state exists to offer, so it wears
+                    the primary tier. As a btn-mini it sat at the same weight as
+                    "Regenerate" and "Drop" and nobody found it. */}
                 <button
-                  className="btn-mini"
-                  disabled={isRunning(reviewMapTask.id)}
-                  onClick={() => launch(reviewMapTask, { repo, pr })}
+                  className="btn-mini btn-accent"
+                  onClick={() => launch(prReviewTask, { repo, pr })}
                 >
-                  {isRunning(reviewMapTask.id) ? (
-                    <>
-                      <span className="pr-run-dot" /> Reading the change…
-                    </>
-                  ) : (
-                    <>{reviewMapTask.icon} Map this change for me</>
-                  )}
+                  {prReviewTask.icon} Review this for me
                 </button>
                 <span className="pr-files-note">
-                  {isRunning(reviewMapTask.id)
-                    ? "an agent is on it — the map lands here when it's done"
-                    : "risk-ranked, nothing posted"}
+                  risk-ranked, findings staged as drafts, nothing posted
                 </span>
               </div>
             )}
@@ -1847,6 +2205,7 @@ export function PrView({
             liveCount={
               (byPath.get(f.path) ?? []).filter((t) => !t.resolved).length
             }
+            draftCount={draftsByPath.get(f.path) ?? 0}
             viewed={viewedByPath.get(f.path) ?? false}
             canViewed={!!conv?.node_id}
             data={dataFor(f)}
@@ -1858,6 +2217,56 @@ export function PrView({
             onAddDraft={addDraft}
           />
         ))}
+
+        {/* The one control that follows you down the diff.
+            A zero-height sticky dock at the bottom of the scroller: it costs no
+            layout, can't lengthen the scroll, and rides above the composer
+            because the composer is outside this element. The main half is the
+            one agent job this PR's state calls for; the caret opens the rest.
+            With none of the four applying it is just Agent, because "always
+            available" is the point of it. */}
+        <div className="pr-fab-dock">
+          <div className="pr-fab">
+            {fab && (
+              <button
+                className="pr-fab-main"
+                title={`${fab.label} — the agent job this PR's state calls for`}
+                disabled={busy || fabBusy}
+                onClick={runFab}
+              >
+                {fabBusy ? (
+                  <>
+                    {/* Name the job. "working on it…" is what the button says
+                        when it has forgotten what you asked it to do. */}
+                    <span className="pr-run-dot" /> {FAB_BUSY[fab.id]}
+                  </>
+                ) : (
+                  <>
+                    {fab.id === "merge" ? "⑃" : <AgentsIcon size={13} />}{" "}
+                    {fab.label}
+                  </>
+                )}
+              </button>
+            )}
+            <button
+              className="pr-fab-more"
+              title="Everything an agent can do with this PR"
+              onClick={openAgentMenu}
+            >
+              {fab ? (
+                <ChevronIcon size={14} className="chevron-up" />
+              ) : (
+                <>
+                  <AgentsIcon size={13} /> Agent
+                </>
+              )}
+              {/* One live signal per control. While the main half is already
+                  showing a running job, a second pulsing dot on the caret is
+                  just two things blinking at you. */}
+              {running.length > 0 && !fabBusy && <span className="pr-agent-live" />}
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* Review is outward-facing: it posts to a real repo under the user's
@@ -1876,14 +2285,55 @@ export function PrView({
                     Drop all
                   </button>
                 </div>
-                {drafts.map((d) => (
-                  <DraftCard
-                    key={d.id}
-                    d={d}
-                    onPatch={patchDraft}
-                    onDrop={dropDraft}
-                  />
-                ))}
+                {/* A manifest, not a second copy. Each of these is already
+                    rendered in full on the line it belongs to, where the code
+                    it's about is visible; repeating the whole editable card down
+                    here put three textareas in a 220px scroller and made both
+                    copies unreadable. One line each, and clicking one takes you
+                    to the real thing. */}
+                <ul className="pr-draft-list">
+                  {drafts.map((d) => {
+                    const at = placed.get(d.id);
+                    return (
+                      <li
+                        key={d.id}
+                        className={`pr-draft-row ${at ? "" : "is-unplaced"}`}
+                      >
+                        <button
+                          className="pr-draft-jump"
+                          title={
+                            at
+                              ? "Show it on the line it belongs to"
+                              : "This line isn't in the diff — it still posts, there's just nothing here to show it against"
+                          }
+                          onClick={() => jumpToDraft(d)}
+                        >
+                          <span
+                            className={`pr-draft-sev ${d.blocking ? "is-blocking" : ""}`}
+                          >
+                            {d.blocking ? "blocking" : "nit"}
+                          </span>
+                          <span className="pr-draft-where">
+                            {(at?.path ?? d.path).split("/").pop()}:
+                            {at?.line ?? d.line}
+                            {!at && " ·  not in this diff"}
+                          </span>
+                          <span className="pr-draft-gist">{gist(d.body)}</span>
+                        </button>
+                        <button
+                          className="btn-mini"
+                          onClick={() =>
+                            setDrafts((prev) =>
+                              prev.filter((x) => x.id !== d.id),
+                            )
+                          }
+                        >
+                          Drop
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
               </div>
             )}
             <textarea
@@ -1894,21 +2344,31 @@ export function PrView({
               onChange={(e) => setComment(e.target.value)}
             />
             <div className="pr-review-actions">
-              {onMicroTask && (
-                <button
-                  className="btn-mini"
-                  title="Stage the findings an agent left as draft comments — nothing is posted"
-                  onClick={() => void importFindings()}
-                >
-                  Stage agent findings
-                </button>
+              {/* "How do I post these?" — you don't, separately. Every verdict
+                  submits the staged comments with it (see submit()), and a list
+                  of drafts sitting above three equal buttons never said so. It
+                  says so here, and the verdict the findings imply is the one
+                  wearing the accent instead of Approve always wearing it. */}
+              {drafts.length > 0 && (
+                <span className="pr-verdict-hint">
+                  {blockingDrafts > 0
+                    ? `${blockingDrafts} blocking`
+                    : `${drafts.length} ${drafts.length === 1 ? "nit" : "nits"}, nothing blocking`}
+                  {" — whichever verdict you pick posts "}
+                  {drafts.length === 1 ? "it" : `all ${drafts.length}`}.
+                </span>
               )}
               <span className="git-spacer" />
               {(["approve", "request-changes", "comment"] as Review[]).map(
                 (a) => (
                   <button
                     key={a}
-                    className={`btn ${a === "approve" ? "btn-accent" : ""}`}
+                    className={`btn ${a === suggestedVerdict ? "btn-accent" : ""}`}
+                    title={
+                      a === suggestedVerdict && drafts.length > 0
+                        ? "The verdict these findings point at"
+                        : undefined
+                    }
                     disabled={
                       busy ||
                       (a !== "approve" &&
@@ -2242,8 +2702,23 @@ const DraftCard = memo(function DraftCard({
   onDrop: (id: string) => void;
 }) {
   return (
-    <div className="pr-draft">
+    // The id is the anchor jumpToDraft scrolls to — without it the best the
+    // manifest could do was the top of the file.
+    <div
+      className={`pr-draft ${d.fromAgent ? "is-agent-made" : ""}`}
+      data-draft-id={d.id}
+    >
       <div className="pr-thread-head">
+        {/* Sitting inline among human review threads, an agent's finding is
+            indistinguishable from a colleague's without this. */}
+        {d.fromAgent && (
+          <span
+            className="agent-byline"
+            title="Found by an agent — you haven't posted it"
+          >
+            <AgentsIcon size={11} /> Agent
+          </span>
+        )}
         <span className="pr-thread-where">
           {d.path.split("/").pop()}:{d.line}
         </span>
@@ -2254,7 +2729,13 @@ const DraftCard = memo(function DraftCard({
       </div>
       <textarea
         className="pr-comment"
-        rows={2}
+        // An agent's finding runs to a paragraph or two — states the input, the
+        // state, and what goes wrong. Two rows turned every one of them into a
+        // scrollbar inside a scrollbar, so the box grows to the text instead.
+        rows={Math.min(
+          14,
+          Math.max(3, Math.ceil(d.body.length / 84) + d.body.split("\n").length),
+        )}
         value={d.body}
         onChange={(e) => onPatch(d.id, { body: e.target.value })}
       />
@@ -2283,6 +2764,7 @@ const PrFileCard = memo(function PrFileCard({
   prOpen,
   prUrl,
   liveCount,
+  draftCount,
   viewed,
   canViewed,
   data,
@@ -2299,6 +2781,7 @@ const PrFileCard = memo(function PrFileCard({
   prOpen: boolean;
   prUrl: string;
   liveCount: number;
+  draftCount: number;
   viewed: boolean;
   canViewed: boolean;
   data: DiffData;
@@ -2334,6 +2817,16 @@ const PrFileCard = memo(function PrFileCard({
             title="unresolved threads on this file"
           >
             {liveCount} 💬
+          </span>
+        )}
+        {/* Staged, not posted. Worth its own mark: it's the only thing on the
+            row that is waiting on a decision from you. */}
+        {draftCount > 0 && (
+          <span
+            className="pr-thread-tag is-draft"
+            title="staged findings, not posted"
+          >
+            {draftCount} ✎
           </span>
         )}
         {f.binary ? (

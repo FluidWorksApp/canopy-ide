@@ -57,17 +57,45 @@ describe("ContextMenu", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
-  it("expands a submenu on hover and runs a nested item", async () => {
+  it("opens a submenu on click and runs a nested item", async () => {
     const nested = vi.fn();
     const onClose = at([
       { label: "New agent", submenu: [{ label: "Claude", onClick: nested }] },
     ]);
-    // The submenu is hover-driven (onMouseEnter on the anchor); hovering the
-    // anchor reveals the nested list.
-    await userEvent.hover(screen.getByRole("button", { name: /New agent/ }));
+    await userEvent.click(screen.getByRole("button", { name: /New agent/ }));
     const claude = await screen.findByRole("button", { name: "Claude" });
     await userEvent.click(claude);
     expect(nested).toHaveBeenCalledOnce();
     expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("does not open a submenu on hover alone", async () => {
+    // Hover-to-open is what made a submenu impossible to shut: clicking the row
+    // closed it and the pointer, still sitting on that row, opened it again.
+    at([{ label: "New agent", submenu: [{ label: "Claude" }] }]);
+    await userEvent.hover(screen.getByRole("button", { name: /New agent/ }));
+    expect(screen.queryByRole("button", { name: "Claude" })).toBeNull();
+  });
+
+  it("closes an open submenu when its row is clicked again", async () => {
+    at([{ label: "New agent", submenu: [{ label: "Claude" }] }]);
+    const row = screen.getByRole("button", { name: /New agent/ });
+    await userEvent.click(row);
+    expect(await screen.findByRole("button", { name: "Claude" })).toBeTruthy();
+    await userEvent.click(row);
+    expect(screen.queryByRole("button", { name: "Claude" })).toBeNull();
+  });
+
+  it("switches between submenus on hover once one is already open", async () => {
+    // The half of hover that was worth keeping: sliding down a list of nested
+    // rows should follow the pointer, it just must not be what opens the first.
+    at([
+      { label: "New agent", submenu: [{ label: "Claude" }] },
+      { label: "Request review", submenu: [{ label: "VijayMatt" }] },
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: /New agent/ }));
+    await userEvent.hover(screen.getByRole("button", { name: /Request review/ }));
+    expect(await screen.findByRole("button", { name: "VijayMatt" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Claude" })).toBeNull();
   });
 });
