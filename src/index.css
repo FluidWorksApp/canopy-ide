@@ -3046,19 +3046,22 @@ body.dragging-tab * {
   inset: 0;
   z-index: 20;
   pointer-events: none; /* closed: clicks fall through to the terminal */
-  opacity: 0;
-  /* Hidden, not just transparent: the overlay's backdrop blur otherwise keeps
-     costing on every repaint of the terminal it covers. */
+  /* Hidden, not faded.
+     This used to animate `opacity` 0 → 1, and that is what was killing the
+     frost: an ancestor with opacity < 1 renders its subtree into a transparent
+     compositing group, and backdrop-filter inside that group samples the group
+     — which has nothing behind it — instead of the page. So the blur computed
+     correctly and drew nothing, leaving the pane as flat translucency over live
+     terminal text. The entrance animation moved down to .workspace-overlay-in,
+     which carries no backdrop-filter, so nothing above the glass is ever
+     part-transparent. */
   visibility: hidden;
-  transition:
-    opacity var(--dur-med) var(--ease-out),
-    visibility 0s linear var(--dur-med);
+  transition: visibility 0s linear var(--dur-med);
 }
 .workspace-overlay-layer.open {
   pointer-events: auto;
-  opacity: 1;
   visibility: visible;
-  transition: opacity var(--dur-med) var(--ease-out);
+  transition: visibility 0s linear 0s;
 }
 
 .workspace-overlay {
@@ -3066,14 +3069,36 @@ body.dragging-tab * {
   inset: 0;
   display: flex;
   flex-direction: column;
-  /* Translucent enough that the terminal reads through the frost. */
-  background: color-mix(in srgb, var(--bg) 58%, transparent);
-  backdrop-filter: blur(18px) saturate(135%);
-  -webkit-backdrop-filter: blur(18px) saturate(135%);
-  transform: scale(1.015);
-  transition: transform var(--dur-med) var(--ease-out);
+  /* The glass itself, and the only job of this element: hold the frost. No
+     transform and no animated opacity here or on anything above it — both
+     suppress backdrop-filter in this engine, which is how a deliberate frosted
+     pane ended up as 58% of nothing over a sharp terminal. */
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  backdrop-filter: blur(30px) saturate(180%);
+  -webkit-backdrop-filter: blur(30px) saturate(180%);
 }
-.workspace-overlay-layer.open .workspace-overlay {
+
+/* The entrance. Separated from the glass so the pane can scale and fade in
+   without taking the backdrop with it. */
+/* The loading block holds the space the diff is about to take, so arriving
+   content fills it rather than pushing the page down under the reader. */
+.aw-loading {
+  min-height: 240px;
+}
+
+.workspace-overlay-in {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  opacity: 0;
+  transform: scale(1.015);
+  transition:
+    opacity var(--dur-med) var(--ease-out),
+    transform var(--dur-med) var(--ease-out);
+}
+.workspace-overlay-layer.open .workspace-overlay-in {
+  opacity: 1;
   transform: scale(1);
 }
 
@@ -7363,16 +7388,17 @@ body.dragging-tab * {
 
 /* The composer sits over the end of the diff, so it should read as a layer on
    top of the page rather than a wall the page stops at: translucent, blurred,
-   with a bright hairline catching the top edge the way a pane of glass does.
-   The blur is what makes it legible — dropping the opacity alone would leave
-   code showing through the text behind it. */
+   with a bright hairline catching the top edge the way a pane of glass does. */
 .pr-review {
   position: relative;
   padding: 9px 14px 10px;
   border-top: 1px solid color-mix(in srgb, var(--border-strong) 70%, transparent);
-  background: color-mix(in srgb, var(--bg-alt) 72%, transparent);
-  backdrop-filter: blur(18px) saturate(1.35);
-  -webkit-backdrop-filter: blur(18px) saturate(1.35);
+  /* The comment above used to end "the blur is what makes it legible". It is
+     not: backdrop-filter does not composite in this webview, so this was 72%
+     glass over a live diff with the code reading straight through the review
+     text. The shadow and the lit edge still lift it off the page; the opacity
+     no longer has a blur to lean on. */
+  background: color-mix(in srgb, var(--bg-alt) 96%, transparent);
   box-shadow: 0 -8px 28px rgba(4, 6, 16, 0.34);
 }
 /* The lit edge. A separate layer so it stays a hairline at any zoom rather

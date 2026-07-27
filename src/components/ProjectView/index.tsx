@@ -1430,20 +1430,23 @@ export const ProjectView = memo(function ProjectView({
 
   /** Open the completed-tasks tab, or focus it if it's already up. Only ever
    *  one — it's a view of a single app-wide log, so a second would be a copy. */
-  const openTaskHistory = useCallback((runId?: string) => {
-    const focus = runId ? { runId, nonce: Date.now() } : undefined;
-    const existing = tabsRef.current.find((t) => t.type === "task-history");
-    if (existing) {
-      // Already open: hand it the run anyway, so a click from the panel lands
-      // on that row instead of wherever the tab was last left.
-      if (focus) patchTabRaw(existing.id, { focus } as Partial<SubTab>);
-      setActiveTabId(existing.id);
-      return;
-    }
-    const id = tabId();
-    setTabs((prev) => [...prev, { id, type: "task-history", focus }]);
-    setActiveTabId(id);
-  }, [patchTabRaw]);
+  const openTaskHistory = useCallback(
+    (runId?: string) => {
+      const focus = runId ? { runId, nonce: Date.now() } : undefined;
+      const existing = tabsRef.current.find((t) => t.type === "task-history");
+      if (existing) {
+        // Already open: hand it the run anyway, so a click from the panel lands
+        // on that row instead of wherever the tab was last left.
+        if (focus) patchTabRaw(existing.id, { focus } as Partial<SubTab>);
+        setActiveTabId(existing.id);
+        return;
+      }
+      const id = tabId();
+      setTabs((prev) => [...prev, { id, type: "task-history", focus }]);
+      setActiveTabId(id);
+    },
+    [patchTabRaw],
+  );
 
   /** Open the agent-instructions tab, focused on one file when a panel row
    *  asked for it. One per project, like the history tab. */
@@ -2397,7 +2400,11 @@ export const ProjectView = memo(function ProjectView({
           // Extensions that claim nothing (.dat, .pack, no extension at all)
           // only give themselves away in the bytes.
           if (kind === "code" && looksBinary(bytes)) {
-            blocked = { reason: "binary", size: stat.size, limit: sizeLimitFor(kind) };
+            blocked = {
+              reason: "binary",
+              size: stat.size,
+              limit: sizeLimitFor(kind),
+            };
             bytes = null;
           }
         }
@@ -3570,9 +3577,16 @@ export const ProjectView = memo(function ProjectView({
         saved: project.customTasks ?? [],
         onNewTask: seedTaskFrom,
         onOneOff: (brief) => openTaskComposer(brief, "once"),
-        onRunSaved: (t) => void startMicroTask(customTaskDef(t), { dir: firstRoot }, ""),
+        onRunSaved: (t) =>
+          void startMicroTask(customTaskDef(t), { dir: firstRoot }, ""),
       }),
-    [seedTaskFrom, openTaskComposer, startMicroTask, firstRoot, project.customTasks],
+    [
+      seedTaskFrom,
+      openTaskComposer,
+      startMicroTask,
+      firstRoot,
+      project.customTasks,
+    ],
   );
 
   const submitRootCreate = async () => {
@@ -3966,7 +3980,9 @@ export const ProjectView = memo(function ProjectView({
   const serverGroups = useMemo(
     () =>
       groupServers(components, runTabs, (ptyId) =>
-        ptyId == null ? [] : (projectStats.find((s) => s.id === ptyId)?.ports ?? []),
+        ptyId == null
+          ? []
+          : (projectStats.find((s) => s.id === ptyId)?.ports ?? []),
       ),
     [components, runTabs, projectStats],
   );
@@ -5172,74 +5188,80 @@ export const ProjectView = memo(function ProjectView({
               >
                 {/* No chrome header here — AgentWorkspaceView's own banner is
                     the single header, and it renders the close button (passed
-                    below) so the agent name/branch aren't repeated twice. */}
-                <div className="workspace-overlay-body">
-                  {wsDrawerOpen && (
-                    <AgentWorkspaceView
-                      key={agentTermWs.ptyId}
-                      repo={agentTermWs.repo}
-                      agent={agentTermWs.agent}
-                      cwd={agentTermWs.cwd}
-                      sessionId={agentTermWs.sessionId}
-                      digest={agentTermWs.digest}
-                      onOpenCommit={openCommit}
-                      onOpenPr={openPr}
-                      onOpenTerminal={(cwd, label) =>
-                        addTerminal(cwd, undefined, label)
-                      }
-                      onNotice={onNotice}
-                      onMessageAgent={(text) =>
-                        messageAgent({
-                          ptyId: agentTermWs.ptyId,
-                          sessionId: agentTermWs.sessionId,
-                          agentId: agentTermWs.agent,
-                          cwd: agentTermWs.cwd,
-                          text,
-                        })
-                      }
-                      onFocusAgent={jumpToPty}
-                      onClose={() => setWsDrawerOpen(false)}
-                      onRaisePrTask={
-                        agentTermWs.repo
-                          ? (branch, worktree) =>
-                              void startMicroTask(
-                                raisePrTask,
-                                {
-                                  repo: agentTermWs.repo as string,
-                                  branch,
-                                  worktree,
-                                },
-                                "",
-                              )
-                          : undefined
-                      }
-                      onReviewPrTask={
-                        agentTermWs.repo
-                          ? (pr) =>
-                              void startMicroTask(
-                                reviewPrTask,
-                                { repo: agentTermWs.repo as string, pr },
-                                "",
-                              )
-                          : undefined
-                      }
-                      onAddressPrCommentsTask={
-                        agentTermWs.repo
-                          ? (pr) =>
-                              void startMicroTask(
-                                addressPrCommentsTask,
-                                { repo: agentTermWs.repo as string, pr },
-                                "",
-                              )
-                          : undefined
-                      }
-                      onRunSavedTask={(task, dir) =>
-                        void startMicroTask(customTaskDef(task), { dir }, "")
-                      }
-                      savedTasks={project.customTasks ?? []}
-                      onRunOneOff={(brief, dir) => runAdhocTask(brief, dir)}
-                    />
-                  )}
+                    below) so the agent name/branch aren't repeated twice.
+                    The extra wrapper carries the entrance animation: it must not
+                    be the pane holding the frost, because a transform or a
+                    part-way opacity above backdrop-filter switches the blur
+                    off. */}
+                <div className="workspace-overlay-in">
+                  <div className="workspace-overlay-body">
+                    {wsDrawerOpen && (
+                      <AgentWorkspaceView
+                        key={agentTermWs.ptyId}
+                        repo={agentTermWs.repo}
+                        agent={agentTermWs.agent}
+                        cwd={agentTermWs.cwd}
+                        sessionId={agentTermWs.sessionId}
+                        digest={agentTermWs.digest}
+                        onOpenCommit={openCommit}
+                        onOpenPr={openPr}
+                        onOpenTerminal={(cwd, label) =>
+                          addTerminal(cwd, undefined, label)
+                        }
+                        onNotice={onNotice}
+                        onMessageAgent={(text) =>
+                          messageAgent({
+                            ptyId: agentTermWs.ptyId,
+                            sessionId: agentTermWs.sessionId,
+                            agentId: agentTermWs.agent,
+                            cwd: agentTermWs.cwd,
+                            text,
+                          })
+                        }
+                        onFocusAgent={jumpToPty}
+                        onClose={() => setWsDrawerOpen(false)}
+                        onRaisePrTask={
+                          agentTermWs.repo
+                            ? (branch, worktree) =>
+                                void startMicroTask(
+                                  raisePrTask,
+                                  {
+                                    repo: agentTermWs.repo as string,
+                                    branch,
+                                    worktree,
+                                  },
+                                  "",
+                                )
+                            : undefined
+                        }
+                        onReviewPrTask={
+                          agentTermWs.repo
+                            ? (pr) =>
+                                void startMicroTask(
+                                  reviewPrTask,
+                                  { repo: agentTermWs.repo as string, pr },
+                                  "",
+                                )
+                            : undefined
+                        }
+                        onAddressPrCommentsTask={
+                          agentTermWs.repo
+                            ? (pr) =>
+                                void startMicroTask(
+                                  addressPrCommentsTask,
+                                  { repo: agentTermWs.repo as string, pr },
+                                  "",
+                                )
+                            : undefined
+                        }
+                        onRunSavedTask={(task, dir) =>
+                          void startMicroTask(customTaskDef(task), { dir }, "")
+                        }
+                        savedTasks={project.customTasks ?? []}
+                        onRunOneOff={(brief, dir) => runAdhocTask(brief, dir)}
+                      />
+                    )}
+                  </div>
                 </div>
               </section>
             </div>
@@ -5666,7 +5688,9 @@ export const ProjectView = memo(function ProjectView({
                   ? () =>
                       taskRows(
                         "About the current changes: ",
-                        changeGroups[0]?.repo ?? componentsRef.current[0]?.path ?? "",
+                        changeGroups[0]?.repo ??
+                          componentsRef.current[0]?.path ??
+                          "",
                       )
                   : undefined
               }
