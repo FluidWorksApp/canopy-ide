@@ -5497,8 +5497,15 @@ export const ProjectView = memo(function ProjectView({
             between a bare child and a <Panel> changes its element type, which
             unmounts the subtree — and Term's cleanup kills the PTY. Toggling
             focus mode would silently kill every terminal (and any agent running
-            in one). Keeping the tree shape fixed keeps the PTYs alive. */}
-        <PanelGroup direction="horizontal">
+            in one). Keeping the tree shape fixed keeps the PTYs alive.
+
+            autoSaveId keyed by project persists the sidebar width to
+            localStorage per project: a resize survives reload and reopening,
+            and each project keeps its own width. The library stores the
+            side+main and main-only (collapsed) arrangements separately, so
+            collapsing and reopening restores the saved width; defaultSize is
+            only the first-run fallback. */}
+        <PanelGroup direction="horizontal" autoSaveId={`side-panel:${project.id}`}>
           {!collapsed && !zen && (
             <>
               <Panel id="side" order={1} defaultSize={20} minSize={13} maxSize={40}>
