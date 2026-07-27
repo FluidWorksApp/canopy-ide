@@ -51,6 +51,14 @@ export interface MicroTaskDef<P> {
   effect?: TaskEffect;
   /** Set by tasks that mutate files; the launcher prepares the checkout. */
   isolation?: PrWorktreeIsolation<P>;
+  /** The milestones this task reports, in order. Declaring them is the whole
+   *  opt-in: the launcher appends the reporting protocol to the brief, and any
+   *  surface showing the run renders the rail. A task without them is one whose
+   *  shape isn't known ahead of time — an ad-hoc brief, a user's own task — and
+   *  those fall back to the live "last tool used" note in the Tasks panel. */
+  steps?: readonly TaskStep[];
+  /** Where those milestones are appended. Required alongside `steps`. */
+  progressPath?(payload: P): string;
 }
 
 export type TaskEffect = "reads" | "posts" | "pushes";
@@ -79,6 +87,142 @@ export function microTaskProtocol(): string {
     `acknowledges, stop — one closing sentence at most; Canopy will close this terminal.`
   );
 }
+
+/** A task's milestones, in order.
+ *
+ *  A one-shot agent is a black box for however long it runs, and "an agent is on
+ *  it" is not progress — it says nothing at minute four that it didn't say at
+ *  second one. So the task reports: it appends a step's `id` to the progress
+ *  file as it finishes it, and the tab lights the milestone up. `owner: "app"`
+ *  marks the step the tab completes itself, after the agent's terminal is gone.
+ *
+ *  Two labels each, because a step reads differently depending on where it is:
+ *  the middle one is happening now, the ones behind it already happened. */
+export interface TaskStep {
+  id: string;
+  /** While it's the one in flight. */
+  doing: string;
+  /** Once it's behind you — a rail still reading "Reading the change" three
+   *  steps later reads as stuck. */
+  done: string;
+  /** "app" = the tab finishes this one, so the agent is never asked to. */
+  owner?: "app";
+}
+
+export const PR_REVIEW_STEPS: readonly TaskStep[] = [
+  { id: "read", doing: "Reading the change", done: "Read the change" },
+  { id: "map", doing: "Mapping the risk", done: "Mapped the risk" },
+  { id: "findings", doing: "Finding problems", done: "Found the problems" },
+  { id: "staged", doing: "Staging drafts", done: "Staged as drafts", owner: "app" },
+];
+
+// The rest of the PR tasks, each tracking the order its own brief lays out. The
+// point of writing them per task rather than reusing one generic four is that a
+// rail is only worth looking at if it says something the label doesn't: "Built
+// and tested" on a merge, "Reproduced it here" on a CI fix. Four steps each
+// because that is what fits the dock without wrapping, and because a step that
+// takes under a few seconds is a flicker rather than a milestone.
+
+export const PR_RESOLVE_STEPS: readonly TaskStep[] = [
+  { id: "merge", doing: "Merging the base in", done: "Merged the base in" },
+  { id: "resolve", doing: "Settling each conflict", done: "Settled every conflict" },
+  { id: "verify", doing: "Building and testing", done: "Built and tested" },
+  { id: "push", doing: "Pushing the merge", done: "Pushed the merge" },
+];
+
+export const PR_FIX_CI_STEPS: readonly TaskStep[] = [
+  { id: "logs", doing: "Reading the failing run", done: "Read the failing run" },
+  { id: "repro", doing: "Reproducing it here", done: "Reproduced it here" },
+  { id: "fix", doing: "Fixing the cause", done: "Fixed the cause" },
+  { id: "push", doing: "Pushing for a re-run", done: "Pushed for a re-run" },
+];
+
+export const PR_ADDRESS_STEPS: readonly TaskStep[] = [
+  { id: "collect", doing: "Collecting the comments", done: "Collected the comments" },
+  { id: "validate", doing: "Checking each against the code", done: "Checked each against the code" },
+  { id: "fix", doing: "Fixing what held up", done: "Fixed what held up" },
+  { id: "reply", doing: "Pushing and replying", done: "Pushed and replied" },
+];
+
+export const PR_APPLY_STEPS: readonly TaskStep[] = [
+  { id: "read", doing: "Reading the file as it stands", done: "Read the file as it stands" },
+  { id: "apply", doing: "Applying the suggestion", done: "Applied the suggestion" },
+  { id: "verify", doing: "Building and testing", done: "Built and tested" },
+  { id: "reply", doing: "Pushing and replying", done: "Pushed and replied" },
+];
+
+export const PR_RUN_IT_STEPS: readonly TaskStep[] = [
+  { id: "start", doing: "Starting the app", done: "Started the app" },
+  { id: "drive", doing: "Driving the changed screens", done: "Drove the changed screens" },
+  { id: "checks", doing: "Running the project's tests", done: "Ran the project's tests" },
+  { id: "report", doing: "Writing up what it saw", done: "Wrote up what it saw" },
+];
+
+export const PR_FOLLOW_UPS_STEPS: readonly TaskStep[] = [
+  { id: "collect", doing: "Collecting the threads", done: "Collected the threads" },
+  { id: "triage", doing: "Sorting out of scope from in", done: "Sorted out of scope from in" },
+  { id: "file", doing: "Opening the issues", done: "Opened the issues" },
+  { id: "link", doing: "Linking them back", done: "Linked them back" },
+];
+
+/** Which milestones are finished, given what the agent has reported.
+ *
+ *  A high-water mark, not a set: these are stages of one pass, so reaching the
+ *  third means the first two happened whether or not the agent remembered to
+ *  say so. Reading it as a set produced rails with a later step ticked and
+ *  earlier ones blank — which describes nothing that can actually occur, and
+ *  read as a bug in the task rather than a missed line in a file.
+ *
+ *  Order comes from `steps`, so a line written twice, out of sequence, or
+ *  misspelled can't skew it; unknown lines are ignored rather than guessed at. */
+export function stepsDone(progress: string, steps: readonly TaskStep[]): string[] {
+  const seen = new Set(
+    progress
+      .split("\n")
+      .map((l) => l.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  let furthest = -1;
+  steps.forEach((s, i) => {
+    if (seen.has(s.id)) furthest = i;
+  });
+  return steps.slice(0, furthest + 1).map((s) => s.id);
+}
+
+/** The lines that make an agent report its milestones. Written as shell appends
+ *  rather than a tool call so every CLI can do it, with or without the MCP
+ *  bridge — and truncating first is what stops a re-run showing the previous
+ *  run's progress as already complete. */
+const progressProtocol = (path: string, steps: readonly TaskStep[]): string => {
+  const agentSteps = steps.filter((s) => s.owner !== "app");
+  return (
+    `Report your progress as you go — the user is watching a progress rail in Canopy and it moves ` +
+    `only when you say so. Before anything else, start it empty: \`mkdir -p\` the directory and run ` +
+    `\`: > ${path}\`. Then, the moment you finish each of these, append its name on its own line ` +
+    `(\`printf '<name>\\n' >> ${path}\`), in this order: ` +
+    agentSteps.map((s) => `\`${s.id}\` once you have ${s.done.toLowerCase()}`).join(", ") +
+    `. Append one line each and never rewrite the file. Do this even for a step that turned up ` +
+    `nothing — a milestone that is skipped silently reads as a task that hung. `
+  );
+};
+
+/** The reporting instructions for a task that declared milestones, or nothing
+ *  for one that didn't. Appended by the launcher next to the completion
+ *  protocol rather than written into each brief: it is the same boilerplate
+ *  every time, it is derived entirely from `steps`, and having it in the brief
+ *  put it in the run history where it is pure noise. */
+export function progressBrief<P>(def: MicroTaskDef<P>, payload: P): string {
+  if (!def.steps?.length || !def.progressPath) return "";
+  return progressProtocol(def.progressPath(payload), def.steps);
+}
+
+/** Where a task appends its milestones. Keyed by task as well as by PR: a
+ *  review and a conflict resolution can be running on the same PR at the same
+ *  time, and one file between them is two agents overwriting each other's
+ *  rail. Always under the main checkout, never the worktree — the worktree is
+ *  torn down at the end of the run, and the tab reading the file outlives it. */
+export const prProgressPath = (repo: string, taskId: string, number: number): string =>
+  `${repo}/.canopy/${taskId}-${number}-progress.txt`;
 
 /** Kept lean on purpose: the Git panel's branch rows only know a branch by
  *  name, while a branch tab has the full BranchWork — both can launch this.
@@ -213,6 +357,8 @@ export const addressPrCommentsTask: MicroTaskDef<AddressPrCommentsPayload> = {
   id: "address-pr-comments",
   label: "Address comments",
   icon: "↩",
+  steps: PR_ADDRESS_STEPS,
+  progressPath: (p) => prProgressPath(p.repo, "address-pr-comments", p.pr.number),
   placeholder: "Which comments to focus on…",
   blurb: "Validates each comment, fixes the cause, replies, and pushes.",
   effect: "pushes",
@@ -270,7 +416,7 @@ export const addressPrCommentsTask: MicroTaskDef<AddressPrCommentsPayload> = {
 // the brief keeps it out of git via .git/info/exclude rather than touching the
 // repo's own .gitignore.
 
-const ARTIFACT_EXT = { map: "md", findings: "json", progress: "txt" } as const;
+const ARTIFACT_EXT = { map: "md", findings: "json" } as const;
 
 /** Where a PR task leaves something for the tab to render. */
 export type PrArtifact = keyof typeof ARTIFACT_EXT;
@@ -280,75 +426,6 @@ export const prArtifactPath = (
   number: number,
   kind: PrArtifact = "map",
 ): string => `${repo}/.canopy/pr-${number}-${kind}.${ARTIFACT_EXT[kind]}`;
-
-/** The Review task's milestones, in order.
- *
- *  A one-shot agent is a black box for however long it runs, and "an agent is on
- *  it" is not progress — it says nothing at minute four that it didn't say at
- *  second one. So the task reports: it appends a step's `id` to the progress
- *  file as it finishes it, and the tab lights the milestone up. `owner: "app"`
- *  marks the step the tab completes itself, after the agent's terminal is gone.
- *
- *  Two labels each, because a step reads differently depending on where it is:
- *  the middle one is happening now, the ones behind it already happened. */
-export interface TaskStep {
-  id: string;
-  /** While it's the one in flight. */
-  doing: string;
-  /** Once it's behind you — a rail still reading "Reading the change" three
-   *  steps later reads as stuck. */
-  done: string;
-  /** "app" = the tab finishes this one, so the agent is never asked to. */
-  owner?: "app";
-}
-
-export const PR_REVIEW_STEPS: readonly TaskStep[] = [
-  { id: "read", doing: "Reading the change", done: "Read the change" },
-  { id: "map", doing: "Mapping the risk", done: "Mapped the risk" },
-  { id: "findings", doing: "Finding problems", done: "Found the problems" },
-  { id: "staged", doing: "Staging drafts", done: "Staged as drafts", owner: "app" },
-];
-
-/** Which milestones are finished, given what the agent has reported.
- *
- *  A high-water mark, not a set: these are stages of one pass, so reaching the
- *  third means the first two happened whether or not the agent remembered to
- *  say so. Reading it as a set produced rails with a later step ticked and
- *  earlier ones blank — which describes nothing that can actually occur, and
- *  read as a bug in the task rather than a missed line in a file.
- *
- *  Order comes from `steps`, so a line written twice, out of sequence, or
- *  misspelled can't skew it; unknown lines are ignored rather than guessed at. */
-export function stepsDone(progress: string, steps: readonly TaskStep[]): string[] {
-  const seen = new Set(
-    progress
-      .split("\n")
-      .map((l) => l.trim().toLowerCase())
-      .filter(Boolean),
-  );
-  let furthest = -1;
-  steps.forEach((s, i) => {
-    if (seen.has(s.id)) furthest = i;
-  });
-  return steps.slice(0, furthest + 1).map((s) => s.id);
-}
-
-/** The lines that make an agent report its milestones. Written as shell appends
- *  rather than a tool call so every CLI can do it, with or without the MCP
- *  bridge — and truncating first is what stops a re-run showing the previous
- *  run's progress as already complete. */
-const progressProtocol = (path: string, steps: readonly TaskStep[]): string => {
-  const agentSteps = steps.filter((s) => s.owner !== "app");
-  return (
-    `Report your progress as you go — the user is watching a progress rail on the PR tab and it moves ` +
-    `only when you say so. Before anything else, start it empty: \`mkdir -p\` the directory and run ` +
-    `\`: > ${path}\`. Then, the moment you finish each of these, append its name on its own line ` +
-    `(\`printf '<name>\\n' >> ${path}\`), in this order: ` +
-    agentSteps.map((s) => `\`${s.id}\` once you have ${s.done.toLowerCase()}`).join(", ") +
-    `. Append one line each and never rewrite the file. Do this even for a step that turned up ` +
-    `nothing — a milestone that is skipped silently reads as a task that hung. `
-  );
-};
 
 /** One line the briefs share: make the directory, keep it out of git. */
 const artifactPreamble = (path: string): string =>
@@ -366,6 +443,8 @@ export const prReviewTask: MicroTaskDef<ReviewPrPayload> = {
   id: "pr-review",
   label: "Review",
   icon: "◎",
+  steps: PR_REVIEW_STEPS,
+  progressPath: (p) => prProgressPath(p.repo, "pr-review", p.pr.number),
   placeholder: "Anything to focus on…",
   blurb: "Reads it, maps the risk, and stages findings for you to vet.",
   effect: "reads",
@@ -393,7 +472,6 @@ export const prReviewTask: MicroTaskDef<ReviewPrPayload> = {
         `anything it touches before believing a claim about behaviour. A doc-comment that still ` +
         `describes the old behaviour proves nothing except that it wasn't updated. ` +
         lens +
-        progressProtocol(prArtifactPath(p.repo, n, "progress"), PR_REVIEW_STEPS) +
         `Write two more files, and nothing else. ` +
         `(1) The map. ` +
         artifactPreamble(prArtifactPath(p.repo, n, "map")) +
@@ -429,6 +507,8 @@ export const fixCiTask: MicroTaskDef<ReviewPrPayload> = {
   id: "pr-fix-ci",
   label: "Fix CI",
   icon: "⚒",
+  steps: PR_FIX_CI_STEPS,
+  progressPath: (p) => prProgressPath(p.repo, "pr-fix-ci", p.pr.number),
   placeholder: "Which check to start with…",
   blurb: "Reads the failing logs, fixes the cause, pushes when it's green.",
   effect: "pushes",
@@ -469,6 +549,8 @@ export const resolveConflictsTask: MicroTaskDef<ReviewPrPayload> = {
   id: "pr-resolve-conflicts",
   label: "Resolve conflicts",
   icon: "⑂",
+  steps: PR_RESOLVE_STEPS,
+  progressPath: (p) => prProgressPath(p.repo, "pr-resolve-conflicts", p.pr.number),
   placeholder: "Anything to watch for in the merge…",
   blurb: "Merges the base in, settles every conflict, and pushes.",
   effect: "pushes",
@@ -518,6 +600,8 @@ export const applySuggestionTask: MicroTaskDef<ApplySuggestionPayload> = {
   id: "pr-apply-suggestion",
   label: "Apply suggestion",
   icon: "⇥",
+  steps: PR_APPLY_STEPS,
+  progressPath: (p) => prProgressPath(p.repo, "pr-apply-suggestion", p.pr.number),
   placeholder: "Anything to watch for…",
   blurb: "Applies a reviewer's suggested change, proves it, and pushes.",
   effect: "pushes",
@@ -553,6 +637,8 @@ export const runItReviewTask: MicroTaskDef<ReviewPrPayload> = {
   id: "pr-run-it",
   label: "Run it & look",
   icon: "▶",
+  steps: PR_RUN_IT_STEPS,
+  progressPath: (p) => prProgressPath(p.repo, "pr-run-it", p.pr.number),
   placeholder: "Which screen or flow to exercise…",
   blurb: "Starts the app on the PR's branch and reports what it saw.",
   effect: "reads",
@@ -588,6 +674,8 @@ export const followUpsTask: MicroTaskDef<ReviewPrPayload> = {
   id: "pr-follow-ups",
   label: "Spin off follow-ups",
   icon: "⤴",
+  steps: PR_FOLLOW_UPS_STEPS,
+  progressPath: (p) => prProgressPath(p.repo, "pr-follow-ups", p.pr.number),
   placeholder: "Which ones to spin off…",
   blurb: "Turns out-of-scope comments into issues and links them back.",
   effect: "posts",

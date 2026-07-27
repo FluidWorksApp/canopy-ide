@@ -70,6 +70,8 @@ import {
   adhocTaskDef,
   customTaskDef,
   microTaskProtocol,
+  oneLine,
+  progressBrief,
   raisePrTask,
   reviewPrTask,
   type CustomMicroTask,
@@ -1595,14 +1597,19 @@ export const ProjectView = memo(function ProjectView({
    *  that says what it's doing and what it found. Anything else keeps the
    *  ephemeral tab, which for those CLIs is the only place the run is visible
    *  at all. */
+  /** Returns whether an agent actually started. Every surface that lights a
+   *  button up on click needs to know, because the launch can still fall over
+   *  afterwards — no CLI, a worktree that won't build, a spawn that fails — and
+   *  a caller left guessing shows "Resolving…" over an error toast until a
+   *  timeout rescues it. */
   const startMicroTask = useCallback(
-    async <P,>(def: MicroTaskDef<P>, payload: P, userQuery: string) => {
+    async <P,>(def: MicroTaskDef<P>, payload: P, userQuery: string): Promise<boolean> => {
       const installedClis = AGENT_CLIS.filter((c) => getInstalled()[c.bin]);
       if (installedClis.length === 0) {
         onNotice(
           "Running a task needs an agent CLI — install one in Settings → Agents.",
         );
-        return;
+        return false;
       }
       const preferred = getSettings().defaultAgent;
       const agent = (
@@ -1613,7 +1620,7 @@ export const ProjectView = memo(function ProjectView({
       const cli = AGENT_CLIS.find((c) => c.id === agent);
       if (!cli || !agent) {
         onNotice(`No agent CLI installed to run "${def.label}".`);
-        return;
+        return false;
       }
       // A task that edits files gets the PR's branch in a worktree of its own,
       // same deal as startPrAgent: reuse the worktree already holding it, else
@@ -1640,14 +1647,16 @@ export const ProjectView = memo(function ProjectView({
               `If it's from a private fork you can't fetch, click Checkout first.`,
             "error",
           );
-          return;
+          return false;
         }
       }
-      const seed = `${def.buildContext(payload, userQuery, env)} ${microTaskProtocol()}`;
+      const seed = oneLine(
+        `${def.buildContext(payload, userQuery, env)} ${progressBrief(def, payload)} ${microTaskProtocol()}`,
+      );
       const start = startCommand(agent, seed);
       if (!start) {
         onNotice(`No agent CLI installed to run "${def.label}".`);
-        return;
+        return false;
       }
       // Logged at launch, not at completion: a task that is stopped, or whose
       // agent dies without ever reporting, still has to leave a trace — and the
@@ -1682,7 +1691,7 @@ export const ProjectView = memo(function ProjectView({
           pty = res.id;
         } catch (err) {
           onNotice(`Couldn't start "${def.label}": ${String(err)}`, "error");
-          return;
+          return false;
         }
         updateMicroRuns((runs) =>
           withRun(runs, {
@@ -1700,7 +1709,7 @@ export const ProjectView = memo(function ProjectView({
         // Said once per launch because the alternative is a click that appears
         // to do nothing: the work is real, it is just not in front of you.
         onNotice(`“${def.label}” is running — watch it in Tasks.`);
-        return;
+        return true;
       }
 
       const id = addTerminal(
@@ -1709,7 +1718,7 @@ export const ProjectView = memo(function ProjectView({
         `${def.label} · ${cli.name}`,
         def.icon,
       );
-      if (!id) return;
+      if (!id) return false;
       patchTabRaw(id, {
         micro: { taskId: def.id, runId: record() },
       } as Partial<SubTab>);
@@ -1721,6 +1730,7 @@ export const ProjectView = memo(function ProjectView({
           if (pty != null) seedPrompt(pty);
         }, 2500);
       }
+      return true;
     },
     [
       addTerminal,

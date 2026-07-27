@@ -34,17 +34,18 @@ import { TaskProgress } from "./TaskProgress";
 import type { AgentTarget } from "./TicketsPanel";
 import {
   MICRO_TASKS,
-  PR_REVIEW_STEPS,
   addressPrCommentsTask,
   applySuggestionTask,
   fixCiTask,
   followUpsTask,
   prArtifactPath,
+  prProgressPath,
   prReviewTask,
   resolveConflictsTask,
   runItReviewTask,
   stepsDone,
   type MicroTaskDef,
+  type TaskStep,
 } from "../microTasks";
 import { rowFor, subscribe as subscribeToPrs } from "../prWatchStore";
 import { TASK_HISTORY_EVENT, taskRuns, type TaskRun } from "../taskHistory";
@@ -88,6 +89,29 @@ import {
 // into the renderer. Working-tree diffs (components/DiffView.tsx) have to build
 // their patch first — see the note there about Monaco's diff not computing.
 
+/** The tasks that report milestones, and so get the rail rather than a spinner.
+ *
+ *  It is every agent job this tab can start. That is the point: a one-shot agent
+ *  is a black box for as long as it runs, and "Resolving…" says exactly as much
+ *  at minute four as it did at second one — which is how a run that had quietly
+ *  died looked identical to one that was working. Review had the rail and the
+ *  other six had a word and a dot, so the same click told you a different amount
+ *  depending on which button you happened to press.
+ *
+ *  Reduced to what the rail needs: these are `MicroTaskDef`s of six different
+ *  payload types, and nothing here builds a payload. */
+const RAIL_TASKS: readonly { id: string; label: string; steps: readonly TaskStep[] }[] = (
+  [
+    prReviewTask,
+    resolveConflictsTask,
+    fixCiTask,
+    addressPrCommentsTask,
+    applySuggestionTask,
+    runItReviewTask,
+    followUpsTask,
+  ] as { id: string; label: string; steps?: readonly TaskStep[] }[]
+).flatMap((t) => (t.steps ? [{ id: t.id, label: t.label, steps: t.steps }] : []));
+
 interface PrViewProps {
   repo: string;
   pr: ipc.PrInfo;
@@ -108,7 +132,14 @@ interface PrViewProps {
   onSendResolve: (target: AgentTarget) => void;
   /** Launch a one-shot PR micro-task — review it, map it, address the comments
    *  it came back with. Each reports and closes its own terminal. */
-  onMicroTask?: <P>(task: MicroTaskDef<P>, payload: P, query: string) => void;
+  /** Resolves to whether an agent actually started — a launch can still fail
+   *  after the click (no CLI, a worktree that won't build), and the buttons
+   *  this tab lights up have to come back when it does. */
+  onMicroTask?: <P>(
+    task: MicroTaskDef<P>,
+    payload: P,
+    query: string,
+  ) => Promise<boolean>;
 }
 
 type Review = "approve" | "request-changes" | "comment";
@@ -572,29 +603,34 @@ export function PrView({
   const isBusyTask = (taskId: string) =>
     isRunning(taskId) || pending[taskId] != null;
 
-  /** Milestones the running Review has reported. Polled rather than pushed: the
+  /** Whichever milestone-reporting task is running owns the rail. Only one can
+   *  be: they all take the PR's worktree or its conversation, and two agents
+   *  pushing the same branch is the thing the isolation exists to prevent. */
+  const railTask = RAIL_TASKS.find((t) => isBusyTask(t.id)) ?? null;
+  const reviewBusy = isBusyTask(prReviewTask.id);
+
+  /** Milestones the running task has reported. Polled rather than pushed: the
    *  agent appends to a file (every CLI can, with or without the MCP bridge), so
-   *  the tab has to look. Strictly gated on the task actually running — a poll
+   *  the tab has to look. Strictly gated on a task actually running — a poll
    *  that outlives what it was watching is a tab that never goes quiet. */
   const [steps, setSteps] = useState<string[]>([]);
   /** What the progress file held when this run started. Until it changes, the
    *  agent hasn't truncated it yet and the contents are the *previous* run's —
-   *  showing those would open a fresh review already at four-of-four. */
+   *  showing those would open a fresh run already at four-of-four. */
   const progressBase = useRef<string | null>(null);
-  const reviewBusy = isBusyTask(prReviewTask.id);
+  const railId = railTask?.id ?? null;
+  const railSteps = railTask?.steps;
   useEffect(() => {
-    if (!reviewBusy) return;
+    if (!railId || !railSteps) return;
     let live = true;
-    const path = prArtifactPath(repo, pr.number, "progress");
+    const path = prProgressPath(repo, railId, pr.number);
     const read = () =>
       void ipc
         .fsReadText(path)
         .then((t) => {
           if (!live) return;
           if (progressBase.current === null) progressBase.current = t;
-          setSteps(
-            t === progressBase.current ? [] : stepsDone(t, PR_REVIEW_STEPS),
-          );
+          setSteps(t === progressBase.current ? [] : stepsDone(t, railSteps));
         })
         .catch(() => {
           // No file yet is the normal first second of a run, not an error.
@@ -606,7 +642,7 @@ export function PrView({
       live = false;
       window.clearInterval(tick);
     };
-  }, [reviewBusy, repo, pr.number]);
+  }, [railId, railSteps, repo, pr.number]);
 
   /** Every task launch on this tab goes through here. */
   const launch = useCallback(
@@ -615,11 +651,25 @@ export function PrView({
       setPending((p) => ({ ...p, [def.id]: Date.now() }));
       // A new run starts the rail empty and re-arms the staleness guard, so the
       // last run's milestones don't flash up before this agent has written one.
-      if (def.id === prReviewTask.id) {
+      if (RAIL_TASKS.some((t) => t.id === def.id)) {
         setSteps([]);
         progressBase.current = null;
       }
-      onMicroTask(def, payload, query);
+      // The launcher says whether an agent actually started. It can refuse
+      // after the click — no CLI, a worktree that won't build — and it puts its
+      // own error on screen when it does; what it cannot do is take this tab's
+      // button out of the busy state it entered on the way in. Left to the 30s
+      // sweep below, the pill sat there reading "Resolving…" directly above the
+      // toast explaining that nothing was resolving.
+      void onMicroTask(def, payload, query).then((started) => {
+        if (started) return;
+        setPending((p) => {
+          if (p[def.id] == null) return p;
+          const next = { ...p };
+          delete next[def.id];
+          return next;
+        });
+      });
       // Review reports its milestones on this page, so pointing at the Running
       // now panel would send you away from the thing that's actually showing.
       noticeRef.current(
@@ -672,10 +722,14 @@ export function PrView({
   // the rail is already up by then, and a counter that starts at 0s twice is
   // worse than one that starts a moment late. Self-ticking, so the second hand
   // re-renders one span rather than the tab.
-  const reviewRun = running.find((r) => r.taskId === prReviewTask.id);
-  const reviewElapsed = reviewRun ? (
-    <Elapsed startedAt={reviewRun.startedAt} />
-  ) : undefined;
+  const railRun = running.find((r) => r.taskId === railId);
+  const railElapsed = railRun ? <Elapsed startedAt={railRun.startedAt} /> : undefined;
+
+  /** Review keeps the rail up for a moment after its agent is gone — see
+   *  `settling` — while the tab reads the two files it left behind. Nothing
+   *  else has a handoff, so nothing else needs the grace. */
+  const rail =
+    railTask ?? (settling ? (RAIL_TASKS.find((t) => t.id === prReviewTask.id) ?? null) : null);
 
   const persist = useCallback((next: PrLoop) => {
     setLoop(saveLoop(next));
@@ -1816,13 +1870,13 @@ export function PrView({
             you lose the moment you start reading the diff is a progress rail
             for the thirty seconds you were not going to look away anyway. This
             panel is pinned, so the run stays in sight for its whole life. */}
-        {(reviewBusy || settling) && (
+        {rail && (
           <TaskProgress
-            steps={PR_REVIEW_STEPS}
+            steps={rail.steps}
             done={steps}
-            active={reviewBusy}
-            title={reviewBusy ? "Reviewing this change" : "Review finished"}
-            elapsed={reviewElapsed}
+            active={!!railTask}
+            title={railTask ? rail.label : `${rail.label} finished`}
+            elapsed={railElapsed}
           />
         )}
       </div>
