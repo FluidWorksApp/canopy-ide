@@ -171,3 +171,26 @@ export function removeTaskRun(id: string): void {
 export function clearTaskHistory(): void {
   write([]);
 }
+
+/** The terminal tail with its dead space taken out.
+ *
+ *  What gets captured is a PTY's scrollback, and once the escape codes that
+ *  drew over it are stripped, most of a screen is blank: a CLI that paints a
+ *  status line and clears it leaves the rows behind. Rendered verbatim that was
+ *  a 340px box holding one word at the top and one at the bottom, which reads
+ *  as a broken panel rather than a quiet run. Trailing spaces go, runs of empty
+ *  lines collapse to one, and the ends are trimmed — nothing that carries
+ *  meaning is touched, since consecutive blank lines never do here. */
+export function tidyOutput(raw: string): string {
+  return raw
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+$/, ""))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    // Blank lines off the ends, not whitespace: a plain trim() would eat the
+    // first line's indentation and shunt it out of line with everything under
+    // it, which in a terminal tail is exactly the structure you're reading for.
+    .replace(/^\n+/, "")
+    .replace(/\n+$/, "");
+}

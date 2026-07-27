@@ -10,6 +10,7 @@ import {
   taskRuns,
   updateTaskRun,
   type TaskRun,
+  tidyOutput,
 } from "./taskHistory";
 
 const start = (over: Partial<Omit<TaskRun, "id" | "status" | "startedAt">> = {}) =>
@@ -194,5 +195,32 @@ describe("corrupt storage", () => {
   it("ignores a stored value that isn't a list", () => {
     localStorage.setItem("canopy.taskHistory", '{"runs":[]}');
     expect(taskRuns()).toEqual([]);
+  });
+});
+
+describe("tidyOutput", () => {
+  it("collapses the blank rows a cleared status line leaves behind", () => {
+    // The real shape: a CLI paints a line, clears it, and the stripped
+    // scrollback keeps the empty rows. Verbatim that filled a 340px box with
+    // one word at the top and one at the bottom.
+    const raw = "m\n\n\n\n\n\n\n\n\nRan 6 shell commands\n";
+    expect(tidyOutput(raw)).toBe("m\n\nRan 6 shell commands");
+  });
+
+  it("keeps a single blank line, which is real spacing", () => {
+    expect(tidyOutput("one\n\ntwo")).toBe("one\n\ntwo");
+    expect(tidyOutput("one\ntwo")).toBe("one\ntwo");
+  });
+
+  it("drops trailing whitespace and normalises carriage returns", () => {
+    expect(tidyOutput("a   \nb\t\n")).toBe("a\nb");
+    expect(tidyOutput("a\r\nb\rc")).toBe("a\nb\nc");
+    // Indentation is meaning in a terminal tail; only trailing space goes.
+    expect(tidyOutput("  indented\n")).toBe("  indented");
+  });
+
+  it("survives output that is nothing but whitespace", () => {
+    expect(tidyOutput("\n\n   \n\n")).toBe("");
+    expect(tidyOutput("")).toBe("");
   });
 });

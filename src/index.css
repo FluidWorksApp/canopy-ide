@@ -3925,9 +3925,47 @@ body.dragging-tab * {
 }
 /* The captured terminal tail. Monospace and pre-wrap: it is transcript, and
    re-flowing it would break every aligned thing an agent printed. */
+/* The expanded row holds three different things — the brief, the agent's
+   answer, and the terminal tail — which used to arrive as one column of grey
+   text with no way to tell them apart. Each gets a quiet label. */
+.task-history-section {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.task-history-section-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+/* The answer is what the row was opened to read, and the row itself can only
+   show one truncated line of it. */
+.task-history-section.is-report .task-history-section-head { color: var(--magenta); }
+.task-history-report {
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--magenta);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  background: color-mix(in srgb, var(--magenta) 5%, var(--bg-alt));
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .task-history-output {
   margin: 0;
-  max-height: 340px;
+  /* Sized to what is in it, capped rather than fixed: after tidyOutput a quiet
+     run is three lines, and reserving 340px for it left a mostly-empty slab. */
+  max-height: 300px;
   overflow: auto;
   padding: 10px 12px;
   background: var(--bg-deep);

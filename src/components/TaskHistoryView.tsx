@@ -12,11 +12,12 @@ import {
   completedTaskRuns,
   removeTaskRun,
   TASK_HISTORY_EVENT,
+  tidyOutput,
   type TaskRun,
   type TaskRunStatus,
 } from "../taskHistory";
 import { AGENT_CLIS } from "../projects";
-import { PlayIcon, TrashIcon } from "./icons";
+import { AgentsIcon, PlayIcon, TrashIcon } from "./icons";
 
 const PER_PAGE = 25;
 
@@ -255,7 +256,27 @@ export function TaskHistoryView({
                       </button>
                     </div>
 
-                    <div className="task-history-brief">{run.brief}</div>
+                    {/* Three different things, and until now they arrived as
+                        one undifferentiated column of grey text: what you asked
+                        for, what the agent answered, and what scrolled past
+                        while it worked. The answer is the reason you opened the
+                        row, so it is the one that gets a mark of its own. */}
+                    <div className="task-history-section">
+                      <div className="task-history-section-head">You asked</div>
+                      <div className="task-history-brief">{run.brief}</div>
+                    </div>
+
+                    <div className="task-history-section is-report">
+                      <div className="task-history-section-head">
+                        <AgentsIcon size={11} /> The agent reported
+                      </div>
+                      {/* The row truncates this to one line — it is the row's
+                          job to be scannable. The full text has to live
+                          somewhere, and this is the somewhere. */}
+                      <div className="task-history-report">
+                        {run.summary ?? "It finished without reporting a summary."}
+                      </div>
+                    </div>
 
                     {run.files && run.files.length > 0 && (
                       <div className="task-history-files">
@@ -273,7 +294,12 @@ export function TaskHistoryView({
                     )}
 
                     {run.output ? (
-                      <pre className="task-history-output">{run.output}</pre>
+                      <div className="task-history-section">
+                        <div className="task-history-section-head">Terminal tail</div>
+                        <pre className="task-history-output">
+                          {tidyOutput(run.output)}
+                        </pre>
+                      </div>
                     ) : (
                       <div className="task-history-note">
                         The terminal output for this run is no longer kept — only the
