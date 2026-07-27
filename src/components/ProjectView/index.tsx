@@ -119,6 +119,7 @@ import { AgentWorkspaceView } from "../AgentWorkspaceView";
 import { PreviewView } from "../PreviewView";
 import type { PreviewServer } from "../../preview";
 import { dispatchBrowserOp } from "../../previewAgent";
+import { useBrowserEngine } from "../../browserHost";
 import { serverForUrl } from "../../preview";
 import { ticketBranch, ticketContext, ticketWorktree } from "../../trackers";
 import { prConflictContext, prReviewContext, prWorktree } from "../../prs";
@@ -211,13 +212,18 @@ const decoder = new TextDecoder();
 
 /** How a doc tab's host is hidden when it isn't the front tab.
  *
- *  `display: none` for everything, with one exception: a preview tab keeps its
- *  box. A `display: none` iframe has no layout at all — every element in the
- *  previewed page reports a zero rect — so a backgrounded preview would answer
- *  canopy_browser_snapshot with an empty page and click the wrong coordinates.
- *  `visibility: hidden` keeps the page laid out (and unpainted) so an agent can
- *  drive it while the user works in another tab; absolute + no pointer events
- *  keeps it out of the flow and out of the way of the tab that is in front. */
+ *  `display: none` for everything, with one exception: a preview tab running
+ *  the PROXY engine keeps its box. A `display: none` iframe has no layout at
+ *  all — every element in the previewed page reports a zero rect — so a
+ *  backgrounded preview would answer canopy_browser_snapshot with an empty page
+ *  and click the wrong coordinates. `visibility: hidden` keeps the page laid
+ *  out (and unpainted) so an agent can drive it while the user works in another
+ *  tab; absolute + no pointer events keeps it out of the flow and out of the
+ *  way of the tab that is in front.
+ *
+ *  The webview engine needs none of that: its page lives in a native view whose
+ *  layout has nothing to do with this div, so `display: none` is exactly right
+ *  and browserHost hides the view itself. */
 function hostStyle(front: boolean, keepLaidOut: boolean): CSSProperties {
   if (front) return { display: "block" };
   if (!keepLaidOut) return { display: "none" };
@@ -315,6 +321,9 @@ export const ProjectView = memo(function ProjectView({
   onRestoreStep,
   onRestored,
 }: ProjectViewProps) {
+  // Which engine preview tabs run on — it decides how a backgrounded preview
+  // has to be hidden, which is a layout question, so it belongs up here.
+  const browserEngine = useBrowserEngine();
   const [sideTab, setSideTab] = useState<SideTab>("files");
   // The side panel is a hover overlay, not a docked column. `pinned` is the
   // click/Cmd+B latch that keeps it out; `peeking` is the transient hover state
@@ -4475,6 +4484,7 @@ export const ProjectView = memo(function ProjectView({
             tabId={tab.id}
             url={tab.url}
             annotations={tab.annotations}
+            visible={tab.id === activeTabId && visible}
             onPatch={(patch) => patchTabRaw(tab.id, patch as Partial<SubTab>)}
             servers={previewServers}
             agentTargets={agentTargets}
@@ -4785,7 +4795,7 @@ export const ProjectView = memo(function ProjectView({
             className="fill doc-host"
             style={hostStyle(
               tab.id === activeTabId && visible,
-              tab.type === "preview",
+              tab.type === "preview" && browserEngine === "proxy",
             )}
           >
             <ErrorBoundary label="this tab">{paneFor(tab)}</ErrorBoundary>

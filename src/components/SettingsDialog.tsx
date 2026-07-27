@@ -51,6 +51,7 @@ export type SettingsTab =
   | "terminal"
   | "dictation"
   | "integrations"
+  | "browser"
   | "remote"
   | "privacy";
 
@@ -66,6 +67,7 @@ const TABS: { id: SettingsTab; label: string }[] = [
   { id: "terminal", label: "Terminal" },
   { id: "dictation", label: "Dictation" },
   { id: "integrations", label: "Integrations" },
+  { id: "browser", label: "Browser" },
   { id: "remote", label: "Remote access" },
   { id: "privacy", label: "Privacy" },
 ];
@@ -529,6 +531,11 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
   // (Intel macOS). Default true so the tab doesn't flicker in on every supported
   // platform while the check resolves; only hide once we learn it's unavailable.
   const [dictationOk, setDictationOk] = useState(true);
+  // Whether this platform has the real embedded browser at all. Only macOS
+  // does so far; everywhere else the engine choice is decoration and the
+  // section says so instead of offering a switch that does nothing.
+  const [browserOk, setBrowserOk] = useState(false);
+  const [clearing, setClearing] = useState<null | "busy" | "done" | string>(null);
   const fonts = availableMonoFonts();
 
   useEffect(() => {
@@ -540,6 +547,9 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
         if (!ok) setTab((t) => (t === "dictation" ? "appearance" : t));
       })
       .catch(() => {});
+  }, []);
+  useEffect(() => {
+    void ipc.browserSupported().then(setBrowserOk);
   }, []);
   const visibleTabs = TABS.filter((t) => t.id !== "dictation" || dictationOk);
 
@@ -997,6 +1007,79 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     />
                     <span>Offer to send anonymous crash reports</span>
                   </label>
+                </Item>
+              </>
+            )}
+
+            {tab === "browser" && (
+              <>
+                <Item
+                  name="Engine"
+                  desc="How preview tabs show a page. The embedded browser loads the real URL at its real origin in its own webview, on a profile that persists — log into a site once and you stay logged in, exactly as in Safari. The loopback proxy serves every site from 127.0.0.1 instead, which no session survives, but it is the only engine that exists off macOS."
+                >
+                  {browserOk ? (
+                    <div className="set-checks">
+                      <label className="set-inline-check">
+                        <input
+                          type="radio"
+                          name="browser-engine"
+                          checked={s.browserEngine === "webview"}
+                          onChange={() => patch({ browserEngine: "webview" })}
+                        />
+                        <span>
+                          Embedded browser
+                          <em>Real origins, real cookies, sessions that survive a restart.</em>
+                        </span>
+                      </label>
+                      <label className="set-inline-check">
+                        <input
+                          type="radio"
+                          name="browser-engine"
+                          checked={s.browserEngine === "proxy"}
+                          onChange={() => patch({ browserEngine: "proxy" })}
+                        />
+                        <span>
+                          Loopback proxy
+                          <em>The older engine. No sessions, but it logs every request it forwards.</em>
+                        </span>
+                      </label>
+                      <p className="set-item-desc">
+                        Preview tabs already open keep the engine they started on; reopen them to
+                        switch.
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="set-item-desc">
+                      This build runs preview tabs through the loopback proxy. The embedded browser
+                      is macOS-only so far.
+                    </p>
+                  )}
+                </Item>
+                <Item
+                  name="Browsing data"
+                  desc="One profile is shared by every preview tab, which is what keeps you signed in across them — so clearing it signs you out of everything at once, like a browser's own “clear browsing data”. Cookies, local storage and caches; nothing else on this machine is touched."
+                >
+                  <div className="set-inline">
+                    <button
+                      className="btn"
+                      disabled={!browserOk || clearing === "busy"}
+                      onClick={() => {
+                        setClearing("busy");
+                        void ipc.browserClearData().then(
+                          () => setClearing("done"),
+                          (err) => setClearing(String(err)),
+                        );
+                      }}
+                    >
+                      {clearing === "busy" ? "Clearing…" : "Clear browsing data"}
+                    </button>
+                    {clearing === "done" && (
+                      <span className="set-item-desc">Cleared. Reload any open page to see it.</span>
+                    )}
+                    {typeof clearing === "string" && clearing !== "busy" && clearing !== "done" && (
+                      <span className="set-item-desc">{clearing}</span>
+                    )}
+                  </div>
                 </Item>
               </>
             )}

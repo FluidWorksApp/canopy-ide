@@ -1,5 +1,6 @@
 mod agentid;
 mod agents;
+mod browser;
 mod cli;
 mod context;
 mod crash;
@@ -297,6 +298,7 @@ pub fn run() {
         .manage(relay::RelayManager::default())
         .manage(portal::RemoteManager::default())
         .manage(preview::PreviewManager::default())
+        .manage(browser::BrowserManager::default())
         .manage(context::ContextBridge::default())
         .manage(agents::StatsCache::default())
         .manage(tunnel::TunnelManager::default())
@@ -483,6 +485,16 @@ pub fn run() {
             relay::relay_accept_file,
             preview::preview_start,
             preview::preview_stop,
+            browser::browser_supported,
+            browser::browser_open,
+            browser::browser_navigate,
+            browser::browser_set_bounds,
+            browser::browser_set_visible,
+            browser::browser_close,
+            browser::browser_run_op,
+            browser::browser_command,
+            browser::browser_here,
+            browser::browser_clear_data,
             context::context_publish,
             context::context_remove,
             context::context_tools,
@@ -490,6 +502,7 @@ pub fn run() {
             context::context_release_claim,
             context::browser_result,
             snapshot::webview_snapshot,
+            snapshot::browser_snapshot,
             portal::remote_enable,
             portal::remote_disable,
             portal::remote_status,
@@ -521,6 +534,8 @@ pub fn run() {
                 app.state::<portal::RemoteManager>().shutdown();
                 // ... and any preview proxies.
                 app.state::<preview::PreviewManager>().shutdown_all();
+                // ... and any embedded-browser views.
+                app.state::<browser::BrowserManager>().shutdown_all(app);
                 // ... and any public-link tunnel process.
                 app.state::<tunnel::TunnelManager>().kill_all();
                 // ... and stop polling GitHub for pull requests.

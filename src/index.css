@@ -10200,6 +10200,12 @@ a.btn-mini {
   border: 0;
   display: block;
 }
+/* The webview engine's page is a native view parked over this box, so nothing
+   is ever drawn here. It stays white so the moment before the view appears
+   reads as a blank page rather than a hole in the app. */
+.preview-webview-host {
+  background: #fff;
+}
 .preview-error {
   height: 100%;
   display: flex;

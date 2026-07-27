@@ -1580,9 +1580,10 @@ fn tool_defs() -> serde_json::Value {
         },
         {
             "name": "canopy_browser_network",
-            "description": "Requests the previewed page made, as seen by Canopy's proxy: method, path, status, duration, content type (WebSocket upgrades included). Finds failing or missing API calls.",
+            "description": "Requests the previewed page made, collected in the page itself: method, URL, status, duration. Finds failing or missing API calls. Covers fetch, XHR and subresources; the document request that loaded the page happened before the collector did, so it is not listed.",
             "inputSchema": { "type": "object", "properties": {
-                "url": { "type": "string", "description": "Only this preview origin; defaults to all" }
+                "url": { "type": "string", "description": "Which open preview to read, by origin; defaults to the one in front" },
+                "lines": { "type": "integer", "description": "How many of the most recent requests (default 100)" }
             }, "additionalProperties": false }
         },
         {

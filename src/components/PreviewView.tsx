@@ -1,9 +1,32 @@
-// The in-app browser: an iframe onto the preview proxy (see preview.rs), a URL
-// bar, and an annotate mode. In annotate mode the injected picker highlights
-// elements in the live page; each click lands here as an annotation the user
-// comments on, and the collected feedback goes to an agent through the same
-// AgentLaunchButton + PTY-seed path tickets and PRs use.
-import { useCallback, useEffect, useRef, useState } from "react";
+// The in-app browser: a page, a URL bar, and an annotate mode. In annotate mode
+// the injected picker highlights elements in the live page; each click lands
+// here as an annotation the user comments on, and the collected feedback goes
+// to an agent through the same AgentLaunchButton + PTY-seed path tickets and
+// PRs use.
+//
+// Two engines sit behind the same toolbar (see browserBounds.chooseEngine):
+//
+//   webview — a real child webview at the page's real origin, on a persistent
+//             profile, so a site you log into stays logged in. It is a native
+//             view drawn OVER the window, so this component renders only a
+//             placeholder and hands its rect to browserHost, which is what
+//             actually positions and hides it.
+//   proxy   — the original: an iframe onto a per-origin loopback reverse proxy
+//             (preview.rs). No sessions, but it is the only engine that exists
+//             off macOS.
+//
+// Everything below the transport is shared. The same picker script runs in the
+// page under both, and answers the same messages; only how those messages
+// travel differs — postMessage through the iframe, or an evaluated call and a
+// drained outbox through browser.rs.
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  forgetBrowserView,
+  refreshBrowserViews,
+  registerBrowserView,
+  setBrowserViewWanted,
+  useBrowserEngine,
+} from "../browserHost";
 import * as ipc from "../ipc";
 import {
   previewFeedbackContext,
@@ -21,6 +44,10 @@ interface PreviewViewProps {
   tabId: string;
   url: string;
   annotations: PreviewAnnotation[];
+  /** Whether this tab is the one in front of an open project. Under the proxy
+   *  this only tunes the agent-cursor choreography; under the webview engine it
+   *  is what puts the native view on screen at all. */
+  visible: boolean;
   /** Persist navigation / annotation changes onto the tab, so they survive a
    *  switch away and back (the view itself unmounts like every doc tab). */
   onPatch: (patch: { url?: string; annotations?: PreviewAnnotation[] }) => void;
@@ -64,6 +91,7 @@ export function PreviewView({
   tabId,
   url,
   annotations,
+  visible,
   onPatch,
   servers,
   agentTargets,
@@ -72,12 +100,16 @@ export function PreviewView({
   onStartNew,
   onNotice,
 }: PreviewViewProps) {
+  const engine = useBrowserEngine();
+  const native = engine === "webview";
+
   const [proxy, setProxy] = useState<ipc.PreviewInfo | null>(null);
   const [frameSrc, setFrameSrc] = useState<string | null>(null);
   const [draft, setDraft] = useState(url);
   const [picking, setPicking] = useState(false);
   const [proxyError, setProxyError] = useState<string | null>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const hostRef = useRef<HTMLDivElement>(null);
   const draftFocused = useRef(false);
 
   const annotationsRef = useRef(annotations);
@@ -88,18 +120,24 @@ export function PreviewView({
   urlRef.current = url;
   const pickingRef = useRef(picking);
   pickingRef.current = picking;
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+  const nativeRef = useRef(native);
+  nativeRef.current = native;
 
   const origin = originOf(url);
 
-  const post = useCallback((msg: object) => {
-    iframeRef.current?.contentWindow?.postMessage(msg, "*");
-  }, []);
+  const post = useCallback((msg: Record<string, unknown>) => {
+    if (nativeRef.current) void ipc.browserCommand(tabId, msg).catch(() => {});
+    else iframeRef.current?.contentWindow?.postMessage(msg, "*");
+  }, [tabId]);
 
-  // One proxy per origin; (re)acquired when the tab's origin changes. The
-  // proxy is shared and cheap, so it's left running on unmount — the tab may
-  // come right back, and app exit sweeps them all.
+  // ---------- proxy engine: one proxy per origin ----------
+  // (Re)acquired when the tab's origin changes. The proxy is shared and cheap,
+  // so it's left running on unmount — the tab may come right back, and app exit
+  // sweeps them all.
   useEffect(() => {
-    if (!origin) return;
+    if (native || !origin) return;
     let stale = false;
     setProxyError(null);
     ipc
@@ -115,48 +153,100 @@ export function PreviewView({
     return () => {
       stale = true;
     };
-  }, [origin]);
+  }, [native, origin]);
 
-  /** The previewed page's real URL for a proxied one the iframe reports. */
-  const unproxied = useCallback((proxiedUrl: string): string | null => {
-    const p = proxyRef.current;
-    if (!p) return null;
-    try {
-      const u = new URL(proxiedUrl);
-      if (u.host !== `127.0.0.1:${p.port}`) return null;
-      return `${p.origin}${u.pathname}${u.search}${u.hash}`;
-    } catch {
-      return null;
+  // ---------- webview engine: the native view's lifecycle ----------
+  // The placeholder's rect is measured by browserHost on demand rather than
+  // pushed from here — a pane drag moves this div without re-rendering it.
+  useEffect(() => {
+    if (!native) return;
+    registerBrowserView(tabId, () => {
+      const el = hostRef.current;
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { x: r.x, y: r.y, width: r.width, height: r.height };
+    });
+    return () => {
+      forgetBrowserView(tabId);
+      void ipc.browserClose(tabId);
+    };
+  }, [native, tabId]);
+
+  useEffect(() => {
+    if (!native) return;
+    setBrowserViewWanted(tabId, visible && !!url);
+  }, [native, tabId, visible, url]);
+
+  // The page is created the first time its tab is actually shown, not when the
+  // tab opens: a session restored from hibernation can hold a dozen preview
+  // tabs, and a dozen webviews loading at once is not a startup. The
+  // placeholder often has no size on the render that reveals it, so the
+  // observer — not the effect — is what finally triggers this.
+  const opened = useRef(false);
+  const ensureOpen = useRef<() => void>(() => {});
+  ensureOpen.current = () => {
+    if (!nativeRef.current || opened.current || !visibleRef.current || !urlRef.current) return;
+    const r = hostRef.current?.getBoundingClientRect();
+    if (!r || r.width < 2 || r.height < 2) return;
+    const target = urlRef.current;
+    opened.current = true;
+    void ipc.browserOpen(tabId, target, r.x, r.y, r.width, r.height).then(
+      () => refreshBrowserViews(),
+      (err) => {
+        opened.current = false;
+        onNotice(`Couldn't open ${target}: ${String(err)}`);
+      },
+    );
+  };
+
+  useEffect(() => {
+    if (!native) {
+      opened.current = false;
+      return;
     }
-  }, []);
+    const el = hostRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => ensureOpen.current());
+    ro.observe(el);
+    ensureOpen.current();
+    return () => ro.disconnect();
+  }, [native, tabId]);
+
+  useEffect(() => {
+    ensureOpen.current();
+  }, [native, url, visible]);
 
   // ---------- agent browser control ----------
   // Ops arrive from the MCP bridge via ProjectView (see previewAgent.ts) and
   // are answered through ipc.browserResult, which releases the agent's held
-  // HTTP request. In-page ops go into the iframe as {canopy:"agent"} messages;
-  // the injected picker answers with {canopy:"agent-result"}. A page that's
-  // still loading swallows postMessages, so unanswered ops are re-posted when
+  // HTTP request. In-page ops go to the picker as {canopy:"agent"} messages and
+  // come back as {canopy:"agent-result"} — by postMessage under the proxy, by
+  // an evaluated call and a drained outbox under the webview engine. A page
+  // that's still loading swallows either, so unanswered ops are re-sent when
   // the (new) document announces ready.
   const pendingOps = useRef(new Map<number, { op: ipc.AgentBrowserOp; timer: number }>());
   const navWaiters = useRef<{ id: number; timer: number }[]>([]);
 
-  /** Whether this preview is actually painted right now. A background tab stays
-   *  laid out — that's what keeps snapshot and click honest (see hostStyle in
-   *  ProjectView) — but it isn't on screen, so the page's cursor choreography
-   *  is playing to nobody and the screenshot op has nothing to read. */
-  const painted = useCallback(
-    () =>
+  /** Whether this preview is actually painted right now. Under the proxy a
+   *  background tab stays laid out — that's what keeps snapshot and click
+   *  honest — but it isn't on screen, so the page's cursor choreography is
+   *  playing to nobody. Under the webview engine an unpainted view is genuinely
+   *  hidden, and `visible` is the whole truth. */
+  const painted = useCallback(() => {
+    if (nativeRef.current) return visibleRef.current;
+    return (
       iframeRef.current?.checkVisibility?.({
         visibilityProperty: true,
         opacityProperty: true,
-      }) ?? true,
-    [],
-  );
+      }) ?? true
+    );
+  }, []);
 
   // Where the keyboard was before an unwatched op ran. A click or a type ends
   // with the page focusing the element it acted on, and focus inside an iframe
   // is focus taken from whatever the user was typing in. Recorded before the op
-  // and given back after it — only if the iframe really did take it.
+  // and given back after it — only if the iframe really did take it. The
+  // webview engine can't steal it: a hidden native view takes no focus.
   const focusBefore = useRef<HTMLElement | null>(null);
 
   const restoreFocus = useCallback(() => {
@@ -167,15 +257,46 @@ export function PreviewView({
     back.focus();
   }, []);
 
+  /** The previewed page's real URL for a proxied one the iframe reports. */
+  const unproxied = useCallback((pageUrl: string): string | null => {
+    if (nativeRef.current) return pageUrl;
+    const p = proxyRef.current;
+    if (!p) return null;
+    try {
+      const u = new URL(pageUrl);
+      if (u.host !== `127.0.0.1:${p.port}`) return null;
+      return `${p.origin}${u.pathname}${u.search}${u.hash}`;
+    } catch {
+      return null;
+    }
+  }, []);
+  const unproxiedRef = useRef(unproxied);
+  unproxiedRef.current = unproxied;
+
+  /** Answer one op, mapping the page's own idea of its address back to the real
+   *  one. Under the proxy the page knows itself as 127.0.0.1:<port>, and agents
+   *  must never be told that is where the server lives. */
+  const answer = useCallback(
+    (id: number, ok: boolean, data: unknown) => {
+      let out = data;
+      if (!nativeRef.current && out && typeof out === "object") {
+        const d = out as { url?: unknown };
+        if (typeof d.url === "string") out = { ...d, url: unproxiedRef.current(d.url) ?? d.url };
+      }
+      void ipc.browserResult(id, ok, out);
+    },
+    [],
+  );
+
   const postAgentOp = useCallback(
     (op: ipc.AgentBrowserOp) => {
       const bg = !painted();
-      if (bg) {
+      if (bg && !nativeRef.current) {
         const active = document.activeElement;
         focusBefore.current =
           active instanceof HTMLElement && active !== iframeRef.current ? active : null;
       }
-      post({
+      const message = {
         canopy: "agent",
         id: op.id,
         op: op.op,
@@ -191,9 +312,44 @@ export function PreviewView({
         lines: op.lines ?? undefined,
         clear: op.clear ?? undefined,
         max: op.max ?? undefined,
-      });
+      };
+      if (!nativeRef.current) {
+        iframeRef.current?.contentWindow?.postMessage(message, "*");
+        return;
+      }
+      // The read-only ops finish inside the call and come straight back;
+      // anything cursor-led answers later, through the drained outbox.
+      void ipc.browserRunOp(tabId, message).then(
+        (ack) => {
+          if (!ack) {
+            const p = pendingOps.current.get(op.id);
+            if (!p) return;
+            clearTimeout(p.timer);
+            pendingOps.current.delete(op.id);
+            answer(
+              op.id,
+              false,
+              "The page isn't ready to be driven yet — it may still be loading. Try canopy_browser_snapshot again in a moment.",
+            );
+            return;
+          }
+          if (!ack.done) return;
+          const p = pendingOps.current.get(op.id);
+          if (!p) return;
+          clearTimeout(p.timer);
+          pendingOps.current.delete(op.id);
+          answer(op.id, !!ack.ok, ack.data);
+        },
+        (err) => {
+          const p = pendingOps.current.get(op.id);
+          if (!p) return;
+          clearTimeout(p.timer);
+          pendingOps.current.delete(op.id);
+          answer(op.id, false, String(err));
+        },
+      );
     },
-    [post, painted],
+    [answer, painted, tabId],
   );
 
   const navigate = useCallback(
@@ -205,25 +361,29 @@ export function PreviewView({
       }
       setDraft(target);
       onPatch({ url: target });
+      if (nativeRef.current) {
+        if (opened.current) void ipc.browserNavigate(tabId, target).catch(() => {});
+        // Not open yet: the create effect picks the new URL up when the tab is
+        // next shown, which is the same moment it would have loaded anyway.
+        return;
+      }
       const p = proxyRef.current;
       if (p && p.origin === originOf(target)) {
         setFrameSrc(`http://127.0.0.1:${p.port}${restOf(target)}`);
       }
       // A different origin re-runs the proxy effect via the `origin` dep.
     },
-    [onNotice, onPatch],
+    [onNotice, onPatch, tabId],
   );
 
   /** Consecutive off-origin redirects followed, so a redirect loop between two
-   *  hosts can't drive the tab forever. Reset by any page that loads. */
+   *  hosts can't drive the tab forever. Reset by any page that loads. Proxy
+   *  only: a real webview follows its own redirects, as a browser should. */
   const redirects = useRef(0);
 
-  // The picker inside the page talks postMessage; accept only messages from
-  // our own iframe's window.
-  useEffect(() => {
-    const onMessage = (e: MessageEvent) => {
-      if (e.source !== iframeRef.current?.contentWindow) return;
-      const d = e.data;
+  /** One picker message, whichever transport carried it. */
+  const handleMessage = useCallback(
+    (d: Record<string, unknown>) => {
       if (!d || typeof d !== "object" || !("canopy" in d)) return;
       if (d.canopy === "retarget" && typeof d.url === "string") {
         // The page redirected off the proxied origin — most often a public host
@@ -236,7 +396,7 @@ export function PreviewView({
         return;
       }
       if (d.canopy === "ready") {
-        // A document that loads through the proxy ends the redirect chain.
+        // A document that loads ends the redirect chain.
         redirects.current = 0;
         // Fresh document (first load or in-page navigation): restore mode and
         // the badges for annotations the tab still holds.
@@ -264,32 +424,89 @@ export function PreviewView({
           });
         }
       } else if (d.canopy === "agent-result") {
-        const p = pendingOps.current.get(d.id);
+        const id = Number(d.id);
+        const p = pendingOps.current.get(id);
         if (p) {
           clearTimeout(p.timer);
-          pendingOps.current.delete(d.id);
+          pendingOps.current.delete(id);
           restoreFocus();
-          // The page knows itself by its proxied address; agents must see the
-          // real one, or they'd cite 127.0.0.1:<proxy> as the server's URL.
-          let data = d.data;
-          if (data && typeof data === "object" && typeof data.url === "string") {
-            data = { ...data, url: unproxied(data.url) ?? data.url };
-          }
-          void ipc.browserResult(d.id, !!d.ok, data);
+          answer(id, !!d.ok, d.data);
         }
       } else if (d.canopy === "annotation" && d.payload) {
+        const payload = d.payload as Omit<PreviewAnnotation, "comment" | "n">;
         const next: PreviewAnnotation = {
-          ...(d.payload as Omit<PreviewAnnotation, "comment" | "n">),
-          pageUrl: unproxied(d.payload.pageUrl) ?? urlRef.current,
+          ...payload,
+          pageUrl: unproxied(payload.pageUrl) ?? urlRef.current,
           n: annotationsRef.current.length + 1,
           comment: "",
         };
         onPatch({ annotations: [...annotationsRef.current, next] });
       }
+    },
+    [answer, navigate, onNotice, onPatch, post, postAgentOp, restoreFocus, unproxied],
+  );
+
+  // The picker inside a proxied page talks postMessage; accept only messages
+  // from our own iframe's window.
+  useEffect(() => {
+    if (native) return;
+    const onMessage = (e: MessageEvent) => {
+      if (e.source !== iframeRef.current?.contentWindow) return;
+      handleMessage(e.data);
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [navigate, onNotice, onPatch, post, postAgentOp, restoreFocus, unproxied]);
+  }, [native, handleMessage]);
+
+  // A native page's messages arrive drained, in batches, addressed by tab.
+  useEffect(() => {
+    if (!native) return;
+    let un: (() => void) | undefined;
+    void ipc
+      .onBrowserEvents((e) => {
+        if (e.tabId !== tabId) return;
+        for (const ev of e.events) handleMessage(ev);
+      })
+      .then((u) => {
+        un = u;
+      });
+    return () => un?.();
+  }, [native, tabId, handleMessage]);
+
+  // Real navigations, straight from the platform: the URL bar must be right
+  // even for a page that never runs our script (an error page, a download).
+  useEffect(() => {
+    if (!native) return;
+    let un: (() => void) | undefined;
+    void ipc
+      .onBrowserNav((n) => {
+        if (n.tabId !== tabId || n.loading) return;
+        if (n.url !== urlRef.current) {
+          onPatch({ url: n.url });
+          if (!draftFocused.current) setDraft(n.url);
+        }
+      })
+      .then((u) => {
+        un = u;
+      });
+    return () => un?.();
+  }, [native, tabId, onPatch]);
+
+  // target=_blank and window.open. A second OS window would be a webview
+  // outside every rule the host keeps about where browser pixels may be, so
+  // the tab follows the link itself — one tab, one page.
+  useEffect(() => {
+    if (!native) return;
+    let un: (() => void) | undefined;
+    void ipc
+      .onBrowserPopup((p) => {
+        if (p.tabId === tabId) navigate(p.url);
+      })
+      .then((u) => {
+        un = u;
+      });
+    return () => un?.();
+  }, [native, tabId, navigate]);
 
   // Receive agent ops for this tab. Every op carries its own timer, which is
   // what guarantees the bridge always gets an answer — so unmounting flushes
@@ -301,6 +518,8 @@ export function PreviewView({
   runOpRef.current = (op: ipc.AgentBrowserOp) => {
     if (op.op === "navigate") {
       if (op.url) navigate(op.url);
+      else if (nativeRef.current)
+        void ipc.browserNavigate(tabId, null, op.action ?? "reload").catch(() => {});
       else
         post({
           canopy: "navigate",
@@ -321,17 +540,16 @@ export function PreviewView({
     }
     if (op.op === "screenshot") {
       // Pixels, not structure: the DOM snapshot can say a button exists, not
-      // that it's sitting on top of the heading. Captured through the webview's
-      // own snapshot API, cropped to this iframe's rect.
+      // that it's sitting on top of the heading.
       //
-      // Alone among the ops this one needs the tab actually in front — the
-      // snapshot reads the window's pixels, and a backgrounded preview is laid
-      // out but unpainted, so capturing its rect would return whatever tab IS
-      // in front. ProjectView brings the tab forward before dispatching a
-      // screenshot; the delay lets that paint land, and the visibility check
-      // catches the cases it can't fix (a hidden project, a minimized window).
+      // Alone among the ops this one needs the tab actually in front — a
+      // snapshot reads what is composited, and a hidden view has nothing in it.
+      // ProjectView brings the tab forward before dispatching a screenshot; the
+      // delay lets that paint land, and the visibility check catches the cases
+      // it can't fix (a hidden project, a minimized window).
       setTimeout(() => {
-        const rect = iframeRef.current?.getBoundingClientRect();
+        const el = nativeRef.current ? hostRef.current : iframeRef.current;
+        const rect = el?.getBoundingClientRect();
         if (!rect || !painted() || rect.width < 1 || rect.height < 1) {
           void ipc.browserResult(
             op.id,
@@ -340,8 +558,12 @@ export function PreviewView({
           );
           return;
         }
-        void ipc
-          .webviewSnapshot(rect.x, rect.y, rect.width, rect.height, op.max ?? undefined)
+        // Under the webview engine the page is its own view, so it is captured
+        // whole; under the proxy it is one rectangle of this window's webview.
+        const shot = nativeRef.current
+          ? ipc.browserSnapshot(tabId, op.max ?? undefined)
+          : ipc.webviewSnapshot(rect.x, rect.y, rect.width, rect.height, op.max ?? undefined);
+        void shot
           .then((image) =>
             ipc.browserResult(op.id, true, {
               image,
@@ -405,6 +627,39 @@ export function PreviewView({
       annotationsRef.current,
       serverForUrl(urlRef.current, servers),
     );
+
+  const go = (delta: -1 | 0 | 1) => {
+    if (native) {
+      void ipc
+        .browserNavigate(tabId, null, delta === 0 ? "reload" : delta < 0 ? "back" : "forward")
+        .catch(() => {});
+    } else {
+      post({ canopy: "navigate", delta });
+    }
+  };
+
+  const body = useMemo(() => {
+    if (engine === null) return null;
+    if (native) {
+      // Nothing is rendered into this div — it exists to be measured. The page
+      // is a native view browserHost keeps parked on top of it.
+      return <div ref={hostRef} className="preview-frame preview-webview-host" />;
+    }
+    if (proxyError) {
+      return (
+        <div className="preview-error">
+          <p>Couldn't reach {origin}.</p>
+          <pre>{proxyError}</pre>
+          <button className="btn" onClick={() => navigate(urlRef.current)}>
+            Retry
+          </button>
+        </div>
+      );
+    }
+    return frameSrc ? (
+      <iframe ref={iframeRef} className="preview-frame" src={frameSrc} title="preview" />
+    ) : null;
+  }, [engine, native, proxyError, origin, frameSrc, navigate]);
 
   // ---------- empty tab: pick one of the project's own servers ----------
   // The empty tab offers only servers Canopy can trace back to a component, so
@@ -470,13 +725,13 @@ export function PreviewView({
   return (
     <div className="preview-view">
       <div className="preview-toolbar">
-        <button className="btn-icon" title="Back" onClick={() => post({ canopy: "navigate", delta: -1 })}>
+        <button className="btn-icon" title="Back" onClick={() => go(-1)}>
           ‹
         </button>
-        <button className="btn-icon" title="Forward" onClick={() => post({ canopy: "navigate", delta: 1 })}>
+        <button className="btn-icon" title="Forward" onClick={() => go(1)}>
           ›
         </button>
-        <button className="btn-icon" title="Reload" onClick={() => post({ canopy: "navigate", delta: 0 })}>
+        <button className="btn-icon" title="Reload" onClick={() => go(0)}>
           ↻
         </button>
         <form
@@ -518,26 +773,7 @@ export function PreviewView({
         </button>
       </div>
       <div className="preview-body">
-        <div className="preview-frame-wrap">
-          {proxyError ? (
-            <div className="preview-error">
-              <p>Couldn't reach {origin}.</p>
-              <pre>{proxyError}</pre>
-              <button className="btn" onClick={() => navigate(urlRef.current)}>
-                Retry
-              </button>
-            </div>
-          ) : (
-            frameSrc && (
-              <iframe
-                ref={iframeRef}
-                className="preview-frame"
-                src={frameSrc}
-                title="preview"
-              />
-            )
-          )}
-        </div>
+        <div className="preview-frame-wrap">{body}</div>
         {(annotations.length > 0 || picking) && (
           <div className="preview-panel">
             <div className="preview-panel-head">

@@ -1,21 +1,65 @@
-// Canopy preview picker — injected into every HTML page the preview proxy
-// serves. Runs inside the previewed page, so it can see and describe real DOM;
-// talks to the Canopy app (the iframe's parent) via postMessage, which is the
-// one channel that crosses the origin boundary on purpose.
+// Canopy preview picker — injected into every page the in-app browser shows,
+// under either engine. Runs inside the page, so it can see and describe real
+// DOM, and it is the whole of what an agent's browser ops actually do.
+//
+// Two transports, one script:
+//
+//   "frame"  — the proxy engine (preview.rs). The page is an iframe inside the
+//              Canopy window, served from a loopback origin, and postMessage is
+//              the one channel that crosses the origin boundary on purpose.
+//   "native" — the webview engine (browser.rs). The page is a real child
+//              webview at its real origin, so there is no parent to talk to.
+//              The host drives us by evaluating window.__canopyBrowser.*, and
+//              we answer into an outbox it drains. A tiny cancelled navigation
+//              to the canopy-drain: scheme is the doorbell — see signal().
 //
 // Protocol (all messages tagged { canopy: <type> }):
-//   parent -> page: mode {on}, navigate {delta|url}, sync {marks: [{n, selector}]},
-//                   agent {id, op, ...} (browser-control ops from MCP agents)
-//   page -> parent: ready {url, title}, nav {url, title}, annotation {payload},
-//                   agent-result {id, ok, data}
+//   host -> page: mode {on}, navigate {delta|url}, sync {marks: [{n, selector}]},
+//                 agent {id, op, ...} (browser-control ops from MCP agents)
+//   page -> host: ready {url, title}, nav {url, title}, annotation {payload},
+//                 agent-result {id, ok, data}
 (function () {
   "use strict";
-  if (window.__canopyPicker || window.top === window) return;
+  var NATIVE = !!window.__canopyNativeBrowser;
+  // Under the proxy the picker belongs to the framed page only; the app's own
+  // window loads it too and must skip. A native child webview IS the top
+  // window, so that test has to stand down there.
+  if (window.__canopyPicker || (!NATIVE && window.top === window)) return;
   window.__canopyPicker = true;
 
   var picking = false;
   var marks = []; // {n, selector, el|null, badge}
   var Z = 2147483000;
+
+  // ---------- transport ----------
+
+  var outbox = []; // native only: messages waiting for the host to drain
+  var drainSeq = 0;
+  var signalPending = false;
+
+  /** Ring the host's doorbell. Assigning an unhandled scheme fires the
+   *  webview's navigation policy hook, which reads the counter and cancels —
+   *  the page is untouched, and the host knows to drain without polling. The
+   *  counter matters: re-assigning the same URL is a no-op. */
+  function signal() {
+    if (signalPending) return;
+    signalPending = true;
+    setTimeout(function () {
+      signalPending = false;
+      try {
+        location.href = "canopy-drain:" + ++drainSeq;
+      } catch (_) {}
+    }, 0);
+  }
+
+  function send(msg) {
+    if (NATIVE) {
+      outbox.push(msg);
+      signal();
+    } else {
+      parent.postMessage(msg, "*");
+    }
+  }
 
   // ---------- console capture ----------
   // Installed immediately — the proxy injects this script at the top of <head>,
@@ -55,6 +99,109 @@
   addEventListener("unhandledrejection", function (e) {
     record("error", ["Unhandled promise rejection: " + logArg(e.reason)]);
   });
+
+  // ---------- network capture ----------
+  // Under the proxy every request passed through Rust and was logged there.
+  // A native webview talks to the internet directly, so the log has to be kept
+  // in the page: fetch and XHR are wrapped for status and timing, and a
+  // PerformanceObserver picks up everything the page requests declaratively
+  // (scripts, images, stylesheets, beacons). The one thing neither can see is
+  // the document request itself — by the time this script runs, it is done.
+
+  var net = []; // {method, url, status, ms, from, ts}
+  var NET_CAP = 300;
+
+  function netPush(entry) {
+    net.push(entry);
+    if (net.length > NET_CAP) net.splice(0, net.length - NET_CAP);
+  }
+
+  function absolute(u) {
+    try {
+      return new URL(String(u), location.href).href;
+    } catch (_) {
+      return String(u);
+    }
+  }
+
+  var origFetch = window.fetch;
+  if (typeof origFetch === "function") {
+    window.fetch = function (input, init) {
+      var started = Date.now();
+      var url = absolute(input && input.url ? input.url : input);
+      var method = ((init && init.method) || (input && input.method) || "GET").toUpperCase();
+      return origFetch.apply(this, arguments).then(
+        function (res) {
+          netPush({
+            method: method,
+            url: url,
+            status: res.status,
+            ms: Date.now() - started,
+            from: "fetch",
+            ts: started,
+          });
+          return res;
+        },
+        function (err) {
+          netPush({
+            method: method,
+            url: url,
+            status: 0,
+            error: String((err && err.message) || err),
+            ms: Date.now() - started,
+            from: "fetch",
+            ts: started,
+          });
+          throw err;
+        },
+      );
+    };
+  }
+
+  var XHR = window.XMLHttpRequest;
+  if (XHR && XHR.prototype) {
+    var origOpen = XHR.prototype.open;
+    var origSend = XHR.prototype.send;
+    XHR.prototype.open = function (method, url) {
+      this.__canopyNet = { method: String(method || "GET").toUpperCase(), url: absolute(url) };
+      return origOpen.apply(this, arguments);
+    };
+    XHR.prototype.send = function () {
+      var meta = this.__canopyNet;
+      if (meta) {
+        var started = Date.now();
+        var xhr = this;
+        this.addEventListener("loadend", function () {
+          netPush({
+            method: meta.method,
+            url: meta.url,
+            status: xhr.status,
+            ms: Date.now() - started,
+            from: "xhr",
+            ts: started,
+          });
+        });
+      }
+      return origSend.apply(this, arguments);
+    };
+  }
+
+  try {
+    new PerformanceObserver(function (list) {
+      list.getEntries().forEach(function (e) {
+        // fetch/XHR arrive here too, with worse detail than the wrappers above.
+        if (e.initiatorType === "fetch" || e.initiatorType === "xmlhttprequest") return;
+        netPush({
+          method: "GET",
+          url: e.name,
+          status: e.responseStatus || null,
+          ms: Math.round(e.duration),
+          from: e.initiatorType || "resource",
+          ts: Math.round(performance.timeOrigin + e.startTime),
+        });
+      });
+    }).observe({ type: "resource", buffered: true });
+  } catch (_) {}
 
   // ---------- overlay chrome ----------
 
@@ -208,7 +355,7 @@
     var n = marks.length + 1;
     marks.push({ n: n, selector: payload.selector, el: el, badge: badgeFor(n) });
     layoutBadges();
-    parent.postMessage({ canopy: "annotation", n: n, payload: payload }, "*");
+    send({ canopy: "annotation", n: n, payload: payload });
   }
 
   function swallow(e) {
@@ -248,7 +395,7 @@
   // ---------- navigation reporting ----------
 
   function announce(type) {
-    parent.postMessage({ canopy: type, url: location.href, title: document.title }, "*");
+    send({ canopy: type, url: location.href, title: document.title });
   }
   var pushState = history.pushState.bind(history);
   history.pushState = function () { pushState.apply(null, arguments); announce("nav"); };
@@ -518,8 +665,19 @@
     return out;
   }
 
+  // Set for the duration of one native run(), so a reply that lands before the
+  // call returns can be handed straight back instead of via the outbox — the
+  // read-only ops (snapshot, console, network) all answer that way, and a
+  // direct return is one round trip where the doorbell would be three.
+  var inlineReply = null;
+
   function agentReply(id, ok, data) {
-    parent.postMessage({ canopy: "agent-result", id: id, ok: ok, data: data }, "*");
+    var msg = { canopy: "agent-result", id: id, ok: ok, data: data };
+    if (inlineReply && inlineReply.id === id) {
+      inlineReply.msg = msg;
+      return;
+    }
+    send(msg);
   }
 
   function runAgentOp(d) {
@@ -580,6 +738,14 @@
         if (d.clear) logs.length = 0;
         return agentReply(d.id, true, { messages: out, total: logs.length });
       }
+      case "network": {
+        var m = Math.min(Number(d.lines) || 100, NET_CAP);
+        return agentReply(d.id, true, {
+          requests: net.slice(-m),
+          total: net.length,
+          note: "Captured in the page (fetch, XHR and subresources). The document request itself happened before this script ran, so it isn't listed.",
+        });
+      }
       default:
         return agentReply(d.id, false, "unknown browser op: " + d.op);
     }
@@ -605,10 +771,9 @@
     else exec();
   }
 
-  // ---------- parent commands ----------
+  // ---------- host commands ----------
 
-  addEventListener("message", function (e) {
-    var d = e.data;
+  function onHostMessage(d) {
     if (!d || typeof d !== "object") return;
     if (d.canopy === "mode") setPicking(!!d.on);
     else if (d.canopy === "sync") syncMarks(d.marks);
@@ -618,7 +783,54 @@
       else if (d.delta === 0) location.reload();
       else if (typeof d.delta === "number") history.go(d.delta);
     }
-  });
+  }
+
+  if (NATIVE) {
+    // The host reaches these by evaluating JavaScript in this webview and
+    // reading the returned value, so everything here must be JSON-serialisable
+    // and must not throw across the boundary — an exception there comes back
+    // indistinguishable from `undefined`.
+    window.__canopyBrowser = {
+      cmd: function (d) {
+        try {
+          onHostMessage(d);
+          return true;
+        } catch (err) {
+          return String((err && err.message) || err);
+        }
+      },
+      /** Start an op. Read-only ops finish inside this call and their result
+       *  comes straight back; anything cursor-led or async answers later
+       *  through the outbox. */
+      run: function (d) {
+        d = d || {};
+        d.canopy = "agent";
+        inlineReply = { id: d.id, msg: null };
+        var done;
+        try {
+          onHostMessage(d);
+        } finally {
+          done = inlineReply.msg;
+          inlineReply = null;
+        }
+        return done ? { done: true, ok: done.ok, data: done.data } : { done: false };
+      },
+      drain: function () {
+        var out = outbox;
+        outbox = [];
+        return out;
+      },
+      /** Where the page thinks it is — the URL bar's source of truth for
+       *  in-page (pushState) navigations the host's page-load hook can't see. */
+      here: function () {
+        return { url: location.href, title: document.title };
+      },
+    };
+  } else {
+    addEventListener("message", function (e) {
+      onHostMessage(e.data);
+    });
+  }
 
   announce("ready");
 })();
