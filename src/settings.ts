@@ -3,6 +3,7 @@ import type { CustomMicroTask } from "./microTasks";
 // Type-only, so the projects.ts ↔ settings.ts pair stays a compile-time cycle
 // and never a runtime one.
 import type { CustomAgentCli } from "./projects";
+import type { BrowserEngine } from "./browserBounds";
 
 export type Theme = "auto" | "default" | "gotham" | "daylight" | "custom";
 
@@ -232,6 +233,14 @@ export interface Settings {
    *  Settings restores the whole choice, not just the running link. */
   remoteTunnelProvider: string;
 
+  // ---- Embedded browser ----
+  /** Which engine preview tabs run on. "webview" is a real child webview at
+   *  the page's real origin, with a persistent profile — you log into a site
+   *  once and stay logged in. "proxy" is the older loopback reverse proxy,
+   *  which keeps no session at all but is the only engine that exists off
+   *  macOS; chooseEngine() falls back to it there whatever this says. */
+  browserEngine: BrowserEngine;
+
   // ---- Crash reporting ----
   /** Opt-in, default off: when a panel crashes (or a native panic is found on
    *  the next launch), offer to send an anonymous report — message + stack,
@@ -278,6 +287,7 @@ const DEFAULTS: Settings = {
   dictationLanguage: "",
   remoteReach: "local",
   remoteTunnelProvider: "cloudflare",
+  browserEngine: "webview",
   crashReporting: false,
 };
 
