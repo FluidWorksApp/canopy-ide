@@ -140,6 +140,11 @@ export function TasksPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seed?.nonce]);
 
+  const openNewTask = () => {
+    setDraft(draft && !draft.id ? null : emptyDraft());
+    setOneOff(null);
+  };
+
   const runOneOff = () => {
     const brief = (oneOff ?? "").trim();
     if (!brief) return;
@@ -383,10 +388,7 @@ export function TasksPanel({
           <button
             className="btn-icon"
             title="New task — saved to this project"
-            onClick={() => {
-              setDraft(draft && !draft.id ? null : emptyDraft());
-              setOneOff(null);
-            }}
+            onClick={openNewTask}
           >
             ＋
           </button>
@@ -432,7 +434,14 @@ export function TasksPanel({
         )}
 
         {custom.length === 0 && !draft ? (
-          <div className="tree-empty">Nothing saved yet.</div>
+          // "Nothing saved yet" describes the data and not the feature: it
+          // tells someone who has never made one neither what a task here is
+          // nor why they would want it. This says both, and is the way in.
+          <button className="task-empty-cta" onClick={openNewTask}>
+            Write a job once and run it anywhere in the IDE — on a file, a
+            branch, a PR, or the changes you're reading.
+            <span className="task-empty-cta-go">New task</span>
+          </button>
         ) : (
           custom.map(runRow)
         )}
@@ -514,14 +523,11 @@ export function TasksPanel({
           if (!group.length) return null;
           return (
             <div className="task-effect-group" key={effect}>
-              <div className={`task-effect-head is-${effect}`}>
-                {EFFECT_HEADING[effect]}
-              </div>
               {group.map((t) => (
                 <div
-                  className="task-row task-row-built-in"
+                  className={`task-row task-row-built-in is-${effect}`}
                   key={t.id}
-                  title={`${t.blurb ?? ""} Runs from its own surface — ${t.surfaceNote ?? "see its tab"}, which supplies what it works on.`.trim()}
+                  title={`${t.blurb ?? ""} ${EFFECT_HEADING[effect]}. Runs from its own surface — ${t.surfaceNote ?? "see its tab"}, which supplies what it works on.`.trim()}
                 >
                   <span className="task-icon">{t.icon}</span>
                   <span className="task-label task-label-dim">{t.label}</span>

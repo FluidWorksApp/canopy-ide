@@ -7995,6 +7995,30 @@ textarea,
    rather than the heading, because the heading is shared with the tickets
    panel, and between rather than around, so the first section keeps its edge
    against the panel head. */
+/* The empty state for a section that has never had anything in it: it has to
+   say what the thing is, not that there is none of it. Clickable, because the
+   sentence describing the feature is the natural place to start using it. */
+.task-empty-cta {
+  display: block;
+  width: 100%;
+  padding: 8px 12px 10px;
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+}
+.task-empty-cta:hover { color: var(--text); }
+.task-empty-cta-go {
+  display: block;
+  margin-top: 4px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .task-section + .task-section {
   margin-top: 6px;
   border-top: 1px solid var(--border);
@@ -12106,14 +12130,16 @@ a.btn-mini {
 /* ---------- built-in task list, grouped by consequence ---------- */
 
 .task-effect-group { margin-bottom: 6px; }
-.task-effect-head {
-  padding: 5px 10px 2px;
-  font-size: 10px;
-  color: var(--fg-dim);
-}
-/* The only colour in the list is the one that says "this writes something". */
-.task-effect-head.is-posts { color: var(--warn); }
-.task-effect-head.is-pushes { color: var(--danger); }
+/* The three headings that ran above these groups — "Reads only", "Posts to
+   GitHub under your name", "Changes code and pushes" — are gone: three lines of
+   prose above nine rows, in a rail this narrow, is most of the section. What
+   they said still matters, though, so it moves onto the row's own mark: the
+   glyph is tinted by what the task does to the world, and the full sentence is
+   in the tooltip. The groups keep their order and their spacing, so the reading
+   still goes safest-first. */
+.task-effect-group + .task-effect-group { margin-top: 8px; }
+.task-row-built-in.is-posts .task-icon { color: var(--warn); }
+.task-row-built-in.is-pushes .task-icon { color: var(--danger); }
 
 .task-row-built-in {
   display: grid;
