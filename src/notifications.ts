@@ -2,19 +2,14 @@
 // stream. A Notification (permission request, idle prompt) or an
 // AskUserQuestion (questionnaire) stays pending until a later event from the
 // same session shows the agent moved on (tool ran, turn ended).
-import type { AgentEventEntry } from "./types";
+import type {
+  AgentEventData,
+  AgentEventEntry,
+  PendingQuestion,
+  QuestionOption,
+} from "./types";
 
-export interface QuestionOption {
-  label: string;
-  description?: string;
-}
-
-export interface PendingQuestion {
-  question: string;
-  header?: string;
-  multiSelect?: boolean;
-  options: QuestionOption[];
-}
+export type { PendingQuestion, QuestionOption };
 
 export interface PendingItem {
   key: string;
@@ -32,6 +27,52 @@ export interface PendingItem {
   questions?: PendingQuestion[];
 }
 
+/** Parse one raw hook line into the projection the app keeps. Done once, at
+ *  ingest — everything downstream reads fields off `entry.data`. */
+export function parseAgentEvent(raw: string): AgentEventData | null {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const event = String(parsed.hook_event_name ?? parsed.type ?? "");
+  const tool = String(parsed.tool_name ?? "");
+  const data: AgentEventData = {
+    sessionId: String(parsed.session_id ?? parsed["conversation-id"] ?? ""),
+    cwd: String(parsed.cwd ?? ""),
+    pty: typeof parsed.canopy_pty === "number" ? parsed.canopy_pty : null,
+    event,
+    tool,
+    // The helper stamps `agent` for every non-claude CLI it fronts; bare
+    // claude events carry none.
+    agent: typeof parsed.agent === "string" ? parsed.agent : "",
+  };
+  if (parsed.message != null) data.message = String(parsed.message);
+  const last = parsed["last-assistant-message"];
+  if (typeof last === "string" && last.trim())
+    data.lastAssistantMessage = last.trim();
+  if (typeof parsed.transcript_path === "string")
+    data.transcriptPath = parsed.transcript_path;
+  if (event === "PreToolUse" && tool === "AskUserQuestion") {
+    const input = parsed.tool_input as { questions?: unknown[] } | undefined;
+    data.questions = Array.isArray(input?.questions)
+      ? (input!.questions as Record<string, unknown>[]).map((q) => ({
+          question: String(q.question ?? ""),
+          header: q.header ? String(q.header) : undefined,
+          multiSelect: Boolean(q.multiSelect),
+          options: Array.isArray(q.options)
+            ? (q.options as Record<string, unknown>[]).map((o) => ({
+                label: String(o.label ?? ""),
+                description: o.description ? String(o.description) : undefined,
+              }))
+            : [],
+        }))
+      : [];
+  }
+  return data;
+}
+
 /** Claude's post-completion idle notice arrives through the same Notification
  *  hook as real permission requests — the message text is the only thing that
  *  tells "I'm blocked on you" apart from "I'm done and waiting". */
@@ -41,38 +82,14 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
   const pendingBySession = new Map<string, PendingItem[]>();
 
   for (const entry of events) {
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(entry.raw);
-    } catch {
-      continue;
-    }
-    const sessionId = String(parsed.session_id ?? parsed["conversation-id"] ?? "");
+    const d = entry.data;
+    if (!d) continue;
+    const sessionId = d.sessionId;
     if (!sessionId) continue;
-    const cwd = String(parsed.cwd ?? "");
-    const pty = typeof parsed.canopy_pty === "number" ? parsed.canopy_pty : null;
-    const event = String(parsed.hook_event_name ?? parsed.type ?? "");
-    const tool = String(parsed.tool_name ?? "");
-    // The helper stamps `agent` for every non-claude CLI it fronts; bare
-    // claude events carry none, hence the default.
-    const agent =
-      typeof parsed.agent === "string" && parsed.agent ? parsed.agent : "claude";
+    const { cwd, pty, event, tool } = d;
+    const agent = d.agent || "claude";
 
     if (event === "PreToolUse" && tool === "AskUserQuestion") {
-      const input = parsed.tool_input as { questions?: unknown[] } | undefined;
-      const questions: PendingQuestion[] = Array.isArray(input?.questions)
-        ? (input!.questions as Record<string, unknown>[]).map((q) => ({
-            question: String(q.question ?? ""),
-            header: q.header ? String(q.header) : undefined,
-            multiSelect: Boolean(q.multiSelect),
-            options: Array.isArray(q.options)
-              ? (q.options as Record<string, unknown>[]).map((o) => ({
-                  label: String(o.label ?? ""),
-                  description: o.description ? String(o.description) : undefined,
-                }))
-              : [],
-          }))
-        : [];
       // An agent does one thing at a time, so one urgent card per session:
       // a new ask supersedes whatever was pending (the permission prompt for
       // this very tool call, an earlier answered-but-unresolved ask). Without
@@ -89,16 +106,15 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
           cwd,
           pty,
           ts: entry.ts,
-          questions,
+          questions: d.questions ?? [],
         },
       ]);
     } else if (event === "Notification" || event === "PermissionRequest") {
-      const message = String(
-        parsed.message ??
-          (event === "PermissionRequest"
-            ? `${agent} needs permission${tool ? `: ${tool}` : ""}`
-            : "Agent needs attention"),
-      );
+      const message =
+        d.message ??
+        (event === "PermissionRequest"
+          ? `${agent} needs permission${tool ? `: ${tool}` : ""}`
+          : "Agent needs attention");
       const list = pendingBySession.get(sessionId) ?? [];
       if (IDLE_RE.test(message)) {
         // Completion notice, not a request. One per session is enough —
@@ -139,13 +155,15 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
       // itself worth a calm card until the user re-engages (the next
       // UserPromptSubmit clears it). Codex's agent-turn-complete carries the
       // agent's last words; Claude's Stop carries nothing.
-      const last = String(parsed["last-assistant-message"] ?? "").trim();
+      const last = d.lastAssistantMessage ?? "";
       pendingBySession.set(sessionId, [
-        ...(pendingBySession.get(sessionId) ?? []).filter((i) => i.ts > entry.ts),
+        ...(pendingBySession.get(sessionId) ?? []).filter(
+          (i) => i.ts > entry.ts,
+        ),
         {
           key: `${sessionId}-${entry.ts}-i`,
           kind: "idle",
-          agent: parsed.agent ? agent : event === "Stop" ? "claude" : "codex",
+          agent: d.agent || (event === "Stop" ? "claude" : "codex"),
           sessionId,
           cwd,
           pty,
@@ -170,66 +188,51 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
   return [...pendingBySession.values()].flat().sort((a, b) => b.ts - a.ts);
 }
 
-export const pendingForRoots = (items: PendingItem[], roots: string[]): PendingItem[] =>
-  items.filter((i) => roots.some((r) => i.cwd === r || i.cwd.startsWith(r + "/")));
+export const pendingForRoots = (
+  items: PendingItem[],
+  roots: string[],
+): PendingItem[] =>
+  items.filter((i) =>
+    roots.some((r) => i.cwd === r || i.cwd.startsWith(r + "/")),
+  );
 
 /** The PTY an event came from, stamped into the payload by our hook command
  *  (agents.rs) from $CANOPY_PTY. Null for agents whose hooks can't carry it
  *  (e.g. codex), which then fall back to cwd matching. */
-export function eventPtyId(raw: string): number | null {
-  try {
-    const v = (JSON.parse(raw) as { canopy_pty?: unknown }).canopy_pty;
-    return typeof v === "number" ? v : null;
-  } catch {
-    return null;
-  }
-}
+export const eventPtyId = (e: AgentEventEntry): number | null =>
+  e.data?.pty ?? null;
 
-/** Whether this raw hook event is the given terminal's turn ending — Claude's
+/** Whether this hook event is the given terminal's turn ending — Claude's
  *  Stop, or codex's turn-complete. Micro-tasks wait on this before closing the
  *  tab: it means the job_done tool result reached the agent and the terminal
  *  has quiesced. */
-export function isStopFor(raw: string, pty: number): boolean {
-  try {
-    const parsed = JSON.parse(raw) as { canopy_pty?: unknown; hook_event_name?: unknown; type?: unknown };
-    if (parsed.canopy_pty !== pty) return false;
-    const event = String(parsed.hook_event_name ?? parsed.type ?? "");
-    return event === "Stop" || /turn.complete/i.test(event);
-  } catch {
-    return false;
-  }
+export function isStopFor(e: AgentEventEntry, pty: number): boolean {
+  const d = e.data;
+  return (
+    !!d &&
+    d.pty === pty &&
+    (d.event === "Stop" || /turn.complete/i.test(d.event))
+  );
 }
 
 /** The last tool a terminal's agent finished using, from its PostToolUse hooks —
  *  "Bash", "Edit", "WebFetch". The only live progress signal a detached
  *  micro-task has: with no tab to glance at, "Bash · 2m" in the Tasks panel is
  *  the difference between a task working and a task wedged. */
-export function lastStepFor(events: AgentEventEntry[], pty: number): string | undefined {
+export function lastStepFor(
+  events: AgentEventEntry[],
+  pty: number,
+): string | undefined {
   for (let i = events.length - 1; i >= 0; i--) {
-    try {
-      const parsed = JSON.parse(events[i].raw) as {
-        canopy_pty?: unknown;
-        hook_event_name?: unknown;
-        tool_name?: unknown;
-      };
-      if (parsed.canopy_pty !== pty) continue;
-      if (parsed.hook_event_name !== "PostToolUse") continue;
-      const tool = String(parsed.tool_name ?? "").trim();
-      if (tool) return tool;
-    } catch {
-      // a malformed line is not worth failing the whole scan over
-    }
+    const d = events[i].data;
+    if (!d || d.pty !== pty || d.event !== "PostToolUse") continue;
+    const tool = d.tool.trim();
+    if (tool) return tool;
   }
   return undefined;
 }
 
-export function eventCwd(raw: string): string {
-  try {
-    return String((JSON.parse(raw) as { cwd?: unknown }).cwd ?? "");
-  } catch {
-    return "";
-  }
-}
+export const eventCwd = (e: AgentEventEntry): string => e.data?.cwd ?? "";
 
 /** Keep only events belonging to this project: raised by one of its terminals,
  *  or (when unstamped) from a cwd inside it. Hooks are installed globally in
@@ -241,9 +244,12 @@ export function eventsForProject(
   roots: string[],
 ): AgentEventEntry[] {
   return events.filter((e) => {
-    const pty = eventPtyId(e.raw);
-    if (pty != null) return ptyIds.has(pty);
-    const cwd = eventCwd(e.raw);
-    return cwd !== "" && roots.some((r) => cwd === r || cwd.startsWith(r + "/"));
+    const d = e.data;
+    if (!d) return false;
+    if (d.pty != null) return ptyIds.has(d.pty);
+    return (
+      d.cwd !== "" &&
+      roots.some((r) => d.cwd === r || d.cwd.startsWith(r + "/"))
+    );
   });
 }

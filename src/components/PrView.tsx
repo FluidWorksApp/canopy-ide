@@ -12,7 +12,15 @@
 //   - agent rounds: one-shot agents that address the comments, one round at a
 //     time, with the loop's memory in Canopy rather than in the agent.
 // Everything outward-facing — posting, resolving, merging — stays a human click.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { useEscape } from "../useEscape";
 import { DiffView, DiffModeEnum, SplitSide } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
@@ -200,6 +208,41 @@ const VERDICT_LABEL: Record<string, string> = {
   DISMISSED: "dismissed",
 };
 
+/** The exact shape DiffView's `data` prop wants. It must keep its identity
+ *  between renders: the library rebuilds its DiffFile — reparse, rehighlight,
+ *  full DOM remount — whenever `data` changes identity. */
+type DiffData = {
+  hunks: string[];
+  oldFile: { fileName: string };
+  newFile: { fileName: string };
+};
+
+/** marked + DOMPurify per call is too expensive to run inside render loops. */
+const Markdown = memo(function Markdown({
+  text,
+  className,
+}: {
+  text: string;
+  className: string;
+}) {
+  const html = useMemo(() => renderMarkdown(text), [text]);
+  return (
+    <div className={className} dangerouslySetInnerHTML={{ __html: html }} />
+  );
+});
+
+/** Self-ticking elapsed counter, so the tick re-renders this span and not the
+ *  whole tab. */
+function Elapsed({ startedAt }: { startedAt: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+  const s = Math.max(0, Math.round((now - startedAt) / 1000));
+  return <>{s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`}</>;
+}
+
 export function PrView({
   repo,
   pr,
@@ -236,8 +279,6 @@ export function PrView({
   /** The body read the old way, when the conversation query couldn't be run. */
   const [bodyFallback, setBodyFallback] = useState("");
   const [drafts, setDrafts] = useState<DraftComment[]>([]);
-  const [replyTo, setReplyTo] = useState<string | null>(null);
-  const [replyText, setReplyText] = useState("");
   const [logs, setLogs] = useState<string | null>(null);
   /** People who could be asked to review — loaded only when that's the move. */
   const [candidates, setCandidates] = useState<string[] | null>(null);
@@ -265,6 +306,14 @@ export function PrView({
   const agentMenu = useContextMenu();
   const moreMenu = useContextMenu();
   const fileRefs = useRef(new Map<string, HTMLDivElement>());
+  // Latest-value refs so the callbacks handed to memoized children can stay
+  // identity-stable while still seeing the current props/conversation.
+  const noticeRef = useRef(onNotice);
+  const nodeIdRef = useRef(conv?.node_id);
+  useEffect(() => {
+    noticeRef.current = onNotice;
+    nodeIdRef.current = conv?.node_id;
+  });
 
   // Teammates a review request can go to (everyone but us).
   const teammates =
@@ -345,27 +394,33 @@ export function PrView({
   }, [repo, pr.number, refreshConv]);
 
   useEffect(() => {
+    // The log is written by the launcher and by job_done; the event covers
+    // both. Bail on an unchanged id set: the event fires on every write, for
+    // every open PR tab, and a fresh array here re-renders the whole tab.
+    // (The elapsed counters tick on their own — see Elapsed.)
     const read = () =>
-      setRunning(
-        taskRuns().filter((r) => r.status === "running" && r.brief.includes(pr.url)),
-      );
+      setRunning((prev) => {
+        const next = taskRuns().filter(
+          (r) => r.status === "running" && r.brief.includes(pr.url),
+        );
+        return next.length === prev.length &&
+          next.every((r, i) => r.id === prev[i].id)
+          ? prev
+          : next;
+      });
     read();
     window.addEventListener(TASK_HISTORY_EVENT, read);
-    // The log is written by the launcher and by job_done; the event covers both,
-    // and the interval only keeps the elapsed counter honest.
-    const tick = window.setInterval(read, 1000);
-    return () => {
-      window.removeEventListener(TASK_HISTORY_EVENT, read);
-      window.clearInterval(tick);
-    };
+    return () => window.removeEventListener(TASK_HISTORY_EVENT, read);
   }, [pr.url]);
 
   /** Tasks we've just dispatched, before the launcher has written them to the
    *  run log. An isolated task builds a worktree first, which can take seconds —
    *  and a button that does nothing for seconds is a button that looks broken. */
   const [pending, setPending] = useState<Record<string, number>>({});
-  const isRunning = (taskId: string) => running.some((r) => r.taskId === taskId);
-  const isBusyTask = (taskId: string) => isRunning(taskId) || pending[taskId] != null;
+  const isRunning = (taskId: string) =>
+    running.some((r) => r.taskId === taskId);
+  const isBusyTask = (taskId: string) =>
+    isRunning(taskId) || pending[taskId] != null;
 
   /** Every task launch on this tab goes through here. */
   const launch = useCallback(
@@ -373,9 +428,11 @@ export function PrView({
       if (!onMicroTask) return;
       setPending((p) => ({ ...p, [def.id]: Date.now() }));
       onMicroTask(def, payload, query);
-      onNotice(`${def.label}: an agent is starting — watch it under "Running now".`);
+      noticeRef.current(
+        `${def.label}: an agent is starting — watch it under "Running now".`,
+      );
     },
-    [onMicroTask, onNotice],
+    [onMicroTask],
   );
 
   // Clear a pending marker once the run log shows it, or if it never appears
@@ -384,16 +441,26 @@ export function PrView({
   useEffect(() => {
     const ids = Object.keys(pending);
     if (!ids.length) return;
-    const now = Date.now();
-    const stale = ids.filter(
-      (id) => running.some((r) => r.taskId === id) || now - pending[id] > 30_000,
+    const sweep = () => {
+      const now = Date.now();
+      setPending((p) => {
+        const stale = Object.keys(p).filter(
+          (id) => running.some((r) => r.taskId === id) || now - p[id] > 30_000,
+        );
+        if (!stale.length) return p;
+        const next = { ...p };
+        for (const id of stale) delete next[id];
+        return next;
+      });
+    };
+    sweep();
+    // No 1s render tick to lean on: wake when the oldest marker expires.
+    const soonest = Math.max(
+      250,
+      Math.min(...ids.map((id) => pending[id] + 30_500)) - Date.now(),
     );
-    if (!stale.length) return;
-    setPending((p) => {
-      const next = { ...p };
-      for (const id of stale) delete next[id];
-      return next;
-    });
+    const t = window.setTimeout(sweep, soonest);
+    return () => window.clearTimeout(t);
   }, [running, pending]);
   const MOVE_TASK: Partial<Record<MoveId, string>> = {
     "self-review": selfReviewPrTask.id,
@@ -404,10 +471,6 @@ export function PrView({
   const moveRunning = (m: NextMove) => {
     const id = MOVE_TASK[m.id];
     return !!id && isBusyTask(id);
-  };
-  const elapsed = (r: TaskRun) => {
-    const s = Math.max(0, Math.round((Date.now() - r.startedAt) / 1000));
-    return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
   };
 
   const persist = useCallback((next: PrLoop) => {
@@ -445,7 +508,9 @@ export function PrView({
         // no, and says so.
         if (gate.reason === "no comments to address" && pr.state === "OPEN") {
           persist({ ...loop, auto: true });
-          onNotice("Armed — a round starts by itself when review comments arrive.");
+          onNotice(
+            "Armed — a round starts by itself when review comments arrive.",
+          );
           return;
         }
         onNotice(gate.reason ?? "Nothing to address right now.");
@@ -470,7 +535,8 @@ export function PrView({
    *  hold on to a pty id across a tab that closes itself. */
   useEffect(() => {
     const onAction = (e: Event) => {
-      const action = (e as CustomEvent).detail?.action as ipc.AgentAction | undefined;
+      const action = (e as CustomEvent).detail?.action as
+        ipc.AgentAction | undefined;
       if (!action || action.kind !== "job_done") return;
       const mine =
         action.url?.includes(`/pull/${pr.number}`) ||
@@ -482,14 +548,19 @@ export function PrView({
         setLoop((prev) => {
           if (prev.status !== "working") return prev;
           const round = prev.rounds[prev.rounds.length - 1];
-          const pushed = !!c && !!round?.headSha && c.head_sha !== round.headSha;
+          const pushed =
+            !!c && !!round?.headSha && c.head_sha !== round.headSha;
           const next = finishRound(
             prev,
             action.status === "blocked" ? "blocked" : "done",
             action.summary,
             pushed,
           );
-          return saveLoop(c && isLandable(c) && next.status === "waiting" ? markReady(next) : next);
+          return saveLoop(
+            c && isLandable(c) && next.status === "waiting"
+              ? markReady(next)
+              : next,
+          );
         });
       });
       // A findings/map task reporting in leaves a file behind; pick it up.
@@ -515,7 +586,8 @@ export function PrView({
   useEffect(() => {
     // Armed-but-idle counts: that is the whole point of arming it before the
     // first comment exists.
-    if (!loop.auto && loop.status !== "waiting" && loop.status !== "ready") return;
+    if (!loop.auto && loop.status !== "waiting" && loop.status !== "ready")
+      return;
     let live = true;
     const tick = async () => {
       if (!live || document.visibilityState !== "visible") return;
@@ -527,10 +599,13 @@ export function PrView({
         if (g.ok) {
           launch(addressPrCommentsTask, { repo, pr });
           persist(beginRound(loop, g.ids, c.head_sha));
-          onNotice(`Round ${loop.cycle + 1}: ${g.ids.length} new comment(s) came back — agent is on it.`);
+          onNotice(
+            `Round ${loop.cycle + 1}: ${g.ids.length} new comment(s) came back — agent is on it.`,
+          );
           return;
         }
-        if (g.reason) persist({ ...loop, status: "blocked", blockedReason: g.reason });
+        if (g.reason)
+          persist({ ...loop, status: "blocked", blockedReason: g.reason });
         return;
       }
       if (fresh.length) {
@@ -590,7 +665,13 @@ export function PrView({
       // to `gh pr review` when there are none, so a body-only review still works
       // on a repo where the GraphQL mutation is refused.
       const msg = conv?.node_id
-        ? await ipc.ghPrReviewBatch(repo, conv.node_id, action, comment, threads)
+        ? await ipc.ghPrReviewBatch(
+            repo,
+            conv.node_id,
+            action,
+            comment,
+            threads,
+          )
         : await ipc.ghPrReview(repo, pr.number, action, comment || undefined);
       setDone(msg);
       onNotice(msg);
@@ -645,43 +726,58 @@ export function PrView({
     }
   };
 
-  const runAction = async (label: string, fn: () => Promise<string>) => {
-    setBusy(true);
-    try {
-      onNotice(await fn(), "success");
-      void refreshConv();
-    } catch (err) {
-      onNotice(`${label}: ${String(err)}`, "error");
-    } finally {
-      setBusy(false);
-    }
-  };
+  const runAction = useCallback(
+    async (label: string, fn: () => Promise<string>) => {
+      setBusy(true);
+      try {
+        noticeRef.current(await fn(), "success");
+        void refreshConv();
+      } catch (err) {
+        noticeRef.current(`${label}: ${String(err)}`, "error");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refreshConv],
+  );
 
-  const setResolved = (threadId: string, resolved: boolean) =>
-    void runAction(resolved ? "Resolve" : "Reopen", () =>
-      ipc.ghPrThreadResolved(repo, threadId, resolved),
-    );
+  const setResolved = useCallback(
+    (threadId: string, resolved: boolean) =>
+      void runAction(resolved ? "Resolve" : "Reopen", () =>
+        ipc.ghPrThreadResolved(repo, threadId, resolved),
+      ),
+    [runAction, repo],
+  );
 
-  const sendReply = (threadId: string) => {
-    const body = replyText.trim();
-    if (!body) return;
-    setReplyTo(null);
-    setReplyText("");
-    void runAction("Reply", () => ipc.ghPrThreadReply(repo, threadId, body));
-  };
+  const sendReply = useCallback(
+    (threadId: string, body: string) =>
+      void runAction("Reply", () => ipc.ghPrThreadReply(repo, threadId, body)),
+    [runAction, repo],
+  );
 
-  const toggleViewed = (path: string, viewed: boolean) => {
-    if (!conv?.node_id) return;
-    // Optimistic: the checkbox is a reading aid, and a failed write is worth a
-    // notice but not a spinner.
-    setConv((c) =>
-      c ? { ...c, files: c.files.map((f) => (f.path === path ? { ...f, viewed } : f)) } : c,
-    );
-    void ipc.ghPrFileViewed(repo, conv.node_id, path, viewed).catch((err) => {
-      onNotice(String(err), "error");
-      void refreshConv();
-    });
-  };
+  const toggleViewed = useCallback(
+    (path: string, viewed: boolean) => {
+      const nodeId = nodeIdRef.current;
+      if (!nodeId) return;
+      // Optimistic: the checkbox is a reading aid, and a failed write is worth a
+      // notice but not a spinner.
+      setConv((c) =>
+        c
+          ? {
+              ...c,
+              files: c.files.map((f) =>
+                f.path === path ? { ...f, viewed } : f,
+              ),
+            }
+          : c,
+      );
+      void ipc.ghPrFileViewed(repo, nodeId, path, viewed).catch((err) => {
+        noticeRef.current(String(err), "error");
+        void refreshConv();
+      });
+    },
+    [repo, refreshConv],
+  );
 
   const showLogs = () =>
     void runAction("Read the failing logs", async () => {
@@ -698,7 +794,9 @@ export function PrView({
     if (!conv?.my_last_review_sha) return;
     setBusy(true);
     try {
-      const d = deltaPatch ?? (await ipc.ghPrDiffSince(repo, conv.my_last_review_sha, conv.head_sha));
+      const d =
+        deltaPatch ??
+        (await ipc.ghPrDiffSince(repo, conv.my_last_review_sha, conv.head_sha));
       setDeltaPatch(d);
       setDeltaOn(true);
     } catch (err) {
@@ -713,11 +811,21 @@ export function PrView({
    *  submits the review, and each one can be edited or dropped first. */
   const importFindings = async () => {
     try {
-      const raw = await ipc.fsReadText(prArtifactPath(repo, pr.number, "findings"));
+      const raw = await ipc.fsReadText(
+        prArtifactPath(repo, pr.number, "findings"),
+      );
       const parsed = JSON.parse(raw) as {
-        findings?: { path: string; line: number; side?: string; severity?: string; body: string }[];
+        findings?: {
+          path: string;
+          line: number;
+          side?: string;
+          severity?: string;
+          body: string;
+        }[];
       };
-      const found = (parsed.findings ?? []).filter((f) => f.path && f.line > 0 && f.body?.trim());
+      const found = (parsed.findings ?? []).filter(
+        (f) => f.path && f.line > 0 && f.body?.trim(),
+      );
       if (!found.length) {
         onNotice("That findings file has nothing in it.");
         return;
@@ -733,17 +841,37 @@ export function PrView({
           blocking: f.severity !== "nit",
         })),
       ]);
-      onNotice(`${found.length} finding(s) staged as draft comments — none posted yet.`);
+      onNotice(
+        `${found.length} finding(s) staged as draft comments — none posted yet.`,
+      );
     } catch {
-      onNotice("No findings file yet — run Draft findings or Self-review first.");
+      onNotice(
+        "No findings file yet — run Draft findings or Self-review first.",
+      );
     }
   };
 
-  const jumpToFile = (path: string) => {
+  const jumpToFile = useCallback((path: string) => {
     setExpanded((prev) => new Set(prev).add(path));
     // Let the diff mount before scrolling to it.
-    setTimeout(() => fileRefs.current.get(path)?.scrollIntoView({ block: "start" }), 60);
-  };
+    setTimeout(
+      () => fileRefs.current.get(path)?.scrollIntoView({ block: "start" }),
+      60,
+    );
+  }, []);
+
+  const applySuggestion = useCallback(
+    (t: ipc.PrThread, suggestion: string) =>
+      launch(applySuggestionTask, {
+        repo,
+        pr,
+        path: t.path,
+        line: t.line,
+        suggestion,
+        threadId: t.id,
+      }),
+    [launch, repo, pr],
+  );
 
   const dispatchMove = (m: NextMove, e: React.MouseEvent) => {
     switch (m.id) {
@@ -757,7 +885,9 @@ export function PrView({
         launch(fixCiTask, { repo, pr });
         break;
       case "update-branch":
-        void runAction("Update branch", () => ipc.ghPrUpdateBranch(repo, pr.number));
+        void runAction("Update branch", () =>
+          ipc.ghPrUpdateBranch(repo, pr.number),
+        );
         break;
       case "resolve-conflicts":
         onStartResolve("claude");
@@ -792,18 +922,35 @@ export function PrView({
     () => files.reduce((n, f) => n + f.changed, 0),
     [files],
   );
-  const totalAdd = useMemo(() => files.reduce((n, f) => n + f.additions, 0), [files]);
-  const totalDel = useMemo(() => files.reduce((n, f) => n + f.deletions, 0), [files]);
+  const totalAdd = useMemo(
+    () => files.reduce((n, f) => n + f.additions, 0),
+    [files],
+  );
+  const totalDel = useMemo(
+    () => files.reduce((n, f) => n + f.deletions, 0),
+    [files],
+  );
 
   // The PR body is markdown (headings, tables, code) — render it, don't dump it
   // as raw text. renderMarkdown sanitizes with DOMPurify, which matters: a PR
   // body is authored by whoever opened it, and raw HTML in the webview reaches
   // every Tauri command. Memoised so it isn't re-parsed on each keystroke.
   const bodyText = conv?.body?.trim() ? conv.body : bodyFallback;
-  const bodyHtml = useMemo(() => (bodyText.trim() ? renderMarkdown(bodyText) : ""), [bodyText]);
+  const bodyHtml = useMemo(
+    () => (bodyText.trim() ? renderMarkdown(bodyText) : ""),
+    [bodyText],
+  );
   const mapHtml = useMemo(() => (map ? renderMarkdown(map) : ""), [map]);
 
-  const byPath = useMemo(() => threadsByPath(conv?.threads ?? []), [conv?.threads]);
+  const byPath = useMemo(
+    () => threadsByPath(conv?.threads ?? []),
+    [conv?.threads],
+  );
+  const verdictList = useMemo(() => (conv ? verdicts(conv) : []), [conv]);
+  const liveThreads = useMemo(
+    () => (conv?.threads ?? []).filter((t) => !t.resolved),
+    [conv?.threads],
+  );
   const viewedByPath = useMemo(() => {
     const m = new Map<string, boolean>();
     for (const f of conv?.files ?? []) m.set(f.path, f.viewed);
@@ -816,9 +963,17 @@ export function PrView({
   const extendByPath = useMemo(() => {
     const out = new Map<
       string,
-      { oldFile: Record<string, { data: LineData }>; newFile: Record<string, { data: LineData }> }
+      {
+        oldFile: Record<string, { data: LineData }>;
+        newFile: Record<string, { data: LineData }>;
+      }
     >();
-    const put = (path: string, side: "LEFT" | "RIGHT", line: number, fill: (d: LineData) => void) => {
+    const put = (
+      path: string,
+      side: "LEFT" | "RIGHT",
+      line: number,
+      fill: (d: LineData) => void,
+    ) => {
       if (!line) return;
       let entry = out.get(path);
       if (!entry) {
@@ -832,8 +987,11 @@ export function PrView({
       fill(bucket[key].data);
     };
     for (const t of conv?.threads ?? [])
-      put(t.path, t.side === "LEFT" ? "LEFT" : "RIGHT", t.line, (d) => d.threads.push(t));
-    for (const d of drafts) put(d.path, d.side, d.line, (x) => x.drafts.push(d));
+      put(t.path, t.side === "LEFT" ? "LEFT" : "RIGHT", t.line, (d) =>
+        d.threads.push(t),
+      );
+    for (const d of drafts)
+      put(d.path, d.side, d.line, (x) => x.drafts.push(d));
     return out;
   }, [conv?.threads, drafts]);
 
@@ -861,36 +1019,112 @@ export function PrView({
     const open = new Set<string>();
     let budget = AUTO_EXPAND_BUDGET;
     for (const f of files) {
-      if (f.binary || f.changed > AUTO_EXPAND_FILE || budget - f.changed < 0) continue;
+      if (f.binary || f.changed > AUTO_EXPAND_FILE || budget - f.changed < 0)
+        continue;
       open.add(f.path);
       budget -= f.changed;
     }
     setExpanded(open);
   }, [files, totalChanged]);
 
-  const toggleFile = (path: string) =>
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
+  const toggleFile = useCallback(
+    (path: string) =>
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        if (next.has(path)) next.delete(path);
+        else next.add(path);
+        return next;
+      }),
+    [],
+  );
   const allOpen = files.length > 0 && expanded.size === files.length;
+
+  const onFileRef = useCallback((path: string, el: HTMLDivElement | null) => {
+    if (el) fileRefs.current.set(path, el);
+    else fileRefs.current.delete(path);
+  }, []);
+
+  // A stable `data` object per (path, patch): DiffView rebuilds its DiffFile —
+  // reparse, rehighlight, full DOM remount — whenever `data` changes identity.
+  const dataCache = useRef(new Map<string, DiffData>());
+  const dataFor = (f: FilePatch): DiffData => {
+    const hit = dataCache.current.get(f.path);
+    if (hit && hit.hunks[0] === f.patch) return hit;
+    const data: DiffData = {
+      hunks: [f.patch],
+      oldFile: { fileName: f.path },
+      newFile: { fileName: f.path },
+    };
+    dataCache.current.set(f.path, data);
+    return data;
+  };
+
+  const patchDraft = useCallback((id: string, patch: Partial<DraftComment>) => {
+    setDrafts((prev) =>
+      prev.map((x) => (x.id === id ? { ...x, ...patch } : x)),
+    );
+  }, []);
+  const dropDraft = useCallback((id: string) => {
+    setDrafts((prev) => prev.filter((x) => x.id !== id));
+  }, []);
+  const addDraft = useCallback((d: DraftComment) => {
+    setDrafts((prev) => [...prev, d]);
+  }, []);
+
+  const prOpen = pr.state === "OPEN";
+  const canSuggest = !!onMicroTask;
+  const renderExtendLine = useCallback(
+    ({ data }: { data: LineData }) => (
+      <div className="pr-line-extend">
+        {data.threads.map((t) => (
+          <ThreadCard
+            key={t.id}
+            t={t}
+            prOpen={prOpen}
+            canSuggest={canSuggest}
+            onJump={jumpToFile}
+            onResolve={setResolved}
+            onReply={sendReply}
+            onApplySuggestion={applySuggestion}
+          />
+        ))}
+        {data.drafts.map((d) => (
+          <DraftCard key={d.id} d={d} onPatch={patchDraft} onDrop={dropDraft} />
+        ))}
+      </div>
+    ),
+    [
+      prOpen,
+      canSuggest,
+      jumpToFile,
+      setResolved,
+      sendReply,
+      applySuggestion,
+      patchDraft,
+      dropDraft,
+    ],
+  );
 
   /** Approved, green, and no conflicts — the one state where Merge is the
    *  obvious next move, and the only one where it wears the accent. */
-  const mergeReady = decision === "APPROVED" && !conflicting && liveChecks !== "FAIL";
+  const mergeReady =
+    decision === "APPROVED" && !conflicting && liveChecks !== "FAIL";
 
   const reviewerItems = (): MenuItem[] => {
     const items: MenuItem[] = [];
     // Whoever already reviewed can be asked again — the after-a-push case.
     const past = Array.from(
-      new Set((conv?.reviews ?? []).filter((r) => !r.mine).map((r) => r.author)),
+      new Set(
+        (conv?.reviews ?? []).filter((r) => !r.mine).map((r) => r.author),
+      ),
     );
     for (const login of past)
       items.push({
         label: `Re-request ${login}`,
-        onClick: () => void runAction("Request review", () => ipc.ghPrRequestReview(repo, pr.number, [login])),
+        onClick: () =>
+          void runAction("Request review", () =>
+            ipc.ghPrRequestReview(repo, pr.number, [login]),
+          ),
       });
     // Everyone else with access. On a PR nobody has looked at yet — which is
     // exactly when you press "Ask for review" — `past` is empty, so without
@@ -905,7 +1139,9 @@ export function PrView({
         items.push({
           label: login,
           onClick: () =>
-            void runAction("Request review", () => ipc.ghPrRequestReview(repo, pr.number, [login])),
+            void runAction("Request review", () =>
+              ipc.ghPrRequestReview(repo, pr.number, [login]),
+            ),
         });
     } else if (candidates === null) {
       items.push({ label: "Looking up who can review…", disabled: true });
@@ -920,7 +1156,10 @@ export function PrView({
         })),
       });
     if (!items.length)
-      items.push({ label: "Nobody has reviewed it yet — ask on GitHub", disabled: true });
+      items.push({
+        label: "Nobody has reviewed it yet — ask on GitHub",
+        disabled: true,
+      });
     return items;
   };
 
@@ -968,7 +1207,7 @@ export function PrView({
           icon: <span className="ctx-glyph">{selfReviewPrTask.icon}</span>,
           hint: "private pass, posts nothing",
           disabled: isBusyTask(selfReviewPrTask.id),
-        onClick: () => launch(selfReviewPrTask, { repo, pr }),
+          onClick: () => launch(selfReviewPrTask, { repo, pr }),
         });
         items.push({
           label: act?.count
@@ -992,7 +1231,7 @@ export function PrView({
           icon: <span className="ctx-glyph">{followUpsTask.icon}</span>,
           hint: "out-of-scope comments become issues",
           disabled: isBusyTask(followUpsTask.id),
-        onClick: () => launch(followUpsTask, { repo, pr }),
+          onClick: () => launch(followUpsTask, { repo, pr }),
         });
       }
     }
@@ -1029,19 +1268,28 @@ export function PrView({
       {
         label: "Open on GitHub",
         onClick: () =>
-          void import("@tauri-apps/plugin-opener").then(({ openUrl }) => openUrl(pr.url)),
+          void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
+            openUrl(pr.url),
+          ),
       },
     ];
     if (pr.state === "OPEN") {
       items.push({
         label: "Sync with base branch",
         hint: "gh pr update-branch",
-        onClick: () => void runAction("Update branch", () => ipc.ghPrUpdateBranch(repo, pr.number)),
+        onClick: () =>
+          void runAction("Update branch", () =>
+            ipc.ghPrUpdateBranch(repo, pr.number),
+          ),
       });
       items.push({ label: "Request review", submenu: reviewerItems() });
       items.push({
-        label: conv?.auto_merge ? "Turn auto-merge off" : "Auto-merge when green",
-        hint: conv?.auto_merge ? undefined : "GitHub merges it once its own conditions pass",
+        label: conv?.auto_merge
+          ? "Turn auto-merge off"
+          : "Auto-merge when green",
+        hint: conv?.auto_merge
+          ? undefined
+          : "GitHub merges it once its own conditions pass",
         onClick: () =>
           void runAction("Auto-merge", () =>
             ipc.ghPrAutoMerge(repo, pr.number, "squash", !conv?.auto_merge),
@@ -1066,137 +1314,6 @@ export function PrView({
       );
     moreMenu.open(e, items);
   };
-
-  // ---- pieces -------------------------------------------------------------
-
-  const threadCard = (t: ipc.PrThread, compact = false) => {
-    const suggestion = threadSuggestion(t);
-    return (
-      <div
-        key={t.id}
-        className={`pr-thread ${t.resolved ? "is-resolved" : ""} ${t.outdated ? "is-outdated" : ""}`}
-      >
-        <div className="pr-thread-head">
-          <span className="pr-thread-where" onClick={() => jumpToFile(t.path)} title={t.path}>
-            {t.path.split("/").pop()}
-            {t.line ? `:${t.line}` : ""}
-          </span>
-          {t.resolved && <span className="pr-thread-tag">resolved</span>}
-          {t.outdated && <span className="pr-thread-tag">outdated</span>}
-        </div>
-        {t.comments.slice(0, compact ? 2 : undefined).map((c) => (
-          <div key={c.id} className="pr-comment-row">
-            <div className="pr-comment-meta">
-              <span className="pr-comment-author">{c.author}</span>
-              <span className="pr-comment-when" title={absTime(c.created)}>
-                {ago(c.created)}
-              </span>
-              {isNit(c.body) && <span className="pr-thread-tag">nit</span>}
-            </div>
-            <div
-              className="markdown-body pr-comment-body"
-              dangerouslySetInnerHTML={{ __html: renderMarkdown(c.body) }}
-            />
-          </div>
-        ))}
-        {compact && t.comments.length > 2 && (
-          <div className="pr-thread-more">+{t.comments.length - 2} more</div>
-        )}
-        {pr.state === "OPEN" && (
-          <div className="pr-thread-actions">
-            <button className="btn-mini" onClick={() => setReplyTo(replyTo === t.id ? null : t.id)}>
-              Reply
-            </button>
-            <button className="btn-mini" onClick={() => setResolved(t.id, !t.resolved)}>
-              {t.resolved ? "Reopen" : "Resolve"}
-            </button>
-            {suggestion && onMicroTask && (
-              <button
-                className="btn-mini"
-                title="Apply the suggested change in a worktree, run the tests, and push"
-                onClick={() =>
-                  launch(applySuggestionTask, {
-                    repo,
-                    pr,
-                    path: t.path,
-                    line: t.line,
-                    suggestion,
-                    threadId: t.id,
-                  })
-                }
-              >
-                Apply suggestion
-              </button>
-            )}
-          </div>
-        )}
-        {replyTo === t.id && (
-          <div className="pr-reply">
-            <textarea
-              className="pr-comment"
-              rows={2}
-              autoFocus
-              placeholder="Reply on this thread — posts to GitHub"
-              value={replyText}
-              onChange={(e) => setReplyText(e.target.value)}
-            />
-            <div className="pr-thread-actions">
-              <button className="btn-mini" onClick={() => setReplyTo(null)}>
-                Cancel
-              </button>
-              <button
-                className="btn-mini btn-accent"
-                disabled={!replyText.trim() || busy}
-                onClick={() => sendReply(t.id)}
-              >
-                Post reply
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  const draftCard = (d: DraftComment) => (
-    <div key={d.id} className="pr-draft">
-      <div className="pr-thread-head">
-        <span className="pr-thread-where">
-          {d.path.split("/").pop()}:{d.line}
-        </span>
-        <span className={`pr-thread-tag ${d.blocking ? "is-blocking" : ""}`}>
-          {d.blocking ? "blocking" : "nit"}
-        </span>
-        <span className="pr-thread-tag">not posted</span>
-      </div>
-      <textarea
-        className="pr-comment"
-        rows={2}
-        value={d.body}
-        onChange={(e) =>
-          setDrafts((prev) => prev.map((x) => (x.id === d.id ? { ...x, body: e.target.value } : x)))
-        }
-      />
-      <div className="pr-thread-actions">
-        <button
-          className="btn-mini"
-          onClick={() =>
-            setDrafts((prev) =>
-              prev.map((x) => (x.id === d.id ? { ...x, blocking: !x.blocking } : x)),
-            )
-          }
-        >
-          {d.blocking ? "Mark as nit" : "Mark blocking"}
-        </button>
-        <button
-          className="btn-mini"
-          onClick={() => setDrafts((prev) => prev.filter((x) => x.id !== d.id))}
-        >
-          Drop
-        </button>
-      </div>
-    </div>
-  );
 
   return (
     <div className="pr-view">
@@ -1259,24 +1376,33 @@ export function PrView({
                   Merge ▾
                 </button>
                 {mergeOpen && (
-                  <div className="cli-menu" onMouseLeave={() => setMergeOpen(false)}>
-                    {(["squash", "merge", "rebase"] as MergeMethod[]).map((m) => (
-                      <div
-                        key={m}
-                        className="cli-item"
-                        onClick={() => {
-                          setMergeOpen(false);
-                          setMergeConfirm(m);
-                        }}
-                      >
-                        <span>{MERGE_LABEL[m]}</span>
-                      </div>
-                    ))}
+                  <div
+                    className="cli-menu"
+                    onMouseLeave={() => setMergeOpen(false)}
+                  >
+                    {(["squash", "merge", "rebase"] as MergeMethod[]).map(
+                      (m) => (
+                        <div
+                          key={m}
+                          className="cli-item"
+                          onClick={() => {
+                            setMergeOpen(false);
+                            setMergeConfirm(m);
+                          }}
+                        >
+                          <span>{MERGE_LABEL[m]}</span>
+                        </div>
+                      ),
+                    )}
                   </div>
                 )}
               </div>
             )}
-            <button className="btn-mini" title="More actions" onClick={openMoreMenu}>
+            <button
+              className="btn-mini"
+              title="More actions"
+              onClick={openMoreMenu}
+            >
               ⋯
             </button>
           </div>
@@ -1288,7 +1414,8 @@ export function PrView({
             </span>
           )}
           <span>
-            {pr.author} wants to merge <code>{pr.branch}</code> → <code>{pr.base}</code>
+            {pr.author} wants to merge <code>{pr.branch}</code> →{" "}
+            <code>{pr.base}</code>
           </span>
           {pr.created && (
             <span className="pr-when" title={absTime(pr.created)}>
@@ -1297,9 +1424,13 @@ export function PrView({
           )}
           <span className="pr-stat pr-add">+{pr.additions}</span>
           <span className="pr-stat pr-del">−{pr.deletions}</span>
-          {(conv?.draft ?? pr.draft) && <span className="pr-decision">draft</span>}
+          {(conv?.draft ?? pr.draft) && (
+            <span className="pr-decision">draft</span>
+          )}
           {decision && (
-            <span className="pr-decision">{decision.toLowerCase().replace("_", " ")}</span>
+            <span className="pr-decision">
+              {decision.toLowerCase().replace("_", " ")}
+            </span>
           )}
           {liveChecks && (
             <span
@@ -1315,11 +1446,16 @@ export function PrView({
           )}
           {conflicting && <span className="pr-checks pr-bad">conflicts</span>}
           {!!act?.count && (
-            <span className="pr-checks pr-pending" title="unresolved comments and change requests">
+            <span
+              className="pr-checks pr-pending"
+              title="unresolved comments and change requests"
+            >
               {act.count} to address
             </span>
           )}
-          {conv?.auto_merge && <span className="pr-decision">auto-merge armed</span>}
+          {conv?.auto_merge && (
+            <span className="pr-decision">auto-merge armed</span>
+          )}
         </div>
         {/* The next move. A PR is always in one state that implies one action;
             naming it is what makes this tab a place you finish work rather than
@@ -1346,7 +1482,9 @@ export function PrView({
           {loop.status === "waiting" && loop.auto && (
             <span className="pr-next-note">watching for new comments</span>
           )}
-          {loop.blockedReason && <span className="pr-next-note">{loop.blockedReason}</span>}
+          {loop.blockedReason && (
+            <span className="pr-next-note">{loop.blockedReason}</span>
+          )}
         </div>
       </div>
 
@@ -1366,12 +1504,17 @@ export function PrView({
                   <button
                     className="btn-mini"
                     title="Have an agent read it again"
-                    onClick={() => onMicroTask?.(reviewMapTask, { repo, pr }, "")}
+                    onClick={() =>
+                      onMicroTask?.(reviewMapTask, { repo, pr }, "")
+                    }
                   >
                     Regenerate
                   </button>
                 </div>
-                <div className="markdown-body" dangerouslySetInnerHTML={{ __html: mapHtml }} />
+                <div
+                  className="markdown-body"
+                  dangerouslySetInnerHTML={{ __html: mapHtml }}
+                />
               </div>
             )}
             {!mapHtml && onMicroTask && (
@@ -1400,66 +1543,93 @@ export function PrView({
 
           <aside className="pr-rail">
             {convError && <div className="pr-error">{convError}</div>}
-            {!conv && !convError && <div className="pr-loading">Loading conversation…</div>}
+            {!conv && !convError && (
+              <div className="pr-loading">Loading conversation…</div>
+            )}
 
             {conv && (
               <>
                 <div className="pr-rail-section">
                   <div className="pr-rail-title">
                     Conversation
-                    <button className="btn-mini" title="Refresh" onClick={() => void refreshConv()}>
+                    <button
+                      className="btn-mini"
+                      title="Refresh"
+                      onClick={() => void refreshConv()}
+                    >
                       ↻
                     </button>
                   </div>
-                  {verdicts(conv).length === 0 &&
+                  {verdictList.length === 0 &&
                     conv.comments.length === 0 &&
                     conv.threads.length === 0 && (
                       <div className="pr-rail-empty">No comments yet.</div>
                     )}
-                  {verdicts(conv).map((r) => (
+                  {verdictList.map((r) => (
                     <div
                       key={r.id}
                       className={`pr-verdict ${r.state === "CHANGES_REQUESTED" ? "is-bad" : r.state === "APPROVED" ? "is-ok" : ""}`}
                     >
                       <div className="pr-comment-meta">
                         <span className="pr-comment-author">{r.author}</span>
-                        <span>{VERDICT_LABEL[r.state] ?? r.state.toLowerCase()}</span>
-                        <span className="pr-comment-when" title={absTime(r.submitted)}>
+                        <span>
+                          {VERDICT_LABEL[r.state] ?? r.state.toLowerCase()}
+                        </span>
+                        <span
+                          className="pr-comment-when"
+                          title={absTime(r.submitted)}
+                        >
                           {ago(r.submitted)}
                         </span>
                       </div>
                       {r.body.trim() && (
-                        <div
+                        <Markdown
                           className="markdown-body pr-comment-body"
-                          dangerouslySetInnerHTML={{ __html: renderMarkdown(r.body) }}
+                          text={r.body}
                         />
                       )}
                     </div>
                   ))}
-                  {conv.threads.filter((t) => !t.resolved).map((t) => threadCard(t, true))}
+                  {liveThreads.map((t) => (
+                    <ThreadCard
+                      key={t.id}
+                      t={t}
+                      compact
+                      prOpen={prOpen}
+                      canSuggest={canSuggest}
+                      onJump={jumpToFile}
+                      onResolve={setResolved}
+                      onReply={sendReply}
+                      onApplySuggestion={applySuggestion}
+                    />
+                  ))}
                   {conv.comments.map((c) => (
                     <div key={c.id} className="pr-comment-row">
                       <div className="pr-comment-meta">
                         <span className="pr-comment-author">{c.author}</span>
-                        <span className="pr-comment-when" title={absTime(c.created)}>
+                        <span
+                          className="pr-comment-when"
+                          title={absTime(c.created)}
+                        >
                           {ago(c.created)}
                         </span>
                       </div>
-                      <div
+                      <Markdown
                         className="markdown-body pr-comment-body"
-                        dangerouslySetInnerHTML={{ __html: renderMarkdown(c.body) }}
+                        text={c.body}
                       />
                     </div>
                   ))}
-                  {conv.threads.some((t) => t.resolved) && (
+                  {conv.threads.length > liveThreads.length && (
                     <div className="pr-rail-empty">
-                      {conv.threads.filter((t) => t.resolved).length} resolved thread(s) hidden.
+                      {conv.threads.length - liveThreads.length} resolved
+                      thread(s) hidden.
                     </div>
                   )}
                   {unanchored.length > 0 && (
                     <div className="pr-rail-empty">
-                      {unanchored.length} thread(s) whose line no longer exists — listed above, not in
-                      the diff.
+                      {unanchored.length} thread(s) whose line no longer exists
+                      — listed above, not in the diff.
                     </div>
                   )}
                 </div>
@@ -1469,7 +1639,9 @@ export function PrView({
                     <div className="pr-rail-title">
                       Running now
                       <span className="pr-thread-tag">
-                        {running.length + Object.keys(pending).filter((id) => !isRunning(id)).length}
+                        {running.length +
+                          Object.keys(pending).filter((id) => !isRunning(id))
+                            .length}
                       </span>
                     </div>
                     {Object.keys(pending)
@@ -1489,11 +1661,14 @@ export function PrView({
                         <span className="pr-run-label">
                           {r.icon} {r.label}
                         </span>
-                        <span className="pr-run-elapsed">{elapsed(r)}</span>
+                        <span className="pr-run-elapsed">
+                          <Elapsed startedAt={r.startedAt} />
+                        </span>
                       </div>
                     ))}
                     <div className="pr-rail-empty">
-                      Its terminal is in this project's Tasks panel; it closes itself when done.
+                      Its terminal is in this project's Tasks panel; it closes
+                      itself when done.
                     </div>
                   </div>
                 )}
@@ -1501,24 +1676,30 @@ export function PrView({
                 <div className="pr-rail-section">
                   <div className="pr-rail-title">
                     Agent rounds
-                    {loop.status === "working" && <span className="pr-thread-tag">running</span>}
+                    {loop.status === "working" && (
+                      <span className="pr-thread-tag">running</span>
+                    )}
                   </div>
                   {loop.rounds.length === 0 && (
                     <div className="pr-rail-empty">
-                      No rounds yet. A round validates each comment, fixes the cause, replies, and
-                      pushes — then waits for you.
+                      No rounds yet. A round validates each comment, fixes the
+                      cause, replies, and pushes — then waits for you.
                     </div>
                   )}
                   {loop.rounds.map((r) => (
                     <div key={r.n} className="pr-round">
                       <span className="pr-round-n">#{r.n}</span>
-                      <span className={`pr-thread-tag ${r.status === "blocked" ? "is-blocking" : ""}`}>
+                      <span
+                        className={`pr-thread-tag ${r.status === "blocked" ? "is-blocking" : ""}`}
+                      >
                         {r.status}
                       </span>
                       <span className="pr-round-took">
                         {r.took} comment{r.took === 1 ? "" : "s"}
                       </span>
-                      {r.summary && <div className="pr-round-summary">{r.summary}</div>}
+                      {r.summary && (
+                        <div className="pr-round-summary">{r.summary}</div>
+                      )}
                     </div>
                   ))}
                   {pr.state === "OPEN" && role === "author" && (
@@ -1562,11 +1743,17 @@ export function PrView({
                     >
                       {liveChecks || "no checks"}
                     </span>
-                    {pr.checks_summary && <span className="pr-round-took">{pr.checks_summary}</span>}
+                    {pr.checks_summary && (
+                      <span className="pr-round-took">{pr.checks_summary}</span>
+                    )}
                   </div>
                   {liveChecks === "FAIL" && (
                     <div className="pr-thread-actions">
-                      <button className="btn-mini" disabled={busy} onClick={showLogs}>
+                      <button
+                        className="btn-mini"
+                        disabled={busy}
+                        onClick={showLogs}
+                      >
                         Show failing logs
                       </button>
                       {onMicroTask && (
@@ -1587,7 +1774,9 @@ export function PrView({
         </div>
 
         {error && <div className="pr-error">{error}</div>}
-        {!activePatch && !error && <div className="pr-loading">Loading diff…</div>}
+        {!activePatch && !error && (
+          <div className="pr-loading">Loading diff…</div>
+        )}
 
         {files.length > 0 && (
           <div className="pr-files-bar">
@@ -1598,32 +1787,38 @@ export function PrView({
               {conv && (
                 <span className="pr-files-note">
                   {" "}
-                  · {conv.files.filter((f) => f.viewed).length}/{conv.files.length} viewed
+                  · {conv.files.filter((f) => f.viewed).length}/
+                  {conv.files.length} viewed
                 </span>
               )}
             </span>
             {totalChanged > AUTO_EXPAND_TOTAL && (
-              <span className="pr-files-note">large diff — files collapsed for speed</span>
+              <span className="pr-files-note">
+                large diff — files collapsed for speed
+              </span>
             )}
             <span className="git-spacer" />
             {/* Re-reviewing means reading what changed since you last looked,
                 not the whole PR again. The shas come from your own last review. */}
-            {conv?.my_last_review_sha && conv.my_last_review_sha !== conv.head_sha && (
-              <button
-                className={`btn-mini ${deltaOn ? "btn-accent" : ""}`}
-                title="Only the commits pushed since your last review"
-                disabled={busy}
-                onClick={() => void toggleDelta()}
-              >
-                {deltaOn ? "Whole PR" : "Since your review"}
-              </button>
-            )}
+            {conv?.my_last_review_sha &&
+              conv.my_last_review_sha !== conv.head_sha && (
+                <button
+                  className={`btn-mini ${deltaOn ? "btn-accent" : ""}`}
+                  title="Only the commits pushed since your last review"
+                  disabled={busy}
+                  onClick={() => void toggleDelta()}
+                >
+                  {deltaOn ? "Whole PR" : "Since your review"}
+                </button>
+              )}
             {/* Both diff controls live on the diff, not up in the header: this
                 is the bar they act on, and it keeps the header to actions that
                 change the PR rather than how you're looking at it. */}
             <button
               className="btn-mini"
-              title={split ? "Show one column" : "Show old and new side by side"}
+              title={
+                split ? "Show one column" : "Show old and new side by side"
+              }
               onClick={() => setSplit((v) => !v)}
             >
               {split ? "Unified" : "Split"}
@@ -1631,7 +1826,9 @@ export function PrView({
             <button
               className="btn-mini"
               onClick={() =>
-                setExpanded(allOpen ? new Set() : new Set(files.map((f) => f.path)))
+                setExpanded(
+                  allOpen ? new Set() : new Set(files.map((f) => f.path)),
+                )
               }
             >
               {allOpen ? "Collapse all" : "Expand all"}
@@ -1639,114 +1836,28 @@ export function PrView({
           </div>
         )}
 
-        {files.map((f) => {
-          const open = expanded.has(f.path);
-          const fileThreads = byPath.get(f.path) ?? [];
-          const live = fileThreads.filter((t) => !t.resolved).length;
-          const viewed = viewedByPath.get(f.path) ?? false;
-          return (
-            <div
-              key={f.path}
-              className={`pr-file ${viewed ? "is-viewed" : ""}`}
-              ref={(el) => {
-                if (el) fileRefs.current.set(f.path, el);
-                else fileRefs.current.delete(f.path);
-              }}
-            >
-              <div className="pr-file-head">
-                <span className="pr-file-chevron" onClick={() => toggleFile(f.path)}>
-                  {open ? "▾" : "▸"}
-                </span>
-                <span className="pr-file-path" title={f.path} onClick={() => toggleFile(f.path)}>
-                  {f.path}
-                </span>
-                {live > 0 && (
-                  <span className="pr-thread-tag is-blocking" title="unresolved threads on this file">
-                    {live} 💬
-                  </span>
-                )}
-                {f.binary ? (
-                  <span className="pr-file-stat">binary</span>
-                ) : (
-                  <>
-                    <span className="pr-file-stat pr-add">+{f.additions}</span>
-                    <span className="pr-file-stat pr-del">−{f.deletions}</span>
-                  </>
-                )}
-                {conv?.node_id && (
-                  <label
-                    className="pr-file-viewed"
-                    title="Mark as viewed — shared with GitHub's own checkbox"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={viewed}
-                      onChange={(e) => toggleViewed(f.path, e.target.checked)}
-                    />
-                    viewed
-                  </label>
-                )}
-              </div>
-              {open &&
-                (f.binary ? (
-                  <div className="pr-file-note">{fileNote(f.patch) ?? "Binary file — not shown."}</div>
-                ) : f.changed > RENDER_CAP ? (
-                  <div className="pr-file-note">
-                    {f.changed.toLocaleString()} changed lines — too large to render inline.{" "}
-                    <a href={`${pr.url}/files`}>Open on GitHub</a>
-                  </div>
-                ) : (
-                  <DiffView<LineData>
-                    // Only hunks — a patch has no full file content to give it,
-                    // which is exactly why Monaco's diff can't render this.
-                    // fileName drives syntax highlighting via the extension.
-                    // Highlight is the expensive part, so skip it on big files.
-                    data={{
-                      hunks: [f.patch],
-                      oldFile: { fileName: f.path },
-                      newFile: { fileName: f.path },
-                    }}
-                    diffViewMode={split ? DiffModeEnum.Split : DiffModeEnum.Unified}
-                    diffViewHighlight={f.changed <= HIGHLIGHT_MAX}
-                    diffViewTheme="dark"
-                    diffViewWrap
-                    // The widget is how you comment on a line: it opens a
-                    // composer, and what you write is held locally until the
-                    // whole review is submitted.
-                    diffViewAddWidget={pr.state === "OPEN"}
-                    diffViewFontSize={12}
-                    extendData={extendByPath.get(f.path)}
-                    renderExtendLine={({ data }) => (
-                      <div className="pr-line-extend">
-                        {data.threads.map((t) => threadCard(t))}
-                        {data.drafts.map(draftCard)}
-                      </div>
-                    )}
-                    renderWidgetLine={({ lineNumber, side, onClose }) => (
-                      <LineComposer
-                        onCancel={onClose}
-                        onAdd={(body, blocking) => {
-                          setDrafts((prev) => [
-                            ...prev,
-                            {
-                              id: `${f.path}:${lineNumber}:${Date.now()}`,
-                              path: f.path,
-                              line: lineNumber,
-                              side: side === SplitSide.old ? "LEFT" : "RIGHT",
-                              body,
-                              blocking,
-                            },
-                          ]);
-                          onClose();
-                        }}
-                      />
-                    )}
-                  />
-                ))}
-            </div>
-          );
-        })}
+        {files.map((f) => (
+          <PrFileCard
+            key={f.path}
+            f={f}
+            open={expanded.has(f.path)}
+            split={split}
+            prOpen={prOpen}
+            prUrl={pr.url}
+            liveCount={
+              (byPath.get(f.path) ?? []).filter((t) => !t.resolved).length
+            }
+            viewed={viewedByPath.get(f.path) ?? false}
+            canViewed={!!conv?.node_id}
+            data={dataFor(f)}
+            extendData={extendByPath.get(f.path)}
+            onToggle={toggleFile}
+            onToggleViewed={toggleViewed}
+            onRef={onFileRef}
+            renderExtendLine={renderExtendLine}
+            onAddDraft={addDraft}
+          />
+        ))}
       </div>
 
       {/* Review is outward-facing: it posts to a real repo under the user's
@@ -1759,12 +1870,20 @@ export function PrView({
             {drafts.length > 0 && (
               <div className="pr-drafts">
                 <div className="pr-rail-title">
-                  {drafts.length} inline comment{drafts.length === 1 ? "" : "s"} — not posted yet
+                  {drafts.length} inline comment{drafts.length === 1 ? "" : "s"}{" "}
+                  — not posted yet
                   <button className="btn-mini" onClick={() => setDrafts([])}>
                     Drop all
                   </button>
                 </div>
-                {drafts.map(draftCard)}
+                {drafts.map((d) => (
+                  <DraftCard
+                    key={d.id}
+                    d={d}
+                    onPatch={patchDraft}
+                    onDrop={dropDraft}
+                  />
+                ))}
               </div>
             )}
             <textarea
@@ -1785,18 +1904,23 @@ export function PrView({
                 </button>
               )}
               <span className="git-spacer" />
-              {(["approve", "request-changes", "comment"] as Review[]).map((a) => (
-                <button
-                  key={a}
-                  className={`btn ${a === "approve" ? "btn-accent" : ""}`}
-                  disabled={
-                    busy || (a !== "approve" && !comment.trim() && drafts.length === 0)
-                  }
-                  onClick={() => setConfirm(a)}
-                >
-                  {REVIEW_LABEL[a]}
-                </button>
-              ))}
+              {(["approve", "request-changes", "comment"] as Review[]).map(
+                (a) => (
+                  <button
+                    key={a}
+                    className={`btn ${a === "approve" ? "btn-accent" : ""}`}
+                    disabled={
+                      busy ||
+                      (a !== "approve" &&
+                        !comment.trim() &&
+                        drafts.length === 0)
+                    }
+                    onClick={() => setConfirm(a)}
+                  >
+                    {REVIEW_LABEL[a]}
+                  </button>
+                ),
+              )}
             </div>
           </>
         )}
@@ -1806,11 +1930,15 @@ export function PrView({
         <div className="confirm-backdrop" onClick={() => setConfirm(null)}>
           <div className="confirm" onClick={(e) => e.stopPropagation()}>
             <p>
-              {REVIEW_LABEL[confirm]} <strong>#{pr.number} {pr.title}</strong> as{" "}
-              {pr.mine ? "yourself" : "yourself"} on GitHub?
+              {REVIEW_LABEL[confirm]}{" "}
+              <strong>
+                #{pr.number} {pr.title}
+              </strong>{" "}
+              as {pr.mine ? "yourself" : "yourself"} on GitHub?
             </p>
             <p className="confirm-sub">
-              This posts a public review to the repository and notifies its authors.
+              This posts a public review to the repository and notifies its
+              authors.
               {drafts.length > 0 &&
                 ` ${drafts.length} inline comment${drafts.length === 1 ? "" : "s"} go with it.`}
             </p>
@@ -1837,12 +1965,16 @@ export function PrView({
         <div className="confirm-backdrop" onClick={() => setMergeConfirm(null)}>
           <div className="confirm" onClick={(e) => e.stopPropagation()}>
             <p>
-              {MERGE_LABEL[mergeConfirm]} <strong>#{pr.number} {pr.title}</strong> into{" "}
-              <code>{pr.base}</code> on GitHub?
+              {MERGE_LABEL[mergeConfirm]}{" "}
+              <strong>
+                #{pr.number} {pr.title}
+              </strong>{" "}
+              into <code>{pr.base}</code> on GitHub?
             </p>
             <p className="confirm-sub">
-              This lands <code>{pr.branch}</code> on <code>{pr.base}</code> in the real
-              repository and closes the pull request. It can't be undone here.
+              This lands <code>{pr.branch}</code> on <code>{pr.base}</code> in
+              the real repository and closes the pull request. It can't be
+              undone here.
             </p>
             {conflicting && (
               <p className="confirm-warn">
@@ -1850,17 +1982,22 @@ export function PrView({
               </p>
             )}
             {liveChecks === "FAIL" && (
-              <p className="confirm-warn">Some checks are failing ({pr.checks_summary}).</p>
+              <p className="confirm-warn">
+                Some checks are failing ({pr.checks_summary}).
+              </p>
             )}
             {liveChecks === "PENDING" && (
-              <p className="confirm-warn">Checks are still running ({pr.checks_summary}).</p>
+              <p className="confirm-warn">
+                Checks are still running ({pr.checks_summary}).
+              </p>
             )}
             {decision === "CHANGES_REQUESTED" && (
               <p className="confirm-warn">Changes were requested on this PR.</p>
             )}
             {!!act?.count && (
               <p className="confirm-warn">
-                {act.count} comment{act.count === 1 ? "" : "s"} still unaddressed.
+                {act.count} comment{act.count === 1 ? "" : "s"} still
+                unaddressed.
               </p>
             )}
             <div className="confirm-actions">
@@ -1884,14 +2021,22 @@ export function PrView({
       )}
 
       {closeConfirm && (
-        <div className="confirm-backdrop" onClick={() => setCloseConfirm(false)}>
+        <div
+          className="confirm-backdrop"
+          onClick={() => setCloseConfirm(false)}
+        >
           <div className="confirm" onClick={(e) => e.stopPropagation()}>
             <p>
-              Close <strong>#{pr.number} {pr.title}</strong> without merging?
+              Close{" "}
+              <strong>
+                #{pr.number} {pr.title}
+              </strong>{" "}
+              without merging?
             </p>
             <p className="confirm-sub">
-              The pull request closes on GitHub and its author is notified. You can reopen
-              it there later{closeDelBranch ? " — but only if the branch still exists" : ""}.
+              The pull request closes on GitHub and its author is notified. You
+              can reopen it there later
+              {closeDelBranch ? " — but only if the branch still exists" : ""}.
             </p>
             {/* Opt-in to the destructive half: gh pr close --delete-branch drops
                 the branch locally and on the remote, so reopening is no longer
@@ -1975,6 +2120,295 @@ function LineComposer({
   );
 }
 
+/** One review thread. Reply state is local so typing a reply re-renders this
+ *  card alone — these render inside memoized diffs, where state hoisted to the
+ *  tab would either go stale or defeat the memo. */
+const ThreadCard = memo(function ThreadCard({
+  t,
+  compact = false,
+  prOpen,
+  canSuggest,
+  onJump,
+  onResolve,
+  onReply,
+  onApplySuggestion,
+}: {
+  t: ipc.PrThread;
+  compact?: boolean;
+  prOpen: boolean;
+  canSuggest: boolean;
+  onJump: (path: string) => void;
+  onResolve: (threadId: string, resolved: boolean) => void;
+  onReply: (threadId: string, body: string) => void;
+  onApplySuggestion: (t: ipc.PrThread, suggestion: string) => void;
+}) {
+  const [replying, setReplying] = useState(false);
+  const [replyText, setReplyText] = useState("");
+  const suggestion = threadSuggestion(t);
+  return (
+    <div
+      className={`pr-thread ${t.resolved ? "is-resolved" : ""} ${t.outdated ? "is-outdated" : ""}`}
+    >
+      <div className="pr-thread-head">
+        <span
+          className="pr-thread-where"
+          onClick={() => onJump(t.path)}
+          title={t.path}
+        >
+          {t.path.split("/").pop()}
+          {t.line ? `:${t.line}` : ""}
+        </span>
+        {t.resolved && <span className="pr-thread-tag">resolved</span>}
+        {t.outdated && <span className="pr-thread-tag">outdated</span>}
+      </div>
+      {t.comments.slice(0, compact ? 2 : undefined).map((c) => (
+        <div key={c.id} className="pr-comment-row">
+          <div className="pr-comment-meta">
+            <span className="pr-comment-author">{c.author}</span>
+            <span className="pr-comment-when" title={absTime(c.created)}>
+              {ago(c.created)}
+            </span>
+            {isNit(c.body) && <span className="pr-thread-tag">nit</span>}
+          </div>
+          <Markdown className="markdown-body pr-comment-body" text={c.body} />
+        </div>
+      ))}
+      {compact && t.comments.length > 2 && (
+        <div className="pr-thread-more">+{t.comments.length - 2} more</div>
+      )}
+      {prOpen && (
+        <div className="pr-thread-actions">
+          <button className="btn-mini" onClick={() => setReplying((v) => !v)}>
+            Reply
+          </button>
+          <button
+            className="btn-mini"
+            onClick={() => onResolve(t.id, !t.resolved)}
+          >
+            {t.resolved ? "Reopen" : "Resolve"}
+          </button>
+          {suggestion && canSuggest && (
+            <button
+              className="btn-mini"
+              title="Apply the suggested change in a worktree, run the tests, and push"
+              onClick={() => onApplySuggestion(t, suggestion)}
+            >
+              Apply suggestion
+            </button>
+          )}
+        </div>
+      )}
+      {replying && (
+        <div className="pr-reply">
+          <textarea
+            className="pr-comment"
+            rows={2}
+            autoFocus
+            placeholder="Reply on this thread — posts to GitHub"
+            value={replyText}
+            onChange={(e) => setReplyText(e.target.value)}
+          />
+          <div className="pr-thread-actions">
+            <button className="btn-mini" onClick={() => setReplying(false)}>
+              Cancel
+            </button>
+            <button
+              className="btn-mini btn-accent"
+              disabled={!replyText.trim()}
+              onClick={() => {
+                const body = replyText.trim();
+                setReplying(false);
+                setReplyText("");
+                onReply(t.id, body);
+              }}
+            >
+              Post reply
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+});
+
+/** A draft inline comment (not posted yet), editable in place. */
+const DraftCard = memo(function DraftCard({
+  d,
+  onPatch,
+  onDrop,
+}: {
+  d: DraftComment;
+  onPatch: (id: string, patch: Partial<DraftComment>) => void;
+  onDrop: (id: string) => void;
+}) {
+  return (
+    <div className="pr-draft">
+      <div className="pr-thread-head">
+        <span className="pr-thread-where">
+          {d.path.split("/").pop()}:{d.line}
+        </span>
+        <span className={`pr-thread-tag ${d.blocking ? "is-blocking" : ""}`}>
+          {d.blocking ? "blocking" : "nit"}
+        </span>
+        <span className="pr-thread-tag">not posted</span>
+      </div>
+      <textarea
+        className="pr-comment"
+        rows={2}
+        value={d.body}
+        onChange={(e) => onPatch(d.id, { body: e.target.value })}
+      />
+      <div className="pr-thread-actions">
+        <button
+          className="btn-mini"
+          onClick={() => onPatch(d.id, { blocking: !d.blocking })}
+        >
+          {d.blocking ? "Mark as nit" : "Mark blocking"}
+        </button>
+        <button className="btn-mini" onClick={() => onDrop(d.id)}>
+          Drop
+        </button>
+      </div>
+    </div>
+  );
+});
+
+/** One file of the diff, memoized. Every prop is either a scalar or kept
+ *  identity-stable by the tab, so a keystroke in the review box or a task-log
+ *  write no longer re-renders — let alone remounts — every mounted DiffView. */
+const PrFileCard = memo(function PrFileCard({
+  f,
+  open,
+  split,
+  prOpen,
+  prUrl,
+  liveCount,
+  viewed,
+  canViewed,
+  data,
+  extendData,
+  onToggle,
+  onToggleViewed,
+  onRef,
+  renderExtendLine,
+  onAddDraft,
+}: {
+  f: FilePatch;
+  open: boolean;
+  split: boolean;
+  prOpen: boolean;
+  prUrl: string;
+  liveCount: number;
+  viewed: boolean;
+  canViewed: boolean;
+  data: DiffData;
+  extendData?: {
+    oldFile: Record<string, { data: LineData }>;
+    newFile: Record<string, { data: LineData }>;
+  };
+  onToggle: (path: string) => void;
+  onToggleViewed: (path: string, viewed: boolean) => void;
+  onRef: (path: string, el: HTMLDivElement | null) => void;
+  renderExtendLine: (p: { data: LineData }) => ReactNode;
+  onAddDraft: (d: DraftComment) => void;
+}) {
+  return (
+    <div
+      className={`pr-file ${viewed ? "is-viewed" : ""}`}
+      ref={(el) => onRef(f.path, el)}
+    >
+      <div className="pr-file-head">
+        <span className="pr-file-chevron" onClick={() => onToggle(f.path)}>
+          {open ? "▾" : "▸"}
+        </span>
+        <span
+          className="pr-file-path"
+          title={f.path}
+          onClick={() => onToggle(f.path)}
+        >
+          {f.path}
+        </span>
+        {liveCount > 0 && (
+          <span
+            className="pr-thread-tag is-blocking"
+            title="unresolved threads on this file"
+          >
+            {liveCount} 💬
+          </span>
+        )}
+        {f.binary ? (
+          <span className="pr-file-stat">binary</span>
+        ) : (
+          <>
+            <span className="pr-file-stat pr-add">+{f.additions}</span>
+            <span className="pr-file-stat pr-del">−{f.deletions}</span>
+          </>
+        )}
+        {canViewed && (
+          <label
+            className="pr-file-viewed"
+            title="Mark as viewed — shared with GitHub's own checkbox"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <input
+              type="checkbox"
+              checked={viewed}
+              onChange={(e) => onToggleViewed(f.path, e.target.checked)}
+            />
+            viewed
+          </label>
+        )}
+      </div>
+      {open &&
+        (f.binary ? (
+          <div className="pr-file-note">
+            {fileNote(f.patch) ?? "Binary file — not shown."}
+          </div>
+        ) : f.changed > RENDER_CAP ? (
+          <div className="pr-file-note">
+            {f.changed.toLocaleString()} changed lines — too large to render
+            inline. <a href={`${prUrl}/files`}>Open on GitHub</a>
+          </div>
+        ) : (
+          <DiffView<LineData>
+            // Only hunks — a patch has no full file content to give it,
+            // which is exactly why Monaco's diff can't render this.
+            // fileName drives syntax highlighting via the extension.
+            // Highlight is the expensive part, so skip it on big files.
+            data={data}
+            diffViewMode={split ? DiffModeEnum.Split : DiffModeEnum.Unified}
+            diffViewHighlight={f.changed <= HIGHLIGHT_MAX}
+            diffViewTheme="dark"
+            diffViewWrap
+            // The widget is how you comment on a line: it opens a
+            // composer, and what you write is held locally until the
+            // whole review is submitted.
+            diffViewAddWidget={prOpen}
+            diffViewFontSize={12}
+            extendData={extendData}
+            renderExtendLine={renderExtendLine}
+            renderWidgetLine={({ lineNumber, side, onClose }) => (
+              <LineComposer
+                onCancel={onClose}
+                onAdd={(body, blocking) => {
+                  onAddDraft({
+                    id: `${f.path}:${lineNumber}:${Date.now()}`,
+                    path: f.path,
+                    line: lineNumber,
+                    side: side === SplitSide.old ? "LEFT" : "RIGHT",
+                    body,
+                    blocking,
+                  });
+                  onClose();
+                }}
+              />
+            )}
+          />
+        ))}
+    </div>
+  );
+});
+
 /** Split a multi-file unified patch into one patch per file. */
 export function splitPatch(patch: string): { path: string; patch: string }[] {
   const out: { path: string; patch: string }[] = [];
@@ -1982,7 +2416,8 @@ export function splitPatch(patch: string): { path: string; patch: string }[] {
   let current: { path: string; lines: string[] } | null = null;
   for (const line of lines) {
     if (line.startsWith("diff --git ")) {
-      if (current) out.push({ path: current.path, patch: current.lines.join("\n") });
+      if (current)
+        out.push({ path: current.path, patch: current.lines.join("\n") });
       // "diff --git a/x b/x" — take the b/ side so renames show their new name.
       const m = /diff --git a\/(.+?) b\/(.+)$/.exec(line);
       current = { path: m?.[2] ?? line.slice(11), lines: [line] };
@@ -1990,6 +2425,7 @@ export function splitPatch(patch: string): { path: string; patch: string }[] {
       current.lines.push(line);
     }
   }
-  if (current) out.push({ path: current.path, patch: current.lines.join("\n") });
+  if (current)
+    out.push({ path: current.path, patch: current.lines.join("\n") });
   return out;
 }
