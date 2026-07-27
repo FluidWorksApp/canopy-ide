@@ -21,11 +21,14 @@
 // drained outbox through browser.rs.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  browserPageChanged,
+  browserViewChanged,
   forgetBrowserView,
   refreshBrowserViews,
   registerBrowserView,
   setBrowserViewWanted,
   useBrowserEngine,
+  useBrowserPane,
 } from "../browserHost";
 import * as ipc from "../ipc";
 import {
@@ -80,6 +83,21 @@ const restOf = (url: string): string => {
   }
 };
 
+/** The app's own background as [r, g, b], for painting a webview that has
+ *  nothing in it yet. WebKit's default is white, which against any of Canopy's
+ *  dark skins reads as a broken pane rather than an empty one. */
+function themeRgb(): [number, number, number] | undefined {
+  const raw = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
+  const hex = /^#([0-9a-f]{6})$/i.exec(raw);
+  if (hex) {
+    const n = parseInt(hex[1], 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  const rgb = /^rgba?\(\s*([0-9.]+)[\s,]+([0-9.]+)[\s,]+([0-9.]+)/i.exec(raw);
+  if (rgb) return [Number(rgb[1]), Number(rgb[2]), Number(rgb[3])];
+  return undefined;
+}
+
 const normalize = (raw: string): string | null => {
   const t = raw.trim();
   if (!t) return null;
@@ -102,6 +120,9 @@ export function PreviewView({
 }: PreviewViewProps) {
   const engine = useBrowserEngine();
   const native = engine === "webview";
+  // What the placeholder stands in with while the native view is out of the
+  // way: a still of the page, or the app's own background — never a white hole.
+  const pane = useBrowserPane(tabId, native);
 
   const [proxy, setProxy] = useState<ipc.PreviewInfo | null>(null);
   const [frameSrc, setFrameSrc] = useState<string | null>(null);
@@ -185,7 +206,7 @@ export function PreviewView({
     if (!r || r.width < 2 || r.height < 2) return;
     const target = urlRef.current;
     opened.current = true;
-    void ipc.browserOpen(tabId, target, r.x, r.y, r.width, r.height).then(
+    void ipc.browserOpen(tabId, target, r.x, r.y, r.width, r.height, themeRgb()).then(
       () => refreshBrowserViews(),
       (err) => {
         opened.current = false;
@@ -278,9 +299,12 @@ export function PreviewView({
         const d = out as { url?: unknown };
         if (typeof d.url === "string") out = { ...d, url: unproxiedRef.current(d.url) ?? d.url };
       }
+      // An agent that clicked or typed has changed what the page looks like, so
+      // the frame held for the next overlay is of a page that no longer exists.
+      if (nativeRef.current) browserPageChanged(tabId);
       void ipc.browserResult(id, ok, out);
     },
-    [],
+    [tabId],
   );
 
   const postAgentOp = useCallback(
@@ -475,7 +499,11 @@ export function PreviewView({
     let un: (() => void) | undefined;
     void ipc
       .onBrowserNav((n) => {
-        if (n.tabId !== tabId || n.loading) return;
+        if (n.tabId !== tabId) return;
+        // A frame of the page being navigated away from would freeze the wrong
+        // page, so loading clears it and the settled load earns a new one.
+        browserViewChanged(tabId, n.loading);
+        if (n.loading) return;
         if (n.url !== urlRef.current) {
           onPatch({ url: n.url });
           if (!draftFocused.current) setDraft(n.url);
@@ -636,9 +664,17 @@ export function PreviewView({
   const body = useMemo(() => {
     if (engine === null) return null;
     if (native) {
-      // Nothing is rendered into this div — it exists to be measured. The page
-      // is a native view browserHost keeps parked on top of it.
-      return <div ref={hostRef} className="preview-frame preview-webview-host" />;
+      // Almost nothing is rendered into this div — it exists to be measured,
+      // and the page is a native view browserHost parks on top of it. The one
+      // exception is the freeze-frame: while an overlay has pushed the view off
+      // screen, this is what stands in for the page.
+      return (
+        <div ref={hostRef} className="preview-frame preview-webview-host">
+          {pane.state === "frozen" && pane.frame && (
+            <img className="preview-frozen" src={pane.frame} alt="" draggable={false} />
+          )}
+        </div>
+      );
     }
     if (proxyError) {
       return (
@@ -654,7 +690,7 @@ export function PreviewView({
     return frameSrc ? (
       <iframe ref={iframeRef} className="preview-frame" src={frameSrc} title="preview" />
     ) : null;
-  }, [engine, native, proxyError, origin, frameSrc, navigate]);
+  }, [engine, native, proxyError, origin, frameSrc, navigate, pane]);
 
   // ---------- empty tab: pick one of the project's own servers ----------
   // The empty tab offers only servers Canopy can trace back to a component, so

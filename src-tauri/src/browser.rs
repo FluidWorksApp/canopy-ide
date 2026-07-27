@@ -201,6 +201,10 @@ pub async fn browser_open(
     y: f64,
     width: f64,
     height: f64,
+    // `background` is the app's own colour as [r, g, b]: a webview with nothing
+    // loaded yet paints white, which against a dark theme reads as a broken
+    // pane rather than an empty one.
+    background: Option<Vec<u8>>,
 ) -> Result<(), String> {
     if !SUPPORTED {
         return Err("the embedded browser needs macOS on this build".into());
@@ -213,7 +217,33 @@ pub async fn browser_open(
     if app.state::<BrowserManager>().label(&tab_id).is_some() {
         return browser_navigate(app, tab_id, Some(url), None).await;
     }
-    create(app, window, tab_id, url, x, y, width, height)
+    create(app, window, tab_id, url, x, y, width, height, background)
+}
+
+/// Paint the webview's own empty space in the app's colour.
+///
+/// Tauri's `background_color` is documented as not implemented on macOS, so
+/// this goes to WebKit directly: `underPageBackgroundColor` is what shows
+/// before the first paint, past the end of a short page, and during a rubber
+/// band scroll. Best effort — a failure here is a cosmetic flash, never a
+/// reason to fail opening the page.
+#[cfg(all(desktop, target_os = "macos"))]
+fn tint(view: &tauri::webview::Webview, rgb: [u8; 3]) {
+    let _ = view.with_webview(move |platform| {
+        use objc2_app_kit::NSColor;
+        use objc2_web_kit::WKWebView;
+        let ptr = platform.inner() as *mut WKWebView;
+        let Some(wk) = (unsafe { ptr.as_ref() }) else {
+            return;
+        };
+        let color = NSColor::colorWithSRGBRed_green_blue_alpha(
+            f64::from(rgb[0]) / 255.0,
+            f64::from(rgb[1]) / 255.0,
+            f64::from(rgb[2]) / 255.0,
+            1.0,
+        );
+        unsafe { wk.setUnderPageBackgroundColor(Some(&color)) };
+    });
 }
 
 #[cfg(all(desktop, target_os = "macos"))]
@@ -226,6 +256,7 @@ fn create(
     y: f64,
     width: f64,
     height: f64,
+    background: Option<Vec<u8>>,
 ) -> Result<(), String> {
     use tauri::utils::config::BackgroundThrottlingPolicy;
     use tauri::webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder};
@@ -289,13 +320,19 @@ fn create(
             NewWindowResponse::Deny
         });
 
-    window
+    let view = window
         .add_child(
             builder,
             LogicalPosition::new(x, y),
             LogicalSize::new(width.max(1.0), height.max(1.0)),
         )
         .map_err(|e| format!("couldn't open the browser view: {e}"))?;
+
+    if let Some(rgb) = background.as_deref() {
+        if let [r, g, b, ..] = *rgb {
+            tint(&view, [r, g, b]);
+        }
+    }
 
     app.state::<BrowserManager>().views.lock().unwrap().insert(
         tab_id,
@@ -317,6 +354,7 @@ fn create(
     _y: f64,
     _width: f64,
     _height: f64,
+    _background: Option<Vec<u8>>,
 ) -> Result<(), String> {
     Err("the embedded browser needs macOS on this build".into())
 }
