@@ -20,18 +20,21 @@ interface RailTab {
   title: string;
 }
 
-/** The rail in four groups: what you're editing, what you're running, what's
- *  changing and being reviewed, and who is doing the work. Icons in one column
- *  read as one undifferentiated list — the grouping is what makes the rail
- *  scannable at icon width, where there is no room for headings. */
+/** The rail in three groups: the project itself, what's changing and being
+ *  reviewed, and who is doing the work. Icons in one column read as one
+ *  undifferentiated list — the grouping is what makes the rail scannable at
+ *  icon width, where there is no room for headings.
+ *
+ *  Files and Servers share a group. A group of one buys nothing: it can't be
+ *  told from its neighbour by density, so all it contributes is the 10px of
+ *  boundary padding — whitespace with no rule in it and no run of icons on
+ *  either side to explain it. Both answer "what is in this project", which is
+ *  a real enough pairing to sit under one boundary. */
 const RAIL_GROUPS: { name: string; tabs: RailTab[] }[] = [
   {
-    name: "Files & Assets",
-    tabs: [{ key: "files", Icon: FilesIcon, title: "Components & files" }],
-  },
-  {
-    name: "Execution",
+    name: "Project",
     tabs: [
+      { key: "files", Icon: FilesIcon, title: "Components & files" },
       {
         key: "servers",
         Icon: ServersIcon,

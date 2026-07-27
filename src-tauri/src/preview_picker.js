@@ -404,6 +404,27 @@
   addEventListener("popstate", function () { announce("nav"); });
   addEventListener("hashchange", function () { announce("nav"); });
 
+  // ---------- user input reporting ----------
+  // A press that lands in here is invisible to the app. Under the webview
+  // engine this page is a native view composited over the whole window, so its
+  // events are delivered by the platform and never touch the app's DOM; under
+  // the proxy it is a cross-origin frame, which swallows them just as
+  // completely. Anything the app dismisses on "a click went somewhere else"
+  // therefore stays up forever while you click the page underneath it — the
+  // sliding side panel most of all, because the page is exactly what it is
+  // covering. One bit, on press, is all the host needs to treat it like any
+  // other click in the window.
+  //
+  // Trusted events only: agent ops synthesise clicks on this same document,
+  // and an agent driving the page is not the user reaching past a panel.
+  addEventListener(
+    "pointerdown",
+    function (e) {
+      if (e.isTrusted) send({ canopy: "input" });
+    },
+    true,
+  );
+
   // ---------- agent browser control ----------
   // Ops arrive from MCP tools (canopy_browser_*) relayed by the app. Every op
   // answers with agent-result {id, ok, data}; refs from the last snapshot are

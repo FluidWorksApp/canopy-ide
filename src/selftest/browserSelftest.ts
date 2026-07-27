@@ -28,6 +28,7 @@ import {
   drivableSurfaces,
   type OverlaySurface,
 } from "../overlaySurfaces";
+import { BROWSER_INPUT_EVENT } from "../components/PreviewView";
 import {
   startBrowserWatchdog,
   watchdogViolations,
@@ -443,6 +444,29 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
       if (sample.white > 0.5) notes.push(`advisory: the hidden pane is mostly white (${detail})`);
       if (sample.page < 0.05) notes.push(`advisory: no page colours in the hidden pane (${detail})`);
       return detail;
+    });
+
+    // ---- clicking the page dismisses what is over it ----
+    await step("dismiss", "A press in the page closes the panel covering it", async () => {
+      const surface = OVERLAY_SURFACES.find((s) => s.id === "side-peek");
+      if (!surface?.open) throw new StepFailure("no side panel to open");
+      const up = () => !!document.querySelector(surface.selector);
+      await surface.open();
+      if (!(await settle(up))) throw new StepFailure("the panel never opened");
+      try {
+        // What the injected picker sends when a real press lands in the page.
+        // Raised here rather than clicked for real because the press this is
+        // about happens in a native view the automation cannot reach — which is
+        // the whole reason the forwarding exists.
+        window.dispatchEvent(new CustomEvent(BROWSER_INPUT_EVENT));
+        if (!(await settle(() => !up(), DEADLINE.hide)))
+          throw new StepFailure("the panel stayed up after a press in the page");
+        return "closed";
+      } finally {
+        // A panel left open would hide the pane for every step after this one.
+        if (up()) await surface.close?.();
+        await sleep(500);
+      }
     });
 
     // ---- tab away and back ----
