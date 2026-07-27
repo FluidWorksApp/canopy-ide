@@ -1334,6 +1334,28 @@ body,
   color: var(--accent);
 }
 
+/* Support: the same quiet chip as its neighbours until you reach for it, and
+   then it fills, which is the one bit of warmth the status bar earns. */
+.status-support {
+  display: inline-flex;
+  align-items: center;
+  background: none;
+  border: none;
+  padding: 0 2px;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out);
+}
+/* Sponsor pink, not --danger. The palette's red is what a failed check and a
+   destructive button wear, and a heart in that colour reads as an alert rather
+   than an invitation. */
+.status-support:hover {
+  color: #db61a2;
+}
+.status-support:hover svg {
+  fill: currentColor;
+}
+
 /* The usage panel rendered inside a tray popup: a fixed-width card that scrolls
    vertically only. Fixed width + fixed table layout below is what keeps it from
    reflowing (and a horizontal scrollbar from flickering) as live numbers tick. */

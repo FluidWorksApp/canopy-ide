@@ -6,7 +6,7 @@ import { fmtTokens } from "../format";
 import * as ipc from "../ipc";
 import { estimateCost, sessionCost } from "../pricing";
 import { StatsPanel } from "./StatsPanel";
-import { StatsIcon } from "./icons";
+import { HeartIcon, StatsIcon } from "./icons";
 import type { AgentEventEntry } from "../types";
 
 const fmtMem = (bytes: number) =>
@@ -517,6 +517,22 @@ export const StatusBar = memo(function StatusBar({
           ~${cost.toFixed(2)}
         </span>
       )}
+      {/* Between the spend and the stats: the two things either side of it are
+          what Canopy costs you and what it is doing, which is exactly where
+          asking for support belongs. Opens in the system browser — a donate
+          page has no business in the embedded preview, which is for the app you
+          are building. */}
+      <button
+        className="status-item status-support"
+        title="Support Canopy"
+        onClick={() =>
+          void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
+            openUrl("https://canopyide.dev/support"),
+          )
+        }
+      >
+        <HeartIcon size={13} />
+      </button>
       <span className="status-item status-stats-anchor" ref={statsAnchorRef}>
         <button
           className={`status-stats-btn ${statsOpen ? "is-open" : ""}`}
