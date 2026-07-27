@@ -11,15 +11,23 @@
 //
 //   * its own tab isn't in front, its project isn't open, or the placeholder
 //     has no size — the view says so itself, through `wanted`;
-//   * something is drawn over it. That is tested rather than declared: every
-//     fixed overlay in index.css carries one of the classes below, so one
-//     observer and one rect intersection cover surfaces nobody remembered to
-//     patch, and a new overlay only has to look like the others.
+//   * something is drawn over it. That is discovered structurally, by walking
+//     the visible DOM for anything out of normal flow whose rectangle overlaps
+//     the view — see browserOcclusion.ts for why it is not a class list.
+//
+// The walk is cheap because of how the app already works: every doc tab that
+// isn't in front is `display: none`, and one visibility check prunes each of
+// those subtrees whole. With a browser tab in front the visible tree is the
+// rail, the tab bar, the toolbar and whatever is floating — a few hundred
+// elements, and a computed style is only read where a rectangle actually
+// reaches the browser.
 //
 // The intersection matters as much as the detection. A full-screen backdrop
 // always covers the browser and has to hide it; a corner toast usually misses
 // it entirely, and blanking a page for three seconds of "Saved" would be worse
-// than the toast being clipped.
+// than the toast being clipped. A small dropdown that does reach it hides the
+// whole page for as long as it is open — a menu is transient, and punching a
+// hole in a native view to avoid the blink is not worth what it would cost.
 
 import { useEffect, useState } from "react";
 import {
@@ -32,26 +40,23 @@ import {
   type BrowserEngine,
   type RectLike,
 } from "./browserBounds";
+import {
+  PAINTED_OVERLAY_SELECTOR,
+  isSurface,
+  occludes,
+  stacksAboveFlow,
+  type Candidate,
+  type OccluderStyle,
+} from "./browserOcclusion";
 import * as ipc from "./ipc";
 import { getSettings } from "./settings";
 
-const OVERLAY_SELECTOR = [
-  ".modal-backdrop",
-  ".confirm-backdrop",
-  ".palette-backdrop",
-  ".ctx-menu",
-  ".coach-layer",
-  ".notice",
-  ".update-toast",
-  ".dictation-pill",
-  ".zoom-indicator",
-].join(",");
-
 interface Entry {
-  /** Re-measured on every pass rather than pushed in: a pane drag moves the
+  /** Resolved on every pass rather than pushed in: a pane drag moves the
    *  placeholder without the view re-rendering, and a stale rect would leave
-   *  the page painted where the pane used to be. */
-  measure: () => RectLike | null;
+   *  the page painted where the pane used to be. The element itself, not just
+   *  its rect, because the occlusion walk has to skip it and its ancestors. */
+  host: () => Element | null;
   wanted: boolean;
   /** Last values pushed to the backend, so an unchanged layout stays quiet. */
   bounds: Bounds | null;
@@ -73,13 +78,86 @@ function currentZoom(): number {
   return Number.isFinite(z) && z > 0 ? z : 1;
 }
 
-function occluders(): RectLike[] {
-  const out: RectLike[] = [];
-  for (const el of document.querySelectorAll(OVERLAY_SELECTOR)) {
-    const r = el.getBoundingClientRect();
-    if (r.width > 0 && r.height > 0) out.push(r);
+/** display / visibility / opacity in one question. This is what prunes every
+ *  backgrounded doc tab — one call at the subtree's root, not once per node. */
+function isVisible(el: Element): boolean {
+  const check = (el as Element & { checkVisibility?: (o?: object) => boolean }).checkVisibility;
+  if (typeof check === "function") {
+    return check.call(el, { visibilityProperty: true, opacityProperty: true });
   }
-  return out;
+  return el.getClientRects().length > 0;
+}
+
+function readStyle(el: Element): OccluderStyle {
+  const s = getComputedStyle(el);
+  return { position: s.position, zIndex: s.zIndex, pointerEvents: s.pointerEvents };
+}
+
+/** Elements whose class already warned once, so a permanent blind spot doesn't
+ *  print on every layout pass. */
+const warned = new Set<string>();
+
+function warnBlindSpot(el: Element) {
+  const key = el.className || el.tagName;
+  if (warned.has(key)) return;
+  warned.add(key);
+  console.warn(
+    "[browserHost] %o overlaps a visible embedded browser but is click-through " +
+      "and unlisted, so it can't be detected structurally. If it paints anything, " +
+      "add its class to PAINTED_OVERLAY_SELECTOR in browserOcclusion.ts — otherwise " +
+      "the browser will draw over it.",
+    el,
+  );
+}
+
+/** Everything painted over `view`, found by structure rather than by name. */
+function occludersOver(host: Element, view: RectLike): Candidate[] {
+  const found: Candidate[] = [];
+  // An ancestor contains the view; it can never cover it.
+  const ancestors = new Set<Node>();
+  for (let n: Node | null = host; n; n = n.parentNode) ancestors.add(n);
+
+  const visit = (el: Element) => {
+    for (const child of el.children) {
+      if (child === host || !isVisible(child)) continue;
+      if (ancestors.has(child)) {
+        visit(child);
+        continue;
+      }
+      const rect = child.getBoundingClientRect();
+      let covered = false;
+      // The computed style is the expensive read, so it is only taken for boxes
+      // whose rectangle actually reaches the browser — which, with the browser
+      // being one pane, is very few of them.
+      if (rect.width > 0 && rect.height > 0 && overlaps(view, rect)) {
+        const candidate: Candidate = {
+          rect,
+          style: readStyle(child),
+          painted: child.matches(PAINTED_OVERLAY_SELECTOR),
+        };
+        if (occludes(view, candidate)) {
+          found.push(candidate);
+          covered = true;
+        } else if (
+          import.meta.env.DEV &&
+          !candidate.painted &&
+          stacksAboveFlow(candidate.style) &&
+          !isSurface(candidate.style)
+        ) {
+          // The one thing structure cannot see: a positioned box over the
+          // browser that takes no clicks. Usually a layout wrapper (correctly
+          // ignored), occasionally a toast (which must be listed). Say so.
+          warnBlindSpot(child);
+        }
+      }
+      // A counted occluder's children are inside it and add nothing. Everything
+      // else is descended into even when it misses the view, because a fixed or
+      // absolute descendant escapes its parent's rectangle.
+      if (!covered) visit(child);
+    }
+  };
+  visit(document.body);
+  return found;
 }
 
 function apply() {
@@ -87,11 +165,10 @@ function apply() {
   const zoom = currentZoom();
   const viewport = { width: window.innerWidth, height: window.innerHeight };
   const anyWanted = [...views.values()].some((e) => e.wanted);
-  // Only pay for the hit test when something could actually be covered.
-  const covers = anyWanted ? occluders() : [];
 
   for (const [tabId, e] of views) {
-    const rect = e.wanted ? e.measure() : null;
+    const host = e.wanted ? e.host() : null;
+    const rect = host?.getBoundingClientRect() ?? null;
     const bounds = rect ? webviewBounds(rect, viewport, zoom) : null;
     if (bounds && !sameBounds(bounds, e.bounds)) {
       e.bounds = bounds;
@@ -99,13 +176,10 @@ function apply() {
         .browserSetBounds(tabId, bounds.x, bounds.y, bounds.width, bounds.height)
         .catch(() => {});
     }
-    const visible =
-      e.wanted &&
-      suppressed === 0 &&
-      !!rect &&
-      !!bounds &&
-      showable(bounds) &&
-      !covers.some((c) => overlaps(rect, c));
+    // Only pay for the walk when this view would otherwise be on screen.
+    const clear =
+      !!host && !!rect && !!bounds && showable(bounds) && occludersOver(host, rect).length === 0;
+    const visible = e.wanted && suppressed === 0 && clear;
     if (visible !== e.shown) {
       e.shown = visible;
       void ipc.browserSetVisible(tabId, visible).catch(() => {});
@@ -147,8 +221,8 @@ function watch(need: boolean) {
   }
 }
 
-export function registerBrowserView(tabId: string, measure: () => RectLike | null) {
-  views.set(tabId, { measure, wanted: false, bounds: null, shown: null });
+export function registerBrowserView(tabId: string, host: () => Element | null) {
+  views.set(tabId, { host, wanted: false, bounds: null, shown: null });
 }
 
 export function forgetBrowserView(tabId: string) {
