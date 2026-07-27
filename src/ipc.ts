@@ -165,6 +165,7 @@ export interface AgentBrowserOp {
     | "point"
     | "eval"
     | "console"
+    | "network"
     | "screenshot";
   route: string;
   url?: string | null;
@@ -244,7 +245,8 @@ export const onAgentClaims = (cb: () => void): Promise<UnlistenFn> =>
   listen("agent:claims", () => cb());
 
 /** PNG (base64) of a rectangle of this window, via the webview's own snapshot
- *  API — used to hand an agent a picture of the preview. */
+ *  API — used to hand an agent a picture of the preview under the proxy engine,
+ *  where the page is an iframe in this window. */
 export const webviewSnapshot = (
   x: number,
   y: number,
@@ -252,6 +254,100 @@ export const webviewSnapshot = (
   height: number,
   maxWidth?: number,
 ) => invoke<string>("webview_snapshot", { x, y, width, height, maxWidth });
+
+/** PNG (base64) of one browser view — the whole child webview, no cropping,
+ *  because it is its own view. */
+export const browserSnapshot = (tabId: string, maxWidth?: number) =>
+  invoke<string>("browser_snapshot", { tabId, maxWidth });
+
+// ---------- Embedded browser (webview engine) ----------
+
+/** Whether this platform can host a real child webview at all. Everywhere it
+ *  can't, preview tabs fall back to the proxy engine. */
+export const browserSupported = () =>
+  invoke<boolean>("browser_supported").catch(() => false);
+
+/** Create the view for a tab, or point an existing one at `url`. */
+export const browserOpen = (
+  tabId: string,
+  url: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+) => invoke<void>("browser_open", { tabId, url, x, y, width, height });
+
+export const browserNavigate = (
+  tabId: string,
+  url?: string | null,
+  action?: string | null,
+) => invoke<void>("browser_navigate", { tabId, url, action });
+
+export const browserSetBounds = (
+  tabId: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+) => invoke<void>("browser_set_bounds", { tabId, x, y, width, height });
+
+export const browserSetVisible = (tabId: string, visible: boolean) =>
+  invoke<void>("browser_set_visible", { tabId, visible });
+
+export const browserClose = (tabId: string) =>
+  invoke<void>("browser_close", { tabId }).catch(() => {});
+
+/** Run one agent browser op against the page. Read-only ops answer here;
+ *  anything cursor-led reports `done: false` and lands on `onBrowserEvents`. */
+export interface BrowserOpAck {
+  done: boolean;
+  ok?: boolean;
+  data?: unknown;
+}
+export const browserRunOp = (tabId: string, op: Record<string, unknown>) =>
+  invoke<BrowserOpAck | null>("browser_run_op", { tabId, op });
+
+/** A host->page command with no answer: annotate mode, badge sync, navigate. */
+export const browserCommand = (tabId: string, message: Record<string, unknown>) =>
+  invoke<void>("browser_command", { tabId, message });
+
+/** Where the page thinks it is, for in-page navigations the load hook can't
+ *  see. */
+export const browserHere = (tabId: string) =>
+  invoke<{ url: string; title: string } | null>("browser_here", { tabId });
+
+/** Wipe the shared browser profile — cookies, storage, caches, every site. */
+export const browserClearData = () => invoke<void>("browser_clear_data");
+
+/** Messages a page pushed up: agent-op results, annotations, in-page
+ *  navigations, the ready announcement after every load. */
+export interface BrowserEvents {
+  tabId: string;
+  events: Record<string, unknown>[];
+}
+export const onBrowserEvents = (
+  cb: (e: BrowserEvents) => void,
+): Promise<UnlistenFn> =>
+  listen<BrowserEvents>("browser:events", (event) => cb(event.payload));
+
+export interface BrowserNav {
+  tabId: string;
+  url: string;
+  loading: boolean;
+}
+export const onBrowserNav = (cb: (n: BrowserNav) => void): Promise<UnlistenFn> =>
+  listen<BrowserNav>("browser:nav", (event) => cb(event.payload));
+
+/** target=_blank / window.open, which the view refuses to spawn a real window
+ *  for — the tab follows the link itself instead. */
+export interface BrowserPopup {
+  tabId: string;
+  url: string;
+}
+export const onBrowserPopup = (
+  cb: (p: BrowserPopup) => void,
+): Promise<UnlistenFn> =>
+  listen<BrowserPopup>("browser:popup", (event) => cb(event.payload));
 
 // ---------- Workspaces / FS ----------
 
