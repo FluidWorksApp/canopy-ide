@@ -10,6 +10,7 @@ import {
   taskRuns,
   updateTaskRun,
   type TaskRun,
+  resolveTaskFile,
   tidyOutput,
 } from "./taskHistory";
 
@@ -222,5 +223,34 @@ describe("tidyOutput", () => {
   it("survives output that is nothing but whitespace", () => {
     expect(tidyOutput("\n\n   \n\n")).toBe("");
     expect(tidyOutput("")).toBe("");
+  });
+});
+
+describe("resolveTaskFile", () => {
+  const wt = "/Users/me/code/canopy-wt-pr-177";
+  const repo = "/Users/me/code/canopy";
+
+  it("maps a throwaway worktree's path back onto the repo", () => {
+    // The brief's last step deletes the worktree, so this path is gone by the
+    // time anyone clicks it — but the agent committed and pushed the file, so
+    // the same relative path exists in the repo.
+    expect(resolveTaskFile(`${wt}/src/app.ts`, wt)).toBe(`${repo}/src/app.ts`);
+    expect(resolveTaskFile(`${wt}/a/b/c.rs`, wt)).toBe(`${repo}/a/b/c.rs`);
+  });
+
+  it("leaves a real worktree alone — its copy is the one that was worked in", () => {
+    const mine = "/Users/me/code/canopy-feature";
+    expect(resolveTaskFile(`${mine}/src/app.ts`, mine)).toBe(`${mine}/src/app.ts`);
+    expect(resolveTaskFile(`${repo}/src/app.ts`, repo)).toBe(`${repo}/src/app.ts`);
+  });
+
+  it("does not rewrite a path that isn't under the worktree", () => {
+    // Artifacts are written to the repo's .canopy/ precisely so they survive;
+    // rewriting those would point at a directory that never existed.
+    expect(resolveTaskFile(`${repo}/.canopy/review.md`, wt)).toBe(
+      `${repo}/.canopy/review.md`,
+    );
+    // A sibling whose name merely starts the same way is not inside it.
+    expect(resolveTaskFile(`${wt}-old/src/app.ts`, wt)).toBe(`${wt}-old/src/app.ts`);
   });
 });

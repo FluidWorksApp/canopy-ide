@@ -21,7 +21,14 @@ export function prWorktree(
 export function cleanupLine(repo: string, worktree: string): string {
   return (
     ` This worktree was created just for this task — when you're finished, remove it as your last step: ` +
-    `\`git -C "${repo}" worktree remove --force "${worktree}"\`.`
+    `\`git -C "${repo}" worktree remove --force "${worktree}"\`.` +
+    // Removing the worktree takes everything in it. Code is safe — it was
+    // committed and pushed — but a notes file, a report, a screenshot written
+    // beside it is not, and the history row then lists a file that is gone.
+    ` Anything you write that is NOT committed — a report, notes, a scratch file — must go under ` +
+    `\`${repo}/.canopy/\` instead of in this worktree, or it disappears with it. Create that ` +
+    `directory if it isn't there, and make sure \`.canopy/\` is in \`${repo}/.git/info/exclude\` ` +
+    `so it never shows up as a repo change.`
   );
 }
 

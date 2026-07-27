@@ -172,6 +172,26 @@ export function clearTaskHistory(): void {
   write([]);
 }
 
+/** The path to actually open for a file a run touched.
+ *
+ *  A task that edits code runs in a worktree we create for it, and the brief's
+ *  last instruction is to delete that worktree. So every path the hook digest
+ *  recorded points somewhere that no longer exists, and the chip in the history
+ *  row opened nothing at all — for exactly the runs that changed the most.
+ *
+ *  The work itself survives: the agent committed and pushed it, so the same
+ *  relative path exists in the repo. The throwaway is always `<repo>-wt-pr-<n>`
+ *  (see startPrAgent), which is what lets this map back. A worktree the user
+ *  made themselves is left alone — it is still on disk, and its copy is the one
+ *  the agent actually worked in. */
+export function resolveTaskFile(file: string, cwd: string): string {
+  const wt = /^(.*)-wt-pr-\d+$/.exec(cwd);
+  if (!wt) return file;
+  const repo = wt[1];
+  if (!file.startsWith(`${cwd}/`)) return file;
+  return `${repo}/${file.slice(cwd.length + 1)}`;
+}
+
 /** The terminal tail with its dead space taken out.
  *
  *  What gets captured is a PTY's scrollback, and once the escape codes that

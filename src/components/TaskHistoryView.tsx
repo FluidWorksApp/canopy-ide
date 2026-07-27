@@ -11,6 +11,7 @@ import {
   clearTaskHistory,
   completedTaskRuns,
   removeTaskRun,
+  resolveTaskFile,
   TASK_HISTORY_EVENT,
   tidyOutput,
   type TaskRun,
@@ -279,17 +280,25 @@ export function TaskHistoryView({
                     </div>
 
                     {run.files && run.files.length > 0 && (
-                      <div className="task-history-files">
-                        {run.files.map((f) => (
-                          <button
-                            key={f}
-                            className="task-history-file"
-                            title={f}
-                            onClick={() => onOpenFile?.(f)}
-                          >
-                            {f.split("/").pop()}
-                          </button>
-                        ))}
+                      <div className="task-history-section">
+                        <div className="task-history-section-head">Files it touched</div>
+                        <div className="task-history-files">
+                          {run.files.map((f) => {
+                            // The recorded path may point into a worktree that
+                            // no longer exists; the committed file does.
+                            const at = resolveTaskFile(f, run.cwd);
+                            return (
+                              <button
+                                key={f}
+                                className="task-history-file"
+                                title={at}
+                                onClick={() => onOpenFile?.(at)}
+                              >
+                                {at.split("/").pop()}
+                              </button>
+                            );
+                          })}
+                        </div>
                       </div>
                     )}
 
