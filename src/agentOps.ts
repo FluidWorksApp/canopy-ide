@@ -11,7 +11,14 @@
 // owns the work.
 import * as ipc from "./ipc";
 import { modelFor, monaco } from "./monaco-setup";
-import { ensureLanguageServer, lspRequest } from "./lsp/client";
+import {
+  describeMissingServer,
+  ensureLanguageServer,
+  indexingCeilingMs,
+  lspRequest,
+  serverCommandFor,
+  whenQuiet,
+} from "./lsp/client";
 import { positionOf, type LspPosition } from "./lspPosition";
 import { TRACKERS } from "./trackers";
 
@@ -71,7 +78,11 @@ function markersFor(uri: monaco.Uri) {
     .sort((a, b) => a.line - b.line);
 }
 
-export async function diagnostics(path: string | null | undefined, roots: string[]) {
+export async function diagnostics(
+  path: string | null | undefined,
+  roots: string[],
+  budgetMs?: number | null,
+) {
   if (!path) {
     // No file named: report on everything Canopy currently has open. Honest
     // about its own scope — this is not a project-wide typecheck.
@@ -89,12 +100,24 @@ export async function diagnostics(path: string | null | undefined, roots: string
   }
   const { root } = await prime(path, roots);
   const uri = monaco.Uri.file(path);
+  // A server that indexes before it can answer (rust-analyzer, tens of seconds
+  // on a cold crate) gets waited out on its own terms: quiet ends the wait
+  // early, and hitting the ceiling is reported rather than dressed up as clean.
+  let note: string | undefined;
+  const ceiling = indexingCeilingMs(path);
+  if (ceiling != null) {
+    const budget = budgetMs != null ? Math.min(ceiling, budgetMs) : ceiling;
+    if ((await whenQuiet(path, root, budget)) === "busy") {
+      note = `${serverCommandFor(path) ?? "the language server"} is still indexing — results may be incomplete.`;
+    }
+  }
   const before = markersFor(uri);
   // A file that already has markers has been analysed; otherwise wait for the
   // server's first publish rather than reporting a premature all-clear.
   if (before.length === 0) {
+    const wait = budgetMs != null ? Math.max(0, budgetMs) : DIAGNOSTIC_WAIT_MS;
     await new Promise<void>((resolve) => {
-      const timer = window.setTimeout(finish, DIAGNOSTIC_WAIT_MS);
+      const timer = window.setTimeout(finish, wait);
       const sub = monaco.editor.onDidChangeMarkers((uris) => {
         if (uris.some((u) => u.toString() === uri.toString())) finish();
       });
@@ -105,7 +128,7 @@ export async function diagnostics(path: string | null | undefined, roots: string
       }
     });
   }
-  return { path, root, problems: markersFor(uri) };
+  return { path, root, problems: markersFor(uri), note };
 }
 
 const pathOfUri = (uri: string) => decodeURIComponent(uri.replace(/^file:\/\//, ""));
@@ -147,11 +170,7 @@ async function symbolQuery(
     position,
     ...(method === "textDocument/references" ? { context: { includeDeclaration: false } } : {}),
   });
-  if (result === null) {
-    throw new Error(
-      `No language server covers ${path} — Canopy runs one for TypeScript/JavaScript so far.`,
-    );
-  }
+  if (result === null) throw new Error(await describeMissingServer(path, root));
   const raw = (Array.isArray(result) ? result : result ? [result] : []) as (
     | LspLocation
     | LspLocationLink
@@ -259,7 +278,7 @@ export interface UiOpContext {
 export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unknown> {
   switch (op.op) {
     case "diagnostics":
-      return diagnostics(op.path, ctx.roots);
+      return diagnostics(op.path, ctx.roots, op.waitMs);
     case "references":
       return symbolQuery("textDocument/references", op, ctx.roots);
     case "definition":
