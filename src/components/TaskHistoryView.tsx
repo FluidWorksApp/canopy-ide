@@ -60,6 +60,8 @@ interface TaskHistoryViewProps {
   onRunAgain?: (run: TaskRun) => void;
   /** Open a path in the editor — the files an agent touched are clickable. */
   onOpenFile?: (path: string) => void;
+  /** A run to open expanded, when the tab was opened from that run's row. */
+  focus?: { runId: string; nonce: number };
 }
 
 export function TaskHistoryView({
@@ -67,6 +69,7 @@ export function TaskHistoryView({
   projectName,
   onRunAgain,
   onOpenFile,
+  focus,
 }: TaskHistoryViewProps) {
   // The log is app-wide, the view is not: you opened this from a project, so
   // that project's work is what you meant. "Everywhere" is one click away.
@@ -77,6 +80,25 @@ export function TaskHistoryView({
   const [page, setPage] = useState(0);
   const [open, setOpen] = useState<string | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
+
+  // Opened from a run's row: expand that run, and clear whatever search or
+  // filter would hide it. Landing on an unfiltered list and leaving the reader
+  // to find the row again is what clicking the row was meant to spare them.
+  // Keyed on the nonce, so clicking the same row twice re-focuses it.
+  useEffect(() => {
+    if (!focus) return;
+    setOpen(focus.runId);
+    setQuery("");
+    setFilter("all");
+    setPage(0);
+    // The row may be below the fold in a long history.
+    const at = window.setTimeout(() => {
+      document
+        .querySelector(`[data-run-id="${CSS.escape(focus.runId)}"]`)
+        ?.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 60);
+    return () => window.clearTimeout(at);
+  }, [focus?.nonce, focus?.runId, focus]);
 
   // A task finishing while this tab is open should land in the list — the whole
   // point is that you can leave it open and watch outcomes arrive.
@@ -191,7 +213,11 @@ export function TaskHistoryView({
           {shown.map((run) => {
             const expanded = open === run.id;
             return (
-              <div className={`task-history-row ${expanded ? "is-open" : ""}`} key={run.id}>
+              <div
+                className={`task-history-row ${expanded ? "is-open" : ""}`}
+                key={run.id}
+                data-run-id={run.id}
+              >
                 <div
                   className="task-history-summary"
                   onClick={() => setOpen(expanded ? null : run.id)}

@@ -792,6 +792,14 @@ body,
   box-shadow: inset 0 1px 0 color-mix(in srgb, var(--border) 60%, transparent);
 }
 
+/* Not after the first group. It holds one icon, so a rule above and below it
+   fenced off a single button — which reads as a divider that lost its group
+   rather than a boundary between two. The later ones separate real runs of
+   icons and stay. */
+.rail-group:first-of-type + .rail-group {
+  box-shadow: none;
+}
+
 /* merge rail + side panel into one visual panel: divider only against main */
 .sidebar {
   border-right: none;
@@ -1324,6 +1332,28 @@ body,
 .status-stats-btn:hover,
 .status-stats-btn.is-open {
   color: var(--accent);
+}
+
+/* Support: the same quiet chip as its neighbours until you reach for it, and
+   then it fills, which is the one bit of warmth the status bar earns. */
+.status-support {
+  display: inline-flex;
+  align-items: center;
+  background: none;
+  border: none;
+  padding: 0 2px;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out);
+}
+/* Sponsor pink, not --danger. The palette's red is what a failed check and a
+   destructive button wear, and a heart in that colour reads as an alert rather
+   than an invitation. */
+.status-support:hover {
+  color: #db61a2;
+}
+.status-support:hover svg {
+  fill: currentColor;
 }
 
 /* The usage panel rendered inside a tray popup: a fixed-width card that scrolls
@@ -7981,6 +8011,61 @@ textarea,
   color: var(--text-dim);
 }
 
+/* Tasks panel sections: running, completed, yours, one-off, built-in. Five
+   groups of small rows down a narrow rail run together into one list, and the
+   headings alone were not enough to break them — a rule is. On the wrapper
+   rather than the heading, because the heading is shared with the tickets
+   panel, and between rather than around, so the first section keeps its edge
+   against the panel head. */
+/* The empty state for a section that has never had anything in it: it has to
+   say what the thing is, not that there is none of it. Clickable, because the
+   sentence describing the feature is the natural place to start using it. */
+.task-empty-cta {
+  display: block;
+  width: 100%;
+  padding: 8px 12px 10px;
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+}
+.task-empty-cta:hover { color: var(--text); }
+.task-empty-cta-go {
+  display: block;
+  margin-top: 4px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.task-section + .task-section {
+  margin-top: 6px;
+  border-top: 1px solid var(--border);
+  padding-top: 2px;
+}
+
+/* "Show all 24" under the capped Completed list. A row, not a button-looking
+   button: it belongs to the list it ends. */
+.task-done-more {
+  display: block;
+  width: 100%;
+  padding: 4px 12px 6px 26px;
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.task-done-more:hover {
+  color: var(--text);
+  background: var(--bg-raised);
+}
+
 .ticket-row {
   display: flex;
   align-items: center;
@@ -12067,14 +12152,16 @@ a.btn-mini {
 /* ---------- built-in task list, grouped by consequence ---------- */
 
 .task-effect-group { margin-bottom: 6px; }
-.task-effect-head {
-  padding: 5px 10px 2px;
-  font-size: 10px;
-  color: var(--fg-dim);
-}
-/* The only colour in the list is the one that says "this writes something". */
-.task-effect-head.is-posts { color: var(--warn); }
-.task-effect-head.is-pushes { color: var(--danger); }
+/* The three headings that ran above these groups — "Reads only", "Posts to
+   GitHub under your name", "Changes code and pushes" — are gone: three lines of
+   prose above nine rows, in a rail this narrow, is most of the section. What
+   they said still matters, though, so it moves onto the row's own mark: the
+   glyph is tinted by what the task does to the world, and the full sentence is
+   in the tooltip. The groups keep their order and their spacing, so the reading
+   still goes safest-first. */
+.task-effect-group + .task-effect-group { margin-top: 8px; }
+.task-row-built-in.is-posts .task-icon { color: var(--warn); }
+.task-row-built-in.is-pushes .task-icon { color: var(--danger); }
 
 .task-row-built-in {
   display: grid;

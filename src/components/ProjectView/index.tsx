@@ -1429,16 +1429,20 @@ export const ProjectView = memo(function ProjectView({
 
   /** Open the completed-tasks tab, or focus it if it's already up. Only ever
    *  one — it's a view of a single app-wide log, so a second would be a copy. */
-  const openTaskHistory = useCallback(() => {
+  const openTaskHistory = useCallback((runId?: string) => {
+    const focus = runId ? { runId, nonce: Date.now() } : undefined;
     const existing = tabsRef.current.find((t) => t.type === "task-history");
     if (existing) {
+      // Already open: hand it the run anyway, so a click from the panel lands
+      // on that row instead of wherever the tab was last left.
+      if (focus) patchTabRaw(existing.id, { focus } as Partial<SubTab>);
       setActiveTabId(existing.id);
       return;
     }
     const id = tabId();
-    setTabs((prev) => [...prev, { id, type: "task-history" }]);
+    setTabs((prev) => [...prev, { id, type: "task-history", focus }]);
     setActiveTabId(id);
-  }, []);
+  }, [patchTabRaw]);
 
   /** Open the agent-instructions tab, focused on one file when a panel row
    *  asked for it. One per project, like the history tab. */
@@ -4563,6 +4567,7 @@ export const ProjectView = memo(function ProjectView({
               runAdhocTask(run.brief, run.cwd, run.label)
             }
             onOpenFile={(path) => void openFile(path)}
+            focus={tab.focus}
           />
         );
       case "instructions":

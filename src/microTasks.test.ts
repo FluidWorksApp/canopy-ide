@@ -523,6 +523,25 @@ describe("adhocLabel", () => {
     expect(adhocLabel(`${"x".repeat(40)} tail`)).toBe(`${"x".repeat(32)}…`);
     expect(adhocLabel("   ")).toBe("One-off task");
   });
+
+  it("starts at the ask, not at whatever was pasted in front of it", () => {
+    // The row read "ERR_PNPM_CONFIG_CONFLICT_BU…" — the input the brief opened
+    // with, which names the thing and says nothing about the job.
+    expect(
+      adhocLabel("ERR_PNPM_CONFIG_CONFLICT_BUILD: work out why install fails"),
+    ).toBe("work out why install fails");
+    expect(
+      adhocLabel("https://github.com/o/r/pull/9 compare this against main"),
+    ).toBe("compare this against main");
+    expect(adhocLabel("- fix the flaky test")).toBe("fix the flaky test");
+  });
+
+  it("keeps the brief when stripping would leave nothing to say", () => {
+    // A brief that is only a URL or only an error still has to name its row.
+    const url = "https://github.com/o/r/pull/9";
+    expect(adhocLabel(url)).toBe(url);
+    expect(adhocLabel("ERR_PNPM_CONFIG_CONFLICT")).toBe("ERR_PNPM_CONFIG_CONFLICT");
+  });
 });
 
 describe("adhocTaskDef", () => {

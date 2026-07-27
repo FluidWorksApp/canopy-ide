@@ -379,6 +379,16 @@ export function MoonIcon({ size = 14, className }: IconProps) {
 }
 
 /** A commit: a node on a line, the way every git UI draws one. */
+/** Support the project. Stroked like the rest so it sits in the status bar as
+ *  one of the row rather than as decoration; filled on hover via CSS. */
+export function HeartIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M12 20.5s-7.5-4.7-7.5-9.8a4.2 4.2 0 0 1 7.5-2.6 4.2 4.2 0 0 1 7.5 2.6c0 5.1-7.5 9.8-7.5 9.8z" />
+    </svg>
+  );
+}
+
 export function CommitIcon({ size = 14, className }: IconProps) {
   return (
     <svg {...svgProps(size, className)}>

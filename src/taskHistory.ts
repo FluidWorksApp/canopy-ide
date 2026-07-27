@@ -192,10 +192,20 @@ export function taskRuns(): TaskRun[] {
  *  not about one repo), but every surface showing it is inside a project, so
  *  the default view is scoped and `projectId` is how. */
 export function completedTaskRuns(projectId?: string): TaskRun[] {
-  return read().filter(
-    (r) =>
-      r.status !== "running" &&
-      (projectId === undefined || r.projectId === projectId),
+  return (
+    read()
+      .filter(
+        (r) =>
+          r.status !== "running" &&
+          (projectId === undefined || r.projectId === projectId),
+      )
+      // By when it FINISHED, not when it started. The store is newest-first by
+      // start time (recordTaskStart prepends), which is a different order the
+      // moment two runs overlap: a review begun at 10:00 and still going at
+      // 10:30 finishes after a one-liner begun at 10:20, and "what just came
+      // back" is the question this list answers. Fall back to startedAt for a
+      // run that never recorded an end.
+      .sort((a, b) => (b.endedAt ?? b.startedAt) - (a.endedAt ?? a.startedAt))
   );
 }
 
