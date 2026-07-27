@@ -506,6 +506,7 @@ pub fn run() {
             context::browser_result,
             snapshot::webview_snapshot,
             snapshot::browser_snapshot,
+            snapshot::browser_frame,
             portal::remote_enable,
             portal::remote_disable,
             portal::remote_status,

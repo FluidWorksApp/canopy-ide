@@ -10289,7 +10289,12 @@ a.btn-mini {
 .preview-frame-wrap {
   flex: 1;
   min-width: 0;
-  background: #fff;
+  /* The app's own colour, not white. Under the webview engine this box is
+     revealed every time a panel or a menu opens over the page, and a white
+     rectangle flashing against a dark skin reads as a rendering failure rather
+     than as something being covered. The iframe paints its own page over this
+     anyway, so the proxy engine loses nothing. */
+  background: var(--bg);
 }
 .preview-frame {
   width: 100%;
@@ -10297,11 +10302,25 @@ a.btn-mini {
   border: 0;
   display: block;
 }
-/* The webview engine's page is a native view parked over this box, so nothing
-   is ever drawn here. It stays white so the moment before the view appears
-   reads as a blank page rather than a hole in the app. */
+/* The webview engine's page is a native view parked over this box. Nothing is
+   drawn here except the freeze-frame, and only while the view is hidden. */
 .preview-webview-host {
-  background: #fff;
+  background: var(--bg);
+  position: relative;
+  overflow: hidden;
+}
+/* The last picture of the page, standing in for it while an overlay has the
+   view pushed off screen — so a menu opening looks like the page pausing
+   rather than the page going away. Stretched to the box it stands in for: the
+   capture is of exactly that box, taken at whatever resolution was cheap. */
+.preview-frozen {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  pointer-events: none;
+  user-select: none;
 }
 .preview-error {
   height: 100%;

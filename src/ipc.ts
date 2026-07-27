@@ -260,6 +260,12 @@ export const webviewSnapshot = (
 export const browserSnapshot = (tabId: string, maxWidth?: number) =>
   invoke<string>("browser_snapshot", { tabId, maxWidth });
 
+/** JPEG (base64) of a browser view, for the freeze-frame the pane shows while
+ *  the view is hidden behind an overlay. Lossy and half-size on purpose: it is
+ *  a still under a dialog, and it travels every time a menu opens. */
+export const browserFrame = (tabId: string, maxWidth?: number) =>
+  invoke<string>("browser_frame", { tabId, maxWidth });
+
 // ---------- Embedded browser (webview engine) ----------
 
 /** Whether this platform can host a real child webview at all. Everywhere it
@@ -275,7 +281,8 @@ export const browserOpen = (
   y: number,
   width: number,
   height: number,
-) => invoke<void>("browser_open", { tabId, url, x, y, width, height });
+  background?: [number, number, number],
+) => invoke<void>("browser_open", { tabId, url, x, y, width, height, background });
 
 export const browserNavigate = (
   tabId: string,
