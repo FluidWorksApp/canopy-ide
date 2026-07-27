@@ -41,6 +41,12 @@ import {
   type RectLike,
 } from "./browserBounds";
 import {
+  frameSrc,
+  shouldCapture,
+  type PaneState,
+  paneState,
+} from "./browserFrame";
+import {
   PAINTED_OVERLAY_SELECTOR,
   isSurface,
   occludes,
@@ -50,6 +56,13 @@ import {
 } from "./browserOcclusion";
 import * as ipc from "./ipc";
 import { getSettings } from "./settings";
+
+/** Told to whoever is rendering the pane, so the DOM can stand in for the
+ *  native view while it is out of the way. */
+export interface PaneView {
+  state: PaneState;
+  frame: string | null;
+}
 
 interface Entry {
   /** Resolved on every pass rather than pushed in: a pane drag moves the
@@ -61,6 +74,15 @@ interface Entry {
   /** Last values pushed to the backend, so an unchanged layout stays quiet. */
   bounds: Bounds | null;
   shown: boolean | null;
+  /** The last picture of the page, shown while the view is hidden. */
+  frame: string | null;
+  lastCaptureAt: number;
+  capturing: boolean;
+  /** The page moved on and the held frame is known to be wrong. */
+  dirty: boolean;
+  /** Nothing worth capturing until the page has arrived. */
+  loading: boolean;
+  told: PaneView | null;
 }
 
 const views = new Map<string, Entry>();
@@ -184,8 +206,105 @@ function apply() {
       e.shown = visible;
       void ipc.browserSetVisible(tabId, visible).catch(() => {});
     }
+    // Take the picture while the view is still up. A hidden WKWebView
+    // snapshots to nothing, so the instant the frame is needed is the instant
+    // it can no longer be taken — it has to already be in hand.
+    if (
+      shouldCapture({
+        native: true,
+        shown: e.shown === true,
+        loading: e.loading,
+        lastCaptureAt: e.lastCaptureAt,
+        now: Date.now(),
+        dirty: e.dirty,
+        inFlight: e.capturing,
+      })
+    ) {
+      capture(tabId, e);
+    }
+    publish(tabId, e);
   }
   watch(anyWanted);
+}
+
+function capture(tabId: string, e: Entry) {
+  e.capturing = true;
+  e.lastCaptureAt = Date.now();
+  void ipc.browserFrame(tabId).then(
+    (base64) => {
+      e.capturing = false;
+      if (!base64) return;
+      e.dirty = false;
+      e.frame = frameSrc(base64);
+      publish(tabId, e);
+    },
+    () => {
+      // A view mid-navigation or already gone has no frame to give. Keeping
+      // the previous one is exactly right — it is still the better picture of
+      // this page than nothing is.
+      e.capturing = false;
+    },
+  );
+}
+
+/** Kept beside `views` rather than inside an Entry: the pane hook subscribes on
+ *  the render that creates the placeholder, which is before the effect that
+ *  registers the view has run. */
+const paneListeners = new Map<string, Set<(v: PaneView) => void>>();
+
+function publish(tabId: string, e: Entry) {
+  const next: PaneView = {
+    state: paneState({
+      native: true,
+      wanted: e.wanted,
+      shown: e.shown === true,
+      frame: e.frame,
+    }),
+    frame: e.frame,
+  };
+  if (e.told && e.told.state === next.state && e.told.frame === next.frame) return;
+  e.told = next;
+  const cbs = paneListeners.get(tabId);
+  if (cbs) for (const cb of cbs) cb(next);
+}
+
+/** The page navigated, or an agent acted on it: whatever frame is held is of
+ *  the wrong page now. */
+export function browserViewChanged(tabId: string, loading?: boolean) {
+  const e = views.get(tabId);
+  if (!e) return;
+  e.dirty = true;
+  if (loading !== undefined) e.loading = loading;
+  // A new page's old frame is worse than none — it would freeze the page the
+  // user just navigated away from.
+  if (loading) e.frame = null;
+  schedule();
+}
+
+/** Subscribe to what the pane should be showing. */
+export function watchBrowserPane(tabId: string, cb: (v: PaneView) => void): () => void {
+  let cbs = paneListeners.get(tabId);
+  if (!cbs) {
+    cbs = new Set();
+    paneListeners.set(tabId, cbs);
+  }
+  cbs.add(cb);
+  const told = views.get(tabId)?.told;
+  if (told) cb(told);
+  return () => {
+    cbs.delete(cb);
+    if (cbs.size === 0) paneListeners.delete(tabId);
+  };
+}
+
+/** React binding for the above. */
+export function useBrowserPane(tabId: string, active: boolean): PaneView {
+  const [pane, setPane] = useState<PaneView>({ state: "empty", frame: null });
+  useEffect(() => {
+    if (!active) return;
+    return watchBrowserPane(tabId, setPane);
+  }, [tabId, active]);
+  return active ? pane : { state: "empty", frame: null };
 }
 
 /** A timer rather than requestAnimationFrame: rAF stops while the window is
@@ -222,11 +341,31 @@ function watch(need: boolean) {
 }
 
 export function registerBrowserView(tabId: string, host: () => Element | null) {
-  views.set(tabId, { host, wanted: false, bounds: null, shown: null });
+  views.set(tabId, {
+    host,
+    wanted: false,
+    bounds: null,
+    shown: null,
+    frame: null,
+    lastCaptureAt: 0,
+    capturing: false,
+    dirty: true,
+    loading: true,
+    told: null,
+  });
 }
 
 export function forgetBrowserView(tabId: string) {
   views.delete(tabId);
+  schedule();
+}
+
+/** The page navigated, or an agent acted on it, so any frame in hand is of a
+ *  page that no longer exists. */
+export function browserPageChanged(tabId: string) {
+  const e = views.get(tabId);
+  if (!e) return;
+  e.dirty = true;
   schedule();
 }
 
