@@ -294,12 +294,22 @@ export function TaskHistoryView({
                     )}
 
                     {run.output ? (
-                      <div className="task-history-section">
-                        <div className="task-history-section-head">Terminal tail</div>
+                      /* Shut by default. The answer above is what you opened
+                         the row for; the tail is the evidence behind it, and
+                         only sometimes what you want. Left open it pushed every
+                         other run off the screen. */
+                      <details className="task-history-section task-history-tail">
+                        <summary className="task-history-section-head">
+                          <span className="task-history-tail-caret">›</span>
+                          Terminal tail
+                          <span className="task-history-tail-size">
+                            {tidyOutput(run.output).split("\n").length} lines
+                          </span>
+                        </summary>
                         <pre className="task-history-output">
                           {tidyOutput(run.output)}
                         </pre>
-                      </div>
+                      </details>
                     ) : (
                       <div className="task-history-note">
                         The terminal output for this run is no longer kept — only the

@@ -3961,6 +3961,30 @@ body.dragging-tab * {
   word-break: break-word;
 }
 
+/* Collapsed by default; the summary row is the toggle. */
+.task-history-tail > summary {
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.task-history-tail > summary::-webkit-details-marker { display: none; }
+.task-history-tail > summary:hover { color: var(--text-dim); }
+.task-history-tail-caret {
+  display: inline-block;
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+.task-history-tail[open] > summary { margin-bottom: 5px; }
+.task-history-tail[open] .task-history-tail-caret { transform: rotate(90deg); }
+.task-history-tail-size {
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-faint);
+}
+@media (prefers-reduced-motion: reduce) {
+  .task-history-tail-caret { transition: none; }
+}
+
 .task-history-output {
   margin: 0;
   /* Sized to what is in it, capped rather than fixed: after tidyOutput a quiet
