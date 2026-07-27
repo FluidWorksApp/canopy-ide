@@ -11,7 +11,19 @@
 // owns the work.
 import * as ipc from "./ipc";
 import { modelFor, monaco } from "./monaco-setup";
-import { ensureLanguageServer, lspRequest } from "./lsp/client";
+import {
+  describeMissingServer,
+  ensureLanguageServer,
+  hasServerFor,
+  indexingCeilingMs,
+  lspRequest,
+  runningServersUnder,
+  serverCommandFor,
+  whenQuiet,
+  workspaceRequest,
+} from "./lsp/client";
+import { flattenHover, type HoverContents } from "./lsp/hover";
+import { sortRows, symbolRows, type SymbolRow } from "./lsp/symbols";
 import { positionOf, type LspPosition } from "./lspPosition";
 import { TRACKERS } from "./trackers";
 
@@ -71,7 +83,11 @@ function markersFor(uri: monaco.Uri) {
     .sort((a, b) => a.line - b.line);
 }
 
-export async function diagnostics(path: string | null | undefined, roots: string[]) {
+export async function diagnostics(
+  path: string | null | undefined,
+  roots: string[],
+  budgetMs?: number | null,
+) {
   if (!path) {
     // No file named: report on everything Canopy currently has open. Honest
     // about its own scope — this is not a project-wide typecheck.
@@ -89,12 +105,24 @@ export async function diagnostics(path: string | null | undefined, roots: string
   }
   const { root } = await prime(path, roots);
   const uri = monaco.Uri.file(path);
+  // A server that indexes before it can answer (rust-analyzer, tens of seconds
+  // on a cold crate) gets waited out on its own terms: quiet ends the wait
+  // early, and hitting the ceiling is reported rather than dressed up as clean.
+  let note: string | undefined;
+  const ceiling = indexingCeilingMs(path);
+  if (ceiling != null) {
+    const budget = budgetMs != null ? Math.min(ceiling, budgetMs) : ceiling;
+    if ((await whenQuiet(path, root, budget)) === "busy") {
+      note = `${serverCommandFor(path) ?? "the language server"} is still indexing — results may be incomplete.`;
+    }
+  }
   const before = markersFor(uri);
   // A file that already has markers has been analysed; otherwise wait for the
   // server's first publish rather than reporting a premature all-clear.
   if (before.length === 0) {
+    const wait = budgetMs != null ? Math.max(0, budgetMs) : DIAGNOSTIC_WAIT_MS;
     await new Promise<void>((resolve) => {
-      const timer = window.setTimeout(finish, DIAGNOSTIC_WAIT_MS);
+      const timer = window.setTimeout(finish, wait);
       const sub = monaco.editor.onDidChangeMarkers((uris) => {
         if (uris.some((u) => u.toString() === uri.toString())) finish();
       });
@@ -105,7 +133,7 @@ export async function diagnostics(path: string | null | undefined, roots: string
       }
     });
   }
-  return { path, root, problems: markersFor(uri) };
+  return { path, root, problems: markersFor(uri), note };
 }
 
 const pathOfUri = (uri: string) => decodeURIComponent(uri.replace(/^file:\/\//, ""));
@@ -134,24 +162,33 @@ async function describeLocations(locations: LspLocation[]) {
   return out;
 }
 
+/** Resolve `path` + (`symbol` | line/column) to a live document and an LSP
+ *  position — the addressing every position-based tool shares. */
+async function at(op: ipc.AgentUiOp, roots: string[]) {
+  const path = op.path as string;
+  const { root, text } = await prime(path, roots);
+  const position = positionOf(text, op);
+  return {
+    path,
+    root,
+    position,
+    textDocument: { uri: monaco.Uri.file(path).toString() },
+    of: op.symbol ?? `${path}:${position.line + 1}:${position.character + 1}`,
+  };
+}
+
 async function symbolQuery(
   method: "textDocument/references" | "textDocument/definition",
   op: ipc.AgentUiOp,
   roots: string[],
 ) {
-  const path = op.path as string;
-  const { root, text } = await prime(path, roots);
-  const position = positionOf(text, op);
+  const { path, root, position, textDocument, of } = await at(op, roots);
   const result = await lspRequest(path, root, method, {
-    textDocument: { uri: monaco.Uri.file(path).toString() },
+    textDocument,
     position,
     ...(method === "textDocument/references" ? { context: { includeDeclaration: false } } : {}),
   });
-  if (result === null) {
-    throw new Error(
-      `No language server covers ${path} — Canopy runs one for TypeScript/JavaScript so far.`,
-    );
-  }
+  if (result === null) throw new Error(await describeMissingServer(path, root));
   const raw = (Array.isArray(result) ? result : result ? [result] : []) as (
     | LspLocation
     | LspLocationLink
@@ -163,10 +200,86 @@ async function symbolQuery(
   );
   const found = await describeLocations(locations);
   return {
-    of: op.symbol ?? `${path}:${position.line + 1}:${position.character + 1}`,
+    of,
     count: locations.length,
     truncated: locations.length > MAX_LOCATIONS,
     locations: found,
+  };
+}
+
+/** The type signature and docs the editor shows on hover — the answer to "what
+ *  is this" that a grep can only guess at. */
+async function hover(op: ipc.AgentUiOp, roots: string[]) {
+  const { path, root, position, textDocument, of } = await at(op, roots);
+  const result = (await lspRequest(path, root, "textDocument/hover", {
+    textDocument,
+    position,
+  })) as { contents?: HoverContents } | null;
+  // A server with nothing to say answers null, same as no server at all; only
+  // the second is a failure worth throwing over.
+  if (result === null && !(await hasServerFor(path, root))) {
+    throw new Error(await describeMissingServer(path, root));
+  }
+  const contents = flattenHover(result?.contents);
+  return {
+    of,
+    path,
+    line: position.line + 1,
+    column: position.character + 1,
+    contents,
+    note: contents ? undefined : "The language server has no hover information there.",
+  };
+}
+
+/** Find a symbol by name across the workspace, or outline one file. The
+ *  type-aware answer to "where is X defined", which grep can only approximate
+ *  once the name is common enough to appear in prose. */
+async function symbols(op: ipc.AgentUiOp, roots: string[]) {
+  const query = op.query?.trim();
+  if (!query) {
+    if (!op.path) throw new Error("canopy_symbols needs a query, or a path to outline");
+    const path = op.path;
+    const { root } = await prime(path, roots);
+    const result = await lspRequest(path, root, "textDocument/documentSymbol", {
+      textDocument: { uri: monaco.Uri.file(path).toString() },
+    });
+    if (result === null) throw new Error(await describeMissingServer(path, root));
+    const rows = symbolRows(result, path);
+    return {
+      scope: path,
+      count: rows.length,
+      truncated: rows.length > MAX_LOCATIONS,
+      symbols: rows.slice(0, MAX_LOCATIONS),
+    };
+  }
+
+  // Deliberately asks only the servers already running: starting one here would
+  // make a name lookup pay for a cold rust-analyzer index the agent never asked
+  // for. Nothing running is reported as such, with the cheap way to fix it.
+  const rows: SymbolRow[] = [];
+  let servers = 0;
+  for (const root of roots) {
+    servers += runningServersUnder(root).length;
+    for (const { result } of await workspaceRequest(root, "workspace/symbol", { query })) {
+      rows.push(...symbolRows(result));
+    }
+  }
+  if (servers === 0) {
+    return {
+      scope: `workspace search for "${query}"`,
+      count: 0,
+      symbols: [],
+      note:
+        "No language server is running for this project yet — Canopy starts one when a file " +
+        "of that language is opened. Call canopy_diagnostics on a file first, then ask again.",
+    };
+  }
+  const found = sortRows(rows);
+  return {
+    scope: `workspace search for "${query}"`,
+    count: found.length,
+    truncated: found.length > MAX_LOCATIONS,
+    symbols: found.slice(0, MAX_LOCATIONS),
   };
 }
 
@@ -259,11 +372,15 @@ export interface UiOpContext {
 export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unknown> {
   switch (op.op) {
     case "diagnostics":
-      return diagnostics(op.path, ctx.roots);
+      return diagnostics(op.path, ctx.roots, op.waitMs);
     case "references":
       return symbolQuery("textDocument/references", op, ctx.roots);
     case "definition":
       return symbolQuery("textDocument/definition", op, ctx.roots);
+    case "hover":
+      return hover(op, ctx.roots);
+    case "symbols":
+      return symbols(op, ctx.roots);
     case "tickets":
       return tickets(ctx.repos);
     case "reviews":

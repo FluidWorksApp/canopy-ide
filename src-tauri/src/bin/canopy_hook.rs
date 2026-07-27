@@ -169,6 +169,20 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("{out}");
                 }
             }
+            // Claude only: PostToolUse carrying additionalContext is proven on
+            // its wire and nowhere else, and a hook that guesses wrong about a
+            // CLI's stdout contract breaks the session it's attached to.
+            if agent_override.is_none() && hook_event == "PostToolUse" {
+                if let Some(context) = edit_diagnostics(&event) {
+                    let out = serde_json::json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": "PostToolUse",
+                            "additionalContext": context,
+                        }
+                    });
+                    println!("{out}");
+                }
+            }
         }
         Some(_) => {}
     }
@@ -690,6 +704,167 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{cut}…")
 }
 
+// ---- pushed diagnostics (PostToolUse) -------------------------------------
+//
+// The agent has to *ask* canopy_diagnostics, and the moment it most needs the
+// answer — right after writing a file — is the moment it is least likely to.
+// This pushes the errors instead. Same discipline as peer_context: a hard char
+// budget, and nothing at all unless the answer changed.
+
+/// Cap on the errors injected after one edit. The constraint is the agent's
+/// attention, not the 10k limit — a wall of text after every Write trains it to
+/// skim past exactly the lines that matter.
+const MAX_DIAG_CHARS: usize = 1_500;
+/// Room kept back for the "…and N more" line, so the cap holds with it.
+const DIAG_TAIL_RESERVE: usize = 32;
+/// How long the bridge may spend before we give up. This runs inside the
+/// agent's tool loop: a server that isn't warm yet must be missed, not waited
+/// on. The frontend uses it as its whole budget, skipping the cold-start wait.
+const DIAG_WAIT_MS: u64 = 2_500;
+/// One error line, capped. Type errors get long; the first sentence identifies it.
+const MAX_DIAG_LINE: usize = 200;
+
+const EDIT_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
+
+/// The file a PostToolUse event wrote to, or None when the tool didn't write
+/// one. NotebookEdit names its target `notebook_path`.
+fn edited_path(event: &serde_json::Value) -> Option<&str> {
+    let tool = event["tool_name"].as_str()?;
+    if !EDIT_TOOLS.contains(&tool) {
+        return None;
+    }
+    let input = &event["tool_input"];
+    input["file_path"]
+        .as_str()
+        .or_else(|| input["notebook_path"].as_str())
+        .filter(|p| !p.is_empty())
+}
+
+/// Errors only. A pre-existing warning is noise the agent has to re-read after
+/// every edit; an error in the file it just wrote is the whole point.
+fn error_lines(body: &serde_json::Value) -> Vec<String> {
+    body["problems"]
+        .as_array()
+        .map(|problems| {
+            problems
+                .iter()
+                .filter(|p| p["severity"].as_str() == Some("error"))
+                .map(|p| {
+                    format!(
+                        "line {}: {}",
+                        p["line"].as_u64().unwrap_or(0),
+                        truncate(p["message"].as_str().unwrap_or("").trim(), MAX_DIAG_LINE)
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A stable digest of a file's error set, order-independent: the language
+/// server is free to republish the same problems in a different order, and
+/// re-injecting them because of that would cost a prompt cache for nothing.
+/// FNV-1a, because a hash function is not worth a dependency here.
+fn fingerprint(lines: &[String]) -> String {
+    let mut sorted: Vec<&str> = lines.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for line in sorted {
+        for byte in line.bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        // Separator, so ["ab","c"] and ["a","bc"] don't collide.
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// The text injected after an edit. An empty error list means the file just
+/// came clean — worth one line, since the agent is otherwise still working
+/// around errors it already fixed.
+fn diag_context(file: &str, lines: &[String]) -> String {
+    if lines.is_empty() {
+        return format!("{file}: previous errors resolved.\n");
+    }
+    let mut out = format!(
+        "Canopy's language server reports {} error{} in {file} after your edit:\n",
+        lines.len(),
+        if lines.len() == 1 { "" } else { "s" }
+    );
+    let mut shown = 0;
+    for line in lines {
+        let row = format!("- {line}\n");
+        if out.len() + row.len() > MAX_DIAG_CHARS - DIAG_TAIL_RESERVE {
+            break;
+        }
+        out.push_str(&row);
+        shown += 1;
+    }
+    if shown < lines.len() {
+        out.push_str(&format!("…and {} more.\n", lines.len() - shown));
+    }
+    out
+}
+
+/// Where this terminal's last-seen error fingerprints live. Per pty, like the
+/// per-session digests: independent processes, so nothing to lock.
+fn diag_state_path() -> std::path::PathBuf {
+    let tag = |var: &str| {
+        std::env::var(var)
+            .unwrap_or_default()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect::<String>()
+    };
+    std::env::temp_dir().join(format!(
+        "canopy-diag-{}-{}.json",
+        tag("CANOPY_INSTANCE"),
+        tag("CANOPY_PTY")
+    ))
+}
+
+/// What the agent just broke, if it changed. None when the fingerprint is the
+/// same as last time (the errors are already in the transcript, and re-injecting
+/// them breaks the prompt cache), when the file was already clean, or when
+/// anything at all went wrong — a hook must never cost the turn it rides on.
+fn edit_diagnostics(event: &serde_json::Value) -> Option<String> {
+    if !in_canopy() {
+        return None;
+    }
+    let path = edited_path(event)?.to_string();
+    let body = ui_op(
+        "diagnostics",
+        &serde_json::json!({ "path": path, "waitMs": DIAG_WAIT_MS }),
+        6,
+    )
+    .ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let lines = error_lines(&parsed);
+    let print = fingerprint(&lines);
+
+    let state_path = diag_state_path();
+    let mut state = std::fs::read_to_string(&state_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let unchanged = state.get(&path).and_then(|v| v.as_str()) == Some(print.as_str());
+    // A file that has never had errors isn't news; only coming back from some is.
+    let first_sight_clean = lines.is_empty() && !state.contains_key(&path);
+
+    state.insert(path.clone(), serde_json::json!(print));
+    let _ = std::fs::write(
+        &state_path,
+        serde_json::to_string(&serde_json::Value::Object(state)).unwrap_or_default(),
+    );
+    if unchanged || first_sight_clean {
+        return None;
+    }
+    Some(diag_context(&path, &lines))
+}
+
 // ---- MCP mode (`canopy-hook --mcp`) ---------------------------------------
 //
 // A minimal MCP stdio server: one JSON-RPC message per line in, one per line
@@ -728,6 +903,8 @@ results stay inspectable:
 - Check your own edit compiles -> canopy_diagnostics (the warm language server, \
   not a full `tsc --noEmit`); before changing a shared signature -> \
   canopy_references
+- What a symbol's type and docs are -> canopy_hover; where a symbol by that \
+  name is -> canopy_symbols (not grep)
 - Wait for a server to come up, a build to finish -> canopy_wait_for (don't poll \
   canopy_server_output in a loop)
 - How something LOOKS -> canopy_screenshot (the DOM snapshot can't see overlap \
@@ -1127,6 +1304,8 @@ const STRUCTURED_TOOLS: &[&str] = &[
     "canopy_diagnostics",
     "canopy_references",
     "canopy_definition",
+    "canopy_hover",
+    "canopy_symbols",
     "canopy_tickets",
     "canopy_reviews",
     "canopy_agents",
@@ -1201,6 +1380,8 @@ const READ_ONLY_TOOLS: &[&str] = &[
     "canopy_diagnostics",
     "canopy_references",
     "canopy_definition",
+    "canopy_hover",
+    "canopy_symbols",
     "canopy_tickets",
     "canopy_reviews",
     "canopy_agents",
@@ -1239,6 +1420,15 @@ fn output_schema(name: &str) -> Option<serde_json::Value> {
         "canopy_references" | "canopy_definition" => serde_json::json!({
             "count": { "type": "integer" },
             "locations": { "type": "array" }
+        }),
+        "canopy_hover" => serde_json::json!({
+            "contents": { "type": "string" },
+            "path": { "type": "string" },
+            "line": { "type": "integer" }
+        }),
+        "canopy_symbols" => serde_json::json!({
+            "count": { "type": "integer" },
+            "symbols": { "type": "array" }
         }),
         "canopy_tickets" => serde_json::json!({ "tickets": { "type": "array" } }),
         "canopy_reviews" => serde_json::json!({
@@ -1434,6 +1624,24 @@ fn tool_defs() -> serde_json::Value {
                 "line": { "type": "integer", "description": "1-based line, instead of a symbol name" },
                 "column": { "type": "integer", "description": "1-based column, with line" }
             }, "required": ["path"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_hover",
+            "description": "What the editor shows on hover: a symbol's resolved type signature and its doc comment, from the language server. Answers \"what is this\" without opening the definition. Same addressing as canopy_references.",
+            "inputSchema": { "type": "object", "properties": {
+                "path": { "type": "string", "description": "Absolute path of the file the symbol is used in" },
+                "symbol": { "type": "string", "description": "The name to look up — its first occurrence in the file is used" },
+                "line": { "type": "integer", "description": "1-based line, instead of a symbol name" },
+                "column": { "type": "integer", "description": "1-based column, with line" }
+            }, "required": ["path"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_symbols",
+            "description": "Find a symbol by name across the project (`query`), or outline one file's symbols (`path`): declarations only, with kind and container, from the language server. Beats grep for a name that also appears in strings and comments. Searches the servers already running — prime one with canopy_diagnostics on a file if it says none are.",
+            "inputSchema": { "type": "object", "properties": {
+                "query": { "type": "string", "description": "Symbol name to search the project for (partial names match)" },
+                "path": { "type": "string", "description": "Absolute path to outline instead, when no query is given" }
+            }, "additionalProperties": false }
         },
         {
             "name": "canopy_wait_for",
@@ -1641,6 +1849,8 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
         "canopy_diagnostics" => text(ui_op("diagnostics", args, 25)),
         "canopy_references" => text(ui_op("references", args, 25)),
         "canopy_definition" => text(ui_op("definition", args, 25)),
+        "canopy_hover" => text(ui_op("hover", args, 25)),
+        "canopy_symbols" => text(ui_op("symbols", args, 25)),
         "canopy_tickets" => text(ui_op("tickets", args, 25)),
         "canopy_reviews" => text(ui_op("reviews", args, 25)),
         "canopy_ask_user" => {
@@ -2532,5 +2742,121 @@ mod tests {
         let out = tail_of_named("wall-of-tools", &lines, 4);
         assert_eq!(out.len(), 2);
         assert_eq!(out[1]["text"], "Running it.");
+    }
+
+    // ---- pushed diagnostics ----------------------------------------------
+
+    fn post_tool_use(tool: &str, input: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": tool,
+            "tool_input": input,
+        })
+    }
+
+    #[test]
+    fn only_the_tools_that_write_a_file_name_one() {
+        for tool in ["Edit", "Write", "MultiEdit"] {
+            let e = post_tool_use(tool, serde_json::json!({ "file_path": "/w/a.ts" }));
+            assert_eq!(edited_path(&e), Some("/w/a.ts"), "{tool}");
+        }
+        // NotebookEdit calls it something else.
+        let nb = post_tool_use(
+            "NotebookEdit",
+            serde_json::json!({ "notebook_path": "/w/a.ipynb" }),
+        );
+        assert_eq!(edited_path(&nb), Some("/w/a.ipynb"));
+        // Reads and shells write nothing, so there is nothing to check.
+        assert_eq!(
+            edited_path(&post_tool_use(
+                "Read",
+                serde_json::json!({ "file_path": "/w/a.ts" })
+            )),
+            None
+        );
+        assert_eq!(
+            edited_path(&post_tool_use(
+                "Bash",
+                serde_json::json!({ "command": "ls" })
+            )),
+            None
+        );
+        // A payload we can't read is not an excuse to guess.
+        assert_eq!(
+            edited_path(&post_tool_use(
+                "Edit",
+                serde_json::json!({ "file_path": "" })
+            )),
+            None
+        );
+        assert_eq!(edited_path(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn only_errors_are_worth_pushing() {
+        let body = serde_json::json!({ "problems": [
+            { "severity": "error", "line": 12, "message": "Type 'string' is not assignable" },
+            { "severity": "warning", "line": 3, "message": "unused import" },
+            { "severity": "hint", "line": 1, "message": "prefer const" },
+        ]});
+        assert_eq!(
+            error_lines(&body),
+            vec!["line 12: Type 'string' is not assignable".to_string()]
+        );
+        // Nothing to say, and nothing to panic over.
+        assert!(error_lines(&serde_json::json!({ "problems": [] })).is_empty());
+        assert!(error_lines(&serde_json::json!({ "note": "no server" })).is_empty());
+    }
+
+    #[test]
+    fn a_multiline_message_stays_one_line_and_bounded() {
+        let body = serde_json::json!({ "problems": [
+            { "severity": "error", "line": 1, "message": format!("boom\n{}", "x".repeat(400)) },
+        ]});
+        let lines = error_lines(&body);
+        assert!(!lines[0].contains('\n'));
+        assert!(lines[0].chars().count() <= MAX_DIAG_LINE + 16);
+    }
+
+    /// The point of the fingerprint: republishing the same errors in a
+    /// different order must not read as a change and re-inject the block.
+    #[test]
+    fn the_fingerprint_ignores_order_but_not_content() {
+        let a = vec!["line 1: a".to_string(), "line 9: b".to_string()];
+        let b = vec!["line 9: b".to_string(), "line 1: a".to_string()];
+        assert_eq!(fingerprint(&a), fingerprint(&b));
+        assert_ne!(fingerprint(&a), fingerprint(&["line 1: a".to_string()]));
+        // Clean is its own value, so the transition into and out of it is visible.
+        assert_ne!(fingerprint(&[]), fingerprint(&a));
+        assert_eq!(fingerprint(&[]), fingerprint(&[]));
+        // A separator, so the same bytes split differently don't collide.
+        assert_ne!(
+            fingerprint(&["ab".to_string(), "c".to_string()]),
+            fingerprint(&["a".to_string(), "bc".to_string()])
+        );
+    }
+
+    #[test]
+    fn the_injected_block_stays_inside_its_budget() {
+        let many: Vec<String> = (0..400)
+            .map(|i| format!("line {i}: {}", "e".repeat(120)))
+            .collect();
+        let out = diag_context("/w/a.ts", &many);
+        assert!(out.len() <= MAX_DIAG_CHARS, "{} chars", out.len());
+        assert!(out.contains("400 errors in /w/a.ts"));
+        assert!(out.contains("…and "));
+        assert!(out.contains(" more."));
+    }
+
+    #[test]
+    fn a_short_list_arrives_whole_and_a_clean_file_gets_one_line() {
+        let out = diag_context("/w/a.ts", &["line 4: nope".to_string()]);
+        assert!(out.contains("1 error in /w/a.ts"));
+        assert!(out.contains("- line 4: nope"));
+        assert!(!out.contains("…and"));
+        assert_eq!(
+            diag_context("/w/a.ts", &[]),
+            "/w/a.ts: previous errors resolved.\n"
+        );
     }
 }

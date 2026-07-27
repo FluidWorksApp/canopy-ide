@@ -853,11 +853,18 @@ async fn browser(
 struct UiOp {
     op: String,
     cwd: Option<String>,
-    /// diagnostics / references / definition: where to look.
+    /// diagnostics / references / definition / hover / symbols: where to look.
     path: Option<String>,
     line: Option<u32>,
     column: Option<u32>,
     symbol: Option<String>,
+    /// symbols: a name to search the workspace for, instead of a file to outline.
+    query: Option<String>,
+    /// diagnostics: how long the caller is prepared to wait. The edit hook asks
+    /// for a couple of seconds; without it a cold server would stall the agent's
+    /// loop behind an index it never asked for.
+    #[serde(rename = "waitMs")]
+    wait_ms: Option<u64>,
     /// ask: the question, its options, and how long the agent will hold.
     question: Option<String>,
     #[serde(default)]
@@ -881,7 +888,7 @@ async fn ui_op(
     }
     let deadline = match op.op.as_str() {
         "diagnostics" | "tickets" | "reviews" => UI_OP_TIMEOUT,
-        "references" | "definition" => {
+        "references" | "definition" | "hover" => {
             if op.path.is_none() {
                 return (StatusCode::BAD_REQUEST, format!("{} needs a path", op.op));
             }
@@ -889,6 +896,15 @@ async fn ui_op(
                 return (
                     StatusCode::BAD_REQUEST,
                     format!("{} needs a symbol, or a line and column", op.op),
+                );
+            }
+            UI_OP_TIMEOUT
+        }
+        "symbols" => {
+            if op.query.as_deref().map_or(true, |q| q.trim().is_empty()) && op.path.is_none() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "symbols needs a query to search for, or a path to outline".into(),
                 );
             }
             UI_OP_TIMEOUT
@@ -920,6 +936,8 @@ async fn ui_op(
             "line": op.line,
             "column": op.column,
             "symbol": op.symbol,
+            "query": op.query,
+            "waitMs": op.wait_ms,
             "question": op.question,
             "options": op.options,
         }),

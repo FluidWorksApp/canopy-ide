@@ -201,14 +201,26 @@ export const browserResult = (id: number, ok: boolean, data: unknown) =>
 export interface AgentUiOp {
   id: number;
   op:
-    "diagnostics" | "references" | "definition" | "tickets" | "reviews" | "ask";
+    | "diagnostics"
+    | "references"
+    | "definition"
+    | "hover"
+    | "symbols"
+    | "tickets"
+    | "reviews"
+    | "ask";
   route: string;
   path?: string | null;
   line?: number | null;
   column?: number | null;
   symbol?: string | null;
+  /** symbols: a name to search the workspace for, instead of a file to outline. */
+  query?: string | null;
   question?: string | null;
   options?: string[];
+  /** diagnostics: how long the caller will hold. A hook firing after every
+   *  edit can't sit through a cold server's first index. */
+  waitMs?: number | null;
 }
 export const onAgentUi = (cb: (op: AgentUiOp) => void): Promise<UnlistenFn> =>
   listen<AgentUiOp>("agent:ui", (event) => cb(event.payload));
