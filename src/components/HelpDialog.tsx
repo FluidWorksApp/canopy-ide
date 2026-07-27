@@ -2,6 +2,7 @@
 // Static on purpose — this must render instantly and work offline.
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEscape } from "../useEscape";
+import { IS_MAC } from "../platform";
 
 interface HelpDialogProps {
   onClose: () => void;
@@ -10,9 +11,12 @@ interface HelpDialogProps {
 }
 
 const SHORTCUTS: [string, string][] = [
-  ["⌘N", "New project"],
+  ["⌘N", "New tab — shell, preview or an agent (type to filter, ↵ to open)"],
+  ["⌘⇧N", "New project"],
   ["⌘O", "Open project folder"],
   ["⌘⇧M", "Manage projects (create, edit, delete)"],
+  ["⌘1…9", "Jump to a tab — hold ⌘ and the tabs show their numbers"],
+  ["⌥1…9", "Jump to a project — hold ⌥ and the pills show their numbers"],
   ["⌘⌥← / ⌘⌥→", "Previous / next project"],
   ["⌘T", "New terminal in the active project"],
   ["⌃⇥ / ⌃⇧⇥", "Next / previous tab"],
@@ -30,6 +34,22 @@ const SHORTCUTS: [string, string][] = [
   ["⌥⌫", "Terminal: delete word"],
   ["⌘⌫", "Terminal: delete line"],
 ];
+
+/** The table is written in macOS glyphs. Every accelerator is CmdOrCtrl-based,
+ *  so off macOS the same chord is spelled with Ctrl/Alt/Shift — show that
+ *  rather than teaching a Windows user a key their keyboard doesn't have. */
+function forPlatform(keys: string): string {
+  if (IS_MAC) return keys;
+  return keys
+    .replace(/[⌘⌃]/g, "Ctrl+")
+    .replace(/⌥/g, "Alt+")
+    .replace(/⇧/g, "Shift+")
+    .replace(/⌫/g, "Backspace")
+    // Control+CmdOrCtrl collapses to one Ctrl off macOS, where both halves of
+    // the chord are the same key.
+    .replace(/(Ctrl\+)+/g, "Ctrl+")
+    .replace(/\+ /g, "+");
+}
 
 export function HelpDialog({ onClose, onReplayIntro }: HelpDialogProps) {
   useEscape(onClose, true);
@@ -98,7 +118,7 @@ export function HelpDialog({ onClose, onReplayIntro }: HelpDialogProps) {
               {SHORTCUTS.map(([keys, what]) => (
                 <tr key={keys}>
                   <td>
-                    <code>{keys}</code>
+                    <code>{forPlatform(keys)}</code>
                   </td>
                   <td>{what}</td>
                 </tr>

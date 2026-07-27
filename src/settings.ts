@@ -4,6 +4,7 @@ import type { CustomMicroTask } from "./microTasks";
 // and never a runtime one.
 import type { CustomAgentCli } from "./projects";
 import type { BrowserEngine } from "./browserBounds";
+import { IS_MAC } from "./platform";
 
 export type Theme = "auto" | "default" | "gotham" | "daylight" | "custom";
 
@@ -54,10 +55,6 @@ export interface Hotkey {
   shift: boolean;
   code: string;
 }
-
-const IS_MAC =
-  typeof navigator !== "undefined" &&
-  navigator.platform.toUpperCase().includes("MAC");
 
 /** Default dictation hotkey: ⌘D on Mac, Alt+D elsewhere (plain Ctrl+D is shell
  *  EOF, so it's deliberately avoided). */

@@ -83,6 +83,10 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         "Tabs",
         true,
         &[
+            // The launcher (shell, preview, every agent CLI) as a typed list —
+            // the ＋ menu's keyboard twin. Cmd/Ctrl+T stays the straight-to-a-
+            // shell shortcut for when you already know what you want.
+            &MenuItem::with_id(app, "new-launcher", "New…", true, Some("CmdOrCtrl+N"))?,
             &MenuItem::with_id(
                 app,
                 "new-terminal",
@@ -161,7 +165,9 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 "new-project",
                 "New Project…",
                 true,
-                Some("CmdOrCtrl+N"),
+                // Cmd/Ctrl+N is the new-tab launcher (Tabs menu); a whole new
+                // project is the rarer, bigger thing, so it takes the Shift.
+                Some("CmdOrCtrl+Shift+N"),
             )?,
             &MenuItem::with_id(
                 app,

@@ -61,6 +61,11 @@ import { loadZoom, setZoom, applyZoom, STEP } from "./zoom";
 import { stopWorkspaceServers } from "./lsp/client";
 import { sweepStaleRuns } from "./taskHistory";
 import {
+  digitFromCode,
+  hintModifierOnly,
+  useHeldModifier,
+} from "./useHeldModifier";
+import {
   checkForUpdateAnyChannel,
   installUpdate,
   type UpdateAvailability,
@@ -629,6 +634,13 @@ export default function App() {
                 .then((m) => notify(m, "success"))
                 .catch((err) => notify(String(err), "error")),
             );
+          } else if (e.payload === "new-launcher") {
+            // ⌘N asks the active project for a new tab (ProjectView answers on
+            // menu:new-launcher). With no project open there is no tab to make,
+            // so the only "new" left that means anything is a new project.
+            if (wsRef.current.activeId)
+              window.dispatchEvent(new CustomEvent("menu:new-launcher"));
+            else setDialog({ mode: "new" });
           } else if (e.payload === "new-project") {
             setDialog({ mode: "new" });
           } else if (e.payload === "open-project") {
@@ -1504,6 +1516,28 @@ export default function App() {
     (id: string) => update({ activeId: id }),
     [update],
   );
+  /** ⌥/Alt held: the project pills wear the digit that jumps to them, the way
+   *  ⌘ numbers the tabs inside a project. Two layers, one gesture. */
+  const projectHints = useHeldModifier("projects");
+  useEffect(() => {
+    // Capture phase: a focused terminal or editor would otherwise swallow the
+    // digit (and on macOS ⌥3 would type "£" into the shell).
+    const onKeydown = (e: KeyboardEvent) => {
+      const digit = digitFromCode(e.code);
+      if (digit === null || !hintModifierOnly(e, "projects")) return;
+      const { openIds, projects } = wsRef.current;
+      // The same order the pills are drawn in: ids without a project are
+      // filtered out of the strip, so they must not be counted here either.
+      const id = openIds.filter((i) => projects.some((p) => p.id === i))[
+        digit - 1
+      ];
+      if (!id) return;
+      e.preventDefault();
+      updateRef.current({ activeId: id });
+    };
+    window.addEventListener("keydown", onKeydown, true);
+    return () => window.removeEventListener("keydown", onKeydown, true);
+  }, []);
   const handleCloseProject = useCallback(
     (id: string) => void closeProject(id),
     [closeProject],
@@ -1744,6 +1778,7 @@ export default function App() {
         tabDragId={tabDrag.dragId}
         tabDragItemProps={tabDrag.itemProps}
         hibernated={hibernated}
+        showHints={projectHints}
         onSelectProject={selectProject}
         onCloseProject={handleCloseProject}
         onHibernateProject={hibernateProject}

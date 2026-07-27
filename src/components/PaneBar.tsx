@@ -131,6 +131,9 @@ export interface PaneBarProps {
   tabState: (t: TermSubTab) => "working" | "waiting" | "idle" | "ended";
   /** Drag-to-reorder, one per tab group (agents, docs) — index-aligned with tabGroups. */
   groupDrags: TabDrag[];
+  /** True while ⌘/Ctrl is held: the first nine tabs show the digit that jumps
+   *  to them, numbered left to right across the groups (see useHeldModifier). */
+  showHints: boolean;
   // rail data
   shellChips: RailChip[];
   runChips: RailChip[];
@@ -185,7 +188,7 @@ export interface PaneBarProps {
 
 function PaneBarImpl({
   tabGroups, groupDrags, stripTabs, activeTabId, flashTabId, renamingTabId, renameDraft,
-  collabPaths, isAgentTab, tabState,
+  collabPaths, isAgentTab, tabState, showHints,
   shellChips, runChips, runSummary, shellMenuOpen, setShellMenuOpen,
   runMenuOpen, setRunMenuOpen, activeSection,
   activeFileKind, activeFileView,
@@ -247,6 +250,16 @@ function PaneBarImpl({
     // measureBlob reads refs; no dep needed here
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Numbered left to right across every group, so a hint matches what the eye
+  // counts: the agent/doc split is a visual grouping, not a numbering reset.
+  // Only the first nine — ⌘0 is zoom reset, and nobody counts past a row.
+  const hints = new Map<string, number>();
+  if (showHints)
+    tabGroups
+      .flat()
+      .slice(0, 9)
+      .forEach((t, i) => hints.set(t.id, i + 1));
 
   return (
     <div className={`pane-bar pane-bar-focus-${activeSection}`}>
@@ -336,6 +349,9 @@ function PaneBarImpl({
                     >
                       {tabText(tab)}
                     </span>
+                  )}
+                  {hints.has(tab.id) && (
+                    <span className="tab-hint">{hints.get(tab.id)}</span>
                   )}
                   <span
                     className="tab-close"
