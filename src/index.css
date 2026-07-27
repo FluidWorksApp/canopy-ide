@@ -5880,6 +5880,24 @@ body.dragging-tab * {
   border-color: var(--accent);
   color: var(--accent);
 }
+/* Held by another workspace — clicking still works, it just asks first. */
+.git-branch-tag-busy {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+/* Detached HEAD, explained where the way out of it is. */
+.git-snapshot-note {
+  margin: 6px 8px 2px;
+  padding: 6px 8px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.4;
+}
 
 .git-branch-subject {
   flex: 1;
@@ -6028,6 +6046,85 @@ body.dragging-tab * {
   background: var(--danger);
   border-color: var(--danger);
   color: #1a1b26;
+}
+
+/* ---------- branch switch dialog ---------- */
+/* Wider than a confirm and stacked rather than a button row: these are real
+   alternatives with consequences, and each needs a line to explain itself. */
+.confirm.branch-switch {
+  width: min(460px, 94vw);
+  max-width: min(460px, 94vw);
+}
+
+.branch-switch-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.branch-switch-body {
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+
+.branch-switch-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 14px;
+}
+
+.branch-switch-choice {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  text-align: left;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.branch-switch-choice:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: var(--accent);
+}
+.branch-switch-choice:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+/* The safest way out, led visually — never pre-run. */
+.branch-switch-choice-lead {
+  border-color: var(--accent);
+}
+
+.branch-switch-choice-label {
+  font-size: 13px;
+}
+.branch-switch-choice-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.35;
+}
+
+.branch-switch-detail {
+  margin-top: 12px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.branch-switch-detail summary {
+  cursor: pointer;
+}
+.branch-switch-detail pre {
+  margin-top: 6px;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
 }
 
 /* ---------- PR view ---------- */
