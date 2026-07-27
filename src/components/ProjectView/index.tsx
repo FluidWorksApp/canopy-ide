@@ -87,7 +87,12 @@ import {
   updateTaskRun,
   type TaskRun,
 } from "../../taskHistory";
-import { taskMenuItem, taskMenuItems, type TaskChoice } from "../../taskMenu";
+import {
+  hasTasksToList,
+  taskMenuItem,
+  taskMenuItems,
+  type TaskChoice,
+} from "../../taskMenu";
 import { viewerKindFor } from "../viewers";
 import { ensureLanguageServer } from "../../lsp/client";
 import { Term, type TermHandle } from "../Term";
@@ -3977,11 +3982,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                   if (!dir) return onNotice("No git repository in this project.");
                   runAdhocTask(fileDiffContext(tab.file.path, query), dir, tab.file.name);
                 }}
-                tasks={() =>
-                  taskRows(
-                    `About the changes in \`${tab.file.path}\`: `,
-                    repoForFile(tab.file.path) ?? "",
-                  )
+                tasks={
+                  hasTasksToList({ saved: project.customTasks })
+                    ? () =>
+                        taskRows(
+                          `About the changes in \`${tab.file.path}\`: `,
+                          repoForFile(tab.file.path) ?? "",
+                        )
+                    : undefined
                 }
               />
             }
@@ -4832,11 +4840,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 if (!dir) return onNotice("No git repository in this project.");
                 runAdhocTask(sessionChangesContext(changeContextGroups(), query), dir, "Changes");
               }}
-              tasks={() =>
-                taskRows(
-                  "About the current changes: ",
-                  changeGroups[0]?.repo ?? componentsRef.current[0]?.path ?? "",
-                )
+              tasks={
+                hasTasksToList({ saved: project.customTasks })
+                  ? () =>
+                      taskRows(
+                        "About the current changes: ",
+                        changeGroups[0]?.repo ?? componentsRef.current[0]?.path ?? "",
+                      )
+                  : undefined
               }
             />
           }

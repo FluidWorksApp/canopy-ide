@@ -5,6 +5,7 @@
 // — the caller's context builder decides what each means.
 import { useState } from "react";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
+import { ChevronIcon } from "./icons";
 
 interface AgentQueryBarProps {
   /** Placeholder for the query input. */
@@ -14,8 +15,9 @@ interface AgentQueryBarProps {
   onRunTask: (query: string) => void;
   /** The tasks that already exist — the ones you saved and the ones Canopy
    *  ships. Built by the caller (ProjectView owns the launcher, see
-   *  taskMenu.ts), so this stays a presentation component. Omitted where a
-   *  surface has no way to run them, and then there's no caret. */
+   *  taskMenu.ts), so this stays a presentation component. Left off when there
+   *  is nothing to list, and then there is no caret either: a dropdown that
+   *  opens onto nothing is worse than a plain button. */
   tasks?: () => MenuItem[];
 }
 
@@ -37,7 +39,6 @@ export function AgentQueryBar({
         <ContextMenu
           x={menu.menu.x}
           y={menu.menu.y}
-          above={menu.menu.above}
           items={menu.menu.items}
           onClose={menu.close}
         />
@@ -67,9 +68,9 @@ export function AgentQueryBar({
           <button
             className="btn btn-accent agent-query-more"
             title="Run a task you've already written, or one Canopy ships"
-            onClick={(e) => menu.openAbove(e, tasks())}
+            onClick={(e) => menu.openUnder(e, tasks())}
           >
-            ▴
+            <ChevronIcon size={13} className="chevron-down" />
           </button>
         )}
       </div>

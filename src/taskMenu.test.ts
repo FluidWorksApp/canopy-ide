@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { BUILT_IN_HEADING, CUSTOM_HEADING, taskGroups, taskMenuItem } from "./taskMenu";
+import {
+  BUILT_IN_HEADING,
+  CUSTOM_HEADING,
+  hasTasksToList,
+  taskGroups,
+  taskMenuItem,
+} from "./taskMenu";
 import { MICRO_TASKS, type CustomMicroTask } from "./microTasks";
 
 const saved: CustomMicroTask = {
@@ -59,23 +65,37 @@ describe("taskMenuItem", () => {
       ...over,
     }).submenu ?? [];
 
+  // A surface that can run at least one built-in — a PR tab, say. The whole
+  // built-in group hangs on that, so every test about it supplies one.
+  const here = [{ id: "review-pr", label: "Review PR", icon: "R", run: () => {} }];
+
   it("offers both composers, then segregates the two groups", () => {
-    const items = menu({ saved: [saved] });
-    expect(items[0].label).toBe("New Task…");
-    expect(items[1].label).toContain("One-off task…");
+    const items = menu({ saved: [saved], runnable: here });
+    expect(items[0].label).toBe("New Task\u2026");
+    expect(items[1].label).toContain("One-off task\u2026");
     const headings = items.filter((i) => i.separator).map((i) => i.label);
     expect(headings).toEqual([CUSTOM_HEADING, BUILT_IN_HEADING]);
-    // Custom comes first, and every built-in is still listed under its own head.
-    const custom = items.indexOf(items.find((i) => i.label === "◆ Prod DB Backup")!);
+    const custom = items.indexOf(items.find((i) => i.label === "\u25c6 Prod DB Backup")!);
     expect(custom).toBeGreaterThan(items.findIndex((i) => i.label === CUSTOM_HEADING));
     expect(custom).toBeLessThan(items.findIndex((i) => i.label === BUILT_IN_HEADING));
   });
 
   it("drops the custom heading when nothing is saved, keeps the built-ins", () => {
-    const headings = menu()
+    const headings = menu({ runnable: here })
       .filter((i) => i.separator)
       .map((i) => i.label);
     expect(headings).toEqual([BUILT_IN_HEADING]);
+  });
+
+  it("drops the whole built-in group where none of them can run", () => {
+    // On a diff every built-in belongs to a branch or a PR tab, so the group
+    // was eight greyed rows saying "here are things you cannot do". One
+    // unrunnable row beside runnable ones is useful; a section of nothing but
+    // unrunnable ones is not.
+    const items = menu({ saved: [saved] });
+    expect(items.filter((i) => i.separator).map((i) => i.label)).toEqual([CUSTOM_HEADING]);
+    expect(items.some((i) => i.label?.includes("Raise PR"))).toBe(false);
+    expect(items[0].label).toBe("New Task\u2026");
   });
 
   it("seeds the one-off composer with what was right-clicked", () => {
@@ -85,9 +105,30 @@ describe("taskMenuItem", () => {
   });
 
   it("disables a built-in it can't run and hints why", () => {
-    const raise = menu().find((i) => i.label?.includes("Raise PR"));
+    const raise = menu({ runnable: here }).find((i) => i.label?.includes("Raise PR"));
     expect(raise?.disabled).toBe(true);
     expect(raise?.onClick).toBeUndefined();
     expect(raise?.hint).toContain("branch tab");
+  });
+});
+
+describe("hasTasksToList", () => {
+  it("is false when the menu would hold only the two composers", () => {
+    // The caret exists to list tasks. With none to list it opens onto "New
+    // Task… / One-off task…" — two things the surface offers anyway — so the
+    // surface drops the caret and keeps the plain button.
+    expect(hasTasksToList({})).toBe(false);
+    expect(hasTasksToList({ saved: [] })).toBe(false);
+    // Built-ins that exist but cannot run here do not count as a list.
+    expect(
+      hasTasksToList({ runnable: [{ id: "review-pr", label: "Review PR" }] }),
+    ).toBe(false);
+  });
+
+  it("is true as soon as there is one thing you could actually run", () => {
+    expect(hasTasksToList({ saved: [saved] })).toBe(true);
+    expect(
+      hasTasksToList({ runnable: [{ id: "review-pr", label: "Review PR", run: () => {} }] }),
+    ).toBe(true);
   });
 });

@@ -3298,7 +3298,15 @@ body.dragging-tab * {
   border-top-right-radius: 0;
   border-bottom-right-radius: 0;
 }
+/* ChevronIcon points right; these turn it to face the way the menu opens. A
+   text triangle read as a speck of punctuation at this size — a stroked path
+   at 2.2 is legible and unambiguous about direction. */
+.chevron-up { transform: rotate(-90deg); }
+.chevron-down { transform: rotate(90deg); }
+
 .agent-query-more {
+  display: inline-flex;
+  align-items: center;
   padding-left: 7px;
   padding-right: 7px;
   border-top-left-radius: 0;

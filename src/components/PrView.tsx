@@ -2351,7 +2351,7 @@ export function PrView({
               onClick={openAgentMenu}
             >
               {fab ? (
-                "▴"
+                <ChevronIcon size={14} className="chevron-up" />
               ) : (
                 <>
                   <AgentsIcon size={13} /> Agent
