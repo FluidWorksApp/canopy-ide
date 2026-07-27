@@ -340,11 +340,18 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
     if (!projectId) throw new StepFailure("no project to run in");
 
     await step("preview", "Open a preview tab on the fixture page", async () => {
-      // Asked again only if the first one was lost: the project's view mounts
-      // its listener a render or two after the project itself exists, and an
-      // event dispatched into that gap goes nowhere. Re-asking blindly would
-      // open a second preview tab, and every assertion afterwards would be
-      // about whichever of them answered first.
+      // The project's view mounts its listener a render or two after the
+      // project itself exists, and an event dispatched into that gap goes
+      // nowhere at all. Waiting for its chrome to be on screen is what makes
+      // the first ask land — re-asking blindly opens a second preview tab, and
+      // every assertion afterwards would be about whichever answered first.
+      await until(
+        "the project never finished opening",
+        () => document.querySelector(".pane-bar"),
+        (el) => !!el,
+        DEADLINE.project,
+        () => "no pane bar yet",
+      );
       for (let attempt = 0; attempt < 3 && browserViewSnapshots().length === 0; attempt++) {
         if (attempt > 0) {
           void ipc.jsLog(
