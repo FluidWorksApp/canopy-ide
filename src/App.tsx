@@ -15,7 +15,12 @@ import {
   type WorkspaceState,
 } from "./projects";
 import type { AgentEventEntry, NoticeKind, RelayHandle } from "./types";
-import { derivePending, pendingForRoots } from "./notifications";
+import type { CustomMicroTask } from "./microTasks";
+import {
+  derivePending,
+  parseAgentEvent,
+  pendingForRoots,
+} from "./notifications";
 import { runUiOp } from "./agentOps";
 import { getSettings, THEME_CHANGE_EVENT } from "./settings";
 import { useTabDrag } from "./tabDrag";
@@ -53,7 +58,11 @@ import { shouldOnboard, markOnboarded } from "./onboarding";
 import { loadZoom, setZoom, applyZoom, STEP } from "./zoom";
 import { stopWorkspaceServers } from "./lsp/client";
 import { sweepStaleRuns } from "./taskHistory";
-import { checkForUpdateAnyChannel, installUpdate, type UpdateAvailability } from "./updater";
+import {
+  checkForUpdateAnyChannel,
+  installUpdate,
+  type UpdateAvailability,
+} from "./updater";
 
 /** Tell the hook helper which projects share context between their sessions.
  *  Every project is listed with its opt-in state, so turning sharing off
@@ -73,7 +82,10 @@ function loadRelayChat(label: string): ipc.RelayChatMsg[] {
 }
 function saveRelayChat(label: string, msgs: ipc.RelayChatMsg[]) {
   try {
-    localStorage.setItem(RELAY_CHAT_PREFIX + label, JSON.stringify(msgs.slice(-500)));
+    localStorage.setItem(
+      RELAY_CHAT_PREFIX + label,
+      JSON.stringify(msgs.slice(-500)),
+    );
   } catch {
     // Storage full/blocked — history is a convenience, never fail over it.
   }
@@ -94,14 +106,20 @@ function publishScopes(state: WorkspaceState) {
 export default function App() {
   const [ws, setWs] = useState<WorkspaceState>(emptyWorkspace);
   const [loaded, setLoaded] = useState(false);
-  const [dialog, setDialog] = useState<{ mode: "new" } | { mode: "edit"; project: Project } | null>(null);
+  const [dialog, setDialog] = useState<
+    { mode: "new" } | { mode: "edit"; project: Project } | null
+  >(null);
   const [agentEvents, setAgentEvents] = useState<AgentEventEntry[]>([]);
   // Pending cards the user waved away. Session-scoped on purpose: a dismissed
   // card is "seen", not "never tell me again". Held here (not in the panel)
   // because the project-tab badges count from the same derived list.
-  const [dismissedPending, setDismissedPending] = useState<Set<string>>(new Set());
+  const [dismissedPending, setDismissedPending] = useState<Set<string>>(
+    new Set(),
+  );
   const [manager, setManager] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState<null | { tab?: import("./components/SettingsDialog").SettingsTab }>(null);
+  const [settingsOpen, setSettingsOpen] = useState<null | {
+    tab?: import("./components/SettingsDialog").SettingsTab;
+  }>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   // First-run walkthrough. Seeded once, after the workspace has loaded, so a
@@ -115,7 +133,10 @@ export default function App() {
   // Transient "110%" chip shown for ~1s after a zoom change, then cleared.
   const [zoomPct, setZoomPct] = useState<number | null>(null);
   const zoomHideTimer = useRef<number | null>(null);
-  const [notice, setNotice] = useState<{ text: string; kind: NoticeKind } | null>(null);
+  const [notice, setNotice] = useState<{
+    text: string;
+    kind: NoticeKind;
+  } | null>(null);
   const notify = useCallback(
     (text: string, kind: NoticeKind = "info") => setNotice({ text, kind }),
     [],
@@ -126,9 +147,8 @@ export default function App() {
   const nativeNotify = useCallback(async (title: string, body: string) => {
     if (document.hasFocus()) return;
     try {
-      const { isPermissionGranted, requestPermission, sendNotification } = await import(
-        "@tauri-apps/plugin-notification"
-      );
+      const { isPermissionGranted, requestPermission, sendNotification } =
+        await import("@tauri-apps/plugin-notification");
       let granted = await isPermissionGranted();
       if (!granted) granted = (await requestPermission()) === "granted";
       if (granted) sendNotification({ title, body });
@@ -154,12 +174,22 @@ export default function App() {
   // ProjectView renders the same picture. Chat keeps a rolling transcript
   // (received + our own sends); the inbox holds commands awaiting action.
   const [relayStatus, setRelayStatus] = useState<ipc.RelayStatus>({
-    role: "off", code: null, port: null, ips: [], addr: null, self_id: null, name: null,
-    visibility: null, public_ip: null, members: [],
+    role: "off",
+    code: null,
+    port: null,
+    ips: [],
+    addr: null,
+    self_id: null,
+    name: null,
+    visibility: null,
+    public_ip: null,
+    members: [],
   });
   const [relayChat, setRelayChat] = useState<ipc.RelayChatMsg[]>([]);
   const [relayInbox, setRelayInbox] = useState<ipc.RelayCommandMsg[]>([]);
-  const [relayTransfers, setRelayTransfers] = useState<import("./types").RelayTransfer[]>([]);
+  const [relayTransfers, setRelayTransfers] = useState<
+    import("./types").RelayTransfer[]
+  >([]);
   // The agent-facing ops read the inbox from an event handler that outlives any
   // one render, so they read it through a ref.
   const relayInboxRef = useRef(relayInbox);
@@ -193,6 +223,8 @@ export default function App() {
   // reaches the render tree.
   const collab = useRef<CollabManager | null>(null);
   if (!collab.current) collab.current = new CollabManager();
+  // Narrowed once here: the useMemo below can't see the control-flow guard.
+  const collabMgr = collab.current;
   const [collabTick, setCollabTick] = useState(0);
   // The relay we're persisting chat under = the host's stable identity key.
   // Null when off, so the persist effect never writes an empty transcript.
@@ -239,7 +271,9 @@ export default function App() {
     mgr.onListProject = async (root) => {
       const prefix = root.endsWith("/") ? root : `${root}/`;
       const abs = await ipc.fsListFiles([root]);
-      return abs.filter((p) => p.startsWith(prefix)).map((p) => p.slice(prefix.length));
+      return abs
+        .filter((p) => p.startsWith(prefix))
+        .map((p) => p.slice(prefix.length));
     };
     mgr.onProjectOffer = (doc) => {
       const o = mgr.projectOffers.get(doc);
@@ -329,7 +363,9 @@ export default function App() {
       filters: [{ name: "canopy workspace", extensions: ["json"] }],
     });
     if (!path) return;
-    await exportWorkspace(path, wsRef.current).catch((e) => notify(String(e), "error"));
+    await exportWorkspace(path, wsRef.current).catch((e) =>
+      notify(String(e), "error"),
+    );
   }, []);
 
   const openWorkspaceFile = useCallback(async () => {
@@ -382,7 +418,9 @@ export default function App() {
    *  Unlike a plain open, this wakes a hibernating project: there is no
    *  ProjectView behind the frost to receive the event, and dropping it
    *  silently is worse than deciding the project is needed now. */
-  const openForActionRef = useRef<(id: string) => Promise<void>>(async () => {});
+  const openForActionRef = useRef<(id: string) => Promise<void>>(
+    async () => {},
+  );
   const saveProjectRef = useRef<(p: Project) => Promise<void>>(async () => {});
   const updateRef = useRef<(patch: Partial<WorkspaceState>) => void>(() => {});
 
@@ -408,7 +446,12 @@ export default function App() {
     });
     const subs = [
       ipc.onAgentEvent((raw) =>
-        setAgentEvents((prev) => [...prev.slice(-199), { raw, ts: Date.now() }]),
+        // Parsed once here; consumers read fields off `data`. Re-parsing the
+        // raw line at every consumer was a measurable main-thread cost.
+        setAgentEvents((prev) => [
+          ...prev.slice(-199),
+          { ts: Date.now(), data: parseAgentEvent(raw) },
+        ]),
       ),
       ipc.onRelayState(setRelayStatus),
       ipc.onRelayChat((m) => {
@@ -430,8 +473,12 @@ export default function App() {
         );
       }),
       ipc.onRelayCommand((m) => {
-        setRelayInbox((prev) => (prev.some((x) => x.id === m.id) ? prev : [...prev, m]));
-        const pr = (m.payload as { pr?: { number?: number; title?: string } } | null)?.pr;
+        setRelayInbox((prev) =>
+          prev.some((x) => x.id === m.id) ? prev : [...prev, m],
+        );
+        const pr = (
+          m.payload as { pr?: { number?: number; title?: string } } | null
+        )?.pr;
         const file = (m.payload as { name?: string } | null)?.name;
         const text =
           m.kind === "open-pr" && pr
@@ -505,7 +552,9 @@ export default function App() {
             },
           };
           setRelayChat((prev) =>
-            prev.some((m) => m.id === fileMsg.id) ? prev : [...prev.slice(-499), fileMsg],
+            prev.some((m) => m.id === fileMsg.id)
+              ? prev
+              : [...prev.slice(-499), fileMsg],
           );
         }
         // Mark the row terminal, then retire it after a beat so the bar's
@@ -539,7 +588,10 @@ export default function App() {
           if (e.payload === "close-project") {
             const active = wsRef.current.activeId;
             if (active) void closeProjectRef.current(active);
-          } else if (e.payload === "next-project" || e.payload === "prev-project") {
+          } else if (
+            e.payload === "next-project" ||
+            e.payload === "prev-project"
+          ) {
             const dir = e.payload === "next-project" ? 1 : -1;
             const { openIds, activeId } = wsRef.current;
             if (openIds.length > 1) {
@@ -559,7 +611,10 @@ export default function App() {
                   return;
                 }
                 const { getVersion } = await import("@tauri-apps/api/app");
-                notify(`Canopy is up to date (${await getVersion()}).`, "success");
+                notify(
+                  `Canopy is up to date (${await getVersion()}).`,
+                  "success",
+                );
               })
               .catch((err) => notify(`Update check failed: ${err}`, "error"));
           } else if (e.payload === "install-cli") {
@@ -611,10 +666,16 @@ export default function App() {
     const reportHealth = (report: ipc.HealthReport | null) => {
       if (reported || !report || report.failed.length === 0) return;
       reported = true;
-      notify(`Agent integration needs attention — ${report.failed.join("; ")}`, "warn");
+      notify(
+        `Agent integration needs attention — ${report.failed.join("; ")}`,
+        "warn",
+      );
     };
     subs.push(ipc.onIntegrationHealth(reportHealth));
-    void ipc.agentHealthReport().then(reportHealth).catch(() => {});
+    void ipc
+      .agentHealthReport()
+      .then(reportHealth)
+      .catch(() => {});
     // Focus mode is reachable two ways: the native menu accelerator, and a
     // webview key handler. Belt and braces — the accelerator is what the menu
     // advertises, but a native Cmd+Shift+Enter can be swallowed before it
@@ -624,7 +685,8 @@ export default function App() {
     // Show the zoom chip and (re)arm its 1s auto-hide.
     const flashZoom = (z: number) => {
       setZoomPct(Math.round(z * 100));
-      if (zoomHideTimer.current !== null) window.clearTimeout(zoomHideTimer.current);
+      if (zoomHideTimer.current !== null)
+        window.clearTimeout(zoomHideTimer.current);
       zoomHideTimer.current = window.setTimeout(() => setZoomPct(null), 1000);
     };
     const keys = (e: KeyboardEvent) => {
@@ -633,8 +695,13 @@ export default function App() {
       // meaningful inside terminals (readline undo, NUL). macOS uses Cmd so
       // there's no conflict there. Skip zoom if focus is inside an xterm canvas
       // or textarea so the keypress reaches the shell rather than being consumed.
-      if (e.ctrlKey && !e.metaKey &&
-          (e.target as HTMLElement | null)?.closest(".xterm-screen, .xterm-helper-textarea")) {
+      if (
+        e.ctrlKey &&
+        !e.metaKey &&
+        (e.target as HTMLElement | null)?.closest(
+          ".xterm-screen, .xterm-helper-textarea",
+        )
+      ) {
         return;
       }
       if (e.key === "Escape") {
@@ -647,9 +714,17 @@ export default function App() {
         // numpad keys; "=" is the unshifted "+" key on US layout; "+" always
         // requires Shift, so zoom-in allows shiftKey. e.code covers layouts
         // where the character is remapped (QWERTZ, AZERTY, etc.).
-        const inKey = e.key === "+" || e.key === "=" || e.code === "Equal" || e.code === "NumpadAdd";
-        const outKey = !e.shiftKey && (e.key === "-" || e.code === "Minus" || e.code === "NumpadSubtract");
-        const resetKey = !e.shiftKey && (e.key === "0" || e.code === "Digit0" || e.code === "Numpad0");
+        const inKey =
+          e.key === "+" ||
+          e.key === "=" ||
+          e.code === "Equal" ||
+          e.code === "NumpadAdd";
+        const outKey =
+          !e.shiftKey &&
+          (e.key === "-" || e.code === "Minus" || e.code === "NumpadSubtract");
+        const resetKey =
+          !e.shiftKey &&
+          (e.key === "0" || e.code === "Digit0" || e.code === "Numpad0");
         if (inKey) {
           e.preventDefault();
           flashZoom(setZoom(loadZoom() + STEP));
@@ -673,11 +748,15 @@ export default function App() {
     void ipc.hookBridgePath().then(setHookPath);
     // A relay may already be live (hot reload in dev, a future auto-start) —
     // ask rather than assume "off".
-    void ipc.relayStatus().then(setRelayStatus).catch(() => {});
+    void ipc
+      .relayStatus()
+      .then(setRelayStatus)
+      .catch(() => {});
     return () => {
       window.removeEventListener("keydown", keys);
       window.removeEventListener("canopy:open-settings", openSettings);
-      if (zoomHideTimer.current !== null) window.clearTimeout(zoomHideTimer.current);
+      if (zoomHideTimer.current !== null)
+        window.clearTimeout(zoomHideTimer.current);
       subs.forEach((s) => void s.then((fn) => fn()));
     };
   }, []);
@@ -712,9 +791,11 @@ export default function App() {
     );
     let unlisten: (() => void) | undefined;
     void import("@tauri-apps/api/event").then(({ listen }) =>
-      listen<string>("cli-open", (e) => void openDirAsProject(e.payload)).then((fn) => {
-        unlisten = fn;
-      }),
+      listen<string>("cli-open", (e) => void openDirAsProject(e.payload)).then(
+        (fn) => {
+          unlisten = fn;
+        },
+      ),
     );
     return () => unlisten?.();
   }, [loaded, openDirAsProject]);
@@ -745,8 +826,12 @@ export default function App() {
   const update = useCallback((patch: Partial<WorkspaceState>) => {
     setWs((prev) => {
       const next = { ...prev, ...patch };
-      void saveWorkspace(next);
-      publishScopes(next);
+      // After the updater returns — a disk write and an IPC don't belong in
+      // the render phase.
+      queueMicrotask(() => {
+        void saveWorkspace(next);
+        publishScopes(next);
+      });
       return next;
     });
   }, []);
@@ -760,7 +845,9 @@ export default function App() {
         // on the wake screen, and waking is what registers its paths.
         if (!isHibernating(id)) {
           for (const c of project.components) {
-            await ipc.workspaceAdd(c.path).catch((e) => console.warn("scope add failed", e));
+            await ipc
+              .workspaceAdd(c.path)
+              .catch((e) => console.warn("scope add failed", e));
           }
         }
         update({ openIds: [...wsRef.current.openIds, id], activeId: id });
@@ -781,7 +868,10 @@ export default function App() {
     const project = state.projects.find((p) => p.id === id);
     const stillUsed = new Set(
       keepIds.flatMap(
-        (x) => state.projects.find((p) => p.id === x)?.components.map((c) => c.path) ?? [],
+        (x) =>
+          state.projects
+            .find((p) => p.id === x)
+            ?.components.map((c) => c.path) ?? [],
       ),
     );
     for (const c of project?.components ?? []) {
@@ -804,7 +894,10 @@ export default function App() {
       );
       update({
         openIds,
-        activeId: state.activeId === id ? (openIds[openIds.length - 1] ?? null) : state.activeId,
+        activeId:
+          state.activeId === id
+            ? (openIds[openIds.length - 1] ?? null)
+            : state.activeId,
       });
     },
     [update, releaseProject],
@@ -822,8 +915,8 @@ export default function App() {
   // look like one. Clicking the tab lands on the wake screen. The snapshot
   // store is the only marker; see hibernation.ts for why nothing else records
   // "asleep".
-  const [hibernated, setHibernated] = useState<Record<string, ProjectSnapshot>>(() =>
-    hibernatedProjects(),
+  const [hibernated, setHibernated] = useState<Record<string, ProjectSnapshot>>(
+    () => hibernatedProjects(),
   );
   useEffect(() => {
     const sync = () => setHibernated(hibernatedProjects());
@@ -863,7 +956,10 @@ export default function App() {
         window.clearTimeout(timer);
         if (!ok) {
           setFreezing(null);
-          notify(`Couldn't snapshot ${project.name}, so it stays open.`, "error");
+          notify(
+            `Couldn't snapshot ${project.name}, so it stays open.`,
+            "error",
+          );
           return;
         }
         setFreezing({ id, snapshot: hibernationOf(id) });
@@ -881,11 +977,17 @@ export default function App() {
             `${project.name} is hibernating — its tab is still there, wake it when you need it.`,
             "success",
           );
-          window.setTimeout(() => setFreezing((f) => (f?.id === id ? null : f)), 420);
+          window.setTimeout(
+            () => setFreezing((f) => (f?.id === id ? null : f)),
+            420,
+          );
         }, 1100);
       };
       const onSnapshot = (e: Event) => {
-        const d = (e as CustomEvent).detail as { projectId?: string; ok?: boolean } | null;
+        const d = (e as CustomEvent).detail as {
+          projectId?: string;
+          ok?: boolean;
+        } | null;
         if (d?.projectId !== id) return;
         finish(Boolean(d.ok));
       };
@@ -893,7 +995,9 @@ export default function App() {
       // The view answers synchronously; the timeout only covers a project whose
       // view somehow isn't mounted, and it leaves the project open.
       timer = window.setTimeout(() => finish(false), 2500);
-      window.dispatchEvent(new CustomEvent(HIBERNATE_EVENT, { detail: { projectId: id } }));
+      window.dispatchEvent(
+        new CustomEvent(HIBERNATE_EVENT, { detail: { projectId: id } }),
+      );
     },
     [notify, update],
   );
@@ -906,7 +1010,8 @@ export default function App() {
     if (!snapshot) return;
     // Its paths went back when it fell asleep; the tree, the search and the
     // change feed all need them again before the first tab reopens.
-    for (const c of wsRef.current.projects.find((p) => p.id === id)?.components ?? []) {
+    for (const c of wsRef.current.projects.find((p) => p.id === id)
+      ?.components ?? []) {
       void ipc.workspaceAdd(c.path).catch(() => {});
     }
     const steps = wakeSteps(snapshot);
@@ -937,7 +1042,13 @@ export default function App() {
     (id: string, done: number, total: number, label: string) =>
       setWaking((prev) =>
         prev[id]
-          ? { ...prev, [id]: { ...prev[id], progress: { done, total, label, finished: false } } }
+          ? {
+              ...prev,
+              [id]: {
+                ...prev[id],
+                progress: { done, total, label, finished: false },
+              },
+            }
           : prev,
       ),
     [],
@@ -950,7 +1061,11 @@ export default function App() {
             ...prev,
             [id]: {
               ...prev[id],
-              progress: { ...prev[id].progress, done: prev[id].progress.total, finished: true },
+              progress: {
+                ...prev[id].progress,
+                done: prev[id].progress.total,
+                finished: true,
+              },
             },
           }
         : prev,
@@ -1037,7 +1152,10 @@ export default function App() {
       .onPtySpawned(async (e) => {
         const projectId = projectForCwd(e.cwd);
         if (!projectId) {
-          notify(`A remote agent started in ${e.cwd}, outside any project.`, "info");
+          notify(
+            `A remote agent started in ${e.cwd}, outside any project.`,
+            "info",
+          );
           return;
         }
         await openForActionRef.current(projectId);
@@ -1092,7 +1210,9 @@ export default function App() {
         // ProjectView matches by pty and acts, the rest ignore it.
         if (a.kind === "restart_server") {
           window.dispatchEvent(
-            new CustomEvent("canopy:agent-action", { detail: { projectId: null, action: a } }),
+            new CustomEvent("canopy:agent-action", {
+              detail: { projectId: null, action: a },
+            }),
           );
           return;
         }
@@ -1103,10 +1223,15 @@ export default function App() {
         if (a.kind === "job_done") {
           const ok = a.status === "done";
           const summary = a.summary ?? "A micro-task finished.";
-          notify(`${ok ? "Task done" : "Task blocked"}: ${summary}${a.url ? ` — ${a.url}` : ""}`, ok ? "success" : "warn");
+          notify(
+            `${ok ? "Task done" : "Task blocked"}: ${summary}${a.url ? ` — ${a.url}` : ""}`,
+            ok ? "success" : "warn",
+          );
           void nativeNotify("Canopy — Task", summary);
           window.dispatchEvent(
-            new CustomEvent("canopy:agent-action", { detail: { projectId: null, action: a } }),
+            new CustomEvent("canopy:agent-action", {
+              detail: { projectId: null, action: a },
+            }),
           );
           return;
         }
@@ -1123,9 +1248,14 @@ export default function App() {
           projectForCwd(a.route) ??
           // A worktree the agent runs in follows `<repo>-wt-…`; fall back to the
           // single open project so an action still lands somewhere sensible.
-          (wsRef.current.openIds.length === 1 ? wsRef.current.openIds[0] : undefined);
+          (wsRef.current.openIds.length === 1
+            ? wsRef.current.openIds[0]
+            : undefined);
         if (!projectId) {
-          notify("An agent asked to act, but its directory isn't in any open project.", "info");
+          notify(
+            "An agent asked to act, but its directory isn't in any open project.",
+            "info",
+          );
           return;
         }
         await openForActionRef.current(projectId);
@@ -1133,7 +1263,9 @@ export default function App() {
         window.setTimeout(
           () =>
             window.dispatchEvent(
-              new CustomEvent("canopy:agent-action", { detail: { projectId, action: a } }),
+              new CustomEvent("canopy:agent-action", {
+                detail: { projectId, action: a },
+              }),
             ),
           80,
         );
@@ -1169,7 +1301,9 @@ export default function App() {
       .onAgentBrowser(async (op) => {
         const projectId =
           projectForCwd(op.route) ??
-          (wsRef.current.openIds.length === 1 ? wsRef.current.openIds[0] : undefined);
+          (wsRef.current.openIds.length === 1
+            ? wsRef.current.openIds[0]
+            : undefined);
         if (!projectId) {
           void ipc.browserResult(
             op.id,
@@ -1186,7 +1320,9 @@ export default function App() {
         window.setTimeout(
           () =>
             window.dispatchEvent(
-              new CustomEvent("canopy:agent-browser", { detail: { projectId, op } }),
+              new CustomEvent("canopy:agent-browser", {
+                detail: { projectId, op },
+              }),
             ),
           80,
         );
@@ -1215,7 +1351,9 @@ export default function App() {
             }),
           ) ??
           (wsRef.current.openIds.length === 1
-            ? wsRef.current.projects.find((p) => p.id === wsRef.current.openIds[0])
+            ? wsRef.current.projects.find(
+                (p) => p.id === wsRef.current.openIds[0],
+              )
             : undefined);
         const roots = project?.components.map((c) => c.path) ?? [];
         // An "ask" needs no project — a background agent with a question is
@@ -1231,7 +1369,11 @@ export default function App() {
         try {
           const repos = project
             ? await ipc
-                .gitRepos(project.components.map((c) => [c.label, c.path] as [string, string]))
+                .gitRepos(
+                  project.components.map(
+                    (c) => [c.label, c.path] as [string, string],
+                  ),
+                )
                 .then((rs) => [...new Set(rs.map((r) => r.path))])
                 .catch(() => [])
             : [];
@@ -1246,7 +1388,11 @@ export default function App() {
           });
           void ipc.browserResult(op.id, true, data);
         } catch (err) {
-          void ipc.browserResult(op.id, false, String(err instanceof Error ? err.message : err));
+          void ipc.browserResult(
+            op.id,
+            false,
+            String(err instanceof Error ? err.message : err),
+          );
         }
       })
       .then((u) => {
@@ -1291,14 +1437,23 @@ export default function App() {
 
   // Stable titlebar handlers — kept out of render so the memoized TitleBar
   // only re-renders when its data props change, not on every App state tick.
-  const selectProject = useCallback((id: string) => update({ activeId: id }), [update]);
-  const handleCloseProject = useCallback((id: string) => void closeProject(id), [closeProject]);
+  const selectProject = useCallback(
+    (id: string) => update({ activeId: id }),
+    [update],
+  );
+  const handleCloseProject = useCallback(
+    (id: string) => void closeProject(id),
+    [closeProject],
+  );
   const stopCollab = useCallback(() => {
     collab.current?.stopAll();
     notify("Collaboration ended.");
   }, [notify]);
   const newProject = useCallback(() => setDialog({ mode: "new" }), []);
-  const editProject = useCallback((p: Project) => setDialog({ mode: "edit", project: p }), []);
+  const editProject = useCallback(
+    (p: Project) => setDialog({ mode: "edit", project: p }),
+    [],
+  );
   const openManager = useCallback(() => setManager(true), []);
 
   // Update-toast handlers.
@@ -1328,9 +1483,12 @@ export default function App() {
     const msg = await ipc.relaySendChat(to, text);
     setRelayChat((prev) => [...prev.slice(-499), msg]);
   }, []);
-  const relaySendCommand = useCallback(async (to: string | null, kind: string, payload: unknown) => {
-    await ipc.relaySendCommand(to, kind, payload);
-  }, []);
+  const relaySendCommand = useCallback(
+    async (to: string | null, kind: string, payload: unknown) => {
+      await ipc.relaySendCommand(to, kind, payload);
+    },
+    [],
+  );
   // Unread-per-conversation, derived: a message someone else sent, newer than
   // the last time that conversation was read. "" is the team channel; a member
   // id is a DM. Own messages never count.
@@ -1345,42 +1503,60 @@ export default function App() {
     }
     return counts;
   }, [relayChat, chatSeen, relayStatus.self_id]);
-  const relay: RelayHandle = {
-    status: relayStatus,
-    chat: relayChat,
-    inbox: relayInbox,
-    transfers: relayTransfers,
-    collab: collab.current,
-    collabTick,
-    hostStart: async (name, visibility, port) => {
-      setRelayStatus(await ipc.relayHostStart(name, visibility, port));
-    },
-    hostStop: async () => {
-      relayIntentional.current = true;
-      setRelayStatus(await ipc.relayHostStop());
-      setRelayChat([]);
-    },
-    regenerateCode: async () => {
-      setRelayStatus(await ipc.relayRegenerateCode());
-    },
-    connect: async (addr, code, name) => {
-      setRelayStatus(await ipc.relayConnect(addr, code, name));
-    },
-    disconnect: async () => {
-      relayIntentional.current = true;
-      setRelayStatus(await ipc.relayDisconnect());
-      setRelayChat([]);
-    },
-    sendChat: relaySendChat,
-    sendCommand: relaySendCommand,
-    dismissInbox: (id) => setRelayInbox((prev) => prev.filter((m) => m.id !== id)),
-    reportActiveChat: (peer) => {
-      activeChatRef.current = peer;
-      // Opening (or having open) a conversation reads it.
-      if (peer !== undefined) markSeen(peer);
-    },
-    unread,
-  };
+  // Memoized: this handle is threaded through every ProjectView and beyond,
+  // and a fresh object per App render is what used to defeat memo barriers
+  // downstream (PaneBar, and now ProjectView itself).
+  const relay: RelayHandle = useMemo(
+    () => ({
+      status: relayStatus,
+      chat: relayChat,
+      inbox: relayInbox,
+      transfers: relayTransfers,
+      collab: collabMgr,
+      collabTick,
+      hostStart: async (name, visibility, port) => {
+        setRelayStatus(await ipc.relayHostStart(name, visibility, port));
+      },
+      hostStop: async () => {
+        relayIntentional.current = true;
+        setRelayStatus(await ipc.relayHostStop());
+        setRelayChat([]);
+      },
+      regenerateCode: async () => {
+        setRelayStatus(await ipc.relayRegenerateCode());
+      },
+      connect: async (addr, code, name) => {
+        setRelayStatus(await ipc.relayConnect(addr, code, name));
+      },
+      disconnect: async () => {
+        relayIntentional.current = true;
+        setRelayStatus(await ipc.relayDisconnect());
+        setRelayChat([]);
+      },
+      sendChat: relaySendChat,
+      sendCommand: relaySendCommand,
+      dismissInbox: (id) =>
+        setRelayInbox((prev) => prev.filter((m) => m.id !== id)),
+      reportActiveChat: (peer) => {
+        activeChatRef.current = peer;
+        // Opening (or having open) a conversation reads it.
+        if (peer !== undefined) markSeen(peer);
+      },
+      unread,
+    }),
+    [
+      relayStatus,
+      relayChat,
+      relayInbox,
+      relayTransfers,
+      collabMgr,
+      collabTick,
+      relaySendChat,
+      relaySendCommand,
+      markSeen,
+      unread,
+    ],
+  );
 
   const openProjects = useMemo(
     () =>
@@ -1389,8 +1565,17 @@ export default function App() {
         .filter((p): p is Project => Boolean(p)),
     [ws.openIds, ws.projects],
   );
+  const allProjectRoots = useMemo(
+    () =>
+      openProjects.map((x) => ({
+        name: x.name,
+        roots: x.components.map((c) => c.path),
+      })),
+    [openProjects],
+  );
   const allPending = useMemo(
-    () => derivePending(agentEvents).filter((i) => !dismissedPending.has(i.key)),
+    () =>
+      derivePending(agentEvents).filter((i) => !dismissedPending.has(i.key)),
     [agentEvents, dismissedPending],
   );
   // Resolved rather than asserted: a project can be deleted from the manager
@@ -1410,15 +1595,74 @@ export default function App() {
   // persists with everything else in the workspace file.
   const tabDrag = useTabDrag(ws.openIds, (openIds) => update({ openIds }));
   // Tab badges count only what's blocked on the user — an agent that finished
-  // and is idling is not urgent. Stable identity so the memoized TitleBar
-  // isn't re-rendered by a fresh closure each tick.
-  const pendingCount = useCallback(
-    (p: Project) =>
-      pendingForRoots(allPending, p.components.map((c) => c.path)).filter(
-        (i) => i.kind !== "idle",
-      ).length,
-    [allPending],
+  // and is idling is not urgent. Content-stable: most hook events move no
+  // badge, and only a count actually changing should break TitleBar's memo.
+  const pendingCountsSig = JSON.stringify(
+    Object.fromEntries(
+      openProjects.map((p) => [
+        p.id,
+        pendingForRoots(
+          allPending,
+          p.components.map((c) => c.path),
+        ).filter((i) => i.kind !== "idle").length,
+      ]),
+    ),
   );
+  const pendingCounts = useMemo(
+    () => JSON.parse(pendingCountsSig) as Record<string, number>,
+    [pendingCountsSig],
+  );
+  const pendingCount = useCallback(
+    (p: Project) => pendingCounts[p.id] ?? 0,
+    [pendingCounts],
+  );
+
+  // Stable per-project handlers, so memo(ProjectView) isn't defeated by fresh
+  // closures. Each reads the current project through wsRef at call time.
+  const projectHandlers = useRef(
+    new Map<
+      string,
+      {
+        onRestoreStep: (done: number, total: number, label: string) => void;
+        onRestored: () => void;
+        onEdit: () => void;
+        onShareContext: (on: boolean) => void;
+        onSaveCustomTasks: (tasks: CustomMicroTask[]) => void;
+      }
+    >(),
+  );
+  const handlersFor = (id: string) => {
+    let h = projectHandlers.current.get(id);
+    if (!h) {
+      const find = () => wsRef.current.projects.find((x) => x.id === id);
+      h = {
+        onRestoreStep: (done, total, label) =>
+          restoreStep(id, done, total, label),
+        onRestored: () => restoreDone(id),
+        onEdit: () => {
+          const p = find();
+          if (p) setDialog({ mode: "edit", project: p });
+        },
+        onShareContext: (on) => {
+          const p = find();
+          if (p) void saveProject({ ...p, shareContext: on });
+        },
+        onSaveCustomTasks: (tasks) => {
+          const p = find();
+          if (p) void saveProject({ ...p, customTasks: tasks });
+        },
+      };
+      projectHandlers.current.set(id, h);
+    }
+    return h;
+  };
+  const dismissPending = useCallback((key: string) => {
+    // Bail unchanged when already dismissed: the auto-clear effect fires per
+    // render, and a fresh Set each time would loop it.
+    setDismissedPending((prev) =>
+      prev.has(key) ? prev : new Set(prev).add(key),
+    );
+  }, []);
 
   if (!loaded) return null;
 
@@ -1487,32 +1731,19 @@ export default function App() {
               project={p}
               visible={p.id === ws.activeId}
               restore={waking[p.id]?.snapshot ?? null}
-              onRestoreStep={(done, total, label) => restoreStep(p.id, done, total, label)}
-              onRestored={() => restoreDone(p.id)}
+              onRestoreStep={handlersFor(p.id).onRestoreStep}
+              onRestored={handlersFor(p.id).onRestored}
               zen={zen}
-              allProjects={openProjects.map((x) => ({
-                name: x.name,
-                roots: x.components.map((c) => c.path),
-              }))}
+              allProjects={allProjectRoots}
               events={agentEvents}
               hookPath={hookPath}
               relay={relay}
               dismissedPending={dismissedPending}
-              onDismissPending={(key) =>
-                // Bail unchanged when already dismissed: the auto-clear effect
-                // fires per render, and a fresh Set each time would loop it.
-                setDismissedPending((prev) =>
-                  prev.has(key) ? prev : new Set(prev).add(key),
-                )
-              }
-              onEdit={() => setDialog({ mode: "edit", project: p })}
+              onDismissPending={dismissPending}
+              onEdit={handlersFor(p.id).onEdit}
               onNotice={notify}
-              onShareContext={(on) =>
-                void saveProject({ ...p, shareContext: on })
-              }
-              onSaveCustomTasks={(tasks) =>
-                void saveProject({ ...p, customTasks: tasks })
-              }
+              onShareContext={handlersFor(p.id).onShareContext}
+              onSaveCustomTasks={handlersFor(p.id).onSaveCustomTasks}
             />
           ))}
 
@@ -1533,7 +1764,11 @@ export default function App() {
           if (!project || id !== ws.activeId) return null;
           return (
             <div key={id} className="hib-layer">
-              <HibernationView project={project} snapshot={w.snapshot} progress={w.progress} />
+              <HibernationView
+                project={project}
+                snapshot={w.snapshot}
+                progress={w.progress}
+              />
             </div>
           );
         })}
@@ -1550,7 +1785,11 @@ export default function App() {
       )}
 
       {notice && (
-        <NoticeToast text={notice.text} kind={notice.kind} onDismiss={dismissNotice} />
+        <NoticeToast
+          text={notice.text}
+          kind={notice.kind}
+          onDismiss={dismissNotice}
+        />
       )}
 
       {manager && (
@@ -1575,7 +1814,10 @@ export default function App() {
       )}
 
       {confirmDelete && (
-        <div className="confirm-backdrop" onMouseDown={() => setConfirmDelete(null)}>
+        <div
+          className="confirm-backdrop"
+          onMouseDown={() => setConfirmDelete(null)}
+        >
           <div className="confirm" onMouseDown={(e) => e.stopPropagation()}>
             <p>
               Delete project <strong>{confirmDelete.name}</strong>?

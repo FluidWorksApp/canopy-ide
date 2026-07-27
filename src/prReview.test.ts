@@ -233,6 +233,14 @@ describe("nextMove", () => {
     expect(m.action).toBe("Review the delta");
   });
 
+  it("states the ready-to-land case without an action — Merge ▾ owns merging", () => {
+    // A second Merge button here only opened the header's menu, which is where
+    // the method is chosen; the banner is the status, not the deed.
+    const m = nextMove(pr(), conv({ review_decision: "APPROVED" }), { actionable: 0 });
+    expect(m.id).toBe("merge");
+    expect(m.action).toBeUndefined();
+  });
+
   it("only offers merge when GitHub says approved, green and mergeable", () => {
     expect(nextMove(pr(), conv({ review_decision: "APPROVED" }), { actionable: 0 }).id).toBe("merge");
     expect(

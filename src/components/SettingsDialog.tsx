@@ -543,6 +543,49 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     )}
                   </div>
                 </Item>
+                <Item
+                  name="Side panel"
+                  desc="How the file tree, changes and the rest of the rail's panels come and go."
+                >
+                  <div className="set-checks">
+                    <label className="set-inline-check">
+                      <input
+                        type="checkbox"
+                        checked={s.sidebarHover}
+                        onChange={(e) => patch({ sidebarHover: e.target.checked })}
+                      />
+                      <span>
+                        Hover to view
+                        <em>Rest on a rail icon and its panel opens; otherwise click to open.</em>
+                      </span>
+                    </label>
+                    <label className="set-inline-check">
+                      <input
+                        type="checkbox"
+                        checked={s.sidebarClickOutsideCloses}
+                        onChange={(e) => patch({ sidebarClickOutsideCloses: e.target.checked })}
+                      />
+                      <span>
+                        Click outside to close
+                        <em>A click in the editor puts the panel away.</em>
+                      </span>
+                    </label>
+                    <label className="set-inline-check">
+                      <input
+                        type="checkbox"
+                        checked={s.sidebarOverlay}
+                        onChange={(e) => patch({ sidebarOverlay: e.target.checked })}
+                      />
+                      <span>
+                        Sidebar as overlay
+                        <em>
+                          The panel floats over your work. Off docks it in a column of its own,
+                          which moves the editor across each time it opens.
+                        </em>
+                      </span>
+                    </label>
+                  </div>
+                </Item>
               </>
             )}
 

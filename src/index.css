@@ -919,13 +919,18 @@ body,
   transform: translateX(calc(-100% - 48px));
   opacity: 0;
   pointer-events: none;
+  /* Hidden once the exit finishes: with only opacity 0, WebKit still pays the
+     frost's full-viewport backdrop blur on every repaint of the terminals
+     underneath. Delayed so the slide-out still shows. */
+  visibility: hidden;
   transition:
     transform var(--peek-out) var(--peek-exit),
     /* Opacity has to HOLD while the sheet travels. Fading it in step with the
        slide (or faster) dissolves the panel in place and the movement never
        registers — it just looks like it blinked out. This curve keeps it near
        opaque for most of the exit and drops it at the very end. */
-    opacity var(--peek-out) cubic-bezier(0.85, 0, 1, 1);
+    opacity var(--peek-out) cubic-bezier(0.85, 0, 1, 1),
+    visibility 0s linear var(--peek-out);
 }
 
 /* `transform: none`, not `translateX(0)`: a resolved transform makes the panel a
@@ -936,6 +941,7 @@ body,
   transform: none;
   opacity: 1;
   pointer-events: auto;
+  visibility: visible;
   transition:
     transform var(--peek-in) var(--peek-spring),
     opacity calc(var(--peek-in) * 0.5) var(--ease-out);
@@ -1052,6 +1058,34 @@ body,
 }
 .side-peek-grip:hover {
   background: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+/* Docked, not floating: the panel is part of the row, so the main area sizes
+   itself around it. No frost and no slide — glass and a spring entrance are how
+   an overlay says "I'm in front of your work"; a column that pushed the editor
+   aside is simply part of the layout. */
+.side-dock {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-alt);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+
+/* Closed is width 0, not gone: the panel stays mounted so reopening it doesn't
+   re-run every panel's first fetch. Nothing of it may show — including the
+   resize grip, which would otherwise sit over the rail's edge. */
+.side-dock:not(.open) {
+  border-right: none;
+}
+
+.side-dock:not(.open) .side-peek-grip {
+  display: none;
 }
 
 /* A peek is pointer-driven; someone who has turned motion down still needs the
@@ -1978,9 +2012,37 @@ body,
   margin-top: 16px;
 }
 
-.btn:disabled {
-  opacity: 0.4;
+/* Disabled is a colour, not an opacity. These buttons sit on the hover-peek
+   side panel, which is glass — a translucent sheet with the editor blurred
+   behind it. A button dimmed with `opacity` composites against whatever the
+   editor happens to be showing under it, so two identically-disabled Commit
+   buttons in the Changes panel painted at visibly different brightnesses.
+   Opaque fills can't drift like that. */
+.btn:disabled,
+.btn-mini:disabled {
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  border-color: var(--border);
   cursor: default;
+}
+
+.btn.btn-accent:disabled,
+.btn-mini.btn-accent:disabled {
+  /* Still legible as the primary action, just plainly not available: the
+     accent muted into the surface rather than laid over it. */
+  background: color-mix(in srgb, var(--accent) 22%, var(--bg-raised));
+  color: var(--text-dim);
+  border-color: transparent;
+}
+
+.btn:disabled:hover,
+.btn-mini:disabled:hover {
+  border-color: var(--border);
+}
+
+.btn.btn-accent:disabled:hover,
+.btn-mini.btn-accent:disabled:hover {
+  border-color: transparent;
 }
 
 /* A wide, transparent grab zone with a hairline 1px line drawn down its centre,
@@ -2883,11 +2945,18 @@ body.dragging-tab * {
   z-index: 20;
   pointer-events: none; /* closed: clicks fall through to the terminal */
   opacity: 0;
-  transition: opacity var(--dur-med) var(--ease-out);
+  /* Hidden, not just transparent: the overlay's backdrop blur otherwise keeps
+     costing on every repaint of the terminal it covers. */
+  visibility: hidden;
+  transition:
+    opacity var(--dur-med) var(--ease-out),
+    visibility 0s linear var(--dur-med);
 }
 .workspace-overlay-layer.open {
   pointer-events: auto;
   opacity: 1;
+  visibility: visible;
+  transition: opacity var(--dur-med) var(--ease-out);
 }
 
 .workspace-overlay {
@@ -2901,7 +2970,6 @@ body.dragging-tab * {
   -webkit-backdrop-filter: blur(18px) saturate(135%);
   transform: scale(1.015);
   transition: transform var(--dur-med) var(--ease-out);
-  will-change: transform;
 }
 .workspace-overlay-layer.open .workspace-overlay {
   transform: scale(1);
@@ -4887,6 +4955,34 @@ body.dragging-tab * {
   font-size: 12px;
 }
 
+/* A stack of switches that each need a line of explanation: the box stays on
+   the first line of the label, and the note sits under the name rather than
+   beside it, so three of them read as a list of choices and not a paragraph. */
+.set-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.set-checks .set-inline-check {
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.set-checks .set-inline-check input {
+  margin-top: 1px;
+  flex: 0 0 auto;
+}
+
+.set-checks .set-inline-check em {
+  display: block;
+  margin-top: 2px;
+  font-style: normal;
+  font-size: 11px;
+  color: var(--text-dim);
+  max-width: 46ch;
+}
+
 .set-wide {
   width: 320px;
   max-width: 100%;
@@ -5996,6 +6092,19 @@ body.dragging-tab * {
   margin-top: 5px;
   font-size: 11px;
   color: var(--text-dim);
+}
+
+/* Which repo this PR is in — first on the line, because with several projects
+   open "#843" is only half an address. Monospace and lightly boxed so it reads
+   as an identifier rather than as more of the sentence beside it. */
+.pr-repo {
+  font-family: ui-monospace, monospace;
+  color: var(--text);
+  background: var(--bg-raised);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  padding: 1px 6px;
+  cursor: default;
 }
 
 .pr-when { color: var(--text-dim); cursor: default; }
@@ -11238,3 +11347,23 @@ a.btn-mini {
   min-width: 20px;
 }
 .change-row:hover .change-stage { visibility: visible; }
+
+/* ---------- off-screen row skipping ---------- */
+
+/* content-visibility lets WebKit skip layout and paint for rows outside the
+   viewport — the cheap substitute for list virtualization in the long lists
+   (file tree, changes, commits, PR comments/diffs). contain-intrinsic-size
+   keeps scrollbar geometry sane before a row is first seen; the `auto` keyword
+   remembers the real rendered size afterwards. */
+.tree-row,
+.change-row,
+.git-commit-row,
+.pr-comment-row,
+.pr-thread {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 28px;
+}
+.pr-file {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 420px;
+}
