@@ -54,6 +54,12 @@ import {
   type Candidate,
   type OccluderStyle,
 } from "./browserOcclusion";
+import {
+  emitBrowserSignal,
+  provideViewSnapshots,
+  type ViewSnapshot,
+} from "./browserSignals";
+import { isRegisteredOverlay } from "./overlaySurfaces";
 import * as ipc from "./ipc";
 import { getSettings } from "./settings";
 
@@ -83,6 +89,10 @@ interface Entry {
   /** Nothing worth capturing until the page has arrived. */
   loading: boolean;
   told: PaneView | null;
+  /** Observation only, for the watchdog and the selftest — never read by any
+   *  decision here. When a frame last arrived, and when the page last moved. */
+  lastCaptureOkAt: number;
+  lastNavAt: number;
 }
 
 const views = new Map<string, Entry>();
@@ -91,6 +101,17 @@ let suppressed = 0;
 let observer: MutationObserver | null = null;
 let sizes: ResizeObserver | null = null;
 let scheduled = 0;
+/** Pairs a show/hide with its acknowledgement, so a call that never lands can
+ *  be told apart from one that landed slowly. */
+let visibilitySeq = 0;
+
+/** Enough of an occluder to recognise it in a log line or a violation. */
+function describe(c: Candidate): string {
+  const el = c.el;
+  if (!el) return "?";
+  const cls = typeof el.className === "string" ? el.className.trim().split(/\s+/)[0] : "";
+  return `${el.tagName.toLowerCase()}${cls ? `.${cls}` : ""}`;
+}
 
 /** Cmd +/- scales CSS pixels against the window's points (see zoom.ts), and a
  *  webview is positioned in points. applyZoom stamps the level here. */
@@ -132,6 +153,23 @@ function warnBlindSpot(el: Element) {
   );
 }
 
+/** A surface that occludes correctly but that nobody registered.
+ *
+ *  Structure caught it, so the browser does get out of its way — but no test
+ *  opens it, which is how a surface ends up shipping untested. Covered or
+ *  loud; there is no third state. */
+function warnUnregistered(el: Element) {
+  const key = `reg:${el.className || el.tagName}`;
+  if (warned.has(key)) return;
+  warned.add(key);
+  console.warn(
+    "[browserHost] %o covers the embedded browser but is not in OVERLAY_SURFACES " +
+      "(overlaySurfaces.ts), so the browser selftest never opens it. Add an entry " +
+      "with its selector and, if it can be opened from code, how — otherwise say why not.",
+    el,
+  );
+}
+
 /** Everything painted over `view`, found by structure rather than by name. */
 function occludersOver(host: Element, view: RectLike): Candidate[] {
   const found: Candidate[] = [];
@@ -156,10 +194,12 @@ function occludersOver(host: Element, view: RectLike): Candidate[] {
           rect,
           style: readStyle(child),
           painted: child.matches(PAINTED_OVERLAY_SELECTOR),
+          el: child,
         };
         if (occludes(view, candidate)) {
           found.push(candidate);
           covered = true;
+          if (import.meta.env.DEV && !isRegisteredOverlay(child)) warnUnregistered(child);
         } else if (
           import.meta.env.DEV &&
           !candidate.painted &&
@@ -194,17 +234,48 @@ function apply() {
     const bounds = rect ? webviewBounds(rect, viewport, zoom) : null;
     if (bounds && !sameBounds(bounds, e.bounds)) {
       e.bounds = bounds;
+      emitBrowserSignal({ t: "bounds", at: Date.now(), tabId, bounds });
       void ipc
         .browserSetBounds(tabId, bounds.x, bounds.y, bounds.width, bounds.height)
         .catch(() => {});
     }
     // Only pay for the walk when this view would otherwise be on screen.
-    const clear =
-      !!host && !!rect && !!bounds && showable(bounds) && occludersOver(host, rect).length === 0;
+    const over = host && rect && bounds && showable(bounds) ? occludersOver(host, rect) : null;
+    const clear = !!over && over.length === 0;
     const visible = e.wanted && suppressed === 0 && clear;
     if (visible !== e.shown) {
       e.shown = visible;
-      void ipc.browserSetVisible(tabId, visible).catch(() => {});
+      const seq = ++visibilitySeq;
+      const at = Date.now();
+      emitBrowserSignal({
+        t: "visibility",
+        at,
+        tabId,
+        seq,
+        visible,
+        by: over && over.length > 0 ? describe(over[0]) : over ? null : "offscreen",
+      });
+      void ipc.browserSetVisible(tabId, visible).then(
+        () =>
+          emitBrowserSignal({
+            t: "visibility-ack",
+            at: Date.now(),
+            tabId,
+            seq,
+            visible,
+            ok: true,
+          }),
+        (err) =>
+          emitBrowserSignal({
+            t: "visibility-ack",
+            at: Date.now(),
+            tabId,
+            seq,
+            visible,
+            ok: false,
+            error: String(err),
+          }),
+      );
     }
     // Take the picture while the view is still up. A hidden WKWebView
     // snapshots to nothing, so the instant the frame is needed is the instant
@@ -230,19 +301,35 @@ function apply() {
 function capture(tabId: string, e: Entry) {
   e.capturing = true;
   e.lastCaptureAt = Date.now();
+  const at = e.lastCaptureAt;
   void ipc.browserFrame(tabId).then(
     (base64) => {
       e.capturing = false;
-      if (!base64) return;
+      const now = Date.now();
+      if (!base64) {
+        emitBrowserSignal({ t: "capture", at: now, tabId, result: "empty", ms: now - at });
+        return;
+      }
       e.dirty = false;
       e.frame = frameSrc(base64);
+      e.lastCaptureOkAt = now;
+      emitBrowserSignal({ t: "capture", at: now, tabId, result: "ok", ms: now - at });
       publish(tabId, e);
     },
-    () => {
+    (err) => {
       // A view mid-navigation or already gone has no frame to give. Keeping
       // the previous one is exactly right — it is still the better picture of
       // this page than nothing is.
       e.capturing = false;
+      const now = Date.now();
+      emitBrowserSignal({
+        t: "capture",
+        at: now,
+        tabId,
+        result: "failed",
+        ms: now - at,
+        error: String(err),
+      });
     },
   );
 }
@@ -263,7 +350,17 @@ function publish(tabId: string, e: Entry) {
     frame: e.frame,
   };
   if (e.told && e.told.state === next.state && e.told.frame === next.frame) return;
+  const was = e.told?.state;
   e.told = next;
+  if (was !== next.state) {
+    emitBrowserSignal({
+      t: "pane",
+      at: Date.now(),
+      tabId,
+      state: next.state,
+      frame: !!next.frame,
+    });
+  }
   const cbs = paneListeners.get(tabId);
   if (cbs) for (const cb of cbs) cb(next);
 }
@@ -274,6 +371,8 @@ export function browserViewChanged(tabId: string, loading?: boolean) {
   const e = views.get(tabId);
   if (!e) return;
   e.dirty = true;
+  e.lastNavAt = Date.now();
+  emitBrowserSignal({ t: "nav", at: e.lastNavAt, tabId, loading: !!loading });
   if (loading !== undefined) e.loading = loading;
   // A new page's old frame is worse than none — it would freeze the page the
   // user just navigated away from.
@@ -352,13 +451,41 @@ export function registerBrowserView(tabId: string, host: () => Element | null) {
     dirty: true,
     loading: true,
     told: null,
+    lastCaptureOkAt: 0,
+    lastNavAt: Date.now(),
   });
+  emitBrowserSignal({ t: "register", at: Date.now(), tabId });
 }
 
 export function forgetBrowserView(tabId: string) {
   views.delete(tabId);
+  emitBrowserSignal({ t: "forget", at: Date.now(), tabId });
   schedule();
 }
+
+/** What every registered view believes about itself, for anything watching.
+ *
+ *  A reading, not a recalculation: whoever is checking this layer has to be
+ *  able to compare what the host thinks against what the DOM says, and it can
+ *  only do that if the host's belief is legible from outside. */
+provideViewSnapshots((): ViewSnapshot[] =>
+  [...views.entries()].map(([tabId, e]) => {
+    const host = e.host();
+    return {
+      tabId,
+      wanted: e.wanted,
+      shown: e.shown,
+      bounds: e.bounds,
+      host,
+      hostRect: host ? host.getBoundingClientRect() : null,
+      zoom: currentZoom(),
+      hasFrame: !!e.frame,
+      lastCaptureOkAt: e.lastCaptureOkAt,
+      loading: e.loading,
+      lastNavAt: e.lastNavAt,
+    };
+  }),
+);
 
 /** The page navigated, or an agent acted on it, so any frame in hand is of a
  *  page that no longer exists. */
