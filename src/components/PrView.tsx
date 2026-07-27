@@ -33,6 +33,7 @@ import {
   followUpsTask,
   prArtifactPath,
   prReviewTask,
+  resolveConflictsTask,
   runItReviewTask,
   stepsDone,
   type MicroTaskDef,
@@ -686,14 +687,12 @@ export function PrView({
   const fabBusy =
     (fab?.id === "review" && isBusyTask(prReviewTask.id)) ||
     (fab?.id === "fix-ci" && isBusyTask(fixCiTask.id)) ||
-    (fab?.id === "address" && isBusyTask(addressPrCommentsTask.id));
+    (fab?.id === "address" && isBusyTask(addressPrCommentsTask.id)) ||
+    (fab?.id === "resolve-conflicts" && isBusyTask(resolveConflictsTask.id));
   const runFab = () => {
     switch (fab?.id) {
       case "resolve-conflicts":
-        // The one state with no micro-task: a conflict needs a checkout and a
-        // judgement per hunk, so it goes to a full agent in a worktree — the
-        // same thing the menu offers when the PR conflicts.
-        onStartResolve("claude");
+        launch(resolveConflictsTask, { repo, pr });
         break;
       case "review":
         launch(prReviewTask, { repo, pr });
@@ -1051,7 +1050,7 @@ export function PrView({
         );
         break;
       case "resolve-conflicts":
-        onStartResolve("claude");
+        launch(resolveConflictsTask, { repo, pr });
         break;
       case "address-comments":
         startRound(true);
@@ -1321,6 +1320,17 @@ export function PrView({
    *  is no point reviewing a diff git can't even merge. */
   const openAgentMenu = (e: React.MouseEvent) => {
     const items: MenuItem[] = [];
+    // Conflicting: the only thing worth offering is the resolve. Everything
+    // else reads or edits a diff git cannot merge, and would be redone after.
+    if (onMicroTask && conflicting) {
+      items.push({
+        label: resolveConflictsTask.label,
+        icon: <span className="ctx-glyph">{resolveConflictsTask.icon}</span>,
+        hint: "merges the base in, keeps both sides",
+        disabled: isBusyTask(resolveConflictsTask.id),
+        onClick: () => launch(resolveConflictsTask, { repo, pr }),
+      });
+    }
     if (onMicroTask && !conflicting) {
       items.push({
         label: prReviewTask.label,

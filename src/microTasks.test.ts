@@ -12,6 +12,7 @@ import {
   prArtifactPath,
   prReviewTask,
   raisePrTask,
+  resolveConflictsTask,
   reviewPrTask,
   runItReviewTask,
   stepsDone,
@@ -193,6 +194,7 @@ describe("MICRO_TASKS", () => {
       "review-pr",
       "address-pr-comments",
       "pr-review",
+      "pr-resolve-conflicts",
       "pr-fix-ci",
       "pr-run-it",
       "pr-follow-ups",
@@ -216,7 +218,11 @@ describe("MICRO_TASKS", () => {
     // The grouping is a promise about consequence; these are the three that
     // change the branch, and the isolation flag is the independent evidence.
     const pushes = MICRO_TASKS.filter((t) => t.effect === "pushes").map((t) => t.id);
-    expect(pushes).toEqual(["address-pr-comments", "pr-fix-ci"]);
+    expect(pushes).toEqual([
+      "address-pr-comments",
+      "pr-resolve-conflicts",
+      "pr-fix-ci",
+    ]);
     for (const t of MICRO_TASKS.filter((x) => x.effect === "pushes"))
       expect(t.isolation?.kind, `${t.id} edits code, so it needs its own worktree`).toBe(
         "pr-worktree",
@@ -345,6 +351,29 @@ describe("PR tasks that report back through a file", () => {
     ]);
     expect(stepsDone("done\nfinished\n", PR_REVIEW_STEPS)).toEqual([]);
     expect(stepsDone("", PR_REVIEW_STEPS)).toEqual([]);
+  });
+
+  it("makes the conflict task keep both sides and prove the merge", () => {
+    const ctx = resolveConflictsTask.buildContext({ repo: "/repo", pr }, "", undefined);
+    expect(ctx).toContain("git merge origin/main");
+    // The failure mode of an automated merge is quietly reverting one side.
+    expect(ctx).toContain("intent of");
+    expect(ctx).toContain("BOTH sides");
+    expect(ctx).toContain("silently reverts the other");
+    // A merge that compiles is not a merge that is correct.
+    expect(ctx).toContain("run the project's build and tests before committing");
+    expect(ctx).toContain("Never force-push");
+    // Detached, so a bare push has nothing to push to.
+    expect(ctx).toContain("git push origin HEAD:fix/parser");
+    expect(ctx).toContain("canopy_job_done");
+    expect(ctx).not.toMatch(/[\r\n]/);
+    // It edits code, so it must never run in the shared checkout.
+    expect(resolveConflictsTask.isolation?.kind).toBe("pr-worktree");
+  });
+
+  it("stops rather than guessing when only the author can decide", () => {
+    const ctx = resolveConflictsTask.buildContext({ repo: "/repo", pr }, "", undefined);
+    expect(ctx).toContain("report blocked");
   });
 
   it("makes the CI task work from the logs and forbids the cheap fixes", () => {

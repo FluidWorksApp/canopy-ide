@@ -459,6 +459,51 @@ export const fixCiTask: MicroTaskDef<ReviewPrPayload> = {
   },
 };
 
+/** Bring the base in and settle every conflict. Shaped exactly like Fix CI —
+ *  edits code, needs the PR's own worktree, commits and pushes, has one clear
+ *  ending — and it is one of these for the same reasons: the run is recorded in
+ *  the history, it reports through canopy_job_done, and its tab closes itself.
+ *  It used to be the odd one out, opening a persistent agent terminal you then
+ *  had to babysit and clean up by hand. */
+export const resolveConflictsTask: MicroTaskDef<ReviewPrPayload> = {
+  id: "pr-resolve-conflicts",
+  label: "Resolve conflicts",
+  icon: "⑂",
+  placeholder: "Anything to watch for in the merge…",
+  blurb: "Merges the base in, settles every conflict, and pushes.",
+  effect: "pushes",
+  surfaceNote: "on a PR tab",
+  cwd: (p) => p.repo,
+  isolation: { kind: "pr-worktree", target: (p) => ({ repo: p.repo, pr: p.pr }) },
+  buildContext(p, userQuery, env) {
+    const n = p.pr.number;
+    const query = oneLine(userQuery);
+    return oneLine(
+      `Pull request #${n}: "${p.pr.title}" (${p.pr.url}) has merge conflicts with its base. It merges ` +
+        `${p.pr.branch} into ${p.pr.base}, and its head is checked out in this worktree. ` +
+        `Bring in the latest base — \`git fetch origin\` then \`git merge origin/${p.pr.base}\` — and ` +
+        `resolve every conflict by editing the files and removing the markers. Preserve the intent of ` +
+        `BOTH sides rather than picking one: a conflict is two changes that were each made for a ` +
+        `reason, and taking either side wholesale silently reverts the other. Read enough of the ` +
+        `surrounding code, and the log for the base's side (\`git log -p origin/${p.pr.base} -- <file>\`), ` +
+        `to know what each side was for before you choose. ` +
+        `Where the two genuinely cannot both stand, keep the base's and say so in your summary — the ` +
+        `base is what everyone else is already building on. ` +
+        `Then prove it: run the project's build and tests before committing, because a merge that ` +
+        `compiles is not a merge that is correct, and conflicts in code that no test covers are exactly ` +
+        `where this goes wrong. Commit the merge, and push only once it is green. ` +
+        `Never force-push, never rebase, never amend someone else's commit, and do not merge the PR ` +
+        `itself. If a conflict needs a decision only the author can make, stop and report blocked with ` +
+        `the file and both sides described, rather than guessing. ` +
+        `Pass the PR's URL to canopy_job_done and make the summary the count of files resolved plus any ` +
+        `choice you had to make.` +
+        (query ? ` The user adds: "${query}".` : "") +
+        detachedPushLine(p.pr.branch) +
+        (env?.cleanup ? cleanupLine(env.cleanup.repo, env.cleanup.worktree) : ""),
+    );
+  },
+};
+
 export interface ApplySuggestionPayload extends ReviewPrPayload {
   path: string;
   line: number;
@@ -577,6 +622,7 @@ export const MICRO_TASKS: MicroTaskDef<never>[] = [
   reviewPrTask as MicroTaskDef<never>,
   addressPrCommentsTask as MicroTaskDef<never>,
   prReviewTask as MicroTaskDef<never>,
+  resolveConflictsTask as MicroTaskDef<never>,
   fixCiTask as MicroTaskDef<never>,
   runItReviewTask as MicroTaskDef<never>,
   followUpsTask as MicroTaskDef<never>,
