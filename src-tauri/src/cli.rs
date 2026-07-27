@@ -47,7 +47,10 @@ pub fn open_forwarded(app: &AppHandle, argv: Vec<String>, cwd: String) {
     if let Some(dir) = dir_from_args(argv, Path::new(&cwd)) {
         let _ = app.emit("cli-open", dir);
     }
-    if let Some(w) = app.get_webview_window("main") {
+    // The window, not the webview window: once a preview tab adds a child
+    // webview the latter stops resolving, and `canopy .` would silently fail to
+    // raise the app.
+    if let Some(w) = app.get_window("main") {
         let _ = w.unminimize();
         let _ = w.set_focus();
     }

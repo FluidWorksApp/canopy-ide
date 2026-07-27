@@ -244,9 +244,11 @@ export const contextReleaseClaim = (owner: string) =>
 export const onAgentClaims = (cb: () => void): Promise<UnlistenFn> =>
   listen("agent:claims", () => cb());
 
-/** PNG (base64) of a rectangle of this window, via the webview's own snapshot
- *  API — used to hand an agent a picture of the preview under the proxy engine,
- *  where the page is an iframe in this window. */
+/** PNG (base64) of a rectangle of the app's own webview, via the webview's own
+ *  snapshot API — a picture of the preview under the proxy engine, where the
+ *  page is an iframe in this window, and of the app's UI anywhere else. Works
+ *  with native preview tabs open; child webviews are captured whole by
+ *  {@link browserSnapshot} instead. */
 export const webviewSnapshot = (
   x: number,
   y: number,
