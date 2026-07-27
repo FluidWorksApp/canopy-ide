@@ -254,3 +254,61 @@ describe("resolveTaskFile", () => {
     expect(resolveTaskFile(`${wt}-old/src/app.ts`, wt)).toBe(`${wt}-old/src/app.ts`);
   });
 });
+
+describe("completedTaskRuns ordering", () => {
+  beforeEach(() => localStorage.clear());
+
+  it("orders by when a run finished, not when it started", () => {
+    // The store is newest-first by start time, which is a different order as
+    // soon as two runs overlap: the long one started first and came back last.
+    const slow = recordTaskStart({
+      taskId: "pr-review",
+      label: "Review",
+      agent: "claude",
+      cwd: "/repo",
+      projectId: "p1",
+      brief: "review it",
+    });
+    const quick = recordTaskStart({
+      taskId: "adhoc",
+      label: "Quick",
+      agent: "claude",
+      cwd: "/repo",
+      projectId: "p1",
+      brief: "quick one",
+    });
+    recordTaskEnd(quick, { status: "done", endedAt: 1_000 });
+    recordTaskEnd(slow, { status: "done", endedAt: 2_000 });
+
+    expect(completedTaskRuns("p1").map((r) => r.label)).toEqual([
+      "Review",
+      "Quick",
+    ]);
+  });
+
+  it("falls back to the start time for a run that never recorded an end", () => {
+    const a = recordTaskStart({
+      taskId: "adhoc",
+      label: "Ended",
+      agent: "claude",
+      cwd: "/repo",
+      projectId: "p1",
+      brief: "b",
+    });
+    recordTaskEnd(a, { status: "done", endedAt: 5_000 });
+    // Settled without an endedAt of its own.
+    const b = recordTaskStart({
+      taskId: "adhoc",
+      label: "Swept",
+      agent: "claude",
+      cwd: "/repo",
+      projectId: "p1",
+      brief: "b",
+    });
+    updateTaskRun(b, { startedAt: 9_000 } as never);
+    sweepStaleRuns();
+    const labels = completedTaskRuns("p1").map((r) => r.label);
+    expect(labels).toContain("Ended");
+    expect(labels).toContain("Swept");
+  });
+});

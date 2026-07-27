@@ -7989,6 +7989,37 @@ textarea,
   color: var(--text-dim);
 }
 
+/* Tasks panel sections: running, completed, yours, one-off, built-in. Five
+   groups of small rows down a narrow rail run together into one list, and the
+   headings alone were not enough to break them — a rule is. On the wrapper
+   rather than the heading, because the heading is shared with the tickets
+   panel, and between rather than around, so the first section keeps its edge
+   against the panel head. */
+.task-section + .task-section {
+  margin-top: 6px;
+  border-top: 1px solid var(--border);
+  padding-top: 2px;
+}
+
+/* "Show all 24" under the capped Completed list. A row, not a button-looking
+   button: it belongs to the list it ends. */
+.task-done-more {
+  display: block;
+  width: 100%;
+  padding: 4px 12px 6px 26px;
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.task-done-more:hover {
+  color: var(--text);
+  background: var(--bg-raised);
+}
+
 .ticket-row {
   display: flex;
   align-items: center;
