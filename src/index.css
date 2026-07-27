@@ -776,7 +776,7 @@ body,
   box-shadow: inset -1px 0 0 color-mix(in srgb, var(--border) 70%, transparent);
 }
 
-/* Files & Assets / Source control & Review / Agents. The rail is icon-width,
+/* Project / Source control & Review / Agents. The rail is icon-width,
    so the grouping can't be labelled — a hairline plus a little air is the whole
    signal. Inset box-shadow rather than border-top: the buttons are full-bleed
    and a real border would inset the active wash by a pixel. */
@@ -790,14 +790,6 @@ body,
 
 .rail-group + .rail-group {
   box-shadow: inset 0 1px 0 color-mix(in srgb, var(--border) 60%, transparent);
-}
-
-/* Not after the first group. It holds one icon, so a rule above and below it
-   fenced off a single button — which reads as a divider that lost its group
-   rather than a boundary between two. The later ones separate real runs of
-   icons and stay. */
-.rail-group:first-of-type + .rail-group {
-  box-shadow: none;
 }
 
 /* merge rail + side panel into one visual panel: divider only against main */

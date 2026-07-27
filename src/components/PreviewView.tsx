@@ -42,6 +42,11 @@ import { AgentLaunchButton } from "./AgentLaunchButton";
 import { LiveDot } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
 
+/** A trusted press landed inside a previewed page, forwarded out of it by the
+ *  injected picker. The page's own events never reach this window under either
+ *  engine, so this is the only way the rest of the app hears about them. */
+export const BROWSER_INPUT_EVENT = "canopy:browser-input";
+
 interface PreviewViewProps {
   /** The owning SubTab's id — how agent browser ops address this view. */
   tabId: string;
@@ -419,6 +424,16 @@ export function PreviewView({
         // because two hosts redirecting to each other would otherwise loop.
         if (redirects.current++ < 5) navigate(d.url);
         else onNotice(`${d.url} keeps redirecting — the preview stopped following it.`);
+        return;
+      }
+      if (d.canopy === "input") {
+        // Someone pressed inside the page. The press happened outside this
+        // window's event tree — a native child view, or a cross-origin frame —
+        // so re-emit it here as the plain fact it is: a click landed in the
+        // app, on the browser. Whoever dismisses on clicks elsewhere (the side
+        // panel) can then treat the browser like any other surface instead of
+        // a hole in the window that clicks fall into.
+        window.dispatchEvent(new CustomEvent(BROWSER_INPUT_EVENT));
         return;
       }
       if (d.canopy === "ready") {

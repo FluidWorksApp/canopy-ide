@@ -124,7 +124,7 @@ import { CommitView } from "../CommitView";
 import { ReviewView, type ReviewPayload } from "../ReviewView";
 import { BranchView } from "../BranchView";
 import { AgentWorkspaceView } from "../AgentWorkspaceView";
-import { PreviewView } from "../PreviewView";
+import { BROWSER_INPUT_EVENT, PreviewView } from "../PreviewView";
 import type { PreviewServer } from "../../preview";
 import { dispatchBrowserOp } from "../../previewAgent";
 import { useBrowserEngine } from "../../browserHost";
@@ -3139,6 +3139,12 @@ export const ProjectView = memo(function ProjectView({
     // choice once the panel is docked: a pane that isn't covering anything has
     // no reason to close because you clicked in the editor.
     if (!sideOpen || !sidePrefs.clickOutsideCloses) return;
+    const dismiss = () => {
+      cancelPeekOpen();
+      cancelPeekClose();
+      setPeeking(false);
+      setPinned(false);
+    };
     const onDown = (e: PointerEvent) => {
       const target = e.target;
       if (
@@ -3146,13 +3152,20 @@ export const ProjectView = memo(function ProjectView({
         target.closest(".side-peek, .side-dock, .rail")
       )
         return;
-      cancelPeekOpen();
-      cancelPeekClose();
-      setPeeking(false);
-      setPinned(false);
+      dismiss();
     };
     window.addEventListener("pointerdown", onDown, true);
-    return () => window.removeEventListener("pointerdown", onDown, true);
+    // The in-app browser is a hole in that listener: its page is a native view
+    // over the window under one engine and a cross-origin frame under the
+    // other, so a press in it produces no pointerdown here at all and the
+    // panel would sit over the page while you clicked it. PreviewView forwards
+    // the press back out; it can only have come from the page, which is never
+    // the panel, so there is nothing left to test.
+    window.addEventListener(BROWSER_INPUT_EVENT, dismiss);
+    return () => {
+      window.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener(BROWSER_INPUT_EVENT, dismiss);
+    };
   }, [sideOpen, cancelPeekOpen, cancelPeekClose, sidePrefs.clickOutsideCloses]);
 
   // Click is the latch: it pins the panel open so it survives the pointer
