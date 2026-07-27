@@ -1,7 +1,7 @@
 // Bottom status tray: git branch, running agent, model, tokens, estimated
 // cost. Token/model data comes from Claude Code session transcripts (path
 // arrives via hook events); cost is an estimate from a static pricing map.
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { fmtTokens } from "../format";
 import * as ipc from "../ipc";
 import { estimateCost, sessionCost } from "../pricing";
@@ -46,13 +46,24 @@ interface StatusBarProps {
   activePtyId?: number | null;
 }
 
-export function StatusBar({ roots, agents, events, visible, projects, onSetModel, activePtyId }: StatusBarProps) {
+export const StatusBar = memo(function StatusBar({
+  roots,
+  agents,
+  events,
+  visible,
+  projects,
+  onSetModel,
+  activePtyId,
+}: StatusBarProps) {
   const [branch, setBranch] = useState<string | null>(null);
   const [dirty, setDirty] = useState(0);
   const [app, setApp] = useState<ipc.AppStats | null>(null);
   const [stats, setStats] = useState<ipc.ClaudeSessionStats | null>(null);
   const [modelMenu, setModelMenu] = useState(false);
-  const [confirmModel, setConfirmModel] = useState<{ id: string; label: string } | null>(null);
+  const [confirmModel, setConfirmModel] = useState<{
+    id: string;
+    label: string;
+  } | null>(null);
   // Resource breakdown popup. Machine-wide session stats are subscribed only
   // while it is open — the rest of the time this component costs nothing.
   const [breakdown, setBreakdown] = useState(false);
@@ -65,7 +76,8 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
   useEffect(() => {
     if (!statsOpen) return;
     const onDown = (e: MouseEvent) => {
-      if (!statsAnchorRef.current?.contains(e.target as Node)) setStatsOpen(false);
+      if (!statsAnchorRef.current?.contains(e.target as Node))
+        setStatsOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setStatsOpen(false);
@@ -81,7 +93,10 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
   // clips its one-line row — and clipped everything that pops above it, so
   // only a shadow sliver ever showed). Fixed positioning, measured from the
   // clicked chip, ignores ancestor clipping entirely.
-  const [menuPos, setMenuPos] = useState<{ right: number; bottom: number } | null>(null);
+  const [menuPos, setMenuPos] = useState<{
+    right: number;
+    bottom: number;
+  } | null>(null);
   const anchorMenu = (e: React.MouseEvent) => {
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
     setMenuPos({
@@ -90,7 +105,11 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
     });
   };
   const menuStyle = menuPos
-    ? ({ position: "fixed", right: menuPos.right, bottom: menuPos.bottom } as const)
+    ? ({
+        position: "fixed",
+        right: menuPos.right,
+        bottom: menuPos.bottom,
+      } as const)
     : undefined;
   const [openSessions, setOpenSessions] = useState<Record<number, boolean>>({});
   // All-CLI token/cost usage, for the grand-total row atop the popup. Fetched
@@ -101,9 +120,12 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
     const sub = ipc.onPtyStats(setAllSessions);
     let cancelled = false;
     const pull = () =>
-      void ipc.agentUsage().then((u) => {
-        if (!cancelled) setUsage(u);
-      }).catch(() => {});
+      void ipc
+        .agentUsage()
+        .then((u) => {
+          if (!cancelled) setUsage(u);
+        })
+        .catch(() => {});
     pull();
     const timer = setInterval(pull, 8_000);
     return () => {
@@ -130,28 +152,22 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
   // in the project spoke last (which only corrected itself when the newly
   // focused agent next emitted an event). Project-latest is the fallback for
   // non-terminal tabs and unstamped events.
-  const transcript = (() => {
+  const transcript = useMemo(() => {
     let projectLatest: string | null = null;
     for (let i = events.length - 1; i >= 0; i--) {
-      try {
-        const parsed = JSON.parse(events[i].raw);
-        if (
-          typeof parsed.transcript_path !== "string" ||
-          typeof parsed.cwd !== "string" ||
-          !roots.some((r) => parsed.cwd === r || parsed.cwd.startsWith(r + "/"))
-        ) {
-          continue;
-        }
-        if (activePtyId != null && parsed.canopy_pty === activePtyId) {
-          return parsed.transcript_path as string;
-        }
-        projectLatest ??= parsed.transcript_path as string;
-      } catch {
-        // non-JSON hook line
+      const d = events[i].data;
+      if (
+        !d?.transcriptPath ||
+        !d.cwd ||
+        !roots.some((r) => d.cwd === r || d.cwd.startsWith(r + "/"))
+      ) {
+        continue;
       }
+      if (activePtyId != null && d.pty === activePtyId) return d.transcriptPath;
+      projectLatest ??= d.transcriptPath;
     }
     return projectLatest;
-  })();
+  }, [events, roots, activePtyId]);
 
   // Both pollers gate on `visible`: each spawns a git subprocess / transcript
   // read per tick per project, and a backgrounded project doesn't need either.
@@ -160,11 +176,14 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
     if (!roots[0] || !visible) return;
     let cancelled = false;
     const refresh = () => {
-      void ipc.gitStatus(roots[0]).then((s) => {
-        if (cancelled) return;
-        setBranch(s.branch);
-        setDirty(s.entries.filter((e) => e.status !== "!!").length);
-      }).catch(() => {});
+      void ipc
+        .gitStatus(roots[0])
+        .then((s) => {
+          if (cancelled) return;
+          setBranch(s.branch);
+          setDirty(s.entries.filter((e) => e.status !== "!!").length);
+        })
+        .catch(() => {});
     };
     refresh();
     const timer = setInterval(refresh, 10_000);
@@ -181,10 +200,13 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
     if (!transcript || !visible) return;
     let cancelled = false;
     const refresh = () => {
-      void ipc.claudeSessionStats(transcript).then((s) => {
-        TRANSCRIPT_STATS.set(transcript, s);
-        if (!cancelled) setStats(s);
-      }).catch(() => {});
+      void ipc
+        .claudeSessionStats(transcript)
+        .then((s) => {
+          TRANSCRIPT_STATS.set(transcript, s);
+          if (!cancelled) setStats(s);
+        })
+        .catch(() => {});
     };
     refresh();
     const timer = setInterval(refresh, 8_000);
@@ -199,7 +221,10 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
   return (
     <div className="status-bar">
       {branch && (
-        <span className="status-item status-branch" title={`git branch (${dirty} changed files)`}>
+        <span
+          className="status-item status-branch"
+          title={`git branch (${dirty} changed files)`}
+        >
           ⎇ {branch}
           {dirty > 0 && <span className="status-dirty"> ±{dirty}</span>}
         </span>
@@ -244,18 +269,31 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
                     const mine = allSessions.filter(
                       (s) =>
                         !assigned.has(s.id) &&
-                        p.roots.some((r) => s.cwd === r || s.cwd.startsWith(r + "/")),
+                        p.roots.some(
+                          (r) => s.cwd === r || s.cwd.startsWith(r + "/"),
+                        ),
                     );
                     mine.forEach((s) => assigned.add(s.id));
                     return { name: p.name, sessions: mine };
                   })
                   .filter((g) => g.sessions.length > 0);
                 const other = allSessions.filter((s) => !assigned.has(s.id));
-                if (other.length > 0) groups.push({ name: "Other terminals", sessions: other });
-                const termCpu = allSessions.reduce((n, s) => n + s.total_cpu, 0);
-                const termMem = allSessions.reduce((n, s) => n + s.total_mem_bytes, 0);
+                if (other.length > 0)
+                  groups.push({ name: "Other terminals", sessions: other });
+                const termCpu = allSessions.reduce(
+                  (n, s) => n + s.total_cpu,
+                  0,
+                );
+                const termMem = allSessions.reduce(
+                  (n, s) => n + s.total_mem_bytes,
+                  0,
+                );
                 const usSent = usage.reduce(
-                  (n, u) => n + u.input_tokens + u.cache_read_tokens + u.cache_creation_tokens,
+                  (n, u) =>
+                    n +
+                    u.input_tokens +
+                    u.cache_read_tokens +
+                    u.cache_creation_tokens,
                   0,
                 );
                 const usRecv = usage.reduce((n, u) => n + u.output_tokens, 0);
@@ -283,13 +321,20 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
                         <span>Tokens · cost · all CLIs</span>
                         <span className="bd-nums">
                           ↑{fmtTokens(usSent)} ↓{fmtTokens(usRecv)}
-                          {usPriced && ` · ${usEst ? "~" : ""}$${usCost.toFixed(2)}`}
+                          {usPriced &&
+                            ` · ${usEst ? "~" : ""}$${usCost.toFixed(2)}`}
                         </span>
                       </div>
                     )}
                     {groups.map((g) => {
-                      const cpu = g.sessions.reduce((n, s) => n + s.total_cpu, 0);
-                      const mem = g.sessions.reduce((n, s) => n + s.total_mem_bytes, 0);
+                      const cpu = g.sessions.reduce(
+                        (n, s) => n + s.total_cpu,
+                        0,
+                      );
+                      const mem = g.sessions.reduce(
+                        (n, s) => n + s.total_mem_bytes,
+                        0,
+                      );
                       return (
                         <div key={g.name} className="bd-group">
                           <div className="bd-head">
@@ -306,18 +351,27 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
                                   className="bd-row bd-session"
                                   title={s.cwd}
                                   onClick={() =>
-                                    setOpenSessions((prev) => ({ ...prev, [s.id]: !sOpen }))
+                                    setOpenSessions((prev) => ({
+                                      ...prev,
+                                      [s.id]: !sOpen,
+                                    }))
                                   }
                                 >
                                   <span>
-                                    <span className="tree-chevron">{sOpen ? "▾" : "▸"}</span>
+                                    <span className="tree-chevron">
+                                      {sOpen ? "▾" : "▸"}
+                                    </span>
                                     {s.title || "shell"}
                                     {s.ports.length > 0 && (
-                                      <span className="bd-ports"> :{s.ports.join(" :")}</span>
+                                      <span className="bd-ports">
+                                        {" "}
+                                        :{s.ports.join(" :")}
+                                      </span>
                                     )}
                                   </span>
                                   <span className="bd-nums">
-                                    {s.total_cpu.toFixed(0)}% · {fmtMem(s.total_mem_bytes)}
+                                    {s.total_cpu.toFixed(0)}% ·{" "}
+                                    {fmtMem(s.total_mem_bytes)}
                                   </span>
                                 </div>
                                 {sOpen &&
@@ -325,10 +379,15 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
                                     .sort((a, b) => b.mem_bytes - a.mem_bytes)
                                     .slice(0, 8)
                                     .map((p) => (
-                                      <div key={p.pid} className="bd-row bd-proc" title={p.cmd}>
+                                      <div
+                                        key={p.pid}
+                                        className="bd-row bd-proc"
+                                        title={p.cmd}
+                                      >
                                         <span>{p.name}</span>
                                         <span className="bd-nums">
-                                          {p.cpu.toFixed(0)}% · {fmtMem(p.mem_bytes)}
+                                          {p.cpu.toFixed(0)}% ·{" "}
+                                          {fmtMem(p.mem_bytes)}
                                         </span>
                                       </div>
                                     ))}
@@ -338,7 +397,10 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
                         </div>
                       );
                     })}
-                    <div className="bd-head" title="Canopy's own engine, language servers and the agent hook bridge — everything not running inside a terminal">
+                    <div
+                      className="bd-head"
+                      title="Canopy's own engine, language servers and the agent hook bridge — everything not running inside a terminal"
+                    >
                       <span>Core services</span>
                       <span className="bd-nums">
                         {Math.max(0, app.cpu - termCpu).toFixed(0)}% ·{" "}
@@ -382,7 +444,11 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
             </span>
           )}
           {modelMenu && (
-            <div className="status-menu" style={menuStyle} onMouseLeave={() => setModelMenu(false)}>
+            <div
+              className="status-menu"
+              style={menuStyle}
+              onMouseLeave={() => setModelMenu(false)}
+            >
               {MODELS.map((m) => (
                 <div
                   key={m.id}
@@ -401,18 +467,21 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
         </span>
       )}
       {confirmModel && (
-        <div className="confirm-backdrop" onMouseDown={() => setConfirmModel(null)}>
+        <div
+          className="confirm-backdrop"
+          onMouseDown={() => setConfirmModel(null)}
+        >
           <div className="confirm" onMouseDown={(e) => e.stopPropagation()}>
             <p>
               Switch this session to <strong>{confirmModel.label}</strong>?
             </p>
             <p className="confirm-sub">
               This types <code>/model {confirmModel.id}</code> into the Claude
-              terminal and submits it. Claude applies it to the running session —
-              if the new model has a smaller context window, Claude will warn or
-              compact in the terminal, so check its response there. If you have
-              unsent text typed in that session's input box, it will be submitted
-              along with the command.
+              terminal and submits it. Claude applies it to the running session
+              — if the new model has a smaller context window, Claude will warn
+              or compact in the terminal, so check its response there. If you
+              have unsent text typed in that session's input box, it will be
+              submitted along with the command.
             </p>
             <div className="confirm-actions">
               <button className="btn" onClick={() => setConfirmModel(null)}>
@@ -441,7 +510,10 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
         </span>
       )}
       {cost != null && (
-        <span className="status-item status-cost" title="estimated session cost">
+        <span
+          className="status-item status-cost"
+          title="estimated session cost"
+        >
           ~${cost.toFixed(2)}
         </span>
       )}
@@ -464,4 +536,4 @@ export function StatusBar({ roots, agents, events, visible, projects, onSetModel
       </span>
     </div>
   );
-}
+});

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { lastStepFor } from "./notifications";
+import { lastStepFor, parseAgentEvent } from "./notifications";
 import {
   elapsedLabel,
   findRun,
@@ -30,12 +30,19 @@ describe("the running-task list", () => {
   });
 
   it("finds, patches and drops by pty id", () => {
-    const runs = withRun(withRun([], run()), run({ ptyId: 8, label: "Raise PR" }));
+    const runs = withRun(
+      withRun([], run()),
+      run({ ptyId: 8, label: "Raise PR" }),
+    );
     expect(findRun(runs, 8)?.label).toBe("Raise PR");
     expect(findRun(runs, 99)).toBeUndefined();
     expect(findRun(runs, null)).toBeUndefined();
-    expect(findRun(patchRun(runs, 7, { blocked: true }), 7)?.blocked).toBe(true);
-    expect(findRun(patchRun(runs, 7, { blocked: true }), 8)?.blocked).toBeUndefined();
+    expect(findRun(patchRun(runs, 7, { blocked: true }), 7)?.blocked).toBe(
+      true,
+    );
+    expect(
+      findRun(patchRun(runs, 7, { blocked: true }), 8)?.blocked,
+    ).toBeUndefined();
     expect(withoutRun(runs, 7).map((r) => r.ptyId)).toEqual([8]);
   });
 });
@@ -54,13 +61,25 @@ describe("elapsedLabel", () => {
 // Lives in notifications.ts with the rest of the hook-stream readers, but it
 // exists for these rows: it is the only live progress a task with no tab has.
 describe("lastStepFor", () => {
-  const ev = (o: Record<string, unknown>, ts: number) => ({ raw: JSON.stringify(o), ts });
+  const ev = (o: Record<string, unknown>, ts: number) => ({
+    ts,
+    data: parseAgentEvent(JSON.stringify(o)),
+  });
 
   it("takes the newest finished tool from that terminal", () => {
     const events = [
-      ev({ canopy_pty: 7, hook_event_name: "PostToolUse", tool_name: "Read" }, 1),
-      ev({ canopy_pty: 8, hook_event_name: "PostToolUse", tool_name: "Edit" }, 2),
-      ev({ canopy_pty: 7, hook_event_name: "PostToolUse", tool_name: "Bash" }, 3),
+      ev(
+        { canopy_pty: 7, hook_event_name: "PostToolUse", tool_name: "Read" },
+        1,
+      ),
+      ev(
+        { canopy_pty: 8, hook_event_name: "PostToolUse", tool_name: "Edit" },
+        2,
+      ),
+      ev(
+        { canopy_pty: 7, hook_event_name: "PostToolUse", tool_name: "Bash" },
+        3,
+      ),
       ev({ canopy_pty: 7, hook_event_name: "Stop" }, 4),
     ];
     expect(lastStepFor(events, 7)).toBe("Bash");
@@ -70,8 +89,11 @@ describe("lastStepFor", () => {
 
   it("ignores unnamed tools and unparseable lines", () => {
     const events = [
-      ev({ canopy_pty: 7, hook_event_name: "PostToolUse", tool_name: "Bash" }, 1),
-      { raw: "{not json", ts: 2 },
+      ev(
+        { canopy_pty: 7, hook_event_name: "PostToolUse", tool_name: "Bash" },
+        1,
+      ),
+      { ts: 2, data: parseAgentEvent("{not json") },
       ev({ canopy_pty: 7, hook_event_name: "PostToolUse", tool_name: "" }, 3),
     ];
     expect(lastStepFor(events, 7)).toBe("Bash");
@@ -83,7 +105,9 @@ describe("runNote", () => {
 
   it("puts needing the user above everything else", () => {
     // Both spellings of blocked: the tool said so, or the hook state did.
-    expect(runNote(run({ blocked: true }), "working", "Bash", now)).toBe("Needs you · 2m");
+    expect(runNote(run({ blocked: true }), "working", "Bash", now)).toBe(
+      "Needs you · 2m",
+    );
     expect(runNote(run(), "waiting", "Bash", now)).toBe("Needs you · 2m");
   });
 

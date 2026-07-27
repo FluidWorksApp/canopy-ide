@@ -55,7 +55,8 @@ export interface Hotkey {
 }
 
 const IS_MAC =
-  typeof navigator !== "undefined" && navigator.platform.toUpperCase().includes("MAC");
+  typeof navigator !== "undefined" &&
+  navigator.platform.toUpperCase().includes("MAC");
 
 /** Default dictation hotkey: ⌘D on Mac, Alt+D elsewhere (plain Ctrl+D is shell
  *  EOF, so it's deliberately avoided). */
@@ -274,13 +275,24 @@ const DEFAULTS: Settings = {
 
 const KEY = "canopy.settings";
 
+/** Parsed-settings cache, keyed on the raw stored string: getSettings is
+ *  called from render paths, and re-parsing per call added up. Keying on the
+ *  raw string (rather than invalidating on our own writes) stays correct when
+ *  something else touches the key — tests do. Also makes the returned object
+ *  identity-stable between writes. */
+let settingsCache: { raw: string | null; value: Settings } | null = null;
+
 export function getSettings(): Settings {
+  const raw = localStorage.getItem(KEY);
+  if (settingsCache && settingsCache.raw === raw) return settingsCache.value;
+  let value: Settings;
   try {
-    const stored = JSON.parse(localStorage.getItem(KEY) ?? "{}") as Partial<Settings>;
-    return { ...DEFAULTS, ...stored };
+    value = { ...DEFAULTS, ...(JSON.parse(raw ?? "{}") as Partial<Settings>) };
   } catch {
-    return { ...DEFAULTS };
+    value = { ...DEFAULTS };
   }
+  settingsCache = { raw, value };
+  return value;
 }
 
 /** Fired after any settings write. Most settings are read where they're used
@@ -291,7 +303,8 @@ export const SETTINGS_CHANGE_EVENT = "canopy:settings-changed";
 export function updateSettings(patch: Partial<Settings>): Settings {
   const next = { ...getSettings(), ...patch };
   localStorage.setItem(KEY, JSON.stringify(next));
-  if (typeof window !== "undefined") window.dispatchEvent(new Event(SETTINGS_CHANGE_EVENT));
+  if (typeof window !== "undefined")
+    window.dispatchEvent(new Event(SETTINGS_CHANGE_EVENT));
   return next;
 }
 
@@ -302,7 +315,8 @@ function luminance(hex: string): number {
   const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex.trim());
   if (!m) return 0.5;
   const [r, g, b] = m.slice(1, 4).map((h) => parseInt(h, 16) / 255);
-  const lin = (c: number) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  const lin = (c: number) =>
+    c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
   return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
 }
 
@@ -327,7 +341,10 @@ export function applyTheme(theme: Theme, customAccent?: string): void {
     // thing to want, and forcing a skin change to get one was the wrong
     // model.
     root.setProperty("--accent", accent);
-    root.setProperty("--on-accent", luminance(accent) > 0.5 ? "#12131c" : "#ffffff");
+    root.setProperty(
+      "--on-accent",
+      luminance(accent) > 0.5 ? "#12131c" : "#ffffff",
+    );
   } else {
     // No override — fall back to whatever the skin's stylesheet block says.
     root.removeProperty("--accent");
