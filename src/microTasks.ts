@@ -5,7 +5,7 @@
 // launcher appends the shared completion protocol. Kin to the context builders
 // in prs.ts / trackers.ts, but registered so any surface can host a CTA.
 import type * as ipc from "./ipc";
-import { cleanupLine } from "./prs";
+import { cleanupLine, detachedPushLine } from "./prs";
 
 /** A task that edits files can't run in the shared checkout — other agents live
  *  there, and switching its branch under them is how you lose an afternoon. A
@@ -224,7 +224,7 @@ export const addressPrCommentsTask: MicroTaskDef<AddressPrCommentsPayload> = {
     const query = oneLine(userQuery);
     return oneLine(
       `Address the review comments on pull request #${n}: "${p.pr.title}" (${p.pr.url}). ` +
-        `Its branch ${p.pr.branch} is checked out in this worktree. ` +
+        `This worktree is checked out at its head. ` +
         `First collect every comment that is still live: \`gh pr view ${n} --comments\` for the ` +
         `conversation, and \`gh api repos/{owner}/{repo}/pulls/${n}/comments\` for the inline ` +
         `review threads — skip outdated and already-resolved threads and any earlier replies of ` +
@@ -256,6 +256,7 @@ export const addressPrCommentsTask: MicroTaskDef<AddressPrCommentsPayload> = {
         `Pass the PR's URL to canopy_job_done and make the summary "<x> addressed, <y> pushed back ` +
         `on".` +
         (query ? ` The user adds: "${query}".` : "") +
+        detachedPushLine(p.pr.branch) +
         (env?.cleanup ? cleanupLine(env.cleanup.repo, env.cleanup.worktree) : ""),
     );
   },
@@ -438,8 +439,8 @@ export const fixCiTask: MicroTaskDef<ReviewPrPayload> = {
     const n = p.pr.number;
     const query = oneLine(userQuery);
     return oneLine(
-      `Make the failing checks on pull request #${n}: "${p.pr.title}" (${p.pr.url}) pass. Its branch ` +
-        `${p.pr.branch} is checked out in this worktree. ` +
+      `Make the failing checks on pull request #${n}: "${p.pr.title}" (${p.pr.url}) pass. Its ` +
+        `head is checked out in this worktree. ` +
         `Start from the evidence, not a guess: \`gh pr checks ${n}\` for what is red, then ` +
         `\`gh run view <run-id> --log-failed\` for each failing run's actual output. Reproduce the ` +
         `failure locally with the project's own command before changing anything — a check that fails ` +
@@ -452,6 +453,7 @@ export const fixCiTask: MicroTaskDef<ReviewPrPayload> = {
         `amend someone else's commit, and do not merge. Pass the PR's URL to canopy_job_done with a ` +
         `summary of what was broken and what fixed it.` +
         (query ? ` The user adds: "${query}".` : "") +
+        detachedPushLine(p.pr.branch) +
         (env?.cleanup ? cleanupLine(env.cleanup.repo, env.cleanup.worktree) : ""),
     );
   },
@@ -482,7 +484,7 @@ export const applySuggestionTask: MicroTaskDef<ApplySuggestionPayload> = {
     const query = oneLine(userQuery);
     return oneLine(
       `A reviewer suggested a change on pull request #${n} (${p.pr.url}) at ${p.path}:${p.line}. Its ` +
-        `branch ${p.pr.branch} is checked out in this worktree. The suggested replacement for that ` +
+        `head is checked out in this worktree. The suggested replacement for that ` +
         `line (or line range) is, between the markers: <<<SUGGESTION ${oneLine(p.suggestion)} ` +
         `SUGGESTION>>>. Open ${p.path} and read what is there now — the suggestion was written against ` +
         `the diff and the file may have moved on. Apply it if it still makes sense, adjusting ` +
@@ -494,6 +496,7 @@ export const applySuggestionTask: MicroTaskDef<ApplySuggestionPayload> = {
         `\`gh api repos/{owner}/{repo}/pulls/${n}/comments\` replies, and do not resolve the thread or ` +
         `merge — that stays with the human. Pass the PR's URL to canopy_job_done.` +
         (query ? ` The user adds: "${query}".` : "") +
+        detachedPushLine(p.pr.branch) +
         (env?.cleanup ? cleanupLine(env.cleanup.repo, env.cleanup.worktree) : ""),
     );
   },
@@ -516,7 +519,7 @@ export const runItReviewTask: MicroTaskDef<ReviewPrPayload> = {
     const query = oneLine(userQuery);
     return oneLine(
       `Exercise pull request #${n}: "${p.pr.title}" (${p.pr.url}) as a user would, and report what you ` +
-        `saw. Its branch ${p.pr.branch} is checked out in this worktree — this is the review no hosted ` +
+        `saw. Its head is checked out in this worktree — this is the review no hosted ` +
         `tool can do, so spend the effort on running it rather than re-reading the diff. ` +
         `Read \`gh pr diff ${n}\` only far enough to know which screens or endpoints the change touches. ` +
         `Install dependencies if they're missing, then start the project's dev server with ` +

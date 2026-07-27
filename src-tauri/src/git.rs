@@ -1990,8 +1990,10 @@ pub async fn git_worktree_add(
 /// Fetch a PR's head and check it out in a fresh worktree, without touching the
 /// main checkout's current branch. `pull/<n>/head` is exposed for every PR —
 /// fork or not — so this reaches branches a plain `fetch` (origin's own branches
-/// only) can't. `-B` (re)points the PR's branch at the fetched head and checks
-/// it out in the worktree; the main checkout is never switched.
+/// only) can't. The worktree is detached at that head rather than on the PR's
+/// branch: git allows a branch in one worktree at a time, and the branch is
+/// routinely checked out in the main repo already. `branch` is still taken —
+/// it names what the agent pushes to (`HEAD:<branch>`) and is validated here.
 #[tauri::command]
 pub async fn git_worktree_add_pr(
     state: State<'_, WorkspaceManager>,
@@ -2007,15 +2009,26 @@ pub async fn git_worktree_add_pr(
     let mut fetch = git(&top);
     fetch.args(["fetch", "origin", &format!("pull/{number}/head")]);
     run_net(&mut fetch)?;
+    // Detached, not `-B <branch>`, for two reasons the old form got wrong.
+    //
+    // Git lets a branch be checked out in exactly one worktree, so `-B` failed
+    // outright — "already used by worktree" — whenever the PR's branch was
+    // checked out anywhere else, including the main checkout, which is the
+    // ordinary case for a PR you are working on. And `-B` force-moves the local
+    // branch to the fetched head, which silently discards local commits on it.
+    //
+    // At the same commit either way; the agent pushes with an explicit refspec
+    // (see detachedPushLine) instead of a bare `git push`.
     let mut add = git(&top);
     add.arg("worktree")
         .arg("add")
-        .arg("-B")
-        .arg(branch.trim())
+        .arg("--detach")
         .arg(&path)
         .arg("FETCH_HEAD");
     run(&mut add)?;
-    Ok(format!("Worktree created at {path}"))
+    Ok(format!(
+        "Worktree created at {path} (detached at #{number}'s head)"
+    ))
 }
 
 /// Remove a worktree. Destructive when it holds uncommitted work, so `force` is
