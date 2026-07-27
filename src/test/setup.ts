@@ -30,6 +30,13 @@ if (typeof globalThis.localStorage === "undefined") {
   } as Storage;
 }
 
+// jsdom has no layout, so it ships no scrollIntoView. Any list that keeps its
+// selection in view (the palettes, the tab strip) would throw on the first
+// arrow key — a no-op stands in, since there is nothing to scroll here.
+if (!Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = () => {};
+}
+
 beforeEach(() => {
   mockIPC((cmd) => {
     throw new Error(

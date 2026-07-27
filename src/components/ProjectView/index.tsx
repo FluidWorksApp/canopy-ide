@@ -112,6 +112,12 @@ import { modelCommandLine, modelSwitchFor } from "../../agentModels";
 import { AgentsPanel, digestBySurface } from "../AgentsPanel";
 import { StatusBar } from "../StatusBar";
 import { Palette, type PaletteMode } from "../Palette";
+import { LaunchPalette } from "../LaunchPalette";
+import {
+  digitFromCode,
+  hintModifierOnly,
+  useHeldModifier,
+} from "../../useHeldModifier";
 import { GitPanel } from "../GitPanel";
 import { TicketsPanel, type AgentTarget } from "../TicketsPanel";
 import { PrsPanel } from "../PrsPanel";
@@ -384,6 +390,12 @@ export const ProjectView = memo(function ProjectView({
   } = useCliLauncher();
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
   const [palette, setPalette] = useState<PaletteMode | null>(null);
+  /** The ⌘N launcher — the ＋ menu as a type-and-Enter list. */
+  const [launcherOpen, setLauncherOpen] = useState(false);
+  /** ⌘/Ctrl held: number the tabs, so ⌘3 stops being something to memorise.
+   *  Only for the project on screen — a hidden project numbering its tabs
+   *  would be nine badges nobody can see and a keypress that lands elsewhere. */
+  const tabHints = useHeldModifier("tabs", visible);
   // When set, the whole project's file surface (tree, quick-open, search, new
   // terminals) points at this worktree instead of the main checkout — so an
   // agent's worktree becomes the environment you actually work in.
@@ -398,6 +410,9 @@ export const ProjectView = memo(function ProjectView({
   const termHandles = useRef(new Map<string, TermHandle | null>());
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
+  /** The tabs in the order the pane bar draws them — what ⌘1..9 counts, and
+   *  filled in below once the groups are known. */
+  const barTabsRef = useRef<SubTab[]>([]);
   const closeTabRef = useRef<(id: string) => void>(() => {});
   /** Set from stopMicroRun below, for the teardown paths that run before it is
    *  in scope (hibernation, unmount) — a detached task must never outlive the
@@ -2030,6 +2045,14 @@ export const ProjectView = memo(function ProjectView({
     };
     const quickOpen = () => setPalette("files");
     const findInFiles = () => setPalette("search");
+    // ⌘N: the ＋ menu without the mouse. Re-probe on open for the same reason
+    // the ＋ menu does — a stale "install" hint sends you to an installer for a
+    // CLI you already have.
+    const newLauncher = () => {
+      refreshInstalled();
+      refreshUpdates();
+      setLauncherOpen(true);
+    };
     const cycleTabs = (dir: 1 | -1) => {
       const list = tabsRef.current;
       if (list.length < 2) return;
@@ -2047,6 +2070,20 @@ export const ProjectView = memo(function ProjectView({
     const recentKeydown = () => Date.now() - lastKeydownNav.t < 150;
     const onKeydown = (e: KeyboardEvent) => {
       if (!visibleRef.current) return;
+      // ⌘1..9 (Ctrl off macOS) — the digits the tabs show while the modifier is
+      // held. Handled here rather than as a menu accelerator: nine menu rows for
+      // this would be absurd, and the key must land even when focus is inside
+      // xterm or Monaco, which is what the capture-phase listener is for.
+      const digit = digitFromCode(e.code);
+      if (digit !== null && hintModifierOnly(e, "tabs")) {
+        const tab = barTabsRef.current[digit - 1];
+        // Only swallow the key when it goes somewhere. With fewer tabs than
+        // that, ⌘7 is still the terminal's to handle.
+        if (!tab) return;
+        e.preventDefault();
+        setActiveTabId(tab.id);
+        return;
+      }
       // Ctrl+Cmd+Arrow (matches the "Next/Previous Tab" accelerators).
       if (!(e.ctrlKey && (e.metaKey || e.altKey))) return;
       if (e.code === "ArrowRight" || e.code === "ArrowLeft") {
@@ -2083,6 +2120,7 @@ export const ProjectView = memo(function ProjectView({
     window.addEventListener("menu:prev-tab", prev);
     window.addEventListener("menu:quick-open", quickOpen);
     window.addEventListener("menu:find-in-files", findInFiles);
+    window.addEventListener("menu:new-launcher", newLauncher);
     return () => {
       window.removeEventListener("canopy:run-command", runCommand);
       window.removeEventListener("menu:close-tab", closeTabHandler);
@@ -2093,8 +2131,9 @@ export const ProjectView = memo(function ProjectView({
       window.removeEventListener("menu:prev-tab", prev);
       window.removeEventListener("menu:quick-open", quickOpen);
       window.removeEventListener("menu:find-in-files", findInFiles);
+      window.removeEventListener("menu:new-launcher", newLauncher);
     };
-  }, [visible, project.components, addTerminal]);
+  }, [visible, project.components, addTerminal, refreshInstalled, refreshUpdates]);
 
   // An agent asked the IDE to do something through the MCP bridge — start a
   // run command, or open a preview. App routed it here by matching the action's
@@ -3752,6 +3791,7 @@ export const ProjectView = memo(function ProjectView({
     ],
     [stripTabs, isAgentTab],
   );
+  barTabsRef.current = useMemo(() => tabGroups.flat(), [tabGroups]);
   // Drag to reorder, one strip per group: agents stay left of docs however you
   // shuffle them, and a tab dropped outside its own group simply snaps back.
   // The order lives in `tabs` itself, so the panes (which are all mounted)
@@ -4756,6 +4796,7 @@ export const ProjectView = memo(function ProjectView({
         onCommitRename={commitRename}
         onCancelRename={cancelRename}
         onRenameDraftChange={setRenameDraft}
+        showHints={tabHints}
         onNewShell={onNewShell}
         onClearScrollback={onClearScrollback}
         onHardReset={onHardReset}
@@ -5894,6 +5935,17 @@ export const ProjectView = memo(function ProjectView({
         agentLabel={modelTarget?.label}
         activePtyId={activeTab?.type === "terminal" ? activeTab.ptyId : null}
       />
+      {launcherOpen && visible && (
+        <LaunchPalette
+          installed={installed}
+          cliUpdates={cliUpdates}
+          targetLabel={components[0]?.label}
+          onShell={onNewShell}
+          onPreview={() => openPreview()}
+          onLaunchCli={(cli) => launchCli(cli)}
+          onClose={() => setLauncherOpen(false)}
+        />
+      )}
       {palette && visible && (
         <Palette
           mode={palette}

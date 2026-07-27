@@ -2722,6 +2722,43 @@ body.dragging-tab * {
   color: var(--warn);
 }
 
+/* The digit a tab (or project pill) answers to while ⌘/⌥ is held. It sits in
+   the right-hand slot, next to the close ✕, and fades in so a held modifier
+   reads as a layer settling over the strip rather than a jolt. */
+.tab-hint {
+  display: grid;
+  place-items: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--bg-deep);
+  background: var(--accent);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  animation: tab-hint-in var(--dur-fast) var(--ease-out);
+}
+
+@keyframes tab-hint-in {
+  from {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab-hint {
+    animation: none;
+  }
+}
+
 /* Running commands (servers/jobs) get their own right-hand rail — they are
    long-lived services, not shells, so they never sit in the terminal strip. */
 .run-rail {
@@ -5745,6 +5782,26 @@ body.dragging-tab * {
   border-top: 1px solid var(--border);
   color: var(--text-dim);
   font-size: 10px;
+}
+
+/* ⌘N launcher rows: same palette shell, but each row leads with the launcher's
+   mark, so the list reads like the ＋ menu it stands in for. */
+.launch-row {
+  align-items: center;
+}
+
+.launch-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  flex: 0 0 18px;
+  color: var(--text-dim);
+}
+
+.launch-row .cli-install,
+.launch-row .cli-update {
+  margin-left: auto;
 }
 
 /* ---------- run states: live / finished / failed ---------- */

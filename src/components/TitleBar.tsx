@@ -3,14 +3,12 @@ import { CloseIcon, FrostIcon } from "./icons";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
 import type { Project } from "../projects";
 import type { TabDrag } from "../tabDrag";
-
 // macOS gets the frameless "Overlay" titlebar (set in tauri.conf.json), so our
 // TitleBar becomes the real window titlebar: it must reserve space for the
 // native traffic lights on the left and act as the window drag handle. On
-// Windows/Linux the native bar stays, `titleBarStyle` is ignored, and this
+// Windows/Linux the native bar stays, `titleBarStyle` is ignored, and the
 // class is simply absent — nothing changes there.
-const IS_MAC =
-  typeof navigator !== "undefined" && navigator.platform.toUpperCase().includes("MAC");
+import { IS_MAC } from "../platform";
 
 /** True while the window is in macOS fullscreen, where the traffic lights are
  *  hidden and the space reserved for them would read as a dead gap. There's no
@@ -61,6 +59,9 @@ interface TitleBarProps {
   /** Projects that are asleep — their pill wears the frost and the menu offers
    *  to wake them rather than to put them under again. */
   hibernated: Record<string, unknown>;
+  /** True while ⌥/Alt is held: each of the first nine pills shows the digit
+   *  that jumps to it (see useHeldModifier). */
+  showHints: boolean;
   onSelectProject: (id: string) => void;
   onCloseProject: (id: string) => void;
   onHibernateProject: (id: string) => void;
@@ -82,6 +83,7 @@ function TitleBarImpl({
   tabDragId,
   tabDragItemProps,
   hibernated,
+  showHints,
   onSelectProject,
   onCloseProject,
   onHibernateProject,
@@ -107,8 +109,10 @@ function TitleBarImpl({
       {/* The strip around the pills is draggable too — the pills/badges/close
           are their own click targets, so they still work. */}
       <div className="project-tabs" data-tauri-drag-region>
-        {openProjects.map((p) => {
+        {openProjects.map((p, i) => {
           const asleep = p.id in hibernated;
+          // Only the first nine are reachable by digit, so only they wear one.
+          const hint = showHints && i < 9 ? i + 1 : null;
           return (
           <div
             key={p.id}
@@ -159,6 +163,7 @@ function TitleBarImpl({
                 {pendingCount(p)}
               </span>
             )}
+            {hint !== null && <span className="tab-hint">{hint}</span>}
             <span
               className="tab-close"
               title="Close project"
