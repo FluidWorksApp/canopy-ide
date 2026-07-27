@@ -3399,9 +3399,16 @@ export const ProjectView = memo(function ProjectView({
           .filter((s) => s.procs.some((p) => /claude/i.test(p.name)))
           .map((s) => s.id),
       );
-      const target = termTabs.find(
-        (t) => t.ptyId != null && claudePtys.has(t.ptyId),
-      );
+      // The tray shows the ACTIVE tab's session, so the switch has to land in
+      // that same session — picking the project's first Claude terminal sent
+      // every `/model` to whichever agent happened to be leftmost, no matter
+      // which one you were looking at. Only fall back to the first Claude
+      // terminal when the active tab isn't one (a file or diff tab, say).
+      const isClaudeTerm = (t: TermSubTab) =>
+        t.ptyId != null && claudePtys.has(t.ptyId);
+      const active = termTabs.find((t) => t.id === activeTabIdRef.current);
+      const target =
+        active && isClaudeTerm(active) ? active : termTabs.find(isClaudeTerm);
       if (target?.ptyId == null) {
         onNotice("No running Claude session in this project.");
         return;
