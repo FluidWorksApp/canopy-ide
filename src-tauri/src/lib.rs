@@ -23,6 +23,7 @@ mod punch;
 mod relay;
 mod selftest;
 mod snapshot;
+mod spot;
 mod tunnel;
 mod winproc;
 mod wsbridge;
@@ -222,6 +223,13 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 true,
                 Some("CmdOrCtrl+Shift+F"),
             )?,
+            &MenuItem::with_id(
+                app,
+                "spot-search",
+                "SpotSearch Everything…",
+                true,
+                Some("CmdOrCtrl+K"),
+            )?,
         ],
     )?;
     let window = Submenu::with_items(
@@ -312,6 +320,7 @@ pub fn run() {
         .manage(prwatch::PrWatcher::default())
         .manage(dictation::DictationManager::default())
         .manage(selftest::SelftestState::default())
+        .manage(spot::SpotIndex::default())
         .manage(cli::pending_from_env())
         .setup(|app| {
             // ONNX Runtime is loaded dynamically on every platform (Cargo.toml
@@ -389,6 +398,9 @@ pub fn run() {
             pty::pty_kill_all,
             pty::pty_set_title,
             pty::instance_id,
+            spot::spot_ingest,
+            spot::spot_search,
+            spot::spot_save_context_image,
             fsx::workspace_add,
             fsx::workspace_remove,
             fsx::workspace_list,

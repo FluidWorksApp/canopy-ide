@@ -99,6 +99,11 @@ hkdf = "0.12"
 chacha20poly1305 = "0.10"
 # Compact text encoding for binary file chunks tunnelled as JSON relay frames.
 base64 = "0.22"
+# SpotSearch's persistent index (spot.rs): FTS5 over agent transcripts and
+# terminal scrollback. Bundled so the shipped app never depends on the OS
+# sqlite (macOS's system copy predates the FTS5 fixes we rely on) — it compiles
+# in statically, same notarisation story as any other Rust code.
+rusqlite = { version = "0.32", features = ["bundled"] }
 # OS CSPRNG for per-transfer key-derivation salts (nonce separation across
 # file-transfer retries). Already present transitively via spake2/rand_core.
 getrandom = "0.2"

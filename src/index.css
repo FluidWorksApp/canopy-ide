@@ -5776,6 +5776,31 @@ body.dragging-tab * {
   font-size: 10px;
 }
 
+/* SpotSearch: same palette shell, taller list (it holds many sections) with
+   quiet group headers between them. */
+.spot-palette .palette-list {
+  max-height: 56vh;
+}
+
+.spot-group {
+  padding: 8px 14px 3px;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  user-select: none;
+}
+
+.spot-icon {
+  display: inline-flex;
+  justify-content: center;
+  width: 16px;
+  flex: 0 0 16px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
 /* ⌘N launcher rows: same palette shell, but each row leads with the launcher's
    mark, so the list reads like the ＋ menu it stands in for. */
 .launch-row {

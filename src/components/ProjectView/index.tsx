@@ -67,6 +67,7 @@ import {
 import { renderPtyText } from "../../ptyText";
 import {
   addressPrCommentsTask,
+  adhocLabel,
   adhocTaskDef,
   customTaskDef,
   microTaskProtocol,
@@ -115,6 +116,9 @@ import { AgentsPanel, digestBySurface } from "../AgentsPanel";
 import { StatusBar } from "../StatusBar";
 import { Palette, type PaletteMode } from "../Palette";
 import { LaunchPalette } from "../LaunchPalette";
+import { SpotSearch } from "../SpotSearch";
+import type { SpotAction } from "../../spotSources";
+import { capturePageContext, composeTaskBrief } from "../../spotContext";
 import {
   digitFromCode,
   hintModifierOnly,
@@ -394,6 +398,8 @@ export const ProjectView = memo(function ProjectView({
   const [palette, setPalette] = useState<PaletteMode | null>(null);
   /** The ⌘N launcher — the ＋ menu as a type-and-Enter list. */
   const [launcherOpen, setLauncherOpen] = useState(false);
+  /** SpotSearch (⌘K) — the omnibox over everything this project knows. */
+  const [spotOpen, setSpotOpen] = useState(false);
   /** ⌘/Ctrl held: number the tabs, so ⌘3 stops being something to memorise.
    *  Only for the project on screen — a hidden project numbering its tabs
    *  would be nine badges nobody can see and a keypress that lands elsewhere. */
@@ -410,6 +416,9 @@ export const ProjectView = memo(function ProjectView({
   const baselines = useRef(new Map<string, string>());
   const recentSaves = useRef(new Map<string, number>());
   const termHandles = useRef(new Map<string, TermHandle | null>());
+  /** The view's own root, for SpotSearch's page screenshot — its rect is what
+   *  "the page behind the palette" means. */
+  const rootRef = useRef<HTMLDivElement>(null);
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   /** The tabs in the order the pane bar draws them — what ⌘1..9 counts, and
@@ -2055,6 +2064,7 @@ export const ProjectView = memo(function ProjectView({
     };
     const quickOpen = () => setPalette("files");
     const findInFiles = () => setPalette("search");
+    const spotSearch = () => setSpotOpen(true);
     // ⌘N: the ＋ menu without the mouse. Re-probe on open for the same reason
     // the ＋ menu does — a stale "install" hint sends you to an installer for a
     // CLI you already have.
@@ -2094,6 +2104,19 @@ export const ProjectView = memo(function ProjectView({
         setActiveTabId(tab.id);
         return;
       }
+      // ⌘K — the menu accelerator never fires while focus is in xterm/Monaco
+      // (same macOS routing gap as the tab-cycle chord above), so the palette
+      // must also open from here. Opening an open palette is a no-op.
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        !e.shiftKey &&
+        !e.altKey &&
+        e.code === "KeyK"
+      ) {
+        e.preventDefault();
+        setSpotOpen(true);
+        return;
+      }
       // Ctrl+Cmd+Arrow (matches the "Next/Previous Tab" accelerators).
       if (!(e.ctrlKey && (e.metaKey || e.altKey))) return;
       if (e.code === "ArrowRight" || e.code === "ArrowLeft") {
@@ -2130,6 +2153,7 @@ export const ProjectView = memo(function ProjectView({
     window.addEventListener("menu:prev-tab", prev);
     window.addEventListener("menu:quick-open", quickOpen);
     window.addEventListener("menu:find-in-files", findInFiles);
+    window.addEventListener("menu:spot-search", spotSearch);
     window.addEventListener("menu:new-launcher", newLauncher);
     return () => {
       window.removeEventListener("canopy:run-command", runCommand);
@@ -2141,6 +2165,7 @@ export const ProjectView = memo(function ProjectView({
       window.removeEventListener("menu:prev-tab", prev);
       window.removeEventListener("menu:quick-open", quickOpen);
       window.removeEventListener("menu:find-in-files", findInFiles);
+      window.removeEventListener("menu:spot-search", spotSearch);
       window.removeEventListener("menu:new-launcher", newLauncher);
     };
   }, [visible, project.components, addTerminal, refreshInstalled, refreshUpdates]);
@@ -4461,6 +4486,103 @@ export const ProjectView = memo(function ProjectView({
     [tabMenu.open, stripTabs, activeTabId],
   );
 
+  /** Everything Enter can do in SpotSearch, routed to the same handlers the
+   *  panels and menus already use — the palette names the action, this owns
+   *  the doing. */
+  const onSpotAction = useCallback(
+    (action: SpotAction) => {
+      switch (action.type) {
+        case "run-task": {
+          const dir = componentsRef.current[0]?.path;
+          if (!dir) return;
+          const active = tabsRef.current.find(
+            (t) => t.id === activeTabIdRef.current,
+          );
+          const termText =
+            active?.type === "terminal"
+              ? (termHandles.current.get(active.id)?.captureText(2000) ??
+                undefined)
+              : undefined;
+          // Capture after the palette has left the screen — a snapshot taken
+          // now would be a picture of the palette, not of the page under it.
+          window.setTimeout(() => {
+            void capturePageContext({
+              activeTab: active,
+              dir,
+              termText,
+              rect: rootRef.current?.getBoundingClientRect() ?? null,
+            }).then((context) =>
+              runAdhocTask(
+                composeTaskBrief(action.brief, context),
+                dir,
+                adhocLabel(action.brief),
+              ),
+            );
+          }, 120);
+          return;
+        }
+        case "new-shell":
+          onNewShell();
+          return;
+        case "new-preview":
+          openPreview();
+          return;
+        case "launch-cli": {
+          const cli = AGENT_CLIS.find((c) => c.id === action.cliId);
+          if (cli) launchCli(cli);
+          return;
+        }
+        case "open-file":
+          void openFile(action.path);
+          return;
+        case "focus-tab":
+          setActiveTabId(action.tabId);
+          return;
+        case "open-session": {
+          const d = action.digest;
+          void openAgent({
+            agent: d.agent ?? "agent",
+            cwd: d.cwd ?? d.launch_cwd ?? componentsRef.current[0]?.path ?? "",
+            // The pty id only means anything inside the launch that assigned
+            // it — a digest from another instance binds by session id instead.
+            ptyId:
+              d.surface != null && d.instance === thisInstanceRef.current
+                ? Number(d.surface)
+                : undefined,
+            sessionId: d.session_id,
+            digest: d,
+          });
+          return;
+        }
+        case "open-ticket":
+          openTicket(action.ticket, action.source);
+          return;
+        case "open-pr":
+          openPr(action.repo, action.pr);
+          return;
+        case "open-server":
+          if (action.tabId) setActiveTabId(action.tabId);
+          else selectSideTab("servers");
+          return;
+        case "open-task-run":
+          openTaskHistory(action.runId);
+          return;
+      }
+    },
+    [
+      onNewShell,
+      openPreview,
+      launchCli,
+      openFile,
+      openAgent,
+      openTicket,
+      openPr,
+      selectSideTab,
+      openTaskHistory,
+      runAdhocTask,
+    ],
+  );
+
   // ---------- document tabs ----------
   // Doc tabs used to render only while active, so switching away and back
   // rebuilt the view from scratch: scroll jumped to the top, loaded data was
@@ -5860,6 +5982,7 @@ export const ProjectView = memo(function ProjectView({
 
   return (
     <div
+      ref={rootRef}
       className="project-view"
       style={{ display: visible ? "flex" : "none" }}
     >
@@ -5975,6 +6098,27 @@ export const ProjectView = memo(function ProjectView({
           components={components.map((c) => ({ label: c.label, path: c.path }))}
           onOpen={(p) => void openFile(p)}
           onClose={() => setPalette(null)}
+        />
+      )}
+      {spotOpen && visible && (
+        <SpotSearch
+          ctx={{
+            components: components.map((c) => ({
+              label: c.label,
+              path: c.path,
+            })),
+            tabs,
+            serverGroups,
+            digests: wsDigests,
+            projectId: project.id,
+            clis: AGENT_CLIS.filter((c) => installed[c.bin]).map((c) => ({
+              id: c.id,
+              name: c.name,
+            })),
+            installed,
+          }}
+          onAction={onSpotAction}
+          onClose={() => setSpotOpen(false)}
         />
       )}
       {coachTip && visible && (
