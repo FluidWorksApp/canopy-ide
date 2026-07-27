@@ -76,7 +76,11 @@ export interface TaskMenuOptions {
   onRunSaved: (task: CustomMicroTask) => void;
 }
 
-export function taskMenuItem(o: TaskMenuOptions): MenuItem {
+/** The rows themselves: write one, run one unsaved, then what already exists.
+ *  Split out from `taskMenuItem` so a surface that IS the task menu — the Run
+ *  task caret on a diff — shows them directly instead of behind another
+ *  "Tasks ▸" hop into a submenu of one. */
+export function taskMenuItems(o: TaskMenuOptions): MenuItem[] {
   const { custom, builtIn } = taskGroups({
     builtIns: o.runnable,
     saved: o.saved,
@@ -98,5 +102,9 @@ export function taskMenuItem(o: TaskMenuOptions): MenuItem {
   if (builtIn.length > 0) {
     items.push({ separator: true, label: BUILT_IN_HEADING }, ...builtIn.map(row));
   }
-  return { label: "Tasks", submenu: items };
+  return items;
+}
+
+export function taskMenuItem(o: TaskMenuOptions): MenuItem {
+  return { label: "Tasks", submenu: taskMenuItems(o) };
 }

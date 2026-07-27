@@ -3287,6 +3287,25 @@ body.dragging-tab * {
   border-color: var(--accent);
 }
 
+/* Run what you typed, or pick one that already exists. Split like the PR tab's
+   floating button: one control with a default, not two that happen to touch. */
+.agent-query-run {
+  display: flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+}
+.agent-query-run > .btn:first-child {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.agent-query-more {
+  padding-left: 7px;
+  padding-right: 7px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-left: 1px solid color-mix(in srgb, var(--on-accent) 22%, transparent);
+}
+
 /* In the file-diff toolbar the bar sits on its own strip under the buttons. */
 .diff-agent-bar {
   padding: 6px 12px;

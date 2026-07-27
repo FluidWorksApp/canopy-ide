@@ -87,7 +87,7 @@ import {
   updateTaskRun,
   type TaskRun,
 } from "../../taskHistory";
-import { taskMenuItem, type TaskChoice } from "../../taskMenu";
+import { taskMenuItem, taskMenuItems, type TaskChoice } from "../../taskMenu";
 import { viewerKindFor } from "../viewers";
 import { ensureLanguageServer } from "../../lsp/client";
 import { Term, type TermHandle } from "../Term";
@@ -3049,6 +3049,24 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
    *  new task about it, run a one-off about it, then the two groups of tasks.
    *  The surfaces stay ignorant of the task registry — they ask for the item
    *  and splice it into their menu. */
+  /** The same rows as `taskMenu`, without the "Tasks ▸" hop — for a control
+   *  that is already the task menu. */
+  const taskRows = useCallback(
+    (seed: string, dir: string, runnable?: TaskChoice[]) =>
+      taskMenuItems({
+        seed,
+        runnable,
+        saved: project.customTasks ?? [],
+        onNewTask: seedTaskFrom,
+        onOneOff: (brief) => openTaskComposer(brief, "once"),
+        // In the directory the surface is about, not the first root: the bar
+        // sits on one repo's changes and that is where its tasks belong.
+        onRunSaved: (t) => void startMicroTask(customTaskDef(t), { dir }, ""),
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [seedTaskFrom, openTaskComposer, startMicroTask, project.customTasks],
+  );
+
   const taskMenu = useCallback(
     (seed: string, runnable?: TaskChoice[]) =>
       taskMenuItem({
@@ -3959,6 +3977,12 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                   if (!dir) return onNotice("No git repository in this project.");
                   runAdhocTask(fileDiffContext(tab.file.path, query), dir, tab.file.name);
                 }}
+                tasks={() =>
+                  taskRows(
+                    `About the changes in \`${tab.file.path}\`: `,
+                    repoForFile(tab.file.path) ?? "",
+                  )
+                }
               />
             }
           />
@@ -4808,6 +4832,12 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 if (!dir) return onNotice("No git repository in this project.");
                 runAdhocTask(sessionChangesContext(changeContextGroups(), query), dir, "Changes");
               }}
+              tasks={() =>
+                taskRows(
+                  "About the current changes: ",
+                  changeGroups[0]?.repo ?? componentsRef.current[0]?.path ?? "",
+                )
+              }
             />
           }
         />
