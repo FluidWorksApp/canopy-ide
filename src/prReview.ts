@@ -255,7 +255,12 @@ export function nextMove(
  *  Agent, opening the menu. Order is by what blocks what: a red build outranks
  *  unanswered comments (you'd be answering review notes on a broken branch),
  *  and merging only ever appears when GitHub itself says it can. */
-export type FabActionId = "review" | "address" | "fix-ci" | "merge";
+export type FabActionId =
+  | "resolve-conflicts"
+  | "fix-ci"
+  | "address"
+  | "merge"
+  | "review";
 
 export interface FabAction {
   id: FabActionId;
@@ -272,15 +277,22 @@ export function fabAction(
   const decision = conv?.review_decision || pr.review_decision;
   const conflicting = (conv?.mergeable || pr.mergeable) === "CONFLICTING";
 
+  // Conflicts outrank even a red build: nothing about this PR can land until
+  // git can merge it, and reviewing a diff git has already given up on is work
+  // you will do again once the resolve moves the lines under it.
+  if (conflicting)
+    return { id: "resolve-conflicts", label: "Resolve conflicts" };
   if (checks === "FAIL") return { id: "fix-ci", label: "Fix CI" };
   if (opts.actionable > 0)
     return {
       id: "address",
       label: `Address ${opts.actionable} ${opts.actionable === 1 ? "comment" : "comments"}`,
     };
-  if (decision === "APPROVED" && checks !== "FAIL" && !conflicting)
+  if (decision === "APPROVED" && checks !== "FAIL")
     return { id: "merge", label: "Merge" };
-  // Nothing has judged it yet — the one thing an agent can do about that.
+  // Nothing has judged it yet. Once a verdict exists the button stops offering
+  // to review — a PR that has been reviewed does not need reviewing again, and
+  // the states above already cover what a verdict actually asks of you.
   if (!decision || decision === "REVIEW_REQUIRED")
     return { id: "review", label: "Review" };
   return null;

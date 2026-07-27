@@ -673,6 +673,7 @@ export function PrView({
   /** What the button says while its job runs — the job's own name, so a glance
    *  still tells you which of the four you started. */
   const FAB_BUSY: Record<FabActionId, string> = {
+    "resolve-conflicts": "Resolving…",
     review: "Reviewing…",
     address: "Addressing…",
     "fix-ci": "Fixing CI…",
@@ -688,6 +689,12 @@ export function PrView({
     (fab?.id === "address" && isBusyTask(addressPrCommentsTask.id));
   const runFab = () => {
     switch (fab?.id) {
+      case "resolve-conflicts":
+        // The one state with no micro-task: a conflict needs a checkout and a
+        // judgement per hunk, so it goes to a full agent in a worktree — the
+        // same thing the menu offers when the PR conflicts.
+        onStartResolve("claude");
+        break;
       case "review":
         launch(prReviewTask, { repo, pr });
         break;

@@ -378,6 +378,21 @@ describe("fabAction", () => {
     expect(a?.id).not.toBe("request-review");
   });
 
+  it("puts conflicts ahead of everything — nothing can land until git can merge", () => {
+    // The regression: a PR with conflicts, a red build and comments still
+    // offered "Review", because conflicts were not one of the states at all.
+    const a = fabAction(pr(), conv({ mergeable: "CONFLICTING", checks: "FAIL" }), {
+      actionable: 3,
+    });
+    expect(a).toEqual({ id: "resolve-conflicts", label: "Resolve conflicts" });
+    // Even approved and green, a conflicting PR is not a merge.
+    expect(
+      fabAction(pr(), conv({ mergeable: "CONFLICTING", review_decision: "APPROVED" }), {
+        actionable: 0,
+      })?.id,
+    ).toBe("resolve-conflicts");
+  });
+
   it("puts a red build ahead of unanswered comments", () => {
     const a = fabAction(pr(), conv({ checks: "FAIL" }), { actionable: 3 });
     expect(a).toEqual({ id: "fix-ci", label: "Fix CI" });
@@ -397,7 +412,7 @@ describe("fabAction", () => {
       fabAction(pr(), conv({ review_decision: "APPROVED", mergeable: "CONFLICTING" }), {
         actionable: 0,
       })?.id,
-    ).not.toBe("merge");
+    ).toBe("resolve-conflicts");
   });
 
   it("offers nothing on a closed PR, or once it is approved and merged out", () => {
