@@ -117,6 +117,10 @@ export interface AgentSubTab {
 export interface TaskHistorySubTab {
   id: string;
   type: "task-history";
+  /** A run to expand on arrival, when the tab was opened from that run's row.
+   *  Carries a nonce so clicking the same row twice re-focuses it rather than
+   *  looking like nothing happened. */
+  focus?: { runId: string; nonce: number };
 }
 
 /** The instruction files every agent reads before it sees any code — the

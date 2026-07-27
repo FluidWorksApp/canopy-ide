@@ -14,7 +14,7 @@ import {
   type CustomMicroTask,
   type TaskEffect,
 } from "../microTasks";
-import { BUILT_IN_HEADING, CUSTOM_HEADING } from "../taskMenu";
+import { BUILT_IN_HEADING } from "../taskMenu";
 import { completedTaskRuns, TASK_HISTORY_EVENT, type TaskRun } from "../taskHistory";
 import { PlayIcon, StopIcon, TrashIcon } from "./icons";
 
@@ -53,7 +53,9 @@ interface TasksPanelProps {
   /** Run a brief once, without adding it to the list. */
   onRunOneOff: (brief: string, dir: string) => void;
   /** Open the completed-tasks tab — the full searchable history. */
-  onOpenHistory: () => void;
+  /** Open the full history. Given a run id, expand that run when it opens —
+   *  a row you clicked should not make you find it again in the list. */
+  onOpenHistory: (focus?: string) => void;
   /** The tasks this project keeps. Owned by the project, so editing one is a
    *  workspace save, not a settings write — and a task written here doesn't
    *  turn up in a project it makes no sense in. */
@@ -235,27 +237,16 @@ export function TasksPanel({
       <div className="side-panel-head">
         <span>Tasks</span>
         <span className="task-head-actions">
-        <button
-          className="btn-icon"
-          title="Run a one-off task — type the job, it runs once, nothing is saved"
-          onClick={() => {
-            setOneOff((v) => (v == null ? "" : null));
-            setOneOffDir(components[0]?.path ?? "");
-            setDraft(null);
-          }}
-        >
-          ⚡
-        </button>
-        <button
-          className="btn-icon"
-          title="New task"
-          onClick={() => {
-            setDraft(draft && !draft.id ? null : emptyDraft());
-            setOneOff(null);
-          }}
-        >
-          ＋
-        </button>
+          {/* The two composers now sit on the sections they belong to, where
+              what they make is visible. Up here they were a lightning bolt and
+              a plus with a paragraph underneath explaining which was which. */}
+          <button
+            className="btn-icon"
+            title="Open the full history — search, filter, and read what each task reported"
+            onClick={() => onOpenHistory()}
+          >
+            ⤢
+          </button>
         </span>
       </div>
 
@@ -310,7 +301,7 @@ export function TasksPanel({
             <button
               className="btn-icon"
               title="Open the full history — search, filter, and read what each task reported"
-              onClick={onOpenHistory}
+              onClick={() => onOpenHistory()}
             >
               ⤢
             </button>
@@ -323,10 +314,14 @@ export function TasksPanel({
           {done.slice(0, 3).map((r) => (
             <div className="task-row task-row-done" key={r.id}>
               <span className={`task-done-dot st-${r.status}`} title={r.status} />
+              {/* Opens the history *at this run*. Clicking a specific row and
+                  landing on an undifferentiated list means finding it again by
+                  eye, which is the one thing clicking the row should have
+                  spared you. */}
               <span
                 className="task-label task-label-link"
                 title={r.summary ?? "No summary reported."}
-                onClick={onOpenHistory}
+                onClick={() => onOpenHistory(r.id)}
               >
                 {r.icon ? `${r.icon} ` : ""}
                 {r.label}
@@ -425,24 +420,53 @@ export function TasksPanel({
         </div>
       )}
 
+      {/* Three sections, and the difference between them is who owns the task
+          and how long it lives — which is what you are choosing between when
+          you come here. Yours, kept. Canopy's, always available. And a one-off,
+          which is a button rather than a section because there is nothing to
+          list: it exists for the length of one run. */}
       <div className="ticket-state-head">
-        {CUSTOM_HEADING}
+        Your tasks
         <span className="badge">{custom.length}</span>
+        <span className="status-spacer" />
+        <button
+          className="btn-icon"
+          title="New task — saved to this project"
+          onClick={() => {
+            setDraft(draft && !draft.id ? null : emptyDraft());
+            setOneOff(null);
+          }}
+        >
+          ＋
+        </button>
       </div>
       {custom.length === 0 && !draft ? (
-        <div className="tree-empty">
-          One-shot jobs an agent runs and reports back on — the terminal closes
-          itself when the job is done. Create one with ＋, or run one without
-          keeping it with ⚡.
-        </div>
+        <div className="tree-empty">Nothing saved yet.</div>
       ) : (
         custom.map(runRow)
       )}
 
-      {/* Grouped by what each one DOES, not by what it is called: four of these
-          are some flavour of "review", and the difference that matters is
-          whether anything leaves your machine. The surface note moves into the
-          tooltip — it read as information but was "on a PR tab" seven times. */}
+      <div className="ticket-state-head">
+        One-off
+        <span className="status-spacer" />
+        <button
+          className="btn-mini"
+          title="Type a job, run it once — nothing is saved to the list"
+          onClick={() => {
+            setOneOff((v) => (v == null ? "" : null));
+            setOneOffDir(components[0]?.path ?? "");
+            setDraft(null);
+          }}
+        >
+          ⚡ Run once
+        </button>
+      </div>
+
+      {/* Grouped by what each one DOES, not by what it is called: several are
+          some flavour of "review", and the difference that matters is whether
+          anything leaves your machine. The surface note is in the tooltip — as
+          a visible column it read as information but said "on a PR tab" seven
+          times over. */}
       <div className="ticket-state-head">{BUILT_IN_HEADING}</div>
       {(["reads", "posts", "pushes"] as TaskEffect[]).map((effect) => {
         const group = MICRO_TASKS.filter((t) => (t.effect ?? "reads") === effect);
@@ -454,11 +478,10 @@ export function TasksPanel({
               <div
                 className="task-row task-row-built-in"
                 key={t.id}
-                title={`Runs from its own surface — ${t.surfaceNote ?? "see its tab"}, which supplies what it works on`}
+                title={`${t.blurb ?? ""} Runs from its own surface — ${t.surfaceNote ?? "see its tab"}, which supplies what it works on.`.trim()}
               >
                 <span className="task-icon">{t.icon}</span>
                 <span className="task-label task-label-dim">{t.label}</span>
-                {t.blurb && <span className="task-blurb">{t.blurb}</span>}
               </div>
             ))}
           </div>

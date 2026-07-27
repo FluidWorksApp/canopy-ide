@@ -662,10 +662,17 @@ export const ADHOC_TASK_ID = "adhoc";
  *  tab title and the history row still say what the thing was. Saved tasks have
  *  a label because the user typed one; a one-off never gets asked. */
 export function adhocLabel(brief: string): string {
-  const job = oneLine(brief);
-  if (!job) return "One-off task";
-  if (job.length <= 32) return job;
-  const cut = job.slice(0, 32);
+  // A brief pasted from something — an error, a URL, a log line — starts with
+  // the thing, not with the ask. Taking the head verbatim then titled the row
+  // "ERR_PNPM_CONFIG_CONFLICT_BU…", which names the input and says nothing
+  // about the job. Skip the opening noise and start where the sentence does.
+  const job = oneLine(brief)
+    .replace(/^(?:https?:\/\/\S+|[A-Z][A-Z0-9_]{5,}|[-*>\s]+|`[^`]*`)+\s*[:,-]?\s*/, "")
+    .trim();
+  const head = job || oneLine(brief);
+  if (!head) return "One-off task";
+  if (head.length <= 32) return head;
+  const cut = head.slice(0, 32);
   const space = cut.lastIndexOf(" ");
   return `${(space > 12 ? cut.slice(0, space) : cut).replace(/[\s,.;:—-]+$/, "")}…`;
 }
