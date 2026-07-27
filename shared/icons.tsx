@@ -49,6 +49,15 @@ export const IconToken = (p: IconProps) => (
   </Svg>
 )
 
+/** Stopwatch — elapsed work, not a time of day. */
+export const IconStopwatch = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="12" cy="13.5" r="7.5" />
+    <path d="M12 10v3.5l2.2 1.6" />
+    <path d="M9.5 2.5h5M18.6 6.4 20 5" />
+  </Svg>
+)
+
 export const IconFolder = (p: IconProps) => (
   <Svg {...p}>
     <path d="M3.5 6.5A1.5 1.5 0 0 1 5 5h3.6l1.6 2H19a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 19 18H5a1.5 1.5 0 0 1-1.5-1.5z" />

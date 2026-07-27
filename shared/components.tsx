@@ -14,11 +14,13 @@ import {
   basename,
   fmtTokens,
 } from './model'
+import { formatDuration, formatDurationWords, hasWorkingTime, workingTime } from './agentDuration'
 import {
   IconBranch,
   IconChevron,
   IconCpu,
   IconFolder,
+  IconStopwatch,
   IconToken,
 } from './icons'
 import { AgentGlyph } from './agentGlyphs'
@@ -53,10 +55,19 @@ export function AgentBadge({ agent, sz = 34 }: { agent: string; sz?: number }) {
   )
 }
 
-/** A small icon + value telemetry cell (folder, cpu, tokens). */
-function Telem({ icon, children }: { icon: ReactNode; children: ReactNode }) {
+/** A small icon + value telemetry cell (folder, cpu, tokens). `title` is for a
+ *  cell whose number needs spelling out — "12:07" is compact, not obvious. */
+function Telem({
+  icon,
+  title,
+  children,
+}: {
+  icon: ReactNode
+  title?: string
+  children: ReactNode
+}) {
   return (
-    <span className="telem">
+    <span className="telem" title={title}>
       {icon}
       <span className="mono">{children}</span>
     </span>
@@ -86,6 +97,14 @@ export function AgentCard({
     : row.live
       ? STATE_LABEL[row.state] ?? row.state
       : 'idle'
+  // Working time: this stretch, and what the session has done in total. Only a
+  // live, working row keeps counting past its last hook event — see
+  // agentDuration.ts for why a stopped agent must freeze instead.
+  const work = workingTime(
+    { active_secs: row.activeSecs, run_secs: row.runSecs, updated: row.updated },
+    Date.now() / 1000,
+    row.live && row.state === 'working',
+  )
   return (
     <button
       className={`card agent state-${row.state} ${row.live ? 'on' : 'off'} ${
@@ -127,6 +146,24 @@ export function AgentCard({
           {row.tokens ? (
             <Telem icon={<IconToken s={13} />}>{fmtTokens(row.tokens)}</Telem>
           ) : null}
+          {hasWorkingTime(work) && (
+            <Telem
+              icon={<IconStopwatch s={13} />}
+              title={[
+                work.run > 0 && work.run !== work.total
+                  ? `Working for ${formatDurationWords(work.run)} without a break`
+                  : '',
+                `${formatDurationWords(work.total)} of work in this session`,
+                'Time spent idle or waiting on you is not counted',
+              ]
+                .filter(Boolean)
+                .join('\n')}
+            >
+              {work.run > 0 && work.run !== work.total
+                ? `${formatDuration(work.run)} · ${formatDuration(work.total)}`
+                : formatDuration(work.total)}
+            </Telem>
+          )}
         </div>
       </div>
     </button>

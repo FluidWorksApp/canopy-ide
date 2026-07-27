@@ -3068,6 +3068,13 @@ body.dragging-tab * {
 .aw-stat {
   white-space: nowrap;
 }
+/* In the stats strip the chip inherits the strip's size and colour — it is one
+   more measurement beside tokens and cost, not a badge. */
+.aw-stats .agent-runtime {
+  font-size: inherit;
+  font-family: inherit;
+  color: inherit;
+}
 .aw-stat-model {
   color: var(--text);
   border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
@@ -4525,6 +4532,34 @@ body.dragging-tab * {
   border-radius: var(--r-sm);
   corner-shape: squircle;
   padding: 0 6px;
+}
+
+/* Working time: the current uninterrupted stretch, then the session's total.
+   Tabular figures so a once-a-second tick changes the digits and nothing
+   else — proportional numerals make the whole row twitch as 1s roll past. */
+.agent-runtime {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.agent-runtime-mark {
+  opacity: 0.75;
+  flex: 0 0 auto;
+}
+/* The lifetime total, quieter than the live run beside it: one number is what
+   is happening now, the other is context for it. */
+.agent-runtime-total {
+  opacity: 0.6;
+}
+.agent-runtime-total::before {
+  content: "·";
+  margin: 0 3px;
 }
 
 /* Running agents with no hook signal: the panel is blind until setup. */

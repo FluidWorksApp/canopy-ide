@@ -8,6 +8,7 @@ import { AGENT_CLIS, restoreCommand } from "../projects";
 import { identifyAgent, observeForLearning } from "../agentIdentity";
 import { effectiveState, silenceLabel } from "../agentState";
 import { forgetSessions, restorableFrom } from "../restorable";
+import { AgentRuntime } from "./AgentRuntime";
 import {
   AgentIcon,
   DiffIcon,
@@ -716,6 +717,17 @@ export function AgentsPanel({
             <TerminalIcon size={13} className="ap-mark" />
           )}
           <span className="agent-name">{agent?.label ?? s.title}</span>
+          {/* How long it has actually been working: this stretch while it is
+              working, the session's total once it stops. Ahead of the directory
+              and branch chips because this row truncates rather than wraps, and
+              a timer clipped off the end is a timer that is not there — those
+              two ellipsize gracefully, a stopwatch does not. Both numbers are
+              in the tooltip, and in the agent's workspace tab.
+
+              Live only while `shown` says it is genuinely working: a CLI that
+              dies mid-turn leaves "working" behind forever, and a clock counting
+              up from that would invent hours of work it never did. */}
+          {agent && <AgentRuntime timing={digest} live={shown === "working"} />}
           {/* Kept on the left, right after the name: the hover stats overlay is
               anchored to the row's right edge, so a badge over there gets buried
               the moment you hover the very row you're trying to inspect. */}
@@ -1271,6 +1283,9 @@ export function AgentsPanel({
                 <div className="restore-main">
                   <AgentIcon id={agentId} size={14} className="ap-mark" />
                   <span className="agent-name">{agentId}</span>
+                  {/* What this session got done before it went away. Never live
+                      here, so it reads as a finished total. */}
+                  <AgentRuntime timing={d} live={false} />
                   {dir && (
                     <span className="agent-dir" title={runIn}>
                       {dir}

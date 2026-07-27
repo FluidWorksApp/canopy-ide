@@ -46,6 +46,22 @@ const MAX_CONTEXT_CHARS: usize = 4_000;
 /// hours on disk to make crash restore work, but injecting them all crowds the
 /// truncation budget with dead sessions at the expense of live ones.
 const PEER_MAX_AGE_SECS: u64 = 30 * 60;
+/// The most one quiet stretch may be credited as working time.
+///
+/// This process only ever sees discrete events, so the span between two of them
+/// is inferred rather than observed. For the normal case the inference is right:
+/// a `cargo build` or a long test run *is* work, and nothing fires until it
+/// returns. It is wrong for the case that looks identical from here — the laptop
+/// slept, the network dropped, or an agent was left mid-turn overnight and
+/// finished its tool call the next morning. Only length tells those apart, and
+/// not reliably.
+///
+/// So a longer gap is credited at this ceiling instead of in full: generous
+/// enough that a genuine slow tool call is counted almost exactly, low enough
+/// that an abandoned turn adds fifteen minutes to a total rather than nine
+/// hours. The frontend applies the same bound when extrapolating past the last
+/// event (MAX_OPEN_GAP_SECS in shared/agentDuration.ts).
+const MAX_CREDITED_GAP_SECS: u64 = 900;
 
 fn home() -> String {
     std::env::var("HOME").unwrap_or_default()
@@ -288,6 +304,83 @@ fn state_for(hook_event: &str, event: &serde_json::Value) -> Option<&'static str
     })
 }
 
+/// A session's working-time clock: how much of its life it actually spent
+/// working, rather than how long it has been open.
+///
+/// Kept here because this process is the only thing that sees every lifecycle
+/// transition, and because it must survive the app restarting, the terminal
+/// closing, and the session being resumed days later — all of which a number
+/// held in the UI would not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct WorkClock {
+    /// Working seconds across the session's whole life.
+    total: u64,
+    /// Working seconds in the current (or most recent) uninterrupted stretch.
+    run: u64,
+    /// Unix seconds the current stretch began. Recorded for display only —
+    /// subtracting it from `now` would give wall clock, which is the very thing
+    /// these numbers exist to replace.
+    run_started: Option<u64>,
+}
+
+impl WorkClock {
+    /// Advance by one hook event.
+    ///
+    /// The span since the previous event is credited only when the session spent
+    /// it `working`. `idle` (finished a turn, waiting for the human to type) and
+    /// `waiting` (blocked on a question or a permission prompt) are precisely
+    /// the spans that must not count — they are the difference between "this
+    /// agent has been open since Tuesday" and "this agent did forty minutes of
+    /// work".
+    ///
+    /// Nothing is credited for a stretch that never ends: an agent killed
+    /// mid-turn writes no further event, so its last open span is simply never
+    /// counted. That is the right way round — the total under-reports a session
+    /// that died rather than inventing work it may not have done.
+    fn advance(
+        self,
+        prev_state: &str,
+        state: &str,
+        prev_updated: Option<u64>,
+        now: u64,
+    ) -> WorkClock {
+        let credit = if prev_state == "working" {
+            prev_updated.map_or(0, |t| now.saturating_sub(t).min(MAX_CREDITED_GAP_SECS))
+        } else {
+            0
+        };
+        let total = self.total + credit;
+        // A stretch ends when the agent finishes — `idle` or `ended` — and the
+        // next `working` starts a fresh one.
+        //
+        // `waiting` deliberately does not end it. An approval prompt or a
+        // question halfway through a turn holds the agent up; it does not hand
+        // it a new piece of work. A run that restarted on every prompt would
+        // report the seconds since you clicked Allow, when what you asked was
+        // how long this turn has been going. So the run clock pauses there and
+        // resumes — a stopwatch, not a new lap.
+        //
+        // The `run_started.is_none()` arm is the upgrade path: a digest written
+        // before this clock existed can be mid-`working` with no stretch on
+        // record, and starting one now beats never having a run to show.
+        if state == "working"
+            && (matches!(prev_state, "idle" | "ended") || self.run_started.is_none())
+        {
+            WorkClock {
+                total,
+                run: 0,
+                run_started: Some(now),
+            }
+        } else {
+            WorkClock {
+                total,
+                run: self.run + credit,
+                run_started: self.run_started,
+            }
+        }
+    }
+}
+
 /// One file per session; this process is the only writer for its own session,
 /// and hook invocations within a session are serial.
 fn update_digest(
@@ -355,7 +448,11 @@ fn update_digest(
         digest["surface"] = serde_json::json!(pty);
         digest["instance"] = serde_json::json!(std::env::var("CANOPY_INSTANCE").ok());
     }
-    digest["updated"] = serde_json::json!(now_secs());
+    // Read before it is overwritten: the working-time clock below measures from
+    // the previous event, and this field is where the previous event's time is.
+    let prev_updated = digest["updated"].as_u64();
+    let now = now_secs();
+    digest["updated"] = serde_json::json!(now);
     if let Some(t) = event["transcript_path"].as_str() {
         digest["transcript_path"] = serde_json::json!(t);
     }
@@ -380,12 +477,26 @@ fn update_digest(
     let prev_state = digest["state"].as_str().unwrap_or("idle").to_string();
     let state = match state_for(hook_event, event) {
         Some(s) => s.to_string(),
-        None => prev_state,
+        None => prev_state.clone(),
     };
     digest["state"] = serde_json::json!(state);
     // `idle` is still what peer_context and older readers key on; derive it from
     // the richer state so the two can never disagree.
     digest["idle"] = serde_json::json!(state == "idle" || state == "ended");
+
+    // How long this session has actually been working — the current stretch and
+    // the lifetime total. Advanced on every event, from the state the session
+    // was in *before* this one, since that is the state it spent the elapsed
+    // span in.
+    let clock = WorkClock {
+        total: digest["active_secs"].as_u64().unwrap_or(0),
+        run: digest["run_secs"].as_u64().unwrap_or(0),
+        run_started: digest["run_started"].as_u64(),
+    }
+    .advance(&prev_state, &state, prev_updated, now);
+    digest["active_secs"] = serde_json::json!(clock.total);
+    digest["run_secs"] = serde_json::json!(clock.run);
+    digest["run_started"] = serde_json::json!(clock.run_started);
 
     // Subagents (Claude dispatches them through the Task tool) that finished
     // this turn. Counted from SubagentStop and zeroed when a new human turn
@@ -2573,6 +2684,99 @@ mod tests {
 
     fn digest(pty: &str, instance: &str, cwd: &str) -> serde_json::Value {
         serde_json::json!({ "surface": pty, "instance": instance, "cwd": cwd })
+    }
+
+    /// One whole turn, event by event, as the wire delivers it. The numbers that
+    /// come out are what the panel puts on the row, so this is the test that
+    /// says what "working time" means.
+    #[test]
+    fn a_turn_credits_only_the_spans_the_agent_spent_working() {
+        let t0 = 1_000_000;
+        let c = WorkClock::default();
+        // SessionStart: idle, nothing to count.
+        let c = c.advance("idle", "idle", None, t0);
+        assert_eq!(c, WorkClock::default());
+        // The human types 40s later. None of that thinking time is the agent's.
+        let c = c.advance("idle", "working", Some(t0), t0 + 40);
+        assert_eq!(c.total, 0);
+        assert_eq!(c.run, 0);
+        assert_eq!(c.run_started, Some(t0 + 40));
+        // 30s of the agent working out what to do, then a tool call.
+        let c = c.advance("working", "working", Some(t0 + 40), t0 + 70);
+        assert_eq!((c.total, c.run), (30, 30));
+        // 20s later it stops — the turn is done.
+        let c = c.advance("working", "idle", Some(t0 + 70), t0 + 90);
+        assert_eq!((c.total, c.run), (50, 50));
+        // The human reads the answer for ten minutes. Still 50.
+        let c = c.advance("idle", "working", Some(t0 + 90), t0 + 690);
+        assert_eq!((c.total, c.run), (50, 0), "a new stretch restarts the run");
+        assert_eq!(c.run_started, Some(t0 + 690));
+        // A second turn of 15s: the run reads 15, the total 65.
+        let c = c.advance("working", "idle", Some(t0 + 690), t0 + 705);
+        assert_eq!((c.total, c.run), (65, 15));
+    }
+
+    /// A permission prompt is the clearest case of time that is not work: the
+    /// agent is stopped, and the clock must stop with it.
+    #[test]
+    fn time_blocked_on_the_user_is_not_working_time() {
+        let t0 = 2_000_000;
+        let c = WorkClock::default().advance("idle", "working", Some(t0), t0);
+        // PreToolUse -> the prompt appears 2s later.
+        let c = c.advance("working", "waiting", Some(t0), t0 + 2);
+        assert_eq!((c.total, c.run), (2, 2));
+        // The user approves five minutes later. Not one second of it counts.
+        let c = c.advance("waiting", "working", Some(t0 + 2), t0 + 302);
+        assert_eq!((c.total, c.run), (2, 2));
+        // ...and it is the *same* stretch resuming, so `run` carries on rather
+        // than restarting: a turn interrupted by an approval is still one run.
+        assert_eq!(c.run_started, Some(t0));
+        let c = c.advance("working", "idle", Some(t0 + 302), t0 + 310);
+        assert_eq!((c.total, c.run), (10, 10));
+    }
+
+    /// A slow build is silent but real; an abandoned turn is silent and not.
+    /// Nothing here can tell them apart, so a long gap is credited at the cap.
+    #[test]
+    fn a_quiet_stretch_is_credited_up_to_the_cap_and_no_further() {
+        let t0 = 3_000_000;
+        let build = WorkClock::default().advance("working", "working", Some(t0), t0 + 600);
+        assert_eq!(build.total, 600, "a ten-minute build is real work");
+        let overnight = WorkClock::default().advance("working", "working", Some(t0), t0 + 86_400);
+        assert_eq!(overnight.total, MAX_CREDITED_GAP_SECS);
+    }
+
+    /// A digest written before the clock existed, and one whose stamp is in the
+    /// future (clock skew, a machine that changed timezone) — neither may make
+    /// the numbers jump or go backwards.
+    #[test]
+    fn the_clock_survives_a_missing_or_skewed_previous_stamp() {
+        let c = WorkClock {
+            total: 90,
+            run: 30,
+            run_started: Some(10),
+        };
+        assert_eq!(c.advance("working", "working", None, 4_000_000).total, 90);
+        assert_eq!(
+            c.advance("working", "working", Some(4_000_500), 4_000_000)
+                .total,
+            90,
+            "a future stamp credits nothing rather than subtracting"
+        );
+    }
+
+    /// The clock is a property of the session, not of the app: an event arriving
+    /// after a restart carries on from whatever is on disk.
+    #[test]
+    fn totals_accumulate_across_whatever_was_already_recorded() {
+        let c = WorkClock {
+            total: 7_200,
+            run: 45,
+            run_started: Some(1),
+        }
+        .advance("working", "working", Some(100), 130);
+        assert_eq!((c.total, c.run), (7_230, 75));
+        assert_eq!(c.run_started, Some(1));
     }
 
     /// The bug this replaced: identity by directory hid every peer in a shared

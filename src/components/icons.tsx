@@ -582,6 +582,20 @@ export function ExchangeIcon({ size = 14, className }: IconProps) {
   );
 }
 
+/** Stopwatch: how long an agent has actually been working. A stopwatch rather
+ *  than a wall clock on purpose — the number beside it is elapsed work, not a
+ *  time of day. */
+export function StopwatchIcon({ size = 12, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={2.1}>
+      <circle cx="12" cy="13.5" r="7.5" />
+      <path d="M12 10v3.5l2.2 1.6" />
+      <path d="M9.5 2.5h5" />
+      <path d="M18.6 6.4 20 5" />
+    </svg>
+  );
+}
+
 // Broadcast/live: a solid core with signal arcs, for sharing a file or project
 // live with the team.
 export function LiveShareIcon({ size = 14, className }: IconProps) {

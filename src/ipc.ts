@@ -929,6 +929,11 @@ export interface AgentWorkspace {
   state: string | null;
   cwd: string | null;
   updated: number | null;
+  /** The session's working-time clock (see SessionDigest.active_secs): seconds
+   *  actually worked over its life, and seconds in the current uninterrupted
+   *  stretch. Null when no hook ever wrote a digest for this session. */
+  active_secs: number | null;
+  run_secs: number | null;
   /** Files the agent itself reported editing — intent, capped by the hook;
    *  the diff panes are the authoritative list. */
   touched: string[];
@@ -1223,6 +1228,17 @@ export interface SessionDigest {
    *  when the next human prompt starts. */
   subagents?: number;
   updated?: number;
+  /** Seconds this session has actually spent working, over its whole life —
+   *  idle and blocked-on-you spans excluded. Kept by canopy_hook.rs, which is
+   *  the only writer that sees every transition; see shared/agentDuration.ts
+   *  for how a row turns it into a number on screen. Absent on pre-upgrade
+   *  digests and on CLIs read straight from disk. */
+  active_secs?: number;
+  /** Seconds in the current (or most recent) uninterrupted working stretch. */
+  run_secs?: number;
+  /** Unix seconds the current stretch began. For display only — the span since
+   *  then is wall clock, which is the thing these fields exist to replace. */
+  run_started?: number;
   prompts?: string[];
   files?: string[];
   /** Where the session was launched. Pinned at first sighting and never
