@@ -6452,6 +6452,16 @@ body.dragging-tab * {
   background: var(--bg-overlay);
   border-color: var(--accent);
 }
+/* Restated here because the rule above outranks .btn-accent and was taking its
+   background away while leaving its text colour behind — dark ink meant for a
+   bright fill, sitting on the raised grey. The hover pair below had the same
+   two-class weight and so kept working, which is why Merge only looked right
+   under the pointer. */
+.pr-actions .btn-accent {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
 .pr-actions .btn-accent:hover {
   background: color-mix(in srgb, var(--accent) 88%, white);
   border-color: transparent;
