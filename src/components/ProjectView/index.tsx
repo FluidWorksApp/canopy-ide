@@ -108,6 +108,7 @@ import { ChangesPanel, type ChangeGroup } from "../ChangesPanel";
 import { useEscape } from "../../useEscape";
 import { useTabDrag, applyOrder } from "../../tabDrag";
 import { agentIdForCommand, identifyAgent } from "../../agentIdentity";
+import { modelCommandLine, modelSwitchFor } from "../../agentModels";
 import { AgentsPanel, digestBySurface } from "../AgentsPanel";
 import { StatusBar } from "../StatusBar";
 import { Palette, type PaletteMode } from "../Palette";
@@ -3385,47 +3386,58 @@ export const ProjectView = memo(function ProjectView({
     }
   }, [activeTabId, visible, pending, onDismissPending]);
 
-  // Switch the model of the Claude session running in this project by typing
-  // `/model <name>` into its terminal — the same thing the user would type, so
-  // the CLI's own confirmations and context-size warnings appear right there.
-  // The terminal is focused afterwards so those warnings are actually seen.
+  // The session the tray's model control acts on: the terminal you are looking
+  // at, when it runs a CLI whose model Canopy knows how to change; otherwise
+  // the first such terminal in the project, for the tabs that are not terminals
+  // at all. One derivation feeds both the chip and the click, so the menu can
+  // never describe one session while the keystrokes go to another — which is
+  // what happened while the two were worked out separately, and every `/model`
+  // landed in the leftmost Claude tab.
+  const modelTarget = useMemo(() => {
+    const agentOf = (t: TermSubTab) => {
+      if (t.ptyId == null) return null;
+      const s = projectStats.find((x) => x.id === t.ptyId);
+      const agent = s ? (identifyAgent(s.agent_hint)?.id ?? null) : null;
+      const sw = modelSwitchFor(agent);
+      if (!agent || !sw) return null;
+      // A bare binary Canopy ships no entry for (gemini) has no registry name
+      // to borrow, so it is named by the id — which is its command anyway.
+      const label = AGENT_CLIS.find((c) => c.id === agent)?.name ?? agent;
+      return { tabId: t.id, ptyId: t.ptyId, agent, label, sw };
+    };
+    const termTabs = tabs.filter((t): t is TermSubTab => t.type === "terminal");
+    const active = termTabs.find((t) => t.id === activeTabId);
+    if (active) return agentOf(active);
+    for (const t of termTabs) {
+      const hit = agentOf(t);
+      if (hit) return hit;
+    }
+    return null;
+  }, [tabs, activeTabId, projectStats]);
+  const modelTargetRef = useRef(modelTarget);
+  modelTargetRef.current = modelTarget;
+
+  // Change that session's model by typing the CLI's own command into its
+  // terminal — the same thing the user would type, so the CLI's confirmations,
+  // pickers and context-size warnings appear right there. The terminal is
+  // focused afterwards so they are actually seen.
   const setAgentModel = useCallback(
-    (model: string) => {
-      const termTabs = tabsRef.current.filter(
-        (t): t is TermSubTab => t.type === "terminal",
-      );
-      const claudePtys = new Set(
-        statsRef.current
-          .filter((s) => s.procs.some((p) => /claude/i.test(p.name)))
-          .map((s) => s.id),
-      );
-      // The tray shows the ACTIVE tab's session, so the switch has to land in
-      // that same session — picking the project's first Claude terminal sent
-      // every `/model` to whichever agent happened to be leftmost, no matter
-      // which one you were looking at. Only fall back to the first Claude
-      // terminal when the active tab isn't one (a file or diff tab, say).
-      const isClaudeTerm = (t: TermSubTab) =>
-        t.ptyId != null && claudePtys.has(t.ptyId);
-      const active = termTabs.find((t) => t.id === activeTabIdRef.current);
-      const target =
-        active && isClaudeTerm(active) ? active : termTabs.find(isClaudeTerm);
-      if (target?.ptyId == null) {
-        onNotice("No running Claude session in this project.");
+    (model?: string) => {
+      const target = modelTargetRef.current;
+      if (!target) {
+        onNotice("No agent session here to switch.");
         return;
       }
-      const ptyId = target.ptyId;
-      void ipc.ptyWrite(ptyId, `/model ${model}`);
+      const { ptyId, tabId, sw } = target;
+      void ipc.ptyWrite(ptyId, modelCommandLine(sw, model));
       // Enter goes separately, a beat later: the slash-command menu opens while
       // the text streams in, and an Enter in the same write can select the
       // menu's highlighted entry instead of submitting the typed command.
       setTimeout(() => void ipc.ptyWrite(ptyId, "\r"), 250);
-      setActiveTabId(target.id);
-      setTimeout(() => termHandles.current.get(target.id)?.focus(), 50);
+      setActiveTabId(tabId);
+      setTimeout(() => termHandles.current.get(tabId)?.focus(), 50);
     },
     [onNotice],
-  );
-  const hasClaude = projectStats.some((s) =>
-    s.procs.some((p) => /claude/i.test(p.name)),
   );
 
   // Launch an agent CLI in the project's first component — or, if it isn't on
@@ -5853,7 +5865,9 @@ export const ProjectView = memo(function ProjectView({
         events={projectEvents}
         visible={visible}
         projects={allProjects}
-        onSetModel={hasClaude ? setAgentModel : undefined}
+        onSetModel={modelTarget ? setAgentModel : undefined}
+        modelSwitch={modelTarget?.sw ?? null}
+        agentLabel={modelTarget?.label}
         activePtyId={activeTab?.type === "terminal" ? activeTab.ptyId : null}
       />
       {palette && visible && (
