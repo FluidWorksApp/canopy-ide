@@ -90,8 +90,20 @@ const DEADLINE = {
 };
 
 /** How long a surface has to appear, and then to finish sliding over the pane.
- *  Both are generous for the same reason as the deadlines above. */
-const SETTLE_TRIES = 120;
+ *  Measured in time rather than in tries: a busy machine stretches every
+ *  setTimeout, and a loop of "300 tries at 25ms" then takes minutes instead of
+ *  seconds — patient in a way that turns a short run into a stuck one. */
+const SETTLE_MS = 6_000;
+
+/** Poll `read` until it is true or the budget runs out. */
+async function settle(read: () => boolean, ms = SETTLE_MS): Promise<boolean> {
+  const until = Date.now() + ms;
+  for (;;) {
+    if (read()) return true;
+    if (Date.now() > until) return false;
+    await sleep(25);
+  }
+}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -626,24 +638,21 @@ async function exerciseSurface(
     await surface.open?.();
     // A surface that never paints is not this test's business — it is a
     // registry entry whose preconditions weren't met.
-    let appeared = false;
-    for (let i = 0; i < SETTLE_TRIES && !appeared; i++) {
-      appeared = painting(surface.selector);
-      if (!appeared) await sleep(25);
-    }
+    const appeared = await settle(() => painting(surface.selector));
     if (!appeared) {
+      // Undo the ask anyway. Half of these surfaces are toggles, and one that
+      // was merely slow to arrive would otherwise land after we stopped
+      // looking and sit over the page for every check that follows.
+      await ensureClosed(surface, true);
       return { ...base, skipped: true, why: surface.why ?? "the surface never appeared" };
     }
     // A surface that opens somewhere else entirely — a menu hanging off the tab
     // bar, a chip in a corner — must NOT hide the page, and demanding that it
     // does would be demanding a bug. Give it a moment to finish arriving first:
     // most of these slide, and where it starts is not where it ends up.
-    let over = false;
-    for (let i = 0; i < SETTLE_TRIES && !over; i++) {
-      over = coversPane(surface.selector, pane);
-      if (!over) await sleep(25);
-    }
+    const over = await settle(() => coversPane(surface.selector, pane));
     if (!over) {
+      await ensureClosed(surface, true);
       return {
         ...base,
         skipped: true,
@@ -722,17 +731,13 @@ function coversPane(selector: string, pane: DOMRect | null): boolean {
  *  whole red run that says nothing. So the closer is tried, then every general
  *  dismissal the app has, and only a surface that survives all of that is
  *  reported as unclosable. */
-async function ensureClosed(surface: OverlaySurface) {
+async function ensureClosed(surface: OverlaySurface, force = false) {
   // Already gone: calling the closer again would re-open every surface whose
-  // opener and closer are the same toggle.
-  if (!painting(surface.selector)) return;
-  const gone = async () => {
-    for (let i = 0; i < 12; i++) {
-      if (!painting(surface.selector)) return true;
-      await sleep(50);
-    }
-    return false;
-  };
+  // opener and closer are the same toggle. `force` is for the other case —
+  // an opener that has been fired and not yet taken effect, which has to be
+  // undone precisely because nothing is on screen to see it happen.
+  if (!force && !painting(surface.selector)) return;
+  const gone = () => settle(() => !painting(surface.selector), 2_000);
   try {
     await surface.close?.();
   } catch {
