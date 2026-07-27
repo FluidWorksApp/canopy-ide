@@ -14,9 +14,9 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import { Panel, PanelGroup } from "react-resizable-panels";
+import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import * as ipc from "../../ipc";
-import { getSettings, SETTINGS_CHANGE_EVENT } from "../../settings";
+import { getSettings } from "../../settings";
 import { modelFor, monaco, languageForPath } from "../../monaco-setup";
 import { getCaret, subscribeCaret } from "../../editorState";
 import { GuestSession, OwnerSession } from "../../collab";
@@ -178,7 +178,6 @@ import {
   type PreviewSubTab,
   type RailChip,
   type ProjectViewProps,
-  sidebarPrefs,
 } from "./helpers";
 export { tabDisplayLabel, previewLabel };
 export type {
@@ -270,23 +269,6 @@ function TermPorts({
   );
 }
 
-/** How long the pointer must rest ON a rail icon before its panel slides out —
- *  and it has to be resting, not merely passing: leaving the icon cancels the
- *  clock, so crossing the rail on the way elsewhere never opens anything.
- *  Long enough to be a decision, short enough to still feel like hover. */
-const HOVER_INTENT_MS = 280;
-/** The grace period after the pointer leaves both rail and panel. Generous on
- *  purpose: the gap between "reading the file tree" and "reaching for it again"
- *  is longer than a menu's flyout delay. */
-const PEEK_CLOSE_MS = 1500;
-/** The pointer is still in the rail but has moved off the tabs — it has said
- *  where it's going, so there is nothing left to wait for. Short enough that the
- *  panel is gone before a tooltip can appear over where it was. */
-const PEEK_LEAVE_MS = 220;
-const SIDE_DEFAULT_W = 300;
-const SIDE_MIN_W = 200;
-const SIDE_MAX_W = 560;
-
 // Memoized: App re-renders on every agent event, relay tick and toast, and
 // every open project's view — visible or not — used to re-render with it.
 // Every prop is either data that should re-render this view or a handler App
@@ -310,23 +292,9 @@ export const ProjectView = memo(function ProjectView({
   onRestored,
 }: ProjectViewProps) {
   const [sideTab, setSideTab] = useState<SideTab>("files");
-  // The side panel is a hover overlay, not a docked column. `pinned` is the
-  // click/Cmd+B latch that keeps it out; `peeking` is the transient hover state
-  // that the debounce below retracts. Either one shows it.
-  const [pinned, setPinned] = useState(false);
-  const [peeking, setPeeking] = useState(false);
-  /** How the user wants the panel to behave (Settings → Appearance). Held in
-   *  state rather than read inline: these decide what effects are registered,
-   *  and a change has to take hold without reopening the project. */
-  const [sidePrefs, setSidePrefs] = useState(sidebarPrefs);
-  useEffect(() => {
-    const refresh = () => setSidePrefs(sidebarPrefs());
-    window.addEventListener(SETTINGS_CHANGE_EVENT, refresh);
-    return () => window.removeEventListener(SETTINGS_CHANGE_EVENT, refresh);
-  }, []);
-  const [sideWidth, setSideWidth] = useState(SIDE_DEFAULT_W);
-  const sideWidthRef = useRef(SIDE_DEFAULT_W);
-  const sideOpen = !zen && (pinned || peeking);
+  // The side panel is a docked column, resizable via the PanelGroup handle.
+  // `collapsed` is the click/Cmd+B latch that hides it.
+  const [collapsed, setCollapsed] = useState(false);
   const [tabs, setTabs] = useState<SubTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   /** Briefly ringed after a jump — with several similar terminal tabs open,
@@ -1994,10 +1962,7 @@ export const ProjectView = memo(function ProjectView({
       const first = componentsRef.current[0];
       if (first) addTerminal(first.path);
     };
-    const toggleSidebarHandler = () => {
-      setPinned((v) => !v);
-      setPeeking(false);
-    };
+    const toggleSidebarHandler = () => setCollapsed((v) => !v);
     const quickOpen = () => setPalette("files");
     const findInFiles = () => setPalette("search");
     const cycleTabs = (dir: 1 | -1) => {
@@ -2660,16 +2625,16 @@ export const ProjectView = memo(function ProjectView({
   // (liveSessionByPty, just above) — that binding is what brings an agent back
   // mid-thought instead of at a fresh prompt.
 
-  // `pinned`, not `peeking`: the latch is the user's standing decision about
-  // the side panel, where a peek is just where the pointer happened to be when
-  // the project was put to sleep.
+  // Snapshot whether the side panel was showing. The persisted field is named
+  // `sidePinned` for backward compat with stored snapshots; it now maps to the
+  // docked panel being open, i.e. `!collapsed`.
   const snapshotState = useRef({
     activeTabId,
     sideTab,
-    pinned,
+    collapsed,
     worktreeEnv,
   });
-  snapshotState.current = { activeTabId, sideTab, pinned, worktreeEnv };
+  snapshotState.current = { activeTabId, sideTab, collapsed, worktreeEnv };
 
   useEffect(() => {
     const onHibernate = (e: Event) => {
@@ -2678,14 +2643,14 @@ export const ProjectView = memo(function ProjectView({
       const {
         activeTabId: active,
         sideTab: side,
-        pinned: sideOut,
+        collapsed: sideHidden,
         worktreeEnv: wt,
       } = snapshotState.current;
       const snap = buildSnapshot({
         tabs: tabsRef.current,
         activeTabId: active,
         sideTab: side,
-        sidePinned: sideOut,
+        sidePinned: !sideHidden,
         worktree: wt,
         sessionFor: (pty) => liveSessionByPtyRef.current.get(pty),
       });
@@ -2835,7 +2800,7 @@ export const ProjectView = memo(function ProjectView({
       restoreStepRef.current?.(0, steps.length, steps[0]?.label ?? "Ready");
       if (restore.worktree) setWorktreeEnv(restore.worktree);
       setSideTab(restore.sideTab);
-      setPinned(restore.sidePinned);
+      setCollapsed(!restore.sidePinned);
       const ids: (string | null)[] = [];
       for (const [i, step] of steps.entries()) {
         if (cancelled) return;
@@ -2999,159 +2964,30 @@ export const ProjectView = memo(function ProjectView({
     [pending],
   );
 
-  // Stable ActivityRail handlers. Identity only changes with pinned/sideTab
+  // Stable ActivityRail handlers. Identity only changes with collapsed/sideTab
   // (a user action), not on every render — so the memoized rail stays put while
   // terminals stream, agents tick, and stats update.
-  const openTimer = useRef<number | null>(null);
-  const closeTimer = useRef<number | null>(null);
-  const resizing = useRef(false);
 
-  const cancelPeekClose = useCallback(() => {
-    if (closeTimer.current !== null) {
-      window.clearTimeout(closeTimer.current);
-      closeTimer.current = null;
-    }
-  }, []);
-  const schedulePeekClose = useCallback(
-    (delay = PEEK_CLOSE_MS) => {
-      cancelPeekClose();
-      // Not while a width drag is in flight: the pointer routinely leaves the
-      // panel mid-drag, and retracting it out from under the grip is maddening.
-      if (resizing.current) return;
-      closeTimer.current = window.setTimeout(() => {
-        closeTimer.current = null;
-        setPeeking(false);
-      }, delay);
-    },
-    [cancelPeekClose],
-  );
-  const cancelPeekOpen = useCallback(() => {
-    if (openTimer.current !== null) {
-      window.clearTimeout(openTimer.current);
-      openTimer.current = null;
-    }
-  }, []);
-  useEffect(
-    () => () => {
-      if (openTimer.current !== null) window.clearTimeout(openTimer.current);
-      if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
-    },
-    [],
-  );
-
-  /** Hover-intent, not hover. A panel is only committed once the pointer has
-   *  settled on an icon — otherwise sweeping the rail on the way to Settings
-   *  would mount every panel behind it, and the trackers panel mounting means
-   *  a round trip to GitHub/Jira for a tab you never meant to open.
-   *
-   *  A pinned panel ignores hover entirely. Pinning says "keep THIS one out",
-   *  and a pointer drifting over the rail on its way somewhere else has no
-   *  business swapping it — a peek is transient, a pin is a choice. */
-  const hoverSideTab = useCallback(
-    (tab: SideTab) => {
-      // Off by default (Appearance → "Hover to view"): a panel that comes out
-      // because you passed an icon on your way somewhere else is a panel you
-      // didn't ask for. With it off the rail opens on click only.
-      if (pinned || !sidePrefs.hover) return;
-      cancelPeekClose();
-      cancelPeekOpen();
-      openTimer.current = window.setTimeout(() => {
-        openTimer.current = null;
-        setSideTab(tab);
-        setPeeking(true);
-      }, HOVER_INTENT_MS);
-    },
-    [cancelPeekClose, cancelPeekOpen, pinned, sidePrefs.hover],
-  );
-  const leaveSideHover = useCallback(
-    (prompt?: boolean) => {
-      cancelPeekOpen();
-      schedulePeekClose(prompt ? PEEK_LEAVE_MS : PEEK_CLOSE_MS);
-    },
-    [cancelPeekOpen, schedulePeekClose],
-  );
-
-  /** A click anywhere else dismisses the panel on the spot — pinned included.
-   *  The panel covers the editor, so a click past it is someone reaching for
-   *  what's underneath; leaving it up to be clicked through twice is the one
-   *  thing an overlay must not do. The grace period is for a wandering pointer,
-   *  and a click says the pointer has arrived somewhere on purpose.
-   *
-   *  Clicks inside the panel or on the rail are exempt — the panel's own
-   *  context menus and dialogs are descendants of it, so they are covered too.
-   *  On pointerdown, not click: waiting for mouseup leaves the panel sitting
-   *  over whatever you are in the middle of pressing. */
-  useEffect(() => {
-    // Appearance → "Click outside to close". On by default, and off is a real
-    // choice once the panel is docked: a pane that isn't covering anything has
-    // no reason to close because you clicked in the editor.
-    if (!sideOpen || !sidePrefs.clickOutsideCloses) return;
-    const onDown = (e: PointerEvent) => {
-      const target = e.target;
-      if (
-        target instanceof Element &&
-        target.closest(".side-peek, .side-dock, .rail")
-      )
-        return;
-      cancelPeekOpen();
-      cancelPeekClose();
-      setPeeking(false);
-      setPinned(false);
-    };
-    window.addEventListener("pointerdown", onDown, true);
-    return () => window.removeEventListener("pointerdown", onDown, true);
-  }, [sideOpen, cancelPeekOpen, cancelPeekClose, sidePrefs.clickOutsideCloses]);
-
-  // Click is the latch: it pins the panel open so it survives the pointer
-  // leaving. Clicking the pinned tab again puts it away.
+  // Click the active tab to collapse the panel; click another to switch to it
+  // (opening the panel if it was collapsed).
   const selectSideTab = useCallback(
     (tab: SideTab) => {
-      cancelPeekOpen();
-      cancelPeekClose();
-      if (pinned && sideTab === tab) {
-        setPinned(false);
-        setPeeking(false);
+      if (collapsed) {
+        setCollapsed(false);
+        setSideTab(tab);
+      } else if (sideTab === tab) {
+        setCollapsed(true);
       } else {
         setSideTab(tab);
-        setPinned(true);
       }
     },
-    [cancelPeekClose, cancelPeekOpen, pinned, sideTab],
+    [collapsed, sideTab],
   );
   const openSettings = useCallback(
     () => window.dispatchEvent(new CustomEvent("canopy:open-settings")),
     [],
   );
-  const toggleSidebar = useCallback(() => {
-    cancelPeekOpen();
-    cancelPeekClose();
-    setPinned((v) => !v);
-    setPeeking(false);
-  }, [cancelPeekClose, cancelPeekOpen]);
-
-  /** Drag the panel's right edge. The overlay is out of flow, so the old
-   *  PanelGroup percentage no longer applies — the width is plain pixels. */
-  const startSideResize = useCallback((e: React.PointerEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = sideWidthRef.current;
-    resizing.current = true;
-    const move = (ev: PointerEvent) => {
-      const w = Math.max(
-        SIDE_MIN_W,
-        Math.min(SIDE_MAX_W, startW + ev.clientX - startX),
-      );
-      sideWidthRef.current = w;
-      setSideWidth(w);
-    };
-    const up = () => {
-      resizing.current = false;
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-  }, []);
+  const toggleSidebar = useCallback(() => setCollapsed((v) => !v), []);
 
   // Jump to the terminal running the agent that raised the item: prefer a
   // terminal whose PTY tree contains an agent process, then match by cwd.
@@ -3390,7 +3226,7 @@ export const ProjectView = memo(function ProjectView({
         // Surface the new agent where it lives: the Agents section, expanded so
         // the just-launched row is actually in view.
         setSideTab("agents");
-        setPinned(true);
+        setCollapsed(false);
       } else if (cli.rebound || !cli.install) {
         // Two cases, one answer: an override points somewhere the vendor's
         // installer can never satisfy, and a custom entry has no installer at all
@@ -3465,7 +3301,7 @@ export const ProjectView = memo(function ProjectView({
   } | null>(null);
   const openTaskComposer = useCallback(
     (brief: string, mode: "save" | "once") => {
-      setPinned(true);
+      setCollapsed(false);
       setSideTab("tasks");
       setTaskSeed((prev) => ({ brief, mode, nonce: (prev?.nonce ?? 0) + 1 }));
     },
@@ -5435,7 +5271,7 @@ export const ProjectView = memo(function ProjectView({
       ))}
       {sidePane("git", () => (
         <GitPanel
-          visible={sideTab === "git" && visible && sideOpen}
+          visible={sideTab === "git" && visible && !collapsed}
           components={project.components.map((c) => ({
             label: c.label,
             path: c.path,
@@ -5601,7 +5437,7 @@ export const ProjectView = memo(function ProjectView({
       ))}
       {sidePane("agents", () => (
         <AgentsPanel
-          visible={sideTab === "agents" && visible && sideOpen}
+          visible={sideTab === "agents" && visible && !collapsed}
           stats={projectStats}
           hookPath={hookPath}
           pending={pending}
@@ -5644,8 +5480,7 @@ export const ProjectView = memo(function ProjectView({
         {!zen && (
           <ActivityRail
             sideTab={sideTab}
-            open={sideOpen}
-            pinned={pinned}
+            collapsed={collapsed}
             changeBadge={changeCount + collabEditedCount}
             prsBadge={prsBadge}
             tasksBadge={runningMicro.length}
@@ -5654,34 +5489,9 @@ export const ProjectView = memo(function ProjectView({
             teamBadge={teamBadge}
             relayRole={relay.status.role}
             onSelectTab={selectSideTab}
-            onHoverTab={hoverSideTab}
-            onHoverCancel={cancelPeekOpen}
-            onHoverLeave={leaveSideHover}
             onOpenSettings={openSettings}
             onToggleSidebar={toggleSidebar}
           />
-        )}
-        {/* Docked (Appearance → "Sidebar as overlay", off): the panel takes a
-            column of its own and the main area moves over for it, instead of
-            floating above it. It costs a reflow of the main area every time it
-            opens — which is what re-wraps the terminals in it — so it is the
-            non-default, but it's the right trade for anyone who wants the panel
-            up while they work. Same `sidePanel` element either way; only one of
-            the two branches renders it. */}
-        {!zen && !sidePrefs.overlay && (
-          <div
-            className={`side-dock ${sideOpen ? "open" : ""}`}
-            // Collapsed to nothing rather than unmounted, for the same reason
-            // the overlay slides out of frame instead of leaving: a panel that
-            // unmounts re-fetches on the way back, and the trackers panel
-            // mounting means a round trip to GitHub before it can paint.
-            style={{ width: sideOpen ? sideWidth : 0 }}
-            onMouseEnter={cancelPeekClose}
-            onMouseLeave={() => schedulePeekClose()}
-          >
-            {sidePanel}
-            <div className="side-peek-grip" onPointerDown={startSideResize} />
-          </div>
         )}
         {/* The PanelGroup renders in every mode on purpose. Swapping mainArea
             between a bare child and a <Panel> changes its element type, which
@@ -5689,36 +5499,18 @@ export const ProjectView = memo(function ProjectView({
             focus mode would silently kill every terminal (and any agent running
             in one). Keeping the tree shape fixed keeps the PTYs alive. */}
         <PanelGroup direction="horizontal">
+          {!collapsed && !zen && (
+            <>
+              <Panel id="side" order={1} defaultSize={20} minSize={13} maxSize={40}>
+                {sidePanel}
+              </Panel>
+              <PanelResizeHandle className="resize-handle" />
+            </>
+          )}
           <Panel id="main" order={2}>
             {mainArea}
           </Panel>
         </PanelGroup>
-        {/* The side panel floats over the editor instead of displacing it: the
-            main area never reflows, so a peek costs nothing but a repaint — and
-            a terminal never re-wraps because you glanced at the file tree.
-            Always mounted, slid out of frame when closed, for the same reason
-            the panes inside it are display-toggled. */}
-        {!zen && sidePrefs.overlay && (
-          <div className="side-peek-layer">
-            <div
-              className={`side-peek ${sideOpen ? "open" : ""}`}
-              style={{ width: sideWidth }}
-              onMouseEnter={cancelPeekClose}
-              onMouseLeave={() => schedulePeekClose()}
-            >
-              {/* The frost is its own layer, not a background on .side-peek.
-                  backdrop-filter makes an element a containing block for fixed
-                  descendants — with it on the wrapper, every context menu and
-                  confirm dialog inside the panel would anchor to the panel
-                  instead of the viewport. */}
-              <div className="side-peek-frost" />
-              {sidePanel}
-              {/* No title here either — a tooltip on the panel's own edge would
-                  cover the panel. The col-resize cursor is the affordance. */}
-              <div className="side-peek-grip" onPointerDown={startSideResize} />
-            </div>
-          </div>
-        )}
       </div>
       {/* Full-width, spanning rail + sidebar + main. Zen hides it via CSS. */}
       <StatusBar
