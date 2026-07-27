@@ -260,6 +260,11 @@ export const webviewSnapshot = (
 export const browserSnapshot = (tabId: string, maxWidth?: number) =>
   invoke<string>("browser_snapshot", { tabId, maxWidth });
 
+/** A line into the app's own log, so a failure in something the devtools can't
+ *  see (a native child webview) leaves a trace a user can read back. */
+export const jsLog = (level: string, message: string) =>
+  invoke<void>("js_log", { level, message }).catch(() => {});
+
 /** JPEG (base64) of a browser view, for the freeze-frame the pane shows while
  *  the view is hidden behind an overlay. Lossy and half-size on purpose: it is
  *  a still under a dialog, and it travels every time a menu opens. */

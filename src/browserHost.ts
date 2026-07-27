@@ -80,8 +80,8 @@ interface Entry {
   capturing: boolean;
   /** The page moved on and the held frame is known to be wrong. */
   dirty: boolean;
-  /** Nothing worth capturing until the page has arrived. */
-  loading: boolean;
+  /** Frames taken since this view opened — only used to log the first one. */
+  frames: number;
   told: PaneView | null;
 }
 
@@ -91,6 +91,29 @@ let suppressed = 0;
 let observer: MutationObserver | null = null;
 let sizes: ResizeObserver | null = null;
 let scheduled = 0;
+
+/** The embedded browser is a native view nobody can inspect from devtools, and
+ *  every one of its failures is invisible by construction: a capture that never
+ *  runs, a hide that never lands, and a working page all look identical from
+ *  the outside. So each hop says what it did, into the app log where a user can
+ *  read it back. Kept terse — routine captures are DEV-only, everything that
+ *  changes what is on screen is always recorded. */
+function log(line: string) {
+  void ipc.jsLog("info", `browser: ${line}`);
+}
+
+/** Tab ids are uuids; the first chunk is plenty to follow one through a log. */
+function short(tabId: string): string {
+  return tabId.slice(0, 8);
+}
+
+/** Enough of an occluder to recognise it in a log line. */
+function describe(c: Candidate): string {
+  const el = c.el;
+  if (!el) return "?";
+  const cls = typeof el.className === "string" ? el.className.trim().split(/\s+/)[0] : "";
+  return `${el.tagName.toLowerCase()}${cls ? `.${cls}` : ""}`;
+}
 
 /** Cmd +/- scales CSS pixels against the window's points (see zoom.ts), and a
  *  webview is positioned in points. applyZoom stamps the level here. */
@@ -156,6 +179,7 @@ function occludersOver(host: Element, view: RectLike): Candidate[] {
           rect,
           style: readStyle(child),
           painted: child.matches(PAINTED_OVERLAY_SELECTOR),
+          el: child,
         };
         if (occludes(view, candidate)) {
           found.push(candidate);
@@ -199,12 +223,18 @@ function apply() {
         .catch(() => {});
     }
     // Only pay for the walk when this view would otherwise be on screen.
-    const clear =
-      !!host && !!rect && !!bounds && showable(bounds) && occludersOver(host, rect).length === 0;
+    const over = host && rect && bounds && showable(bounds) ? occludersOver(host, rect) : null;
+    const clear = !!over && over.length === 0;
+    const cover = over && over.length > 0 ? describe(over[0]) : "offscreen";
     const visible = e.wanted && suppressed === 0 && clear;
     if (visible !== e.shown) {
       e.shown = visible;
-      void ipc.browserSetVisible(tabId, visible).catch(() => {});
+      const at = Date.now();
+      log(`${visible ? "show" : "hide"} issued tab=${short(tabId)}${visible ? "" : ` by=${cover}`}`);
+      void ipc.browserSetVisible(tabId, visible).then(
+        () => log(`${visible ? "show" : "hide"} acked tab=${short(tabId)} in=${Date.now() - at}ms`),
+        (err) => log(`${visible ? "show" : "hide"} FAILED tab=${short(tabId)} ${err}`),
+      );
     }
     // Take the picture while the view is still up. A hidden WKWebView
     // snapshots to nothing, so the instant the frame is needed is the instant
@@ -213,7 +243,6 @@ function apply() {
       shouldCapture({
         native: true,
         shown: e.shown === true,
-        loading: e.loading,
         lastCaptureAt: e.lastCaptureAt,
         now: Date.now(),
         dirty: e.dirty,
@@ -230,19 +259,30 @@ function apply() {
 function capture(tabId: string, e: Entry) {
   e.capturing = true;
   e.lastCaptureAt = Date.now();
+  const at = Date.now();
   void ipc.browserFrame(tabId).then(
     (base64) => {
       e.capturing = false;
-      if (!base64) return;
+      if (!base64) {
+        log(`capture EMPTY tab=${short(tabId)}`);
+        return;
+      }
       e.dirty = false;
       e.frame = frameSrc(base64);
+      // Routine refreshes are noise; the first frame is the one that says the
+      // whole pipeline works, so it is always reported.
+      if (e.frames++ === 0 || import.meta.env.DEV) {
+        log(`capture ok tab=${short(tabId)} kb=${Math.round(base64.length / 1024)} in=${Date.now() - at}ms n=${e.frames}`);
+      }
       publish(tabId, e);
     },
-    () => {
+    (err) => {
       // A view mid-navigation or already gone has no frame to give. Keeping
-      // the previous one is exactly right — it is still the better picture of
-      // this page than nothing is.
+      // the previous one is right — it is still a better picture of this page
+      // than nothing is. But a capture that ALWAYS fails is the difference
+      // between a frozen page and a blank one, so it is never silent.
       e.capturing = false;
+      log(`capture FAILED tab=${short(tabId)} ${err}`);
     },
   );
 }
@@ -263,21 +303,27 @@ function publish(tabId: string, e: Entry) {
     frame: e.frame,
   };
   if (e.told && e.told.state === next.state && e.told.frame === next.frame) return;
+  const was = e.told?.state;
   e.told = next;
+  if (was !== next.state) {
+    log(`pane tab=${short(tabId)} ${was ?? "-"} -> ${next.state} frame=${next.frame ? "yes" : "no"}`);
+  }
   const cbs = paneListeners.get(tabId);
   if (cbs) for (const cb of cbs) cb(next);
 }
 
-/** The page navigated, or an agent acted on it: whatever frame is held is of
- *  the wrong page now. */
+/** The page navigated: whatever frame is held is of the page being left.
+ *
+ *  `loading` only decides whether to throw that frame away — it never gates
+ *  capturing. An event missed here costs one stale frame, not the feature. */
 export function browserViewChanged(tabId: string, loading?: boolean) {
   const e = views.get(tabId);
   if (!e) return;
   e.dirty = true;
-  if (loading !== undefined) e.loading = loading;
-  // A new page's old frame is worse than none — it would freeze the page the
-  // user just navigated away from.
-  if (loading) e.frame = null;
+  if (loading) {
+    e.frame = null;
+    log(`nav tab=${short(tabId)} loading, frame dropped`);
+  }
   schedule();
 }
 
@@ -311,8 +357,54 @@ export function useBrowserPane(tabId: string, active: boolean): PaneView {
  *  occluded, and a dialog opened by a shortcut or an agent is exactly when
  *  that happens. */
 function schedule() {
+  sweepUntil = Math.max(sweepUntil, Date.now() + SWEEP_MS);
+  startSweep();
+  tick();
+}
+
+/** One debounced pass, without arming a sweep — what the sweep and the
+ *  heartbeat themselves use, so neither can keep the other alive forever. */
+function tick() {
   if (scheduled) return;
   scheduled = window.setTimeout(apply, 16);
+}
+
+/** How long to keep re-checking after the DOM last changed.
+ *
+ *  This is the other half of the bug where the app's side panel opened straight
+ *  over the page. A panel arrives by adding a class, which fires the observer
+ *  once — and then SLIDES in over 340ms under a CSS transition, which fires
+ *  nothing at all. Sampling once, 16ms after the class change, catches the
+ *  panel while it is still off to the left of the browser and concludes
+ *  correctly that nothing overlaps. Nothing ever asks again, and the panel
+ *  finishes its slide on top of a page that was never told to move.
+ *
+ *  Whether that was visible came down to luck: a panel whose contents load
+ *  asynchronously (Pull requests) mutates the DOM again mid-slide and gets
+ *  re-checked by accident, while one that renders in a single pass (Team)
+ *  never does. Hence a sweep rather than a sample — long enough to outlast
+ *  --peek-in, which is the slowest transition in the app. */
+const SWEEP_MS = 600;
+const SWEEP_STEP_MS = 60;
+/** A page nobody is touching still has to be captured, and the DOM is silent
+ *  while it is being read. Slow, because all it guards against is a frame going
+ *  stale — and it only runs while a view is actually on screen. */
+const HEARTBEAT_MS = 1000;
+
+let sweepUntil = 0;
+let sweeping = 0;
+let heartbeat = 0;
+
+function startSweep() {
+  if (sweeping) return;
+  sweeping = window.setInterval(() => {
+    if (Date.now() >= sweepUntil) {
+      window.clearInterval(sweeping);
+      sweeping = 0;
+      return;
+    }
+    tick();
+  }, SWEEP_STEP_MS);
 }
 
 /** The observers run only while a browser view wants to be on screen, which is
@@ -330,6 +422,10 @@ function watch(need: boolean) {
     sizes.observe(document.documentElement);
     window.addEventListener("resize", schedule);
     window.addEventListener("scroll", schedule, true);
+    // A transition moves an element every frame while mutating nothing. These
+    // bubble, so one listener covers every animated surface in the app.
+    for (const ev of MOTION) window.addEventListener(ev, schedule, true);
+    heartbeat = window.setInterval(tick, HEARTBEAT_MS);
   } else if (!need && observer) {
     observer.disconnect();
     observer = null;
@@ -337,8 +433,13 @@ function watch(need: boolean) {
     sizes = null;
     window.removeEventListener("resize", schedule);
     window.removeEventListener("scroll", schedule, true);
+    for (const ev of MOTION) window.removeEventListener(ev, schedule, true);
+    window.clearInterval(heartbeat);
+    heartbeat = 0;
   }
 }
+
+const MOTION = ["transitionrun", "transitionstart", "transitionend", "animationstart", "animationend"];
 
 export function registerBrowserView(tabId: string, host: () => Element | null) {
   views.set(tabId, {
@@ -350,7 +451,7 @@ export function registerBrowserView(tabId: string, host: () => Element | null) {
     lastCaptureAt: 0,
     capturing: false,
     dirty: true,
-    loading: true,
+    frames: 0,
     told: null,
   });
 }
