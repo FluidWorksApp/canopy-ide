@@ -105,6 +105,30 @@ export function FailIcon({ size = 14, className }: IconProps) {
   );
 }
 
+/** Wrench + play: the rail's execution tab. A wrench on its own reads as
+ *  settings, and a play triangle on its own reads as "run the thing in front" —
+ *  together they say run *and* manage, which is what the panel does.
+ *
+ *  The wrench is scaled toward the lower-left (its stroke widened to compensate,
+ *  or it would read thinner than its neighbours) and the play mark sits bottom
+ *  right, in the one corner both the wrench's head and its handle leave empty.
+ *  Not the top right: the rail's running-count badge lands there and would eat
+ *  the play mark exactly when servers are up. */
+export function ServersIcon({ size = 18, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <g transform="translate(-1.3 4.86) scale(0.78)" strokeWidth={2.5}>
+        <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+      </g>
+      <path
+        d="M17.4 15.4v5.6a.55.55 0 0 0 .84.47l4.6-2.8a.55.55 0 0 0 0-.94l-4.6-2.8a.55.55 0 0 0-.84.47Z"
+        fill="currentColor"
+        stroke="none"
+      />
+    </svg>
+  );
+}
+
 export function TerminalIcon({ size = 14, className }: IconProps) {
   return (
     <svg {...svgProps(size, className)}>

@@ -6,6 +6,7 @@ import {
   GitBranchIcon,
   IssueIcon,
   PullRequestIcon,
+  ServersIcon,
   SettingsIcon,
   SidebarIcon,
   TasksIcon,
@@ -19,14 +20,24 @@ interface RailTab {
   title: string;
 }
 
-/** The rail in three groups: what you're editing, what's changing and being
- *  reviewed, and who is doing the work. Seven icons in one column read as one
- *  undifferentiated list — the grouping is what makes the rail scannable at
- *  icon width, where there is no room for headings. */
+/** The rail in four groups: what you're editing, what you're running, what's
+ *  changing and being reviewed, and who is doing the work. Icons in one column
+ *  read as one undifferentiated list — the grouping is what makes the rail
+ *  scannable at icon width, where there is no room for headings. */
 const RAIL_GROUPS: { name: string; tabs: RailTab[] }[] = [
   {
     name: "Files & Assets",
     tabs: [{ key: "files", Icon: FilesIcon, title: "Components & files" }],
+  },
+  {
+    name: "Execution",
+    tabs: [
+      {
+        key: "servers",
+        Icon: ServersIcon,
+        title: "Servers — every component you can run, start and manage",
+      },
+    ],
   },
   {
     name: "Source control & Review",
@@ -54,6 +65,9 @@ interface ActivityRailProps {
   /** Latched open by a click or Cmd+B, so it outlives the pointer. */
   pinned: boolean;
   changeBadge: number;
+  /** Servers currently up. A count rather than a dot: "is anything running"
+   *  and "did I leave four of them running" are different questions. */
+  serversBadge: number;
   /** PRs waiting on this user, across every open project. */
   prsBadge: number;
   tasksBadge: number;
@@ -78,6 +92,7 @@ function ActivityRailImpl({
   open,
   pinned,
   changeBadge,
+  serversBadge,
   prsBadge,
   tasksBadge,
   pendingCount,
@@ -123,6 +138,11 @@ function ActivityRailImpl({
               <t.Icon size={22} />
               {t.key === "changes" && changeBadge > 0 && (
                 <span className="rail-badge">{Math.min(changeBadge, 99)}</span>
+              )}
+              {t.key === "servers" && serversBadge > 0 && (
+                <span className="rail-badge rail-badge-live">
+                  {Math.min(serversBadge, 99)}
+                </span>
               )}
               {t.key === "prs" && prsBadge > 0 && (
                 <span className="rail-badge rail-badge-urgent">{Math.min(prsBadge, 99)}</span>

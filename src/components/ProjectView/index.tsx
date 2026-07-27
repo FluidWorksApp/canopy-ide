@@ -114,6 +114,8 @@ import { Palette, type PaletteMode } from "../Palette";
 import { GitPanel } from "../GitPanel";
 import { TicketsPanel, type AgentTarget } from "../TicketsPanel";
 import { PrsPanel } from "../PrsPanel";
+import { ServersPanel } from "../ServersPanel";
+import { groupServers, runningCount, type ServerEntry } from "../../servers";
 import { needsYouCount } from "../../prInbox";
 import { usePrWatch } from "../../usePrWatch";
 import { TicketView } from "../TicketView";
@@ -3934,6 +3936,28 @@ export const ProjectView = memo(function ProjectView({
     })
     .sort((a, b) => Number(b.run) - Number(a.run));
 
+  // The Servers panel's rows: components that have something to execute, joined
+  // to the run tabs and the ports they turned out to be listening on. Memoized
+  // on its three inputs — the stats poller ticks every 2s and this must not
+  // rebuild the panel's rows on ticks that changed no port.
+  const serverGroups = useMemo(
+    () =>
+      groupServers(components, runTabs, (ptyId) =>
+        ptyId == null ? [] : (projectStats.find((s) => s.id === ptyId)?.ports ?? []),
+      ),
+    [components, runTabs, projectStats],
+  );
+  const serversRunning = runningCount(serverGroups);
+
+  /** Start a configured run command, from the Servers panel. Same call the
+   *  files panel's run rows make, so both surfaces drive one tab. */
+  const startServer = useCallback(
+    (path: string, entry: ServerEntry) => {
+      addTerminal(path, entry.command, entry.name, "▶", true);
+    },
+    [addTerminal],
+  );
+
   // Mirror this project's live shape — components, run servers, agents — into
   // the Rust context bridge, where `canopy-hook --mcp` serves it to agents as
   // the canopy_* tools. Runs every render, but the stringify diff means a
@@ -5501,6 +5525,18 @@ export const ProjectView = memo(function ProjectView({
           ))}
         </div>
       ))}
+      {sidePane("servers", () => (
+        <ServersPanel
+          groups={serverGroups}
+          onStart={startServer}
+          onRestart={restartRun}
+          onStop={(ptyId) => void ipc.ptyKill(ptyId)}
+          onOpenRun={setActiveTabId}
+          onOpenPreview={(url) => openPreview(url)}
+          onNewTerminal={(path) => addTerminal(path)}
+          onEdit={onEdit}
+        />
+      ))}
       {sidePane("git", () => (
         <GitPanel
           visible={sideTab === "git" && visible && sideOpen}
@@ -5724,6 +5760,7 @@ export const ProjectView = memo(function ProjectView({
             open={sideOpen}
             pinned={pinned}
             changeBadge={changeCount + collabEditedCount}
+            serversBadge={serversRunning}
             prsBadge={prsBadge}
             tasksBadge={runningMicro.length}
             pendingCount={pending.length}
