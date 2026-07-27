@@ -333,6 +333,11 @@ pub async fn git_head_content(
 }
 
 fn store_path() -> Result<std::path::PathBuf, String> {
+    // A selftest run gets a disposable workspace: it must not open the user's
+    // projects to test itself, nor leave its scratch one behind. See selftest.rs.
+    if let Some(dir) = crate::selftest::store_dir() {
+        return Ok(dir.join("projects.json"));
+    }
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .map_err(|_| "no home dir".to_string())?;

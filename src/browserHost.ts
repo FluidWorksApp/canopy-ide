@@ -54,6 +54,14 @@ import {
   type Candidate,
   type OccluderStyle,
 } from "./browserOcclusion";
+import {
+  describeBrowserSignal,
+  emitBrowserSignal,
+  onBrowserSignal,
+  provideViewSnapshots,
+  type ViewSnapshot,
+} from "./browserSignals";
+import { isRegisteredOverlay } from "./overlaySurfaces";
 import * as ipc from "./ipc";
 import { getSettings } from "./settings";
 
@@ -80,9 +88,17 @@ interface Entry {
   capturing: boolean;
   /** The page moved on and the held frame is known to be wrong. */
   dirty: boolean;
-  /** Frames taken since this view opened — only used to log the first one. */
-  frames: number;
   told: PaneView | null;
+  /** Observation only, for the watchdog and the selftest — never read by any
+   *  decision here. When a frame last arrived, when the page last moved, and
+   *  whether it is still arriving.
+   *
+   *  `loading` in particular is reported and never acted on: gating capture on
+   *  it was the bug that made a view stop photographing itself forever (see
+   *  shouldCapture), so it stays a fact about the page rather than a switch. */
+  lastCaptureOkAt: number;
+  lastNavAt: number;
+  loading: boolean;
 }
 
 const views = new Map<string, Entry>();
@@ -91,29 +107,36 @@ let suppressed = 0;
 let observer: MutationObserver | null = null;
 let sizes: ResizeObserver | null = null;
 let scheduled = 0;
+/** Pairs a show/hide with its acknowledgement, so a call that never lands can
+ *  be told apart from one that landed slowly. */
+let visibilitySeq = 0;
 
-/** The embedded browser is a native view nobody can inspect from devtools, and
- *  every one of its failures is invisible by construction: a capture that never
- *  runs, a hide that never lands, and a working page all look identical from
- *  the outside. So each hop says what it did, into the app log where a user can
- *  read it back. Kept terse — routine captures are DEV-only, everything that
- *  changes what is on screen is always recorded. */
-function log(line: string) {
-  void ipc.jsLog("info", `browser: ${line}`);
-}
-
-/** Tab ids are uuids; the first chunk is plenty to follow one through a log. */
-function short(tabId: string): string {
-  return tabId.slice(0, 8);
-}
-
-/** Enough of an occluder to recognise it in a log line. */
+/** Enough of an occluder to recognise it in a log line or a violation. */
 function describe(c: Candidate): string {
   const el = c.el;
   if (!el) return "?";
   const cls = typeof el.className === "string" ? el.className.trim().split(/\s+/)[0] : "";
   return `${el.tagName.toLowerCase()}${cls ? `.${cls}` : ""}`;
 }
+
+/** Every hop the host takes goes into the app log, always — the embedded
+ *  browser is a native view nobody can inspect from devtools, and a capture
+ *  that never runs, a hide that never lands and a working page all look
+ *  identical from outside. The signals are the record; this is the copy a user
+ *  can read back. Kept terse: routine capture refreshes are DEV-only, and
+ *  anything that changes what is on screen is never silent. */
+const logged = new Map<string, number>();
+onBrowserSignal((s) => {
+  if (s.t === "capture" && s.result === "ok") {
+    // The first frame is the one that says the whole pipeline works, so it is
+    // always reported; the ones after it are noise outside development.
+    const n = (logged.get(s.tabId) ?? 0) + 1;
+    logged.set(s.tabId, n);
+    if (n > 1 && !import.meta.env.DEV) return;
+  }
+  if (s.t === "forget") logged.delete(s.tabId);
+  void ipc.jsLog("info", `browser: ${describeBrowserSignal(s)}`);
+});
 
 /** Cmd +/- scales CSS pixels against the window's points (see zoom.ts), and a
  *  webview is positioned in points. applyZoom stamps the level here. */
@@ -155,6 +178,23 @@ function warnBlindSpot(el: Element) {
   );
 }
 
+/** A surface that occludes correctly but that nobody registered.
+ *
+ *  Structure caught it, so the browser does get out of its way — but no test
+ *  opens it, which is how a surface ends up shipping untested. Covered or
+ *  loud; there is no third state. */
+function warnUnregistered(el: Element) {
+  const key = `reg:${el.className || el.tagName}`;
+  if (warned.has(key)) return;
+  warned.add(key);
+  console.warn(
+    "[browserHost] %o covers the embedded browser but is not in OVERLAY_SURFACES " +
+      "(overlaySurfaces.ts), so the browser selftest never opens it. Add an entry " +
+      "with its selector and, if it can be opened from code, how — otherwise say why not.",
+    el,
+  );
+}
+
 /** Everything painted over `view`, found by structure rather than by name. */
 function occludersOver(host: Element, view: RectLike): Candidate[] {
   const found: Candidate[] = [];
@@ -184,6 +224,7 @@ function occludersOver(host: Element, view: RectLike): Candidate[] {
         if (occludes(view, candidate)) {
           found.push(candidate);
           covered = true;
+          if (import.meta.env.DEV && !isRegisteredOverlay(child)) warnUnregistered(child);
         } else if (
           import.meta.env.DEV &&
           !candidate.painted &&
@@ -218,6 +259,7 @@ function apply() {
     const bounds = rect ? webviewBounds(rect, viewport, zoom) : null;
     if (bounds && !sameBounds(bounds, e.bounds)) {
       e.bounds = bounds;
+      emitBrowserSignal({ t: "bounds", at: Date.now(), tabId, bounds });
       void ipc
         .browserSetBounds(tabId, bounds.x, bounds.y, bounds.width, bounds.height)
         .catch(() => {});
@@ -225,15 +267,39 @@ function apply() {
     // Only pay for the walk when this view would otherwise be on screen.
     const over = host && rect && bounds && showable(bounds) ? occludersOver(host, rect) : null;
     const clear = !!over && over.length === 0;
-    const cover = over && over.length > 0 ? describe(over[0]) : "offscreen";
     const visible = e.wanted && suppressed === 0 && clear;
     if (visible !== e.shown) {
       e.shown = visible;
+      const seq = ++visibilitySeq;
       const at = Date.now();
-      log(`${visible ? "show" : "hide"} issued tab=${short(tabId)}${visible ? "" : ` by=${cover}`}`);
+      emitBrowserSignal({
+        t: "visibility",
+        at,
+        tabId,
+        seq,
+        visible,
+        by: over && over.length > 0 ? describe(over[0]) : over ? null : "offscreen",
+      });
       void ipc.browserSetVisible(tabId, visible).then(
-        () => log(`${visible ? "show" : "hide"} acked tab=${short(tabId)} in=${Date.now() - at}ms`),
-        (err) => log(`${visible ? "show" : "hide"} FAILED tab=${short(tabId)} ${err}`),
+        () =>
+          emitBrowserSignal({
+            t: "visibility-ack",
+            at: Date.now(),
+            tabId,
+            seq,
+            visible,
+            ok: true,
+          }),
+        (err) =>
+          emitBrowserSignal({
+            t: "visibility-ack",
+            at: Date.now(),
+            tabId,
+            seq,
+            visible,
+            ok: false,
+            error: String(err),
+          }),
       );
     }
     // Take the picture while the view is still up. A hidden WKWebView
@@ -259,21 +325,19 @@ function apply() {
 function capture(tabId: string, e: Entry) {
   e.capturing = true;
   e.lastCaptureAt = Date.now();
-  const at = Date.now();
+  const at = e.lastCaptureAt;
   void ipc.browserFrame(tabId).then(
     (base64) => {
       e.capturing = false;
+      const now = Date.now();
       if (!base64) {
-        log(`capture EMPTY tab=${short(tabId)}`);
+        emitBrowserSignal({ t: "capture", at: now, tabId, result: "empty", ms: now - at });
         return;
       }
       e.dirty = false;
       e.frame = frameSrc(base64);
-      // Routine refreshes are noise; the first frame is the one that says the
-      // whole pipeline works, so it is always reported.
-      if (e.frames++ === 0 || import.meta.env.DEV) {
-        log(`capture ok tab=${short(tabId)} kb=${Math.round(base64.length / 1024)} in=${Date.now() - at}ms n=${e.frames}`);
-      }
+      e.lastCaptureOkAt = now;
+      emitBrowserSignal({ t: "capture", at: now, tabId, result: "ok", ms: now - at });
       publish(tabId, e);
     },
     (err) => {
@@ -282,7 +346,15 @@ function capture(tabId: string, e: Entry) {
       // than nothing is. But a capture that ALWAYS fails is the difference
       // between a frozen page and a blank one, so it is never silent.
       e.capturing = false;
-      log(`capture FAILED tab=${short(tabId)} ${err}`);
+      const now = Date.now();
+      emitBrowserSignal({
+        t: "capture",
+        at: now,
+        tabId,
+        result: "failed",
+        ms: now - at,
+        error: String(err),
+      });
     },
   );
 }
@@ -306,7 +378,13 @@ function publish(tabId: string, e: Entry) {
   const was = e.told?.state;
   e.told = next;
   if (was !== next.state) {
-    log(`pane tab=${short(tabId)} ${was ?? "-"} -> ${next.state} frame=${next.frame ? "yes" : "no"}`);
+    emitBrowserSignal({
+      t: "pane",
+      at: Date.now(),
+      tabId,
+      state: next.state,
+      frame: !!next.frame,
+    });
   }
   const cbs = paneListeners.get(tabId);
   if (cbs) for (const cb of cbs) cb(next);
@@ -320,10 +398,12 @@ export function browserViewChanged(tabId: string, loading?: boolean) {
   const e = views.get(tabId);
   if (!e) return;
   e.dirty = true;
-  if (loading) {
-    e.frame = null;
-    log(`nav tab=${short(tabId)} loading, frame dropped`);
-  }
+  e.lastNavAt = Date.now();
+  emitBrowserSignal({ t: "nav", at: e.lastNavAt, tabId, loading: !!loading });
+  if (loading !== undefined) e.loading = loading;
+  // A new page's old frame is worse than none — it would freeze the page the
+  // user just navigated away from.
+  if (loading) e.frame = null;
   schedule();
 }
 
@@ -451,15 +531,43 @@ export function registerBrowserView(tabId: string, host: () => Element | null) {
     lastCaptureAt: 0,
     capturing: false,
     dirty: true,
-    frames: 0,
     told: null,
+    lastCaptureOkAt: 0,
+    lastNavAt: Date.now(),
+    loading: false,
   });
+  emitBrowserSignal({ t: "register", at: Date.now(), tabId });
 }
 
 export function forgetBrowserView(tabId: string) {
   views.delete(tabId);
+  emitBrowserSignal({ t: "forget", at: Date.now(), tabId });
   schedule();
 }
+
+/** What every registered view believes about itself, for anything watching.
+ *
+ *  A reading, not a recalculation: whoever is checking this layer has to be
+ *  able to compare what the host thinks against what the DOM says, and it can
+ *  only do that if the host's belief is legible from outside. */
+provideViewSnapshots((): ViewSnapshot[] =>
+  [...views.entries()].map(([tabId, e]) => {
+    const host = e.host();
+    return {
+      tabId,
+      wanted: e.wanted,
+      shown: e.shown,
+      bounds: e.bounds,
+      host,
+      hostRect: host ? host.getBoundingClientRect() : null,
+      zoom: currentZoom(),
+      hasFrame: !!e.frame,
+      lastCaptureOkAt: e.lastCaptureOkAt,
+      loading: e.loading,
+      lastNavAt: e.lastNavAt,
+    };
+  }),
+);
 
 /** The page navigated, or an agent acted on it, so any frame in hand is of a
  *  page that no longer exists. */

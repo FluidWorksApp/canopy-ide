@@ -75,8 +75,8 @@ export interface Candidate {
   style: OccluderStyle;
   /** Matched PAINTED_OVERLAY_SELECTOR — a surface even if it takes no clicks. */
   painted?: boolean;
-  /** Only so a log line can name what covered the page. Never read by the
-   *  decision, which is why this stays testable without a DOM. */
+  /** Only so a log line or a violation can name what covered the page. Never
+   *  read by the decision, which is why this stays testable without a DOM. */
   el?: Element;
 }
 

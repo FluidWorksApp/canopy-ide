@@ -21,6 +21,7 @@ mod prwatch;
 mod pty;
 mod punch;
 mod relay;
+mod selftest;
 mod snapshot;
 mod tunnel;
 mod winproc;
@@ -304,6 +305,7 @@ pub fn run() {
         .manage(tunnel::TunnelManager::default())
         .manage(prwatch::PrWatcher::default())
         .manage(dictation::DictationManager::default())
+        .manage(selftest::SelftestState::default())
         .manage(cli::pending_from_env())
         .setup(|app| {
             // ONNX Runtime is loaded dynamically on every platform (Cargo.toml
@@ -350,6 +352,8 @@ pub fn run() {
             agents::start_monitor(app.handle().clone());
             agents::start_hook_bridge(app.handle().clone());
             context::start(app.handle().clone());
+            // Only does anything when this launch asked to test itself.
+            selftest::start(app.handle());
             let menu = build_menu(app.handle())?;
             app.set_menu(menu)?;
             app.on_menu_event(|app, event| {
@@ -366,6 +370,8 @@ pub fn run() {
             crash::file_crash_issue,
             cli::cli_take_pending_open,
             cli::cli_install_shim,
+            selftest::selftest_config,
+            selftest::selftest_finish,
             pty::pty_spawn,
             pty::pty_spawn_detached,
             pty::pty_output,

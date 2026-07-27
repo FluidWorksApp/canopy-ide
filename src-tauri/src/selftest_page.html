@@ -1,0 +1,33 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Canopy browser selftest</title>
+<style>
+  /* Deterministic on purpose. The pixel checks sample this page's colours out
+     of the freeze-frame the app paints in the pane, so nothing here may move,
+     animate, load from the network, or depend on a font that might be missing. */
+  html,
+  body {
+    margin: 0;
+    height: 100%;
+    background: #0f8a5f;
+    color: #ffffff;
+    font: 600 42px/1.2 -apple-system, system-ui, sans-serif;
+  }
+  main {
+    height: 100%;
+    display: grid;
+    place-items: center;
+    background: repeating-linear-gradient(
+      45deg,
+      #0f8a5f 0 60px,
+      #0b6f4c 60px 120px
+    );
+  }
+  p {
+    margin: 0;
+    padding: 18px 28px;
+    background: #06301f;
+    border-radius: 12px;
+  }
+</style>
+<main><p id="mark">CANOPY SELFTEST</p></main>

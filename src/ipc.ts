@@ -257,15 +257,33 @@ export const webviewSnapshot = (
   maxWidth?: number,
 ) => invoke<string>("webview_snapshot", { x, y, width, height, maxWidth });
 
+/** A line into the app's own log, so a failure in something devtools can't see
+ *  — a native child webview — leaves a trace a user can read back. */
+export const jsLog = (level: string, message: string) =>
+  invoke<void>("js_log", { level, message }).catch(() => {});
+
+/** The scripted browser scenario, when the app was launched to test itself
+ *  (`canopy --selftest=browser`). Null on every ordinary launch. */
+export interface SelftestConfig {
+  scenario: string;
+  /** A page the app serves itself, so nothing depends on the network. */
+  url: string;
+  /** A throwaway directory to open as the project the scenario runs in. */
+  projectDir: string;
+  reportPath: string;
+}
+
+export const selftestConfig = () =>
+  invoke<SelftestConfig | null>("selftest_config").catch(() => null);
+
+/** Hand back the report and end the process — 0 if every step passed. */
+export const selftestFinish = (report: unknown) =>
+  invoke<void>("selftest_finish", { report }).catch(() => {});
+
 /** PNG (base64) of one browser view — the whole child webview, no cropping,
  *  because it is its own view. */
 export const browserSnapshot = (tabId: string, maxWidth?: number) =>
   invoke<string>("browser_snapshot", { tabId, maxWidth });
-
-/** A line into the app's own log, so a failure in something the devtools can't
- *  see (a native child webview) leaves a trace a user can read back. */
-export const jsLog = (level: string, message: string) =>
-  invoke<void>("js_log", { level, message }).catch(() => {});
 
 /** JPEG (base64) of a browser view, for the freeze-frame the pane shows while
  *  the view is hidden behind an overlay. Lossy and half-size on purpose: it is
