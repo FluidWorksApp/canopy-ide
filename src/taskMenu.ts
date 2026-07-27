@@ -62,6 +62,18 @@ export function taskGroups(o: {
   };
 }
 
+/** Is there an actual task to offer, beyond the two composers?
+ *
+ *  A control whose only job is to list tasks should not exist when the list is
+ *  empty — a caret that opens "New Task… / One-off task…" is a caret promising
+ *  a menu and delivering the two things the surface could already do. */
+export function hasTasksToList(o: {
+  saved?: CustomMicroTask[];
+  runnable?: TaskChoice[];
+}): boolean {
+  return (o.saved?.length ?? 0) > 0 || (o.runnable ?? []).some((r) => r.run);
+}
+
 export interface TaskMenuOptions {
   /** Opening words of the create form's brief — what the user clicked, said
    *  in the agent's terms ("On branch x: ", "In `/path`: "). */
@@ -76,7 +88,11 @@ export interface TaskMenuOptions {
   onRunSaved: (task: CustomMicroTask) => void;
 }
 
-export function taskMenuItem(o: TaskMenuOptions): MenuItem {
+/** The rows themselves: write one, run one unsaved, then what already exists.
+ *  Split out from `taskMenuItem` so a surface that IS the task menu — the Run
+ *  task caret on a diff — shows them directly instead of behind another
+ *  "Tasks ▸" hop into a submenu of one. */
+export function taskMenuItems(o: TaskMenuOptions): MenuItem[] {
   const { custom, builtIn } = taskGroups({
     builtIns: o.runnable,
     saved: o.saved,
@@ -95,8 +111,17 @@ export function taskMenuItem(o: TaskMenuOptions): MenuItem {
   if (custom.length > 0) {
     items.push({ separator: true, label: CUSTOM_HEADING }, ...custom.map(row));
   }
-  if (builtIn.length > 0) {
+  // Listing an unrunnable built-in earns its place next to runnable ones: it
+  // says the feature exists and where to find it. A section where NONE of them
+  // can run says only "here are eight things you cannot do", which is worse
+  // than not offering the section at all — on a diff, every PR task is in that
+  // state, and the menu was a wall of grey.
+  if (builtIn.some((b) => b.run)) {
     items.push({ separator: true, label: BUILT_IN_HEADING }, ...builtIn.map(row));
   }
-  return { label: "Tasks", submenu: items };
+  return items;
+}
+
+export function taskMenuItem(o: TaskMenuOptions): MenuItem {
+  return { label: "Tasks", submenu: taskMenuItems(o) };
 }

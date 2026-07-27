@@ -55,7 +55,9 @@ import {
   type OccluderStyle,
 } from "./browserOcclusion";
 import {
+  describeBrowserSignal,
   emitBrowserSignal,
+  onBrowserSignal,
   provideViewSnapshots,
   type ViewSnapshot,
 } from "./browserSignals";
@@ -86,13 +88,17 @@ interface Entry {
   capturing: boolean;
   /** The page moved on and the held frame is known to be wrong. */
   dirty: boolean;
-  /** Nothing worth capturing until the page has arrived. */
-  loading: boolean;
   told: PaneView | null;
   /** Observation only, for the watchdog and the selftest — never read by any
-   *  decision here. When a frame last arrived, and when the page last moved. */
+   *  decision here. When a frame last arrived, when the page last moved, and
+   *  whether it is still arriving.
+   *
+   *  `loading` in particular is reported and never acted on: gating capture on
+   *  it was the bug that made a view stop photographing itself forever (see
+   *  shouldCapture), so it stays a fact about the page rather than a switch. */
   lastCaptureOkAt: number;
   lastNavAt: number;
+  loading: boolean;
 }
 
 const views = new Map<string, Entry>();
@@ -112,6 +118,25 @@ function describe(c: Candidate): string {
   const cls = typeof el.className === "string" ? el.className.trim().split(/\s+/)[0] : "";
   return `${el.tagName.toLowerCase()}${cls ? `.${cls}` : ""}`;
 }
+
+/** Every hop the host takes goes into the app log, always — the embedded
+ *  browser is a native view nobody can inspect from devtools, and a capture
+ *  that never runs, a hide that never lands and a working page all look
+ *  identical from outside. The signals are the record; this is the copy a user
+ *  can read back. Kept terse: routine capture refreshes are DEV-only, and
+ *  anything that changes what is on screen is never silent. */
+const logged = new Map<string, number>();
+onBrowserSignal((s) => {
+  if (s.t === "capture" && s.result === "ok") {
+    // The first frame is the one that says the whole pipeline works, so it is
+    // always reported; the ones after it are noise outside development.
+    const n = (logged.get(s.tabId) ?? 0) + 1;
+    logged.set(s.tabId, n);
+    if (n > 1 && !import.meta.env.DEV) return;
+  }
+  if (s.t === "forget") logged.delete(s.tabId);
+  void ipc.jsLog("info", `browser: ${describeBrowserSignal(s)}`);
+});
 
 /** Cmd +/- scales CSS pixels against the window's points (see zoom.ts), and a
  *  webview is positioned in points. applyZoom stamps the level here. */
@@ -284,7 +309,6 @@ function apply() {
       shouldCapture({
         native: true,
         shown: e.shown === true,
-        loading: e.loading,
         lastCaptureAt: e.lastCaptureAt,
         now: Date.now(),
         dirty: e.dirty,
@@ -318,8 +342,9 @@ function capture(tabId: string, e: Entry) {
     },
     (err) => {
       // A view mid-navigation or already gone has no frame to give. Keeping
-      // the previous one is exactly right — it is still the better picture of
-      // this page than nothing is.
+      // the previous one is right — it is still a better picture of this page
+      // than nothing is. But a capture that ALWAYS fails is the difference
+      // between a frozen page and a blank one, so it is never silent.
       e.capturing = false;
       const now = Date.now();
       emitBrowserSignal({
@@ -365,8 +390,10 @@ function publish(tabId: string, e: Entry) {
   if (cbs) for (const cb of cbs) cb(next);
 }
 
-/** The page navigated, or an agent acted on it: whatever frame is held is of
- *  the wrong page now. */
+/** The page navigated: whatever frame is held is of the page being left.
+ *
+ *  `loading` only decides whether to throw that frame away — it never gates
+ *  capturing. An event missed here costs one stale frame, not the feature. */
 export function browserViewChanged(tabId: string, loading?: boolean) {
   const e = views.get(tabId);
   if (!e) return;
@@ -410,8 +437,54 @@ export function useBrowserPane(tabId: string, active: boolean): PaneView {
  *  occluded, and a dialog opened by a shortcut or an agent is exactly when
  *  that happens. */
 function schedule() {
+  sweepUntil = Math.max(sweepUntil, Date.now() + SWEEP_MS);
+  startSweep();
+  tick();
+}
+
+/** One debounced pass, without arming a sweep — what the sweep and the
+ *  heartbeat themselves use, so neither can keep the other alive forever. */
+function tick() {
   if (scheduled) return;
   scheduled = window.setTimeout(apply, 16);
+}
+
+/** How long to keep re-checking after the DOM last changed.
+ *
+ *  This is the other half of the bug where the app's side panel opened straight
+ *  over the page. A panel arrives by adding a class, which fires the observer
+ *  once — and then SLIDES in over 340ms under a CSS transition, which fires
+ *  nothing at all. Sampling once, 16ms after the class change, catches the
+ *  panel while it is still off to the left of the browser and concludes
+ *  correctly that nothing overlaps. Nothing ever asks again, and the panel
+ *  finishes its slide on top of a page that was never told to move.
+ *
+ *  Whether that was visible came down to luck: a panel whose contents load
+ *  asynchronously (Pull requests) mutates the DOM again mid-slide and gets
+ *  re-checked by accident, while one that renders in a single pass (Team)
+ *  never does. Hence a sweep rather than a sample — long enough to outlast
+ *  --peek-in, which is the slowest transition in the app. */
+const SWEEP_MS = 600;
+const SWEEP_STEP_MS = 60;
+/** A page nobody is touching still has to be captured, and the DOM is silent
+ *  while it is being read. Slow, because all it guards against is a frame going
+ *  stale — and it only runs while a view is actually on screen. */
+const HEARTBEAT_MS = 1000;
+
+let sweepUntil = 0;
+let sweeping = 0;
+let heartbeat = 0;
+
+function startSweep() {
+  if (sweeping) return;
+  sweeping = window.setInterval(() => {
+    if (Date.now() >= sweepUntil) {
+      window.clearInterval(sweeping);
+      sweeping = 0;
+      return;
+    }
+    tick();
+  }, SWEEP_STEP_MS);
 }
 
 /** The observers run only while a browser view wants to be on screen, which is
@@ -429,6 +502,10 @@ function watch(need: boolean) {
     sizes.observe(document.documentElement);
     window.addEventListener("resize", schedule);
     window.addEventListener("scroll", schedule, true);
+    // A transition moves an element every frame while mutating nothing. These
+    // bubble, so one listener covers every animated surface in the app.
+    for (const ev of MOTION) window.addEventListener(ev, schedule, true);
+    heartbeat = window.setInterval(tick, HEARTBEAT_MS);
   } else if (!need && observer) {
     observer.disconnect();
     observer = null;
@@ -436,8 +513,13 @@ function watch(need: boolean) {
     sizes = null;
     window.removeEventListener("resize", schedule);
     window.removeEventListener("scroll", schedule, true);
+    for (const ev of MOTION) window.removeEventListener(ev, schedule, true);
+    window.clearInterval(heartbeat);
+    heartbeat = 0;
   }
 }
+
+const MOTION = ["transitionrun", "transitionstart", "transitionend", "animationstart", "animationend"];
 
 export function registerBrowserView(tabId: string, host: () => Element | null) {
   views.set(tabId, {
@@ -449,10 +531,10 @@ export function registerBrowserView(tabId: string, host: () => Element | null) {
     lastCaptureAt: 0,
     capturing: false,
     dirty: true,
-    loading: true,
     told: null,
     lastCaptureOkAt: 0,
     lastNavAt: Date.now(),
+    loading: false,
   });
   emitBrowserSignal({ t: "register", at: Date.now(), tabId });
 }

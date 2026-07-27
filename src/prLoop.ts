@@ -244,3 +244,59 @@ export function forgetLoop(repo: string, number: number): void {
     /* ignore */
   }
 }
+
+// ---------- findings already posted ----------
+//
+// A Review task's findings file stays on disk after the review is submitted —
+// nothing deletes it, and the tab re-reads it on every mount. Without a record
+// of what already went out, re-opening the tab staged the same comments again,
+// as drafts, on a PR where they are live threads. So the posting is remembered
+// here: keys only, never the comment bodies, and capped like the loops are.
+
+const POSTED_KEY = "canopy.prPostedFindings";
+const MAX_POSTED_PRS = 60;
+/** Per PR. A review with more findings than this is not the case worth sizing
+ *  for, and the tail being re-offered is a far smaller wrong than unbounded
+ *  growth in a store the user can't see or clear. */
+const MAX_POSTED_PER_PR = 200;
+
+type PostedStore = Record<string, { at: number; keys: string[] }>;
+
+function readPosted(): PostedStore {
+  try {
+    const v = JSON.parse(localStorage.getItem(POSTED_KEY) ?? "{}") as unknown;
+    return v && typeof v === "object" ? (v as PostedStore) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Identity of a finding, matched on what the agent wrote rather than on the
+ *  posted comment: submit() prefixes "Nit: " on the way out, so the text that
+ *  comes back from GitHub is not the text that was staged. */
+export const findingKey = (f: { path: string; line: number; body: string }): string =>
+  `${f.path}:${f.line}:${f.body.trim()}`;
+
+export function postedFindings(repo: string, number: number): Set<string> {
+  return new Set(readPosted()[loopKey(repo, number)]?.keys ?? []);
+}
+
+export function rememberPosted(repo: string, number: number, keys: string[]): void {
+  if (!keys.length) return;
+  const all = readPosted();
+  const k = loopKey(repo, number);
+  const merged = [...new Set([...(all[k]?.keys ?? []), ...keys])];
+  all[k] = { at: Date.now(), keys: merged.slice(-MAX_POSTED_PER_PR) };
+  const prs = Object.keys(all);
+  if (prs.length > MAX_POSTED_PRS) {
+    prs
+      .sort((a, b) => (all[a].at ?? 0) - (all[b].at ?? 0))
+      .slice(0, prs.length - MAX_POSTED_PRS)
+      .forEach((key) => delete all[key]);
+  }
+  try {
+    localStorage.setItem(POSTED_KEY, JSON.stringify(all));
+  } catch {
+    // Same trade as the loops: a full quota must not fail a review.
+  }
+}

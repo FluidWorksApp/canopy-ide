@@ -17,6 +17,7 @@
 
 import * as ipc from "../ipc";
 import {
+  describeBrowserSignal,
   onBrowserSignal,
   browserViewSnapshots,
   type BrowserSignal,
@@ -153,29 +154,6 @@ const viewSays = (v: ViewSnapshot | undefined) => {
 type Issued = Extract<BrowserSignal, { t: "visibility" }>;
 type Acked = Extract<BrowserSignal, { t: "visibility-ack" }>;
 
-/** One signal as a log line. */
-function describe(s: BrowserSignal): string {
-  const tab = s.tabId.slice(0, 8);
-  switch (s.t) {
-    case "visibility":
-      return `${s.visible ? "show" : "hide"} issued tab=${tab} seq=${s.seq}${
-        s.visible ? "" : ` by=${s.by}`
-      }`;
-    case "visibility-ack":
-      return `${s.visible ? "show" : "hide"} ${s.ok ? "acked" : `FAILED ${s.error}`} tab=${tab} seq=${s.seq}`;
-    case "capture":
-      return `capture ${s.result} tab=${tab} in=${s.ms}ms`;
-    case "pane":
-      return `pane tab=${tab} -> ${s.state} frame=${s.frame ? "yes" : "no"}`;
-    case "nav":
-      return `nav tab=${tab} loading=${s.loading}`;
-    case "bounds":
-      return `bounds tab=${tab} ${s.bounds.width}x${s.bounds.height}@${s.bounds.x},${s.bounds.y}`;
-    default:
-      return `${s.t} tab=${tab}`;
-  }
-}
-
 const hideIssued = (list: BrowserSignal[]): Issued | undefined =>
   list.find((s): s is Issued => s.t === "visibility" && !s.visible);
 
@@ -295,7 +273,7 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
     // The whole timeline in the log. This is the record that turns "the preview
     // was broken" into a sequence somebody can read afterwards, and it is the
     // only view anyone gets of a native surface that devtools cannot inspect.
-    void ipc.jsLog("info", `browser: ${describe(s)}`);
+    void ipc.jsLog("info", `browser: ${describeBrowserSignal(s)}`);
   });
   void ipc.jsLog("info", `browser:SELFTEST starting on ${cfg.url}`);
   // Release builds don't run the watchdog; a run that is explicitly testing

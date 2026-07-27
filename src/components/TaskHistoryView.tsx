@@ -11,12 +11,14 @@ import {
   clearTaskHistory,
   completedTaskRuns,
   removeTaskRun,
+  resolveTaskFile,
   TASK_HISTORY_EVENT,
+  tidyOutput,
   type TaskRun,
   type TaskRunStatus,
 } from "../taskHistory";
 import { AGENT_CLIS } from "../projects";
-import { PlayIcon, TrashIcon } from "./icons";
+import { AgentsIcon, PlayIcon, TrashIcon } from "./icons";
 
 const PER_PAGE = 25;
 
@@ -255,25 +257,68 @@ export function TaskHistoryView({
                       </button>
                     </div>
 
-                    <div className="task-history-brief">{run.brief}</div>
+                    {/* Three different things, and until now they arrived as
+                        one undifferentiated column of grey text: what you asked
+                        for, what the agent answered, and what scrolled past
+                        while it worked. The answer is the reason you opened the
+                        row, so it is the one that gets a mark of its own. */}
+                    <div className="task-history-section">
+                      <div className="task-history-section-head">You asked</div>
+                      <div className="task-history-brief">{run.brief}</div>
+                    </div>
+
+                    <div className="task-history-section is-report">
+                      <div className="task-history-section-head">
+                        <AgentsIcon size={11} /> The agent reported
+                      </div>
+                      {/* The row truncates this to one line — it is the row's
+                          job to be scannable. The full text has to live
+                          somewhere, and this is the somewhere. */}
+                      <div className="task-history-report">
+                        {run.summary ?? "It finished without reporting a summary."}
+                      </div>
+                    </div>
 
                     {run.files && run.files.length > 0 && (
-                      <div className="task-history-files">
-                        {run.files.map((f) => (
-                          <button
-                            key={f}
-                            className="task-history-file"
-                            title={f}
-                            onClick={() => onOpenFile?.(f)}
-                          >
-                            {f.split("/").pop()}
-                          </button>
-                        ))}
+                      <div className="task-history-section">
+                        <div className="task-history-section-head">Files it touched</div>
+                        <div className="task-history-files">
+                          {run.files.map((f) => {
+                            // The recorded path may point into a worktree that
+                            // no longer exists; the committed file does.
+                            const at = resolveTaskFile(f, run.cwd);
+                            return (
+                              <button
+                                key={f}
+                                className="task-history-file"
+                                title={at}
+                                onClick={() => onOpenFile?.(at)}
+                              >
+                                {at.split("/").pop()}
+                              </button>
+                            );
+                          })}
+                        </div>
                       </div>
                     )}
 
                     {run.output ? (
-                      <pre className="task-history-output">{run.output}</pre>
+                      /* Shut by default. The answer above is what you opened
+                         the row for; the tail is the evidence behind it, and
+                         only sometimes what you want. Left open it pushed every
+                         other run off the screen. */
+                      <details className="task-history-section task-history-tail">
+                        <summary className="task-history-section-head">
+                          <span className="task-history-tail-caret">›</span>
+                          Terminal tail
+                          <span className="task-history-tail-size">
+                            {tidyOutput(run.output).split("\n").length} lines
+                          </span>
+                        </summary>
+                        <pre className="task-history-output">
+                          {tidyOutput(run.output)}
+                        </pre>
+                      </details>
                     ) : (
                       <div className="task-history-note">
                         The terminal output for this run is no longer kept — only the

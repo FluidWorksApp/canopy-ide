@@ -5,18 +5,19 @@ import {
   adhocTaskDef,
   applySuggestionTask,
   customTaskDef,
-  draftFindingsTask,
   fixCiTask,
   followUpsTask,
   microTaskProtocol,
   oneLine,
   prArtifactPath,
+  prReviewTask,
   raisePrTask,
-  reviewMapTask,
+  resolveConflictsTask,
   reviewPrTask,
   runItReviewTask,
-  selfReviewPrTask,
+  stepsDone,
   MICRO_TASKS,
+  PR_REVIEW_STEPS,
   type RaisePrPayload,
 } from "./microTasks";
 import { isStopFor, parseAgentEvent } from "./notifications";
@@ -224,9 +225,8 @@ describe("MICRO_TASKS", () => {
       "raise-pr",
       "review-pr",
       "address-pr-comments",
-      "pr-review-map",
-      "pr-draft-findings",
-      "pr-self-review",
+      "pr-review",
+      "pr-resolve-conflicts",
       "pr-fix-ci",
       "pr-run-it",
       "pr-follow-ups",
@@ -254,10 +254,8 @@ describe("MICRO_TASKS", () => {
   it("does not call a task that pushes a task that only reads", () => {
     // The grouping is a promise about consequence; these are the three that
     // change the branch, and the isolation flag is the independent evidence.
-    const pushes = MICRO_TASKS.filter((t) => t.effect === "pushes").map(
-      (t) => t.id,
-    );
-    expect(pushes).toEqual(["address-pr-comments", "pr-fix-ci"]);
+    const pushes = MICRO_TASKS.filter((t) => t.effect === "pushes").map((t) => t.id);
+    expect(pushes).toEqual(["address-pr-comments", "pr-resolve-conflicts", "pr-fix-ci"]);
     for (const t of MICRO_TASKS.filter((x) => x.effect === "pushes"))
       expect(
         t.isolation?.kind,
@@ -286,9 +284,7 @@ describe("PR task tracking", () => {
     const briefs = [
       reviewPrTask,
       addressPrCommentsTask,
-      reviewMapTask,
-      draftFindingsTask,
-      selfReviewPrTask,
+      prReviewTask,
       fixCiTask,
       runItReviewTask,
       followUpsTask,
@@ -330,25 +326,99 @@ describe("PR tasks that report back through a file", () => {
     );
   });
 
-  it("tells the map task where to write and to keep it out of git", () => {
-    const ctx = reviewMapTask.buildContext({ repo: "/repo", pr }, "");
+  it("asks the one review task for both files, and forbids posting either", () => {
+    // The whole point of the merge: one read of the diff, two outputs — the map
+    // the tab renders and the findings it stages. A brief that dropped one of
+    // them would leave half the PR tab permanently empty with no error anywhere.
+    const ctx = prReviewTask.buildContext({ repo: "/repo", pr }, "");
     expect(ctx).toContain("/repo/.canopy/pr-12-map.md");
+    expect(ctx).toContain("/repo/.canopy/pr-12-findings.json");
     expect(ctx).toContain(".git/info/exclude");
-    expect(ctx).toContain("do not post");
+    expect(ctx).toContain('"severity"');
+    expect(ctx).toContain("post no comments and no review");
     expect(ctx).not.toMatch(/[\r\n]/);
   });
 
-  it("asks for findings as the exact JSON the composer parses, and posts nothing", () => {
-    const ctx = draftFindingsTask.buildContext({ repo: "/repo", pr }, "");
-    expect(ctx).toContain("/repo/.canopy/pr-12-findings.json");
-    expect(ctx).toContain('"severity"');
-    expect(ctx).toContain("post nothing to GitHub");
+  it("adds the author's lens only on the user's own PR", () => {
+    const mine = prReviewTask.buildContext({ repo: "/repo", pr }, "");
+    expect(mine).toContain("the user's own PR");
+    expect(mine).toContain("debug leftovers");
+    const theirs = prReviewTask.buildContext(
+      { repo: "/repo", pr: { ...(pr as object), mine: false } as never },
+      "",
+    );
+    expect(theirs).not.toContain("the user's own PR");
+    // Same bar either way — the lens adds a tail, it doesn't lower the bar.
+    expect(theirs).toContain('"severity"');
+    expect(theirs).toContain("/repo/.canopy/pr-12-map.md");
   });
 
-  it("keeps the self-review private", () => {
-    const ctx = selfReviewPrTask.buildContext({ repo: "/repo", pr }, "");
-    expect(ctx).toContain("Nothing you find goes to GitHub");
-    expect(ctx).toContain("/repo/.canopy/pr-12-findings.json");
+  it("asks the review task to report every milestone it owns, from a clean file", () => {
+    const ctx = prReviewTask.buildContext({ repo: "/repo", pr }, "");
+    expect(ctx).toContain("/repo/.canopy/pr-12-progress.txt");
+    // Truncation is what stops a re-run opening at four-of-four done.
+    expect(ctx).toContain(": > /repo/.canopy/pr-12-progress.txt");
+    // Every step but the tab's own has to be named, or the rail stalls on a
+    // milestone the agent was never told to report.
+    for (const s of PR_REVIEW_STEPS.filter((x) => x.owner !== "app"))
+      expect(ctx, `the brief never names the "${s.id}" milestone`).toContain(`\`${s.id}\``);
+    expect(ctx).not.toContain("`staged`");
+    expect(ctx).not.toMatch(/[\r\n]/);
+  });
+
+  it("treats milestones as a high-water mark, not a set", () => {
+    // Stages of one pass: reaching the third means the first two happened,
+    // whether or not the agent remembered to write the line. Read as a set,
+    // a missed line rendered a rail with a later step ticked and earlier ones
+    // blank — which describes nothing that can actually happen.
+    expect(stepsDone("read\nmap\n", PR_REVIEW_STEPS)).toEqual(["read", "map"]);
+    expect(stepsDone("findings\n", PR_REVIEW_STEPS)).toEqual([
+      "read",
+      "map",
+      "findings",
+    ]);
+    // The app's own last step implies every one before it.
+    expect(stepsDone("staged\n", PR_REVIEW_STEPS)).toEqual([
+      "read",
+      "map",
+      "findings",
+      "staged",
+    ]);
+  });
+
+  it("is not skewed by a line repeated, out of order, or invented", () => {
+    expect(stepsDone("map\nread\n", PR_REVIEW_STEPS)).toEqual(["read", "map"]);
+    expect(stepsDone("read\nread\nREAD\n", PR_REVIEW_STEPS)).toEqual(["read"]);
+    expect(stepsDone("  findings  \n\n", PR_REVIEW_STEPS)).toEqual([
+      "read",
+      "map",
+      "findings",
+    ]);
+    expect(stepsDone("done\nfinished\n", PR_REVIEW_STEPS)).toEqual([]);
+    expect(stepsDone("", PR_REVIEW_STEPS)).toEqual([]);
+  });
+
+  it("makes the conflict task keep both sides and prove the merge", () => {
+    const ctx = resolveConflictsTask.buildContext({ repo: "/repo", pr }, "", undefined);
+    expect(ctx).toContain("git merge origin/main");
+    // The failure mode of an automated merge is quietly reverting one side.
+    expect(ctx).toContain("intent of");
+    expect(ctx).toContain("BOTH sides");
+    expect(ctx).toContain("silently reverts the other");
+    // A merge that compiles is not a merge that is correct.
+    expect(ctx).toContain("run the project's build and tests before committing");
+    expect(ctx).toContain("Never force-push");
+    // Detached, so a bare push has nothing to push to.
+    expect(ctx).toContain("git push origin HEAD:fix/parser");
+    expect(ctx).toContain("canopy_job_done");
+    expect(ctx).not.toMatch(/[\r\n]/);
+    // It edits code, so it must never run in the shared checkout.
+    expect(resolveConflictsTask.isolation?.kind).toBe("pr-worktree");
+  });
+
+  it("stops rather than guessing when only the author can decide", () => {
+    const ctx = resolveConflictsTask.buildContext({ repo: "/repo", pr }, "", undefined);
+    expect(ctx).toContain("report blocked");
   });
 
   it("makes the CI task work from the logs and forbids the cheap fixes", () => {

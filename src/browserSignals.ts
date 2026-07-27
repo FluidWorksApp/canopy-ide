@@ -50,6 +50,32 @@ export type BrowserSignal =
   | { t: "pane"; at: number; tabId: string; state: PaneState; frame: boolean }
   | { t: "nav"; at: number; tabId: string; loading: boolean };
 
+/** One signal as a log line. Lives here rather than in either consumer: the
+ *  host writes these to the app log as they happen and the selftest writes the
+ *  same lines into its own timeline, and two spellings of the same event would
+ *  make the two records impossible to line up. */
+export function describeBrowserSignal(s: BrowserSignal): string {
+  const tab = s.tabId.slice(0, 8);
+  switch (s.t) {
+    case "visibility":
+      return `${s.visible ? "show" : "hide"} issued tab=${tab} seq=${s.seq}${
+        s.visible ? "" : ` by=${s.by}`
+      }`;
+    case "visibility-ack":
+      return `${s.visible ? "show" : "hide"} ${s.ok ? "acked" : `FAILED ${s.error}`} tab=${tab} seq=${s.seq}`;
+    case "capture":
+      return `capture ${s.result} tab=${tab} in=${s.ms}ms`;
+    case "pane":
+      return `pane tab=${tab} -> ${s.state} frame=${s.frame ? "yes" : "no"}`;
+    case "nav":
+      return `nav tab=${tab} loading=${s.loading}`;
+    case "bounds":
+      return `bounds tab=${tab} ${s.bounds.width}x${s.bounds.height}@${s.bounds.x},${s.bounds.y}`;
+    default:
+      return `${s.t} tab=${tab}`;
+  }
+}
+
 type Listener = (s: BrowserSignal) => void;
 
 const listeners = new Set<Listener>();

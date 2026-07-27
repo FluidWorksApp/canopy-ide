@@ -43,7 +43,6 @@ describe("paneState", () => {
 const cap = (o: Partial<CaptureInput> = {}): CaptureInput => ({
   native: true,
   shown: true,
-  loading: false,
   lastCaptureAt: 0,
   now: 10_000,
   dirty: false,
@@ -62,8 +61,15 @@ describe("shouldCapture", () => {
     expect(shouldCapture(cap({ shown: false }))).toBe(false);
   });
 
-  it("waits for a page that is still arriving", () => {
-    expect(shouldCapture(cap({ loading: true }))).toBe(false);
+  // Regression: capturing used to be gated on a "page has loaded" flag set by
+  // a single navigation event. A listener that missed that event — which a
+  // re-subscribing effect does — latched the view as forever-loading, so it
+  // never captured again and every overlay showed a blank pane instead of the
+  // page. A frame of a half-loaded page is replaced on the next pass; a gate
+  // that sticks is not.
+  it("captures a page that may still be loading, rather than risk never capturing", () => {
+    expect(shouldCapture(cap({ dirty: false, lastCaptureAt: 0, now: 50 }))).toBe(false);
+    expect(shouldCapture(cap({ dirty: true }))).toBe(true);
   });
 
   it("does not stack captures on top of each other", () => {
@@ -87,7 +93,7 @@ describe("shouldCapture", () => {
 
   it("still refuses a dirty frame it cannot take", () => {
     expect(shouldCapture(cap({ dirty: true, shown: false }))).toBe(false);
-    expect(shouldCapture(cap({ dirty: true, loading: true }))).toBe(false);
+    expect(shouldCapture(cap({ dirty: true, inFlight: true }))).toBe(false);
   });
 });
 

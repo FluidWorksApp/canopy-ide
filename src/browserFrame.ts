@@ -53,8 +53,6 @@ export interface CaptureInput {
   /** Only a view that is actually painting can be captured; a hidden WKWebView
    *  snapshots to nothing. */
   shown: boolean;
-  /** No point capturing a page that is still arriving. */
-  loading: boolean;
   lastCaptureAt: number;
   now: number;
   /** Set when the page navigated or an agent acted on it — the held frame is
@@ -64,8 +62,16 @@ export interface CaptureInput {
   inFlight: boolean;
 }
 
+/** Whether to take a picture now.
+ *
+ *  Deliberately NOT gated on the page having finished loading. It was, and that
+ *  was the bug: "loaded" arrived as one navigation event, and a listener that
+ *  missed it — which a constantly re-subscribing effect will — latched the view
+ *  as forever-loading, so it never captured again for the whole life of the
+ *  tab, silently. A blank frame from a page mid-load costs nothing because the
+ *  next pass replaces it; a gate that can stick costs the entire feature. */
 export function shouldCapture(c: CaptureInput): boolean {
-  if (!c.native || !c.shown || c.loading || c.inFlight) return false;
+  if (!c.native || !c.shown || c.inFlight) return false;
   if (c.dirty) return true;
   return c.now - c.lastCaptureAt >= CAPTURE_INTERVAL_MS;
 }

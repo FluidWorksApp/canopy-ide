@@ -206,3 +206,46 @@ export function removeTaskRun(id: string): void {
 export function clearTaskHistory(): void {
   write([]);
 }
+
+/** The path to actually open for a file a run touched.
+ *
+ *  A task that edits code runs in a worktree we create for it, and the brief's
+ *  last instruction is to delete that worktree. So every path the hook digest
+ *  recorded points somewhere that no longer exists, and the chip in the history
+ *  row opened nothing at all — for exactly the runs that changed the most.
+ *
+ *  The work itself survives: the agent committed and pushed it, so the same
+ *  relative path exists in the repo. The throwaway is always `<repo>-wt-pr-<n>`
+ *  (see startPrAgent), which is what lets this map back. A worktree the user
+ *  made themselves is left alone — it is still on disk, and its copy is the one
+ *  the agent actually worked in. */
+export function resolveTaskFile(file: string, cwd: string): string {
+  const wt = /^(.*)-wt-pr-\d+$/.exec(cwd);
+  if (!wt) return file;
+  const repo = wt[1];
+  if (!file.startsWith(`${cwd}/`)) return file;
+  return `${repo}/${file.slice(cwd.length + 1)}`;
+}
+
+/** The terminal tail with its dead space taken out.
+ *
+ *  What gets captured is a PTY's scrollback, and once the escape codes that
+ *  drew over it are stripped, most of a screen is blank: a CLI that paints a
+ *  status line and clears it leaves the rows behind. Rendered verbatim that was
+ *  a 340px box holding one word at the top and one at the bottom, which reads
+ *  as a broken panel rather than a quiet run. Trailing spaces go, runs of empty
+ *  lines collapse to one, and the ends are trimmed — nothing that carries
+ *  meaning is touched, since consecutive blank lines never do here. */
+export function tidyOutput(raw: string): string {
+  return raw
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+$/, ""))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    // Blank lines off the ends, not whitespace: a plain trim() would eat the
+    // first line's indentation and shunt it out of line with everything under
+    // it, which in a terminal tail is exactly the structure you're reading for.
+    .replace(/^\n+/, "")
+    .replace(/\n+$/, "");
+}

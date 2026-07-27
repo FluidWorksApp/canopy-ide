@@ -26,10 +26,12 @@ interface ContextMenuProps {
   x: number;
   y: number;
   items: MenuItem[];
+  /** Treat `y` as the menu's bottom edge and grow upward from it. */
+  above?: boolean;
   onClose: () => void;
 }
 
-export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
+export function ContextMenu({ x, y, items, above, onClose }: ContextMenuProps) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ x, y });
   const [openSub, setOpenSub] = useState<number | null>(null);
@@ -65,11 +67,14 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
     const r = el.getBoundingClientRect();
     // Math.max guards the case where the menu is larger than the window, which
     // would otherwise clamp it to a negative offset and cut off the top/left.
+    // Growing upward needs the height, which only exists after layout — hence
+    // measuring here rather than guessing at the call site.
+    const top = above ? y - r.height : y;
     setPos({
       x: Math.max(6, Math.min(x, window.innerWidth - r.width - 6)),
-      y: Math.max(6, Math.min(y, window.innerHeight - r.height - 6)),
+      y: Math.max(6, Math.min(top, window.innerHeight - r.height - 6)),
     });
-  }, [x, y]);
+  }, [x, y, above]);
 
   useEffect(() => {
     // Capture phase, so a click on the page closes the menu before any
@@ -116,8 +121,12 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
           <div
             key={i}
             className="ctx-sub-anchor"
-            onMouseEnter={() => setOpenSub(i)}
-            onMouseLeave={() => setOpenSub((cur) => (cur === i ? null : cur))}
+            // Hover switches between submenus, but never opens the first one:
+            // with hover-to-open, clicking a row to close its panel reopened it
+            // the instant the pointer crossed back in, so it read as a panel
+            // that refused to shut. Opening is a click; once one is open,
+            // sliding down the list still swaps panels the way you'd expect.
+            onMouseEnter={() => setOpenSub((cur) => (cur === null ? null : i))}
           >
             <button
               className={`ctx-item ${openSub === i ? "ctx-item-on" : ""}`}
@@ -183,12 +192,68 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
 
 /** Menu state helper: `open(e, items)` from an onContextMenu handler. */
 export function useContextMenu() {
-  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  const [menu, setMenu] = useState<{
+    x: number;
+    y: number;
+    items: MenuItem[];
+    /** y is the bottom edge to grow up from, not the top to hang down from. */
+    above?: boolean;
+  } | null>(null);
+  /** Which control opened it, and when it last closed.
+   *
+   *  A second click on the same button has to close the menu, and it couldn't:
+   *  the document listener runs in the capture phase, so it closed the menu
+   *  *before* the button's own onClick fired, and that onClick then reopened it.
+   *  The menu looked permanently stuck open and nothing but Escape or a click
+   *  elsewhere dismissed it. So a close records its anchor, and an open from
+   *  that same anchor moments later is the second half of one click: ignore it
+   *  and stay closed. A different button still opens normally — this is a
+   *  toggle, not a lockout. */
+  const anchor = useRef<Element | null>(null);
+  const closedAt = useRef<{ at: number; anchor: Element | null }>({
+    at: 0,
+    anchor: null,
+  });
+  const isSecondClick = (e: React.MouseEvent) =>
+    closedAt.current.anchor === e.currentTarget &&
+    performance.now() - closedAt.current.at < 300;
+
   const open = (e: React.MouseEvent, items: MenuItem[]) => {
     e.preventDefault();
     e.stopPropagation();
     setMenu({ x: e.clientX, y: e.clientY, items });
   };
-  const close = () => setMenu(null);
-  return { menu, open, close };
+  /** For a button that opens a dropdown rather than a right-click. Anchoring to
+   *  the pointer is right for a context menu and wrong for a button: the panel
+   *  lands wherever inside the control you happened to click, covering the thing
+   *  you just pressed. Hang it off the button's bottom-left instead, so it reads
+   *  as belonging to that button. */
+  const openUnder = (e: React.MouseEvent, items: MenuItem[]) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (isSecondClick(e)) return;
+    anchor.current = e.currentTarget;
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setMenu({ x: r.left, y: r.bottom + 4, items });
+  };
+  /** For a control near the bottom of the window, where a menu hung below it
+   *  would open off-screen and only be dragged back by the viewport clamp —
+   *  landing wherever it fits rather than where it belongs. This anchors it to
+   *  the button's top edge instead, growing upward. The caller measures after
+   *  layout, so the y is the button's top and ContextMenu's own clamp does the
+   *  rest once it knows the menu's height. */
+  const openAbove = (e: React.MouseEvent, items: MenuItem[]) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (isSecondClick(e)) return;
+    anchor.current = e.currentTarget;
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setMenu({ x: r.left, y: r.top - 6, items, above: true });
+  };
+  const close = () => {
+    closedAt.current = { at: performance.now(), anchor: anchor.current };
+    anchor.current = null;
+    setMenu(null);
+  };
+  return { menu, open, openUnder, openAbove, close };
 }
