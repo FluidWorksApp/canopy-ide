@@ -624,8 +624,48 @@ export const gitRepoStatus = (repo: string) =>
   invoke<RepoStatus>("git_repo_status", { repo });
 export const gitBranches = (repo: string) =>
   invoke<BranchInfo[]>("git_branches", { repo });
+/** The worktree standing between you and a branch — git allows a branch in one
+ *  checkout at a time. */
+export interface BranchHolder {
+  branch: string;
+  path: string;
+  name: string;
+  /** A workspace Canopy made for an agent (under `.claude/worktrees`). */
+  agent: boolean;
+  is_main: boolean;
+  dirty: number;
+  locked: string | null;
+  prunable: string | null;
+  head: string;
+}
+
+/** What a branch switch did, or why it couldn't. Every refusal a person can
+ *  resolve comes back as an outcome, not a thrown error — the UI turns these
+ *  into choices instead of showing git's stderr. */
+export type CheckoutOutcome =
+  | { kind: "switched"; message: string }
+  | { kind: "branch_in_worktree"; holder: BranchHolder }
+  | {
+      kind: "local_changes";
+      files: string[];
+      untracked: boolean;
+      detail: string;
+    }
+  | { kind: "changes_stashed"; stash: string; detail: string }
+  | { kind: "failed"; summary: string; detail: string };
+
 export const gitCheckout = (repo: string, branch: string, create = false) =>
-  invoke<string>("git_checkout", { repo, branch, create });
+  invoke<CheckoutOutcome>("git_checkout", { repo, branch, create });
+/** Check out a ref without moving any branch onto it — look, then leave. */
+export const gitCheckoutDetached = (repo: string, refname: string) =>
+  invoke<CheckoutOutcome>("git_checkout_detached", { repo, refname });
+/** Switch, carrying this checkout's uncommitted changes across. */
+export const gitCheckoutCarry = (repo: string, branch: string) =>
+  invoke<CheckoutOutcome>("git_checkout_carry", { repo, branch });
+/** Free a branch name from the worktree holding it. That worktree keeps every
+ *  file it has — it just stops claiming the name. */
+export const gitBranchRelease = (repo: string, branch: string) =>
+  invoke<string>("git_branch_release", { repo, branch });
 /** Delete a local branch. `force` (git -D) is needed for a squash-merged branch
  *  whose remote is gone; otherwise the safe -d refuses unmerged work. Protected
  *  and current branches are refused by the backend. */
