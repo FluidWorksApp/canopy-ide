@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  resolveNativeTsc,
   resolveServerRoot,
+  resolveTypescriptLaunch,
   serverUnavailableMessage,
   specForPath,
   SERVERS,
@@ -104,5 +106,62 @@ describe("serverUnavailableMessage", () => {
     const msg = serverUnavailableMessage(rust, new Error("client stopped during initialize"));
     expect(msg).toContain("rust-analyzer failed to start");
     expect(msg).not.toContain("not found on PATH");
+  });
+});
+
+describe("resolveNativeTsc", () => {
+  it("finds whichever platform package npm actually installed", async () => {
+    const arm = "/proj/node_modules/@typescript/typescript-darwin-arm64/lib/tsc";
+    expect(await resolveNativeTsc("/proj", statter([arm]))).toBe(arm);
+    const linux = "/proj/node_modules/@typescript/typescript-linux-x64/lib/tsc";
+    expect(await resolveNativeTsc("/proj", statter([linux]))).toBe(linux);
+  });
+
+  it("finds the Windows executable, which carries an extension", async () => {
+    const win = "/proj/node_modules/@typescript/typescript-win32-x64/lib/tsc.exe";
+    expect(await resolveNativeTsc("/proj", statter([win]))).toBe(win);
+  });
+
+  it("is undefined when no platform package is installed", async () => {
+    expect(await resolveNativeTsc("/proj", statter([]))).toBeUndefined();
+  });
+});
+
+describe("resolveTypescriptLaunch", () => {
+  const ts = SERVERS.find((s) => s.id === "typescript")!;
+  const tsserver = "/proj/node_modules/typescript/lib/tsserver.js";
+  const native = "/proj/node_modules/@typescript/typescript-darwin-arm64/lib/tsc";
+  const launch = (present: string[]) =>
+    resolveTypescriptLaunch(ts, "/proj", "/proj/node_modules/.bin/tsls", statter(present));
+
+  it("drives a project's own tsserver through the wrapper, as before", async () => {
+    // A project pinning TypeScript 6 must not be moved onto a different engine.
+    const l = await launch([tsserver]);
+    expect(l.command).toBe("/proj/node_modules/.bin/tsls");
+    expect(l.args).toEqual(["--stdio"]);
+    expect(l.initializationOptions).toEqual({ tsserver: { path: tsserver } });
+  });
+
+  it("keeps using tsserver even when a native compiler sits beside it", async () => {
+    // Both present is the ordinary TypeScript 6 project; the native binary
+    // must not hijack a toolchain that already works.
+    expect((await launch([tsserver, native])).initializationOptions).toEqual({
+      tsserver: { path: tsserver },
+    });
+  });
+
+  it("talks straight to the native server when the project is TypeScript 7", async () => {
+    // TypeScript 7 ships no tsserver at all, so the wrapper has nothing to run
+    // and the compiler binary answers LSP itself.
+    const l = await launch([native]);
+    expect(l.command).toBe(native);
+    expect(l.args).toEqual(["--lsp", "--stdio"]);
+    expect(l.initializationOptions).toBeUndefined();
+  });
+
+  it("falls back to the wrapper's own lookup when the project has neither", async () => {
+    const l = await launch([]);
+    expect(l.command).toBe("/proj/node_modules/.bin/tsls");
+    expect(l.initializationOptions).toEqual({ tsserver: { path: undefined } });
   });
 });

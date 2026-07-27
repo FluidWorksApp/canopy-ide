@@ -9,20 +9,13 @@
 //
 // It also drives the full owner/guest exchange with reordered delivery, which
 // is where a state-machine mistake shows up that a pure transform test can't.
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
-import ts from "typescript";
-
-const here = dirname(fileURLToPath(import.meta.url));
-const src = readFileSync(join(here, "..", "src", "collab-ot.ts"), "utf8");
-const js = ts.transpileModule(src, {
-  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-}).outputText;
-const mod = await import(
-  "data:text/javascript;base64," + Buffer.from(js).toString("base64")
-);
-const { apply, transform, transformOffset, baseLength, targetLength } = mod;
+// Imported directly as TypeScript: Node strips the types itself (unflagged
+// since 22.18), and `erasableSyntaxOnly` in tsconfig.app.json guarantees this
+// tree never uses syntax that stripping can't handle. The compiler's own
+// transpile API is no longer an option — TypeScript 7 dropped the flat `ts.*`
+// namespace from the package entry point.
+const { apply, transform, transformOffset, baseLength, targetLength } =
+  await import("../src/collab-ot.ts");
 
 let seed = Number(process.argv[3] ?? 12345) >>> 0;
 const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32);
