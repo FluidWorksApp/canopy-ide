@@ -418,8 +418,10 @@ pub fn start_monitor(app: AppHandle) {
 
 /// File-based agent hook bridge: any coding-CLI hook system (Claude Code hooks,
 /// Codex hooks, ...) can append JSON lines to `~/.canopy/agent-events.jsonl`;
-/// we tail it and re-emit each line as an `agent:event`. Works with any platform
-/// that can run a shell command as a hook — fully offline, no server.
+/// we tail it and emit each poll's new lines as one `agent:events` batch — a
+/// busy agent writes several lines per 500ms window, and each emit costs a
+/// React commit on the other side. Works with any platform that can run a
+/// shell command as a hook — fully offline, no server.
 pub fn start_hook_bridge(app: AppHandle) {
     let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
         return;
@@ -458,11 +460,14 @@ pub fn start_hook_bridge(app: AppHandle) {
                     continue;
                 }
                 offset = len;
-                for line in new_data.lines() {
-                    let line = line.trim();
-                    if !line.is_empty() {
-                        let _ = app.emit("agent:event", line.to_string());
-                    }
+                let batch: Vec<String> = new_data
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                if !batch.is_empty() {
+                    let _ = app.emit("agent:events", batch);
                 }
             }
         })

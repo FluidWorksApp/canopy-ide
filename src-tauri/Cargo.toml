@@ -72,7 +72,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.11.3", features = [] }
+tauri = { version = "2.11.3", features = ["unstable"] }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
 # PTY: cross-platform pseudo-terminal, the core of the terminal feature
@@ -144,11 +144,11 @@ libc = "0.2"
 objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSValue", "NSGeometry", "NSDictionary", "NSString", "NSError", "NSData"] }
-objc2-app-kit = { version = "0.3", features = ["NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphics"] }
+objc2-app-kit = { version = "0.3", features = ["NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphics", "NSColor", "NSResponder", "NSView"] }
 objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKSnapshotConfiguration", "block2"] }
 
 [dev-dependencies]
 # `test` feature enables tauri::test::mock_app for exercising PTY spawn/attach
 # against a mock runtime. Dev-only, so the release build is unaffected.
-tauri = { version = "2.11.3", features = ["test"] }
+tauri = { version = "2.11.3", features = ["test", "unstable"] }
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }

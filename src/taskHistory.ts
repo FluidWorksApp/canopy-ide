@@ -55,25 +55,43 @@ const MAX_RUNS = 200;
  *  before the record itself does. */
 const MAX_WITH_OUTPUT = 60;
 
+/** Parsed-runs cache, keyed on the raw stored string. The blob can approach
+ *  half a megabyte (transcript tails), and read() is called by every open PR
+ *  tab and Tasks panel on every history event — parsing it once per write
+ *  instead of once per reader matters. Callers must not mutate the array. */
+let cache: { raw: string | null; runs: TaskRun[] } | null = null;
+
 function read(): TaskRun[] {
+  const raw = localStorage.getItem(KEY);
+  if (cache && cache.raw === raw) return cache.runs;
+  let runs: TaskRun[];
   try {
-    const v = JSON.parse(localStorage.getItem(KEY) ?? "[]") as unknown;
-    return Array.isArray(v) ? (v as TaskRun[]) : [];
+    const v = JSON.parse(raw ?? "[]") as unknown;
+    runs = Array.isArray(v) ? (v as TaskRun[]) : [];
   } catch {
-    return [];
+    runs = [];
   }
+  cache = { raw, runs };
+  return runs;
 }
 
 function write(runs: TaskRun[]) {
   // Newest first, so trimming is a slice and the panel needs no sort.
-  const trimmed = runs.slice(0, MAX_RUNS).map((r, i) =>
-    i < MAX_WITH_OUTPUT || r.output === undefined ? r : { ...r, output: undefined },
-  );
+  const trimmed = runs
+    .slice(0, MAX_RUNS)
+    .map((r, i) =>
+      i < MAX_WITH_OUTPUT || r.output === undefined
+        ? r
+        : { ...r, output: undefined },
+    );
   try {
-    localStorage.setItem(KEY, JSON.stringify(trimmed));
+    const s = JSON.stringify(trimmed);
+    localStorage.setItem(KEY, s);
+    cache = { raw: s, runs: trimmed };
   } catch {
     // Storage full or unavailable — losing a history entry is not worth
     // interrupting anyone over, and the task itself already ran.
+    cache = null;
   }
   // Fired here rather than by each caller so no write can forget it. `storage`
   // events only reach *other* tabs, which in a one-window desktop app is never.
@@ -92,7 +110,9 @@ const runId = () =>
 /** Log a task as it launches, returning the id the finish is keyed on. Recorded
  *  at launch rather than at completion so a task that is stopped, or whose agent
  *  dies without ever reporting, still leaves a trace. */
-export function recordTaskStart(run: Omit<TaskRun, "id" | "status" | "startedAt">): string {
+export function recordTaskStart(
+  run: Omit<TaskRun, "id" | "status" | "startedAt">,
+): string {
   const id = runId();
   write([{ ...run, id, status: "running", startedAt: Date.now() }, ...read()]);
   return id;
@@ -101,8 +121,11 @@ export function recordTaskStart(run: Omit<TaskRun, "id" | "status" | "startedAt"
 /** Complete a run. A no-op for an unknown id, and — deliberately — for a run
  *  that already ended: the tab-close path fires after job_done on every
  *  successful task, and must not overwrite "done" with "stopped". */
-export function recordTaskEnd(id: string, patch: Partial<Omit<TaskRun, "id">>): void {
-  const runs = read();
+export function recordTaskEnd(
+  id: string,
+  patch: Partial<Omit<TaskRun, "id">>,
+): void {
+  const runs = [...read()];
   const i = runs.findIndex((r) => r.id === id);
   if (i === -1 || runs[i].status !== "running") return;
   runs[i] = { ...runs[i], ...patch, endedAt: patch.endedAt ?? Date.now() };
@@ -117,14 +140,20 @@ export function endAbandonedRun(id: string, output?: string): void {
   const runs = read();
   const run = runs.find((r) => r.id === id);
   if (!run || run.status !== "running") return;
-  recordTaskEnd(id, { status: run.askedForUser ? "blocked" : "stopped", output });
+  recordTaskEnd(id, {
+    status: run.askedForUser ? "blocked" : "stopped",
+    output,
+  });
 }
 
 /** Patch a run without settling its outcome — used for the captured terminal
  *  output (recorded when the tab closes, which is after the outcome is known)
  *  and for a blocked agent's note, where the run is still very much going. */
-export function updateTaskRun(id: string, patch: Partial<Omit<TaskRun, "id" | "status">>): void {
-  const runs = read();
+export function updateTaskRun(
+  id: string,
+  patch: Partial<Omit<TaskRun, "id" | "status">>,
+): void {
+  const runs = [...read()];
   const i = runs.findIndex((r) => r.id === id);
   if (i === -1) return;
   runs[i] = { ...runs[i], ...patch };
@@ -143,7 +172,11 @@ export function sweepStaleRuns(): void {
   write(
     runs.map((r) =>
       r.status === "running"
-        ? { ...r, status: r.askedForUser ? "blocked" : "stopped", endedAt: r.endedAt ?? Date.now() }
+        ? {
+            ...r,
+            status: r.askedForUser ? "blocked" : "stopped",
+            endedAt: r.endedAt ?? Date.now(),
+          }
         : r,
     ),
   );
@@ -160,7 +193,9 @@ export function taskRuns(): TaskRun[] {
  *  the default view is scoped and `projectId` is how. */
 export function completedTaskRuns(projectId?: string): TaskRun[] {
   return read().filter(
-    (r) => r.status !== "running" && (projectId === undefined || r.projectId === projectId),
+    (r) =>
+      r.status !== "running" &&
+      (projectId === undefined || r.projectId === projectId),
   );
 }
 

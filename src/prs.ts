@@ -76,3 +76,18 @@ export function prConflictContext(pr: ipc.PrInfo, wt?: { repo: string; worktree:
     (wt ? cleanupLine(wt.repo, wt.worktree) : "")
   );
 }
+
+/** Which repository a PR belongs to, said the way GitHub says it: `owner/name`
+ *  parsed out of the origin URL (ssh, https, or scp-style, with or without the
+ *  trailing `.git`). Falls back to the checkout's folder name, which is still
+ *  an answer — with several projects open, a PR tab that names no repo leaves
+ *  you counting tabs to work out which #843 you're looking at. */
+export function repoLabel(remoteUrl: string, repoPath: string): string {
+  const url = remoteUrl.trim().replace(/\.git$/, "").replace(/\/+$/, "");
+  // Everything after the host: `git@host:owner/name`, `https://host/owner/name`,
+  // `ssh://git@host:22/owner/name`. Take the last two segments.
+  const tail = url.replace(/^[a-z+]+:\/\/[^/]+\//i, "").replace(/^[^@]*@[^:]+:/, "");
+  const parts = tail.split("/").filter(Boolean);
+  if (parts.length >= 2) return parts.slice(-2).join("/");
+  return repoPath.replace(/\/+$/, "").split("/").pop() ?? "";
+}

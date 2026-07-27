@@ -20,7 +20,7 @@ import {
   PR_REVIEW_STEPS,
   type RaisePrPayload,
 } from "./microTasks";
-import { isStopFor } from "./notifications";
+import { isStopFor, parseAgentEvent } from "./notifications";
 import type * as ipc from "./ipc";
 
 const payload = (over: Partial<RaisePrPayload> = {}): RaisePrPayload => ({
@@ -33,7 +33,10 @@ const payload = (over: Partial<RaisePrPayload> = {}): RaisePrPayload => ({
 
 describe("raisePrTask.buildContext", () => {
   it("stays on one line even with a multiline user query", () => {
-    const ctx = raisePrTask.buildContext(payload(), "first line\nsecond line\r\nthird");
+    const ctx = raisePrTask.buildContext(
+      payload(),
+      "first line\nsecond line\r\nthird",
+    );
     expect(ctx).not.toMatch(/[\r\n]/);
     expect(ctx).toContain('The user adds: "first line second line third"');
   });
@@ -42,12 +45,12 @@ describe("raisePrTask.buildContext", () => {
     expect(raisePrTask.buildContext(payload({ unpushed: true }), "")).toContain(
       "Push it first",
     );
-    expect(raisePrTask.buildContext(payload({ unpushed: undefined }), "")).toContain(
-      "If it has no upstream or unpushed commits",
-    );
-    expect(raisePrTask.buildContext(payload({ unpushed: false }), "")).not.toContain(
-      "git push",
-    );
+    expect(
+      raisePrTask.buildContext(payload({ unpushed: undefined }), ""),
+    ).toContain("If it has no upstream or unpushed commits");
+    expect(
+      raisePrTask.buildContext(payload({ unpushed: false }), ""),
+    ).not.toContain("git push");
   });
 
   it("always creates the PR via gh and forbids new commits", () => {
@@ -71,21 +74,34 @@ describe("raisePrTask.buildContext", () => {
   });
 
   it("omits the user-adds clause when nothing was typed", () => {
-    expect(raisePrTask.buildContext(payload(), "")).not.toContain("The user adds");
-    expect(raisePrTask.buildContext(payload(), "   ")).not.toContain("The user adds");
+    expect(raisePrTask.buildContext(payload(), "")).not.toContain(
+      "The user adds",
+    );
+    expect(raisePrTask.buildContext(payload(), "   ")).not.toContain(
+      "The user adds",
+    );
   });
 
   it("runs in the worktree when the branch has one, else the repo", () => {
     expect(raisePrTask.cwd(payload())).toBe("/repo");
-    expect(raisePrTask.cwd(payload({ worktree: "/repo-wt-x" }))).toBe("/repo-wt-x");
+    expect(raisePrTask.cwd(payload({ worktree: "/repo-wt-x" }))).toBe(
+      "/repo-wt-x",
+    );
   });
 });
 
 describe("reviewPrTask.buildContext", () => {
-  const pr = { number: 42, title: "Fix the flux", url: "https://x/pr/42" } as ipc.PrInfo;
+  const pr = {
+    number: 42,
+    title: "Fix the flux",
+    url: "https://x/pr/42",
+  } as ipc.PrInfo;
 
   it("reads via gh without checking out, and reports through job_done", () => {
-    const ctx = reviewPrTask.buildContext({ repo: "/repo", pr }, "focus on the parser");
+    const ctx = reviewPrTask.buildContext(
+      { repo: "/repo", pr },
+      "focus on the parser",
+    );
     expect(ctx).not.toMatch(/[\r\n]/);
     expect(ctx).toContain("gh pr view 42");
     expect(ctx).toContain("gh pr diff 42");
@@ -104,7 +120,9 @@ describe("reviewPrTask.buildContext", () => {
 
   it("sets a high bar for findings and demotes the rest to nits", () => {
     const ctx = reviewPrTask.buildContext({ repo: "/repo", pr }, "");
-    expect(ctx).toContain("name the file and line and state the concrete failure");
+    expect(ctx).toContain(
+      "name the file and line and state the concrete failure",
+    );
     expect(ctx).toContain("it is not a finding");
     expect(ctx).toContain('prefix it "Nit:"');
     expect(ctx).toContain("never let one hold the PR up");
@@ -121,7 +139,10 @@ describe("reviewPrTask.buildContext", () => {
   });
 
   it("routes an approval around GitHub's own-PR refusal", () => {
-    const mine = reviewPrTask.buildContext({ repo: "/repo", pr: { ...pr, mine: true } }, "");
+    const mine = reviewPrTask.buildContext(
+      { repo: "/repo", pr: { ...pr, mine: true } },
+      "",
+    );
     expect(mine).toContain("GitHub will refuse `--approve`");
     expect(mine).toContain("post that same body with `--comment` instead");
   });
@@ -134,7 +155,8 @@ describe("addressPrCommentsTask", () => {
     url: "https://x/pr/42",
     branch: "fix/flux",
   } as ipc.PrInfo;
-  const ctx = (query = "") => addressPrCommentsTask.buildContext({ repo: "/repo", pr }, query);
+  const ctx = (query = "") =>
+    addressPrCommentsTask.buildContext({ repo: "/repo", pr }, query);
 
   it("collects the live threads and stays on one line", () => {
     const c = ctx("only the ones from Sam");
@@ -157,9 +179,13 @@ describe("addressPrCommentsTask", () => {
 
   it("fixes the cause everywhere, and pushes back in writing where it doesn't", () => {
     const c = ctx();
-    expect(c).toContain("Fix the cause rather than the line that was pointed at");
+    expect(c).toContain(
+      "Fix the cause rather than the line that was pointed at",
+    );
     expect(c).toContain("everywhere else the same problem exists");
-    expect(c).toContain("change nothing and reply on that thread with the evidence");
+    expect(c).toContain(
+      "change nothing and reply on that thread with the evidence",
+    );
     expect(c).toContain("do not widen the PR");
   });
 
@@ -172,13 +198,19 @@ describe("addressPrCommentsTask", () => {
   });
 
   it("runs in a worktree of its own and tears down a throwaway one", () => {
-    expect(addressPrCommentsTask.isolation?.target({ repo: "/repo", pr })).toEqual({
+    expect(
+      addressPrCommentsTask.isolation?.target({ repo: "/repo", pr }),
+    ).toEqual({
       repo: "/repo",
       pr,
     });
-    const disposable = addressPrCommentsTask.buildContext({ repo: "/repo", pr }, "", {
-      cleanup: { repo: "/repo", worktree: "/repo-wt-pr-42" },
-    });
+    const disposable = addressPrCommentsTask.buildContext(
+      { repo: "/repo", pr },
+      "",
+      {
+        cleanup: { repo: "/repo", worktree: "/repo-wt-pr-42" },
+      },
+    );
     expect(disposable).toContain("worktree remove --force");
     expect(disposable).toContain("/repo-wt-pr-42");
     expect(disposable).not.toMatch(/[\r\n]/);
@@ -209,8 +241,13 @@ describe("MICRO_TASKS", () => {
     // confusion this replaced — so it fails here instead.
     for (const t of MICRO_TASKS) {
       expect(t.blurb, `${t.id} has no blurb`).toBeTruthy();
-      expect(t.blurb!.length, `${t.id}'s blurb is too long for one line`).toBeLessThan(80);
-      expect(["reads", "posts", "pushes"], `${t.id} has no effect`).toContain(t.effect);
+      expect(
+        t.blurb!.length,
+        `${t.id}'s blurb is too long for one line`,
+      ).toBeLessThan(80);
+      expect(["reads", "posts", "pushes"], `${t.id} has no effect`).toContain(
+        t.effect,
+      );
     }
   });
 
@@ -218,15 +255,12 @@ describe("MICRO_TASKS", () => {
     // The grouping is a promise about consequence; these are the three that
     // change the branch, and the isolation flag is the independent evidence.
     const pushes = MICRO_TASKS.filter((t) => t.effect === "pushes").map((t) => t.id);
-    expect(pushes).toEqual([
-      "address-pr-comments",
-      "pr-resolve-conflicts",
-      "pr-fix-ci",
-    ]);
+    expect(pushes).toEqual(["address-pr-comments", "pr-resolve-conflicts", "pr-fix-ci"]);
     for (const t of MICRO_TASKS.filter((x) => x.effect === "pushes"))
-      expect(t.isolation?.kind, `${t.id} edits code, so it needs its own worktree`).toBe(
-        "pr-worktree",
-      );
+      expect(
+        t.isolation?.kind,
+        `${t.id} edits code, so it needs its own worktree`,
+      ).toBe("pr-worktree");
     // Nothing that only reads may carry a brief that posts a review.
     for (const t of MICRO_TASKS.filter((x) => x.effect === "reads"))
       expect(t.id).not.toBe("review-pr");
@@ -256,10 +290,19 @@ describe("PR task tracking", () => {
       followUpsTask,
     ].map((t) => [t.id, t.buildContext({ repo: "/repo", pr }, "")] as const);
     for (const [id, brief] of briefs)
-      expect(brief, `${id} does not name the PR's URL`).toContain("https://github.com/o/r/pull/12");
+      expect(brief, `${id} does not name the PR's URL`).toContain(
+        "https://github.com/o/r/pull/12",
+      );
     expect(
       applySuggestionTask.buildContext(
-        { repo: "/repo", pr, path: "src/a.ts", line: 4, suggestion: "x", threadId: "T_1" },
+        {
+          repo: "/repo",
+          pr,
+          path: "src/a.ts",
+          line: 4,
+          suggestion: "x",
+          threadId: "T_1",
+        },
         "",
       ),
     ).toContain("https://github.com/o/r/pull/12");
@@ -278,7 +321,9 @@ describe("PR tasks that report back through a file", () => {
 
   it("puts artifacts under .canopy in the repo, where fs_read_file can reach them", () => {
     expect(prArtifactPath("/repo", 12)).toBe("/repo/.canopy/pr-12-map.md");
-    expect(prArtifactPath("/repo", 12, "findings")).toBe("/repo/.canopy/pr-12-findings.json");
+    expect(prArtifactPath("/repo", 12, "findings")).toBe(
+      "/repo/.canopy/pr-12-findings.json",
+    );
   });
 
   it("asks the one review task for both files, and forbids posting either", () => {
@@ -404,7 +449,11 @@ describe("PR tasks that report back through a file", () => {
   });
 
   it("drives the app for the run-it review instead of re-reading the diff", () => {
-    const ctx = runItReviewTask.buildContext({ repo: "/repo", pr }, "", undefined);
+    const ctx = runItReviewTask.buildContext(
+      { repo: "/repo", pr },
+      "",
+      undefined,
+    );
     expect(ctx).toContain("canopy_start_server");
     expect(ctx).toContain("canopy_screenshot");
     expect(ctx).toContain("canopy_stop_server");
@@ -458,7 +507,9 @@ describe("customTaskDef", () => {
   });
 
   it("omits the user-adds clause when nothing was typed", () => {
-    expect(customTaskDef(custom).buildContext({ dir: "/p" }, "")).not.toContain("The user adds");
+    expect(customTaskDef(custom).buildContext({ dir: "/p" }, "")).not.toContain(
+      "The user adds",
+    );
   });
 });
 
@@ -488,19 +539,32 @@ describe("adhocTaskDef", () => {
   });
 
   it("takes a caller's label when the surface has a better one", () => {
-    expect(adhocTaskDef("some long brief about a diff", "Changes").label).toBe("Changes");
+    expect(adhocTaskDef("some long brief about a diff", "Changes").label).toBe(
+      "Changes",
+    );
   });
 
   it("still folds in extra context the launcher passes", () => {
-    expect(adhocTaskDef("Bump the changelog").buildContext({ dir: "/p" }, "and tag it")).toContain(
-      'The user adds: "and tag it"',
-    );
+    expect(
+      adhocTaskDef("Bump the changelog").buildContext(
+        { dir: "/p" },
+        "and tag it",
+      ),
+    ).toContain('The user adds: "and tag it"');
   });
 });
 
 describe("isStopFor", () => {
-  const stop = (pty: number | undefined, event = "Stop") =>
-    JSON.stringify({ session_id: "s1", hook_event_name: event, canopy_pty: pty });
+  const stop = (pty: number | undefined, event = "Stop") => ({
+    ts: 0,
+    data: parseAgentEvent(
+      JSON.stringify({
+        session_id: "s1",
+        hook_event_name: event,
+        canopy_pty: pty,
+      }),
+    ),
+  });
 
   it("matches Stop from the same terminal only", () => {
     expect(isStopFor(stop(7), 7)).toBe(true);
@@ -510,12 +574,22 @@ describe("isStopFor", () => {
 
   it("treats codex turn-complete as a stop too", () => {
     expect(
-      isStopFor(JSON.stringify({ type: "agent-turn-complete", canopy_pty: 7 }), 7),
+      isStopFor(
+        {
+          ts: 0,
+          data: parseAgentEvent(
+            JSON.stringify({ type: "agent-turn-complete", canopy_pty: 7 }),
+          ),
+        },
+        7,
+      ),
     ).toBe(true);
   });
 
   it("ignores other events and malformed lines", () => {
     expect(isStopFor(stop(7, "PostToolUse"), 7)).toBe(false);
-    expect(isStopFor("not json", 7)).toBe(false);
+    expect(isStopFor({ ts: 0, data: parseAgentEvent("not json") }, 7)).toBe(
+      false,
+    );
   });
 });

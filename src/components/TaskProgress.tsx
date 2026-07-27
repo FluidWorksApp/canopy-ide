@@ -15,8 +15,9 @@ interface Props {
   active: boolean;
   /** What the agent is doing, in three words. */
   title: string;
-  /** How long it has been going, already formatted. */
-  elapsed?: string;
+  /** How long it has been going. A node, not a string, so the counter can tick
+   *  itself without re-rendering whatever drew the rail. */
+  elapsed?: React.ReactNode;
 }
 
 export function TaskProgress({ steps, done, active, title, elapsed }: Props) {

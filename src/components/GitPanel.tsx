@@ -2,10 +2,19 @@
 // commit, sync with the remote, and pull requests. Everything runs through the
 // system `git`/`gh` in the Rust core — the same tools the user's terminal uses,
 // so hooks, credential helpers and SSH config all behave identically.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  errorDialog,
+  heldBadge,
+  heldBranches,
+  switchDialog,
+  type SwitchAction,
+  type SwitchDialog,
+} from "../branchSwitch";
 import * as ipc from "../ipc";
 import type { Notify } from "../types";
 import { useEscape } from "../useEscape";
+import { BranchSwitchDialog } from "./BranchSwitchDialog";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { RestartIcon } from "./icons";
 import { LooseEnds } from "./LooseEnds";
@@ -87,7 +96,16 @@ export function GitPanel({
   const [confirm, setConfirm] = useState<
     { text: string; run: () => void; okLabel?: string } | null
   >(null);
+  /** A branch switch git refused, turned into a question. `holder` is kept
+   *  alongside the dialog because acting on it needs the workspace's path,
+   *  which the copy alone doesn't carry. */
+  const [switching, setSwitching] = useState<{
+    branch: string;
+    holder: ipc.BranchHolder | null;
+    dialog: SwitchDialog;
+  } | null>(null);
   useEscape(() => setConfirm(null), confirm != null);
+  useEscape(() => setSwitching(null), switching != null);
   const ctx = useContextMenu();
 
   const key = components.map((c) => c.path).join("\n");
@@ -133,21 +151,30 @@ export function GitPanel({
   // `git status` per worktree to get dirty counts, and a repo can easily have
   // 20+ agent worktrees — polling that every few seconds would spawn a storm
   // of git processes for a panel nobody is looking at.
-  const loadWorktrees = useCallback(async () => {
-    if (!repo) return;
-    setBusy("worktrees");
-    try {
-      setWorktrees(await ipc.gitWorktrees(repo));
-    } catch (err) {
-      onNotice(String(err), "error");
-    } finally {
-      setBusy(null);
-    }
-  }, [repo, onNotice]);
+  const loadWorktrees = useCallback(
+    async (quiet = false) => {
+      if (!repo) return;
+      if (!quiet) setBusy("worktrees");
+      try {
+        setWorktrees(await ipc.gitWorktrees(repo));
+      } catch (err) {
+        if (!quiet) onNotice(String(err), "error");
+      } finally {
+        if (!quiet) setBusy(null);
+      }
+    },
+    [repo, onNotice],
+  );
 
+  // The branches list wants them too — a branch another workspace holds is
+  // badged as such, so the conflict is visible before the click. Same one-shot
+  // load, quietly: the badge is decoration, not the reason you're here.
   useEffect(() => {
     if (section === "worktrees") void loadWorktrees();
+    else if (section === "branches") void loadWorktrees(true);
   }, [section, loadWorktrees]);
+
+  const held = useMemo(() => heldBranches(worktrees, repo), [worktrees, repo]);
 
   /** Run a git action, surface its real output, and refresh. Used for the
    *  heavier, less frequent operations (commit, sync, checkout) where the user
@@ -164,6 +191,68 @@ export function GitPanel({
       onNotice(String(err), "error");
     } finally {
       setBusy(null);
+    }
+  };
+
+  /** Every route into a branch switch goes through here. A switch git refuses
+   *  is not an error to report — it's a question to ask, so the outcome becomes
+   *  a dialog with a way forward and the raw text stays folded inside it. */
+  const trySwitch = async (
+    branch: string,
+    run: () => Promise<ipc.CheckoutOutcome>,
+  ) => {
+    setBusy("checkout");
+    try {
+      const out = await run();
+      const dialog = switchDialog(branch, out);
+      setSwitching(
+        dialog
+          ? { branch, holder: out.kind === "branch_in_worktree" ? out.holder : null, dialog }
+          : null,
+      );
+      if (out.kind === "switched") onNotice(out.message, "success");
+      await refresh();
+      void loadWorktrees(true);
+    } catch (err) {
+      setSwitching({ branch, holder: null, dialog: errorDialog(branch, err) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** What the user picked in that dialog. Each branch here is one explicit git
+   *  operation — none of them silently discards anything. */
+  const resolveSwitch = (action: SwitchAction) => {
+    if (!switching || !repo) return;
+    const { branch, holder } = switching;
+    switch (action) {
+      case "cancel":
+        setSwitching(null);
+        break;
+      case "open-there":
+        if (holder) {
+          setSwitching(null);
+          onUseWorktree(repo, holder.path, holder.branch);
+        }
+        break;
+      case "move-here":
+        void trySwitch(branch, async () => {
+          await ipc.gitBranchRelease(repo, branch);
+          return ipc.gitCheckout(repo, branch, false);
+        });
+        break;
+      case "cleanup":
+        void trySwitch(branch, async () => {
+          await ipc.gitWorktreePrune(repo);
+          return ipc.gitCheckout(repo, branch, false);
+        });
+        break;
+      case "snapshot":
+        void trySwitch(branch, () => ipc.gitCheckoutDetached(repo, branch));
+        break;
+      case "carry":
+        void trySwitch(branch, () => ipc.gitCheckoutCarry(repo, branch));
+        break;
     }
   };
 
@@ -185,7 +274,13 @@ export function GitPanel({
       items.push({
         label: b.remote_only ? "Check out from GitHub" : "Switch to this branch",
         hint: "git checkout",
-        onClick: () => repo && void act("checkout", () => ipc.gitCheckout(repo, b.name, false)),
+        onClick: () => repo && void trySwitch(b.name, () => ipc.gitCheckout(repo, b.name, false)),
+      });
+      items.push({
+        label: "Test a snapshot of it",
+        hint: "git checkout --detach",
+        onClick: () =>
+          repo && void trySwitch(b.name, () => ipc.gitCheckoutDetached(repo, b.name)),
       });
     }
     if (branchTaskMenu && repo) {
@@ -348,12 +443,12 @@ export function GitPanel({
           className="git-branch"
           title={
             status?.detached
-              ? "detached HEAD — checkout a branch to commit"
+              ? "You're looking at a snapshot, not a branch. Click here, then click any branch to go back — nothing was lost. (git: detached HEAD)"
               : `branch${status?.upstream ? ` · tracking ${status.upstream}` : " · no upstream"}`
           }
           onClick={() => setSection("branches")}
         >
-          {status?.detached ? "⚠ detached" : `⎇ ${status?.branch ?? "—"}`}
+          {status?.detached ? "⚠ snapshot" : `⎇ ${status?.branch ?? "—"}`}
         </button>
         {status && (status.ahead > 0 || status.behind > 0) && (
           <span className="git-counts" title={`${status.ahead} to push · ${status.behind} to pull`}>
@@ -406,6 +501,14 @@ export function GitPanel({
 
       {section === "branches" && (
         <div className="git-scroll">
+          {/* Detached HEAD is the one state where the way out is not obvious.
+              Say what it is and how to leave it, right where the exit is. */}
+          {status?.detached && (
+            <div className="git-snapshot-note">
+              You're looking at a snapshot of the code. Click any branch below to go
+              back — nothing you had is lost.
+            </div>
+          )}
           <div className="git-branch-new">
             <input
               className="git-branch-input"
@@ -416,14 +519,15 @@ export function GitPanel({
             {branchFilter.trim() && !branches.some((b) => b.name === branchFilter.trim()) && (
               <button
                 className="btn-mini"
-                onClick={() =>
-                  repo &&
-                  void act("create branch", async () => {
-                    const r = await ipc.gitCheckout(repo, branchFilter.trim(), true);
-                    setBranchFilter("");
-                    return r;
-                  })
-                }
+                onClick={() => {
+                  if (!repo) return;
+                  const name = branchFilter.trim();
+                  void trySwitch(name, async () => {
+                    const out = await ipc.gitCheckout(repo, name, true);
+                    if (out.kind === "switched") setBranchFilter("");
+                    return out;
+                  });
+                }}
               >
                 Create
               </button>
@@ -440,38 +544,49 @@ export function GitPanel({
                 (a.current === b.current ? 0 : a.current ? -1 : 1) ||
                 (a.remote_only === b.remote_only ? 0 : a.remote_only ? 1 : -1),
             )
-            .map((b) => (
-              <div
-                key={b.name}
-                className={`git-branch-row ${b.current ? "git-branch-current" : ""} ${b.remote_only ? "git-branch-remote" : ""}`}
-                title={
-                  b.current
-                    ? `${b.name} — you're on this branch\n${b.subject}`
-                    : b.remote_only
-                      ? `${b.name} — on GitHub. Click to check it out here.\n${b.subject}`
-                      : b.synced
-                        ? `${b.name} — click to switch\n${b.subject}`
-                        : `${b.name} — local only, not pushed yet. Click to switch.\n${b.subject}`
-                }
-                onClick={() =>
-                  !b.current &&
-                  repo &&
-                  // A remote-only name (no origin/ prefix) checks out and starts
-                  // tracking it — the same DWIM git does for `git checkout x`.
-                  void act("checkout", () => ipc.gitCheckout(repo, b.name, false))
-                }
-                onContextMenu={(e) => ctx.open(e, branchMenu(b))}
-              >
-                <span className="git-branch-mark">{b.current ? "●" : b.remote_only ? "☁" : "○"}</span>
-                <span className="git-branch-name">{b.name}</span>
-                {b.remote_only ? (
-                  <span className="git-branch-tag git-branch-tag-remote">on GitHub</span>
-                ) : (
-                  !b.synced && <span className="git-branch-tag">not pushed</span>
-                )}
-                <span className="git-branch-subject">{b.subject}</span>
-              </div>
-            ))}
+            .map((b) => {
+              // A branch another workspace has checked out: badge it, so the
+              // conflict is something you can see rather than something you
+              // discover by clicking.
+              const busyIn = b.current ? undefined : held.get(b.name);
+              const badge = busyIn && heldBadge(busyIn);
+              return (
+                <div
+                  key={b.name}
+                  className={`git-branch-row ${b.current ? "git-branch-current" : ""} ${b.remote_only ? "git-branch-remote" : ""}`}
+                  title={
+                    b.current
+                      ? `${b.name} — you're on this branch\n${b.subject}`
+                      : badge
+                        ? `${badge.title}\n${b.subject}`
+                        : b.remote_only
+                          ? `${b.name} — on GitHub. Click to check it out here.\n${b.subject}`
+                          : b.synced
+                            ? `${b.name} — click to switch\n${b.subject}`
+                            : `${b.name} — local only, not pushed yet. Click to switch.\n${b.subject}`
+                  }
+                  onClick={() =>
+                    !b.current &&
+                    repo &&
+                    // A remote-only name (no origin/ prefix) checks out and starts
+                    // tracking it — the same DWIM git does for `git checkout x`.
+                    void trySwitch(b.name, () => ipc.gitCheckout(repo, b.name, false))
+                  }
+                  onContextMenu={(e) => ctx.open(e, branchMenu(b))}
+                >
+                  <span className="git-branch-mark">{b.current ? "●" : b.remote_only ? "☁" : "○"}</span>
+                  <span className="git-branch-name">{b.name}</span>
+                  {badge ? (
+                    <span className="git-branch-tag git-branch-tag-busy">{badge.label}</span>
+                  ) : b.remote_only ? (
+                    <span className="git-branch-tag git-branch-tag-remote">on GitHub</span>
+                  ) : (
+                    !b.synced && <span className="git-branch-tag">not pushed</span>
+                  )}
+                  <span className="git-branch-subject">{b.subject}</span>
+                </div>
+              );
+            })}
         </div>
       )}
 
@@ -674,6 +789,15 @@ export function GitPanel({
             </div>
           </div>
         </div>
+      )}
+
+      {/* A branch switch git wouldn't do is a question, not an error. */}
+      {switching && (
+        <BranchSwitchDialog
+          dialog={switching.dialog}
+          busy={busy === "checkout"}
+          onChoose={resolveSwitch}
+        />
       )}
 
       {ctx.menu && (

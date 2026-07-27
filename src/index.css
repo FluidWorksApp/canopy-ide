@@ -919,13 +919,18 @@ body,
   transform: translateX(calc(-100% - 48px));
   opacity: 0;
   pointer-events: none;
+  /* Hidden once the exit finishes: with only opacity 0, WebKit still pays the
+     frost's full-viewport backdrop blur on every repaint of the terminals
+     underneath. Delayed so the slide-out still shows. */
+  visibility: hidden;
   transition:
     transform var(--peek-out) var(--peek-exit),
     /* Opacity has to HOLD while the sheet travels. Fading it in step with the
        slide (or faster) dissolves the panel in place and the movement never
        registers — it just looks like it blinked out. This curve keeps it near
        opaque for most of the exit and drops it at the very end. */
-    opacity var(--peek-out) cubic-bezier(0.85, 0, 1, 1);
+    opacity var(--peek-out) cubic-bezier(0.85, 0, 1, 1),
+    visibility 0s linear var(--peek-out);
 }
 
 /* `transform: none`, not `translateX(0)`: a resolved transform makes the panel a
@@ -936,6 +941,7 @@ body,
   transform: none;
   opacity: 1;
   pointer-events: auto;
+  visibility: visible;
   transition:
     transform var(--peek-in) var(--peek-spring),
     opacity calc(var(--peek-in) * 0.5) var(--ease-out);
@@ -1052,6 +1058,34 @@ body,
 }
 .side-peek-grip:hover {
   background: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+/* Docked, not floating: the panel is part of the row, so the main area sizes
+   itself around it. No frost and no slide — glass and a spring entrance are how
+   an overlay says "I'm in front of your work"; a column that pushed the editor
+   aside is simply part of the layout. */
+.side-dock {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-alt);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+
+/* Closed is width 0, not gone: the panel stays mounted so reopening it doesn't
+   re-run every panel's first fetch. Nothing of it may show — including the
+   resize grip, which would otherwise sit over the rail's edge. */
+.side-dock:not(.open) {
+  border-right: none;
+}
+
+.side-dock:not(.open) .side-peek-grip {
+  display: none;
 }
 
 /* A peek is pointer-driven; someone who has turned motion down still needs the
@@ -1978,9 +2012,37 @@ body,
   margin-top: 16px;
 }
 
-.btn:disabled {
-  opacity: 0.4;
+/* Disabled is a colour, not an opacity. These buttons sit on the hover-peek
+   side panel, which is glass — a translucent sheet with the editor blurred
+   behind it. A button dimmed with `opacity` composites against whatever the
+   editor happens to be showing under it, so two identically-disabled Commit
+   buttons in the Changes panel painted at visibly different brightnesses.
+   Opaque fills can't drift like that. */
+.btn:disabled,
+.btn-mini:disabled {
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  border-color: var(--border);
   cursor: default;
+}
+
+.btn.btn-accent:disabled,
+.btn-mini.btn-accent:disabled {
+  /* Still legible as the primary action, just plainly not available: the
+     accent muted into the surface rather than laid over it. */
+  background: color-mix(in srgb, var(--accent) 22%, var(--bg-raised));
+  color: var(--text-dim);
+  border-color: transparent;
+}
+
+.btn:disabled:hover,
+.btn-mini:disabled:hover {
+  border-color: var(--border);
+}
+
+.btn.btn-accent:disabled:hover,
+.btn-mini.btn-accent:disabled:hover {
+  border-color: transparent;
 }
 
 /* A wide, transparent grab zone with a hairline 1px line drawn down its centre,
@@ -2144,7 +2206,10 @@ body,
 .tree-root-header {
   display: flex;
   align-items: center;
-  padding: 4px 8px;
+  /* Fixed to the tree row height: headers ride in the same windowed list as
+     the rows, and the spacer math needs every line at one height. */
+  height: 26px;
+  padding: 0 8px;
   font-weight: 600;
   cursor: pointer;
   color: var(--text);
@@ -2224,26 +2289,17 @@ body,
   flex: 0 0 auto;
 }
 
-/* Nesting: each level indents with a guide line. The line is placed to fall
-   directly under the parent row's chevron center — row margin 6 + row padding
-   6 + half the 11px chevron ≈ 17 — so children hang off the chevron they open
-   from rather than off arbitrary whitespace. */
-.tree-indent {
-  margin-left: 17px;
-  /* A hairline guide, dimmed below the panel's own borders — on a deep tree a
-     full-strength line at every level reads as a hard ladder. It brightens to
-     the accent while its subtree holds the cursor (see below), so the active
-     path is easy to trace back to its parent. */
+/* Nesting: each level indents with a guide line, one span per ancestor level,
+   drawn by each row for its own 26px slice — rows are flat siblings now (the
+   windowed list needs that), so the continuous hairline the nested wrappers
+   used to draw is these slices stacking. The line falls near the parent row's
+   chevron center, and stays dimmed below the panel's own borders: on a deep
+   tree a full-strength line at every level reads as a hard ladder. */
+.tree-guide {
+  flex: 0 0 20px;
+  align-self: stretch;
+  margin-left: 5px;
   border-left: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-  padding-left: 2px;
-  transition: border-color var(--dur-fast) var(--ease-out);
-}
-
-/* Trace the active branch: the indent guide wrapping the cursor row's subtree
-   picks up a faint accent, so the eye can follow a nested file back to the
-   folder it lives in. :has keeps this pure-CSS — no per-row bookkeeping. */
-.tree-indent:has(> .tree-row-cursor) {
-  border-left-color: color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
 .tree-chevron {
@@ -2281,8 +2337,7 @@ body,
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tree-chevron,
-  .tree-indent {
+  .tree-chevron {
     transition: none;
   }
 }
@@ -2599,16 +2654,15 @@ body.dragging-tab * {
    section back so it stays reachable, and clicking a tab there shifts focus,
    which clears the dim at its source. */
 .pane-section-dim {
-  opacity: 0.4;
-  filter: blur(1.1px) saturate(0.72);
-  transition:
-    opacity 0.18s ease,
-    filter 0.18s ease;
+  /* Opacity only — no blur. A filter here put the section on its own layer
+     and re-filtered it on every frame of the status dots animating inside;
+     the deeper 0.34 recovers the "receded" read the blur used to add. */
+  opacity: 0.34;
+  transition: opacity 0.18s ease;
 }
 .pane-section-dim:hover,
 .pane-section-dim:focus-within {
   opacity: 1;
-  filter: none;
 }
 /* The active rail takes precedence: it lifts onto a raised pill, brightens its
    label, grows its active chip, and is allowed more room — so a live shell or
@@ -2883,11 +2937,18 @@ body.dragging-tab * {
   z-index: 20;
   pointer-events: none; /* closed: clicks fall through to the terminal */
   opacity: 0;
-  transition: opacity var(--dur-med) var(--ease-out);
+  /* Hidden, not just transparent: the overlay's backdrop blur otherwise keeps
+     costing on every repaint of the terminal it covers. */
+  visibility: hidden;
+  transition:
+    opacity var(--dur-med) var(--ease-out),
+    visibility 0s linear var(--dur-med);
 }
 .workspace-overlay-layer.open {
   pointer-events: auto;
   opacity: 1;
+  visibility: visible;
+  transition: opacity var(--dur-med) var(--ease-out);
 }
 
 .workspace-overlay {
@@ -2901,7 +2962,6 @@ body.dragging-tab * {
   -webkit-backdrop-filter: blur(18px) saturate(135%);
   transform: scale(1.015);
   transition: transform var(--dur-med) var(--ease-out);
-  will-change: transform;
 }
 .workspace-overlay-layer.open .workspace-overlay {
   transform: scale(1);
@@ -3535,7 +3595,10 @@ body.dragging-tab * {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 10px;
+  /* Fixed height: the Changes list is windowed, and the spacer math is the
+     scrollbar. */
+  height: 26px;
+  padding: 0 10px;
   cursor: pointer;
   overflow: hidden;
 }
@@ -4976,6 +5039,34 @@ body.dragging-tab * {
   font-size: 12px;
 }
 
+/* A stack of switches that each need a line of explanation: the box stays on
+   the first line of the label, and the note sits under the name rather than
+   beside it, so three of them read as a list of choices and not a paragraph. */
+.set-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.set-checks .set-inline-check {
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.set-checks .set-inline-check input {
+  margin-top: 1px;
+  flex: 0 0 auto;
+}
+
+.set-checks .set-inline-check em {
+  display: block;
+  margin-top: 2px;
+  font-style: normal;
+  font-size: 11px;
+  color: var(--text-dim);
+  max-width: 46ch;
+}
+
 .set-wide {
   width: 320px;
   max-width: 100%;
@@ -5878,6 +5969,24 @@ body.dragging-tab * {
   border-color: var(--accent);
   color: var(--accent);
 }
+/* Held by another workspace — clicking still works, it just asks first. */
+.git-branch-tag-busy {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+/* Detached HEAD, explained where the way out of it is. */
+.git-snapshot-note {
+  margin: 6px 8px 2px;
+  padding: 6px 8px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.4;
+}
 
 .git-branch-subject {
   flex: 1;
@@ -6028,6 +6137,85 @@ body.dragging-tab * {
   color: #1a1b26;
 }
 
+/* ---------- branch switch dialog ---------- */
+/* Wider than a confirm and stacked rather than a button row: these are real
+   alternatives with consequences, and each needs a line to explain itself. */
+.confirm.branch-switch {
+  width: min(460px, 94vw);
+  max-width: min(460px, 94vw);
+}
+
+.branch-switch-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.branch-switch-body {
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+
+.branch-switch-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 14px;
+}
+
+.branch-switch-choice {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  text-align: left;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.branch-switch-choice:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: var(--accent);
+}
+.branch-switch-choice:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+/* The safest way out, led visually — never pre-run. */
+.branch-switch-choice-lead {
+  border-color: var(--accent);
+}
+
+.branch-switch-choice-label {
+  font-size: 13px;
+}
+.branch-switch-choice-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.35;
+}
+
+.branch-switch-detail {
+  margin-top: 12px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.branch-switch-detail summary {
+  cursor: pointer;
+}
+.branch-switch-detail pre {
+  margin-top: 6px;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+}
+
 /* ---------- PR view ---------- */
 
 .pr-view {
@@ -6134,6 +6322,19 @@ body.dragging-tab * {
   margin-top: 5px;
   font-size: 11px;
   color: var(--text-dim);
+}
+
+/* Which repo this PR is in — first on the line, because with several projects
+   open "#843" is only half an address. Monospace and lightly boxed so it reads
+   as an identifier rather than as more of the sentence beside it. */
+.pr-repo {
+  font-family: ui-monospace, monospace;
+  color: var(--text);
+  background: var(--bg-raised);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  padding: 1px 6px;
+  cursor: default;
 }
 
 .pr-when { color: var(--text-dim); cursor: default; }
@@ -10710,13 +10911,38 @@ a.btn-mini {
 .preview-frame-wrap {
   flex: 1;
   min-width: 0;
-  background: #fff;
+  /* The app's own colour, not white. Under the webview engine this box is
+     revealed every time a panel or a menu opens over the page, and a white
+     rectangle flashing against a dark skin reads as a rendering failure rather
+     than as something being covered. The iframe paints its own page over this
+     anyway, so the proxy engine loses nothing. */
+  background: var(--bg);
 }
 .preview-frame {
   width: 100%;
   height: 100%;
   border: 0;
   display: block;
+}
+/* The webview engine's page is a native view parked over this box. Nothing is
+   drawn here except the freeze-frame, and only while the view is hidden. */
+.preview-webview-host {
+  background: var(--bg);
+  position: relative;
+  overflow: hidden;
+}
+/* The last picture of the page, standing in for it while an overlay has the
+   view pushed off screen — so a menu opening looks like the page pausing
+   rather than the page going away. Stretched to the box it stands in for: the
+   capture is of exactly that box, taken at whatever resolution was cheap. */
+.preview-frozen {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  pointer-events: none;
+  user-select: none;
 }
 .preview-error {
   height: 100%;
@@ -11132,6 +11358,125 @@ a.btn-mini {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ---- A file Canopy refused to load (binary / too large) ------------------ */
+.blocked-file {
+  max-width: 460px;
+  padding: 24px;
+  text-align: center;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-raised);
+}
+
+.blocked-file-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.blocked-file-path {
+  margin-top: 4px;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.blocked-file-detail {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.blocked-file-actions {
+  margin-top: 16px;
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+
+/* ---- Settings → Editor → File associations ------------------------------- */
+.assoc {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.assoc-add {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.assoc-input {
+  width: 140px;
+  font-family: var(--font-mono, monospace);
+}
+
+.assoc-search {
+  width: 100%;
+}
+
+.assoc-arrow {
+  color: var(--text-dim);
+}
+
+.assoc-error {
+  font-size: 11px;
+  color: var(--danger, #f7768e);
+}
+
+/* Bounded so the shipped table can be long without pushing the rest of the
+   Editor screen off the modal. */
+.assoc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.assoc-group {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--bg-raised);
+}
+
+.assoc-group-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.assoc-group-blurb {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+.assoc-row {
+  display: grid;
+  grid-template-columns: 130px 1fr 70px;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.assoc-pattern {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assoc-spacer {
+  display: block;
 }
 
 /* ---- An agent's question (canopy_ask_user) ------------------------------- */
@@ -11869,3 +12214,22 @@ a.btn-mini {
   min-width: 20px;
 }
 .change-row:hover .change-stage { visibility: visible; }
+
+/* ---------- off-screen row skipping ---------- */
+
+/* content-visibility lets WebKit skip layout and paint for rows outside the
+   viewport — the cheap substitute for list virtualization where the list
+   isn't windowed (commits, PR comments/diffs; the file tree and Changes list
+   are truly windowed via WindowedList and don't need it). contain-intrinsic-
+   size keeps scrollbar geometry sane before a row is first seen; the `auto`
+   keyword remembers the real rendered size afterwards. */
+.git-commit-row,
+.pr-comment-row,
+.pr-thread {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 28px;
+}
+.pr-file {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 420px;
+}

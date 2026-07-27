@@ -3,6 +3,7 @@ import type { CustomMicroTask } from "./microTasks";
 // Type-only, so the projects.ts ↔ settings.ts pair stays a compile-time cycle
 // and never a runtime one.
 import type { CustomAgentCli } from "./projects";
+import type { BrowserEngine } from "./browserBounds";
 
 export type Theme = "auto" | "default" | "gotham" | "daylight" | "custom";
 
@@ -55,7 +56,8 @@ export interface Hotkey {
 }
 
 const IS_MAC =
-  typeof navigator !== "undefined" && navigator.platform.toUpperCase().includes("MAC");
+  typeof navigator !== "undefined" &&
+  navigator.platform.toUpperCase().includes("MAC");
 
 /** Default dictation hotkey: ⌘D on Mac, Alt+D elsewhere (plain Ctrl+D is shell
  *  EOF, so it's deliberately avoided). */
@@ -126,6 +128,24 @@ export interface Settings {
    *  the user having to pick a second colour. */
   customAccent: string;
 
+  // ---- Side panel behaviour (Appearance). Three independent choices about
+  // one panel: how it opens, how it closes, and whether it covers the work or
+  // moves it aside.
+  /** Settle the pointer on a rail icon and the panel comes out on its own. Off
+   *  by default: a panel that appears because you passed over an icon on the
+   *  way somewhere else is a panel you didn't ask for. */
+  sidebarHover: boolean;
+  /** A click in the content area puts the panel away. On by default — while
+   *  the panel overlays the editor, a click past it is someone reaching for
+   *  what's underneath, and having to click twice is the one thing an overlay
+   *  must not do. */
+  sidebarClickOutsideCloses: boolean;
+  /** The panel floats over the content instead of taking a column from it. On
+   *  by default: docking it reflows the main area every time it opens, which
+   *  re-wraps every terminal in it. Turn it off to have the panel push the
+   *  editor aside and stay out of its way. */
+  sidebarOverlay: boolean;
+
   // ---- Personalize: font + cursor, Editor (Monaco) and Terminal (xterm)
   // independently — different rendering engines, so neither shares the
   // other's font metrics or cursor vocabulary. Applied to newly opened
@@ -140,6 +160,13 @@ export interface Settings {
   editorFontSize: number;
   editorCursorStyle: CursorStyle;
   editorCursorBlink: boolean;
+  /** File pattern -> Monaco language id, the user's own overrides only
+   *  (Settings → Editor → File associations). Canopy's shipped table lives in
+   *  fileAssociations.ts and is deliberately NOT copied in here: storing it
+   *  would freeze today's list into every existing install, so a mapping added
+   *  in a later version would never reach anyone who has opened this screen.
+   *  Re-pointing a shipped pattern writes an entry under the same key. */
+  fileAssociations: Record<string, string>;
   /** Which agent CLI starts work on a ticket (registry id in projects.ts).
    *  Was hardcoded to claude, which quietly made every other agent a
    *  second-class citizen in a product built to run all of them. */
@@ -206,6 +233,14 @@ export interface Settings {
    *  Settings restores the whole choice, not just the running link. */
   remoteTunnelProvider: string;
 
+  // ---- Embedded browser ----
+  /** Which engine preview tabs run on. "webview" is a real child webview at
+   *  the page's real origin, with a persistent profile — you log into a site
+   *  once and stay logged in. "proxy" is the older loopback reverse proxy,
+   *  which keeps no session at all but is the only engine that exists off
+   *  macOS; chooseEngine() falls back to it there whatever this says. */
+  browserEngine: BrowserEngine;
+
   // ---- Crash reporting ----
   /** Opt-in, default off: when a panel crashes (or a native panic is found on
    *  the next launch), offer to send an anonymous report — message + stack,
@@ -236,6 +271,9 @@ const DEFAULTS: Settings = {
   trackerKeys: {},
   theme: "default",
   customAccent: "",
+  sidebarHover: false,
+  sidebarClickOutsideCloses: true,
+  sidebarOverlay: true,
   terminalFontFamily: TERMINAL_FONT_DEFAULT,
   terminalCursorStyle: "block",
   terminalCursorBlink: true,
@@ -243,28 +281,48 @@ const DEFAULTS: Settings = {
   editorFontSize: 13,
   editorCursorStyle: "bar",
   editorCursorBlink: true,
+  fileAssociations: {},
   dictationHotkey: DEFAULT_DICTATION_HOTKEY,
   dictationModel: "",
   dictationLanguage: "",
   remoteReach: "local",
   remoteTunnelProvider: "cloudflare",
+  browserEngine: "webview",
   crashReporting: false,
 };
 
 const KEY = "canopy.settings";
 
+/** Parsed-settings cache, keyed on the raw stored string: getSettings is
+ *  called from render paths, and re-parsing per call added up. Keying on the
+ *  raw string (rather than invalidating on our own writes) stays correct when
+ *  something else touches the key — tests do. Also makes the returned object
+ *  identity-stable between writes. */
+let settingsCache: { raw: string | null; value: Settings } | null = null;
+
 export function getSettings(): Settings {
+  const raw = localStorage.getItem(KEY);
+  if (settingsCache && settingsCache.raw === raw) return settingsCache.value;
+  let value: Settings;
   try {
-    const stored = JSON.parse(localStorage.getItem(KEY) ?? "{}") as Partial<Settings>;
-    return { ...DEFAULTS, ...stored };
+    value = { ...DEFAULTS, ...(JSON.parse(raw ?? "{}") as Partial<Settings>) };
   } catch {
-    return { ...DEFAULTS };
+    value = { ...DEFAULTS };
   }
+  settingsCache = { raw, value };
+  return value;
 }
+
+/** Fired after any settings write. Most settings are read where they're used
+ *  and need nothing; the ones that change how a live surface behaves (the side
+ *  panel's three) are held in component state, and this is how they hear. */
+export const SETTINGS_CHANGE_EVENT = "canopy:settings-changed";
 
 export function updateSettings(patch: Partial<Settings>): Settings {
   const next = { ...getSettings(), ...patch };
   localStorage.setItem(KEY, JSON.stringify(next));
+  if (typeof window !== "undefined")
+    window.dispatchEvent(new Event(SETTINGS_CHANGE_EVENT));
   return next;
 }
 
@@ -275,7 +333,8 @@ function luminance(hex: string): number {
   const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex.trim());
   if (!m) return 0.5;
   const [r, g, b] = m.slice(1, 4).map((h) => parseInt(h, 16) / 255);
-  const lin = (c: number) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  const lin = (c: number) =>
+    c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
   return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
 }
 
@@ -300,7 +359,10 @@ export function applyTheme(theme: Theme, customAccent?: string): void {
     // thing to want, and forcing a skin change to get one was the wrong
     // model.
     root.setProperty("--accent", accent);
-    root.setProperty("--on-accent", luminance(accent) > 0.5 ? "#12131c" : "#ffffff");
+    root.setProperty(
+      "--on-accent",
+      luminance(accent) > 0.5 ? "#12131c" : "#ffffff",
+    );
   } else {
     // No override — fall back to whatever the skin's stylesheet block says.
     root.removeProperty("--accent");

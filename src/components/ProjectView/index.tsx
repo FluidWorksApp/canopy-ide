@@ -5,18 +5,18 @@
 // Terminals stay mounted so TUIs keep running. Bottom status tray shows git
 // branch, agents, model, tokens, cost.
 import {
+  memo,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
-  useSyncExternalStore,
   type CSSProperties,
   type ReactNode,
 } from "react";
 import { Panel, PanelGroup } from "react-resizable-panels";
 import * as ipc from "../../ipc";
-import { getSettings } from "../../settings";
+import { getSettings, SETTINGS_CHANGE_EVENT } from "../../settings";
 import { modelFor, monaco, languageForPath } from "../../monaco-setup";
 import { getCaret, subscribeCaret } from "../../editorState";
 import { GuestSession, OwnerSession } from "../../collab";
@@ -50,7 +50,6 @@ import {
 import type { OpenFile } from "../../types";
 import {
   derivePending,
-  eventPtyId,
   eventsForProject,
   isStopFor,
   lastStepFor,
@@ -94,6 +93,12 @@ import {
   type TaskChoice,
 } from "../../taskMenu";
 import { viewerKindFor } from "../viewers";
+import {
+  blockForOpen,
+  looksBinary,
+  sizeLimitFor,
+  type OpenBlock,
+} from "../../fileOpen";
 import { ensureLanguageServer } from "../../lsp/client";
 import { Term, type TermHandle } from "../Term";
 import { ContextMenu, useContextMenu, type MenuItem } from "../ContextMenu";
@@ -119,12 +124,22 @@ import { AgentWorkspaceView } from "../AgentWorkspaceView";
 import { PreviewView } from "../PreviewView";
 import type { PreviewServer } from "../../preview";
 import { dispatchBrowserOp } from "../../previewAgent";
+import { useBrowserEngine } from "../../browserHost";
 import { serverForUrl } from "../../preview";
 import { ticketBranch, ticketContext, ticketWorktree } from "../../trackers";
 import { prConflictContext, prReviewContext, prWorktree } from "../../prs";
-import { fileDiffContext, reviewContext, sessionChangesContext } from "../../diffContext";
+import {
+  fileDiffContext,
+  reviewContext,
+  sessionChangesContext,
+} from "../../diffContext";
 import { AgentQueryBar } from "../AgentQueryBar";
-import { forgetSessions, markRestored, restorableFrom, type Restorable } from "../../restorable";
+import {
+  forgetSessions,
+  markRestored,
+  restorableFrom,
+  type Restorable,
+} from "../../restorable";
 import {
   buildSnapshot,
   terminalLaunch,
@@ -175,6 +190,7 @@ import {
   type PreviewSubTab,
   type RailChip,
   type ProjectViewProps,
+  sidebarPrefs,
 } from "./helpers";
 export { tabDisplayLabel, previewLabel };
 export type {
@@ -201,13 +217,18 @@ const decoder = new TextDecoder();
 
 /** How a doc tab's host is hidden when it isn't the front tab.
  *
- *  `display: none` for everything, with one exception: a preview tab keeps its
- *  box. A `display: none` iframe has no layout at all — every element in the
- *  previewed page reports a zero rect — so a backgrounded preview would answer
- *  canopy_browser_snapshot with an empty page and click the wrong coordinates.
- *  `visibility: hidden` keeps the page laid out (and unpainted) so an agent can
- *  drive it while the user works in another tab; absolute + no pointer events
- *  keeps it out of the flow and out of the way of the tab that is in front. */
+ *  `display: none` for everything, with one exception: a preview tab running
+ *  the PROXY engine keeps its box. A `display: none` iframe has no layout at
+ *  all — every element in the previewed page reports a zero rect — so a
+ *  backgrounded preview would answer canopy_browser_snapshot with an empty page
+ *  and click the wrong coordinates. `visibility: hidden` keeps the page laid
+ *  out (and unpainted) so an agent can drive it while the user works in another
+ *  tab; absolute + no pointer events keeps it out of the flow and out of the
+ *  way of the tab that is in front.
+ *
+ *  The webview engine needs none of that: its page lives in a native view whose
+ *  layout has nothing to do with this div, so `display: none` is exactly right
+ *  and browserHost hides the view itself. */
 function hostStyle(front: boolean, keepLaidOut: boolean): CSSProperties {
   if (front) return { display: "block" };
   if (!keepLaidOut) return { display: "none" };
@@ -283,16 +304,46 @@ const SIDE_DEFAULT_W = 300;
 const SIDE_MIN_W = 200;
 const SIDE_MAX_W = 560;
 
-export function ProjectView({ project, visible, zen, events, hookPath, allProjects, dismissedPending, onDismissPending, onEdit, onNotice, onShareContext, onSaveCustomTasks, relay, restore, onRestoreStep, onRestored }: ProjectViewProps) {
+// Memoized: App re-renders on every agent event, relay tick and toast, and
+// every open project's view — visible or not — used to re-render with it.
+// Every prop is either data that should re-render this view or a handler App
+// keeps identity-stable.
+export const ProjectView = memo(function ProjectView({
+  project,
+  visible,
+  zen,
+  events,
+  hookPath,
+  allProjects,
+  dismissedPending,
+  onDismissPending,
+  onEdit,
+  onNotice,
+  onShareContext,
+  onSaveCustomTasks,
+  relay,
+  restore,
+  onRestoreStep,
+  onRestored,
+}: ProjectViewProps) {
+  // Which engine preview tabs run on — it decides how a backgrounded preview
+  // has to be hidden, which is a layout question, so it belongs up here.
+  const browserEngine = useBrowserEngine();
   const [sideTab, setSideTab] = useState<SideTab>("files");
-  // Monaco's caret, for the context snapshot. Subscribed rather than passed
-  // down: the editor sits several components below, and this is read-only.
-  const caret = useSyncExternalStore(subscribeCaret, getCaret);
   // The side panel is a hover overlay, not a docked column. `pinned` is the
   // click/Cmd+B latch that keeps it out; `peeking` is the transient hover state
   // that the debounce below retracts. Either one shows it.
   const [pinned, setPinned] = useState(false);
   const [peeking, setPeeking] = useState(false);
+  /** How the user wants the panel to behave (Settings → Appearance). Held in
+   *  state rather than read inline: these decide what effects are registered,
+   *  and a change has to take hold without reopening the project. */
+  const [sidePrefs, setSidePrefs] = useState(sidebarPrefs);
+  useEffect(() => {
+    const refresh = () => setSidePrefs(sidebarPrefs());
+    window.addEventListener(SETTINGS_CHANGE_EVENT, refresh);
+    return () => window.removeEventListener(SETTINGS_CHANGE_EVENT, refresh);
+  }, []);
   const [sideWidth, setSideWidth] = useState(SIDE_DEFAULT_W);
   const sideWidthRef = useRef(SIDE_DEFAULT_W);
   const sideOpen = !zen && (pinned || peeking);
@@ -309,22 +360,35 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const [renameDraft, setRenameDraft] = useState("");
   // Right-click on the empty area below the file list creates here (the last
   // component's root — the tree that space sits under). Null = closed.
-  const [rootCreate, setRootCreate] = useState<{ dir: string; kind: "file" | "dir"; value: string } | null>(null);
+  const [rootCreate, setRootCreate] = useState<{
+    dir: string;
+    kind: "file" | "dir";
+    value: string;
+  } | null>(null);
   useEscape(() => setRootCreate(null), rootCreate != null);
   const [cliMenuOpen, setCliMenuOpen] = useState(false);
   const [shareMenuOpen, setShareMenuOpen] = useState(false);
   const [shareProjectMenuOpen, setShareProjectMenuOpen] = useState(false);
   const [shellMenuOpen, setShellMenuOpen] = useState(false);
   const [runMenuOpen, setRunMenuOpen] = useState(false);
-  const { installed, prereqs, getInstalled, cliUpdates, refreshInstalled, refreshUpdates } = useCliLauncher();
+  const {
+    installed,
+    prereqs,
+    getInstalled,
+    cliUpdates,
+    refreshInstalled,
+    refreshUpdates,
+  } = useCliLauncher();
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
   const [palette, setPalette] = useState<PaletteMode | null>(null);
   // When set, the whole project's file surface (tree, quick-open, search, new
   // terminals) points at this worktree instead of the main checkout — so an
   // agent's worktree becomes the environment you actually work in.
-  const [worktreeEnv, setWorktreeEnv] = useState<
-    { repo: string; path: string; branch: string } | null
-  >(null);
+  const [worktreeEnv, setWorktreeEnv] = useState<{
+    repo: string;
+    path: string;
+    branch: string;
+  } | null>(null);
 
   const baselines = useRef(new Map<string, string>());
   const recentSaves = useRef(new Map<string, number>());
@@ -336,9 +400,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
    *  in scope (hibernation, unmount) — a detached task must never outlive the
    *  project it was launched from. */
   const stopMicroRunRef = useRef<(ptyId: number) => void>(() => {});
-  const openFileRef = useRef<(path: string, opts?: { diff?: boolean }) => Promise<void>>(
-    async () => {},
-  );
+  const openFileRef = useRef<
+    (path: string, opts?: { diff?: boolean }) => Promise<void>
+  >(async () => {});
 
   // Process stats for THIS project's terminals only. Subscribed here rather
   // than in App: the monitor emits every 2s, and holding the array at App
@@ -356,7 +420,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // done — both mean "look at me", so the tab gets its attention ring.
   // Heuristic by design: it rings the tab, it never fabricates an urgent
   // pending card. Re-arms whenever the agent works again.
-  const idleWatch = useRef(new Map<number, { busy: boolean; idle: number; flagged: boolean }>());
+  const idleWatch = useRef(
+    new Map<number, { busy: boolean; idle: number; flagged: boolean }>(),
+  );
   // A plain shell that an agent ran inside of is classified as an agent only
   // while that process lives (see agentPtyIds in the render). Once the agent
   // exits, the still-open shell would silently demote into the SHELLS rail and
@@ -392,7 +458,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             if (gone >= 2) {
               agentLife.current.delete(s.id);
               const tab = tabsRef.current.find(
-                (t): t is TermSubTab => t.type === "terminal" && t.ptyId === s.id,
+                (t): t is TermSubTab =>
+                  t.type === "terminal" && t.ptyId === s.id,
               );
               // A launched agent tab (command matches) or a run stays put; only
               // an idle plain shell that hosted a now-exited agent gets closed.
@@ -408,7 +475,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           idleWatch.current.delete(s.id);
           continue;
         }
-        const w = idleWatch.current.get(s.id) ?? { busy: false, idle: 0, flagged: false };
+        const w = idleWatch.current.get(s.id) ?? {
+          busy: false,
+          idle: 0,
+          flagged: false,
+        };
         if (s.total_cpu > 10) {
           idleWatch.current.set(s.id, { busy: true, idle: 0, flagged: false });
         } else if (w.busy && !w.flagged && ++w.idle >= 3) {
@@ -418,7 +489,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             (t): t is TermSubTab => t.type === "terminal" && t.ptyId === s.id,
           );
           // A ring on the tab you're watching is noise (same rule as OSC).
-          if (tab && !(tab.id === activeTabIdRef.current && visibleRef.current)) {
+          if (
+            tab &&
+            !(tab.id === activeTabIdRef.current && visibleRef.current)
+          ) {
             patchTab(tab.id, {
               notice: "Agent went quiet — it may be waiting on a prompt",
               unread: true,
@@ -428,7 +502,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           idleWatch.current.set(s.id, w);
         }
       }
-      setStats((prev) => (prev.length === 0 && mine.length === 0 ? prev : mine));
+      // Bail when nothing moved: this lands every 2s for every open project,
+      // and a fresh array here re-renders the whole view.
+      setStats((prev) =>
+        prev.length === mine.length &&
+        JSON.stringify(prev) === JSON.stringify(mine)
+          ? prev
+          : mine,
+      );
     });
     return () => void sub.then((fn) => fn());
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -441,7 +522,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       worktreeEnv &&
       (c.path === worktreeEnv.repo || c.path.startsWith(worktreeEnv.repo + "/"))
     ) {
-      return { ...c, path: worktreeEnv.path + c.path.slice(worktreeEnv.repo.length) };
+      return {
+        ...c,
+        path: worktreeEnv.path + c.path.slice(worktreeEnv.repo.length),
+      };
     }
     return c;
   });
@@ -461,11 +545,26 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // ---------- terminals ----------
 
   const addTerminal = useCallback(
-    (cwd: string, command?: string, title?: string, icon?: string, run = false) => {
+    (
+      cwd: string,
+      command?: string,
+      title?: string,
+      icon?: string,
+      run = false,
+    ) => {
       const id = tabId();
       setTabs((prev) => [
         ...prev,
-        { id, type: "terminal", cwd, title: title ?? "shell", ptyId: null, command, icon, run },
+        {
+          id,
+          type: "terminal",
+          cwd,
+          title: title ?? "shell",
+          ptyId: null,
+          command,
+          icon,
+          run,
+        },
       ]);
       setActiveTabId(id);
       // Returned so callers that must talk to the new terminal (seeding an
@@ -529,7 +628,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   /** Open a pull request as its own tab, reusing one already open for it. */
   const openPr = useCallback((repo: string, pr: ipc.PrInfo) => {
     const existing = tabsRef.current.find(
-      (t): t is PrSubTab => t.type === "pr" && t.repo === repo && t.pr.number === pr.number,
+      (t): t is PrSubTab =>
+        t.type === "pr" && t.repo === repo && t.pr.number === pr.number,
     );
     if (existing) {
       setActiveTabId(existing.id);
@@ -549,7 +649,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   }, []);
 
   const patchTabRaw = useCallback((id: string, patch: Partial<SubTab>) => {
-    setTabs((prev) => prev.map((t) => (t.id === id ? ({ ...t, ...patch } as SubTab) : t)));
+    setTabs((prev) =>
+      prev.map((t) => (t.id === id ? ({ ...t, ...patch } as SubTab) : t)),
+    );
   }, []);
 
   /** Open an embedded-browser preview tab. With no URL the tab opens on the
@@ -589,18 +691,24 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   collabRef.current = relay.collab;
   const ownerCursorAt = useRef(0);
 
-  const sharedDocFor = useCallback((path: string) => shared.current.get(path), []);
+  const sharedDocFor = useCallback(
+    (path: string) => shared.current.get(path),
+    [],
+  );
 
-  const sendOwnerCursor = useCallback((path: string, anchor: number, head: number) => {
-    const s = shared.current.get(path);
-    if (!s) return;
-    // Same 50ms floor the guest view uses: presence is droppable, and a caret
-    // dragged across a file must not become a frame per pixel.
-    const now = Date.now();
-    if (now - ownerCursorAt.current < 50) return;
-    ownerCursorAt.current = now;
-    s.sendCursor(anchor, head);
-  }, []);
+  const sendOwnerCursor = useCallback(
+    (path: string, anchor: number, head: number) => {
+      const s = shared.current.get(path);
+      if (!s) return;
+      // Same 50ms floor the guest view uses: presence is droppable, and a caret
+      // dragged across a file must not become a frame per pixel.
+      const now = Date.now();
+      if (now - ownerCursorAt.current < 50) return;
+      ownerCursorAt.current = now;
+      s.sendCursor(anchor, head);
+    },
+    [],
+  );
 
   /** Share the open file with a member, live. This is the ONLY place a path
    *  becomes a shareable document, and it is reachable only from a click. */
@@ -610,14 +718,20 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       if (!session) {
         const model = monaco.editor.getModel(monaco.Uri.file(path));
         if (!model) {
-          onNotice("Open the file in the editor before sharing it live.", "error");
+          onNotice(
+            "Open the file in the editor before sharing it live.",
+            "error",
+          );
           return;
         }
         session = relay.collab.share(path, model);
         shared.current.set(path, session);
       }
       session.offerTo(member, name, languageForPath(path) ?? null);
-      onNotice(`Offered ${name} to ${memberName} — live once they accept.`, "success");
+      onNotice(
+        `Offered ${name} to ${memberName} — live once they accept.`,
+        "success",
+      );
     },
     [onNotice, relay],
   );
@@ -652,12 +766,20 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           session = relay.collab.share(abs, model);
           shared.current.set(abs, session);
         }
-        session.offerTo(to, relPath.split("/").pop() ?? relPath, languageForPath(abs) ?? null);
-        const opener = relay.status.members.find((m) => m.id === to)?.name ?? "A teammate";
+        session.offerTo(
+          to,
+          relPath.split("/").pop() ?? relPath,
+          languageForPath(abs) ?? null,
+        );
+        const opener =
+          relay.status.members.find((m) => m.id === to)?.name ?? "A teammate";
         onNotice(`${opener} opened ${relPath.split("/").pop() ?? relPath}`);
       };
       relay.collab.shareProject(root, project.name, member);
-      onNotice(`Sharing "${project.name}" with ${memberName} — they can open any file live.`, "success");
+      onNotice(
+        `Sharing "${project.name}" with ${memberName} — they can open any file live.`,
+        "success",
+      );
     },
     [onNotice, relay, project.name],
   );
@@ -676,7 +798,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // snapshot, so the tab is opened from the manager's state rather than at the
   // moment we accept — there is nothing to show until the text arrives.
   useEffect(() => {
-    const open = tabsRef.current.filter((t): t is CollabSubTab => t.type === "collab");
+    const open = tabsRef.current.filter(
+      (t): t is CollabSubTab => t.type === "collab",
+    );
     for (const [doc, meta] of relay.collab.liveGuests()) {
       if (open.some((t) => t.doc === doc)) continue;
       const id = tabId();
@@ -702,7 +826,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       const id = tabId();
       setTabs((prev) => [
         ...prev,
-        { id, type: "shared-project", doc, name: meta.name, ownerName: meta.fromName },
+        {
+          id,
+          type: "shared-project",
+          doc,
+          name: meta.name,
+          ownerName: meta.fromName,
+        },
       ]);
       setActiveTabId(id);
     }
@@ -713,7 +843,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // only the visible project speaks, or every mounted one would overwrite it.
   const activeTabForChat = tabs.find((t) => t.id === activeTabId);
   const activeChatPeer =
-    visible && activeTabForChat?.type === "chat" ? activeTabForChat.peer : undefined;
+    visible && activeTabForChat?.type === "chat"
+      ? activeTabForChat.peer
+      : undefined;
   useEffect(() => {
     if (!visible) return;
     relay.reportActiveChat(activeChatPeer);
@@ -762,7 +894,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       // A review request carries its own diff — open it directly, no repo
       // lookup needed (the reviewer may not even have the code).
       if (item.kind === "review") {
-        openReview({ ...(item.payload as ReviewPayload), from: item.from_name });
+        openReview({
+          ...(item.payload as ReviewPayload),
+          from: item.from_name,
+        });
         relay.dismissInbox(item.id);
         return;
       }
@@ -777,11 +912,17 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       }
       try {
         const repos = await ipc.gitRepos(
-          componentsRef.current.map((c) => [c.label, c.path] as [string, string]),
+          componentsRef.current.map(
+            (c) => [c.label, c.path] as [string, string],
+          ),
         );
         for (const r of repos) {
           const url = await ipc.gitRemoteUrl(r.path).catch(() => "");
-          if (url && payload.repo && url.toLowerCase() === payload.repo.toLowerCase()) {
+          if (
+            url &&
+            payload.repo &&
+            url.toLowerCase() === payload.repo.toLowerCase()
+          ) {
             openPr(r.path, payload.pr);
             relay.dismissInbox(item.id);
             return;
@@ -806,7 +947,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   useEffect(() => {
     let live = true;
     void ipc
-      .gitRepos(project.components.map((c) => [c.label, c.path] as [string, string]))
+      .gitRepos(
+        project.components.map((c) => [c.label, c.path] as [string, string]),
+      )
       .then((repos) => live && setRepoPaths(repos.map((r) => r.path)))
       .catch(() => {});
     return () => {
@@ -819,7 +962,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // the list must agree, or the badge is just noise you can't clear from here.
   // Other projects' queues are one line at the bottom of the panel, not a
   // number on a rail you're looking at while working somewhere else.
-  const prsRows = usePrWatch().rows;
+  const prsRows = usePrWatch((s) => s.rows);
   const prsBadge = useMemo(
     () => needsYouCount(prsRows.filter((r) => repoPaths.includes(r.repo))),
     [prsRows, repoPaths],
@@ -846,24 +989,37 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const thisInstanceRef = useRef(thisInstance);
   thisInstanceRef.current = thisInstance;
   useEffect(() => {
-    void ipc.instanceId().then(setThisInstance).catch(() => {});
+    void ipc
+      .instanceId()
+      .then(setThisInstance)
+      .catch(() => {});
   }, []);
   useEffect(() => {
     const load = () =>
       void ipc
         .sessionDigests()
-        .then((d) =>
-          setWsDigests(
-            d.filter((x) =>
-              rootsRef.current.some((r) => x.cwd === r || (x.cwd ?? "").startsWith(r + "/")),
+        .then((d) => {
+          const mine = d.filter((x) =>
+            rootsRef.current.some(
+              (r) => x.cwd === r || (x.cwd ?? "").startsWith(r + "/"),
             ),
-          ),
-        )
+          );
+          // Bail when unchanged — otherwise this was an unconditional full
+          // re-render of every open project, every 4 seconds, forever.
+          setWsDigests((prev) =>
+            prev.length === mine.length &&
+            JSON.stringify(prev) === JSON.stringify(mine)
+              ? prev
+              : mine,
+          );
+        })
         .catch(() => {});
     load();
-    const t = setInterval(load, 4000);
+    // Hidden projects still need digests (job_done handling reads them), just
+    // not at the visible cadence.
+    const t = setInterval(load, visible ? 4000 : 20_000);
     return () => clearInterval(t);
-  }, []);
+  }, [visible]);
 
   // Restorable agent sessions, loaded while the launcher (empty state) is on
   // screen — that is precisely the moment "you left three agents mid-thought"
@@ -878,9 +1034,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         .then((d) => {
           if (!live) return;
           const mine = d.filter((x) =>
-            rootsRef.current.some((r) => x.cwd === r || (x.cwd ?? "").startsWith(r + "/")),
+            rootsRef.current.some(
+              (r) => x.cwd === r || (x.cwd ?? "").startsWith(r + "/"),
+            ),
           );
-          setRestorable(restorableFrom(mine, statsRef.current, liveSessionIdsRef.current));
+          setRestorable(
+            restorableFrom(mine, statsRef.current, liveSessionIdsRef.current),
+          );
         })
         .catch(() => live && setRestorable([]));
     load();
@@ -899,7 +1059,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // "reopen it" would re-run a task that already finished.
   useEffect(() => {
     const open: RememberedTerminal[] = tabs
-      .filter((t): t is TermSubTab => t.type === "terminal" && !t.exited && !t.micro)
+      .filter(
+        (t): t is TermSubTab => t.type === "terminal" && !t.exited && !t.micro,
+      )
       .map((t) => ({
         cwd: t.cwd,
         command: t.command,
@@ -925,8 +1087,12 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // A terminal running `claude` or `omp` is an agent, not a shell — listing it
   // under "Terminals" was accurate about the mechanism and wrong about the
   // thing. Split by what the command actually starts.
-  const rememberedAgents = remembered.filter((t) => agentIdForCommand(t.command));
-  const rememberedShells = remembered.filter((t) => !agentIdForCommand(t.command));
+  const rememberedAgents = remembered.filter((t) =>
+    agentIdForCommand(t.command),
+  );
+  const rememberedShells = remembered.filter(
+    (t) => !agentIdForCommand(t.command),
+  );
   // An agent terminal whose directory already has a restorable session is
   // redundant — that row restores the same work WITH its history, so offering
   // "start it fresh" beside it is just a worse duplicate.
@@ -935,7 +1101,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   );
 
   const reopenTerminal = useCallback(
-    (t: RememberedTerminal) => addTerminal(t.cwd, t.command, t.title, t.icon, t.run),
+    (t: RememberedTerminal) =>
+      addTerminal(t.cwd, t.command, t.title, t.icon, t.run),
     [addTerminal],
   );
 
@@ -974,7 +1141,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
 
   // Worktrees for the ticket tab's cross-reference. Loaded when a ticket tab
   // opens rather than polled — the Issues panel keeps its own copy for rows.
-  const [ticketWorktrees, setTicketWorktrees] = useState<ipc.WorktreeInfo[]>([]);
+  const [ticketWorktrees, setTicketWorktrees] = useState<ipc.WorktreeInfo[]>(
+    [],
+  );
   const ticketRepo = useCallback(async () => {
     const repos = await ipc.gitRepos(
       componentsRef.current.map((c) => [c.label, c.path] as [string, string]),
@@ -998,8 +1167,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       const preferred = getSettings().defaultAgent;
       const agent =
         agentId ||
-        (installedClis.find((c) => c.id === preferred) ?? installedClis[0] ?? AGENT_CLIS[0])
-          ?.id;
+        (
+          installedClis.find((c) => c.id === preferred) ??
+          installedClis[0] ??
+          AGENT_CLIS[0]
+        )?.id;
       const cli = AGENT_CLIS.find((c) => c.id === agent);
       const start = startCommand(agent, ticketContext(ticket));
       if (!cli || !start) {
@@ -1019,7 +1191,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         setTimeout(() => void ipc.ptyWrite(pty, "\r"), 250);
       };
       try {
-        const worktrees = await ipc.gitWorktrees(repo).catch(() => [] as ipc.WorktreeInfo[]);
+        const worktrees = await ipc
+          .gitWorktrees(repo)
+          .catch(() => [] as ipc.WorktreeInfo[]);
         const existing = ticketWorktree(ticket, worktrees);
         const title = `${ticket.id} · ${cli.name}`;
         if (existing) {
@@ -1030,8 +1204,15 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         }
         const branch = ticketBranch(ticket);
         const path = `${repo}-wt-${branch.replace(/\//g, "-")}`;
-        const branches = await ipc.gitBranches(repo).catch(() => [] as ipc.BranchInfo[]);
-        await ipc.gitWorktreeAdd(repo, path, branch, !branches.some((b) => b.name === branch));
+        const branches = await ipc
+          .gitBranches(repo)
+          .catch(() => [] as ipc.BranchInfo[]);
+        await ipc.gitWorktreeAdd(
+          repo,
+          path,
+          branch,
+          !branches.some((b) => b.name === branch),
+        );
         await ipc.workspaceAdd(path).catch(() => {});
         setTicketWorktrees(await ipc.gitWorktrees(repo).catch(() => worktrees));
         const id = addTerminal(path, start.command, title, cli.icon);
@@ -1053,13 +1234,23 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // is seeded with (review vs. resolve-the-conflicts) and the error wording —
   // the worktree checkout/reuse and seeding are identical.
   const startPrAgent = useCallback(
-    async (mode: "review" | "resolve", repo: string, pr: ipc.PrInfo, agentId?: string) => {
-      const noun = mode === "resolve" ? "conflict resolution on" : "a review of";
+    async (
+      mode: "review" | "resolve",
+      repo: string,
+      pr: ipc.PrInfo,
+      agentId?: string,
+    ) => {
+      const noun =
+        mode === "resolve" ? "conflict resolution on" : "a review of";
       const installedClis = AGENT_CLIS.filter((c) => getInstalled()[c.bin]);
       const preferred = getSettings().defaultAgent;
       const agent =
         agentId ||
-        (installedClis.find((c) => c.id === preferred) ?? installedClis[0] ?? AGENT_CLIS[0])?.id;
+        (
+          installedClis.find((c) => c.id === preferred) ??
+          installedClis[0] ??
+          AGENT_CLIS[0]
+        )?.id;
       const cli = AGENT_CLIS.find((c) => c.id === agent);
       if (!cli) {
         onNotice(`Unknown agent "${agent}".`);
@@ -1071,12 +1262,16 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         // the main checkout's branch) so it works even for a PR you've never
         // checked out. Only a worktree WE created is disposable, so only then do
         // we tell the agent to remove it and skip registering it as a component.
-        const worktrees = await ipc.gitWorktrees(repo).catch(() => [] as ipc.WorktreeInfo[]);
+        const worktrees = await ipc
+          .gitWorktrees(repo)
+          .catch(() => [] as ipc.WorktreeInfo[]);
         const existing = prWorktree(pr, worktrees);
         const path = existing?.path ?? `${repo}-wt-pr-${pr.number}`;
         const cleanup = existing ? undefined : { repo, worktree: path };
         const context =
-          mode === "resolve" ? prConflictContext(pr, cleanup) : prReviewContext(pr, cleanup);
+          mode === "resolve"
+            ? prConflictContext(pr, cleanup)
+            : prReviewContext(pr, cleanup);
         const start = startCommand(agent, context);
         if (!start) {
           onNotice(`Unknown agent "${agent}".`);
@@ -1109,11 +1304,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     [addTerminal, onNotice, getInstalled],
   );
   const startPrReview = useCallback(
-    (repo: string, pr: ipc.PrInfo, agentId?: string) => startPrAgent("review", repo, pr, agentId),
+    (repo: string, pr: ipc.PrInfo, agentId?: string) =>
+      startPrAgent("review", repo, pr, agentId),
     [startPrAgent],
   );
   const startPrConflictResolve = useCallback(
-    (repo: string, pr: ipc.PrInfo, agentId?: string) => startPrAgent("resolve", repo, pr, agentId),
+    (repo: string, pr: ipc.PrInfo, agentId?: string) =>
+      startPrAgent("resolve", repo, pr, agentId),
     [startPrAgent],
   );
 
@@ -1122,7 +1319,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const openBranch = useCallback(
     (repo: string, branch: ipc.BranchWork) => {
       const existing = tabsRef.current.find(
-        (t): t is BranchSubTab => t.type === "branch" && t.branch.branch === branch.branch,
+        (t): t is BranchSubTab =>
+          t.type === "branch" && t.branch.branch === branch.branch,
       );
       if (existing) {
         // The audit's copy is fresher (dirty counts move); take it.
@@ -1139,7 +1337,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
 
   /** Open a commit as its own tab, reusing one already open for it. */
   const openCommit = useCallback(
-    (repo: string, commit: { hash: string; short: string; subject: string }) => {
+    (
+      repo: string,
+      commit: { hash: string; short: string; subject: string },
+    ) => {
       const existing = tabsRef.current.find(
         (t): t is CommitSubTab => t.type === "commit" && t.hash === commit.hash,
       );
@@ -1190,11 +1391,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       let repo: string | null = null;
       try {
         const repos = await ipc.gitRepos(
-          componentsRef.current.map((c) => [c.label, c.path] as [string, string]),
+          componentsRef.current.map(
+            (c) => [c.label, c.path] as [string, string],
+          ),
         );
         const cwd = p.cwd;
         repo =
-          repos.find((r) => cwd === r.path || cwd.startsWith(`${r.path}/`))?.path ??
+          repos.find((r) => cwd === r.path || cwd.startsWith(`${r.path}/`))
+            ?.path ??
           // Sibling worktrees follow the `<repo>-wt-<branch>` convention.
           repos.find((r) => cwd.startsWith(`${r.path}-wt-`))?.path ??
           repos[0]?.path ??
@@ -1236,24 +1440,29 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
 
   /** Open the agent-instructions tab, focused on one file when a panel row
    *  asked for it. One per project, like the history tab. */
-  const openInstructions = useCallback((focus?: string) => {
-    const existing = tabsRef.current.find((t) => t.type === "instructions");
-    if (existing) {
-      if (focus) patchTabRaw(existing.id, { focus } as Partial<SubTab>);
-      setActiveTabId(existing.id);
-      return;
-    }
-    const id = tabId();
-    setTabs((prev) => [...prev, { id, type: "instructions", focus }]);
-    setActiveTabId(id);
-  }, [patchTabRaw]);
+  const openInstructions = useCallback(
+    (focus?: string) => {
+      const existing = tabsRef.current.find((t) => t.type === "instructions");
+      if (existing) {
+        if (focus) patchTabRaw(existing.id, { focus } as Partial<SubTab>);
+        setActiveTabId(existing.id);
+        return;
+      }
+      const id = tabId();
+      setTabs((prev) => [...prev, { id, type: "instructions", focus }]);
+      setActiveTabId(id);
+    },
+    [patchTabRaw],
+  );
 
   /** Open an issue as its own tab, reusing one already open for it. */
   const openTicket = useCallback(
     (ticket: ipc.TicketInfo, source: string) => {
       const existing = tabsRef.current.find(
         (t): t is TicketSubTab =>
-          t.type === "ticket" && t.source === source && t.ticket.id === ticket.id,
+          t.type === "ticket" &&
+          t.source === source &&
+          t.ticket.id === ticket.id,
       );
       if (existing) {
         // Refresh the payload: the panel's copy is newer than the tab's.
@@ -1265,7 +1474,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       setTabs((prev) => [...prev, { id, type: "ticket", ticket, source }]);
       setActiveTabId(id);
       void ticketRepo().then((repo) => {
-        if (repo) void ipc.gitWorktrees(repo).then(setTicketWorktrees).catch(() => {});
+        if (repo)
+          void ipc
+            .gitWorktrees(repo)
+            .then(setTicketWorktrees)
+            .catch(() => {});
       });
     },
     [patchTabRaw, ticketRepo],
@@ -1292,14 +1505,23 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       const preferred = getSettings().defaultAgent;
       const agent =
         agentId ||
-        (installedClis.find((c) => c.id === preferred) ?? installedClis[0] ?? AGENT_CLIS[0])?.id;
+        (
+          installedClis.find((c) => c.id === preferred) ??
+          installedClis[0] ??
+          AGENT_CLIS[0]
+        )?.id;
       const cli = AGENT_CLIS.find((c) => c.id === agent);
       const start = agent ? startCommand(agent, seed) : null;
       if (!cli || !start) {
         onNotice(`Unknown agent "${agent}".`);
         return;
       }
-      const id = addTerminal(dir, start.command, `${title} · ${cli.name}`, cli.icon);
+      const id = addTerminal(
+        dir,
+        start.command,
+        `${title} · ${cli.name}`,
+        cli.icon,
+      );
       if (id && start.typePrompt) {
         setTimeout(() => {
           const pty = tabsRef.current.find(
@@ -1320,10 +1542,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
    *  job_done, a pty exit) sees the list as it is now, not as it was painted. */
   const [microRuns, setMicroRuns] = useState<MicroRun[]>([]);
   const microRunsRef = useRef<MicroRun[]>(microRuns);
-  const updateMicroRuns = useCallback((fn: (runs: MicroRun[]) => MicroRun[]) => {
-    microRunsRef.current = fn(microRunsRef.current);
-    setMicroRuns(microRunsRef.current);
-  }, []);
+  const updateMicroRuns = useCallback(
+    (fn: (runs: MicroRun[]) => MicroRun[]) => {
+      microRunsRef.current = fn(microRunsRef.current);
+      setMicroRuns(microRunsRef.current);
+    },
+    [],
+  );
   // Ages the "· 2m" on each running row, and only while something is running:
   // a project with no task in flight should not repaint on a timer.
   const [microClock, setMicroClock] = useState(() => Date.now());
@@ -1364,7 +1589,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     async <P,>(def: MicroTaskDef<P>, payload: P, userQuery: string) => {
       const installedClis = AGENT_CLIS.filter((c) => getInstalled()[c.bin]);
       if (installedClis.length === 0) {
-        onNotice("Running a task needs an agent CLI — install one in Settings → Agents.");
+        onNotice(
+          "Running a task needs an agent CLI — install one in Settings → Agents.",
+        );
         return;
       }
       const preferred = getSettings().defaultAgent;
@@ -1388,10 +1615,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       if (def.isolation) {
         const { repo, pr } = def.isolation.target(payload);
         try {
-          const worktrees = await ipc.gitWorktrees(repo).catch(() => [] as ipc.WorktreeInfo[]);
+          const worktrees = await ipc
+            .gitWorktrees(repo)
+            .catch(() => [] as ipc.WorktreeInfo[]);
           const existing = prWorktree(pr, worktrees);
           const path = existing?.path ?? `${repo}-wt-pr-${pr.number}`;
-          if (!existing) await ipc.gitWorktreeAddPr(repo, path, pr.number, pr.branch);
+          if (!existing)
+            await ipc.gitWorktreeAddPr(repo, path, pr.number, pr.branch);
           dir = path;
           env = existing ? undefined : { cleanup: { repo, worktree: path } };
         } catch (err) {
@@ -1470,7 +1700,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         def.icon,
       );
       if (!id) return;
-      patchTabRaw(id, { micro: { taskId: def.id, runId: record() } } as Partial<SubTab>);
+      patchTabRaw(id, {
+        micro: { taskId: def.id, runId: record() },
+      } as Partial<SubTab>);
       if (start.typePrompt) {
         setTimeout(() => {
           const pty = tabsRef.current.find(
@@ -1480,7 +1712,15 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         }, 2500);
       }
     },
-    [addTerminal, patchTabRaw, onNotice, project.id, getInstalled, canReportDone, updateMicroRuns],
+    [
+      addTerminal,
+      patchTabRaw,
+      onNotice,
+      project.id,
+      getInstalled,
+      canReportDone,
+      updateMicroRuns,
+    ],
   );
 
   /** Run a brief that was composed on the spot (a diff surface's "ask about
@@ -1502,23 +1742,29 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
    *  event stream goes quiet once the PTY dies. `tabId` is set only for a task
    *  that ran in a tab; a detached one has nothing to close. */
   const microFinish = useRef(
-    new Map<number, { tabId?: string; sid?: string; since: number; timer: number }>(),
+    new Map<
+      number,
+      { tabId?: string; sid?: string; since: number; timer: number }
+    >(),
   );
 
   /** The transcript of a detached run, read off the PTY's own scrollback and
    *  replayed through a terminal parser — the equivalent of what closeTab
    *  captures from a tab's xterm buffer, and the last chance to take it: the
    *  session is gone the moment the PTY is killed. */
-  const captureDetachedOutput = useCallback(async (ptyId: number, runId?: string) => {
-    if (!runId) return;
-    try {
-      const raw = await ipc.ptyOutput(ptyId, 64 * 1024);
-      const text = raw ? await renderPtyText(raw) : "";
-      if (text) updateTaskRun(runId, { output: text });
-    } catch {
-      // A missing transcript is a smaller loss than a task that never settles.
-    }
-  }, []);
+  const captureDetachedOutput = useCallback(
+    async (ptyId: number, runId?: string) => {
+      if (!runId) return;
+      try {
+        const raw = await ipc.ptyOutput(ptyId, 64 * 1024);
+        const text = raw ? await renderPtyText(raw) : "";
+        if (text) updateTaskRun(runId, { output: text });
+      } catch {
+        // A missing transcript is a smaller loss than a task that never settles.
+      }
+    },
+    [],
+  );
 
   const reapMicroTask = useCallback(
     (ptyId: number) => {
@@ -1536,7 +1782,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           // The SessionEnd hook rewrites the digest as the CLI dies — forget
           // after that final write, or the delete would race it and the session
           // would resurface in restorables.
-          if (sid) setTimeout(() => void ipc.sessionForget(sid).catch(() => {}), 500);
+          if (sid)
+            setTimeout(() => void ipc.sessionForget(sid).catch(() => {}), 500);
         });
       if (detached) {
         // Capture first, kill second: the scrollback dies with the session.
@@ -1589,7 +1836,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       void captureDetachedOutput(ptyId, run.runId).finally(() => {
         if (run.runId) endAbandonedRun(run.runId);
         void ipc.ptyKill(ptyId).finally(() => {
-          if (sid) setTimeout(() => void ipc.sessionForget(sid).catch(() => {}), 500);
+          if (sid)
+            setTimeout(() => void ipc.sessionForget(sid).catch(() => {}), 500);
         });
       });
     },
@@ -1602,7 +1850,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // agent still working for a project that is gone has nobody left to report to.
   useEffect(
     () => () => {
-      for (const r of [...microRunsRef.current]) stopMicroRunRef.current(r.ptyId);
+      for (const r of [...microRunsRef.current])
+        stopMicroRunRef.current(r.ptyId);
     },
     [],
   );
@@ -1615,7 +1864,12 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     (ptyId: number) => {
       const run = findRun(microRunsRef.current, ptyId);
       if (!run) return;
-      const id = attachTerminal(ptyId, run.cwd, `${run.label} · task`, run.icon ?? "⚡");
+      const id = attachTerminal(
+        ptyId,
+        run.cwd,
+        `${run.label} · task`,
+        run.icon ?? "⚡",
+      );
       updateMicroRuns((runs) => patchRun(runs, ptyId, { viewTabId: id }));
     },
     [attachTerminal, updateMicroRuns],
@@ -1646,7 +1900,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   useEffect(() => {
     if (microFinish.current.size === 0) return;
     for (const [ptyId, entry] of microFinish.current) {
-      if (events.some((e) => e.ts >= entry.since && isStopFor(e.raw, ptyId))) {
+      if (events.some((e) => e.ts >= entry.since && isStopFor(e, ptyId))) {
         reapMicroTask(ptyId);
       }
     }
@@ -1663,7 +1917,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         onNotice("No project directory to stage the review in.");
         return null;
       }
-      const safe = (review.branch || "review").replace(/[^A-Za-z0-9._-]+/g, "-");
+      const safe = (review.branch || "review").replace(
+        /[^A-Za-z0-9._-]+/g,
+        "-",
+      );
       const path = `${dir}/.canopy-review-${safe}.patch`;
       try {
         await ipc.fsWriteFile(path, review.patch);
@@ -1678,34 +1935,42 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
 
   /** Re-run a run tab's command in place, reusing the tab (and its position in
    *  the rail) rather than spawning a new one. */
-  const restartRun = useCallback(
-    (id: string) => {
-      const tab = tabsRef.current.find((t) => t.id === id);
-      if (tab?.type !== "terminal") return;
-      if (tab.ptyId != null) void ipc.ptyKill(tab.ptyId);
-      // Remount Term with a fresh key by clearing the pty and exit state; the
-      // effect below respawns it.
+  const restartRun = useCallback((id: string) => {
+    const tab = tabsRef.current.find((t) => t.id === id);
+    if (tab?.type !== "terminal") return;
+    if (tab.ptyId != null) void ipc.ptyKill(tab.ptyId);
+    // Remount Term with a fresh key by clearing the pty and exit state; the
+    // effect below respawns it.
+    setTabs((prev) =>
+      prev.map((t) =>
+        t.id === id
+          ? ({
+              ...t,
+              ptyId: null,
+              exited: false,
+              exitCode: undefined,
+              epoch: (t as TermSubTab).epoch ?? 0,
+            } as SubTab)
+          : t,
+      ),
+    );
+    setTimeout(() => {
       setTabs((prev) =>
         prev.map((t) =>
-          t.id === id
-            ? ({ ...t, ptyId: null, exited: false, exitCode: undefined, epoch: (t as TermSubTab).epoch ?? 0 } as SubTab)
+          t.id === id && t.type === "terminal"
+            ? // Re-clear exit state here too: the old pty's kill can emit a
+              // late pty:exit in the gap since t=0 that flips `exited` back on.
+              {
+                ...t,
+                epoch: (t.epoch ?? 0) + 1,
+                exited: false,
+                exitCode: undefined,
+              }
             : t,
         ),
       );
-      setTimeout(() => {
-        setTabs((prev) =>
-          prev.map((t) =>
-            t.id === id && t.type === "terminal"
-              ? // Re-clear exit state here too: the old pty's kill can emit a
-                // late pty:exit in the gap since t=0 that flips `exited` back on.
-                { ...t, epoch: (t.epoch ?? 0) + 1, exited: false, exitCode: undefined }
-              : t,
-          ),
-        );
-      }, 200);
-    },
-    [],
-  );
+    }, 200);
+  }, []);
 
   // Looking at a tab is what marks it read. As an effect rather than something
   // hung off the tab's onClick, so every route in — clicking, Ctrl+Tab cycling,
@@ -1715,9 +1980,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     if (!visible || !activeTabId) return;
     setTabs((prev) =>
       prev.some(
-        (t) => t.id === activeTabId && (t.type === "terminal" || t.type === "chat") && t.unread,
+        (t) =>
+          t.id === activeTabId &&
+          (t.type === "terminal" || t.type === "chat") &&
+          t.unread,
       )
-        ? prev.map((t) => (t.id === activeTabId ? ({ ...t, unread: false } as SubTab) : t))
+        ? prev.map((t) =>
+            t.id === activeTabId ? ({ ...t, unread: false } as SubTab) : t,
+          )
         : prev,
     );
   }, [activeTabId, visible, tabs]);
@@ -1730,7 +2000,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const activeTabElRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (!visible) return;
-    activeTabElRef.current?.scrollIntoView({ inline: "nearest", block: "nearest" });
+    activeTabElRef.current?.scrollIntoView({
+      inline: "nearest",
+      block: "nearest",
+    });
   }, [activeTabId, visible]);
   useEffect(() => {
     if (!visible) return;
@@ -1784,9 +2057,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     // Settings asks for interactive CLI flows (gh auth login/logout, brew
     // install) to run somewhere the user can actually answer prompts.
     const runCommand = (e: Event) => {
-      const d = (e as CustomEvent).detail as { command?: string; title?: string };
+      const d = (e as CustomEvent).detail as {
+        command?: string;
+        title?: string;
+      };
       const first = componentsRef.current[0];
-      if (d?.command && first) addTerminal(first.path, d.command, d.title ?? d.command, "⚙");
+      if (d?.command && first)
+        addTerminal(first.path, d.command, d.title ?? d.command, "⚙");
     };
     window.addEventListener("canopy:run-command", runCommand);
     window.addEventListener("menu:close-tab", closeTabHandler);
@@ -1814,7 +2091,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // path to this project; act on it with the same handlers the UI buttons use.
   useEffect(() => {
     const onAction = (e: Event) => {
-      const d = (e as CustomEvent).detail as { projectId: string | null; action: ipc.AgentAction };
+      const d = (e as CustomEvent).detail as {
+        projectId: string | null;
+        action: ipc.AgentAction;
+      };
       const a = d.action;
       // restart is keyed by terminal, not project: only the ProjectView that
       // owns that pty acts, whatever project it belongs to.
@@ -1834,7 +2114,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       if (a.kind === "job_done") {
         const tab = tabsRef.current.find(
           (t): t is TermSubTab =>
-            t.type === "terminal" && a.ptyId != null && t.ptyId === a.ptyId && Boolean(t.micro),
+            t.type === "terminal" &&
+            a.ptyId != null &&
+            t.ptyId === a.ptyId &&
+            Boolean(t.micro),
         );
         const detached = findRun(microRunsRef.current, a.ptyId);
         const ptyId = tab?.ptyId ?? detached?.ptyId;
@@ -1842,9 +2125,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         const runId = tab?.micro?.runId ?? detached?.runId;
         // Files the session touched, when a hook wrote a digest for it — the
         // same pty→digest binding the Agents panel uses.
-        const files = digestBySurface(wsDigestsRef.current, thisInstanceRef.current).get(
-          String(ptyId),
-        )?.files;
+        const files = digestBySurface(
+          wsDigestsRef.current,
+          thisInstanceRef.current,
+        ).get(String(ptyId))?.files;
         if (a.status === "blocked") {
           // Blocked is not an ending — the agent is waiting on the user and the
           // run continues. Keep what it said and mark that it asked, so that if
@@ -1861,10 +2145,16 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           // said what happened, and the Tasks row now says "Needs you" with the
           // terminal one click away.
           if (tab) setActiveTabId(tab.id);
-          else updateMicroRuns((runs) => patchRun(runs, ptyId, { blocked: true }));
+          else
+            updateMicroRuns((runs) => patchRun(runs, ptyId, { blocked: true }));
         } else {
           if (runId)
-            recordTaskEnd(runId, { status: "done", summary: a.summary, url: a.url, files });
+            recordTaskEnd(runId, {
+              status: "done",
+              summary: a.summary,
+              url: a.url,
+              files,
+            });
           finishMicroTask(ptyId, tab?.id);
         }
         return;
@@ -1877,7 +2167,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         // pair the component-commands ▶ uses. Reuse a tab already on it.
         const existing = tabsRef.current.find(
           (t): t is TermSubTab =>
-            t.type === "terminal" && Boolean(t.run) && t.cwd === a.dir && t.command === a.command,
+            t.type === "terminal" &&
+            Boolean(t.run) &&
+            t.cwd === a.dir &&
+            t.command === a.command,
         );
         if (existing && !existing.exited) setActiveTabId(existing.id);
         else if (existing) restartRun(existing.id);
@@ -1888,19 +2181,30 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         // and because opening is async either way.
         const path = a.path;
         const line = a.line;
-        void openFileRef.current(path, { diff: a.kind === "show_diff" }).then(() => {
-          if (line)
-            requestAnimationFrame(() =>
-              window.dispatchEvent(
-                new CustomEvent("canopy:reveal-line", { detail: { path, line } }),
-              ),
-            );
-        });
+        void openFileRef
+          .current(path, { diff: a.kind === "show_diff" })
+          .then(() => {
+            if (line)
+              requestAnimationFrame(() =>
+                window.dispatchEvent(
+                  new CustomEvent("canopy:reveal-line", {
+                    detail: { path, line },
+                  }),
+                ),
+              );
+          });
       }
     };
     window.addEventListener("canopy:agent-action", onAction);
     return () => window.removeEventListener("canopy:agent-action", onAction);
-  }, [project.id, openPreview, addTerminal, restartRun, finishMicroTask, updateMicroRuns]);
+  }, [
+    project.id,
+    openPreview,
+    addTerminal,
+    restartRun,
+    finishMicroTask,
+    updateMicroRuns,
+  ]);
 
   // A browser-control op (canopy_browser_*): pick the preview tab it targets —
   // by origin when it names a URL, else the active/first preview tab, creating
@@ -1925,10 +2229,15 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       }
     };
     const onBrowserOp = (e: Event) => {
-      const d = (e as CustomEvent).detail as { projectId: string; op: ipc.AgentBrowserOp };
+      const d = (e as CustomEvent).detail as {
+        projectId: string;
+        op: ipc.AgentBrowserOp;
+      };
       if (d?.projectId !== project.id) return;
       const op = d.op;
-      const previews = tabsRef.current.filter((t): t is PreviewSubTab => t.type === "preview");
+      const previews = tabsRef.current.filter(
+        (t): t is PreviewSubTab => t.type === "preview",
+      );
       const wantOrigin = op.url ? originOf(op.url) : null;
       const tab =
         (wantOrigin && previews.find((t) => originOf(t.url) === wantOrigin)) ||
@@ -1950,12 +2259,18 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       }
     };
     window.addEventListener("canopy:agent-browser", onBrowserOp);
-    return () => window.removeEventListener("canopy:agent-browser", onBrowserOp);
+    return () =>
+      window.removeEventListener("canopy:agent-browser", onBrowserOp);
   }, [project.id, openPreview]);
 
-  const patchTab = useCallback((id: string, patch: Partial<TermSubTab> & Partial<FileSubTab>) => {
-    setTabs((prev) => prev.map((t) => (t.id === id ? ({ ...t, ...patch } as SubTab) : t)));
-  }, []);
+  const patchTab = useCallback(
+    (id: string, patch: Partial<TermSubTab> & Partial<FileSubTab>) => {
+      setTabs((prev) =>
+        prev.map((t) => (t.id === id ? ({ ...t, ...patch } as SubTab) : t)),
+      );
+    },
+    [],
+  );
 
   const patchFile = useCallback((path: string, patch: Partial<OpenFile>) => {
     setTabs((prev) =>
@@ -1976,7 +2291,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     const closingTab = tabsRef.current.find((t) => t.id === id);
     if (closingTab?.type === "terminal" && closingTab.micro?.runId) {
       const runId = closingTab.micro.runId;
-      const output = termHandles.current.get(id)?.captureText(8000) || undefined;
+      const output =
+        termHandles.current.get(id)?.captureText(8000) || undefined;
       if (output) updateTaskRun(runId, { output });
       // A no-op for a run that already reported done; otherwise it settles as
       // "blocked" if the agent had asked for the user, else "stopped".
@@ -1985,13 +2301,18 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     termHandles.current.delete(id);
     setTabs((prev) => {
       const closing = prev.find((t) => t.id === id);
-      if (closing?.type === "terminal" && closing.micro && closing.ptyId != null) {
+      if (
+        closing?.type === "terminal" &&
+        closing.micro &&
+        closing.ptyId != null
+      ) {
         // A micro-task session never reaches restorables, however it ends —
         // that includes the user closing the tab mid-run. Forget after the
         // unmount-kill's grace window so the delete lands on the CLI's final
         // digest write instead of racing it.
         const sid = liveSessionByPtyRef.current.get(closing.ptyId);
-        if (sid) setTimeout(() => void ipc.sessionForget(sid).catch(() => {}), 4000);
+        if (sid)
+          setTimeout(() => void ipc.sessionForget(sid).catch(() => {}), 4000);
       }
       if (closing?.type === "file") {
         // Closing the tab disposes the model the OwnerSession is subscribed
@@ -2009,7 +2330,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         collabRef.current.close(closing.doc);
         monaco.editor
           .getModels()
-          .find((m) => m.uri.scheme === "canopy-collab" && m.uri.path.startsWith(`/${closing.doc}/`))
+          .find(
+            (m) =>
+              m.uri.scheme === "canopy-collab" &&
+              m.uri.path.startsWith(`/${closing.doc}/`),
+          )
           ?.dispose();
       }
       if (closing?.type === "shared-project") {
@@ -2034,7 +2359,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // -project tab whose project is no longer joined.
   useEffect(() => {
     for (const t of tabsRef.current) {
-      if (t.type === "shared-project" && !relay.collab.joinedProjects.has(t.doc)) {
+      if (
+        t.type === "shared-project" &&
+        !relay.collab.joinedProjects.has(t.doc)
+      ) {
         closeTabRef.current(t.id);
       }
     }
@@ -2044,28 +2372,42 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // ---------- files ----------
 
   const openFile = useCallback(
-    async (path: string, opts?: { diff?: boolean }) => {
+    async (path: string, opts?: { diff?: boolean; force?: boolean }) => {
       const existing = tabsRef.current.find(
         (t) => t.type === "file" && t.file.path === path,
       ) as FileSubTab | undefined;
-      let bytes: Uint8Array;
+      const kind = viewerKindFor(path);
+      // Ask the size before reading the bytes. A .zip or a multi-gigabyte log
+      // used to be pulled across IPC in full and only then found unrenderable,
+      // by which point the tab was already frozen and the memory already spent.
+      let blocked: OpenBlock | null = null;
+      let bytes: Uint8Array | null = null;
       try {
-        bytes = await ipc.fsReadFile(path);
+        const stat = await ipc.fsStat(path);
+        blocked = opts?.force ? null : blockForOpen(path, kind, stat.size);
+        if (!blocked) {
+          bytes = await ipc.fsReadFile(path);
+          // Extensions that claim nothing (.dat, .pack, no extension at all)
+          // only give themselves away in the bytes.
+          if (kind === "code" && looksBinary(bytes)) {
+            blocked = { reason: "binary", size: stat.size, limit: sizeLimitFor(kind) };
+            bytes = null;
+          }
+        }
       } catch (err) {
         console.warn("open failed", path, err);
         return;
       }
-      const kind = viewerKindFor(path);
       // Proper diff for changed files: baseline is git HEAD. Any text-ish file
       // qualifies — gating on code/json/markdown silently denied a diff to
       // things like .gitignore, Dockerfile or .env, which are exactly the files
       // people click in the git panel.
       let diffOriginal: string | null = null;
       const diffable = !["pdf", "image", "sheet", "docx"].includes(kind);
-      if (opts?.diff && diffable) {
+      if (!blocked && bytes && opts?.diff && diffable) {
         diffOriginal = await ipc.gitHeadContent(path).catch(() => null);
       }
-      if (kind === "code" || diffOriginal != null) {
+      if (bytes && (kind === "code" || diffOriginal != null)) {
         const text = decoder.decode(bytes);
         if (!baselines.current.has(path)) baselines.current.set(path, text);
         modelFor(path, text);
@@ -2075,7 +2417,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       if (existing) {
         patchFile(path, {
           bytes,
-          ...(diffOriginal != null ? { view: "diff" as const, diffOriginal } : {}),
+          blocked,
+          ...(diffOriginal != null
+            ? { view: "diff" as const, diffOriginal }
+            : {}),
         });
         setActiveTabId(existing.id);
         return;
@@ -2090,11 +2435,17 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             path,
             name: path.split("/").pop() ?? path,
             kind,
-            view: diffOriginal != null ? "diff" : kind === "code" ? "source" : "preview",
+            view:
+              diffOriginal != null
+                ? "diff"
+                : kind === "code"
+                  ? "source"
+                  : "preview",
             diffOriginal,
             dirty: false,
             external: null,
             bytes,
+            blocked,
           },
         },
       ]);
@@ -2184,14 +2535,23 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           ipc
             .gitRepoStatus(c.path)
             .then((s) => {
-              const files = [...s.conflicted, ...s.staged, ...s.unstaged, ...s.untracked];
+              const files = [
+                ...s.conflicted,
+                ...s.staged,
+                ...s.unstaged,
+                ...s.untracked,
+              ];
               const seen = new Set<string>();
               const unique = files.filter((f) => {
                 if (seen.has(f.path)) return false;
                 seen.add(f.path);
                 return true;
               });
-              return { component: c.label, repo: s.path, files: unique } as ChangeGroup;
+              return {
+                component: c.label,
+                repo: s.path,
+                files: unique,
+              } as ChangeGroup;
             })
             .catch(() => null),
         ),
@@ -2199,7 +2559,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       const seenRepo = new Set<string>();
       const groups = results.filter(
         (g): g is ChangeGroup =>
-          g != null && g.files.length > 0 && !seenRepo.has(g.repo) && (seenRepo.add(g.repo), true),
+          g != null &&
+          g.files.length > 0 &&
+          !seenRepo.has(g.repo) &&
+          (seenRepo.add(g.repo), true),
       );
       setChangeGroups(groups);
     } finally {
@@ -2226,6 +2589,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         if (saved && now - saved < 1500) continue;
         const file = findFile(path);
         if (!file || e.kind === "remove") continue;
+        // A tab that refused to load the file in the first place must not
+        // re-read it every time something touches it on disk.
+        if (file.blocked) continue;
         try {
           const bytes = await ipc.fsReadFile(path);
           if (file.kind === "code") {
@@ -2261,7 +2627,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // row — relating the tab you're looking at back to its entry in the list.
   const activePty = activeTab?.type === "terminal" ? activeTab.ptyId : null;
   const runTabs = useMemo(
-    () => tabs.filter((t): t is TermSubTab => t.type === "terminal" && Boolean(t.run)),
+    () =>
+      tabs.filter(
+        (t): t is TermSubTab => t.type === "terminal" && Boolean(t.run),
+      ),
     [tabs],
   );
   // Every pty this project owns. Detached micro-task runs are in here too, and
@@ -2297,12 +2666,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const liveSessionIds = useMemo(() => {
     const ids = new Set<string>();
     for (const e of projectEvents) {
-      try {
-        const sid = (JSON.parse(e.raw) as { session_id?: unknown }).session_id;
-        if (typeof sid === "string" && sid) ids.add(sid);
-      } catch {
-        // a malformed line shouldn't hide every restorable session
-      }
+      if (e.data?.sessionId) ids.add(e.data.sessionId);
     }
     return [...ids];
   }, [projectEvents]);
@@ -2315,17 +2679,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const liveSessionByPty = useMemo(() => {
     const latest = new Map<number, { sid: string; ts: number }>();
     for (const e of projectEvents) {
-      const pty = eventPtyId(e.raw);
-      if (pty == null) continue;
-      let sid: unknown;
-      try {
-        sid = (JSON.parse(e.raw) as { session_id?: unknown }).session_id;
-      } catch {
-        continue;
-      }
-      if (typeof sid !== "string" || !sid) continue;
-      const prev = latest.get(pty);
-      if (!prev || e.ts >= prev.ts) latest.set(pty, { sid, ts: e.ts });
+      const d = e.data;
+      if (!d || d.pty == null || !d.sessionId) continue;
+      const prev = latest.get(d.pty);
+      if (!prev || e.ts >= prev.ts)
+        latest.set(d.pty, { sid: d.sessionId, ts: e.ts });
     }
     const m = new Map<number, string>();
     for (const [pty, v] of latest) m.set(pty, v.sid);
@@ -2356,8 +2714,12 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     const onHibernate = (e: Event) => {
       const d = (e as CustomEvent).detail as { projectId?: string } | null;
       if (d?.projectId !== project.id) return;
-      const { activeTabId: active, sideTab: side, pinned: sideOut, worktreeEnv: wt } =
-        snapshotState.current;
+      const {
+        activeTabId: active,
+        sideTab: side,
+        pinned: sideOut,
+        worktreeEnv: wt,
+      } = snapshotState.current;
       const snap = buildSnapshot({
         tabs: tabsRef.current,
         activeTabId: active,
@@ -2380,9 +2742,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       // micro-task session is never restored (resuming a finished job re-runs
       // it), so a task in flight when the project goes to sleep ends the same
       // way its tab-bound cousin just did — stopped, and recorded as such.
-      if (ok) for (const r of [...microRunsRef.current]) stopMicroRunRef.current(r.ptyId);
+      if (ok)
+        for (const r of [...microRunsRef.current])
+          stopMicroRunRef.current(r.ptyId);
       window.dispatchEvent(
-        new CustomEvent(HIBERNATED_EVENT, { detail: { projectId: project.id, ok } }),
+        new CustomEvent(HIBERNATED_EVENT, {
+          detail: { projectId: project.id, ok },
+        }),
       );
     };
     window.addEventListener(HIBERNATE_EVENT, onHibernate);
@@ -2430,11 +2796,21 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           return tab?.id ?? null;
         }
         case "preview":
-          return push({ id: tabId(), type: "preview", url: t.url, annotations: [] });
+          return push({
+            id: tabId(),
+            type: "preview",
+            url: t.url,
+            annotations: [],
+          });
         case "pr":
           return push({ id: tabId(), type: "pr", repo: t.repo, pr: t.pr });
         case "ticket":
-          return push({ id: tabId(), type: "ticket", ticket: t.ticket, source: t.source });
+          return push({
+            id: tabId(),
+            type: "ticket",
+            ticket: t.ticket,
+            source: t.source,
+          });
         case "commit":
           return push({
             id: tabId(),
@@ -2445,7 +2821,12 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             subject: t.subject,
           });
         case "branch":
-          return push({ id: tabId(), type: "branch", repo: t.repo, branch: t.branch });
+          return push({
+            id: tabId(),
+            type: "branch",
+            repo: t.repo,
+            branch: t.branch,
+          });
         case "review":
           return push({ id: tabId(), type: "review", review: t.review });
         case "agent":
@@ -2463,7 +2844,12 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         case "instructions":
           return push({ id: tabId(), type: "instructions", focus: t.focus });
         case "chat":
-          return push({ id: tabId(), type: "chat", peer: t.peer, name: t.name });
+          return push({
+            id: tabId(),
+            type: "chat",
+            peer: t.peer,
+            name: t.name,
+          });
       }
     },
     [addTerminal, patchFile],
@@ -2505,9 +2891,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         // differently so a workspace of files doesn't crawl.
         await wait(step.tab.kind === "terminal" ? 260 : 90);
         if (cancelled) return;
-        restoreStepRef.current?.(i + 1, steps.length, steps[i + 1]?.label ?? "Ready");
+        restoreStepRef.current?.(
+          i + 1,
+          steps.length,
+          steps[i + 1]?.label ?? "Ready",
+        );
       }
-      const front = restore.activeIndex != null ? ids[restore.activeIndex] : null;
+      const front =
+        restore.activeIndex != null ? ids[restore.activeIndex] : null;
       if (front) setActiveTabId(front);
       restoredRef.current?.();
     })();
@@ -2539,11 +2930,17 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         window.setTimeout(() => void ipc.ptyWrite(pty, "\r"), 350);
       };
       const livePtyForSession = () =>
-        [...liveSessionByPtyRef.current.entries()].find(([p, sid]) => sid === sessionId && alive(p))?.[0];
+        [...liveSessionByPtyRef.current.entries()].find(
+          ([p, sid]) => sid === sessionId && alive(p),
+        )?.[0];
       // 1) The workspace's own terminal, if it's still live.
       if (alive(opts.ptyId)) {
         typeInto(opts.ptyId);
-        return { delivered: true, note: `Sent to ${agentId}.`, ptyId: opts.ptyId };
+        return {
+          delivered: true,
+          note: `Sent to ${agentId}.`,
+          ptyId: opts.ptyId,
+        };
       }
       // 2) Any live terminal running this session (it may have moved tabs).
       const moved = sessionId ? livePtyForSession() : undefined;
@@ -2553,13 +2950,24 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       }
       // 3) Ended: resume, wait for the session to report a PTY, then deliver.
       if (!sessionId) {
-        return { delivered: false, note: "No live agent to receive the comments — open its terminal first." };
+        return {
+          delivered: false,
+          note: "No live agent to receive the comments — open its terminal first.",
+        };
       }
       const cmd = restoreCommand(agentId, sessionId);
       if (!cmd) {
-        return { delivered: false, note: `${agentId} can't be resumed to receive the comments.` };
+        return {
+          delivered: false,
+          note: `${agentId} can't be resumed to receive the comments.`,
+        };
       }
-      addTerminal(cwd, cmd, agentId, AGENT_CLIS.find((c) => c.id === agentId)?.icon);
+      addTerminal(
+        cwd,
+        cmd,
+        agentId,
+        AGENT_CLIS.find((c) => c.id === agentId)?.icon,
+      );
       for (let i = 0; i < 40; i++) {
         await new Promise((r) => setTimeout(r, 400));
         const back = livePtyForSession();
@@ -2581,11 +2989,18 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     },
     [addTerminal],
   );
-  const runningAgents = projectStats.flatMap((s) => {
-    const agent = identifyAgent(s.agent_hint);
-    return agent ? [{ name: agent.label, cpu: s.total_cpu }] : [];
-  });
-  const changedPaths = new Set(changeGroups.flatMap((g) => g.files.map((f) => f.abs)));
+  const runningAgents = useMemo(
+    () =>
+      projectStats.flatMap((s) => {
+        const agent = identifyAgent(s.agent_hint);
+        return agent ? [{ name: agent.label, cpu: s.total_cpu }] : [];
+      }),
+    [projectStats],
+  );
+  const changedPaths = useMemo(
+    () => new Set(changeGroups.flatMap((g) => g.files.map((f) => f.abs))),
+    [changeGroups],
+  );
   const changeCount = changeGroups.reduce((n, g) => n + g.files.length, 0);
   // Files teammates are editing live in a project we're sharing — no git
   // presence until saved, scoped to this project's roots.
@@ -2593,7 +3008,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     () =>
       relay.collab
         .ownerChanges()
-        .filter((c) => rootsRef.current.some((r) => c.path === r || c.path.startsWith(r + "/"))),
+        .filter((c) =>
+          rootsRef.current.some(
+            (r) => c.path === r || c.path.startsWith(r + "/"),
+          ),
+        ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [relay.collabTick, rootsKey],
   );
@@ -2651,10 +3070,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       openTimer.current = null;
     }
   }, []);
-  useEffect(() => () => {
-    if (openTimer.current !== null) window.clearTimeout(openTimer.current);
-    if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
-  }, []);
+  useEffect(
+    () => () => {
+      if (openTimer.current !== null) window.clearTimeout(openTimer.current);
+      if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
+    },
+    [],
+  );
 
   /** Hover-intent, not hover. A panel is only committed once the pointer has
    *  settled on an icon — otherwise sweeping the rail on the way to Settings
@@ -2666,7 +3088,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
    *  business swapping it — a peek is transient, a pin is a choice. */
   const hoverSideTab = useCallback(
     (tab: SideTab) => {
-      if (pinned) return;
+      // Off by default (Appearance → "Hover to view"): a panel that comes out
+      // because you passed an icon on your way somewhere else is a panel you
+      // didn't ask for. With it off the rail opens on click only.
+      if (pinned || !sidePrefs.hover) return;
       cancelPeekClose();
       cancelPeekOpen();
       openTimer.current = window.setTimeout(() => {
@@ -2675,7 +3100,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         setPeeking(true);
       }, HOVER_INTENT_MS);
     },
-    [cancelPeekClose, cancelPeekOpen, pinned],
+    [cancelPeekClose, cancelPeekOpen, pinned, sidePrefs.hover],
   );
   const leaveSideHover = useCallback(
     (prompt?: boolean) => {
@@ -2696,10 +3121,17 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
    *  On pointerdown, not click: waiting for mouseup leaves the panel sitting
    *  over whatever you are in the middle of pressing. */
   useEffect(() => {
-    if (!sideOpen) return;
+    // Appearance → "Click outside to close". On by default, and off is a real
+    // choice once the panel is docked: a pane that isn't covering anything has
+    // no reason to close because you clicked in the editor.
+    if (!sideOpen || !sidePrefs.clickOutsideCloses) return;
     const onDown = (e: PointerEvent) => {
       const target = e.target;
-      if (target instanceof Element && target.closest(".side-peek, .rail")) return;
+      if (
+        target instanceof Element &&
+        target.closest(".side-peek, .side-dock, .rail")
+      )
+        return;
       cancelPeekOpen();
       cancelPeekClose();
       setPeeking(false);
@@ -2707,7 +3139,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     };
     window.addEventListener("pointerdown", onDown, true);
     return () => window.removeEventListener("pointerdown", onDown, true);
-  }, [sideOpen, cancelPeekOpen, cancelPeekClose]);
+  }, [sideOpen, cancelPeekOpen, cancelPeekClose, sidePrefs.clickOutsideCloses]);
 
   // Click is the latch: it pins the panel open so it survives the pointer
   // leaving. Clicking the pinned tab again puts it away.
@@ -2744,7 +3176,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     const startW = sideWidthRef.current;
     resizing.current = true;
     const move = (ev: PointerEvent) => {
-      const w = Math.max(SIDE_MIN_W, Math.min(SIDE_MAX_W, startW + ev.clientX - startX));
+      const w = Math.max(
+        SIDE_MIN_W,
+        Math.min(SIDE_MAX_W, startW + ev.clientX - startX),
+      );
       sideWidthRef.current = w;
       setSideWidth(w);
     };
@@ -2774,7 +3209,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       }
       setActiveTabId(target.id);
       setFlashTabId(target.id);
-      window.setTimeout(() => setFlashTabId((c) => (c === target.id ? null : c)), 1200);
+      window.setTimeout(
+        () => setFlashTabId((c) => (c === target.id ? null : c)),
+        1200,
+      );
       setTimeout(() => termHandles.current.get(target.id)?.focus(), 50);
     },
     [showMicroRun],
@@ -2788,13 +3226,21 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
    *  that answers it lands in another agent's session. */
   const pendingTerminal = useCallback(
     (item: PendingItem): { ptyId: number; tabId?: string } | null => {
-      const termTabs = tabsRef.current.filter((t): t is TermSubTab => t.type === "terminal");
-      const byPty = termTabs.find((t) => t.ptyId != null && t.ptyId === item.pty);
+      const termTabs = tabsRef.current.filter(
+        (t): t is TermSubTab => t.type === "terminal",
+      );
+      const byPty = termTabs.find(
+        (t) => t.ptyId != null && t.ptyId === item.pty,
+      );
       if (byPty?.ptyId != null) return { ptyId: byPty.ptyId, tabId: byPty.id };
       const detached = findRun(microRunsRef.current, item.pty);
       if (detached) return { ptyId: detached.ptyId };
-      const byCwd = termTabs.find((t) => item.cwd === t.cwd || item.cwd.startsWith(t.cwd + "/"));
-      return byCwd?.ptyId != null ? { ptyId: byCwd.ptyId, tabId: byCwd.id } : null;
+      const byCwd = termTabs.find(
+        (t) => item.cwd === t.cwd || item.cwd.startsWith(t.cwd + "/"),
+      );
+      return byCwd?.ptyId != null
+        ? { ptyId: byCwd.ptyId, tabId: byCwd.id }
+        : null;
     },
     [],
   );
@@ -2824,12 +3270,15 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       // Nothing matched by pty, by run, or by directory: fall back to an agent
       // terminal in this project, which is where an unstamped event (a CLI whose
       // hooks can't carry the pty) most likely came from.
-      const termTabs = tabsRef.current.filter((t): t is TermSubTab => t.type === "terminal");
+      const termTabs = tabsRef.current.filter(
+        (t): t is TermSubTab => t.type === "terminal",
+      );
       const agentPtyIds = new Set(
         stats.filter((s) => identifyAgent(s.agent_hint)).map((s) => s.id),
       );
       const target =
-        termTabs.find((t) => t.ptyId != null && agentPtyIds.has(t.ptyId)) ?? termTabs[0];
+        termTabs.find((t) => t.ptyId != null && agentPtyIds.has(t.ptyId)) ??
+        termTabs[0];
       if (target) {
         setActiveTabId(target.id);
         setTimeout(() => termHandles.current.get(target.id)?.focus(), 50);
@@ -2854,7 +3303,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     (item: PendingItem, selections: number[][]) => {
       const found = pendingTerminal(item);
       if (!found) {
-        onNotice("Can't find the terminal this question came from — answer there.");
+        onNotice(
+          "Can't find the terminal this question came from — answer there.",
+        );
         return;
       }
       // Only a single-page form is answered here. Multi-question forms need
@@ -2891,7 +3342,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     (item: PendingItem, decision: "approve" | "deny") => {
       const found = pendingTerminal(item);
       if (!found) {
-        onNotice("Can't find the terminal this prompt came from — answer there.");
+        onNotice(
+          "Can't find the terminal this prompt came from — answer there.",
+        );
         return;
       }
       const ptyId = found.ptyId;
@@ -2940,7 +3393,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           .filter((s) => s.procs.some((p) => /claude/i.test(p.name)))
           .map((s) => s.id),
       );
-      const target = termTabs.find((t) => t.ptyId != null && claudePtys.has(t.ptyId));
+      const target = termTabs.find(
+        (t) => t.ptyId != null && claudePtys.has(t.ptyId),
+      );
       if (target?.ptyId == null) {
         onNotice("No running Claude session in this project.");
         return;
@@ -2965,44 +3420,50 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   /** Launch an agent CLI. `at` defaults to the first component; right-clicking a
    *  component header passes that component's path so it starts in the right
    *  directory rather than wherever the ＋ menu would have put it. */
-  const launchCli = useCallback((cli: AgentCli, at?: string) => {
-    const cwd = at ?? componentsRef.current[0]?.path;
-    if (!cwd) return;
-    if (installed[cli.bin]) {
-      addTerminal(cwd, shellBin(cli.bin), cli.name, cli.icon);
-      // Surface the new agent where it lives: the Agents section, expanded so
-      // the just-launched row is actually in view.
-      setSideTab("agents");
-      setPinned(true);
-    } else if (cli.rebound || !cli.install) {
-      // Two cases, one answer: an override points somewhere the vendor's
-      // installer can never satisfy, and a custom entry has no installer at all
-      // — so an "install" offer would repeat forever, which is the loop these
-      // settings exist to end. Send them to the setting that is actually wrong.
-      onNotice(
-        `${cli.name} is set to \`${cli.bin}\`, which isn't on this machine — check Settings → Agents.`,
-      );
-    } else {
-      // A run tab, so the installer exits when done — and that exit is the
-      // signal to re-probe (see onExited below). No timers, no staleness.
-      addTerminal(cwd, cli.install, `install ${cli.name}`, "⬇", true);
-    }
-  }, [installed, addTerminal, onNotice]);
+  const launchCli = useCallback(
+    (cli: AgentCli, at?: string) => {
+      const cwd = at ?? componentsRef.current[0]?.path;
+      if (!cwd) return;
+      if (installed[cli.bin]) {
+        addTerminal(cwd, shellBin(cli.bin), cli.name, cli.icon);
+        // Surface the new agent where it lives: the Agents section, expanded so
+        // the just-launched row is actually in view.
+        setSideTab("agents");
+        setPinned(true);
+      } else if (cli.rebound || !cli.install) {
+        // Two cases, one answer: an override points somewhere the vendor's
+        // installer can never satisfy, and a custom entry has no installer at all
+        // — so an "install" offer would repeat forever, which is the loop these
+        // settings exist to end. Send them to the setting that is actually wrong.
+        onNotice(
+          `${cli.name} is set to \`${cli.bin}\`, which isn't on this machine — check Settings → Agents.`,
+        );
+      } else {
+        // A run tab, so the installer exits when done — and that exit is the
+        // signal to re-probe (see onExited below). No timers, no staleness.
+        addTerminal(cwd, cli.install, `install ${cli.name}`, "⬇", true);
+      }
+    },
+    [installed, addTerminal, onNotice],
+  );
 
   /** Run `cli`'s updater in a run tab. Its exit re-probes versions (see
    *  onExited), so the badge clears the moment the update lands — no timers. */
-  const runCliUpdate = useCallback((cli: AgentCli, at?: string) => {
-    const cwd = at ?? componentsRef.current[0]?.path;
-    if (!cwd) return;
-    // Route to the command matched to the install source (e.g. `brew upgrade`);
-    // fall back to the CLI's own updater when the source is a plain registry.
-    const cmd = cliUpdates[cli.bin]?.updateCmd ?? updateCommand(cli);
-    // Nothing to run: an entry with neither an updater nor an installer (a
-    // custom CLI) never badges an update in the first place, so this is the
-    // belt to that brace rather than a state a user can reach.
-    if (!cmd) return;
-    addTerminal(cwd, cmd, `update ${cli.name}`, "⬆", true);
-  }, [cliUpdates, addTerminal]);
+  const runCliUpdate = useCallback(
+    (cli: AgentCli, at?: string) => {
+      const cwd = at ?? componentsRef.current[0]?.path;
+      if (!cwd) return;
+      // Route to the command matched to the install source (e.g. `brew upgrade`);
+      // fall back to the CLI's own updater when the source is a plain registry.
+      const cmd = cliUpdates[cli.bin]?.updateCmd ?? updateCommand(cli);
+      // Nothing to run: an entry with neither an updater nor an installer (a
+      // custom CLI) never badges an update in the first place, so this is the
+      // belt to that brace rather than a state a user can reach.
+      if (!cmd) return;
+      addTerminal(cwd, cmd, `update ${cli.name}`, "⬆", true);
+    },
+    [cliUpdates, addTerminal],
+  );
 
   /** The launcher list — shell plus every agent CLI — for a given directory.
    *  Shared by the ＋ menu, the empty-state grid and the component right-click
@@ -3041,11 +3502,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     mode: "save" | "once";
     nonce: number;
   } | null>(null);
-  const openTaskComposer = useCallback((brief: string, mode: "save" | "once") => {
-    setPinned(true);
-    setSideTab("tasks");
-    setTaskSeed((prev) => ({ brief, mode, nonce: (prev?.nonce ?? 0) + 1 }));
-  }, []);
+  const openTaskComposer = useCallback(
+    (brief: string, mode: "save" | "once") => {
+      setPinned(true);
+      setSideTab("tasks");
+      setTaskSeed((prev) => ({ brief, mode, nonce: (prev?.nonce ?? 0) + 1 }));
+    },
+    [],
+  );
   const seedTaskFrom = useCallback(
     (brief: string) => openTaskComposer(brief, "save"),
     [openTaskComposer],
@@ -3054,6 +3518,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
    *  new task about it, run a one-off about it, then the two groups of tasks.
    *  The surfaces stay ignorant of the task registry — they ask for the item
    *  and splice it into their menu. */
+  const firstRoot = roots[0] ?? "";
   /** The same rows as `taskMenu`, without the "Tasks ▸" hop — for a control
    *  that is already the task menu. */
   const taskRows = useCallback(
@@ -3080,10 +3545,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         saved: project.customTasks ?? [],
         onNewTask: seedTaskFrom,
         onOneOff: (brief) => openTaskComposer(brief, "once"),
-        onRunSaved: (t) => void startMicroTask(customTaskDef(t), { dir: roots[0] ?? "" }, ""),
+        onRunSaved: (t) => void startMicroTask(customTaskDef(t), { dir: firstRoot }, ""),
       }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [seedTaskFrom, openTaskComposer, startMicroTask, roots[0], project.customTasks],
+    [seedTaskFrom, openTaskComposer, startMicroTask, firstRoot, project.customTasks],
   );
 
   const submitRootCreate = async () => {
@@ -3111,7 +3575,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   }, []);
   // Empty draft clears the custom name and falls back to the auto title.
   const commitRename = useCallback(() => {
-    if (renamingTabId) patchTab(renamingTabId, { customTitle: renameDraft.trim() || undefined });
+    if (renamingTabId)
+      patchTab(renamingTabId, { customTitle: renameDraft.trim() || undefined });
     setRenamingTabId(null);
   }, [renamingTabId, renameDraft, patchTab]);
   const cancelRename = useCallback(() => setRenamingTabId(null), []);
@@ -3129,7 +3594,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const agentPtyList = projectStats
     .filter((s) => identifyAgent(s.agent_hint))
     .map((s) => s.id);
-  const agentPtyKey = agentPtyList.slice().sort((a, b) => a - b).join(",");
+  const agentPtyKey = agentPtyList
+    .slice()
+    .sort((a, b) => a - b)
+    .join(",");
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const agentPtyIds = useMemo(() => new Set(agentPtyList), [agentPtyKey]);
   const isAgentTab = useCallback(
@@ -3144,8 +3612,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // soft-pulse while its work burns CPU, gray steady when idle.
   // Same content-keying as agentPtyIds: identity changes only when the set of
   // busy ptys crosses the CPU threshold, not on every sample.
-  const busyPtyList = projectStats.filter((s) => s.total_cpu > 10).map((s) => s.id);
-  const busyPtyKey = busyPtyList.slice().sort((a, b) => a - b).join(",");
+  const busyPtyList = projectStats
+    .filter((s) => s.total_cpu > 10)
+    .map((s) => s.id);
+  const busyPtyKey = busyPtyList
+    .slice()
+    .sort((a, b) => a - b)
+    .join(",");
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const busyPtyIds = useMemo(() => new Set(busyPtyList), [busyPtyKey]);
   // The tab dot's state. For an agent tab we use the authoritative session state
@@ -3158,8 +3631,16 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     (t: TermSubTab): "working" | "waiting" | "idle" | "ended" => {
       if (isAgentTab(t) && t.ptyId != null) {
         const sid = liveSessionByPty.get(t.ptyId);
-        const st = sid ? wsDigests.find((d) => d.session_id === sid)?.state : undefined;
-        if (st === "working" || st === "waiting" || st === "idle" || st === "ended") return st;
+        const st = sid
+          ? wsDigests.find((d) => d.session_id === sid)?.state
+          : undefined;
+        if (
+          st === "working" ||
+          st === "waiting" ||
+          st === "idle" ||
+          st === "ended"
+        )
+          return st;
       }
       return t.ptyId != null && busyPtyIds.has(t.ptyId) ? "working" : "idle";
     },
@@ -3174,19 +3655,29 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     () => [
       ...microRuns.map((r) => {
         const sid = liveSessionByPty.get(r.ptyId);
-        const state = (sid ? wsDigests.find((d) => d.session_id === sid)?.state : undefined) ?? "idle";
+        const state =
+          (sid
+            ? wsDigests.find((d) => d.session_id === sid)?.state
+            : undefined) ?? "idle";
         return {
           ptyId: r.ptyId,
           title: r.label,
           state,
           icon: r.icon,
-          note: runNote(r, state, lastStepFor(projectEvents, r.ptyId), microClock),
+          note: runNote(
+            r,
+            state,
+            lastStepFor(projectEvents, r.ptyId),
+            microClock,
+          ),
           blocked: Boolean(r.blocked) || state === "waiting",
           watching: Boolean(r.viewTabId),
         };
       }),
       ...tabs
-        .filter((t): t is TermSubTab => t.type === "terminal" && Boolean(t.micro))
+        .filter(
+          (t): t is TermSubTab => t.type === "terminal" && Boolean(t.micro),
+        )
         .map((t) => ({
           tabId: t.id,
           title: t.customTitle || t.title,
@@ -3194,14 +3685,25 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           icon: t.icon,
         })),
     ],
-    [microRuns, tabs, tabState, liveSessionByPty, wsDigests, projectEvents, microClock],
+    [
+      microRuns,
+      tabs,
+      tabState,
+      liveSessionByPty,
+      wsDigests,
+      projectEvents,
+      microClock,
+    ],
   );
   const stripTabs = useMemo(
     () => tabs.filter((t) => t.type !== "terminal" || !t.run),
     [tabs],
   );
   const shellTabs = useMemo(
-    () => stripTabs.filter((t): t is TermSubTab => t.type === "terminal" && !isAgentTab(t)),
+    () =>
+      stripTabs.filter(
+        (t): t is TermSubTab => t.type === "terminal" && !isAgentTab(t),
+      ),
     [stripTabs, isAgentTab],
   );
   const tabGroups: SubTab[][] = useMemo(
@@ -3315,7 +3817,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     if (coachTip) markTipSeen(coachTip);
     setCoachTip(null);
   };
-  const COACH_TIPS: Record<CoachTip, { selector: string; title: string; body: string }> = {
+  const COACH_TIPS: Record<
+    CoachTip,
+    { selector: string; title: string; body: string }
+  > = {
     shells: {
       selector: '[data-rail="SHELLS"]',
       title: "Your shell lives here",
@@ -3363,12 +3868,16 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       // keeps `amp` from matching a process called `ramp`.
       const byProc = AGENT_CLIS.find((c) =>
         procs.some(
-          (p) => binName(p.name) === binName(c.bin) || binName(p.cmd.split(" ")[0] ?? "") === binName(c.bin),
+          (p) =>
+            binName(p.name) === binName(c.bin) ||
+            binName(p.cmd.split(" ")[0] ?? "") === binName(c.bin),
         ),
       );
       // Via the registry id, so a terminal remembered from before a rebind —
       // still carrying the vendor's name — keeps its agent and its icon.
-      const byCommand = AGENT_CLIS.find((c) => c.id === agentIdForCommand(t.command));
+      const byCommand = AGENT_CLIS.find(
+        (c) => c.id === agentIdForCommand(t.command),
+      );
       return {
         tabId: t.id,
         title: t.customTitle ?? t.title,
@@ -3381,12 +3890,17 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // The session changeset shaped for the agent context builder: component
   // label plus each file's repo-relative path.
   const changeContextGroups = () =>
-    changeGroups.map((g) => ({ component: g.component, paths: g.files.map((f) => f.path) }));
+    changeGroups.map((g) => ({
+      component: g.component,
+      paths: g.files.map((f) => f.path),
+    }));
 
   // Which component checkout an absolute path lives in — the cwd a fresh agent
   // opened on that file should start in. Falls back to the first component.
   const repoForFile = (abs: string) =>
-    componentsRef.current.find((c) => abs === c.path || abs.startsWith(`${c.path}/`))?.path ??
+    componentsRef.current.find(
+      (c) => abs === c.path || abs.startsWith(`${c.path}/`),
+    )?.path ??
     componentsRef.current[0]?.path ??
     null;
 
@@ -3397,12 +3911,15 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // sort first — they're the configured dev servers, a shell's port is a bonus.
   const previewServers: PreviewServer[] = tabs
     .filter(
-      (t): t is TermSubTab => t.type === "terminal" && t.ptyId != null && !t.exited,
+      (t): t is TermSubTab =>
+        t.type === "terminal" && t.ptyId != null && !t.exited,
     )
     .flatMap((t) => {
       const ports = projectStats.find((s) => s.id === t.ptyId)?.ports ?? [];
       const comp =
-        components.find((c) => t.cwd === c.path || t.cwd.startsWith(`${c.path}/`)) ?? null;
+        components.find(
+          (c) => t.cwd === c.path || t.cwd.startsWith(`${c.path}/`),
+        ) ?? null;
       return ports.map((p) => ({
         url: `http://localhost:${p}`,
         port: p,
@@ -3421,77 +3938,104 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // the Rust context bridge, where `canopy-hook --mcp` serves it to agents as
   // the canopy_* tools. Runs every render, but the stringify diff means a
   // publish only crosses IPC when something actually changed.
+  //
+  // The caret is read here rather than subscribed as state: a per-keystroke
+  // useSyncExternalStore re-rendered this whole component to feed one field.
+  // The debounced subscription below re-publishes (no render) on caret moves.
   const lastContextRef = useRef("");
+  const publishContextRef = useRef(() => {});
   useEffect(() => {
-    const snapshot = JSON.stringify({
-      id: project.id,
-      name: project.name,
-      components: components.map((c) => ({
-        label: c.label,
-        path: c.path,
-        commands: c.commands ?? [],
-      })),
-      runServers: tabs
-        .filter((t): t is TermSubTab => t.type === "terminal" && !!t.run)
-        .map((t) => ({
-          ptyId: t.ptyId,
-          title: t.customTitle ?? t.title,
-          command: t.command ?? "",
-          cwd: t.cwd,
-          component:
-            components.find((c) => t.cwd === c.path || t.cwd.startsWith(`${c.path}/`))?.label ??
-            null,
-          listeningPorts: projectStats.find((s) => s.id === t.ptyId)?.ports ?? [],
-          running: !t.exited && t.ptyId != null,
-          exitCode: t.exitCode ?? null,
+    const publish = () => {
+      const caret = getCaret();
+      const snapshot = JSON.stringify({
+        id: project.id,
+        name: project.name,
+        components: components.map((c) => ({
+          label: c.label,
+          path: c.path,
+          commands: c.commands ?? [],
         })),
-      agents: agentTargets.map((a) => ({
-        ptyId: a.ptyId,
-        agent: a.agentId,
-        title: a.title,
-        dir: a.dir,
-      })),
-      // Preview annotations, so canopy_annotations can serve the visual
-      // feedback the user marked — element, comment, and serving component.
-      annotations: tabs
-        .filter((t): t is PreviewSubTab => t.type === "preview")
-        .flatMap((t) => {
-          const server = serverForUrl(t.url, previewServers);
-          return t.annotations.map((a) => ({
-            n: a.n,
-            selector: a.selector,
-            component: a.components[0] ?? null,
-            tag: a.tag,
-            text: a.text,
-            comment: a.comment,
-            pageUrl: a.pageUrl || t.url,
-            servingComponent: server?.componentLabel ?? null,
-            servingComponentPath: server?.componentPath ?? null,
-          }));
-        }),
-      // Open preview tabs, so agents know what the browser-control tools
-      // (canopy_browser_*) are currently pointed at.
-      previews: tabs
-        .filter((t): t is PreviewSubTab => t.type === "preview")
-        .map((t) => ({ url: t.url || null, annotations: t.annotations.length })),
-      // What the user is looking at (canopy_editor_state) — the tab in front of
-      // them, the caret, the selection. Deixis: "fix this" has a referent, and
-      // this is it.
-      editor: {
-        focused: visible,
-        activeTab: describeTab(tabs.find((t) => t.id === activeTabId)),
-        openTabs: tabs.map(describeTab).filter(Boolean),
-        caret:
-          caret && tabs.some((t) => t.type === "file" && t.file.path === caret.path)
-            ? caret
-            : null,
-      },
-    });
-    if (snapshot !== lastContextRef.current) {
-      lastContextRef.current = snapshot;
-      void ipc.contextPublish(project.id, snapshot);
-    }
+        runServers: tabs
+          .filter((t): t is TermSubTab => t.type === "terminal" && !!t.run)
+          .map((t) => ({
+            ptyId: t.ptyId,
+            title: t.customTitle ?? t.title,
+            command: t.command ?? "",
+            cwd: t.cwd,
+            component:
+              components.find(
+                (c) => t.cwd === c.path || t.cwd.startsWith(`${c.path}/`),
+              )?.label ?? null,
+            listeningPorts:
+              projectStats.find((s) => s.id === t.ptyId)?.ports ?? [],
+            running: !t.exited && t.ptyId != null,
+            exitCode: t.exitCode ?? null,
+          })),
+        agents: agentTargets.map((a) => ({
+          ptyId: a.ptyId,
+          agent: a.agentId,
+          title: a.title,
+          dir: a.dir,
+        })),
+        // Preview annotations, so canopy_annotations can serve the visual
+        // feedback the user marked — element, comment, and serving component.
+        annotations: tabs
+          .filter((t): t is PreviewSubTab => t.type === "preview")
+          .flatMap((t) => {
+            const server = serverForUrl(t.url, previewServers);
+            return t.annotations.map((a) => ({
+              n: a.n,
+              selector: a.selector,
+              component: a.components[0] ?? null,
+              tag: a.tag,
+              text: a.text,
+              comment: a.comment,
+              pageUrl: a.pageUrl || t.url,
+              servingComponent: server?.componentLabel ?? null,
+              servingComponentPath: server?.componentPath ?? null,
+            }));
+          }),
+        // Open preview tabs, so agents know what the browser-control tools
+        // (canopy_browser_*) are currently pointed at.
+        previews: tabs
+          .filter((t): t is PreviewSubTab => t.type === "preview")
+          .map((t) => ({
+            url: t.url || null,
+            annotations: t.annotations.length,
+          })),
+        // What the user is looking at (canopy_editor_state) — the tab in front of
+        // them, the caret, the selection. Deixis: "fix this" has a referent, and
+        // this is it.
+        editor: {
+          focused: visible,
+          activeTab: describeTab(tabs.find((t) => t.id === activeTabId)),
+          openTabs: tabs.map(describeTab).filter(Boolean),
+          caret:
+            caret &&
+            tabs.some((t) => t.type === "file" && t.file.path === caret.path)
+              ? caret
+              : null,
+        },
+      });
+      if (snapshot !== lastContextRef.current) {
+        lastContextRef.current = snapshot;
+        void ipc.contextPublish(project.id, snapshot);
+      }
+    };
+    publishContextRef.current = publish;
+    publish();
   });
+  useEffect(() => {
+    let t: number | undefined;
+    const unsub = subscribeCaret(() => {
+      window.clearTimeout(t);
+      t = window.setTimeout(() => publishContextRef.current(), 250);
+    });
+    return () => {
+      unsub();
+      window.clearTimeout(t);
+    };
+  }, []);
   // A closed project's servers die with it; drop its snapshot too.
   useEffect(() => () => void ipc.contextRemove(project.id), [project.id]);
 
@@ -3503,7 +4047,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // only when it genuinely belongs to this agent (a reused PTY can still carry
   // a previous CLI's digest — attaching it is exactly the bug this replaces).
   const agentTermWs =
-    activeTab?.type === "terminal" && isAgentTab(activeTab) && activeTab.ptyId != null
+    activeTab?.type === "terminal" &&
+    isAgentTab(activeTab) &&
+    activeTab.ptyId != null
       ? (() => {
           const stat = projectStats.find((s) => s.id === activeTab.ptyId);
           const procs = stat?.procs ?? [];
@@ -3514,13 +4060,17 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 binName(p.cmd.split(" ")[0] ?? "") === binName(c.bin),
             ),
           );
-          const byCommand = AGENT_CLIS.find((c) => c.id === agentIdForCommand(activeTab.command));
+          const byCommand = AGENT_CLIS.find(
+            (c) => c.id === agentIdForCommand(activeTab.command),
+          );
           const agent = (byProc ?? byCommand)?.id ?? "agent";
           // The live session cwd — the same source the Agents panel keys off,
           // so the overlay and a panel-opened tab resolve the same workspace.
           const cwd = stat?.cwd || activeTab.cwd || "";
           const repo =
-            components.find((c) => cwd === c.path || cwd.startsWith(c.path + "/"))?.path ?? null;
+            components.find(
+              (c) => cwd === c.path || cwd.startsWith(c.path + "/"),
+            )?.path ?? null;
           // Bind to the session actually running in this terminal by identity,
           // never by the digest's `surface` (the pty from whenever the hook last
           // wrote — stale across a restart, which is what stapled a dead session
@@ -3542,12 +4092,21 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             digest = ld && (ld.agent ?? "agent") === agent ? ld : undefined;
             sessionId = boundSid;
           } else {
-            const d = digestBySurface(wsDigests, thisInstance).get(String(activeTab.ptyId));
+            const d = digestBySurface(wsDigests, thisInstance).get(
+              String(activeTab.ptyId),
+            );
             const belongs = d && (!thisInstance || d.instance === thisInstance);
             digest = belongs && (d.agent ?? "agent") === agent ? d : undefined;
             sessionId = digest?.session_id;
           }
-          return { repo, agent, cwd, sessionId, digest, ptyId: activeTab.ptyId as number };
+          return {
+            repo,
+            agent,
+            cwd,
+            sessionId,
+            digest,
+            ptyId: activeTab.ptyId as number,
+          };
         })()
       : null;
   // Derived, not stored: the overlay shows when the terminal in front is one you
@@ -3571,7 +4130,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   // Forget terminals that have gone away. PTY ids can be reused, and a stale
   // entry would open the workspace unbidden on whatever inherits the number.
   const liveTermPtys = useMemo(
-    () => tabs.filter((t): t is TermSubTab => t.type === "terminal").map((t) => t.ptyId),
+    () =>
+      tabs
+        .filter((t): t is TermSubTab => t.type === "terminal")
+        .map((t) => t.ptyId),
     [tabs],
   );
   useEffect(() => {
@@ -3639,25 +4201,33 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           ? [taskMenu(`In \`${tab.file.path}\`: `)]
           : tab.type === "pr"
             ? [
-                taskMenu(`About PR #${tab.pr.number} "${tab.pr.title}" (${tab.pr.url}): `, [
-                  {
-                    id: reviewPrTask.id,
-                    label: `Review PR #${tab.pr.number}`,
-                    icon: reviewPrTask.icon,
-                    run: () => void startMicroTask(reviewPrTask, { repo: tab.repo, pr: tab.pr }, ""),
-                  },
-                  {
-                    id: addressPrCommentsTask.id,
-                    label: `Address comments on #${tab.pr.number}`,
-                    icon: addressPrCommentsTask.icon,
-                    run: () =>
-                      void startMicroTask(
-                        addressPrCommentsTask,
-                        { repo: tab.repo, pr: tab.pr },
-                        "",
-                      ),
-                  },
-                ]),
+                taskMenu(
+                  `About PR #${tab.pr.number} "${tab.pr.title}" (${tab.pr.url}): `,
+                  [
+                    {
+                      id: reviewPrTask.id,
+                      label: `Review PR #${tab.pr.number}`,
+                      icon: reviewPrTask.icon,
+                      run: () =>
+                        void startMicroTask(
+                          reviewPrTask,
+                          { repo: tab.repo, pr: tab.pr },
+                          "",
+                        ),
+                    },
+                    {
+                      id: addressPrCommentsTask.id,
+                      label: `Address comments on #${tab.pr.number}`,
+                      icon: addressPrCommentsTask.icon,
+                      run: () =>
+                        void startMicroTask(
+                          addressPrCommentsTask,
+                          { repo: tab.repo, pr: tab.pr },
+                          "",
+                        ),
+                    },
+                  ],
+                ),
               ]
             : tab.type === "branch"
               ? [
@@ -3677,7 +4247,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                                   repo: tab.repo,
                                   branch: tab.branch.branch,
                                   worktree: tab.branch.worktree,
-                                  unpushed: !tab.branch.upstream || tab.branch.ahead > 0,
+                                  unpushed:
+                                    !tab.branch.upstream ||
+                                    tab.branch.ahead > 0,
                                 },
                                 "",
                               ),
@@ -3695,7 +4267,12 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       const items: MenuItem[] =
         tab.type === "terminal"
           ? [
-              { label: "Rename", onClick: () => { if (tab.type === "terminal") startRename(tab); } },
+              {
+                label: "Rename",
+                onClick: () => {
+                  if (tab.type === "terminal") startRename(tab);
+                },
+              },
               { label: "Close", danger: true, onClick: () => closeTab(tab.id) },
             ]
           : [
@@ -3707,7 +4284,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
     [startRename, closeTab, tabMenu.open, taskMenu, startMicroTask],
   );
   const onClearScrollback = useCallback(() => {
-    if (activeTermTab) termHandles.current.get(activeTermTab.id)?.clearScrollback();
+    if (activeTermTab)
+      termHandles.current.get(activeTermTab.id)?.clearScrollback();
   }, [activeTermTab]);
   const onHardReset = useCallback(() => {
     if (activeTermTab) termHandles.current.get(activeTermTab.id)?.hardReset();
@@ -3718,19 +4296,28 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const onShareFile = useCallback(
     (memberId: string, memberName: string) => {
       if (activeFileTab)
-        shareFileLive(activeFileTab.file.path, activeFileTab.file.name, memberId, memberName);
+        shareFileLive(
+          activeFileTab.file.path,
+          activeFileTab.file.name,
+          memberId,
+          memberName,
+        );
     },
     [activeFileTab, shareFileLive],
   );
   const onShareProject = useCallback(
-    (memberId: string, memberName: string) => shareProjectLive(memberId, memberName),
+    (memberId: string, memberName: string) =>
+      shareProjectLive(memberId, memberName),
     [shareProjectLive],
   );
-  const onNewShell = useCallback(
-    () => { const cwd = componentsRef.current[0]?.path; if (cwd) addTerminal(cwd); },
-    [addTerminal],
+  const onNewShell = useCallback(() => {
+    const cwd = componentsRef.current[0]?.path;
+    if (cwd) addTerminal(cwd);
+  }, [addTerminal]);
+  const onLaunchCli = useCallback(
+    (cli: AgentCli) => launchCli(cli),
+    [launchCli],
   );
-  const onLaunchCli = useCallback((cli: AgentCli) => launchCli(cli), [launchCli]);
   const onRunCliUpdate = useCallback(
     (cli: AgentCli, _e: React.MouseEvent) => runCliUpdate(cli),
     [runCliUpdate],
@@ -3766,11 +4353,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const panes = useRef(new Map<string, { tab: DocSubTab; el: ReactNode }>());
   useEffect(() => {
     const live = new Set(tabs.map((t) => t.id));
-    for (const id of [...panes.current.keys()]) if (!live.has(id)) panes.current.delete(id);
+    for (const id of [...panes.current.keys()])
+      if (!live.has(id)) panes.current.delete(id);
   }, [tabs]);
   const paneFor = (tab: DocSubTab): ReactNode => {
     const cached = panes.current.get(tab.id);
-    if (cached && cached.tab === tab && tab.id !== activeTabId) return cached.el;
+    if (cached && cached.tab === tab && tab.id !== activeTabId)
+      return cached.el;
     const el = docTabView(tab);
     panes.current.set(tab.id, { tab, el });
     return el;
@@ -3814,27 +4403,44 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             onRaisePrTask={
               tab.repo
                 ? (branch, worktree) =>
-                    void startMicroTask(raisePrTask, { repo: tab.repo as string, branch, worktree }, "")
+                    void startMicroTask(
+                      raisePrTask,
+                      { repo: tab.repo as string, branch, worktree },
+                      "",
+                    )
                 : undefined
             }
             onReviewPrTask={
               tab.repo
-                ? (pr) => void startMicroTask(reviewPrTask, { repo: tab.repo as string, pr }, "")
+                ? (pr) =>
+                    void startMicroTask(
+                      reviewPrTask,
+                      { repo: tab.repo as string, pr },
+                      "",
+                    )
                 : undefined
             }
             onAddressPrCommentsTask={
               tab.repo
                 ? (pr) =>
-                    void startMicroTask(addressPrCommentsTask, { repo: tab.repo as string, pr }, "")
+                    void startMicroTask(
+                      addressPrCommentsTask,
+                      { repo: tab.repo as string, pr },
+                      "",
+                    )
                 : undefined
             }
-            onRunSavedTask={(task, dir) => void startMicroTask(customTaskDef(task), { dir }, "")}
+            onRunSavedTask={(task, dir) =>
+              void startMicroTask(customTaskDef(task), { dir }, "")
+            }
             savedTasks={project.customTasks ?? []}
             onRunOneOff={(brief, dir) => runAdhocTask(brief, dir)}
           />
         );
       case "commit":
-        return <CommitView repo={tab.repo} hash={tab.hash} onNotice={onNotice} />;
+        return (
+          <CommitView repo={tab.repo} hash={tab.hash} onNotice={onNotice} />
+        );
       case "ticket":
         return (
           <TicketView
@@ -3844,7 +4450,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             agentTargets={agentTargets}
             installed={installed}
             onStartNew={(agentId) => void startTicketWork(tab.ticket, agentId)}
-            onSendToAgent={(target) => sendTicketToAgent(target, ticketContext(tab.ticket))}
+            onSendToAgent={(target) =>
+              sendTicketToAgent(target, ticketContext(tab.ticket))
+            }
           />
         );
       case "pr":
@@ -3856,10 +4464,18 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             relay={relay}
             agentTargets={agentTargets}
             installed={installed}
-            onStartReview={(agentId) => void startPrReview(tab.repo, tab.pr, agentId)}
-            onSendToAgent={(target) => sendTicketToAgent(target, prReviewContext(tab.pr))}
-            onStartResolve={(agentId) => void startPrConflictResolve(tab.repo, tab.pr, agentId)}
-            onSendResolve={(target) => sendTicketToAgent(target, prConflictContext(tab.pr))}
+            onStartReview={(agentId) =>
+              void startPrReview(tab.repo, tab.pr, agentId)
+            }
+            onSendToAgent={(target) =>
+              sendTicketToAgent(target, prReviewContext(tab.pr))
+            }
+            onStartResolve={(agentId) =>
+              void startPrConflictResolve(tab.repo, tab.pr, agentId)
+            }
+            onSendResolve={(target) =>
+              sendTicketToAgent(target, prConflictContext(tab.pr))
+            }
             onMicroTask={startMicroTask}
           />
         );
@@ -3891,6 +4507,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             tabId={tab.id}
             url={tab.url}
             annotations={tab.annotations}
+            visible={tab.id === activeTabId && visible}
             onPatch={(patch) => patchTabRaw(tab.id, patch as Partial<SubTab>)}
             servers={previewServers}
             agentTargets={agentTargets}
@@ -3935,11 +4552,22 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           />
         );
       case "chat":
-        return <ChatView peer={tab.peer} title={tab.name} relay={relay} onNotice={onNotice} />;
+        return (
+          <ChatView
+            peer={tab.peer}
+            title={tab.name}
+            relay={relay}
+            onNotice={onNotice}
+          />
+        );
       case "collab": {
         const session = relay.collab.get(tab.doc);
         return session instanceof GuestSession ? (
-          <CollabView session={session} ownerName={tab.ownerName} onNotice={onNotice} />
+          <CollabView
+            session={session}
+            ownerName={tab.ownerName}
+            onNotice={onNotice}
+          />
         ) : (
           <div className="editor-empty">
             <h2>{tab.name}</h2>
@@ -3973,14 +4601,22 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             }}
             onAcceptExternal={() => acceptExternal(tab.file.path)}
             onKeepMine={() => keepMine(tab.file.path)}
-            onCloseDiff={() => patchFile(tab.file.path, { view: "source", diffOriginal: null })}
+            onCloseDiff={() =>
+              patchFile(tab.file.path, { view: "source", diffOriginal: null })
+            }
+            onOpenAnyway={() => void openFile(tab.file.path, { force: true })}
             diffAgentBar={
               <AgentQueryBar
                 placeholder="Ask an agent about this file's changes…"
                 onRunTask={(query) => {
                   const dir = repoForFile(tab.file.path);
-                  if (!dir) return onNotice("No git repository in this project.");
-                  runAdhocTask(fileDiffContext(tab.file.path, query), dir, tab.file.name);
+                  if (!dir)
+                    return onNotice("No git repository in this project.");
+                  runAdhocTask(
+                    fileDiffContext(tab.file.path, query),
+                    dir,
+                    tab.file.name,
+                  );
                 }}
                 tasks={
                   hasTasksToList({ saved: project.customTasks })
@@ -4077,18 +4713,27 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             <div
               key={tab.id}
               className="fill term-host"
-              style={{ display: tab.id === activeTabId && visible ? "block" : "none" }}
+              style={{
+                display: tab.id === activeTabId && visible ? "block" : "none",
+              }}
               // Selected text is a task waiting to be written down — an error,
               // a TODO the shell just printed, a command worth automating.
               // Right-click offers to make one; without a selection the event
               // passes through untouched.
               onContextMenu={(e) => {
-                const sel = termHandles.current.get(tab.id)?.getSelection().trim();
+                const sel = termHandles.current
+                  .get(tab.id)
+                  ?.getSelection()
+                  .trim();
                 if (!sel) return;
                 termMenu.open(e, [taskMenu(sel)]);
               }}
             >
-              <TermPorts ptyId={tab.ptyId} stats={stats} onPreview={openPreview} />
+              <TermPorts
+                ptyId={tab.ptyId}
+                stats={stats}
+                onPreview={openPreview}
+              />
               <Term
                 // epoch remounts the Term (fresh PTY) when a run tab restarts
                 key={`${tab.id}:${tab.epoch ?? 0}`}
@@ -4111,20 +4756,32 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 // loses its Enter to zsh's line editor — the task sat unrun at
                 // a prompt. As an argv it never touches the tty.
                 initialCommand={tab.run || tab.micro ? undefined : tab.command}
-                runCommand={(tab.run || tab.micro) && tab.command ? tab.command : undefined}
+                runCommand={
+                  (tab.run || tab.micro) && tab.command
+                    ? tab.command
+                    : undefined
+                }
                 onSpawned={(ptyId) =>
                   // A freshly spawned pty is alive by definition, so clear any
                   // stale exited/failed state. Restart kills the old pty and
                   // remounts a beat later; that kill's late pty:exit can land in
                   // the gap and wrongly mark the tab failed while THIS new
                   // process is the one now running (a red ✕ on a live server).
-                  patchTab(tab.id, { ptyId, exited: false, exitCode: undefined })
+                  patchTab(tab.id, {
+                    ptyId,
+                    exited: false,
+                    exitCode: undefined,
+                  })
                 }
                 onExited={(code) => {
                   // Shell tabs close on exit; run tabs stay so the output and
                   // exit status remain readable.
                   if (tab.run) {
-                    patchTab(tab.id, { exited: true, exitCode: code, ptyId: null });
+                    patchTab(tab.id, {
+                      exited: true,
+                      exitCode: code,
+                      ptyId: null,
+                    });
                     // An installer or updater finishing is the moment
                     // "install" labels and update badges go stale — re-probe
                     // right now, not on a timer. Announced rather than
@@ -4136,14 +4793,17 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                       AGENT_CLIS.some(
                         (c) =>
                           c.install != null &&
-                          (c.install === tab.command || updateCommand(c) === tab.command),
+                          (c.install === tab.command ||
+                            updateCommand(c) === tab.command),
                       )
                     ) {
                       announceCliInstallsChanged();
                     }
                   } else closeTab(tab.id);
                 }}
-                onTitle={(title) => patchTab(tab.id, { title: title || tab.command || "shell" })}
+                onTitle={(title) =>
+                  patchTab(tab.id, { title: title || tab.command || "shell" })
+                }
                 onNotify={(notice) =>
                   // Only unread if you aren't already looking at it — a ring on
                   // the tab you're watching is noise.
@@ -4165,7 +4825,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           <div
             key={tab.id}
             className="fill doc-host"
-            style={hostStyle(tab.id === activeTabId && visible, tab.type === "preview")}
+            style={hostStyle(
+              tab.id === activeTabId && visible,
+              tab.type === "preview" && browserEngine === "proxy",
+            )}
           >
             <ErrorBoundary label="this tab">{paneFor(tab)}</ErrorBoundary>
           </div>
@@ -4233,7 +4896,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                       binary isn't there. Offering "install" would be a button
                       that cannot work. */}
                   {!installed[cli.bin] && (
-                    <span className="launch-install">{cli.install ? "install" : "not found"}</span>
+                    <span className="launch-install">
+                      {cli.install ? "install" : "not found"}
+                    </span>
                   )}
                   {installed[cli.bin] && cliUpdates[cli.bin]?.hasUpdate && (
                     <span
@@ -4260,7 +4925,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                   <span>
                     Pick up where you left off
                     <span className="badge">
-                      {restorable.length + freshAgents.length + rememberedShells.length}
+                      {restorable.length +
+                        freshAgents.length +
+                        rememberedShells.length}
                     </span>
                   </span>
                   <span className="resume-head-actions">
@@ -4291,7 +4958,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                 </div>
                 {restorable.length > 0 &&
                   (freshAgents.length > 0 || rememberedShells.length > 0) && (
-                    <div className="resume-subhead">Agent sessions — resume with history</div>
+                    <div className="resume-subhead">
+                      Agent sessions — resume with history
+                    </div>
                   )}
                 {restorable.map((r) => (
                   <div
@@ -4332,7 +5001,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                         e.stopPropagation();
                         forgetSessions([r.digest]);
                         setRestorable((prev) =>
-                          prev.filter((x) => x.digest.session_id !== r.digest.session_id),
+                          prev.filter(
+                            (x) => x.digest.session_id !== r.digest.session_id,
+                          ),
                         );
                       }}
                     >
@@ -4347,7 +5018,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                       Agents — started fresh, no history to resume
                     </div>
                     {freshAgents.map((t, i) => {
-                      const cli = AGENT_CLIS.find((c) => c.id === agentIdForCommand(t.command));
+                      const cli = AGENT_CLIS.find(
+                        (c) => c.id === agentIdForCommand(t.command),
+                      );
                       return (
                         <div
                           key={`a-${t.cwd}-${i}`}
@@ -4356,7 +5029,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                           onClick={() => reopenTerminal(t)}
                         >
                           <AgentIcon id={cli?.id ?? "agent"} size={14} />
-                          <span className="resume-prompt">{cli?.name ?? t.title}</span>
+                          <span className="resume-prompt">
+                            {cli?.name ?? t.title}
+                          </span>
                           <span className="resume-dir">
                             {t.cwd.split("/").filter(Boolean).pop()}
                           </span>
@@ -4391,7 +5066,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                       >
                         <TerminalIcon size={13} />
                         <span className="resume-prompt">
-                          {t.command ? <code>{t.command}</code> : <em>shell</em>}
+                          {t.command ? (
+                            <code>{t.command}</code>
+                          ) : (
+                            <em>shell</em>
+                          )}
                         </span>
                         <span className="resume-dir">
                           {t.cwd.split("/").filter(Boolean).pop()}
@@ -4457,7 +5136,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                       digest={agentTermWs.digest}
                       onOpenCommit={openCommit}
                       onOpenPr={openPr}
-                      onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
+                      onOpenTerminal={(cwd, label) =>
+                        addTerminal(cwd, undefined, label)
+                      }
                       onNotice={onNotice}
                       onMessageAgent={(text) =>
                         messageAgent({
@@ -4475,7 +5156,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                           ? (branch, worktree) =>
                               void startMicroTask(
                                 raisePrTask,
-                                { repo: agentTermWs.repo as string, branch, worktree },
+                                {
+                                  repo: agentTermWs.repo as string,
+                                  branch,
+                                  worktree,
+                                },
                                 "",
                               )
                           : undefined
@@ -4537,7 +5222,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   useEffect(() => {
     setSideSeen((prev) => (prev.includes(sideTab) ? prev : [...prev, sideTab]));
   }, [sideTab]);
-  const sidePanes = useRef(new Map<SideTab, { active: boolean; el: ReactNode }>());
+  const sidePanes = useRef(
+    new Map<SideTab, { active: boolean; el: ReactNode }>(),
+  );
   const sidePane = (key: SideTab, build: () => ReactNode) => {
     if (!sideSeen.includes(key)) return null;
     const active = sideTab === key;
@@ -4563,7 +5250,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         />
       )}
       {rootCreate && (
-        <div className="confirm-backdrop" onMouseDown={() => setRootCreate(null)}>
+        <div
+          className="confirm-backdrop"
+          onMouseDown={() => setRootCreate(null)}
+        >
           <div className="confirm" onMouseDown={(e) => e.stopPropagation()}>
             <p>
               New {rootCreate.kind === "dir" ? "folder" : "file"} in{" "}
@@ -4572,9 +5262,13 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             <input
               autoFocus
               className="git-branch-input"
-              placeholder={rootCreate.kind === "dir" ? "folder name" : "name.ext"}
+              placeholder={
+                rootCreate.kind === "dir" ? "folder name" : "name.ext"
+              }
               value={rootCreate.value}
-              onChange={(e) => setRootCreate((p) => (p ? { ...p, value: e.target.value } : p))}
+              onChange={(e) =>
+                setRootCreate((p) => (p ? { ...p, value: e.target.value } : p))
+              }
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
@@ -4586,7 +5280,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               <button className="btn" onClick={() => setRootCreate(null)}>
                 Cancel
               </button>
-              <button className="btn btn-accent" onClick={() => void submitRootCreate()}>
+              <button
+                className="btn btn-accent"
+                onClick={() => void submitRootCreate()}
+              >
                 Create
               </button>
             </div>
@@ -4603,8 +5300,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             const dir = components[components.length - 1]?.path;
             if (!dir) return;
             compMenu.open(e, [
-              { label: "New File…", onClick: () => setRootCreate({ dir, kind: "file", value: "" }) },
-              { label: "New Folder…", onClick: () => setRootCreate({ dir, kind: "dir", value: "" }) },
+              {
+                label: "New File…",
+                onClick: () => setRootCreate({ dir, kind: "file", value: "" }),
+              },
+              {
+                label: "New Folder…",
+                onClick: () => setRootCreate({ dir, kind: "dir", value: "" }),
+              },
             ]);
           }}
         >
@@ -4637,10 +5340,17 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             <div key={c.path} className="component-section">
               <div
                 className="component-header"
-                onClick={() => setOpenSections((prev) => ({ ...prev, [c.path]: !sectionOpen(c.path) }))}
+                onClick={() =>
+                  setOpenSections((prev) => ({
+                    ...prev,
+                    [c.path]: !sectionOpen(c.path),
+                  }))
+                }
                 onContextMenu={(e) => compMenu.open(e, launcherItems(c.path))}
               >
-                <span className={`tree-chevron ${sectionOpen(c.path) ? "tree-chevron-open" : ""}`}>
+                <span
+                  className={`tree-chevron ${sectionOpen(c.path) ? "tree-chevron-open" : ""}`}
+                >
                   <ChevronIcon />
                 </span>
                 <span className="component-title">{c.label}</span>
@@ -4659,7 +5369,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               </div>
               {sectionOpen(c.path) && (
                 <>
-                  {(c.commands ?? []).filter((cmd) => cmd.command.trim()).length > 0 && (
+                  {(c.commands ?? []).filter((cmd) => cmd.command.trim())
+                    .length > 0 && (
                     <div className="component-commands">
                       {(c.commands ?? [])
                         .filter((cmd) => cmd.command.trim())
@@ -4678,13 +5389,23 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                           const start = () =>
                             tab
                               ? restartRun(tab.id)
-                              : addTerminal(c.path, cmd.command, cmd.name || cmd.command, "▶", true);
+                              : addTerminal(
+                                  c.path,
+                                  cmd.command,
+                                  cmd.name || cmd.command,
+                                  "▶",
+                                  true,
+                                );
                           const ok = finished?.exitCode === 0;
                           return (
                             <div
                               key={cmd.name + cmd.command}
                               className={`command-run-row ${running ? "command-running" : ""} ${
-                                finished ? (ok ? "command-done" : "command-failed") : ""
+                                finished
+                                  ? ok
+                                    ? "command-done"
+                                    : "command-failed"
+                                  : ""
                               }`}
                               title={
                                 running
@@ -4693,22 +5414,34 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                                     ? `${ok ? "finished" : `exited ${finished.exitCode ?? "?"}`} — ${cmd.command}`
                                     : cmd.command
                               }
-                              onClick={() => (tab ? setActiveTabId(tab.id) : start())}
+                              onClick={() =>
+                                tab ? setActiveTabId(tab.id) : start()
+                              }
                             >
                               {running ? (
-                                <LiveDot size={9} className="command-live-dot" />
+                                <LiveDot
+                                  size={9}
+                                  className="command-live-dot"
+                                />
                               ) : finished ? (
                                 ok ? (
                                   <CheckIcon size={11} className="command-ok" />
                                 ) : (
-                                  <FailIcon size={11} className="command-fail" />
+                                  <FailIcon
+                                    size={11}
+                                    className="command-fail"
+                                  />
                                 )
                               ) : (
                                 <PlayIcon size={11} className="command-play" />
                               )}
-                              <span className="command-run-name">{cmd.name || cmd.command}</span>
+                              <span className="command-run-name">
+                                {cmd.name || cmd.command}
+                              </span>
                               {finished && !ok && (
-                                <span className="command-exit-code">{finished.exitCode}</span>
+                                <span className="command-exit-code">
+                                  {finished.exitCode}
+                                </span>
                               )}
                               <span
                                 className="command-run-actions"
@@ -4727,7 +5460,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                                       className="icon-btn icon-btn-danger"
                                       title="Stop"
                                       onClick={() => {
-                                        if (running.ptyId != null) void ipc.ptyKill(running.ptyId);
+                                        if (running.ptyId != null)
+                                          void ipc.ptyKill(running.ptyId);
                                       }}
                                     >
                                       <StopIcon size={13} />
@@ -4739,7 +5473,11 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                                     title={finished ? "Run again" : "Run"}
                                     onClick={start}
                                   >
-                                    {finished ? <RestartIcon size={14} /> : <PlayIcon size={12} />}
+                                    {finished ? (
+                                      <RestartIcon size={14} />
+                                    ) : (
+                                      <PlayIcon size={12} />
+                                    )}
                                   </button>
                                 )}
                               </span>
@@ -4766,7 +5504,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       {sidePane("git", () => (
         <GitPanel
           visible={sideTab === "git" && visible && sideOpen}
-          components={project.components.map((c) => ({ label: c.label, path: c.path }))}
+          components={project.components.map((c) => ({
+            label: c.label,
+            path: c.path,
+          }))}
           activeWorktree={worktreeEnv?.path ?? null}
           onUseWorktree={(repo, path, branch) => {
             void ipc.workspaceAdd(path).catch(() => {});
@@ -4787,7 +5528,12 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
                       id: raisePrTask.id,
                       label: `Raise PR for ${branch}`,
                       icon: raisePrTask.icon,
-                      run: () => void startMicroTask(raisePrTask, { repo, branch, worktree }, ""),
+                      run: () =>
+                        void startMicroTask(
+                          raisePrTask,
+                          { repo, branch, worktree },
+                          "",
+                        ),
                     },
                   ],
             )
@@ -4814,6 +5560,16 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               .then(() => refreshChanges())
               .catch((err) => onNotice(String(err), "error"))
           }
+          onDiscard={(repo, file) =>
+            void ipc
+              .gitDiscard(
+                repo,
+                file.untracked ? [] : [file.path],
+                file.untracked ? [file.path] : [],
+              )
+              .then(() => refreshChanges())
+              .catch((err) => onNotice(String(err), "error"))
+          }
           onCommit={(repo, message) =>
             ipc
               .gitCommit(repo, message, false)
@@ -4836,9 +5592,14 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             <AgentQueryBar
               placeholder="Ask an agent about these changes…"
               onRunTask={(query) => {
-                const dir = changeGroups[0]?.repo ?? componentsRef.current[0]?.path;
+                const dir =
+                  changeGroups[0]?.repo ?? componentsRef.current[0]?.path;
                 if (!dir) return onNotice("No git repository in this project.");
-                runAdhocTask(sessionChangesContext(changeContextGroups(), query), dir, "Changes");
+                runAdhocTask(
+                  sessionChangesContext(changeContextGroups(), query),
+                  dir,
+                  "Changes",
+                );
               }}
               tasks={
                 hasTasksToList({ saved: project.customTasks })
@@ -4856,13 +5617,18 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       {sidePane("prs", () => (
         <PrsPanel
           localRepos={repoPaths}
-          projectFor={(repo) => (repoPaths.includes(repo) ? project.name : undefined)}
+          projectFor={(repo) =>
+            repoPaths.includes(repo) ? project.name : undefined
+          }
           onOpen={(repo, pr) => openPr(repo, pr)}
         />
       ))}
       {sidePane("trackers", () => (
         <TicketsPanel
-          components={project.components.map((c) => ({ label: c.label, path: c.path }))}
+          components={project.components.map((c) => ({
+            label: c.label,
+            path: c.path,
+          }))}
           agentTargets={agentTargets}
           installed={installed}
           onStartWork={startTicketWork}
@@ -4870,7 +5636,9 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onOpenTicket={openTicket}
           onOpenIntegrations={() => {
             window.dispatchEvent(
-              new CustomEvent("canopy:open-settings", { detail: { tab: "integrations" } }),
+              new CustomEvent("canopy:open-settings", {
+                detail: { tab: "integrations" },
+              }),
             );
           }}
         />
@@ -4888,8 +5656,16 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           components={components.map((c) => ({ label: c.label, path: c.path }))}
           running={runningMicro}
           seed={taskSeed}
-          onShow={(t) => (t.ptyId != null ? showMicroRun(t.ptyId) : t.tabId && setActiveTabId(t.tabId))}
-          onStop={(t) => (t.ptyId != null ? stopMicroRun(t.ptyId) : t.tabId && closeTab(t.tabId))}
+          onShow={(t) =>
+            t.ptyId != null
+              ? showMicroRun(t.ptyId)
+              : t.tabId && setActiveTabId(t.tabId)
+          }
+          onStop={(t) =>
+            t.ptyId != null
+              ? stopMicroRun(t.ptyId)
+              : t.tabId && closeTab(t.tabId)
+          }
           onRunCustom={(task: CustomMicroTask, dir: string, query: string) =>
             void startMicroTask(customTaskDef(task), { dir }, query)
           }
@@ -4919,7 +5695,12 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
           onShareContext={onShareContext}
           liveSessionIds={liveSessionIds}
           onRestore={(cwd, cmd, title, agentId) =>
-            addTerminal(cwd, cmd, title, AGENT_CLIS.find((c) => c.id === agentId)?.icon)
+            addTerminal(
+              cwd,
+              cmd,
+              title,
+              AGENT_CLIS.find((c) => c.id === agentId)?.icon,
+            )
           }
           onNotice={onNotice}
           onOpenInstructions={openInstructions}
@@ -4930,7 +5711,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   );
 
   return (
-    <div className="project-view" style={{ display: visible ? "flex" : "none" }}>
+    <div
+      className="project-view"
+      style={{ display: visible ? "flex" : "none" }}
+    >
       {/* Rail + panels share a row; the status bar sits below it so it spans the
           full window width (rail + sidebar + main), not just the editor column. */}
       <div className="project-body">
@@ -4954,6 +5738,28 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             onToggleSidebar={toggleSidebar}
           />
         )}
+        {/* Docked (Appearance → "Sidebar as overlay", off): the panel takes a
+            column of its own and the main area moves over for it, instead of
+            floating above it. It costs a reflow of the main area every time it
+            opens — which is what re-wraps the terminals in it — so it is the
+            non-default, but it's the right trade for anyone who wants the panel
+            up while they work. Same `sidePanel` element either way; only one of
+            the two branches renders it. */}
+        {!zen && !sidePrefs.overlay && (
+          <div
+            className={`side-dock ${sideOpen ? "open" : ""}`}
+            // Collapsed to nothing rather than unmounted, for the same reason
+            // the overlay slides out of frame instead of leaving: a panel that
+            // unmounts re-fetches on the way back, and the trackers panel
+            // mounting means a round trip to GitHub before it can paint.
+            style={{ width: sideOpen ? sideWidth : 0 }}
+            onMouseEnter={cancelPeekClose}
+            onMouseLeave={() => schedulePeekClose()}
+          >
+            {sidePanel}
+            <div className="side-peek-grip" onPointerDown={startSideResize} />
+          </div>
+        )}
         {/* The PanelGroup renders in every mode on purpose. Swapping mainArea
             between a bare child and a <Panel> changes its element type, which
             unmounts the subtree — and Term's cleanup kills the PTY. Toggling
@@ -4969,7 +5775,7 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
             a terminal never re-wraps because you glanced at the file tree.
             Always mounted, slid out of frame when closed, for the same reason
             the panes inside it are display-toggled. */}
-        {!zen && (
+        {!zen && sidePrefs.overlay && (
           <div className="side-peek-layer">
             <div
               className={`side-peek ${sideOpen ? "open" : ""}`}
@@ -5019,4 +5825,4 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
       )}
     </div>
   );
-}
+});

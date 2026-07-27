@@ -5,7 +5,7 @@
 //! It reuses the *local* command surface, not the team relay's wire protocol:
 //! - snapshots come straight from `store_load` / `session_digests` /
 //!   `agent_usage` (all machine-global, no project scoping);
-//! - live status deltas are the app's own `pty:stats` / `agent:event` /
+//! - live status deltas are the app's own `pty:stats` / `agent:events` /
 //!   `pty:exit` events, tapped with `listen_any` and forwarded verbatim;
 //! - agent output streams from the `PtyManager` scrollback + broadcast fan-out
 //!   (see pty.rs), and input / approve / deny / kill go back through
@@ -52,7 +52,7 @@ const DEFAULT_PORT: u16 = 6680;
 /// 6-digit PIN over a throttled endpoint is not brute-forceable in practice.
 const AUTH_TARPIT: Duration = Duration::from_secs(2);
 /// App events we mirror to every connected portal client.
-const FORWARDED_EVENTS: [&str; 3] = ["pty:stats", "agent:event", "pty:exit"];
+const FORWARDED_EVENTS: [&str; 3] = ["pty:stats", "agent:events", "pty:exit"];
 
 /// Live bearer tokens for the *current* enable session. The set is created fresh
 /// in `remote_enable` and dropped on disable/rotate, so a token is valid for

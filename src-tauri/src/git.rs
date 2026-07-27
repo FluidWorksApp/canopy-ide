@@ -377,22 +377,322 @@ pub async fn git_branches(
     Ok(branches)
 }
 
+// ---------- switching branches ----------
+//
+// Switching is the one git operation a non-expert reaches for constantly, and
+// the one with the most ways to refuse. Every refusal git can produce here is
+// something a person can resolve, so they come back as *outcomes* the UI turns
+// into choices — `Err` stays reserved for "we couldn't even run git".
+
+/// The worktree standing between you and a branch: git allows a branch in one
+/// checkout at a time, so switching means dealing with whoever has it.
+#[derive(Serialize, Clone)]
+pub struct BranchHolder {
+    pub branch: String,
+    pub path: String,
+    pub name: String,
+    /// Under `.claude/worktrees` — a workspace Canopy made for an agent, not
+    /// something the user set up by hand.
+    pub agent: bool,
+    pub is_main: bool,
+    pub dirty: u32,
+    pub locked: Option<String>,
+    pub prunable: Option<String>,
+    pub head: String,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CheckoutOutcome {
+    Switched {
+        message: String,
+    },
+    /// Another worktree holds the branch.
+    BranchInWorktree {
+        holder: BranchHolder,
+    },
+    /// Uncommitted work here would be overwritten; `files` is git's own list.
+    LocalChanges {
+        files: Vec<String>,
+        untracked: bool,
+        detail: String,
+    },
+    /// The switch happened, but the set-aside changes wouldn't reapply. They
+    /// are still saved — this outcome exists so the UI can say where.
+    ChangesStashed {
+        stash: String,
+        detail: String,
+    },
+    /// Nothing we recognise. Still carries a human first line so the raw text
+    /// is never the whole message.
+    Failed {
+        summary: String,
+        detail: String,
+    },
+}
+
+fn is_agent_worktree(path: &str) -> bool {
+    path.contains("/.claude/worktrees/") || path.contains("\\.claude\\worktrees\\")
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (a.canonicalize(), b.canonicalize()),
+            (Ok(x), Ok(y)) if x == y
+        )
+}
+
+/// Which worktree holds `branch`, if it isn't this one. Run before every
+/// switch, so it stays to two git processes however many worktrees the repo
+/// has: the listing, then a status for the one worktree that matters.
+fn branch_holder(top: &Path, branch: &str) -> Option<BranchHolder> {
+    let w = scan_worktrees(top)
+        .ok()?
+        .into_iter()
+        .find(|w| w.branch.as_deref() == Some(branch) && !same_dir(Path::new(&w.path), top))?;
+    let dirty = if w.prunable.is_none() && !w.bare {
+        run(git(Path::new(&w.path)).args(["status", "--porcelain"]))
+            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count() as u32)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    Some(BranchHolder {
+        branch: branch.to_string(),
+        agent: is_agent_worktree(&w.path),
+        name: w.name,
+        path: w.path,
+        is_main: w.is_main,
+        dirty,
+        locked: w.locked,
+        prunable: w.prunable,
+        head: w.head,
+    })
+}
+
+/// The checkout refusals worth acting on. Git's wording for these has been
+/// stable for many releases; anything else stays `Unknown` and is shown raw
+/// beneath a summary rather than guessed at.
+#[derive(Debug, PartialEq)]
+enum CheckoutRefusal {
+    LocalChanges { files: Vec<String>, untracked: bool },
+    BranchInWorktree { path: String },
+    Unknown,
+}
+
+fn classify_checkout(err: &str) -> CheckoutRefusal {
+    if let Some(path) = err
+        .lines()
+        .find(|l| l.contains("is already used by worktree at"))
+        .and_then(|l| l.split_once("worktree at "))
+        .map(|(_, p)| p.trim().trim_matches('\'').to_string())
+    {
+        return CheckoutRefusal::BranchInWorktree { path };
+    }
+    let mut lines = err.lines();
+    while let Some(line) = lines.next() {
+        if !line.contains("would be overwritten by") {
+            continue;
+        }
+        // Git indents the file list; the "Please …" advice returns to column 0.
+        let files: Vec<String> = lines
+            .by_ref()
+            .take_while(|f| f.starts_with(char::is_whitespace) && !f.trim().is_empty())
+            .map(|f| f.trim().to_string())
+            .collect();
+        return CheckoutRefusal::LocalChanges {
+            files,
+            untracked: line.contains("untracked"),
+        };
+    }
+    CheckoutRefusal::Unknown
+}
+
+fn switch_failed(top: &Path, target: &str, err: String) -> CheckoutOutcome {
+    match classify_checkout(&err) {
+        // Preflight missed it, or the worktree appeared in between. Look the
+        // holder up properly; if that fails too, git's path is enough to talk
+        // about it.
+        CheckoutRefusal::BranchInWorktree { path } => CheckoutOutcome::BranchInWorktree {
+            holder: branch_holder(top, target).unwrap_or_else(|| BranchHolder {
+                branch: target.to_string(),
+                name: path.rsplit('/').next().unwrap_or(&path).to_string(),
+                agent: is_agent_worktree(&path),
+                path,
+                is_main: false,
+                dirty: 0,
+                locked: None,
+                prunable: None,
+                head: String::new(),
+            }),
+        },
+        CheckoutRefusal::LocalChanges { files, untracked } => CheckoutOutcome::LocalChanges {
+            files,
+            untracked,
+            detail: err,
+        },
+        CheckoutRefusal::Unknown => CheckoutOutcome::Failed {
+            summary: format!("Git couldn't switch to {target}."),
+            detail: err,
+        },
+    }
+}
+
+fn stash_top(top: &Path) -> Option<String> {
+    run(git(top).args(["rev-parse", "-q", "--verify", "refs/stash"]))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 #[tauri::command]
 pub async fn git_checkout(
     state: State<'_, WorkspaceManager>,
     repo: String,
     branch: String,
     create: bool,
-) -> Result<String, String> {
+) -> Result<CheckoutOutcome, String> {
     let top = repo_path(&state, &repo)?;
+    if !create {
+        if let Some(holder) = branch_holder(&top, &branch) {
+            return Ok(CheckoutOutcome::BranchInWorktree { holder });
+        }
+    }
     let mut cmd = git(&top);
     if create {
         cmd.args(["checkout", "-b", &branch]);
     } else {
         cmd.args(["checkout", &branch]);
     }
-    run(&mut cmd)?;
-    Ok(format!("Switched to {branch}"))
+    match run(&mut cmd) {
+        Ok(_) => Ok(CheckoutOutcome::Switched {
+            message: format!("Switched to {branch}"),
+        }),
+        Err(err) => Ok(switch_failed(&top, &branch, err)),
+    }
+}
+
+/// What a name points at. `checkout --detach` does none of the guessing plain
+/// `checkout` does, so a branch you have only ever seen on GitHub has to be
+/// resolved to its remote-tracking twin here — otherwise the one option that
+/// touches nothing would be the one that refuses.
+fn resolve_ref(top: &Path, name: &str) -> Option<String> {
+    for candidate in [name.to_string(), format!("refs/remotes/origin/{name}")] {
+        let spec = format!("{candidate}^{{commit}}");
+        if run(git(top).args(["rev-parse", "--verify", "--quiet", &spec])).is_ok() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Check out a ref without moving any branch onto it — the "look at this, then
+/// go back" switch. The next branch switch undoes it entirely.
+#[tauri::command]
+pub async fn git_checkout_detached(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    refname: String,
+) -> Result<CheckoutOutcome, String> {
+    let top = repo_path(&state, &repo)?;
+    let name = refname.trim();
+    if name.is_empty() {
+        return Err("need a branch or commit to look at".into());
+    }
+    let Some(target) = resolve_ref(&top, name) else {
+        return Ok(CheckoutOutcome::Failed {
+            summary: format!("There's nothing here called {name}."),
+            detail: format!("No branch, tag or commit matches {name}. Fetching from GitHub first may bring it in."),
+        });
+    };
+    match run(git(&top).args(["checkout", "--detach", &target])) {
+        Ok(_) => Ok(CheckoutOutcome::Switched {
+            message: format!("Looking at {name} — nothing moved"),
+        }),
+        Err(err) => Ok(switch_failed(&top, name, err)),
+    }
+}
+
+/// Free a branch name from the worktree holding it. That worktree goes to a
+/// detached HEAD at the same commit, so its files — including uncommitted work
+/// — are left exactly as they are; only the name is released.
+#[tauri::command]
+pub async fn git_branch_release(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    branch: String,
+) -> Result<String, String> {
+    let top = repo_path(&state, &repo)?;
+    let Some(holder) = branch_holder(&top, &branch) else {
+        return Ok(format!("{branch} is free"));
+    };
+    if let Some(reason) = &holder.locked {
+        return Err(format!(
+            "The workspace at {} is locked ({reason}), so {branch} can't be moved out of it.",
+            holder.path
+        ));
+    }
+    if holder.prunable.is_some() {
+        // Its directory is gone; only git's bookkeeping still claims the name.
+        run(git(&top).args(["worktree", "prune"]))?;
+        return Ok(format!("{branch} is free"));
+    }
+    // Not user input: this path came from `git worktree list` for a repo that
+    // was already scope-checked, so it is part of that repo by construction.
+    run(git(Path::new(&holder.path)).args(["switch", "--detach"]))?;
+    Ok(format!("{branch} is free"))
+}
+
+/// Switch with the working tree's changes carried across: set them aside, move
+/// the branch, put them back. If they clash with the new branch they stay
+/// saved rather than being forced anywhere — the switch is never worth losing
+/// work over.
+#[tauri::command]
+pub async fn git_checkout_carry(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    branch: String,
+) -> Result<CheckoutOutcome, String> {
+    let top = repo_path(&state, &repo)?;
+    if let Some(holder) = branch_holder(&top, &branch) {
+        return Ok(CheckoutOutcome::BranchInWorktree { holder });
+    }
+    let before = stash_top(&top);
+    run(git(&top).args([
+        "stash",
+        "push",
+        "--include-untracked",
+        "-m",
+        &format!("canopy: switching to {branch}"),
+    ]))?;
+    // Comparing the stash ref beats parsing "No local changes to save": it is
+    // the same answer without depending on git's wording.
+    let after = stash_top(&top);
+    let stashed = after.is_some() && after != before;
+
+    if let Err(err) = run(git(&top).args(["checkout", &branch])) {
+        if stashed {
+            let _ = run(git(&top).args(["stash", "pop"]));
+        }
+        return Ok(switch_failed(&top, &branch, err));
+    }
+    if !stashed {
+        return Ok(CheckoutOutcome::Switched {
+            message: format!("Switched to {branch}"),
+        });
+    }
+    match run(git(&top).args(["stash", "pop"])) {
+        Ok(_) => Ok(CheckoutOutcome::Switched {
+            message: format!("Switched to {branch} with your changes"),
+        }),
+        // A conflicting pop leaves the stash in place — that is git's own
+        // safety net, and the reason this outcome can promise nothing is lost.
+        Err(detail) => Ok(CheckoutOutcome::ChangesStashed {
+            stash: "stash@{0}".into(),
+            detail,
+        }),
+    }
 }
 
 // ---------- staging ----------
@@ -432,20 +732,37 @@ pub async fn git_unstage(
 
 /// Throw away working-tree changes. Destructive and unrecoverable — the UI must
 /// confirm before calling this.
+///
+/// The two lists are different jobs and git has no single command for both.
+/// `tracked` is restored from HEAD, which also clears anything staged for those
+/// paths, so one Discard means the same thing whether the change was staged or
+/// not. `untracked` has no HEAD to restore from — the only way to discard a
+/// file git has never seen is to delete it, which is what `clean` does, and it
+/// touches nothing tracked even if a caller mixes the lists up.
 #[tauri::command]
 pub async fn git_discard(
     state: State<'_, WorkspaceManager>,
     repo: String,
-    paths: Vec<String>,
+    tracked: Vec<String>,
+    untracked: Vec<String>,
 ) -> Result<(), String> {
     let top = repo_path(&state, &repo)?;
-    if paths.is_empty() {
-        return Ok(());
+    if !tracked.is_empty() {
+        let mut cmd = git(&top);
+        // `--` so a path that looks like a flag can't become one.
+        cmd.args(["checkout", "HEAD", "--"]);
+        cmd.args(&tracked);
+        run(&mut cmd)?;
     }
-    let mut cmd = git(&top);
-    cmd.args(["checkout", "--"]);
-    cmd.args(&paths);
-    run(&mut cmd).map(|_| ())
+    if !untracked.is_empty() {
+        let mut cmd = git(&top);
+        // -d for a directory the file is the only thing in; -f because clean
+        // refuses to do anything without it.
+        cmd.args(["clean", "-f", "-d", "--"]);
+        cmd.args(&untracked);
+        run(&mut cmd)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1874,6 +2191,22 @@ pub async fn git_worktrees(
 /// Parse `git worktree list --porcelain` and count uncommitted files in each
 /// live worktree. Shared by the Worktrees tab and the work audit.
 fn list_worktrees(top: &Path) -> Result<Vec<WorktreeInfo>, String> {
+    let mut list = scan_worktrees(top)?;
+    // Dirty counts are the expensive half — a `git status` per worktree, and a
+    // repo can have 20+ of them. Anything that only needs to know *which*
+    // worktree holds a branch calls scan_worktrees instead.
+    for w in list.iter_mut() {
+        if w.prunable.is_none() && !w.bare {
+            if let Ok(s) = run(git(std::path::Path::new(&w.path)).args(["status", "--porcelain"])) {
+                w.dirty = s.lines().filter(|l| !l.trim().is_empty()).count() as u32;
+            }
+        }
+    }
+    Ok(list)
+}
+
+/// The worktree records alone — one git process, no per-worktree status.
+fn scan_worktrees(top: &Path) -> Result<Vec<WorktreeInfo>, String> {
     let out = run(git(top).args(["worktree", "list", "--porcelain"]))?;
 
     let mut list: Vec<WorktreeInfo> = Vec::new();
@@ -1945,16 +2278,9 @@ fn list_worktrees(top: &Path) -> Result<Vec<WorktreeInfo>, String> {
         list.push(w);
     }
 
-    // First record is always the main working tree. Count dirty files per
-    // worktree so the UI can show which ones have uncommitted work — the thing
-    // you need before removing one.
+    // First record is always the main working tree.
     for (i, w) in list.iter_mut().enumerate() {
         w.is_main = i == 0;
-        if w.prunable.is_none() && !w.bare {
-            if let Ok(s) = run(git(std::path::Path::new(&w.path)).args(["status", "--porcelain"])) {
-                w.dirty = s.lines().filter(|l| !l.trim().is_empty()).count() as u32;
-            }
-        }
     }
     Ok(list)
 }
@@ -3773,5 +4099,65 @@ index 333..444 100644
         assert_eq!(count_suffix(0), "");
         assert_eq!(count_suffix(1), " with 1 inline comment");
         assert_eq!(count_suffix(4), " with 4 inline comments");
+    }
+
+    // The strings below are git's real output, captured from git 2.x — the
+    // classifier's whole job is to keep them out of the user's face.
+
+    #[test]
+    fn classify_reads_the_worktree_that_holds_a_branch() {
+        let err = "fatal: 'feat/embedded-browser' is already used by worktree at '/Users/dev/repo/.claude/worktrees/agent-a17876ad98b03ff64'";
+        assert_eq!(
+            classify_checkout(err),
+            CheckoutRefusal::BranchInWorktree {
+                path: "/Users/dev/repo/.claude/worktrees/agent-a17876ad98b03ff64".into()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_collects_the_files_checkout_would_overwrite() {
+        let err = "error: Your local changes to the following files would be overwritten by checkout:\n\tsrc/app.ts\n\tsrc/index.css\nPlease commit your changes or stash them before you switch branches.\nAborting";
+        assert_eq!(
+            classify_checkout(err),
+            CheckoutRefusal::LocalChanges {
+                files: vec!["src/app.ts".into(), "src/index.css".into()],
+                untracked: false,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_tells_untracked_collisions_apart() {
+        let err = "error: The following untracked working tree files would be overwritten by checkout:\n\tnotes.md\nPlease move or remove them before you switch branches.\nAborting";
+        assert_eq!(
+            classify_checkout(err),
+            CheckoutRefusal::LocalChanges {
+                files: vec!["notes.md".into()],
+                untracked: true,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_leaves_anything_else_alone() {
+        assert_eq!(
+            classify_checkout("fatal: invalid reference: nope"),
+            CheckoutRefusal::Unknown
+        );
+        assert_eq!(classify_checkout(""), CheckoutRefusal::Unknown);
+    }
+
+    #[test]
+    fn agent_worktrees_are_recognised_by_where_they_live() {
+        assert!(is_agent_worktree(
+            "/Users/dev/repo/.claude/worktrees/agent-a1"
+        ));
+        assert!(is_agent_worktree(
+            r"C:\Users\dev\repo\.claude\worktrees\agent-a1"
+        ));
+        // A worktree the user made themselves is not an agent's.
+        assert!(!is_agent_worktree("/Users/dev/repo-wt-feature"));
+        assert!(!is_agent_worktree("/Users/dev/claude/worktrees/thing"));
     }
 }

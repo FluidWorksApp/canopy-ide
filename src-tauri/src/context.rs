@@ -706,8 +706,6 @@ async fn action(
 /// /ctx/action these are request/response: the op is handed to the UI with a
 /// ticket id, the handler parks on a oneshot, and the frontend (ultimately the
 /// script injected into the previewed page) answers through `browser_result`.
-/// The network op short-circuits: the preview proxy already logs every request
-/// it forwards, so it's answered here without a page round-trip.
 #[derive(serde::Deserialize)]
 struct BrowserOp {
     op: String,
@@ -782,8 +780,12 @@ async fn browser(
                 return (StatusCode::BAD_REQUEST, "eval needs code".into());
             }
         }
-        "snapshot" | "console" | "screenshot" => {}
-        "network" => return network_response(&app, op.url.as_deref()),
+        // `network` used to be answered here, from the preview proxy's own
+        // request log. The webview engine has no proxy to log anything, so the
+        // page collects its own traffic (see preview_picker.js) and this became
+        // an ordinary page round-trip like the rest. `/ctx/network` below still
+        // reads the proxy log directly, for a preview running that engine.
+        "snapshot" | "console" | "network" | "screenshot" => {}
         other => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -853,11 +855,18 @@ async fn browser(
 struct UiOp {
     op: String,
     cwd: Option<String>,
-    /// diagnostics / references / definition: where to look.
+    /// diagnostics / references / definition / hover / symbols: where to look.
     path: Option<String>,
     line: Option<u32>,
     column: Option<u32>,
     symbol: Option<String>,
+    /// symbols: a name to search the workspace for, instead of a file to outline.
+    query: Option<String>,
+    /// diagnostics: how long the caller is prepared to wait. The edit hook asks
+    /// for a couple of seconds; without it a cold server would stall the agent's
+    /// loop behind an index it never asked for.
+    #[serde(rename = "waitMs")]
+    wait_ms: Option<u64>,
     /// ask: the question, its options, and how long the agent will hold.
     question: Option<String>,
     #[serde(default)]
@@ -881,7 +890,7 @@ async fn ui_op(
     }
     let deadline = match op.op.as_str() {
         "diagnostics" | "tickets" | "reviews" => UI_OP_TIMEOUT,
-        "references" | "definition" => {
+        "references" | "definition" | "hover" => {
             if op.path.is_none() {
                 return (StatusCode::BAD_REQUEST, format!("{} needs a path", op.op));
             }
@@ -889,6 +898,15 @@ async fn ui_op(
                 return (
                     StatusCode::BAD_REQUEST,
                     format!("{} needs a symbol, or a line and column", op.op),
+                );
+            }
+            UI_OP_TIMEOUT
+        }
+        "symbols" => {
+            if op.query.as_deref().map_or(true, |q| q.trim().is_empty()) && op.path.is_none() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "symbols needs a query to search for, or a path to outline".into(),
                 );
             }
             UI_OP_TIMEOUT
@@ -920,6 +938,8 @@ async fn ui_op(
             "line": op.line,
             "column": op.column,
             "symbol": op.symbol,
+            "query": op.query,
+            "waitMs": op.wait_ms,
             "question": op.question,
             "options": op.options,
         }),

@@ -20,9 +20,15 @@ import {
   reviewPrTask,
   type CustomMicroTask,
 } from "../microTasks";
-import { BUILT_IN_HEADING, CUSTOM_HEADING, ONE_OFF_HEADING, type TaskChoice } from "../taskMenu";
+import {
+  BUILT_IN_HEADING,
+  CUSTOM_HEADING,
+  ONE_OFF_HEADING,
+  type TaskChoice,
+} from "../taskMenu";
 
-const fmtCost = (n: number) => (n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`);
+const fmtCost = (n: number) =>
+  n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`;
 /** Tokens Canopy sent the model — fresh input plus both cache legs. */
 const sentTokens = (u: ipc.AgentSessionUsage) =>
   u.input_tokens + u.cache_read_tokens + u.cache_creation_tokens;
@@ -114,12 +120,21 @@ type DiffViewData = {
 // diff header) and folds everything past this many into a dropdown.
 const TOUCHED_LIMIT = 6;
 const basename = (p: string) => p.split("/").filter(Boolean).pop() ?? p;
-const parentDir = (p: string) => p.split("/").filter(Boolean).slice(-2, -1)[0] ?? "";
+const parentDir = (p: string) =>
+  p.split("/").filter(Boolean).slice(-2, -1)[0] ?? "";
 
 /** A file-card header: the directory dimmed, the filename emphasized, and an
  *  optional count badge — so a wall of full paths reads as filenames first,
  *  the folder as context. Shared by the edits pane and the diff panes. */
-function FileName({ path, count, countTitle }: { path: string; count?: number; countTitle?: string }) {
+function FileName({
+  path,
+  count,
+  countTitle,
+}: {
+  path: string;
+  count?: number;
+  countTitle?: string;
+}) {
   const slash = path.lastIndexOf("/");
   const dir = slash >= 0 ? path.slice(0, slash + 1) : "";
   const base = slash >= 0 ? path.slice(slash + 1) : path;
@@ -146,11 +161,20 @@ function FileName({ path, count, countTitle }: { path: string; count?: number; c
 // header parses to nothing (empty tbody, blank card). Handing it the raw
 // old/new as file *content* with empty hunks does NOT work — the core can
 // diff content but the React component does not — so we author the hunk.
-function editToHunk(path: string, old: string | null, next: string | null): string {
+function editToHunk(
+  path: string,
+  old: string | null,
+  next: string | null,
+): string {
   const oldLines = old != null ? old.split("\n") : [];
   const newLines = next != null ? next.split("\n") : [];
   let p = 0;
-  while (p < oldLines.length && p < newLines.length && oldLines[p] === newLines[p]) p++;
+  while (
+    p < oldLines.length &&
+    p < newLines.length &&
+    oldLines[p] === newLines[p]
+  )
+    p++;
   let s = 0;
   while (
     s < oldLines.length - p &&
@@ -161,7 +185,9 @@ function editToHunk(path: string, old: string | null, next: string | null): stri
   const ctxPre = oldLines.slice(Math.max(0, p - 2), p).map((l) => ` ${l}`);
   const removed = oldLines.slice(p, oldLines.length - s).map((l) => `-${l}`);
   const added = newLines.slice(p, newLines.length - s).map((l) => `+${l}`);
-  const ctxPost = oldLines.slice(oldLines.length - s, oldLines.length - s + 2).map((l) => ` ${l}`);
+  const ctxPost = oldLines
+    .slice(oldLines.length - s, oldLines.length - s + 2)
+    .map((l) => ` ${l}`);
   const body = [...ctxPre, ...removed, ...added, ...ctxPost].join("\n");
   const oldCount = ctxPre.length + removed.length + ctxPost.length;
   const newCount = ctxPre.length + added.length + ctxPost.length;
@@ -217,7 +243,11 @@ function buildFileEdit(
     const at = locateBlock(fileLines, newLines);
     if (at < 0) continue;
     const ot = untrunc(e.old);
-    placed.push({ at, oldLines: ot === "" ? [] : ot.split("\n"), newLen: newLines.length });
+    placed.push({
+      at,
+      oldLines: ot === "" ? [] : ot.split("\n"),
+      newLen: newLines.length,
+    });
   }
   if (!placed.length) return null;
   placed.sort((a, b) => a.at - b.at);
@@ -246,7 +276,8 @@ const sideName = (s: number) => (s === SplitSide.old ? "old" : "new");
 // keeping the old object when nothing changed: a new identity re-renders the
 // diff below, and a rebuilt diff drops whatever comment was being written into
 // it. Both are small — a session's journal and the files it touched.
-export const sameJson = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+export const sameJson = (a: unknown, b: unknown) =>
+  JSON.stringify(a) === JSON.stringify(b);
 export const sameMap = (a: Map<string, string>, b: Map<string, string>) =>
   a.size === b.size && [...b].every(([k, v]) => a.get(k) === v);
 
@@ -331,7 +362,11 @@ function CommentCard({
         title="Include when sending to the agent"
       />
       <div className="aw-comment-body">{c.body}</div>
-      <button className="btn-icon aw-comment-x" title="Remove comment" onClick={onRemove}>
+      <button
+        className="btn-icon aw-comment-x"
+        title="Remove comment"
+        onClick={onRemove}
+      >
         ✕
       </button>
     </div>
@@ -395,7 +430,8 @@ export function AgentWorkspaceView({
   }, [commentsKey]);
   useEffect(() => {
     try {
-      if (comments.length) localStorage.setItem(commentsKey, JSON.stringify(comments));
+      if (comments.length)
+        localStorage.setItem(commentsKey, JSON.stringify(comments));
       else localStorage.removeItem(commentsKey);
     } catch {
       // storage full/blocked — the in-memory drafts still work this session.
@@ -417,11 +453,18 @@ export function AgentWorkspaceView({
   const addComment = (c: Omit<DraftComment, "id" | "selected">) =>
     setComments((prev) => [
       ...prev,
-      { ...c, id: `${c.diffKey}:${c.side}:${c.line}:${prev.length}:${c.body.length}`, selected: true },
+      {
+        ...c,
+        id: `${c.diffKey}:${c.side}:${c.line}:${prev.length}:${c.body.length}`,
+        selected: true,
+      },
     ]);
   const toggleComment = (id: string) =>
-    setComments((prev) => prev.map((c) => (c.id === id ? { ...c, selected: !c.selected } : c)));
-  const removeComment = (id: string) => setComments((prev) => prev.filter((c) => c.id !== id));
+    setComments((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, selected: !c.selected } : c)),
+    );
+  const removeComment = (id: string) =>
+    setComments((prev) => prev.filter((c) => c.id !== id));
   const setAllSelected = (v: boolean) =>
     setComments((prev) => prev.map((c) => ({ ...c, selected: v })));
   // This agent's token/cost usage, read from its own CLI store (Claude, Codex
@@ -436,9 +479,15 @@ export function AgentWorkspaceView({
       .then((rows) => {
         if (!live) return;
         const mine = rows.filter((u) => u.agent === agent && u.supported);
-        const byId = sessionId ? mine.find((u) => u.session_id === sessionId) : undefined;
+        const byId = sessionId
+          ? mine.find((u) => u.session_id === sessionId)
+          : undefined;
         const inCwd = mine
-          .filter((u) => u.cwd && (u.cwd === cwd || cwd.startsWith(u.cwd) || u.cwd.startsWith(cwd)))
+          .filter(
+            (u) =>
+              u.cwd &&
+              (u.cwd === cwd || cwd.startsWith(u.cwd) || u.cwd.startsWith(cwd)),
+          )
           .sort((a, b) => b.updated - a.updated);
         setUsage(byId ?? inCwd[0] ?? null);
       })
@@ -473,15 +522,20 @@ export function AgentWorkspaceView({
   // one real diff per file (real line numbers) instead of numbered-from-1
   // fragments. Read straight off disk — repo-relative journal paths are joined to
   // the repo, absolute ones (scratchpad, memory) used as-is.
-  const [fileContents, setFileContents] = useState<Map<string, string>>(new Map());
+  const [fileContents, setFileContents] = useState<Map<string, string>>(
+    new Map(),
+  );
   useEffect(() => {
     let live = true;
-    const paths = [...new Set(edits.filter((e) => e.present).map((e) => e.path))];
+    const paths = [
+      ...new Set(edits.filter((e) => e.present).map((e) => e.path)),
+    ];
     if (!paths.length) {
       setFileContents((prev) => (prev.size ? new Map() : prev));
       return;
     }
-    const abs = (p: string) => (p.startsWith("/") ? p : repo ? `${repo}/${p}` : p);
+    const abs = (p: string) =>
+      p.startsWith("/") ? p : repo ? `${repo}/${p}` : p;
     void Promise.all(
       paths.map(async (p) => {
         try {
@@ -525,7 +579,10 @@ export function AgentWorkspaceView({
   useEffect(() => {
     if (pane) return;
     if (edits.length > 0) setPane("edits");
-    else if (ws) setPane(ws.dirty > 0 || ws.on_base || ws.detached ? "uncommitted" : "diff");
+    else if (ws)
+      setPane(
+        ws.dirty > 0 || ws.on_base || ws.detached ? "uncommitted" : "diff",
+      );
   }, [edits, ws, pane]);
 
   useEffect(() => {
@@ -550,7 +607,9 @@ export function AgentWorkspaceView({
     void ipc
       .ghAvailable()
       .then((ok) => (ok && repo ? ipc.ghPrList(repo) : []))
-      .then((prs) => live && setPr(prs.find((p) => p.branch === branch) ?? null))
+      .then(
+        (prs) => live && setPr(prs.find((p) => p.branch === branch) ?? null),
+      )
       .catch(() => live && setPr(null));
     return () => {
       live = false;
@@ -577,14 +636,30 @@ export function AgentWorkspaceView({
         ws.isolated ? ws.workdir : null,
         pane === "uncommitted",
       )
-      .then((p) => live && setPatch((prev) => (prev?.patch === p.patch ? prev : p)))
+      .then(
+        (p) => live && setPatch((prev) => (prev?.patch === p.patch ? prev : p)),
+      )
       .catch((e) => live && onNotice(String(e), "error"));
     return () => {
       live = false;
     };
-  }, [repo, ws?.branch, ws?.workdir, ws?.isolated, ws?.detached, ws?.on_base, pane, tick, onNotice]);
+  }, [
+    repo,
+    ws?.branch,
+    ws?.workdir,
+    ws?.isolated,
+    ws?.detached,
+    ws?.on_base,
+    pane,
+    tick,
+    onNotice,
+  ]);
 
-  const st = ws?.state ? STATE_META[ws.state] : digest?.state ? STATE_META[digest.state] : undefined;
+  const st = ws?.state
+    ? STATE_META[ws.state]
+    : digest?.state
+      ? STATE_META[digest.state]
+      : undefined;
   const task = lastHumanPrompt(digest?.prompts);
   const cost = usage ? sessionCost(usage) : null;
   const touched = ws?.touched?.length ? ws.touched : (digest?.files ?? []);
@@ -601,7 +676,10 @@ export function AgentWorkspaceView({
   // Split once per patch, not per render: a fresh array each render would give
   // every DiffView a new `data` identity, which rebuilds its diff and resets any
   // open comment composer on the next digest poll.
-  const files = useMemo(() => (patch?.patch ? splitPatch(patch.patch) : []), [patch?.patch]);
+  const files = useMemo(
+    () => (patch?.patch ? splitPatch(patch.patch) : []),
+    [patch?.patch],
+  );
 
   // The set of paths this agent is known to have touched — from its own edit
   // journal and its reported-editing list. Matched by basename too, since a
@@ -609,7 +687,8 @@ export function AgentWorkspaceView({
   // prefix.
   const agentPaths = new Set<string>([...edits.map((e) => e.path), ...touched]);
   const agentBasenames = new Set<string>([...agentPaths].map(basename));
-  const isAgentFile = (p: string) => agentPaths.has(p) || agentBasenames.has(basename(p));
+  const isAgentFile = (p: string) =>
+    agentPaths.has(p) || agentBasenames.has(basename(p));
   // This workspace shows ONLY this agent's work, never the rest of the tree.
   // On an isolated worktree every change in the diff is this agent's by
   // construction; on a shared checkout we can claim only the files it actually
@@ -623,12 +702,27 @@ export function AgentWorkspaceView({
   const canAttribute = isolated || agentPaths.size > 0;
 
   // Journal edits grouped by file, newest file last, preserving edit order.
-  const editsByFile: { path: string; items: ipc.AgentEdit[] }[] = [];
-  for (const e of edits) {
-    const g = editsByFile.find((x) => x.path === e.path);
-    if (g) g.items.push(e);
-    else editsByFile.push({ path: e.path, items: [e] });
-  }
+  const editsByFile = useMemo(() => {
+    const groups: { path: string; items: ipc.AgentEdit[] }[] = [];
+    for (const e of edits) {
+      const g = groups.find((x) => x.path === e.path);
+      if (g) g.items.push(e);
+      else groups.push({ path: e.path, items: [e] });
+    }
+    return groups;
+  }, [edits]);
+
+  // The merged whole-file diffs, built once per (edits, contents) change —
+  // buildFileEdit splits the entire file per call, too heavy for a render body.
+  const mergedEdits = useMemo(() => {
+    const m = new Map<string, { patch: string; before: string } | null>();
+    for (const g of editsByFile) {
+      const content = fileContents.get(g.path);
+      if (content != null)
+        m.set(g.path, buildFileEdit(g.path, content, g.items));
+    }
+    return m;
+  }, [editsByFile, fileContents]);
 
   // Jump from a reported-editing chip to that file's diff section below. A
   // reported path (relative to the hook's cwd) and a diff path (relative to the
@@ -655,7 +749,12 @@ export function AgentWorkspaceView({
   // `diffKey` scopes comments to this exact view — for the journal pane that
   // includes the edit index, since each edit is its own view with line numbers
   // that restart at 1. Commenting is offered only when we can actually deliver.
-  const commentProps = (diffKey: string, file: string, forPane: Pane, realLine: boolean) => {
+  const commentProps = (
+    diffKey: string,
+    file: string,
+    forPane: Pane,
+    realLine: boolean,
+  ) => {
     const oldFile: Record<number, { data: DraftComment[] }> = {};
     const newFile: Record<number, { data: DraftComment[] }> = {};
     for (const c of comments) {
@@ -735,7 +834,10 @@ export function AgentWorkspaceView({
   // the line so the agent needn't reopen the diff to know what's meant.
   const formatReview = (list: DraftComment[]) => {
     const where = ws?.branch ? ` on ${ws.branch}` : "";
-    const out = [`Review comments${where} (${list.length}) from the Canopy workspace:`, ""];
+    const out = [
+      `Review comments${where} (${list.length}) from the Canopy workspace:`,
+      "",
+    ];
     list.forEach((c, i) => {
       out.push(`${i + 1}. ${c.realLine ? `${c.file}:${c.line}` : c.file}`);
       if (c.code.trim()) out.push(`   \`${c.code.trim()}\``);
@@ -745,7 +847,8 @@ export function AgentWorkspaceView({
   };
 
   const sendComments = async (which: "selected" | "all") => {
-    const list = which === "all" ? comments : comments.filter((c) => c.selected);
+    const list =
+      which === "all" ? comments : comments.filter((c) => c.selected);
     if (!list.length || !onMessageAgent || sending) return;
     setSending(true);
     try {
@@ -754,7 +857,8 @@ export function AgentWorkspaceView({
         const ids = new Set(list.map((c) => c.id));
         setComments((prev) => prev.filter((c) => !ids.has(c.id)));
         onNotice(
-          res.note || `Sent ${list.length} comment${list.length === 1 ? "" : "s"} to ${agent}.`,
+          res.note ||
+            `Sent ${list.length} comment${list.length === 1 ? "" : "s"} to ${agent}.`,
           "success",
         );
         // The review is over the moment it's delivered: get out of the way and
@@ -777,7 +881,9 @@ export function AgentWorkspaceView({
   // A stable `data` object per (view, content): DiffView rebuilds its diff — and
   // drops any open composer — whenever `data` changes identity, so we hand back
   // the same object until the hunk actually changes.
-  const dataCache = useRef(new Map<string, { sig: string; data: DiffViewData }>());
+  const dataCache = useRef(
+    new Map<string, { sig: string; data: DiffViewData }>(),
+  );
   const dataFor = (
     key: string,
     path: string,
@@ -834,12 +940,19 @@ export function AgentWorkspaceView({
   const builtInChoices: TaskChoice[] = [
     {
       id: raisePrTask.id,
-      label: ws?.branch && !ws.on_base && !pr ? `Raise PR for ${ws.branch}` : raisePrTask.label,
+      label:
+        ws?.branch && !ws.on_base && !pr
+          ? `Raise PR for ${ws.branch}`
+          : raisePrTask.label,
       icon: raisePrTask.icon,
       note: raiseWhy,
       run:
         onRaisePrTask && ws?.branch && !ws.on_base && !pr
-          ? () => onRaisePrTask(ws.branch as string, ws.isolated ? ws.workdir : null)
+          ? () =>
+              onRaisePrTask(
+                ws.branch as string,
+                ws.isolated ? ws.workdir : null,
+              )
           : undefined,
     },
     {
@@ -851,10 +964,15 @@ export function AgentWorkspaceView({
     },
     {
       id: addressPrCommentsTask.id,
-      label: pr ? `Address comments on #${pr.number}` : addressPrCommentsTask.label,
+      label: pr
+        ? `Address comments on #${pr.number}`
+        : addressPrCommentsTask.label,
       icon: addressPrCommentsTask.icon,
       note: "no PR from this branch yet",
-      run: onAddressPrCommentsTask && pr ? () => onAddressPrCommentsTask(pr) : undefined,
+      run:
+        onAddressPrCommentsTask && pr
+          ? () => onAddressPrCommentsTask(pr)
+          : undefined,
     },
   ];
 
@@ -867,11 +985,16 @@ export function AgentWorkspaceView({
           and the scoped diff below carry the real numbers. */}
       <div className="ticket-view-head aw-banner">
         <div className="ticket-view-title">
-          {st && <span className={`agent-state-dot ${st.cls}`} title={st.label} />}
+          {st && (
+            <span className={`agent-state-dot ${st.cls}`} title={st.label} />
+          )}
           <AgentIcon id={agent} size={16} className="ticket-view-mark" />
           <span className="aw-agent">{agent}</span>
           {ws?.branch && (
-            <span className="agent-branch" title={ws.detached ? "detached HEAD" : `On branch ${ws.branch}`}>
+            <span
+              className="agent-branch"
+              title={ws.detached ? "detached HEAD" : `On branch ${ws.branch}`}
+            >
               <GitBranchIcon size={12} /> {ws.branch}
               {ws.detached ? " (detached)" : ""}
             </span>
@@ -880,7 +1003,11 @@ export function AgentWorkspaceView({
           {ws?.workdir && (
             <span
               className="ticket-view-chip"
-              title={ws.isolated ? `Isolated worktree: ${ws.workdir}` : `Shared checkout: ${ws.workdir}`}
+              title={
+                ws.isolated
+                  ? `Isolated worktree: ${ws.workdir}`
+                  : `Shared checkout: ${ws.workdir}`
+              }
             >
               {ws.isolated ? "isolated worktree" : "shared checkout"} ·{" "}
               {ws.workdir.split("/").pop()}
@@ -895,7 +1022,9 @@ export function AgentWorkspaceView({
             <button
               className="btn"
               title={`Open a shell in the worktree: ${ws.workdir}`}
-              onClick={() => onOpenTerminal(ws.workdir as string, ws.branch ?? agent)}
+              onClick={() =>
+                onOpenTerminal(ws.workdir as string, ws.branch ?? agent)
+              }
             >
               New shell in worktree
             </button>
@@ -927,7 +1056,10 @@ export function AgentWorkspaceView({
                 >
                   {onRunOneOff &&
                     (oneOff == null ? (
-                      <button className="cli-menu-item" onClick={() => setOneOff("")}>
+                      <button
+                        className="cli-menu-item"
+                        onClick={() => setOneOff("")}
+                      >
                         ⚡ One-off task…
                       </button>
                     ) : (
@@ -944,7 +1076,9 @@ export function AgentWorkspaceView({
                           className="oneoff-input"
                           rows={3}
                           placeholder={`What should this agent do?\nIt runs once in ${
-                            ws?.isolated && ws.branch ? ws.branch : "this workspace"
+                            ws?.isolated && ws.branch
+                              ? ws.branch
+                              : "this workspace"
                           }, then closes — nothing is saved.`}
                           value={oneOff}
                           onChange={(e) => setOneOff(e.target.value)}
@@ -963,7 +1097,8 @@ export function AgentWorkspaceView({
                         />
                         <div className="oneoff-actions">
                           <span className="oneoff-hint">
-                            <kbd>↵</kbd> run · <kbd>⇧↵</kbd> new line · <kbd>esc</kbd> cancel
+                            <kbd>↵</kbd> run · <kbd>⇧↵</kbd> new line ·{" "}
+                            <kbd>esc</kbd> cancel
                           </span>
                           <button
                             className="btn btn-accent"
@@ -977,7 +1112,11 @@ export function AgentWorkspaceView({
                     ))}
                   <div className="cli-menu-label">{CUSTOM_HEADING}</div>
                   {savedTasks.length === 0 ? (
-                    <button className="cli-menu-item" disabled title="Write one in the Tasks panel">
+                    <button
+                      className="cli-menu-item"
+                      disabled
+                      title="Write one in the Tasks panel"
+                    >
                       None saved yet
                     </button>
                   ) : (
@@ -1009,7 +1148,9 @@ export function AgentWorkspaceView({
                       }}
                     >
                       {c.icon} {c.label}
-                      {!c.run && c.note && <span className="cli-menu-why">{c.note}</span>}
+                      {!c.run && c.note && (
+                        <span className="cli-menu-why">{c.note}</span>
+                      )}
                     </button>
                   ))}
                 </div>
@@ -1042,7 +1183,10 @@ export function AgentWorkspaceView({
         {(usage || st) && (
           <div className="aw-stats">
             {st && (
-              <span className={`aw-stat-state ${st.cls}`} title={`Session state: ${st.label}`}>
+              <span
+                className={`aw-stat-state ${st.cls}`}
+                title={`Session state: ${st.label}`}
+              >
                 {st.label}
               </span>
             )}
@@ -1062,7 +1206,10 @@ export function AgentWorkspaceView({
               </>
             )}
             {cost != null && (
-              <span className="aw-stat" title="Cost — estimated unless the CLI reports its own">
+              <span
+                className="aw-stat"
+                title="Cost — estimated unless the CLI reports its own"
+              >
                 {fmtCost(cost)}
               </span>
             )}
@@ -1086,12 +1233,14 @@ export function AgentWorkspaceView({
       )}
       {ws?.cwd_missing && (
         <div className="tree-empty">
-          The agent's directory ({ws.cwd}) no longer exists — showing what git still knows.
+          The agent's directory ({ws.cwd}) no longer exists — showing what git
+          still knows.
         </div>
       )}
       {ws?.on_base && (
         <div className="tree-empty">
-          Working directly on {ws.base} — no branch of its own, showing uncommitted changes only.
+          Working directly on {ws.base} — no branch of its own, showing
+          uncommitted changes only.
         </div>
       )}
 
@@ -1165,7 +1314,8 @@ export function AgentWorkspaceView({
                   className="aw-touched-file aw-touched-more-btn"
                   onClick={() => setShowMoreTouched((v) => !v)}
                 >
-                  +{touched.length - TOUCHED_LIMIT} more {showMoreTouched ? "▴" : "▾"}
+                  +{touched.length - TOUCHED_LIMIT} more{" "}
+                  {showMoreTouched ? "▴" : "▾"}
                 </button>
                 {showMoreTouched && (
                   <div
@@ -1187,7 +1337,9 @@ export function AgentWorkspaceView({
                           }}
                         >
                           <span className="aw-more-name">{basename(f)}</span>
-                          <span className="aw-more-dir">{parentDir(f) || "·"}</span>
+                          <span className="aw-more-dir">
+                            {parentDir(f) || "·"}
+                          </span>
                         </button>
                       );
                     })}
@@ -1246,14 +1398,18 @@ export function AgentWorkspaceView({
         <div className="aw-review-bar">
           <span className="aw-review-count">
             {comments.length} comment{comments.length === 1 ? "" : "s"}
-            {selectedCount !== comments.length ? ` · ${selectedCount} selected` : ""}
+            {selectedCount !== comments.length
+              ? ` · ${selectedCount} selected`
+              : ""}
           </span>
           <label className="aw-review-all">
             <input
               type="checkbox"
               checked={selectedCount === comments.length}
               ref={(el) => {
-                if (el) el.indeterminate = selectedCount > 0 && selectedCount < comments.length;
+                if (el)
+                  el.indeterminate =
+                    selectedCount > 0 && selectedCount < comments.length;
               }}
               onChange={(e) => setAllSelected(e.target.checked)}
             />
@@ -1301,7 +1457,11 @@ export function AgentWorkspaceView({
                 title={`${c.hash}\n${c.author} · ${c.date}\n\nClick to open this commit`}
                 onClick={() =>
                   repo &&
-                  onOpenCommit(repo, { hash: c.hash, short: c.short, subject: c.subject })
+                  onOpenCommit(repo, {
+                    hash: c.hash,
+                    short: c.short,
+                    subject: c.subject,
+                  })
                 }
               >
                 <span className="git-commit-hash">{c.short}</span>
@@ -1318,7 +1478,9 @@ export function AgentWorkspaceView({
             greyed, because it's still a true record of what the agent did. */}
         {pane === "edits" &&
           (editsByFile.length === 0 ? (
-            <div className="tree-empty">No edits recorded for this agent yet.</div>
+            <div className="tree-empty">
+              No edits recorded for this agent yet.
+            </div>
           ) : (
             editsByFile.map((g) => {
               // One real diff for the whole file when every edit can be placed in
@@ -1326,7 +1488,7 @@ export function AgentWorkspaceView({
               // like a normal file diff. Otherwise fall back to per-edit fragments
               // (a superseded or moved edit can't be placed, but is still true).
               const content = fileContents.get(g.path);
-              const merged = content != null ? buildFileEdit(g.path, content, g.items) : null;
+              const merged = mergedEdits.get(g.path) ?? null;
               return (
                 <div key={g.path} className="pr-file">
                   <FileName
@@ -1336,13 +1498,26 @@ export function AgentWorkspaceView({
                   />
                   {merged && content != null ? (
                     <DiffView
-                      data={dataFor(`edits:${g.path}`, g.path, merged.patch, merged.before, content)}
-                      diffViewMode={split ? DiffModeEnum.Split : DiffModeEnum.Unified}
+                      data={dataFor(
+                        `edits:${g.path}`,
+                        g.path,
+                        merged.patch,
+                        merged.before,
+                        content,
+                      )}
+                      diffViewMode={
+                        split ? DiffModeEnum.Split : DiffModeEnum.Unified
+                      }
                       diffViewHighlight
                       diffViewTheme="dark"
                       diffViewWrap
                       diffViewFontSize={12}
-                      {...commentProps(`edits:${g.path}`, g.path, "edits", true)}
+                      {...commentProps(
+                        `edits:${g.path}`,
+                        g.path,
+                        "edits",
+                        true,
+                      )}
                     />
                   ) : (
                     g.items.map((e, i) => (
@@ -1355,7 +1530,9 @@ export function AgentWorkspaceView({
                             : `${e.tool} · superseded by a later change`
                         }
                       >
-                        {!e.present && <span className="aw-edit-tag">superseded</span>}
+                        {!e.present && (
+                          <span className="aw-edit-tag">superseded</span>
+                        )}
                         {/* A fragment: the edit's own old→new, numbered from 1 —
                             used only when the edit can't be placed in the file. */}
                         <DiffView
@@ -1364,12 +1541,19 @@ export function AgentWorkspaceView({
                             g.path,
                             editToHunk(g.path, e.old, e.new),
                           )}
-                          diffViewMode={split ? DiffModeEnum.Split : DiffModeEnum.Unified}
+                          diffViewMode={
+                            split ? DiffModeEnum.Split : DiffModeEnum.Unified
+                          }
                           diffViewHighlight
                           diffViewTheme="dark"
                           diffViewWrap
                           diffViewFontSize={12}
-                          {...commentProps(`edits:${g.path}:${i}`, g.path, "edits", false)}
+                          {...commentProps(
+                            `edits:${g.path}:${i}`,
+                            g.path,
+                            "edits",
+                            false,
+                          )}
                         />
                       </div>
                     ))
@@ -1384,7 +1568,8 @@ export function AgentWorkspaceView({
             whole tree off as this agent's work. */}
         {pane !== "edits" &&
           (!ws ? (
-            !wsErr && repo && <div className="tree-empty">Loading workspace…</div>
+            !wsErr &&
+            repo && <div className="tree-empty">Loading workspace…</div>
           ) : !patch ? (
             pane && <div className="tree-empty">Loading diff…</div>
           ) : mine.length === 0 ? (
@@ -1392,10 +1577,10 @@ export function AgentWorkspaceView({
               No changes by this agent{pane === "uncommitted" ? " yet" : ""}.
               {!canAttribute && (
                 <div className="aw-note">
-                  It ran on a shared checkout without reporting its edits, so its
-                  changes can't be told apart from the rest of the tree. Run it
-                  in an isolated worktree, or with a CLI that reports edits, to
-                  see them here.
+                  It ran on a shared checkout without reporting its edits, so
+                  its changes can't be told apart from the rest of the tree. Run
+                  it in an isolated worktree, or with a CLI that reports edits,
+                  to see them here.
                 </div>
               )}
             </div>
@@ -1404,7 +1589,8 @@ export function AgentWorkspaceView({
           ))}
         {patch?.truncated && pane !== "edits" && (
           <div className="tree-empty">
-            Diff truncated at 2 MB — use <code>git diff</code> for the whole thing.
+            Diff truncated at 2 MB — use <code>git diff</code> for the whole
+            thing.
           </div>
         )}
       </div>

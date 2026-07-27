@@ -35,6 +35,14 @@ import {
   type CustomAgentCli,
 } from "../projects";
 import { AGENT_TOOL_GROUPS, ALL_AGENT_TOOLS } from "../agentTools";
+import {
+  BUILTIN_MAP,
+  EXTRA_ASSOCIATIONS,
+  LANGUAGES,
+  describePattern,
+  languageLabel,
+  normalizePattern,
+} from "../fileAssociations";
 
 export type SettingsTab =
   | "appearance"
@@ -43,6 +51,7 @@ export type SettingsTab =
   | "terminal"
   | "dictation"
   | "integrations"
+  | "browser"
   | "remote"
   | "privacy";
 
@@ -58,6 +67,7 @@ const TABS: { id: SettingsTab; label: string }[] = [
   { id: "terminal", label: "Terminal" },
   { id: "dictation", label: "Dictation" },
   { id: "integrations", label: "Integrations" },
+  { id: "browser", label: "Browser" },
   { id: "remote", label: "Remote access" },
   { id: "privacy", label: "Privacy" },
 ];
@@ -99,6 +109,135 @@ function Item({
       <div className="set-item-name">{name}</div>
       {desc && <div className="set-item-desc">{desc}</div>}
       <div className="set-item-control">{children}</div>
+    </div>
+  );
+}
+
+/**
+ * Which language each file type is highlighted as.
+ *
+ * Monaco's bundled grammars leave real holes — C++ registers .c/.h and nothing
+ * else, there is no JSON grammar at all, and .astro/.svelte/.vue/.toml are
+ * unknown — so Canopy ships a table pointing each gap at the closest grammar
+ * that does exist. This screen shows that table rather than hiding it: every
+ * shipped row is re-pointable, and anything missing is one row away.
+ */
+function FileAssociations({
+  value,
+  onChange,
+}: {
+  value: Record<string, string>;
+  onChange: (next: Record<string, string>) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [kind, setKind] = useState<"ext" | "name">("ext");
+  const [pattern, setPattern] = useState("");
+  const [language, setLanguage] = useState("html");
+  const [error, setError] = useState<string | null>(null);
+
+  const set = (p: string, lang: string) => onChange({ ...value, [p]: lang });
+  const clear = (p: string) => {
+    const next = { ...value };
+    delete next[p];
+    onChange(next);
+  };
+
+  const add = () => {
+    const p = normalizePattern(pattern, kind);
+    if (!p) {
+      setError(kind === "ext" ? "Type an extension, e.g. astro" : "Type a file name.");
+      return;
+    }
+    setError(null);
+    setPattern("");
+    set(p, language);
+  };
+
+  const q = query.trim().toLowerCase();
+  const hit = (p: string, lang: string) =>
+    !q || p.toLowerCase().includes(q) || languageLabel(lang).toLowerCase().includes(q);
+
+  const custom = Object.entries(value)
+    .filter(([p]) => BUILTIN_MAP[p] == null)
+    .filter(([p, lang]) => hit(p, lang));
+
+  const picker = (current: string, onPick: (id: string) => void) => (
+    <select value={current} onChange={(e) => onPick(e.target.value)}>
+      {LANGUAGES.map((l) => (
+        <option key={l.id} value={l.id}>
+          {l.label}
+        </option>
+      ))}
+    </select>
+  );
+
+  const row = (p: string, lang: string, shipped: string | null) => (
+    <div key={p} className="assoc-row">
+      <code className="assoc-pattern">{describePattern(p)}</code>
+      {picker(lang, (id) => (shipped === id ? clear(p) : set(p, id)))}
+      {shipped == null ? (
+        <button className="btn-mini" onClick={() => clear(p)} title="Remove this mapping">
+          Remove
+        </button>
+      ) : value[p] != null ? (
+        <button className="btn-mini" onClick={() => clear(p)} title={`Back to ${languageLabel(shipped)}`}>
+          Reset
+        </button>
+      ) : (
+        <span className="assoc-spacer" />
+      )}
+    </div>
+  );
+
+  return (
+    <div className="assoc">
+      <div className="assoc-add">
+        <select value={kind} onChange={(e) => setKind(e.target.value as "ext" | "name")}>
+          <option value="ext">Extension</option>
+          <option value="name">File name</option>
+        </select>
+        <input
+          className="assoc-input"
+          placeholder={kind === "ext" ? "astro" : "Dockerfile.*"}
+          value={pattern}
+          onChange={(e) => setPattern(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && add()}
+        />
+        <span className="assoc-arrow">→</span>
+        {picker(language, setLanguage)}
+        <button className="btn btn-accent" onClick={add}>
+          Add
+        </button>
+      </div>
+      {error && <div className="assoc-error">{error}</div>}
+      <input
+        className="assoc-search"
+        placeholder="Search mappings…"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+      />
+      <div className="assoc-list">
+        {custom.length > 0 && (
+          <div className="assoc-group">
+            <div className="assoc-group-name">Your mappings</div>
+            <div className="assoc-group-blurb">
+              Added here, and checked before every grammar Canopy ships.
+            </div>
+            {custom.map(([p, lang]) => row(p, lang, null))}
+          </div>
+        )}
+        {EXTRA_ASSOCIATIONS.map((group) => {
+          const entries = group.entries.filter((e) => hit(e.pattern, value[e.pattern] ?? e.language));
+          if (entries.length === 0) return null;
+          return (
+            <div key={group.label} className="assoc-group">
+              <div className="assoc-group-name">{group.label}</div>
+              <div className="assoc-group-blurb">{group.blurb}</div>
+              {entries.map((e) => row(e.pattern, value[e.pattern] ?? e.language, e.language))}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -392,6 +531,11 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
   // (Intel macOS). Default true so the tab doesn't flicker in on every supported
   // platform while the check resolves; only hide once we learn it's unavailable.
   const [dictationOk, setDictationOk] = useState(true);
+  // Whether this platform has the real embedded browser at all. Only macOS
+  // does so far; everywhere else the engine choice is decoration and the
+  // section says so instead of offering a switch that does nothing.
+  const [browserOk, setBrowserOk] = useState(false);
+  const [clearing, setClearing] = useState<null | "busy" | "done" | string>(null);
   const fonts = availableMonoFonts();
 
   useEffect(() => {
@@ -403,6 +547,9 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
         if (!ok) setTab((t) => (t === "dictation" ? "appearance" : t));
       })
       .catch(() => {});
+  }, []);
+  useEffect(() => {
+    void ipc.browserSupported().then(setBrowserOk);
   }, []);
   const visibleTabs = TABS.filter((t) => t.id !== "dictation" || dictationOk);
 
@@ -541,6 +688,49 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                         Use skin colour
                       </button>
                     )}
+                  </div>
+                </Item>
+                <Item
+                  name="Side panel"
+                  desc="How the file tree, changes and the rest of the rail's panels come and go."
+                >
+                  <div className="set-checks">
+                    <label className="set-inline-check">
+                      <input
+                        type="checkbox"
+                        checked={s.sidebarHover}
+                        onChange={(e) => patch({ sidebarHover: e.target.checked })}
+                      />
+                      <span>
+                        Hover to view
+                        <em>Rest on a rail icon and its panel opens; otherwise click to open.</em>
+                      </span>
+                    </label>
+                    <label className="set-inline-check">
+                      <input
+                        type="checkbox"
+                        checked={s.sidebarClickOutsideCloses}
+                        onChange={(e) => patch({ sidebarClickOutsideCloses: e.target.checked })}
+                      />
+                      <span>
+                        Click outside to close
+                        <em>A click in the editor puts the panel away.</em>
+                      </span>
+                    </label>
+                    <label className="set-inline-check">
+                      <input
+                        type="checkbox"
+                        checked={s.sidebarOverlay}
+                        onChange={(e) => patch({ sidebarOverlay: e.target.checked })}
+                      />
+                      <span>
+                        Sidebar as overlay
+                        <em>
+                          The panel floats over your work. Off docks it in a column of its own,
+                          which moves the editor across each time it opens.
+                        </em>
+                      </span>
+                    </label>
                   </div>
                 </Item>
               </>
@@ -732,6 +922,15 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   />
                 </Item>
                 <Item name="Cursor">{cursorControls("editorCursorStyle", "editorCursorBlink")}</Item>
+                <Item
+                  name="File associations"
+                  desc="Which language each file type is highlighted as. Open files re-colour immediately."
+                >
+                  <FileAssociations
+                    value={s.fileAssociations}
+                    onChange={(fileAssociations) => patch({ fileAssociations })}
+                  />
+                </Item>
               </>
             )}
 
@@ -808,6 +1007,79 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     />
                     <span>Offer to send anonymous crash reports</span>
                   </label>
+                </Item>
+              </>
+            )}
+
+            {tab === "browser" && (
+              <>
+                <Item
+                  name="Engine"
+                  desc="How preview tabs show a page. The embedded browser loads the real URL at its real origin in its own webview, on a profile that persists — log into a site once and you stay logged in, exactly as in Safari. The loopback proxy serves every site from 127.0.0.1 instead, which no session survives, but it is the only engine that exists off macOS."
+                >
+                  {browserOk ? (
+                    <div className="set-checks">
+                      <label className="set-inline-check">
+                        <input
+                          type="radio"
+                          name="browser-engine"
+                          checked={s.browserEngine === "webview"}
+                          onChange={() => patch({ browserEngine: "webview" })}
+                        />
+                        <span>
+                          Embedded browser
+                          <em>Real origins, real cookies, sessions that survive a restart.</em>
+                        </span>
+                      </label>
+                      <label className="set-inline-check">
+                        <input
+                          type="radio"
+                          name="browser-engine"
+                          checked={s.browserEngine === "proxy"}
+                          onChange={() => patch({ browserEngine: "proxy" })}
+                        />
+                        <span>
+                          Loopback proxy
+                          <em>The older engine. No sessions, but it logs every request it forwards.</em>
+                        </span>
+                      </label>
+                      <p className="set-item-desc">
+                        Preview tabs already open keep the engine they started on; reopen them to
+                        switch.
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="set-item-desc">
+                      This build runs preview tabs through the loopback proxy. The embedded browser
+                      is macOS-only so far.
+                    </p>
+                  )}
+                </Item>
+                <Item
+                  name="Browsing data"
+                  desc="One profile is shared by every preview tab, which is what keeps you signed in across them — so clearing it signs you out of everything at once, like a browser's own “clear browsing data”. Cookies, local storage and caches; nothing else on this machine is touched."
+                >
+                  <div className="set-inline">
+                    <button
+                      className="btn"
+                      disabled={!browserOk || clearing === "busy"}
+                      onClick={() => {
+                        setClearing("busy");
+                        void ipc.browserClearData().then(
+                          () => setClearing("done"),
+                          (err) => setClearing(String(err)),
+                        );
+                      }}
+                    >
+                      {clearing === "busy" ? "Clearing…" : "Clear browsing data"}
+                    </button>
+                    {clearing === "done" && (
+                      <span className="set-item-desc">Cleared. Reload any open page to see it.</span>
+                    )}
+                    {typeof clearing === "string" && clearing !== "busy" && clearing !== "done" && (
+                      <span className="set-item-desc">{clearing}</span>
+                    )}
+                  </div>
                 </Item>
               </>
             )}
