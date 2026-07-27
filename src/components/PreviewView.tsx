@@ -143,6 +143,13 @@ export function PreviewView({
   pickingRef.current = picking;
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
+  // ProjectView hands down a fresh arrow every render, so an effect that
+  // depends on it re-subscribes constantly — and a Tauri listener is registered
+  // asynchronously, so each churn leaves a window with nothing listening. A
+  // navigation event lost in one of those windows used to strand the freeze
+  // frame forever; now nothing that matters depends on this identity.
+  const onPatchRef = useRef(onPatch);
+  onPatchRef.current = onPatch;
   const nativeRef = useRef(native);
   nativeRef.current = native;
 
@@ -501,11 +508,11 @@ export function PreviewView({
       .onBrowserNav((n) => {
         if (n.tabId !== tabId) return;
         // A frame of the page being navigated away from would freeze the wrong
-        // page, so loading clears it and the settled load earns a new one.
+        // page, so loading throws it away and the next capture earns a new one.
         browserViewChanged(tabId, n.loading);
         if (n.loading) return;
         if (n.url !== urlRef.current) {
-          onPatch({ url: n.url });
+          onPatchRef.current({ url: n.url });
           if (!draftFocused.current) setDraft(n.url);
         }
       })
@@ -513,7 +520,7 @@ export function PreviewView({
         un = u;
       });
     return () => un?.();
-  }, [native, tabId, onPatch]);
+  }, [native, tabId]);
 
   // target=_blank and window.open. A second OS window would be a webview
   // outside every rule the host keeps about where browser pixels may be, so
