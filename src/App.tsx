@@ -445,14 +445,18 @@ export default function App() {
       setLoaded(true);
     });
     const subs = [
-      ipc.onAgentEvent((raw) =>
+      ipc.onAgentEvents((raws) => {
         // Parsed once here; consumers read fields off `data`. Re-parsing the
-        // raw line at every consumer was a measurable main-thread cost.
-        setAgentEvents((prev) => [
-          ...prev.slice(-199),
-          { ts: Date.now(), data: parseAgentEvent(raw) },
-        ]),
-      ),
+        // raw line at every consumer was a measurable main-thread cost, as was
+        // one setState per line — the bridge batches each 500ms window.
+        const ts = Date.now();
+        setAgentEvents((prev) =>
+          [
+            ...prev,
+            ...raws.map((raw) => ({ ts, data: parseAgentEvent(raw) })),
+          ].slice(-200),
+        );
+      }),
       ipc.onRelayState(setRelayStatus),
       ipc.onRelayChat((m) => {
         setRelayChat((prev) => [...prev.slice(-499), m]);

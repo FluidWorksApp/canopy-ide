@@ -5,6 +5,10 @@
 import { useState, type ReactNode } from "react";
 import type { FileChange } from "../ipc";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
+import { WindowedList } from "./WindowedList";
+
+/** Must match .change-row's CSS height — the windowing spacers are the scrollbar. */
+const ROW_H = 26;
 
 export interface ChangeGroup {
   /** Component label this repo is shown under. */
@@ -47,11 +51,19 @@ interface ChangesPanelProps {
 
 /** Staged / not-yet-staged within one repo group. Conflicted files are neither:
  *  they have to be resolved before they can be committed at all. */
-const stagedIn = (g: ChangeGroup) => g.files.filter((f) => f.staged && !f.conflicted).length;
-const unstagedIn = (g: ChangeGroup) => g.files.filter((f) => !f.staged && !f.conflicted);
+const stagedIn = (g: ChangeGroup) =>
+  g.files.filter((f) => f.staged && !f.conflicted).length;
+const unstagedIn = (g: ChangeGroup) =>
+  g.files.filter((f) => !f.staged && !f.conflicted);
 
 const kindClass = (f: FileChange) =>
-  f.conflicted ? "conflicted" : f.untracked ? "untracked" : f.staged ? "staged" : "unstaged";
+  f.conflicted
+    ? "conflicted"
+    : f.untracked
+      ? "untracked"
+      : f.staged
+        ? "staged"
+        : "unstaged";
 
 // Two-letter porcelain code -> single badge letter, matching git's own status.
 const badge = (f: FileChange) => {
@@ -84,7 +96,10 @@ export function ChangesPanel({
   /** The file whose discard is waiting on a yes. Throwing work away is the one
    *  thing in this panel that can't be undone — an untracked file isn't even in
    *  git's reflog — so it asks first, every time. */
-  const [discarding, setDiscarding] = useState<{ repo: string; file: FileChange } | null>(null);
+  const [discarding, setDiscarding] = useState<{
+    repo: string;
+    file: FileChange;
+  } | null>(null);
   const setMessage = (repo: string, text: string) =>
     setMessages((m) => ({ ...m, [repo]: text }));
   const commit = (repo: string) => {
@@ -101,7 +116,10 @@ export function ChangesPanel({
   const rowMenu = (g: ChangeGroup, f: FileChange): MenuItem[] => {
     const items: MenuItem[] = [
       { label: "Open diff", onClick: () => onOpen(f.abs) },
-      { label: "Copy path", onClick: () => void navigator.clipboard.writeText(f.abs) },
+      {
+        label: "Copy path",
+        onClick: () => void navigator.clipboard.writeText(f.abs),
+      },
     ];
     if (!f.conflicted && (onStage || onUnstage))
       items.push(
@@ -130,10 +148,18 @@ export function ChangesPanel({
   return (
     <div className="side-panel">
       {menu.menu && (
-        <ContextMenu x={menu.menu.x} y={menu.menu.y} items={menu.menu.items} onClose={menu.close} />
+        <ContextMenu
+          x={menu.menu.x}
+          y={menu.menu.y}
+          items={menu.menu.items}
+          onClose={menu.close}
+        />
       )}
       {discarding && (
-        <div className="confirm-backdrop" onMouseDown={() => setDiscarding(null)}>
+        <div
+          className="confirm-backdrop"
+          onMouseDown={() => setDiscarding(null)}
+        >
           <div className="confirm" onMouseDown={(e) => e.stopPropagation()}>
             <p>
               {discarding.file.untracked ? "Delete" : "Discard changes to"}{" "}
@@ -184,7 +210,9 @@ export function ChangesPanel({
             >
               <span className="change-kind change-collab-tag">live</span>
               <span className="change-name">{c.name}</span>
-              <span className="change-dir">{c.path.split("/").slice(0, -1).join("/")}</span>
+              <span className="change-dir">
+                {c.path.split("/").slice(0, -1).join("/")}
+              </span>
               <button
                 className="btn-mini change-collab-save"
                 title="Write these edits to disk (then git tracks them normally)"
@@ -227,7 +255,11 @@ export function ChangesPanel({
                   value={messages[g.repo] ?? ""}
                   onChange={(e) => setMessage(g.repo, e.target.value)}
                   onKeyDown={(e) => {
-                    if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && stagedIn(g) > 0)
+                    if (
+                      (e.metaKey || e.ctrlKey) &&
+                      e.key === "Enter" &&
+                      stagedIn(g) > 0
+                    )
                       commit(g.repo);
                   }}
                 />
@@ -247,7 +279,12 @@ export function ChangesPanel({
                   {unstagedIn(g).length > 0 && onStage && (
                     <button
                       className="btn-mini"
-                      onClick={() => onStage(g.repo, unstagedIn(g).map((f) => f.path))}
+                      onClick={() =>
+                        onStage(
+                          g.repo,
+                          unstagedIn(g).map((f) => f.path),
+                        )
+                      }
                     >
                       Stage all
                     </button>
@@ -268,32 +305,42 @@ export function ChangesPanel({
                 </div>
               </div>
             )}
-            {g.files.map((f) => (
-              <div
-                key={f.path}
-                className="change-row"
-                title={`${f.status.trim() || "??"} ${f.path}`}
-                onClick={() => onOpen(f.abs)}
-                onContextMenu={(e) => menu.open(e, rowMenu(g, f))}
-              >
-                <span className={`change-kind change-${kindClass(f)}`}>{badge(f)}</span>
-                <span className="change-name">{f.path.split("/").pop()}</span>
-                <span className="change-dir">{f.path.split("/").slice(0, -1).join("/")}</span>
-                {(onStage || onUnstage) && !f.conflicted && (
-                  <button
-                    className="btn-mini change-stage"
-                    title={f.staged ? "Unstage this file" : "Stage this file"}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (f.staged) onUnstage?.(g.repo, [f.path]);
-                      else onStage?.(g.repo, [f.path]);
-                    }}
-                  >
-                    {f.staged ? "−" : "+"}
-                  </button>
-                )}
-              </div>
-            ))}
+            {/* Windowed: a rebase or generated-file churn can put thousands of
+                files here, and only the ones near the viewport need to exist. */}
+            <WindowedList
+              items={g.files}
+              rowHeight={ROW_H}
+              renderRow={(f) => (
+                <div
+                  key={f.path}
+                  className="change-row"
+                  title={`${f.status.trim() || "??"} ${f.path}`}
+                  onClick={() => onOpen(f.abs)}
+                  onContextMenu={(e) => menu.open(e, rowMenu(g, f))}
+                >
+                  <span className={`change-kind change-${kindClass(f)}`}>
+                    {badge(f)}
+                  </span>
+                  <span className="change-name">{f.path.split("/").pop()}</span>
+                  <span className="change-dir">
+                    {f.path.split("/").slice(0, -1).join("/")}
+                  </span>
+                  {(onStage || onUnstage) && !f.conflicted && (
+                    <button
+                      className="btn-mini change-stage"
+                      title={f.staged ? "Unstage this file" : "Stage this file"}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (f.staged) onUnstage?.(g.repo, [f.path]);
+                        else onStage?.(g.repo, [f.path]);
+                      }}
+                    >
+                      {f.staged ? "−" : "+"}
+                    </button>
+                  )}
+                </div>
+              )}
+            />
           </div>
         ))
       )}
