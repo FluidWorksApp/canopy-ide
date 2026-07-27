@@ -3046,20 +3046,22 @@ body.dragging-tab * {
   inset: 0;
   z-index: 20;
   pointer-events: none; /* closed: clicks fall through to the terminal */
-  opacity: 0;
-  /* Hidden, not just transparent: a closed overlay must not take clicks, and
-     an opacity-0 layer still gets composited over every terminal repaint.
-     (It used to be carrying a backdrop blur too — see .workspace-overlay.) */
+  /* Hidden, not faded.
+     This used to animate `opacity` 0 → 1, and that is what was killing the
+     frost: an ancestor with opacity < 1 renders its subtree into a transparent
+     compositing group, and backdrop-filter inside that group samples the group
+     — which has nothing behind it — instead of the page. So the blur computed
+     correctly and drew nothing, leaving the pane as flat translucency over live
+     terminal text. The entrance animation moved down to .workspace-overlay-in,
+     which carries no backdrop-filter, so nothing above the glass is ever
+     part-transparent. */
   visibility: hidden;
-  transition:
-    opacity var(--dur-med) var(--ease-out),
-    visibility 0s linear var(--dur-med);
+  transition: visibility 0s linear var(--dur-med);
 }
 .workspace-overlay-layer.open {
   pointer-events: auto;
-  opacity: 1;
   visibility: visible;
-  transition: opacity var(--dur-med) var(--ease-out);
+  transition: visibility 0s linear 0s;
 }
 
 .workspace-overlay {
@@ -3067,27 +3069,36 @@ body.dragging-tab * {
   inset: 0;
   display: flex;
   flex-direction: column;
-  /* Near-opaque, and no backdrop-filter.
-
-     This was 58% over an 18px backdrop blur — translucent on the understanding
-     that the blur would turn the terminal behind it into a wash. The blur does
-     not composite here: the property is supported and computes to
-     `blur(18px) saturate(1.35)`, and the terminal still renders through it
-     sharp. So the workspace was 58% glass over live, legible text, and the two
-     layers read as one — headings landing on transcript lines, the file chips
-     crossing the agent's output. Worst while the diff was still loading, since
-     there was least of its own content to cover anything.
-
-     The blur is dropped rather than fixed: at this opacity it would be
-     invisible even where it does composite, and it was costing a repaint of
-     everything behind it (which is what the `visibility: hidden` on the closed
-     layer above is working around). A whisper of translucency stays, so the
-     overlay still reads as sitting over the terminal rather than replacing it. */
-  background: color-mix(in srgb, var(--bg) 97%, transparent);
-  transform: scale(1.015);
-  transition: transform var(--dur-med) var(--ease-out);
+  /* The glass itself, and the only job of this element: hold the frost. No
+     transform and no animated opacity here or on anything above it — both
+     suppress backdrop-filter in this engine, which is how a deliberate frosted
+     pane ended up as 58% of nothing over a sharp terminal. */
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  backdrop-filter: blur(30px) saturate(180%);
+  -webkit-backdrop-filter: blur(30px) saturate(180%);
 }
-.workspace-overlay-layer.open .workspace-overlay {
+
+/* The entrance. Separated from the glass so the pane can scale and fade in
+   without taking the backdrop with it. */
+/* The loading block holds the space the diff is about to take, so arriving
+   content fills it rather than pushing the page down under the reader. */
+.aw-loading {
+  min-height: 240px;
+}
+
+.workspace-overlay-in {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  opacity: 0;
+  transform: scale(1.015);
+  transition:
+    opacity var(--dur-med) var(--ease-out),
+    transform var(--dur-med) var(--ease-out);
+}
+.workspace-overlay-layer.open .workspace-overlay-in {
+  opacity: 1;
   transform: scale(1);
 }
 

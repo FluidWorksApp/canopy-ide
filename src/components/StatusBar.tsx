@@ -8,6 +8,7 @@ import { estimateCost, sessionCost } from "../pricing";
 import { StatsPanel } from "./StatsPanel";
 import { HeartIcon, StatsIcon } from "./icons";
 import type { AgentEventEntry } from "../types";
+import { modelCommandLine, type ModelSwitch } from "../agentModels";
 
 const fmtMem = (bytes: number) =>
   bytes >= 1024 * 1024 * 1024
@@ -19,16 +20,6 @@ const fmtMem = (bytes: number) =>
  *  fresh poll runs, instead of carrying the previous tab's numbers. */
 const TRANSCRIPT_STATS = new Map<string, ipc.ClaudeSessionStats>();
 
-/** What `/model` in Claude Code accepts — aliases resolve to the CLI's own
- *  latest models, so this list doesn't go stale with each release. */
-const MODELS: { id: string; label: string; hint: string }[] = [
-  { id: "default", label: "Default", hint: "recommended" },
-  { id: "opus", label: "Opus", hint: "most capable" },
-  { id: "sonnet", label: "Sonnet", hint: "balanced" },
-  { id: "sonnet[1m]", label: "Sonnet · 1M context", hint: "long sessions" },
-  { id: "haiku", label: "Haiku", hint: "fast, cheapest" },
-  { id: "opusplan", label: "Opus Plan", hint: "Opus plans, Sonnet codes" },
-];
 
 interface StatusBarProps {
   roots: string[];
@@ -39,8 +30,16 @@ interface StatusBarProps {
   visible: boolean;
   /** All open projects — the resource popup groups every session by project. */
   projects: { name: string; roots: string[] }[];
-  /** Present when a Claude session is live in this project; switches its model. */
-  onSetModel?: (model: string) => void;
+  /** Switches the model of the session the tray is showing. `model` is the id
+   *  of one of `modelSwitch`'s choices, and is omitted for a picker — that
+   *  command carries no argument. */
+  onSetModel?: (model?: string) => void;
+  /** How the CLI in front changes model, or null when Canopy has no verified
+   *  way to change that one's (see agentModels.ts) — then no control is shown,
+   *  rather than a menu that types a command the CLI doesn't have. */
+  modelSwitch?: ModelSwitch | null;
+  /** What to call the CLI in front in the switch dialog ("Codex CLI"). */
+  agentLabel?: string;
   /** The pty of the active terminal tab — the model/token tray follows THIS
    *  tab's session, not whichever session in the project spoke last. */
   activePtyId?: number | null;
@@ -53,6 +52,8 @@ export const StatusBar = memo(function StatusBar({
   visible,
   projects,
   onSetModel,
+  modelSwitch,
+  agentLabel,
   activePtyId,
 }: StatusBarProps) {
   const [branch, setBranch] = useState<string | null>(null);
@@ -60,8 +61,10 @@ export const StatusBar = memo(function StatusBar({
   const [app, setApp] = useState<ipc.AppStats | null>(null);
   const [stats, setStats] = useState<ipc.ClaudeSessionStats | null>(null);
   const [modelMenu, setModelMenu] = useState(false);
+  // The pending switch, held for confirmation. `id` is absent for a picker:
+  // there is no model to name yet, the command only opens the CLI's chooser.
   const [confirmModel, setConfirmModel] = useState<{
-    id: string;
+    id?: string;
     label: string;
   } | null>(null);
   // Resource breakdown popup. Machine-wide session stats are subscribed only
@@ -152,8 +155,17 @@ export const StatusBar = memo(function StatusBar({
   // in the project spoke last (which only corrected itself when the newly
   // focused agent next emitted an event). Project-latest is the fallback for
   // non-terminal tabs and unstamped events.
+  //
+  // A terminal whose pty appears in no stamped event shows NOTHING rather than
+  // project-latest. That fallback was written for tabs that have no session of
+  // their own, but it also fired on a tab running a CLI whose transcript we
+  // can't read (Codex, opencode) — so the tray sat over a Codex session
+  // reporting a Claude model and Claude's tokens. Only when nothing in the
+  // stream carries a pty at all (an older hook that can't stamp them) does the
+  // project-wide guess stay the best available answer.
   const transcript = useMemo(() => {
     let projectLatest: string | null = null;
+    let anyStamped = false;
     for (let i = events.length - 1; i >= 0; i--) {
       const d = events[i].data;
       if (
@@ -164,9 +176,10 @@ export const StatusBar = memo(function StatusBar({
         continue;
       }
       if (activePtyId != null && d.pty === activePtyId) return d.transcriptPath;
+      if (d.pty != null) anyStamped = true;
       projectLatest ??= d.transcriptPath;
     }
-    return projectLatest;
+    return activePtyId != null && anyStamped ? null : projectLatest;
   }, [events, roots, activePtyId]);
 
   // Both pollers gate on `visible`: each spawns a git subprocess / transcript
@@ -425,31 +438,44 @@ export const StatusBar = memo(function StatusBar({
           )}
         </span>
       )}
-      {stats?.model && (
+      {(stats?.model || (onSetModel && modelSwitch)) && (
         <span className="status-item status-model-anchor">
-          {onSetModel ? (
+          {onSetModel && modelSwitch ? (
             <button
               className="status-model-btn"
-              title="Change this session's model (/model)"
+              title={
+                modelSwitch.kind === "inline"
+                  ? `Change this session's model (${modelSwitch.command})`
+                  : `Choose this session's model — opens ${agentLabel ?? "the CLI"}'s own picker (${modelSwitch.command})`
+              }
               onClick={(e) => {
+                // A picker has one outcome, so a menu of one item would just be
+                // a click in the way: go straight to the confirmation.
+                if (modelSwitch.kind === "picker") {
+                  setConfirmModel({ label: "a different model" });
+                  return;
+                }
                 anchorMenu(e);
                 setModelMenu((v) => !v);
               }}
             >
-              {stats.model.replace(/^claude-/, "")} ▾
+              {/* Only Claude's transcript tells us the model in play. For the
+                  rest the button names the action instead of pretending to
+                  know — the tab strip already says which CLI it is. */}
+              {stats?.model ? `${stats.model.replace(/^claude-/, "")} ▾` : "model ▾"}
             </button>
           ) : (
             <span title="model (from Claude session transcript)">
-              {stats.model.replace(/^claude-/, "")}
+              {stats?.model?.replace(/^claude-/, "")}
             </span>
           )}
-          {modelMenu && (
+          {modelMenu && modelSwitch?.kind === "inline" && (
             <div
               className="status-menu"
               style={menuStyle}
               onMouseLeave={() => setModelMenu(false)}
             >
-              {MODELS.map((m) => (
+              {modelSwitch.choices.map((m) => (
                 <div
                   key={m.id}
                   className="cli-item"
@@ -466,22 +492,30 @@ export const StatusBar = memo(function StatusBar({
           )}
         </span>
       )}
-      {confirmModel && (
+      {confirmModel && modelSwitch && (
         <div
           className="confirm-backdrop"
           onMouseDown={() => setConfirmModel(null)}
         >
           <div className="confirm" onMouseDown={(e) => e.stopPropagation()}>
             <p>
-              Switch this session to <strong>{confirmModel.label}</strong>?
+              {modelSwitch.kind === "inline" ? (
+                <>
+                  Switch this session to <strong>{confirmModel.label}</strong>?
+                </>
+              ) : (
+                <>Choose a model for this session?</>
+              )}
             </p>
             <p className="confirm-sub">
-              This types <code>/model {confirmModel.id}</code> into the Claude
-              terminal and submits it. Claude applies it to the running session
-              — if the new model has a smaller context window, Claude will warn
-              or compact in the terminal, so check its response there. If you
-              have unsent text typed in that session's input box, it will be
-              submitted along with the command.
+              This types{" "}
+              <code>{modelCommandLine(modelSwitch, confirmModel.id)}</code> into
+              the {agentLabel ?? "agent"} terminal and submits it.{" "}
+              {modelSwitch.kind === "inline"
+                ? `${agentLabel ?? "The CLI"} applies it to the running session — if the new model has a smaller context window it will warn or compact in the terminal, so check its response there.`
+                : `${agentLabel ?? "The CLI"} then opens its own model list in the terminal, where you pick — nothing changes until you do.`}{" "}
+              If you have unsent text typed in that session's input box, it will
+              be submitted along with the command.
             </p>
             <div className="confirm-actions">
               <button className="btn" onClick={() => setConfirmModel(null)}>
@@ -494,7 +528,7 @@ export const StatusBar = memo(function StatusBar({
                   setConfirmModel(null);
                 }}
               >
-                Switch model
+                {modelSwitch.kind === "inline" ? "Switch model" : "Open picker"}
               </button>
             </div>
           </div>

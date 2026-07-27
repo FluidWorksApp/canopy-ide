@@ -108,6 +108,7 @@ import { ChangesPanel, type ChangeGroup } from "../ChangesPanel";
 import { useEscape } from "../../useEscape";
 import { useTabDrag, applyOrder } from "../../tabDrag";
 import { agentIdForCommand, identifyAgent } from "../../agentIdentity";
+import { modelCommandLine, modelSwitchFor } from "../../agentModels";
 import { AgentsPanel, digestBySurface } from "../AgentsPanel";
 import { StatusBar } from "../StatusBar";
 import { Palette, type PaletteMode } from "../Palette";
@@ -1429,20 +1430,23 @@ export const ProjectView = memo(function ProjectView({
 
   /** Open the completed-tasks tab, or focus it if it's already up. Only ever
    *  one — it's a view of a single app-wide log, so a second would be a copy. */
-  const openTaskHistory = useCallback((runId?: string) => {
-    const focus = runId ? { runId, nonce: Date.now() } : undefined;
-    const existing = tabsRef.current.find((t) => t.type === "task-history");
-    if (existing) {
-      // Already open: hand it the run anyway, so a click from the panel lands
-      // on that row instead of wherever the tab was last left.
-      if (focus) patchTabRaw(existing.id, { focus } as Partial<SubTab>);
-      setActiveTabId(existing.id);
-      return;
-    }
-    const id = tabId();
-    setTabs((prev) => [...prev, { id, type: "task-history", focus }]);
-    setActiveTabId(id);
-  }, [patchTabRaw]);
+  const openTaskHistory = useCallback(
+    (runId?: string) => {
+      const focus = runId ? { runId, nonce: Date.now() } : undefined;
+      const existing = tabsRef.current.find((t) => t.type === "task-history");
+      if (existing) {
+        // Already open: hand it the run anyway, so a click from the panel lands
+        // on that row instead of wherever the tab was last left.
+        if (focus) patchTabRaw(existing.id, { focus } as Partial<SubTab>);
+        setActiveTabId(existing.id);
+        return;
+      }
+      const id = tabId();
+      setTabs((prev) => [...prev, { id, type: "task-history", focus }]);
+      setActiveTabId(id);
+    },
+    [patchTabRaw],
+  );
 
   /** Open the agent-instructions tab, focused on one file when a panel row
    *  asked for it. One per project, like the history tab. */
@@ -2396,7 +2400,11 @@ export const ProjectView = memo(function ProjectView({
           // Extensions that claim nothing (.dat, .pack, no extension at all)
           // only give themselves away in the bytes.
           if (kind === "code" && looksBinary(bytes)) {
-            blocked = { reason: "binary", size: stat.size, limit: sizeLimitFor(kind) };
+            blocked = {
+              reason: "binary",
+              size: stat.size,
+              limit: sizeLimitFor(kind),
+            };
             bytes = null;
           }
         }
@@ -3385,47 +3393,58 @@ export const ProjectView = memo(function ProjectView({
     }
   }, [activeTabId, visible, pending, onDismissPending]);
 
-  // Switch the model of the Claude session running in this project by typing
-  // `/model <name>` into its terminal — the same thing the user would type, so
-  // the CLI's own confirmations and context-size warnings appear right there.
-  // The terminal is focused afterwards so those warnings are actually seen.
+  // The session the tray's model control acts on: the terminal you are looking
+  // at, when it runs a CLI whose model Canopy knows how to change; otherwise
+  // the first such terminal in the project, for the tabs that are not terminals
+  // at all. One derivation feeds both the chip and the click, so the menu can
+  // never describe one session while the keystrokes go to another — which is
+  // exactly what happened while the two were worked out separately, and every
+  // `/model` landed in the leftmost Claude tab.
+  const modelTarget = useMemo(() => {
+    const agentOf = (t: TermSubTab) => {
+      if (t.ptyId == null) return null;
+      const s = projectStats.find((x) => x.id === t.ptyId);
+      const agent = s ? (identifyAgent(s.agent_hint)?.id ?? null) : null;
+      const sw = modelSwitchFor(agent);
+      if (!agent || !sw) return null;
+      // A bare binary Canopy ships no entry for (gemini) has no registry name
+      // to borrow, so it is named by the id — which is its command anyway.
+      const label = AGENT_CLIS.find((c) => c.id === agent)?.name ?? agent;
+      return { tabId: t.id, ptyId: t.ptyId, agent, label, sw };
+    };
+    const termTabs = tabs.filter((t): t is TermSubTab => t.type === "terminal");
+    const active = termTabs.find((t) => t.id === activeTabId);
+    if (active) return agentOf(active);
+    for (const t of termTabs) {
+      const hit = agentOf(t);
+      if (hit) return hit;
+    }
+    return null;
+  }, [tabs, activeTabId, projectStats]);
+  const modelTargetRef = useRef(modelTarget);
+  modelTargetRef.current = modelTarget;
+
+  // Change that session's model by typing the CLI's own command into its
+  // terminal — the same thing the user would type, so the CLI's confirmations,
+  // pickers and context-size warnings appear right there. The terminal is
+  // focused afterwards so they are actually seen.
   const setAgentModel = useCallback(
-    (model: string) => {
-      const termTabs = tabsRef.current.filter(
-        (t): t is TermSubTab => t.type === "terminal",
-      );
-      const claudePtys = new Set(
-        statsRef.current
-          .filter((s) => s.procs.some((p) => /claude/i.test(p.name)))
-          .map((s) => s.id),
-      );
-      // The tray shows the ACTIVE tab's session, so the switch has to land in
-      // that same session — picking the project's first Claude terminal sent
-      // every `/model` to whichever agent happened to be leftmost, no matter
-      // which one you were looking at. Only fall back to the first Claude
-      // terminal when the active tab isn't one (a file or diff tab, say).
-      const isClaudeTerm = (t: TermSubTab) =>
-        t.ptyId != null && claudePtys.has(t.ptyId);
-      const active = termTabs.find((t) => t.id === activeTabIdRef.current);
-      const target =
-        active && isClaudeTerm(active) ? active : termTabs.find(isClaudeTerm);
-      if (target?.ptyId == null) {
-        onNotice("No running Claude session in this project.");
+    (model?: string) => {
+      const target = modelTargetRef.current;
+      if (!target) {
+        onNotice("No agent session here to switch.");
         return;
       }
-      const ptyId = target.ptyId;
-      void ipc.ptyWrite(ptyId, `/model ${model}`);
+      const { ptyId, tabId, sw } = target;
+      void ipc.ptyWrite(ptyId, modelCommandLine(sw, model));
       // Enter goes separately, a beat later: the slash-command menu opens while
       // the text streams in, and an Enter in the same write can select the
       // menu's highlighted entry instead of submitting the typed command.
       setTimeout(() => void ipc.ptyWrite(ptyId, "\r"), 250);
-      setActiveTabId(target.id);
-      setTimeout(() => termHandles.current.get(target.id)?.focus(), 50);
+      setActiveTabId(tabId);
+      setTimeout(() => termHandles.current.get(tabId)?.focus(), 50);
     },
     [onNotice],
-  );
-  const hasClaude = projectStats.some((s) =>
-    s.procs.some((p) => /claude/i.test(p.name)),
   );
 
   // Launch an agent CLI in the project's first component — or, if it isn't on
@@ -3558,9 +3577,16 @@ export const ProjectView = memo(function ProjectView({
         saved: project.customTasks ?? [],
         onNewTask: seedTaskFrom,
         onOneOff: (brief) => openTaskComposer(brief, "once"),
-        onRunSaved: (t) => void startMicroTask(customTaskDef(t), { dir: firstRoot }, ""),
+        onRunSaved: (t) =>
+          void startMicroTask(customTaskDef(t), { dir: firstRoot }, ""),
       }),
-    [seedTaskFrom, openTaskComposer, startMicroTask, firstRoot, project.customTasks],
+    [
+      seedTaskFrom,
+      openTaskComposer,
+      startMicroTask,
+      firstRoot,
+      project.customTasks,
+    ],
   );
 
   const submitRootCreate = async () => {
@@ -3954,7 +3980,9 @@ export const ProjectView = memo(function ProjectView({
   const serverGroups = useMemo(
     () =>
       groupServers(components, runTabs, (ptyId) =>
-        ptyId == null ? [] : (projectStats.find((s) => s.id === ptyId)?.ports ?? []),
+        ptyId == null
+          ? []
+          : (projectStats.find((s) => s.id === ptyId)?.ports ?? []),
       ),
     [components, runTabs, projectStats],
   );
@@ -5160,74 +5188,80 @@ export const ProjectView = memo(function ProjectView({
               >
                 {/* No chrome header here — AgentWorkspaceView's own banner is
                     the single header, and it renders the close button (passed
-                    below) so the agent name/branch aren't repeated twice. */}
-                <div className="workspace-overlay-body">
-                  {wsDrawerOpen && (
-                    <AgentWorkspaceView
-                      key={agentTermWs.ptyId}
-                      repo={agentTermWs.repo}
-                      agent={agentTermWs.agent}
-                      cwd={agentTermWs.cwd}
-                      sessionId={agentTermWs.sessionId}
-                      digest={agentTermWs.digest}
-                      onOpenCommit={openCommit}
-                      onOpenPr={openPr}
-                      onOpenTerminal={(cwd, label) =>
-                        addTerminal(cwd, undefined, label)
-                      }
-                      onNotice={onNotice}
-                      onMessageAgent={(text) =>
-                        messageAgent({
-                          ptyId: agentTermWs.ptyId,
-                          sessionId: agentTermWs.sessionId,
-                          agentId: agentTermWs.agent,
-                          cwd: agentTermWs.cwd,
-                          text,
-                        })
-                      }
-                      onFocusAgent={jumpToPty}
-                      onClose={() => setWsDrawerOpen(false)}
-                      onRaisePrTask={
-                        agentTermWs.repo
-                          ? (branch, worktree) =>
-                              void startMicroTask(
-                                raisePrTask,
-                                {
-                                  repo: agentTermWs.repo as string,
-                                  branch,
-                                  worktree,
-                                },
-                                "",
-                              )
-                          : undefined
-                      }
-                      onReviewPrTask={
-                        agentTermWs.repo
-                          ? (pr) =>
-                              void startMicroTask(
-                                reviewPrTask,
-                                { repo: agentTermWs.repo as string, pr },
-                                "",
-                              )
-                          : undefined
-                      }
-                      onAddressPrCommentsTask={
-                        agentTermWs.repo
-                          ? (pr) =>
-                              void startMicroTask(
-                                addressPrCommentsTask,
-                                { repo: agentTermWs.repo as string, pr },
-                                "",
-                              )
-                          : undefined
-                      }
-                      onRunSavedTask={(task, dir) =>
-                        void startMicroTask(customTaskDef(task), { dir }, "")
-                      }
-                      savedTasks={project.customTasks ?? []}
-                      onRunOneOff={(brief, dir) => runAdhocTask(brief, dir)}
-                    />
-                  )}
+                    below) so the agent name/branch aren't repeated twice.
+                    The extra wrapper carries the entrance animation: it must not
+                    be the pane holding the frost, because a transform or a
+                    part-way opacity above backdrop-filter switches the blur
+                    off. */}
+                <div className="workspace-overlay-in">
+                  <div className="workspace-overlay-body">
+                    {wsDrawerOpen && (
+                      <AgentWorkspaceView
+                        key={agentTermWs.ptyId}
+                        repo={agentTermWs.repo}
+                        agent={agentTermWs.agent}
+                        cwd={agentTermWs.cwd}
+                        sessionId={agentTermWs.sessionId}
+                        digest={agentTermWs.digest}
+                        onOpenCommit={openCommit}
+                        onOpenPr={openPr}
+                        onOpenTerminal={(cwd, label) =>
+                          addTerminal(cwd, undefined, label)
+                        }
+                        onNotice={onNotice}
+                        onMessageAgent={(text) =>
+                          messageAgent({
+                            ptyId: agentTermWs.ptyId,
+                            sessionId: agentTermWs.sessionId,
+                            agentId: agentTermWs.agent,
+                            cwd: agentTermWs.cwd,
+                            text,
+                          })
+                        }
+                        onFocusAgent={jumpToPty}
+                        onClose={() => setWsDrawerOpen(false)}
+                        onRaisePrTask={
+                          agentTermWs.repo
+                            ? (branch, worktree) =>
+                                void startMicroTask(
+                                  raisePrTask,
+                                  {
+                                    repo: agentTermWs.repo as string,
+                                    branch,
+                                    worktree,
+                                  },
+                                  "",
+                                )
+                            : undefined
+                        }
+                        onReviewPrTask={
+                          agentTermWs.repo
+                            ? (pr) =>
+                                void startMicroTask(
+                                  reviewPrTask,
+                                  { repo: agentTermWs.repo as string, pr },
+                                  "",
+                                )
+                            : undefined
+                        }
+                        onAddressPrCommentsTask={
+                          agentTermWs.repo
+                            ? (pr) =>
+                                void startMicroTask(
+                                  addressPrCommentsTask,
+                                  { repo: agentTermWs.repo as string, pr },
+                                  "",
+                                )
+                            : undefined
+                        }
+                        onRunSavedTask={(task, dir) =>
+                          void startMicroTask(customTaskDef(task), { dir }, "")
+                        }
+                        savedTasks={project.customTasks ?? []}
+                        onRunOneOff={(brief, dir) => runAdhocTask(brief, dir)}
+                      />
+                    )}
+                  </div>
                 </div>
               </section>
             </div>
@@ -5654,7 +5688,9 @@ export const ProjectView = memo(function ProjectView({
                   ? () =>
                       taskRows(
                         "About the current changes: ",
-                        changeGroups[0]?.repo ?? componentsRef.current[0]?.path ?? "",
+                        changeGroups[0]?.repo ??
+                          componentsRef.current[0]?.path ??
+                          "",
                       )
                   : undefined
               }
@@ -5853,7 +5889,9 @@ export const ProjectView = memo(function ProjectView({
         events={projectEvents}
         visible={visible}
         projects={allProjects}
-        onSetModel={hasClaude ? setAgentModel : undefined}
+        onSetModel={modelTarget ? setAgentModel : undefined}
+        modelSwitch={modelTarget?.sw ?? null}
+        agentLabel={modelTarget?.label}
         activePtyId={activeTab?.type === "terminal" ? activeTab.ptyId : null}
       />
       {palette && visible && (

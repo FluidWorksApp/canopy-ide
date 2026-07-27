@@ -1590,12 +1590,15 @@ export function AgentWorkspaceView({
             When none can be attributed, we say so plainly rather than pass the
             whole tree off as this agent's work. */}
         {pane !== "edits" &&
-          (!ws ? (
-            !wsErr &&
-            repo && <div className="tree-empty">Loading workspace…</div>
-          ) : !patch ? (
-            pane && <div className="tree-empty">Loading diff…</div>
-          ) : mine.length === 0 ? (
+          // One loading state, not two. This was "Loading workspace…" and then
+          // "Loading diff…" — two one-line messages of different widths
+          // replacing each other and then being replaced by the diff, so the
+          // pane visibly stepped through three layouts on the way in. It holds
+          // a fixed block of space now, so what arrives fills it instead of
+          // shoving it around.
+          ((!ws && !wsErr && repo) || (ws && !patch && pane) ? (
+            <div className="tree-empty aw-loading">Reading this agent's changes…</div>
+          ) : !ws || !patch ? null : mine.length === 0 ? (
             <div className="tree-empty">
               No changes by this agent{pane === "uncommitted" ? " yet" : ""}.
               {!canAttribute && (
