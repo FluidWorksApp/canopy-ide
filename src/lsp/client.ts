@@ -17,8 +17,10 @@ import { monaco } from "../monaco-setup";
 import {
   SUPPORTED_LANGUAGES,
   resolveServerRoot,
+  resolveTypescriptLaunch,
   serverUnavailableMessage,
   specForPath,
+  type ServerLaunch,
   type ServerSpec,
 } from "./servers";
 
@@ -128,14 +130,15 @@ async function serverCommand(spec: ServerSpec, root: string): Promise<string> {
   }
 }
 
-async function tsserverPath(root: string): Promise<string | undefined> {
-  const local = `${root}/node_modules/typescript/lib/tsserver.js`;
-  try {
-    await ipc.fsStat(local);
-    return local;
-  } catch {
-    return undefined;
+/** What to spawn for this project. TypeScript is the one server whose answer
+ *  depends on what the project has installed (see resolveTypescriptLaunch);
+ *  everything else runs the spec as written. */
+async function launchFor(spec: ServerSpec, root: string): Promise<ServerLaunch> {
+  const command = await serverCommand(spec, root);
+  if (spec.id !== "typescript") {
+    return { command, args: spec.args, initializationOptions: spec.initializationOptions };
   }
+  return resolveTypescriptLaunch(spec, root, command, exists);
 }
 
 /** Fold a raw `$/progress` frame into the server's busy state. Cheap enough to
@@ -175,8 +178,8 @@ export async function ensureLanguageServer(path: string, root: string): Promise<
     const reader = new IpcMessageReader();
     let serverId: number | null = null;
 
-    const command = await serverCommand(spec, serverRoot);
-    serverId = await ipc.lspStart(command, spec.args, serverRoot, (msg) => {
+    const launch = await launchFor(spec, serverRoot);
+    serverId = await ipc.lspStart(launch.command, launch.args, serverRoot, (msg) => {
       observeProgress(progress, msg);
       reader.push(msg);
     });
@@ -188,10 +191,7 @@ export async function ensureLanguageServer(path: string, root: string): Promise<
     const { MonacoLanguageClient } = await import("monaco-languageclient");
     const writer = new IpcMessageWriter(() => serverId);
 
-    const initializationOptions =
-      spec.id === "typescript"
-        ? { tsserver: { path: await tsserverPath(serverRoot) } }
-        : spec.initializationOptions;
+    const initializationOptions = launch.initializationOptions;
 
     const client = new MonacoLanguageClient({
       name: `${spec.id} language client`,

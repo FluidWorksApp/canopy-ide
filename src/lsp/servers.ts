@@ -96,6 +96,74 @@ export async function resolveServerRoot(
   return root;
 }
 
+/** Everything needed to spawn a server for one project. Only TypeScript varies
+ *  by project today, which is why this isn't simply the spec. */
+export interface ServerLaunch {
+  command: string;
+  args: string[];
+  initializationOptions?: unknown;
+}
+
+/** The platform packages npm publishes TypeScript 7's compiler in. Exactly one
+ *  is ever installed — they are optionalDependencies picked by platform — so
+ *  probing the list costs a stat each and spares us guessing the architecture,
+ *  which `navigator.platform` cannot tell us (it reports MacIntel on Apple
+ *  silicon). */
+const NATIVE_TSC_PACKAGES = [
+  "typescript-darwin-arm64",
+  "typescript-darwin-x64",
+  "typescript-linux-arm64",
+  "typescript-linux-x64",
+  "typescript-win32-arm64",
+  "typescript-win32-x64",
+];
+
+/** TypeScript 7's compiler binary, which is also a language server. */
+export async function resolveNativeTsc(
+  root: string,
+  exists: (path: string) => Promise<boolean>,
+): Promise<string | undefined> {
+  for (const pkg of NATIVE_TSC_PACKAGES) {
+    const lib = `${root}/node_modules/@typescript/${pkg}/lib`;
+    for (const exe of [`${lib}/tsc`, `${lib}/tsc.exe`]) {
+      if (await exists(exe)) return exe;
+    }
+  }
+  return undefined;
+}
+
+/** How to run the TypeScript language service for a project.
+ *
+ *  A project carrying its own `tsserver.js` keeps typescript-language-server
+ *  driving that tsserver, so anything pinning its own toolchain is analysed
+ *  exactly as it was. TypeScript 7 is the native port and ships no tsserver at
+ *  all — there the compiler binary *is* an LSP server, so Canopy talks to it
+ *  directly and skips the wrapper entirely. With neither we still hand the
+ *  wrapper an undefined path and let it find a tsserver of its own, which is
+ *  what happened before any of this existed. */
+export async function resolveTypescriptLaunch(
+  spec: ServerSpec,
+  root: string,
+  wrapperCommand: string,
+  exists: (path: string) => Promise<boolean>,
+): Promise<ServerLaunch> {
+  const tsserver = `${root}/node_modules/typescript/lib/tsserver.js`;
+  if (await exists(tsserver)) {
+    return {
+      command: wrapperCommand,
+      args: spec.args,
+      initializationOptions: { tsserver: { path: tsserver } },
+    };
+  }
+  const native = await resolveNativeTsc(root, exists);
+  if (native) return { command: native, args: ["--lsp", "--stdio"] };
+  return {
+    command: wrapperCommand,
+    args: spec.args,
+    initializationOptions: { tsserver: { path: undefined } },
+  };
+}
+
 /** Spawn failures that mean "the binary isn't there" rather than "it started
  *  and died". lsp_start's own error is `failed to spawn <cmd>: <io error>`. */
 const MISSING = /failed to spawn|no such file|not found|enoent|cannot find/i;
