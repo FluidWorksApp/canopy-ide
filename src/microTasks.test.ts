@@ -11,6 +11,7 @@ import {
   oneLine,
   prArtifactPath,
   prReviewTask,
+  progressBrief,
   raisePrTask,
   resolveConflictsTask,
   reviewPrTask,
@@ -18,7 +19,9 @@ import {
   stepsDone,
   MICRO_TASKS,
   PR_REVIEW_STEPS,
+  type MicroTaskDef,
   type RaisePrPayload,
+  type TaskStep,
 } from "./microTasks";
 import { isStopFor, parseAgentEvent } from "./notifications";
 import type * as ipc from "./ipc";
@@ -353,17 +356,48 @@ describe("PR tasks that report back through a file", () => {
     expect(theirs).toContain("/repo/.canopy/pr-12-map.md");
   });
 
-  it("asks the review task to report every milestone it owns, from a clean file", () => {
-    const ctx = prReviewTask.buildContext({ repo: "/repo", pr }, "");
-    expect(ctx).toContain("/repo/.canopy/pr-12-progress.txt");
-    // Truncation is what stops a re-run opening at four-of-four done.
-    expect(ctx).toContain(": > /repo/.canopy/pr-12-progress.txt");
-    // Every step but the tab's own has to be named, or the rail stalls on a
-    // milestone the agent was never told to report.
-    for (const s of PR_REVIEW_STEPS.filter((x) => x.owner !== "app"))
-      expect(ctx, `the brief never names the "${s.id}" milestone`).toContain(`\`${s.id}\``);
-    expect(ctx).not.toContain("`staged`");
-    expect(ctx).not.toMatch(/[\r\n]/);
+  it("asks every task that declares milestones to report all of them, from a clean file", () => {
+    // Not just Review: the rail is only as good as the instructions, and a task
+    // given `steps` but no reporting lines shows four chips that never light.
+    const withSteps = [
+      prReviewTask,
+      resolveConflictsTask,
+      fixCiTask,
+      addressPrCommentsTask,
+      applySuggestionTask,
+      runItReviewTask,
+      followUpsTask,
+    ] as { id: string; steps?: readonly TaskStep[] }[];
+    for (const def of withSteps) {
+      expect(def.steps, `${def.id} declares no milestones`).toBeTruthy();
+      const path = `/repo/.canopy/${def.id}-12-progress.txt`;
+      const brief = progressBrief(def as MicroTaskDef<unknown>, {
+        repo: "/repo",
+        pr,
+        path: "a.ts",
+        line: 1,
+        suggestion: "x",
+        threadId: "t",
+      });
+      expect(brief, `${def.id} names no progress file`).toContain(path);
+      // Truncation is what stops a re-run opening at four-of-four done.
+      expect(brief, `${def.id} never truncates`).toContain(`: > ${path}`);
+      // Every step but the tab's own has to be named, or the rail stalls on a
+      // milestone the agent was never told to report.
+      for (const s of (def.steps ?? []).filter((x) => x.owner !== "app"))
+        expect(brief, `${def.id}'s brief never names the "${s.id}" milestone`).toContain(
+          `\`${s.id}\``,
+        );
+      expect(brief, `${def.id}'s brief has a newline in it`).not.toMatch(/[\r\n]/);
+    }
+    // The tab stages the drafts itself, so the agent is never asked to.
+    expect(progressBrief(prReviewTask, { repo: "/repo", pr })).not.toContain("`staged`");
+  });
+
+  it("gives a task with no declared milestones no reporting lines at all", () => {
+    // An ad-hoc brief has no knowable shape. Asking it to report four stages it
+    // was never given would have it inventing them.
+    expect(progressBrief(adhocTaskDef("do a thing"), { dir: "/repo" })).toBe("");
   });
 
   it("treats milestones as a high-water mark, not a set", () => {
