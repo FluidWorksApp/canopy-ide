@@ -7,6 +7,24 @@ import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { useEscape } from "../useEscape";
 import { fileIconUrl } from "./fileIcons";
 import { ChevronIcon } from "./icons";
+import { WindowedList } from "./WindowedList";
+
+/** Must match .tree-row's CSS height — the windowing spacers are the scrollbar. */
+const ROW_H = 26;
+
+/** One paintable line of the tree, in visual order: a root header (when shown)
+ *  or a file/dir row with its nesting depth. Flat rather than recursive so the
+ *  list can be windowed — only rows near the viewport are mounted. */
+type TreeItem =
+  | { kind: "header"; root: string }
+  | {
+      kind: "entry";
+      path: string;
+      name: string;
+      isDir: boolean;
+      parent: string | null;
+      depth: number;
+    };
 
 interface FileTreeProps {
   roots: string[];
@@ -69,7 +87,9 @@ function FolderIcon({ open }: { open: boolean }) {
  *  generic file glyph when a type isn't recognised. */
 function FileIcon({ name }: { name: string }) {
   const url = fileIconUrl(name);
-  return url ? <img className="tree-icon-img" src={url} alt="" draggable={false} /> : null;
+  return url ? (
+    <img className="tree-icon-img" src={url} alt="" draggable={false} />
+  ) : null;
 }
 
 interface GitInfo {
@@ -127,7 +147,8 @@ export function FileTree({
     if (!prompt) return false;
     const name = prompt.value.trim();
     if (!name || name.includes("/")) return false;
-    if (prompt.kind === "rename" && `${prompt.dir}/${name}` === prompt.path) return false;
+    if (prompt.kind === "rename" && `${prompt.dir}/${name}` === prompt.path)
+      return false;
     return true;
   })();
 
@@ -138,10 +159,14 @@ export function FileTree({
     const { kind, path, dir } = prompt;
     setPrompt(null);
     if (kind === "new-file") {
-      void run("Create file", async () => {
-        await ipc.fsCreateFile(target);
-        onOpenFile(target);
-      }, dir);
+      void run(
+        "Create file",
+        async () => {
+          await ipc.fsCreateFile(target);
+          onOpenFile(target);
+        },
+        dir,
+      );
     } else if (kind === "new-dir") {
       void run("Create folder", () => ipc.fsCreateDir(target), dir);
     } else if (path) {
@@ -160,27 +185,46 @@ export function FileTree({
   const [cursor, setCursor] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
-  // Visible rows top-to-bottom — exactly what renderDir paints, flattened so
-  // the arrow keys can index into it. Rebuilt from the same lazy `dirs` state,
-  // so a folder that hasn't been expanded contributes nothing (its children
-  // aren't loaded, and aren't on screen). `parent` powers ArrowLeft's jump-out.
-  const flat = useMemo(() => {
-    const out: { path: string; isDir: boolean; parent: string | null }[] = [];
-    // `parent` is the row a child hangs off — its containing directory, so
-    // ArrowLeft can jump out to it. It's null for a root's direct entries: the
-    // root itself is not a navigable row here (rendered separately, or hidden),
-    // so there's nowhere above them to jump to.
-    const walk = (dirPath: string, parent: string | null) => {
+  // Every visible line top-to-bottom, flattened from the same lazy `dirs`
+  // state — a folder that hasn't been expanded contributes nothing (its
+  // children aren't loaded, and aren't on screen). This is both what the
+  // windowed list paints and what the arrow keys index into. `parent` is the
+  // row a child hangs off — its containing directory, so ArrowLeft can jump
+  // out to it; null for a root's direct entries.
+  const items = useMemo(() => {
+    const out: TreeItem[] = [];
+    const walk = (dirPath: string, parent: string | null, depth: number) => {
       const state = dirs[dirPath];
       if (!state?.expanded || !state.entries) return;
       for (const entry of state.entries) {
-        out.push({ path: entry.path, isDir: entry.is_dir, parent });
-        if (entry.is_dir) walk(entry.path, entry.path);
+        out.push({
+          kind: "entry",
+          path: entry.path,
+          name: entry.name,
+          isDir: entry.is_dir,
+          parent,
+          depth,
+        });
+        if (entry.is_dir) walk(entry.path, entry.path, depth + 1);
       }
     };
-    for (const root of roots) walk(root, null);
+    for (const root of roots) {
+      if (!hideRootHeader) out.push({ kind: "header", root });
+      walk(root, null, hideRootHeader ? 0 : 1);
+    }
     return out;
-  }, [dirs, roots]);
+  }, [dirs, roots, hideRootHeader]);
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  /** Navigable rows only — headers aren't part of the keyboard cursor cycle. */
+  const flat = useMemo(
+    () =>
+      items.filter(
+        (i): i is Extract<TreeItem, { kind: "entry" }> => i.kind === "entry",
+      ),
+    [items],
+  );
+  const rowsRef = useRef<HTMLDivElement | null>(null);
 
   const loadGit = useCallback(async (root: string) => {
     try {
@@ -207,9 +251,17 @@ export function FileTree({
         if (info.modified.has(path)) return "git-modified";
         if (isDir && [...info.modified].some((m) => m.startsWith(dirPath)))
           return "git-modified";
-        if (info.untracked.some((u) => path === u || u === dirPath || path.startsWith(u)))
+        if (
+          info.untracked.some(
+            (u) => path === u || u === dirPath || path.startsWith(u),
+          )
+        )
           return "git-new";
-        if (info.ignored.some((i) => path === i || i === dirPath || path.startsWith(i)))
+        if (
+          info.ignored.some(
+            (i) => path === i || i === dirPath || path.startsWith(i),
+          )
+        )
           return "git-ignored";
       }
       return "";
@@ -217,28 +269,34 @@ export function FileTree({
     [git],
   );
 
-  const loadDir = useCallback(async (path: string) => {
-    try {
-      const entries = await (readDir ?? ipc.fsReadDir)(path);
-      setDirs((prev) => ({
-        ...prev,
-        [path]: { entries, expanded: prev[path]?.expanded ?? true },
-      }));
-    } catch {
-      // directory vanished; drop it
-      setDirs((prev) => {
-        const next = { ...prev };
-        delete next[path];
-        return next;
-      });
-    }
-  }, [readDir]);
+  const loadDir = useCallback(
+    async (path: string) => {
+      try {
+        const entries = await (readDir ?? ipc.fsReadDir)(path);
+        setDirs((prev) => ({
+          ...prev,
+          [path]: { entries, expanded: prev[path]?.expanded ?? true },
+        }));
+      } catch {
+        // directory vanished; drop it
+        setDirs((prev) => {
+          const next = { ...prev };
+          delete next[path];
+          return next;
+        });
+      }
+    },
+    [readDir],
+  );
 
   const toggleDir = useCallback(
     (path: string) => {
       const state = dirsRef.current[path];
       if (!state?.entries) {
-        setDirs((prev) => ({ ...prev, [path]: { entries: null, expanded: true } }));
+        setDirs((prev) => ({
+          ...prev,
+          [path]: { entries: null, expanded: true },
+        }));
         void loadDir(path);
       } else {
         setDirs((prev) => ({
@@ -261,20 +319,30 @@ export function FileTree({
   // So we can't stop at the first `overflow: auto` ancestor; we must find one
   // that is genuinely scrollable (scrollHeight > clientHeight).
   const reveal = useCallback((path: string) => {
-    const list = listRef.current;
-    if (!list) return;
-    const row = list.querySelector<HTMLElement>(`[data-tree-path="${CSS.escape(path)}"]`);
-    if (!row) return;
-    let box: HTMLElement | null = list;
+    const el = rowsRef.current;
+    if (!el) return;
+    // Arithmetic, not a DOM query: a row outside the window isn't mounted, but
+    // its position is fully determined by its index and the fixed row height.
+    const index = itemsRef.current.findIndex(
+      (i) => i.kind === "entry" && i.path === path,
+    );
+    if (index < 0) return;
+    let box: HTMLElement | null = el;
     while (box) {
       const oy = getComputedStyle(box).overflowY;
-      const scrollable = (oy === "auto" || oy === "scroll") && box.scrollHeight > box.clientHeight;
+      const scrollable =
+        (oy === "auto" || oy === "scroll") &&
+        box.scrollHeight > box.clientHeight;
       if (scrollable) break;
       box = box.parentElement;
     }
     if (!box) return;
-    const rowTop = row.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop;
-    const rowBottom = rowTop + row.offsetHeight;
+    const listTop =
+      el.getBoundingClientRect().top -
+      box.getBoundingClientRect().top +
+      box.scrollTop;
+    const rowTop = listTop + index * ROW_H;
+    const rowBottom = rowTop + ROW_H;
     if (rowTop < box.scrollTop) box.scrollTop = rowTop - 4;
     else if (rowBottom > box.scrollTop + box.clientHeight)
       box.scrollTop = rowBottom - box.clientHeight + 4;
@@ -290,7 +358,16 @@ export function FileTree({
 
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      const keys = ["ArrowDown", "ArrowUp", "ArrowRight", "ArrowLeft", "Home", "End", "Enter", " "];
+      const keys = [
+        "ArrowDown",
+        "ArrowUp",
+        "ArrowRight",
+        "ArrowLeft",
+        "Home",
+        "End",
+        "Enter",
+        " ",
+      ];
       if (!keys.includes(e.key)) return;
       // Both: preventDefault stops the panel scrolling, stopPropagation keeps
       // the app-level key handlers (tab cycling, etc.) out of it while the tree
@@ -302,7 +379,8 @@ export function FileTree({
       const i = flat.findIndex((r) => r.path === cursor);
       const cur = i >= 0 ? flat[i] : null;
 
-      if (e.key === "ArrowDown") return moveCursor(flat[Math.min(flat.length - 1, i + 1)].path);
+      if (e.key === "ArrowDown")
+        return moveCursor(flat[Math.min(flat.length - 1, i + 1)].path);
       if (e.key === "ArrowUp") return moveCursor(flat[i <= 0 ? 0 : i - 1].path);
       if (e.key === "Home") return moveCursor(flat[0].path);
       if (e.key === "End") return moveCursor(flat[flat.length - 1].path);
@@ -313,7 +391,8 @@ export function FileTree({
 
       if (e.key === "ArrowRight") {
         if (cur.isDir && !open) toggleDir(cur.path);
-        else if (open && state?.entries?.length) moveCursor(state.entries[0].path);
+        else if (open && state?.entries?.length)
+          moveCursor(state.entries[0].path);
         return;
       }
       if (e.key === "ArrowLeft") {
@@ -367,7 +446,11 @@ export function FileTree({
 
   const parentOf = (p: string) => p.slice(0, p.lastIndexOf("/")) || "/";
 
-  const run = async (label: string, fn: () => Promise<unknown>, refreshDir: string) => {
+  const run = async (
+    label: string,
+    fn: () => Promise<unknown>,
+    refreshDir: string,
+  ) => {
     try {
       await fn();
       await loadDir(refreshDir);
@@ -390,11 +473,13 @@ export function FileTree({
       { separator: true, label: "" },
       {
         label: "Rename…",
-        onClick: () => setPrompt({ kind: "rename", dir: parentOf(path), value: name, path }),
+        onClick: () =>
+          setPrompt({ kind: "rename", dir: parentOf(path), value: name, path }),
       },
       {
         label: "Duplicate",
-        onClick: () => void run("Duplicate", () => ipc.fsDuplicate(path), parentOf(path)),
+        onClick: () =>
+          void run("Duplicate", () => ipc.fsDuplicate(path), parentOf(path)),
       },
       { separator: true, label: "" },
       {
@@ -412,9 +497,12 @@ export function FileTree({
       },
       {
         label: "Reveal in Finder",
-        onClick: () => void ipc.fsReveal(path).catch((e) => onNotice?.(String(e))),
+        onClick: () =>
+          void ipc.fsReveal(path).catch((e) => onNotice?.(String(e))),
       },
-      ...(taskMenuFor ? [{ separator: true, label: "" }, taskMenuFor(path)] : []),
+      ...(taskMenuFor
+        ? [{ separator: true, label: "" }, taskMenuFor(path)]
+        : []),
       { separator: true, label: "" },
       {
         // Trash, not unlink: recoverable if it was a misclick, and uncommitted
@@ -428,56 +516,99 @@ export function FileTree({
 
   /** Right-clicking blank space acts on the directory you are looking at. */
   const emptyItems = (dir: string): MenuItem[] => [
-    { label: "New File…", onClick: () => setPrompt({ kind: "new-file", dir, value: "" }) },
-    { label: "New Folder…", onClick: () => setPrompt({ kind: "new-dir", dir, value: "" }) },
+    {
+      label: "New File…",
+      onClick: () => setPrompt({ kind: "new-file", dir, value: "" }),
+    },
+    {
+      label: "New Folder…",
+      onClick: () => setPrompt({ kind: "new-dir", dir, value: "" }),
+    },
     ...(taskMenuFor ? [taskMenuFor(dir)] : []),
     { separator: true, label: "" },
-    { label: "Reveal in Finder", onClick: () => void ipc.fsReveal(dir).catch(() => {}) },
+    {
+      label: "Reveal in Finder",
+      onClick: () => void ipc.fsReveal(dir).catch(() => {}),
+    },
     { label: "Refresh", onClick: () => void loadDir(dir) },
   ];
 
-  const renderDir = (path: string, depth: number) => {
-    const state = dirs[path];
-    if (!state?.expanded || !state.entries) return null;
-    return state.entries.map((entry) => {
-      const expanded = dirs[entry.path]?.expanded ?? false;
+  const renderItem = (item: TreeItem) => {
+    if (item.kind === "header") {
       return (
-        <div key={entry.path} className={depth > 0 ? "tree-indent" : undefined}>
-          <div
-            data-tree-path={entry.path}
-            id={rowId(entry.path)}
-            role="treeitem"
-            aria-selected={entry.path === cursor}
-            aria-expanded={entry.is_dir ? expanded : undefined}
-            className={`tree-row ${changedPaths.has(entry.path) ? "tree-changed" : ""} ${
-              !entry.is_dir && entry.path === selectedPath ? "tree-row-selected" : ""
-            } ${entry.path === cursor ? "tree-row-cursor" : ""} ${gitClass(entry.path, entry.is_dir)}`}
-            onClick={() => {
-              // Keep mouse and keyboard in agreement: a click parks the cursor
-              // where you clicked, so arrowing continues from there.
-              setCursor(entry.path);
-              if (entry.is_dir) toggleDir(entry.path);
-              else onOpenFile(entry.path);
-            }}
-            onContextMenu={(e) => {
-              if (!readOnly) open(e, itemsFor(entry.path, entry.is_dir, entry.name));
+        <div
+          key={`header:${item.root}`}
+          className="tree-root-header"
+          onClick={() => toggleDir(item.root)}
+        >
+          <span className="tree-icon">
+            {dirs[item.root]?.expanded ? "▾" : "▸"}
+          </span>
+          <span className="tree-root-name" title={item.root}>
+            {item.root.split("/").pop()}
+          </span>
+          <button
+            className="btn-icon"
+            title="Remove from workspace"
+            onClick={(e) => {
+              e.stopPropagation();
+              onRemoveRoot?.(item.root);
             }}
           >
-            <span className={`tree-chevron ${entry.is_dir && expanded ? "tree-chevron-open" : ""}`}>
-              {entry.is_dir ? <ChevronIcon /> : null}
-            </span>
-            <span className="tree-file-icon">
-              {entry.is_dir ? <FolderIcon open={expanded} /> : <FileIcon name={entry.name} />}
-            </span>
-            <span className={entry.is_dir ? "tree-dir" : "tree-file"}>{entry.name}</span>
-            {changedPaths.has(entry.path) && !entry.is_dir && (
-              <span className="tree-changed-dot" aria-hidden />
-            )}
-          </div>
-          {entry.is_dir && renderDir(entry.path, depth + 1)}
+            ✕
+          </button>
         </div>
       );
-    });
+    }
+    const expanded = dirs[item.path]?.expanded ?? false;
+    return (
+      <div
+        key={item.path}
+        data-tree-path={item.path}
+        id={rowId(item.path)}
+        role="treeitem"
+        aria-selected={item.path === cursor}
+        aria-expanded={item.isDir ? expanded : undefined}
+        className={`tree-row ${changedPaths.has(item.path) ? "tree-changed" : ""} ${
+          !item.isDir && item.path === selectedPath ? "tree-row-selected" : ""
+        } ${item.path === cursor ? "tree-row-cursor" : ""} ${gitClass(item.path, item.isDir)}`}
+        onClick={() => {
+          // Keep mouse and keyboard in agreement: a click parks the cursor
+          // where you clicked, so arrowing continues from there.
+          setCursor(item.path);
+          if (item.isDir) toggleDir(item.path);
+          else onOpenFile(item.path);
+        }}
+        onContextMenu={(e) => {
+          if (!readOnly) open(e, itemsFor(item.path, item.isDir, item.name));
+        }}
+      >
+        {/* Ancestor guides, one per level — rows are flat siblings now (the
+            windowing needs that), so each row draws its own slice of the
+            hairlines the nested wrappers used to provide. */}
+        {Array.from({ length: item.depth }, (_, d) => (
+          <span key={d} className="tree-guide" aria-hidden />
+        ))}
+        <span
+          className={`tree-chevron ${item.isDir && expanded ? "tree-chevron-open" : ""}`}
+        >
+          {item.isDir ? <ChevronIcon /> : null}
+        </span>
+        <span className="tree-file-icon">
+          {item.isDir ? (
+            <FolderIcon open={expanded} />
+          ) : (
+            <FileIcon name={item.name} />
+          )}
+        </span>
+        <span className={item.isDir ? "tree-dir" : "tree-file"}>
+          {item.name}
+        </span>
+        {changedPaths.has(item.path) && !item.isDir && (
+          <span className="tree-changed-dot" aria-hidden />
+        )}
+      </div>
+    );
   };
 
   return (
@@ -502,12 +633,17 @@ export function FileTree({
       // several "cursors" appeared at once. Ignore blurs into our own descendants
       // (the rename prompt input, the context menu) — those aren't leaving.
       onBlur={(e) => {
-        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setCursor(null);
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null))
+          setCursor(null);
       }}
       // Blank space below the tree still belongs to the first root.
-      onContextMenu={(e) => !readOnly && roots[0] && open(e, emptyItems(roots[0]))}
+      onContextMenu={(e) =>
+        !readOnly && roots[0] && open(e, emptyItems(roots[0]))
+      }
     >
-      {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={close} />}
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={close} />
+      )}
 
       {prompt && (
         <div className="confirm-backdrop" onMouseDown={() => setPrompt(null)}>
@@ -531,17 +667,27 @@ export function FileTree({
               className="git-branch-input"
               ref={promptInput}
               value={prompt.value}
-              placeholder={prompt.kind === "new-dir" ? "folder name" : "name.ext"}
+              placeholder={
+                prompt.kind === "new-dir" ? "folder name" : "name.ext"
+              }
               onChange={(e) => setPrompt({ ...prompt, value: e.target.value })}
               onKeyDown={(e) => {
                 if (e.key === "Escape") setPrompt(null);
               }}
             />
             <div className="confirm-actions">
-              <button type="button" className="btn" onClick={() => setPrompt(null)}>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setPrompt(null)}
+              >
                 Cancel
               </button>
-              <button type="submit" className="btn btn-accent" disabled={!promptReady}>
+              <button
+                type="submit"
+                className="btn btn-accent"
+                disabled={!promptReady}
+              >
                 {prompt.kind === "rename" ? "Rename" : "Create"}
               </button>
             </div>
@@ -550,7 +696,10 @@ export function FileTree({
       )}
 
       {confirmDelete && (
-        <div className="confirm-backdrop" onMouseDown={() => setConfirmDelete(null)}>
+        <div
+          className="confirm-backdrop"
+          onMouseDown={() => setConfirmDelete(null)}
+        >
           <div className="confirm" onMouseDown={(e) => e.stopPropagation()}>
             <p>
               Move <strong>{confirmDelete.name}</strong> to the Trash?
@@ -569,7 +718,11 @@ export function FileTree({
                 onClick={() => {
                   const { path } = confirmDelete;
                   setConfirmDelete(null);
-                  void run("Delete", () => ipc.fsTrash(path), path.slice(0, path.lastIndexOf("/")));
+                  void run(
+                    "Delete",
+                    () => ipc.fsTrash(path),
+                    path.slice(0, path.lastIndexOf("/")),
+                  );
                 }}
               >
                 Move to Trash
@@ -579,29 +732,12 @@ export function FileTree({
         </div>
       )}
 
-      {roots.map((root) => (
-        <div key={root} className="tree-root">
-          {!hideRootHeader && (
-            <div className="tree-root-header" onClick={() => toggleDir(root)}>
-              <span className="tree-icon">{dirs[root]?.expanded ? "▾" : "▸"}</span>
-              <span className="tree-root-name" title={root}>
-                {root.split("/").pop()}
-              </span>
-              <button
-                className="btn-icon"
-                title="Remove from workspace"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onRemoveRoot?.(root);
-                }}
-              >
-                ✕
-              </button>
-            </div>
-          )}
-          {renderDir(root, hideRootHeader ? 0 : 1)}
-        </div>
-      ))}
+      <WindowedList
+        items={items}
+        rowHeight={ROW_H}
+        innerRef={rowsRef}
+        renderRow={renderItem}
+      />
       {roots.length === 0 && !hideRootHeader && (
         <div className="tree-empty">No folder open. Use “Open Folder…”</div>
       )}

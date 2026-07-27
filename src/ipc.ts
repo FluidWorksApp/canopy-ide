@@ -35,7 +35,11 @@ export async function ptySpawn(
   // Raw channel payloads arrive as ArrayBuffer for large chunks but as plain
   // number[] below Tauri's internal direct-execute threshold — handle both.
   channel.onmessage = (data) =>
-    onData(data instanceof ArrayBuffer ? new Uint8Array(data) : Uint8Array.from(data));
+    onData(
+      data instanceof ArrayBuffer
+        ? new Uint8Array(data)
+        : Uint8Array.from(data),
+    );
   return invoke("pty_spawn", { ...opts, onData: channel });
 }
 
@@ -87,7 +91,11 @@ export async function ptyAttach(
 ): Promise<PtyGeometry> {
   const channel = new Channel<ArrayBuffer | number[]>();
   channel.onmessage = (data) =>
-    onData(data instanceof ArrayBuffer ? new Uint8Array(data) : Uint8Array.from(data));
+    onData(
+      data instanceof ArrayBuffer
+        ? new Uint8Array(data)
+        : Uint8Array.from(data),
+    );
   return invoke("pty_attach", { id, onData: channel });
 }
 
@@ -107,7 +115,9 @@ export interface PtySpawned {
   cols: number;
   rows: number;
 }
-export const onPtySpawned = (cb: (e: PtySpawned) => void): Promise<UnlistenFn> =>
+export const onPtySpawned = (
+  cb: (e: PtySpawned) => void,
+): Promise<UnlistenFn> =>
   listen<PtySpawned>("pty:spawned", (event) => cb(event.payload));
 
 /** An action an agent requested through the MCP context bridge (start a run
@@ -137,7 +147,9 @@ export interface AgentAction {
   status?: "done" | "blocked";
   summary?: string;
 }
-export const onAgentAction = (cb: (a: AgentAction) => void): Promise<UnlistenFn> =>
+export const onAgentAction = (
+  cb: (a: AgentAction) => void,
+): Promise<UnlistenFn> =>
   listen<AgentAction>("agent:action", (event) => cb(event.payload));
 
 /** A browser-control op an agent sent through the MCP bridge (canopy_browser_*).
@@ -145,7 +157,15 @@ export const onAgentAction = (cb: (a: AgentAction) => void): Promise<UnlistenFn>
  *  until the answer comes back via `browserResult`. Routed like AgentAction. */
 export interface AgentBrowserOp {
   id: number;
-  op: "navigate" | "snapshot" | "click" | "type" | "point" | "eval" | "console" | "screenshot";
+  op:
+    | "navigate"
+    | "snapshot"
+    | "click"
+    | "type"
+    | "point"
+    | "eval"
+    | "console"
+    | "screenshot";
   route: string;
   url?: string | null;
   action?: string | null;
@@ -161,22 +181,27 @@ export interface AgentBrowserOp {
   clear?: boolean | null;
   max?: number | null;
 }
-export const onAgentBrowser = (cb: (op: AgentBrowserOp) => void): Promise<UnlistenFn> =>
+export const onAgentBrowser = (
+  cb: (op: AgentBrowserOp) => void,
+): Promise<UnlistenFn> =>
   listen<AgentBrowserOp>("agent:browser", (event) => cb(event.payload));
 /** Answer a browser op: `data` (any JSON value) becomes the tool's result. */
 export const browserResult = (id: number, ok: boolean, data: unknown) =>
   // Never rejects: a dropped answer would leave the agent's tool call hanging
   // to its timeout with no trace of why, so failures are logged, not thrown.
-  invoke<void>("browser_result", { id, ok, data: JSON.stringify(data ?? null) }).catch((err) =>
-    console.warn("browser_result failed", id, err),
-  );
+  invoke<void>("browser_result", {
+    id,
+    ok,
+    data: JSON.stringify(data ?? null),
+  }).catch((err) => console.warn("browser_result failed", id, err));
 
 /** An op only the running UI can answer: a language-server question, the
  *  trackers it holds keys for, a question for the user. Same ticketing as
  *  AgentBrowserOp — answer with `browserResult`. */
 export interface AgentUiOp {
   id: number;
-  op: "diagnostics" | "references" | "definition" | "tickets" | "reviews" | "ask";
+  op:
+    "diagnostics" | "references" | "definition" | "tickets" | "reviews" | "ask";
   route: string;
   path?: string | null;
   line?: number | null;
@@ -234,11 +259,16 @@ export const fsReadDir = (path: string) =>
 export const fsWriteFile = (path: string, content: string) =>
   invoke<void>("fs_write_file", { path, content });
 export const fsStat = (path: string) =>
-  invoke<{ is_dir: boolean; size: number; modified_ms: number | null }>("fs_stat", { path });
+  invoke<{ is_dir: boolean; size: number; modified_ms: number | null }>(
+    "fs_stat",
+    { path },
+  );
 
 export async function fsReadFile(path: string): Promise<Uint8Array> {
   const data = await invoke<ArrayBuffer | number[]>("fs_read_file", { path });
-  return data instanceof ArrayBuffer ? new Uint8Array(data) : Uint8Array.from(data);
+  return data instanceof ArrayBuffer
+    ? new Uint8Array(data)
+    : Uint8Array.from(data);
 }
 
 const textDecoder = new TextDecoder();
@@ -281,8 +311,11 @@ export const instructionsScan = (roots: string[]) =>
 export const instructionsRead = (path: string, roots: string[]) =>
   invoke<string>("instructions_read", { path, roots });
 
-export const instructionsWrite = (path: string, roots: string[], content: string) =>
-  invoke<void>("instructions_write", { path, roots, content });
+export const instructionsWrite = (
+  path: string,
+  roots: string[],
+  content: string,
+) => invoke<void>("instructions_write", { path, roots, content });
 
 export interface GitStatusResult {
   is_repo: boolean;
@@ -304,19 +337,22 @@ export const fsSearch = (roots: string[], query: string, limit?: number) =>
 
 // ---------- file management ----------
 
-export const fsCreateFile = (path: string) => invoke<string>("fs_create_file", { path });
-export const fsCreateDir = (path: string) => invoke<string>("fs_create_dir", { path });
-export const fsRename = (from: string, to: string) => invoke<string>("fs_rename", { from, to });
+export const fsCreateFile = (path: string) =>
+  invoke<string>("fs_create_file", { path });
+export const fsCreateDir = (path: string) =>
+  invoke<string>("fs_create_dir", { path });
+export const fsRename = (from: string, to: string) =>
+  invoke<string>("fs_rename", { from, to });
 /** Moves to the OS trash — recoverable, unlike an unlink. */
 export const fsTrash = (path: string) => invoke<void>("fs_trash", { path });
 export const fsReveal = (path: string) => invoke<void>("fs_reveal", { path });
-export const fsDuplicate = (path: string) => invoke<string>("fs_duplicate", { path });
+export const fsDuplicate = (path: string) =>
+  invoke<string>("fs_duplicate", { path });
 
 export const gitStatus = (path: string) =>
   invoke<GitStatusResult>("git_status", { path });
 export const gitHeadContent = (path: string) =>
   invoke<string | null>("git_head_content", { path });
-
 
 export interface ClaudeSessionStats {
   model: string | null;
@@ -379,7 +415,8 @@ export interface PreviewInfo {
 /** Start (or reuse) the annotating reverse proxy for a target origin. */
 export const previewStart = (target: string) =>
   invoke<PreviewInfo>("preview_start", { target });
-export const previewStop = (origin: string) => invoke<void>("preview_stop", { origin });
+export const previewStop = (origin: string) =>
+  invoke<void>("preview_stop", { origin });
 
 // ---------- LSP ----------
 
@@ -436,7 +473,9 @@ export interface SessionStats {
   /** Absent when the terminal is an idle shell. */
   agent_hint: AgentHint | null;
 }
-export const onPtyStats = (cb: (stats: SessionStats[]) => void): Promise<UnlistenFn> =>
+export const onPtyStats = (
+  cb: (stats: SessionStats[]) => void,
+): Promise<UnlistenFn> =>
   listen<SessionStats[]>("pty:stats", (event) => cb(event.payload));
 
 export interface AppStats {
@@ -449,7 +488,8 @@ export interface AppStats {
 export const onAppStats = (cb: (s: AppStats) => void): Promise<UnlistenFn> =>
   listen<AppStats>("app:stats", (e) => cb(e.payload));
 
-export const killProcess = (pid: number) => invoke<void>("kill_process", { pid });
+export const killProcess = (pid: number) =>
+  invoke<void>("kill_process", { pid });
 export const hookBridgePath = () => invoke<string | null>("hook_bridge_path");
 /** Whether our hooks are already written into an agent CLI's config — lets the
  *  panel tell "not set up" (offer setup) from "set up, but the agent predates
@@ -497,15 +537,22 @@ export const agentIntegrationHealth = () =>
 /** The launch's integration report if the pass has already finished. It runs
  *  before the webview does, so the event below can fire with nobody listening —
  *  ask for this on mount and take whichever arrives first. */
-export const agentHealthReport = () => invoke<HealthReport | null>("agent_health_report");
+export const agentHealthReport = () =>
+  invoke<HealthReport | null>("agent_health_report");
 /** What the launch's integration pass found and did. Emitted once per start. */
-export const onIntegrationHealth = (cb: (r: HealthReport) => void): Promise<UnlistenFn> =>
+export const onIntegrationHealth = (
+  cb: (r: HealthReport) => void,
+): Promise<UnlistenFn> =>
   listen<HealthReport>("agents:health", (e) => cb(e.payload));
 /** This app launch's instance tag — pair with SessionDigest.instance so a
  *  digest from another instance/run can't bind to this instance's terminals. */
 export const instanceId = () => invoke<string>("instance_id");
-export const onAgentEvent = (cb: (line: string) => void): Promise<UnlistenFn> =>
-  listen<string>("agent:event", (event) => cb(event.payload));
+/** One batch per hook-bridge poll (500ms): every new JSONL line since the
+ *  last, so a busy agent costs one React commit per window, not one per line. */
+export const onAgentEvents = (
+  cb: (lines: string[]) => void,
+): Promise<UnlistenFn> =>
+  listen<string[]>("agent:events", (event) => cb(event.payload));
 
 // ---------- git ----------
 
@@ -561,8 +608,10 @@ export interface CommitInfo {
 
 export const gitRepos = (components: [string, string][]) =>
   invoke<RepoInfo[]>("git_repos", { components });
-export const gitRepoStatus = (repo: string) => invoke<RepoStatus>("git_repo_status", { repo });
-export const gitBranches = (repo: string) => invoke<BranchInfo[]>("git_branches", { repo });
+export const gitRepoStatus = (repo: string) =>
+  invoke<RepoStatus>("git_repo_status", { repo });
+export const gitBranches = (repo: string) =>
+  invoke<BranchInfo[]>("git_branches", { repo });
 export const gitCheckout = (repo: string, branch: string, create = false) =>
   invoke<string>("git_checkout", { repo, branch, create });
 /** Delete a local branch. `force` (git -D) is needed for a squash-merged branch
@@ -581,8 +630,11 @@ export const gitUnstage = (repo: string, paths: string[]) =>
   invoke<void>("git_unstage", { repo, paths });
 /** Throw away changes: tracked paths are restored from HEAD (staged or not),
  *  untracked ones are deleted. Unrecoverable — confirm before calling. */
-export const gitDiscard = (repo: string, tracked: string[], untracked: string[]) =>
-  invoke<void>("git_discard", { repo, tracked, untracked });
+export const gitDiscard = (
+  repo: string,
+  tracked: string[],
+  untracked: string[],
+) => invoke<void>("git_discard", { repo, tracked, untracked });
 export const gitCommit = (repo: string, message: string, amend = false) =>
   invoke<string>("git_commit", { repo, message, amend });
 export const gitFetch = (repo: string) => invoke<string>("git_fetch", { repo });
@@ -700,11 +752,19 @@ export const gitBranchPatch = (
   branch: string,
   worktree: string | null,
   uncommitted: boolean,
-) => invoke<CommitPatch>("git_branch_patch", { repo, branch, worktree, uncommitted });
+) =>
+  invoke<CommitPatch>("git_branch_patch", {
+    repo,
+    branch,
+    worktree,
+    uncommitted,
+  });
 
-export const gitRemoteUrl = (repo: string) => invoke<string>("git_remote_url", { repo });
+export const gitRemoteUrl = (repo: string) =>
+  invoke<string>("git_remote_url", { repo });
 
-export const gitWorkAudit = (repo: string) => invoke<WorkAudit>("git_work_audit", { repo });
+export const gitWorkAudit = (repo: string) =>
+  invoke<WorkAudit>("git_work_audit", { repo });
 
 /** One agent session's work joined against git — metadata only; patches come
  *  from gitBranchPatch and the PR match from ghPrList. */
@@ -746,7 +806,8 @@ export const agentWorkspaceAt = (
   cwd: string,
   agent?: string,
   sessionId?: string,
-) => invoke<AgentWorkspace>("agent_workspace_at", { repo, cwd, agent, sessionId });
+) =>
+  invoke<AgentWorkspace>("agent_workspace_at", { repo, cwd, agent, sessionId });
 
 /** One edit the agent authored, from its change journal. `present` = the `new`
  *  text is still in the file (a later edit by anyone supersedes it). */
@@ -765,17 +826,28 @@ export interface AgentEdit {
 export const agentEdits = (repo: string | null, sessionId: string) =>
   invoke<AgentEdit[]>("agent_edits", { repo, sessionId });
 
-export const gitWorktrees = (repo: string) => invoke<WorktreeInfo[]>("git_worktrees", { repo });
-export const gitWorktreeAdd = (repo: string, path: string, branch: string, create: boolean) =>
-  invoke<string>("git_worktree_add", { repo, path, branch, create });
-export const gitWorktreeAddPr = (repo: string, path: string, number: number, branch: string) =>
-  invoke<string>("git_worktree_add_pr", { repo, path, number, branch });
+export const gitWorktrees = (repo: string) =>
+  invoke<WorktreeInfo[]>("git_worktrees", { repo });
+export const gitWorktreeAdd = (
+  repo: string,
+  path: string,
+  branch: string,
+  create: boolean,
+) => invoke<string>("git_worktree_add", { repo, path, branch, create });
+export const gitWorktreeAddPr = (
+  repo: string,
+  path: string,
+  number: number,
+  branch: string,
+) => invoke<string>("git_worktree_add_pr", { repo, path, number, branch });
 export const gitWorktreeRemove = (repo: string, path: string, force: boolean) =>
   invoke<string>("git_worktree_remove", { repo, path, force });
-export const gitWorktreePrune = (repo: string) => invoke<string>("git_worktree_prune", { repo });
+export const gitWorktreePrune = (repo: string) =>
+  invoke<string>("git_worktree_prune", { repo });
 
 export const ghAvailable = () => invoke<boolean>("gh_available");
-export const ghPrList = (repo: string) => invoke<PrInfo[]>("gh_pr_list", { repo });
+export const ghPrList = (repo: string) =>
+  invoke<PrInfo[]>("gh_pr_list", { repo });
 export const ghPrDiff = (repo: string, number: number) =>
   invoke<string>("gh_pr_diff", { repo, number });
 export const ghPrBody = (repo: string, number: number) =>
@@ -873,10 +945,17 @@ export const ghPrConversation = (repo: string, number: number) =>
   invoke<PrConversation>("gh_pr_conversation", { repo, number });
 export const ghPrThreadReply = (repo: string, threadId: string, body: string) =>
   invoke<string>("gh_pr_thread_reply", { repo, threadId, body });
-export const ghPrThreadResolved = (repo: string, threadId: string, resolved: boolean) =>
-  invoke<string>("gh_pr_thread_resolved", { repo, threadId, resolved });
-export const ghPrFileViewed = (repo: string, prId: string, path: string, viewed: boolean) =>
-  invoke<void>("gh_pr_file_viewed", { repo, prId, path, viewed });
+export const ghPrThreadResolved = (
+  repo: string,
+  threadId: string,
+  resolved: boolean,
+) => invoke<string>("gh_pr_thread_resolved", { repo, threadId, resolved });
+export const ghPrFileViewed = (
+  repo: string,
+  prId: string,
+  path: string,
+  viewed: boolean,
+) => invoke<void>("gh_pr_file_viewed", { repo, prId, path, viewed });
 /** Submit a review and all its inline comments as one review. */
 export const ghPrReviewBatch = (
   repo: string,
@@ -887,8 +966,11 @@ export const ghPrReviewBatch = (
 ) => invoke<string>("gh_pr_review_batch", { repo, prId, event, body, threads });
 export const ghPrUpdateBranch = (repo: string, number: number) =>
   invoke<string>("gh_pr_update_branch", { repo, number });
-export const ghPrRequestReview = (repo: string, number: number, reviewers: string[]) =>
-  invoke<string>("gh_pr_request_review", { repo, number, reviewers });
+export const ghPrRequestReview = (
+  repo: string,
+  number: number,
+  reviewers: string[],
+) => invoke<string>("gh_pr_request_review", { repo, number, reviewers });
 export const ghPrAutoMerge = (
   repo: string,
   number: number,
@@ -960,7 +1042,9 @@ export const prWatchSet = (paths: string[], focused: boolean) =>
 /** Wake the poller (the panel's ↻). Never runs a pass of its own. */
 export const prWatchNow = () => invoke<void>("pr_watch_now");
 /** A repo's rows changed. Unchanged repos emit nothing at all. */
-export const onPrSnapshot = (cb: (s: PrSnapshot) => void): Promise<UnlistenFn> =>
+export const onPrSnapshot = (
+  cb: (s: PrSnapshot) => void,
+): Promise<UnlistenFn> =>
   listen<PrSnapshot>("prs:snapshot", (e) => cb(e.payload));
 export const onPrTick = (cb: (t: PrTick) => void): Promise<UnlistenFn> =>
   listen<PrTick>("prs:tick", (e) => cb(e.payload));
@@ -1084,10 +1168,14 @@ export interface RelayCommandMsg {
 }
 
 export const relayStatus = () => invoke<RelayStatus>("relay_status");
-export const relayHostStart = (name: string, visibility: "local" | "public", port?: number) =>
-  invoke<RelayStatus>("relay_host_start", { name, visibility, port });
+export const relayHostStart = (
+  name: string,
+  visibility: "local" | "public",
+  port?: number,
+) => invoke<RelayStatus>("relay_host_start", { name, visibility, port });
 export const relayHostStop = () => invoke<RelayStatus>("relay_host_stop");
-export const relayRegenerateCode = () => invoke<RelayStatus>("relay_regenerate_code");
+export const relayRegenerateCode = () =>
+  invoke<RelayStatus>("relay_regenerate_code");
 export const relayConnect = (addr: string, code: string, name: string) =>
   invoke<RelayStatus>("relay_connect", { addr, code, name });
 export const relayDisconnect = () => invoke<RelayStatus>("relay_disconnect");
@@ -1115,7 +1203,8 @@ export const remoteRotatePin = () => invoke<RemoteStatus>("remote_rotate_pin");
 export const remoteSetTheme = (theme: Record<string, string>) =>
   invoke<void>("remote_set_theme", { theme });
 /** A QR SVG for any URL (LAN address or the active tunnel URL). */
-export const remoteQr = (text: string) => invoke<string | null>("remote_qr", { text });
+export const remoteQr = (text: string) =>
+  invoke<string | null>("remote_qr", { text });
 
 /** Public-link tunnel (Cloudflare / ngrok / Tailscale). Exposes the portal to
  *  the internet so it loads from any browser without router config. */
@@ -1129,7 +1218,9 @@ export const tunnelStart = (provider: string, port: number, token?: string) =>
   invoke<TunnelState>("tunnel_start", { provider, port, token });
 export const tunnelStop = () => invoke<TunnelState>("tunnel_stop");
 export const tunnelStatus = () => invoke<TunnelState>("tunnel_status");
-export const onTunnelState = (cb: (s: TunnelState) => void): Promise<UnlistenFn> =>
+export const onTunnelState = (
+  cb: (s: TunnelState) => void,
+): Promise<UnlistenFn> =>
   listen<TunnelState>("tunnel:state", (e) => cb(e.payload));
 
 /** Which of these commands are installed (login-shell PATH). */
@@ -1139,14 +1230,23 @@ export const whichCheck = (commands: string[]) =>
  *  never echoes a frame back to its author. */
 export const relaySendChat = (to: string | null, text: string) =>
   invoke<RelayChatMsg>("relay_send_chat", { to, text });
-export const relaySendCommand = (to: string | null, kind: string, payload: unknown) =>
-  invoke<RelayCommandMsg>("relay_send_command", { to, kind, payload });
+export const relaySendCommand = (
+  to: string | null,
+  kind: string,
+  payload: unknown,
+) => invoke<RelayCommandMsg>("relay_send_command", { to, kind, payload });
 
-export const onRelayState = (cb: (s: RelayStatus) => void): Promise<UnlistenFn> =>
+export const onRelayState = (
+  cb: (s: RelayStatus) => void,
+): Promise<UnlistenFn> =>
   listen<RelayStatus>("relay:state", (e) => cb(e.payload));
-export const onRelayChat = (cb: (m: RelayChatMsg) => void): Promise<UnlistenFn> =>
+export const onRelayChat = (
+  cb: (m: RelayChatMsg) => void,
+): Promise<UnlistenFn> =>
   listen<RelayChatMsg>("relay:chat", (e) => cb(e.payload));
-export const onRelayCommand = (cb: (m: RelayCommandMsg) => void): Promise<UnlistenFn> =>
+export const onRelayCommand = (
+  cb: (m: RelayCommandMsg) => void,
+): Promise<UnlistenFn> =>
   listen<RelayCommandMsg>("relay:command", (e) => cb(e.payload));
 
 /** Live collaborative editing. `doc` is an opaque id minted by the sharer; the
@@ -1200,14 +1300,21 @@ export interface RelayTransferProgress {
  *  relay:transfer event. */
 export const relayOfferFile = (to: string, path: string) =>
   invoke<void>("relay_offer_file", { to, path });
-export const relayAcceptFile = (offer: RelayFileOffer, dest: string, from?: string | null) =>
-  invoke<void>("relay_accept_file", { ...offer, dest, from: from ?? null });
-export const onRelayTransfer = (cb: (e: RelayTransferEvent) => void): Promise<UnlistenFn> =>
+export const relayAcceptFile = (
+  offer: RelayFileOffer,
+  dest: string,
+  from?: string | null,
+) => invoke<void>("relay_accept_file", { ...offer, dest, from: from ?? null });
+export const onRelayTransfer = (
+  cb: (e: RelayTransferEvent) => void,
+): Promise<UnlistenFn> =>
   listen<RelayTransferEvent>("relay:transfer", (e) => cb(e.payload));
 export const onRelayTransferProgress = (
   cb: (e: RelayTransferProgress) => void,
 ): Promise<UnlistenFn> =>
-  listen<RelayTransferProgress>("relay:transfer-progress", (e) => cb(e.payload));
+  listen<RelayTransferProgress>("relay:transfer-progress", (e) =>
+    cb(e.payload),
+  );
 
 // ---------- issue trackers ----------
 
@@ -1237,7 +1344,8 @@ export interface GhAuth {
 
 export const ghAuth = () => invoke<GhAuth>("gh_auth");
 
-export const ghIssueList = (repo: string) => invoke<TicketInfo[]>("gh_issue_list", { repo });
+export const ghIssueList = (repo: string) =>
+  invoke<TicketInfo[]>("gh_issue_list", { repo });
 export const linearIssues = (apiKey: string) =>
   invoke<TicketInfo[]>("linear_issues", { apiKey });
 
@@ -1270,8 +1378,10 @@ export interface DictationProgress {
   message: string | null;
 }
 
-export const dictationModels = () => invoke<DictationModel[]>("dictation_models");
-export const dictationStatus = () => invoke<DictationStatus>("dictation_status");
+export const dictationModels = () =>
+  invoke<DictationModel[]>("dictation_models");
+export const dictationStatus = () =>
+  invoke<DictationStatus>("dictation_status");
 export const dictationDownload = (modelId: string) =>
   invoke<void>("dictation_download", { modelId });
 export const dictationDeleteModel = (modelId: string) =>

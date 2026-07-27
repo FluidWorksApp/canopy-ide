@@ -2206,7 +2206,10 @@ body,
 .tree-root-header {
   display: flex;
   align-items: center;
-  padding: 4px 8px;
+  /* Fixed to the tree row height: headers ride in the same windowed list as
+     the rows, and the spacer math needs every line at one height. */
+  height: 26px;
+  padding: 0 8px;
   font-weight: 600;
   cursor: pointer;
   color: var(--text);
@@ -2286,26 +2289,17 @@ body,
   flex: 0 0 auto;
 }
 
-/* Nesting: each level indents with a guide line. The line is placed to fall
-   directly under the parent row's chevron center — row margin 6 + row padding
-   6 + half the 11px chevron ≈ 17 — so children hang off the chevron they open
-   from rather than off arbitrary whitespace. */
-.tree-indent {
-  margin-left: 17px;
-  /* A hairline guide, dimmed below the panel's own borders — on a deep tree a
-     full-strength line at every level reads as a hard ladder. It brightens to
-     the accent while its subtree holds the cursor (see below), so the active
-     path is easy to trace back to its parent. */
+/* Nesting: each level indents with a guide line, one span per ancestor level,
+   drawn by each row for its own 26px slice — rows are flat siblings now (the
+   windowed list needs that), so the continuous hairline the nested wrappers
+   used to draw is these slices stacking. The line falls near the parent row's
+   chevron center, and stays dimmed below the panel's own borders: on a deep
+   tree a full-strength line at every level reads as a hard ladder. */
+.tree-guide {
+  flex: 0 0 20px;
+  align-self: stretch;
+  margin-left: 5px;
   border-left: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-  padding-left: 2px;
-  transition: border-color var(--dur-fast) var(--ease-out);
-}
-
-/* Trace the active branch: the indent guide wrapping the cursor row's subtree
-   picks up a faint accent, so the eye can follow a nested file back to the
-   folder it lives in. :has keeps this pure-CSS — no per-row bookkeeping. */
-.tree-indent:has(> .tree-row-cursor) {
-  border-left-color: color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
 .tree-chevron {
@@ -2343,8 +2337,7 @@ body,
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tree-chevron,
-  .tree-indent {
+  .tree-chevron {
     transition: none;
   }
 }
@@ -2661,16 +2654,15 @@ body.dragging-tab * {
    section back so it stays reachable, and clicking a tab there shifts focus,
    which clears the dim at its source. */
 .pane-section-dim {
-  opacity: 0.4;
-  filter: blur(1.1px) saturate(0.72);
-  transition:
-    opacity 0.18s ease,
-    filter 0.18s ease;
+  /* Opacity only — no blur. A filter here put the section on its own layer
+     and re-filtered it on every frame of the status dots animating inside;
+     the deeper 0.34 recovers the "receded" read the blur used to add. */
+  opacity: 0.34;
+  transition: opacity 0.18s ease;
 }
 .pane-section-dim:hover,
 .pane-section-dim:focus-within {
   opacity: 1;
-  filter: none;
 }
 /* The active rail takes precedence: it lifts onto a raised pill, brightens its
    label, grows its active chip, and is allowed more room — so a live shell or
@@ -3576,7 +3568,10 @@ body.dragging-tab * {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 10px;
+  /* Fixed height: the Changes list is windowed, and the spacer math is the
+     scrollbar. */
+  height: 26px;
+  padding: 0 10px;
   cursor: pointer;
   overflow: hidden;
 }
@@ -11351,12 +11346,11 @@ a.btn-mini {
 /* ---------- off-screen row skipping ---------- */
 
 /* content-visibility lets WebKit skip layout and paint for rows outside the
-   viewport — the cheap substitute for list virtualization in the long lists
-   (file tree, changes, commits, PR comments/diffs). contain-intrinsic-size
-   keeps scrollbar geometry sane before a row is first seen; the `auto` keyword
-   remembers the real rendered size afterwards. */
-.tree-row,
-.change-row,
+   viewport — the cheap substitute for list virtualization where the list
+   isn't windowed (commits, PR comments/diffs; the file tree and Changes list
+   are truly windowed via WindowedList and don't need it). contain-intrinsic-
+   size keeps scrollbar geometry sane before a row is first seen; the `auto`
+   keyword remembers the real rendered size afterwards. */
 .git-commit-row,
 .pr-comment-row,
 .pr-thread {
