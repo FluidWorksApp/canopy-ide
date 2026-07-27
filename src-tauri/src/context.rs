@@ -706,8 +706,6 @@ async fn action(
 /// /ctx/action these are request/response: the op is handed to the UI with a
 /// ticket id, the handler parks on a oneshot, and the frontend (ultimately the
 /// script injected into the previewed page) answers through `browser_result`.
-/// The network op short-circuits: the preview proxy already logs every request
-/// it forwards, so it's answered here without a page round-trip.
 #[derive(serde::Deserialize)]
 struct BrowserOp {
     op: String,
@@ -782,8 +780,12 @@ async fn browser(
                 return (StatusCode::BAD_REQUEST, "eval needs code".into());
             }
         }
-        "snapshot" | "console" | "screenshot" => {}
-        "network" => return network_response(&app, op.url.as_deref()),
+        // `network` used to be answered here, from the preview proxy's own
+        // request log. The webview engine has no proxy to log anything, so the
+        // page collects its own traffic (see preview_picker.js) and this became
+        // an ordinary page round-trip like the rest. `/ctx/network` below still
+        // reads the proxy log directly, for a preview running that engine.
+        "snapshot" | "console" | "network" | "screenshot" => {}
         other => {
             return (
                 StatusCode::BAD_REQUEST,
