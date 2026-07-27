@@ -1127,6 +1127,7 @@ const STRUCTURED_TOOLS: &[&str] = &[
     "canopy_diagnostics",
     "canopy_references",
     "canopy_definition",
+    "canopy_hover",
     "canopy_tickets",
     "canopy_reviews",
     "canopy_agents",
@@ -1201,6 +1202,7 @@ const READ_ONLY_TOOLS: &[&str] = &[
     "canopy_diagnostics",
     "canopy_references",
     "canopy_definition",
+    "canopy_hover",
     "canopy_tickets",
     "canopy_reviews",
     "canopy_agents",
@@ -1239,6 +1241,11 @@ fn output_schema(name: &str) -> Option<serde_json::Value> {
         "canopy_references" | "canopy_definition" => serde_json::json!({
             "count": { "type": "integer" },
             "locations": { "type": "array" }
+        }),
+        "canopy_hover" => serde_json::json!({
+            "contents": { "type": "string" },
+            "path": { "type": "string" },
+            "line": { "type": "integer" }
         }),
         "canopy_tickets" => serde_json::json!({ "tickets": { "type": "array" } }),
         "canopy_reviews" => serde_json::json!({
@@ -1428,6 +1435,16 @@ fn tool_defs() -> serde_json::Value {
         {
             "name": "canopy_definition",
             "description": "Where a symbol is actually defined, from the language server — follows re-exports, aliases and package types a text search can't. Same addressing as canopy_references.",
+            "inputSchema": { "type": "object", "properties": {
+                "path": { "type": "string", "description": "Absolute path of the file the symbol is used in" },
+                "symbol": { "type": "string", "description": "The name to look up — its first occurrence in the file is used" },
+                "line": { "type": "integer", "description": "1-based line, instead of a symbol name" },
+                "column": { "type": "integer", "description": "1-based column, with line" }
+            }, "required": ["path"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_hover",
+            "description": "What the editor shows on hover: a symbol's resolved type signature and its doc comment, from the language server. Answers \"what is this\" without opening the definition. Same addressing as canopy_references.",
             "inputSchema": { "type": "object", "properties": {
                 "path": { "type": "string", "description": "Absolute path of the file the symbol is used in" },
                 "symbol": { "type": "string", "description": "The name to look up — its first occurrence in the file is used" },
@@ -1641,6 +1658,7 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
         "canopy_diagnostics" => text(ui_op("diagnostics", args, 25)),
         "canopy_references" => text(ui_op("references", args, 25)),
         "canopy_definition" => text(ui_op("definition", args, 25)),
+        "canopy_hover" => text(ui_op("hover", args, 25)),
         "canopy_tickets" => text(ui_op("tickets", args, 25)),
         "canopy_reviews" => text(ui_op("reviews", args, 25)),
         "canopy_ask_user" => {

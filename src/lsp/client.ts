@@ -265,6 +265,13 @@ export async function lspRequest(
   return server.request(method, params);
 }
 
+/** Whether a server is actually answering for this file. `lspRequest` returning
+ *  null is ambiguous — no server, or a server that answered null (a hover with
+ *  nothing to say does exactly that) — and only one of those is a failure. */
+export async function hasServerFor(path: string, root: string): Promise<boolean> {
+  return !!(await serverFor(path, root))?.request;
+}
+
 /** Every server already running for this project, for the questions that are
  *  about a workspace rather than a file (workspace/symbol). Deliberately does
  *  not start anything: an agent asking for a symbol shouldn't pay a cold

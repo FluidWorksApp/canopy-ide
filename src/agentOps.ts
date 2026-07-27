@@ -14,11 +14,13 @@ import { modelFor, monaco } from "./monaco-setup";
 import {
   describeMissingServer,
   ensureLanguageServer,
+  hasServerFor,
   indexingCeilingMs,
   lspRequest,
   serverCommandFor,
   whenQuiet,
 } from "./lsp/client";
+import { flattenHover, type HoverContents } from "./lsp/hover";
 import { positionOf, type LspPosition } from "./lspPosition";
 import { TRACKERS } from "./trackers";
 
@@ -157,16 +159,29 @@ async function describeLocations(locations: LspLocation[]) {
   return out;
 }
 
+/** Resolve `path` + (`symbol` | line/column) to a live document and an LSP
+ *  position — the addressing every position-based tool shares. */
+async function at(op: ipc.AgentUiOp, roots: string[]) {
+  const path = op.path as string;
+  const { root, text } = await prime(path, roots);
+  const position = positionOf(text, op);
+  return {
+    path,
+    root,
+    position,
+    textDocument: { uri: monaco.Uri.file(path).toString() },
+    of: op.symbol ?? `${path}:${position.line + 1}:${position.character + 1}`,
+  };
+}
+
 async function symbolQuery(
   method: "textDocument/references" | "textDocument/definition",
   op: ipc.AgentUiOp,
   roots: string[],
 ) {
-  const path = op.path as string;
-  const { root, text } = await prime(path, roots);
-  const position = positionOf(text, op);
+  const { path, root, position, textDocument, of } = await at(op, roots);
   const result = await lspRequest(path, root, method, {
-    textDocument: { uri: monaco.Uri.file(path).toString() },
+    textDocument,
     position,
     ...(method === "textDocument/references" ? { context: { includeDeclaration: false } } : {}),
   });
@@ -182,10 +197,34 @@ async function symbolQuery(
   );
   const found = await describeLocations(locations);
   return {
-    of: op.symbol ?? `${path}:${position.line + 1}:${position.character + 1}`,
+    of,
     count: locations.length,
     truncated: locations.length > MAX_LOCATIONS,
     locations: found,
+  };
+}
+
+/** The type signature and docs the editor shows on hover — the answer to "what
+ *  is this" that a grep can only guess at. */
+async function hover(op: ipc.AgentUiOp, roots: string[]) {
+  const { path, root, position, textDocument, of } = await at(op, roots);
+  const result = (await lspRequest(path, root, "textDocument/hover", {
+    textDocument,
+    position,
+  })) as { contents?: HoverContents } | null;
+  // A server with nothing to say answers null, same as no server at all; only
+  // the second is a failure worth throwing over.
+  if (result === null && !(await hasServerFor(path, root))) {
+    throw new Error(await describeMissingServer(path, root));
+  }
+  const contents = flattenHover(result?.contents);
+  return {
+    of,
+    path,
+    line: position.line + 1,
+    column: position.character + 1,
+    contents,
+    note: contents ? undefined : "The language server has no hover information there.",
   };
 }
 
@@ -283,6 +322,8 @@ export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unkn
       return symbolQuery("textDocument/references", op, ctx.roots);
     case "definition":
       return symbolQuery("textDocument/definition", op, ctx.roots);
+    case "hover":
+      return hover(op, ctx.roots);
     case "tickets":
       return tickets(ctx.repos);
     case "reviews":

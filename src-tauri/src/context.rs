@@ -853,11 +853,16 @@ async fn browser(
 struct UiOp {
     op: String,
     cwd: Option<String>,
-    /// diagnostics / references / definition: where to look.
+    /// diagnostics / references / definition / hover: where to look.
     path: Option<String>,
     line: Option<u32>,
     column: Option<u32>,
     symbol: Option<String>,
+    /// diagnostics: how long the caller is prepared to wait. The edit hook asks
+    /// for a couple of seconds; without it a cold server would stall the agent's
+    /// loop behind an index it never asked for.
+    #[serde(rename = "waitMs")]
+    wait_ms: Option<u64>,
     /// ask: the question, its options, and how long the agent will hold.
     question: Option<String>,
     #[serde(default)]
@@ -881,7 +886,7 @@ async fn ui_op(
     }
     let deadline = match op.op.as_str() {
         "diagnostics" | "tickets" | "reviews" => UI_OP_TIMEOUT,
-        "references" | "definition" => {
+        "references" | "definition" | "hover" => {
             if op.path.is_none() {
                 return (StatusCode::BAD_REQUEST, format!("{} needs a path", op.op));
             }
@@ -920,6 +925,7 @@ async fn ui_op(
             "line": op.line,
             "column": op.column,
             "symbol": op.symbol,
+            "waitMs": op.wait_ms,
             "question": op.question,
             "options": op.options,
         }),

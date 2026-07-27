@@ -40,6 +40,7 @@ export const AGENT_TOOL_GROUPS: AgentToolGroup[] = [
       { name: "canopy_diagnostics", label: "Diagnostics", note: "Errors and warnings for a file" },
       { name: "canopy_references", label: "References", note: "Every real use of a symbol" },
       { name: "canopy_definition", label: "Definition", note: "Where a symbol comes from" },
+      { name: "canopy_hover", label: "Hover", note: "A symbol's type and docs" },
     ],
   },
   {

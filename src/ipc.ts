@@ -201,7 +201,14 @@ export const browserResult = (id: number, ok: boolean, data: unknown) =>
 export interface AgentUiOp {
   id: number;
   op:
-    "diagnostics" | "references" | "definition" | "tickets" | "reviews" | "ask";
+    | "diagnostics"
+    | "references"
+    | "definition"
+    | "hover"
+    | "symbols"
+    | "tickets"
+    | "reviews"
+    | "ask";
   route: string;
   path?: string | null;
   line?: number | null;
