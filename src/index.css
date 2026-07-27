@@ -2741,6 +2741,9 @@ body.dragging-tab * {
   background: var(--accent);
   border-radius: var(--r-xs);
   corner-shape: squircle;
+  /* Lifted off the tab it labels — the same "floating over, not part of"
+     reading as the panel overlays. */
+  box-shadow: var(--shadow-2);
   transform: translateY(-50%);
   animation: tab-hint-in var(--dur-fast) var(--ease-out);
 }
