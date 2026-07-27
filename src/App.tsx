@@ -55,6 +55,8 @@ import { Dictation } from "./components/Dictation";
 import { Onboarding } from "./components/Onboarding";
 import { Welcome } from "./components/Welcome";
 import { shouldOnboard, markOnboarded } from "./onboarding";
+import { isSelftest, setSelftestMode } from "./selftest/mode";
+import { startBrowserWatchdog } from "./browserWatchdog";
 import { loadZoom, setZoom, applyZoom, STEP } from "./zoom";
 import { stopWorkspaceServers } from "./lsp/client";
 import { sweepStaleRuns } from "./taskHistory";
@@ -804,12 +806,69 @@ export default function App() {
     return () => unlisten?.();
   }, [loaded, openDirAsProject]);
 
+  // The embedded browser's invariants, watched while the app runs (see
+  // browserWatchdog.ts). Dev builds always; a release build only when somebody
+  // has explicitly turned it on, so nothing about a shipped launch changes.
+  useEffect(() => startBrowserWatchdog(), []);
+
+  // A broken invariant, made impossible to miss while developing: an error
+  // notice is the one kind that waits to be dismissed rather than fading.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    const onBreach = (e: Event) => {
+      const d = (e as CustomEvent).detail as {
+        kind: string;
+        violation: { code: string; what: string; detail: string };
+      };
+      if (d?.kind !== "opened") return;
+      notify(
+        `Browser invariant ${d.violation.code}: ${d.violation.what} — ${d.violation.detail}`,
+        "error",
+      );
+    };
+    window.addEventListener("canopy:browser-invariant", onBreach);
+    return () => window.removeEventListener("canopy:browser-invariant", onBreach);
+  }, [notify]);
+
+  // `canopy --selftest=browser`: the app drives a scripted browser scenario
+  // against a page it serves itself, then exits with a machine-readable report.
+  // An ordinary launch gets `null` back and loads none of it.
+  useEffect(() => {
+    if (!loaded) return;
+    let cancelled = false;
+    void ipc.selftestConfig().then((cfg) => {
+      if (!cfg || cancelled) return;
+      setSelftestMode(cfg.scenario);
+      void import("./selftest/browserSelftest")
+        .then((m) =>
+          m.runBrowserSelftest(cfg, {
+            openDirAsProject,
+            projectIdFor: (dir) =>
+              wsRef.current.projects.find((p) =>
+                p.components.some((c) => c.path === dir),
+              )?.id,
+          }),
+        )
+        // A scenario that cannot even start must still report, or the run ends
+        // as a timeout that says nothing about why.
+        .catch((err) =>
+          ipc.selftestFinish({ ok: false, error: String(err), scenario: cfg.scenario }),
+        );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [loaded, openDirAsProject]);
+
   // Background update checks: shortly after launch (delayed so it never
   // competes with boot), then every 12h for the long-lived windows people
   // leave open for days. Quiet by design — failures and "already current"
   // say nothing; only a real update surfaces the toast.
   useEffect(() => {
     const tick = () => {
+      // A toast arriving over the page mid-scenario would cover exactly what
+      // the scenario is watching, and it would be right to fail.
+      if (isSelftest()) return;
       void checkForUpdateAnyChannel()
         .then((u) => {
           if (!u || dismissedUpdate.current === u.info.version) return;

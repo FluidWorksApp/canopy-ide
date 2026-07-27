@@ -31,6 +31,12 @@ tauri-build = { version = "2.6.3", features = [] }
 # passes --no-default-features, ships the IDE without dictation, and pulls none
 # of the ASR deps. lib.rs swaps in dictation_stub.rs when this is off.
 default = ["dictation"]
+# Serve the frontend out of the binary instead of the dev server. `tauri build`
+# turns this on itself; a plain `cargo build` does not, and without it a debug
+# binary points at http://localhost:5173 and runs whatever happens to be there.
+# The selftest (and the CI job that runs it) builds with it for exactly that
+# reason: it must test the frontend it was built with.
+custom-protocol = ["tauri/custom-protocol"]
 dictation = [
     "dep:transcribe-rs",
     "dep:ort",
