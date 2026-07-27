@@ -20,6 +20,10 @@ export interface OpenFile {
   external: string | null;
   /** Raw bytes for viewer kinds; refreshed on external change. */
   bytes: Uint8Array | null;
+  /** Set when the file was refused rather than loaded — a binary blob, or past
+   *  the size cap for its viewer. `bytes` stays null in that case: the point is
+   *  that the contents were never read. */
+  blocked?: import("./fileOpen").OpenBlock | null;
 }
 
 export interface QuestionOption {

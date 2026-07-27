@@ -185,6 +185,13 @@ pub async fn fs_read_dir(
     Ok(entries)
 }
 
+/// Nothing the WebView can do with a file this size is worth the copy: the
+/// bytes are serialized across IPC and then held in the renderer's heap. The
+/// frontend applies far tighter, per-viewer limits before it ever asks (see
+/// fileOpen.ts); this is the backstop that keeps *any* caller — the LSP file
+/// provider, an agent tool — from moving a DVD image into the WebView.
+const MAX_READ_BYTES: u64 = 512 * 1024 * 1024;
+
 /// Returns raw file bytes (no base64) via tauri::ipc::Response.
 #[tauri::command]
 pub async fn fs_read_file(
@@ -192,6 +199,14 @@ pub async fn fs_read_file(
     path: String,
 ) -> Result<tauri::ipc::Response, String> {
     let file = check_scope(&state, Path::new(&path))?;
+    // Checked before the read, not after: the point is to never allocate it.
+    let len = std::fs::metadata(&file).map_err(|e| e.to_string())?.len();
+    if len > MAX_READ_BYTES {
+        return Err(format!(
+            "file is too large to load ({:.1} GB)",
+            len as f64 / (1024.0 * 1024.0 * 1024.0)
+        ));
+    }
     let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
     Ok(tauri::ipc::Response::new(bytes))
 }
