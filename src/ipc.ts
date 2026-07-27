@@ -214,6 +214,8 @@ export interface AgentUiOp {
   line?: number | null;
   column?: number | null;
   symbol?: string | null;
+  /** symbols: a name to search the workspace for, instead of a file to outline. */
+  query?: string | null;
   question?: string | null;
   options?: string[];
   /** diagnostics: how long the caller will hold. A hook firing after every

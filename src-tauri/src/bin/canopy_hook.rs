@@ -728,6 +728,8 @@ results stay inspectable:
 - Check your own edit compiles -> canopy_diagnostics (the warm language server, \
   not a full `tsc --noEmit`); before changing a shared signature -> \
   canopy_references
+- What a symbol's type and docs are -> canopy_hover; where a symbol by that \
+  name is -> canopy_symbols (not grep)
 - Wait for a server to come up, a build to finish -> canopy_wait_for (don't poll \
   canopy_server_output in a loop)
 - How something LOOKS -> canopy_screenshot (the DOM snapshot can't see overlap \
@@ -1128,6 +1130,7 @@ const STRUCTURED_TOOLS: &[&str] = &[
     "canopy_references",
     "canopy_definition",
     "canopy_hover",
+    "canopy_symbols",
     "canopy_tickets",
     "canopy_reviews",
     "canopy_agents",
@@ -1203,6 +1206,7 @@ const READ_ONLY_TOOLS: &[&str] = &[
     "canopy_references",
     "canopy_definition",
     "canopy_hover",
+    "canopy_symbols",
     "canopy_tickets",
     "canopy_reviews",
     "canopy_agents",
@@ -1246,6 +1250,10 @@ fn output_schema(name: &str) -> Option<serde_json::Value> {
             "contents": { "type": "string" },
             "path": { "type": "string" },
             "line": { "type": "integer" }
+        }),
+        "canopy_symbols" => serde_json::json!({
+            "count": { "type": "integer" },
+            "symbols": { "type": "array" }
         }),
         "canopy_tickets" => serde_json::json!({ "tickets": { "type": "array" } }),
         "canopy_reviews" => serde_json::json!({
@@ -1451,6 +1459,14 @@ fn tool_defs() -> serde_json::Value {
                 "line": { "type": "integer", "description": "1-based line, instead of a symbol name" },
                 "column": { "type": "integer", "description": "1-based column, with line" }
             }, "required": ["path"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_symbols",
+            "description": "Find a symbol by name across the project (`query`), or outline one file's symbols (`path`): declarations only, with kind and container, from the language server. Beats grep for a name that also appears in strings and comments. Searches the servers already running — prime one with canopy_diagnostics on a file if it says none are.",
+            "inputSchema": { "type": "object", "properties": {
+                "query": { "type": "string", "description": "Symbol name to search the project for (partial names match)" },
+                "path": { "type": "string", "description": "Absolute path to outline instead, when no query is given" }
+            }, "additionalProperties": false }
         },
         {
             "name": "canopy_wait_for",
@@ -1659,6 +1675,7 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
         "canopy_references" => text(ui_op("references", args, 25)),
         "canopy_definition" => text(ui_op("definition", args, 25)),
         "canopy_hover" => text(ui_op("hover", args, 25)),
+        "canopy_symbols" => text(ui_op("symbols", args, 25)),
         "canopy_tickets" => text(ui_op("tickets", args, 25)),
         "canopy_reviews" => text(ui_op("reviews", args, 25)),
         "canopy_ask_user" => {

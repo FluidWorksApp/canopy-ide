@@ -17,10 +17,13 @@ import {
   hasServerFor,
   indexingCeilingMs,
   lspRequest,
+  runningServersUnder,
   serverCommandFor,
   whenQuiet,
+  workspaceRequest,
 } from "./lsp/client";
 import { flattenHover, type HoverContents } from "./lsp/hover";
+import { sortRows, symbolRows, type SymbolRow } from "./lsp/symbols";
 import { positionOf, type LspPosition } from "./lspPosition";
 import { TRACKERS } from "./trackers";
 
@@ -228,6 +231,58 @@ async function hover(op: ipc.AgentUiOp, roots: string[]) {
   };
 }
 
+/** Find a symbol by name across the workspace, or outline one file. The
+ *  type-aware answer to "where is X defined", which grep can only approximate
+ *  once the name is common enough to appear in prose. */
+async function symbols(op: ipc.AgentUiOp, roots: string[]) {
+  const query = op.query?.trim();
+  if (!query) {
+    if (!op.path) throw new Error("canopy_symbols needs a query, or a path to outline");
+    const path = op.path;
+    const { root } = await prime(path, roots);
+    const result = await lspRequest(path, root, "textDocument/documentSymbol", {
+      textDocument: { uri: monaco.Uri.file(path).toString() },
+    });
+    if (result === null) throw new Error(await describeMissingServer(path, root));
+    const rows = symbolRows(result, path);
+    return {
+      scope: path,
+      count: rows.length,
+      truncated: rows.length > MAX_LOCATIONS,
+      symbols: rows.slice(0, MAX_LOCATIONS),
+    };
+  }
+
+  // Deliberately asks only the servers already running: starting one here would
+  // make a name lookup pay for a cold rust-analyzer index the agent never asked
+  // for. Nothing running is reported as such, with the cheap way to fix it.
+  const rows: SymbolRow[] = [];
+  let servers = 0;
+  for (const root of roots) {
+    servers += runningServersUnder(root).length;
+    for (const { result } of await workspaceRequest(root, "workspace/symbol", { query })) {
+      rows.push(...symbolRows(result));
+    }
+  }
+  if (servers === 0) {
+    return {
+      scope: `workspace search for "${query}"`,
+      count: 0,
+      symbols: [],
+      note:
+        "No language server is running for this project yet — Canopy starts one when a file " +
+        "of that language is opened. Call canopy_diagnostics on a file first, then ask again.",
+    };
+  }
+  const found = sortRows(rows);
+  return {
+    scope: `workspace search for "${query}"`,
+    count: found.length,
+    truncated: found.length > MAX_LOCATIONS,
+    symbols: found.slice(0, MAX_LOCATIONS),
+  };
+}
+
 /** Every connected tracker's issues, merged. GitHub an agent could reach with
  *  `gh`; Linear it could not — that key lives in Canopy's settings. */
 async function tickets(repos: string[]) {
@@ -324,6 +379,8 @@ export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unkn
       return symbolQuery("textDocument/definition", op, ctx.roots);
     case "hover":
       return hover(op, ctx.roots);
+    case "symbols":
+      return symbols(op, ctx.roots);
     case "tickets":
       return tickets(ctx.repos);
     case "reviews":
