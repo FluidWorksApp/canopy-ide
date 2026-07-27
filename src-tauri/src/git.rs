@@ -2998,6 +2998,27 @@ fn branch_commits_of(top: &Path, base: &str, branch: &str) -> Vec<CommitInfo> {
         .collect()
 }
 
+/// A session's working-time clock, lifted off its digest. One value rather than
+/// two more scalars on `workspace_join`, which is already at the arity where an
+/// argument gets passed in the wrong slot.
+#[derive(Default, Clone, Copy)]
+pub struct SessionClock {
+    pub active_secs: Option<u64>,
+    pub run_secs: Option<u64>,
+}
+
+impl SessionClock {
+    /// Read from a digest value, absent for anything written before the clock
+    /// existed or for a CLI with no hook at all.
+    fn of(digest: Option<&serde_json::Value>) -> Self {
+        let n = |k: &str| digest.and_then(|v| v.get(k)).and_then(|v| v.as_u64());
+        SessionClock {
+            active_secs: n("active_secs"),
+            run_secs: n("run_secs"),
+        }
+    }
+}
+
 /// One agent session's work, joined against git: the digest's cwd resolved to
 /// a workdir this repo owns, the live branch, counts, and the base..branch
 /// commit list. Metadata only — patches stay behind `git_branch_patch` and the
@@ -3009,6 +3030,11 @@ pub struct AgentWorkspace {
     pub state: Option<String>,
     pub cwd: Option<String>,
     pub updated: Option<u64>,
+    /// The session's working-time clock, as canopy_hook.rs keeps it: seconds
+    /// actually spent working over the session's life, and seconds in the
+    /// current uninterrupted stretch. Zero/None for a session with no digest.
+    pub active_secs: Option<u64>,
+    pub run_secs: Option<u64>,
     /// Files the agent itself reported editing — intent, capped by the hook;
     /// the diff panes are the authoritative list.
     pub touched: Vec<String>,
@@ -3080,6 +3106,7 @@ pub async fn agent_workspace(
         touched,
         dstr("cwd"),
         dstr("branch"),
+        SessionClock::of(Some(&digest)),
     )
 }
 
@@ -3107,7 +3134,7 @@ pub async fn agent_workspace_at(
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
             && !s.contains("..")
     };
-    let (sid, state_s, updated, touched, branch_fallback) = match session_id.as_deref() {
+    let (sid, state_s, updated, touched, branch_fallback, clock) = match session_id.as_deref() {
         Some(s) if valid(s) => {
             let home = std::env::var("HOME").unwrap_or_default();
             let digest: Option<serde_json::Value> = std::fs::read_to_string(
@@ -3140,9 +3167,17 @@ pub async fn agent_workspace_at(
                 updated,
                 touched,
                 dstr("branch"),
+                SessionClock::of(d),
             )
         }
-        _ => (String::new(), None, None, Vec::new(), None),
+        _ => (
+            String::new(),
+            None,
+            None,
+            Vec::new(),
+            None,
+            SessionClock::default(),
+        ),
     };
     workspace_join(
         &top,
@@ -3154,6 +3189,7 @@ pub async fn agent_workspace_at(
         touched,
         Some(cwd),
         branch_fallback,
+        clock,
     )
 }
 
@@ -3286,6 +3322,7 @@ fn workspace_join(
     touched: Vec<String>,
     cwd: Option<String>,
     branch_fallback: Option<String>,
+    clock: SessionClock,
 ) -> Result<AgentWorkspace, String> {
     // Resolve the cwd to a workdir this repo actually owns. Git's own worktree
     // list is the authority, compared canonically — agent-made worktrees were
@@ -3372,6 +3409,8 @@ fn workspace_join(
         state,
         cwd,
         updated,
+        active_secs: clock.active_secs,
+        run_secs: clock.run_secs,
         touched,
         branch,
         detached,

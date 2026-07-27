@@ -34,6 +34,11 @@ export interface Digest {
   updated?: number
   resumable?: boolean
   resume_cwd?: string
+  /** The session's working-time clock, kept by canopy_hook.rs — see
+   *  agentDuration.ts. Absent on digests written before it existed. */
+  active_secs?: number
+  run_secs?: number
+  run_started?: number
 }
 
 /** Live process-tree stats for one PTY this run (pty:stats event). */
@@ -85,6 +90,11 @@ export interface AgentRow {
   tokens?: number
   needsYou: boolean
   updated?: number
+  /** The session's working-time clock, straight off the digest. Left raw here
+   *  rather than resolved to a duration because resolving needs `now`, and
+   *  buildRows is a pure fusion of its inputs — the card calls workingTime(). */
+  activeSecs?: number
+  runSecs?: number
   // For offline agents: history + one-tap resume.
   prompts?: string[]
   files?: string[]
@@ -188,6 +198,8 @@ export function buildRows(
         tokens: u ? u.input_tokens + u.output_tokens : undefined,
         needsYou: live && d.state === 'waiting',
         updated: d.updated,
+        activeSecs: d.active_secs,
+        runSecs: d.run_secs,
         prompts: d.prompts,
         files: d.files,
         resumeCwd: d.resume_cwd ?? d.cwd,

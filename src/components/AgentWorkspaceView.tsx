@@ -12,6 +12,8 @@ import * as ipc from "../ipc";
 import type { Notify } from "../types";
 import { splitPatch } from "./PrView";
 import { STATE_META, lastHumanPrompt } from "./AgentsPanel";
+import { AgentRuntime } from "./AgentRuntime";
+import { effectiveState } from "../agentState";
 import { AgentIcon, GitBranchIcon, RestartIcon } from "./icons";
 import { sessionCost } from "../pricing";
 import {
@@ -661,6 +663,24 @@ export function AgentWorkspaceView({
       ? STATE_META[digest.state]
       : undefined;
   const task = lastHumanPrompt(digest?.prompts);
+  // The working-time clock, preferring the freshly-joined workspace (re-read on
+  // every poll) over the digest the panel handed us when the tab opened.
+  const timing = {
+    active_secs: ws?.active_secs ?? digest?.active_secs,
+    run_secs: ws?.run_secs ?? digest?.run_secs,
+    updated: ws?.updated ?? digest?.updated,
+  };
+  // No CPU reading is available here, so `working` decays to stale on silence
+  // alone — the conservative half of the rule the Agents panel applies with the
+  // process tree to hand. A frozen timer is the right failure: it under-reports
+  // a genuinely busy agent rather than counting up for one that died.
+  const working =
+    effectiveState({
+      state: ws?.state ?? digest?.state,
+      updated: timing.updated ?? undefined,
+      cpu: 0,
+      now: Date.now() / 1000,
+    }) === "working";
   const cost = usage ? sessionCost(usage) : null;
   const touched = ws?.touched?.length ? ws.touched : (digest?.files ?? []);
   const branchable = !!ws?.branch && !ws.detached && !ws.on_base;
@@ -1190,6 +1210,9 @@ export function AgentWorkspaceView({
                 {st.label}
               </span>
             )}
+            {/* Working time, next to what that work cost: how long this run has
+                been going and how much the session has done in total. */}
+            <AgentRuntime timing={timing} live={working} variant="stat" />
             {usage?.model && (
               <span className="aw-stat aw-stat-model" title="Model">
                 {usage.model}
