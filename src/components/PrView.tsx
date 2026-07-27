@@ -21,7 +21,7 @@ import { renderMarkdown } from "../markdown";
 import type { Notify, RelayHandle } from "../types";
 import { agentMenuItems } from "../agentMenu";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
-import { AgentsIcon, TeamIcon } from "./icons";
+import { AgentsIcon, ChevronIcon, TeamIcon } from "./icons";
 import { TaskProgress } from "./TaskProgress";
 import type { AgentTarget } from "./TicketsPanel";
 import {
