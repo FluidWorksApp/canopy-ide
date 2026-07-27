@@ -88,6 +88,12 @@ import {
 } from "../../taskHistory";
 import { taskMenuItem, type TaskChoice } from "../../taskMenu";
 import { viewerKindFor } from "../viewers";
+import {
+  blockForOpen,
+  looksBinary,
+  sizeLimitFor,
+  type OpenBlock,
+} from "../../fileOpen";
 import { ensureLanguageServer } from "../../lsp/client";
 import { Term, type TermHandle } from "../Term";
 import { ContextMenu, useContextMenu, type MenuItem } from "../ContextMenu";
@@ -2352,28 +2358,42 @@ export const ProjectView = memo(function ProjectView({
   // ---------- files ----------
 
   const openFile = useCallback(
-    async (path: string, opts?: { diff?: boolean }) => {
+    async (path: string, opts?: { diff?: boolean; force?: boolean }) => {
       const existing = tabsRef.current.find(
         (t) => t.type === "file" && t.file.path === path,
       ) as FileSubTab | undefined;
-      let bytes: Uint8Array;
+      const kind = viewerKindFor(path);
+      // Ask the size before reading the bytes. A .zip or a multi-gigabyte log
+      // used to be pulled across IPC in full and only then found unrenderable,
+      // by which point the tab was already frozen and the memory already spent.
+      let blocked: OpenBlock | null = null;
+      let bytes: Uint8Array | null = null;
       try {
-        bytes = await ipc.fsReadFile(path);
+        const stat = await ipc.fsStat(path);
+        blocked = opts?.force ? null : blockForOpen(path, kind, stat.size);
+        if (!blocked) {
+          bytes = await ipc.fsReadFile(path);
+          // Extensions that claim nothing (.dat, .pack, no extension at all)
+          // only give themselves away in the bytes.
+          if (kind === "code" && looksBinary(bytes)) {
+            blocked = { reason: "binary", size: stat.size, limit: sizeLimitFor(kind) };
+            bytes = null;
+          }
+        }
       } catch (err) {
         console.warn("open failed", path, err);
         return;
       }
-      const kind = viewerKindFor(path);
       // Proper diff for changed files: baseline is git HEAD. Any text-ish file
       // qualifies — gating on code/json/markdown silently denied a diff to
       // things like .gitignore, Dockerfile or .env, which are exactly the files
       // people click in the git panel.
       let diffOriginal: string | null = null;
       const diffable = !["pdf", "image", "sheet", "docx"].includes(kind);
-      if (opts?.diff && diffable) {
+      if (!blocked && bytes && opts?.diff && diffable) {
         diffOriginal = await ipc.gitHeadContent(path).catch(() => null);
       }
-      if (kind === "code" || diffOriginal != null) {
+      if (bytes && (kind === "code" || diffOriginal != null)) {
         const text = decoder.decode(bytes);
         if (!baselines.current.has(path)) baselines.current.set(path, text);
         modelFor(path, text);
@@ -2383,6 +2403,7 @@ export const ProjectView = memo(function ProjectView({
       if (existing) {
         patchFile(path, {
           bytes,
+          blocked,
           ...(diffOriginal != null
             ? { view: "diff" as const, diffOriginal }
             : {}),
@@ -2410,6 +2431,7 @@ export const ProjectView = memo(function ProjectView({
             dirty: false,
             external: null,
             bytes,
+            blocked,
           },
         },
       ]);
@@ -2553,6 +2575,9 @@ export const ProjectView = memo(function ProjectView({
         if (saved && now - saved < 1500) continue;
         const file = findFile(path);
         if (!file || e.kind === "remove") continue;
+        // A tab that refused to load the file in the first place must not
+        // re-read it every time something touches it on disk.
+        if (file.blocked) continue;
         try {
           const bytes = await ipc.fsReadFile(path);
           if (file.kind === "code") {
@@ -4546,6 +4571,7 @@ export const ProjectView = memo(function ProjectView({
             onCloseDiff={() =>
               patchFile(tab.file.path, { view: "source", diffOriginal: null })
             }
+            onOpenAnyway={() => void openFile(tab.file.path, { force: true })}
             diffAgentBar={
               <AgentQueryBar
                 placeholder="Ask an agent about this file's changes…"

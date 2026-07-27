@@ -35,6 +35,14 @@ import {
   type CustomAgentCli,
 } from "../projects";
 import { AGENT_TOOL_GROUPS, ALL_AGENT_TOOLS } from "../agentTools";
+import {
+  BUILTIN_MAP,
+  EXTRA_ASSOCIATIONS,
+  LANGUAGES,
+  describePattern,
+  languageLabel,
+  normalizePattern,
+} from "../fileAssociations";
 
 export type SettingsTab =
   | "appearance"
@@ -99,6 +107,135 @@ function Item({
       <div className="set-item-name">{name}</div>
       {desc && <div className="set-item-desc">{desc}</div>}
       <div className="set-item-control">{children}</div>
+    </div>
+  );
+}
+
+/**
+ * Which language each file type is highlighted as.
+ *
+ * Monaco's bundled grammars leave real holes — C++ registers .c/.h and nothing
+ * else, there is no JSON grammar at all, and .astro/.svelte/.vue/.toml are
+ * unknown — so Canopy ships a table pointing each gap at the closest grammar
+ * that does exist. This screen shows that table rather than hiding it: every
+ * shipped row is re-pointable, and anything missing is one row away.
+ */
+function FileAssociations({
+  value,
+  onChange,
+}: {
+  value: Record<string, string>;
+  onChange: (next: Record<string, string>) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [kind, setKind] = useState<"ext" | "name">("ext");
+  const [pattern, setPattern] = useState("");
+  const [language, setLanguage] = useState("html");
+  const [error, setError] = useState<string | null>(null);
+
+  const set = (p: string, lang: string) => onChange({ ...value, [p]: lang });
+  const clear = (p: string) => {
+    const next = { ...value };
+    delete next[p];
+    onChange(next);
+  };
+
+  const add = () => {
+    const p = normalizePattern(pattern, kind);
+    if (!p) {
+      setError(kind === "ext" ? "Type an extension, e.g. astro" : "Type a file name.");
+      return;
+    }
+    setError(null);
+    setPattern("");
+    set(p, language);
+  };
+
+  const q = query.trim().toLowerCase();
+  const hit = (p: string, lang: string) =>
+    !q || p.toLowerCase().includes(q) || languageLabel(lang).toLowerCase().includes(q);
+
+  const custom = Object.entries(value)
+    .filter(([p]) => BUILTIN_MAP[p] == null)
+    .filter(([p, lang]) => hit(p, lang));
+
+  const picker = (current: string, onPick: (id: string) => void) => (
+    <select value={current} onChange={(e) => onPick(e.target.value)}>
+      {LANGUAGES.map((l) => (
+        <option key={l.id} value={l.id}>
+          {l.label}
+        </option>
+      ))}
+    </select>
+  );
+
+  const row = (p: string, lang: string, shipped: string | null) => (
+    <div key={p} className="assoc-row">
+      <code className="assoc-pattern">{describePattern(p)}</code>
+      {picker(lang, (id) => (shipped === id ? clear(p) : set(p, id)))}
+      {shipped == null ? (
+        <button className="btn-mini" onClick={() => clear(p)} title="Remove this mapping">
+          Remove
+        </button>
+      ) : value[p] != null ? (
+        <button className="btn-mini" onClick={() => clear(p)} title={`Back to ${languageLabel(shipped)}`}>
+          Reset
+        </button>
+      ) : (
+        <span className="assoc-spacer" />
+      )}
+    </div>
+  );
+
+  return (
+    <div className="assoc">
+      <div className="assoc-add">
+        <select value={kind} onChange={(e) => setKind(e.target.value as "ext" | "name")}>
+          <option value="ext">Extension</option>
+          <option value="name">File name</option>
+        </select>
+        <input
+          className="assoc-input"
+          placeholder={kind === "ext" ? "astro" : "Dockerfile.*"}
+          value={pattern}
+          onChange={(e) => setPattern(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && add()}
+        />
+        <span className="assoc-arrow">→</span>
+        {picker(language, setLanguage)}
+        <button className="btn btn-accent" onClick={add}>
+          Add
+        </button>
+      </div>
+      {error && <div className="assoc-error">{error}</div>}
+      <input
+        className="assoc-search"
+        placeholder="Search mappings…"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+      />
+      <div className="assoc-list">
+        {custom.length > 0 && (
+          <div className="assoc-group">
+            <div className="assoc-group-name">Your mappings</div>
+            <div className="assoc-group-blurb">
+              Added here, and checked before every grammar Canopy ships.
+            </div>
+            {custom.map(([p, lang]) => row(p, lang, null))}
+          </div>
+        )}
+        {EXTRA_ASSOCIATIONS.map((group) => {
+          const entries = group.entries.filter((e) => hit(e.pattern, value[e.pattern] ?? e.language));
+          if (entries.length === 0) return null;
+          return (
+            <div key={group.label} className="assoc-group">
+              <div className="assoc-group-name">{group.label}</div>
+              <div className="assoc-group-blurb">{group.blurb}</div>
+              {entries.map((e) => row(e.pattern, value[e.pattern] ?? e.language, e.language))}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -775,6 +912,15 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   />
                 </Item>
                 <Item name="Cursor">{cursorControls("editorCursorStyle", "editorCursorBlink")}</Item>
+                <Item
+                  name="File associations"
+                  desc="Which language each file type is highlighted as. Open files re-colour immediately."
+                >
+                  <FileAssociations
+                    value={s.fileAssociations}
+                    onChange={(fileAssociations) => patch({ fileAssociations })}
+                  />
+                </Item>
               </>
             )}
 

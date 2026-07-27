@@ -159,6 +159,13 @@ export interface Settings {
   editorFontSize: number;
   editorCursorStyle: CursorStyle;
   editorCursorBlink: boolean;
+  /** File pattern -> Monaco language id, the user's own overrides only
+   *  (Settings → Editor → File associations). Canopy's shipped table lives in
+   *  fileAssociations.ts and is deliberately NOT copied in here: storing it
+   *  would freeze today's list into every existing install, so a mapping added
+   *  in a later version would never reach anyone who has opened this screen.
+   *  Re-pointing a shipped pattern writes an entry under the same key. */
+  fileAssociations: Record<string, string>;
   /** Which agent CLI starts work on a ticket (registry id in projects.ts).
    *  Was hardcoded to claude, which quietly made every other agent a
    *  second-class citizen in a product built to run all of them. */
@@ -265,6 +272,7 @@ const DEFAULTS: Settings = {
   editorFontSize: 13,
   editorCursorStyle: "bar",
   editorCursorBlink: true,
+  fileAssociations: {},
   dictationHotkey: DEFAULT_DICTATION_HOTKEY,
   dictationModel: "",
   dictationLanguage: "",

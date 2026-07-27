@@ -2,6 +2,8 @@
 // git diff (HEAD vs working tree), or the external-change diff.
 import type { ReactNode } from "react";
 import type { OpenFile } from "../types";
+import * as ipc from "../ipc";
+import { describeBlock } from "../fileOpen";
 import { modelFor } from "../monaco-setup";
 import { MonacoEditor } from "./MonacoEditor";
 import { DiffView } from "./DiffView";
@@ -29,10 +31,40 @@ interface FileViewProps {
   onCursor?: (anchor: number, head: number) => void;
   /** "Ask an agent about this diff" control, shown on the git-diff view only. */
   diffAgentBar?: ReactNode;
+  /** Load a file that was refused for its size anyway. */
+  onOpenAnyway?: () => void;
 }
 
 export function FileView(props: FileViewProps) {
   const { file } = props;
+
+  // Refused before the bytes were read — say why, and offer the two things
+  // that are actually useful for a file Canopy can't show.
+  if (file.blocked) {
+    const { title, detail } = describeBlock(file.blocked);
+    return (
+      <div className="viewer-scroll viewer-center">
+        <div className="blocked-file">
+          <div className="blocked-file-title">{title}</div>
+          <div className="blocked-file-path">{file.name}</div>
+          <div className="blocked-file-detail">{detail}</div>
+          <div className="blocked-file-actions">
+            <button className="btn" onClick={() => void ipc.fsReveal(file.path)}>
+              Reveal in file manager
+            </button>
+            {/* Only for size: a binary blob has nothing to show however hard
+                you insist, but "too large" is a judgement call the user is
+                entitled to overrule on their own machine. */}
+            {file.blocked.reason === "too-large" && props.onOpenAnyway && (
+              <button className="btn" onClick={props.onOpenAnyway}>
+                Open anyway
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // Pending external change on a text file → review before it clobbers you.
   if (file.external != null && (file.kind === "code" || file.view === "source")) {

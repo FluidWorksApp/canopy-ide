@@ -10616,6 +10616,125 @@ a.btn-mini {
   white-space: nowrap;
 }
 
+/* ---- A file Canopy refused to load (binary / too large) ------------------ */
+.blocked-file {
+  max-width: 460px;
+  padding: 24px;
+  text-align: center;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-raised);
+}
+
+.blocked-file-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.blocked-file-path {
+  margin-top: 4px;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.blocked-file-detail {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.blocked-file-actions {
+  margin-top: 16px;
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+
+/* ---- Settings → Editor → File associations ------------------------------- */
+.assoc {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.assoc-add {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.assoc-input {
+  width: 140px;
+  font-family: var(--font-mono, monospace);
+}
+
+.assoc-search {
+  width: 100%;
+}
+
+.assoc-arrow {
+  color: var(--text-dim);
+}
+
+.assoc-error {
+  font-size: 11px;
+  color: var(--danger, #f7768e);
+}
+
+/* Bounded so the shipped table can be long without pushing the rest of the
+   Editor screen off the modal. */
+.assoc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.assoc-group {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--bg-raised);
+}
+
+.assoc-group-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.assoc-group-blurb {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+.assoc-row {
+  display: grid;
+  grid-template-columns: 130px 1fr 70px;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.assoc-pattern {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assoc-spacer {
+  display: block;
+}
+
 /* ---- An agent's question (canopy_ask_user) ------------------------------- */
 .ask-dialog {
   max-width: 460px;
