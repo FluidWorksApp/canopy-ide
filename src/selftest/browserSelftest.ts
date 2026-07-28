@@ -29,6 +29,8 @@ import {
   type OverlaySurface,
 } from "../overlaySurfaces";
 import { BROWSER_INPUT_EVENT } from "../components/PreviewView";
+import { lastPassthrough, refreshBrowserViews } from "../browserHost";
+import { updateSettings } from "../settings";
 import {
   startBrowserWatchdog,
   watchdogViolations,
@@ -422,6 +424,49 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
       });
     }
 
+    // ---- the same surfaces, under punch-through layering ----
+    // The contract inverts: the browser view sits UNDER the app webview, so
+    // an overlay must NOT hide the page — it paints over it — and the
+    // overlay's rectangle must be excluded from the click pass-through region.
+    updateSettings({ browserLayering: "punch" });
+    refreshBrowserViews();
+    try {
+      const engaged = await settle(() => {
+        const told = lastPassthrough();
+        return !!told && told.pass.length > 0 && view()?.shown === true;
+      });
+      if (!engaged) {
+        surfaces.push({
+          id: "punch:engage",
+          label: "Punch-through layering engages",
+          kind: "persistent",
+          covers: "center",
+          ok: false,
+          detail: `pass region never synced with the page on screen — ${viewSays(view())}`,
+        });
+      } else {
+        for (const surface of drivableSurfaces()) {
+          const report = await exercisePunchSurface(surface, since, () => signals.length);
+          void ipc.jsLog(
+            report.ok ? "info" : "error",
+            `browser:SELFTEST surface ${report.id} ${
+              report.skipped
+                ? `skipped (${report.why})`
+                : report.ok
+                  ? "ok"
+                  : `FAILED — ${report.detail}`
+            }`,
+          );
+          surfaces.push(report);
+        }
+      }
+    } finally {
+      updateSettings({ browserLayering: "overlay" });
+      refreshBrowserViews();
+      // Let the shipped layering settle back before anything samples pixels.
+      await settle(() => view()?.shown === true);
+    }
+
     // ---- pixel sanity, advisory ----
     await step("pixels", "The hidden pane shows the page, not a white hole", async () => {
       const v = view();
@@ -712,6 +757,104 @@ async function exerciseSurface(
   } finally {
     await ensureClosed(surface);
   }
+}
+
+/** One overlay surface under punch-through: the page must stay on screen
+ *  while the surface paints over it, and the surface's rectangle must be in
+ *  the block region so clicks on it stay in the app. The freeze-frame
+ *  machinery is asserted absent rather than present. */
+async function exercisePunchSurface(
+  surface: OverlaySurface,
+  since: (mark: number) => BrowserSignal[],
+  mark: () => number,
+): Promise<SurfaceReport> {
+  const base: SurfaceReport = {
+    id: `punch:${surface.id}`,
+    label: `${surface.label} (punch-through)`,
+    kind: surface.kind,
+    covers: surface.covers,
+    ok: true,
+  };
+  const v0 = view();
+  if (!v0 || v0.shown !== true) {
+    return { ...base, skipped: true, why: "the page was not on screen to be covered" };
+  }
+  const pane = v0.hostRect;
+  const m = mark();
+  try {
+    await surface.open?.();
+    const appeared = await settle(() => painting(surface.selector));
+    if (!appeared) {
+      await ensureClosed(surface, true);
+      return { ...base, skipped: true, why: surface.why ?? "the surface never appeared" };
+    }
+    const over = await settle(() => coversPane(surface.selector, pane));
+    if (!over) {
+      await ensureClosed(surface, true);
+      return {
+        ...base,
+        skipped: true,
+        why: "it opened clear of the pane, so there was nothing to block",
+      };
+    }
+    // The whole point of the mode: the overlay arrives and the page stays.
+    // Wait as long as a hide would take to be issued, then ask for one.
+    await sleep(1200);
+    const hide = hideIssued(since(m));
+    if (hide) {
+      throw new StepFailure("the page was hidden for an overlay that should paint over it");
+    }
+    if (view()?.shown !== true) {
+      throw new StepFailure(`the page left the screen — ${viewSays(view())}`);
+    }
+    // Clicks under the overlay must stay in the app. The block region is in
+    // window points; the selftest runs unzoomed, so CSS pixels compare 1:1.
+    const blockMs = await until(
+      "the overlay never entered the click block region",
+      () => blockCovers(surface.selector),
+      (b) => b,
+      DEADLINE.hide,
+      () => JSON.stringify(lastPassthrough()?.block ?? null),
+    );
+
+    await ensureClosed(surface);
+    const clearMs = await until(
+      "the block region kept the overlay after it closed",
+      () => !painting(surface.selector) || !blockCovers(surface.selector),
+      (b) => b,
+      DEADLINE.show,
+      () => JSON.stringify(lastPassthrough()?.block ?? null),
+    );
+    if (view()?.shown !== true) {
+      throw new StepFailure("the page left the screen after the overlay closed");
+    }
+    return { ...base, hideMs: blockMs, showMs: clearMs };
+  } catch (err) {
+    return {
+      ...base,
+      ok: false,
+      detail: err instanceof Error ? err.message : String(err),
+    };
+  } finally {
+    await ensureClosed(surface);
+  }
+}
+
+/** Whether any painted box matching `selector` overlaps a rect in the synced
+ *  block region. */
+function blockCovers(selector: string): boolean {
+  const told = lastPassthrough();
+  if (!told) return false;
+  for (const el of document.querySelectorAll(selector)) {
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) continue;
+    for (const b of told.block) {
+      const w = Math.min(r.right, b.x + b.width) - Math.max(r.left, b.x);
+      const h = Math.min(r.bottom, b.y + b.height) - Math.max(r.top, b.y);
+      if (w > 1 && h > 1) return true;
+    }
+  }
+  return false;
 }
 
 /** Whether anything matching `selector` is actually over the pane. */

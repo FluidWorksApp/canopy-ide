@@ -11804,6 +11804,18 @@ a.btn-mini {
   position: relative;
   overflow: hidden;
 }
+/* Punch-through layering (experimental): the page's native view sits UNDER
+   the app webview instead of over it, and the backend stops this webview
+   drawing its background — so the page shows wherever the DOM doesn't paint.
+   These are the only boxes that paint inside the pane's rectangle, and they
+   must stop; every other region keeps its own surface colour, and the window
+   itself is painted in --bg by the backend so nothing flashes the platform
+   default. */
+html.punch-through #root,
+html.punch-through .preview-frame-wrap,
+html.punch-through .preview-webview-host {
+  background: transparent;
+}
 /* The last picture of the page, standing in for it while an overlay has the
    view pushed off screen — so a menu opening looks like the page pausing
    rather than the page going away. Stretched to the box it stands in for: the

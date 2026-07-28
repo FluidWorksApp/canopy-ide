@@ -1055,6 +1055,39 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     </p>
                   )}
                 </Item>
+                {browserOk && (
+                  <Item
+                    name="Layering (experimental)"
+                    desc="How the embedded browser sits against the app. Overlay floats the page above the window and freezes it behind a still whenever a panel or menu opens over it. Punch-through puts the page underneath instead, so panels and menus genuinely slide over the live page — new, and still being proven."
+                  >
+                    <div className="set-checks">
+                      <label className="set-inline-check">
+                        <input
+                          type="radio"
+                          name="browser-layering"
+                          checked={s.browserLayering !== "punch"}
+                          onChange={() => patch({ browserLayering: "overlay" })}
+                        />
+                        <span>
+                          Overlay
+                          <em>The shipped behaviour: hide under overlays, show a freeze-frame.</em>
+                        </span>
+                      </label>
+                      <label className="set-inline-check">
+                        <input
+                          type="radio"
+                          name="browser-layering"
+                          checked={s.browserLayering === "punch"}
+                          onChange={() => patch({ browserLayering: "punch" })}
+                        />
+                        <span>
+                          Punch-through
+                          <em>The live page stays visible under panels and menus.</em>
+                        </span>
+                      </label>
+                    </div>
+                  </Item>
+                )}
                 <Item
                   name="Browsing data"
                   desc="One profile is shared by every preview tab, which is what keeps you signed in across them — so clearing it signs you out of everything at once, like a browser's own “clear browsing data”. Cookies, local storage and caches; nothing else on this machine is touched."

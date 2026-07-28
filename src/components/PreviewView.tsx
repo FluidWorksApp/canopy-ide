@@ -27,6 +27,7 @@ import {
   refreshBrowserViews,
   registerBrowserView,
   setBrowserViewWanted,
+  themeRgb,
   useBrowserEngine,
   useBrowserPane,
 } from "../browserHost";
@@ -87,21 +88,6 @@ const restOf = (url: string): string => {
     return "/";
   }
 };
-
-/** The app's own background as [r, g, b], for painting a webview that has
- *  nothing in it yet. WebKit's default is white, which against any of Canopy's
- *  dark skins reads as a broken pane rather than an empty one. */
-function themeRgb(): [number, number, number] | undefined {
-  const raw = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
-  const hex = /^#([0-9a-f]{6})$/i.exec(raw);
-  if (hex) {
-    const n = parseInt(hex[1], 16);
-    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-  }
-  const rgb = /^rgba?\(\s*([0-9.]+)[\s,]+([0-9.]+)[\s,]+([0-9.]+)/i.exec(raw);
-  if (rgb) return [Number(rgb[1]), Number(rgb[2]), Number(rgb[3])];
-  return undefined;
-}
 
 const normalize = (raw: string): string | null => {
   const t = raw.trim();
