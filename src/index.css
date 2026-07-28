@@ -2634,12 +2634,20 @@ body,
   opacity: 0.5;
 }
 
-/* Drag to reorder (project tabs and the strip alike). The tab in hand fades and
-   stops taking pointer hits, both to read as "in flight" and so the strip
-   underneath can be hit-tested for the tab it's passing over. */
+/* Drag to reorder — the tab in hand lifts above its siblings and follows the
+   pointer via translateX (set inline). pointer-events:none lets the strip
+   underneath be hit-tested for the slot it's passing over. */
 .tab-dragging {
-  opacity: 0.45;
+  opacity: 0.92;
   pointer-events: none;
+  z-index: 10;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45), 0 1px 4px rgba(0, 0, 0, 0.3);
+  border-color: var(--border-strong) !important;
+  background: var(--bg-raised) !important;
+  color: var(--text) !important;
+  /* Disable the base transition while translating so it tracks without lag. */
+  transition: box-shadow var(--dur-fast) var(--ease-out),
+    opacity var(--dur-fast) var(--ease-out) !important;
 }
 
 /* While a tab is in flight the whole window says so, and nothing the pointer
@@ -6328,6 +6336,228 @@ body.dragging-tab * {
   corner-shape: squircle;
   font-size: 9px;
   opacity: 0.7;
+}
+
+/* ---------- Dialog component (Dialog.tsx) ----------
+   The canonical modal surface — replaces ad-hoc .confirm-backdrop uses over
+   time. Keyframes live here; the component itself adds no inline styles.      */
+
+@keyframes cnp-dlg-scrim-in  { from { opacity: 0 } to { opacity: 1 } }
+@keyframes cnp-dlg-scrim-out { from { opacity: 1 } to { opacity: 0 } }
+
+@keyframes cnp-dlg-in {
+  from { opacity: 0; transform: perspective(900px) rotateX(-11deg) scale(.97) }
+  55%  { opacity: 1 }
+  to   { opacity: 1; transform: perspective(900px) rotateX(0deg) scale(1) }
+}
+@keyframes cnp-dlg-out {
+  from { opacity: 1; transform: perspective(900px) rotateX(0deg) scale(1) }
+  to   { opacity: 0; transform: perspective(900px) rotateX(5deg) scale(.99) }
+}
+@media (prefers-reduced-motion: reduce) {
+  @keyframes cnp-dlg-in  { from { opacity: 0 } to { opacity: 1 } }
+  @keyframes cnp-dlg-out { from { opacity: 1 } to { opacity: 0 } }
+}
+
+.dlg-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: color-mix(in oklab, var(--bg-deep) 62%, transparent);
+  backdrop-filter: blur(3px) saturate(115%);
+  -webkit-backdrop-filter: blur(3px) saturate(115%);
+  white-space: normal;
+  text-align: left;
+  animation: cnp-dlg-scrim-in 210ms var(--ease-out) both;
+}
+.dlg-scrim.dlg-scrim-out {
+  animation: cnp-dlg-scrim-out 120ms var(--ease-out) both;
+}
+.dlg-scrim.dlg-inline {
+  position: absolute;
+}
+
+.dlg-panel {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+  corner-shape: squircle;
+  box-shadow: var(--shadow-3), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  color: var(--text);
+  transform-origin: 50% 0%;
+  backface-visibility: hidden;
+  overflow-wrap: anywhere;
+  animation: cnp-dlg-in 210ms cubic-bezier(0.2, 1.06, 0.32, 1) both;
+}
+.dlg-panel.dlg-panel-out {
+  animation: cnp-dlg-out 120ms var(--ease-out) both;
+}
+
+.dlg-sm { max-width: 360px; }
+.dlg-md { max-width: 440px; }
+.dlg-lg { max-width: 560px; }
+
+/* Header */
+.dlg-header {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 18px 20px 4px;
+}
+
+.dlg-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Status dot */
+.dlg-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+}
+.dlg-dot-danger {
+  background: var(--danger);
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--danger) 18%, transparent);
+}
+.dlg-dot-accent {
+  background: var(--accent);
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--accent) 18%, transparent);
+}
+.dlg-dot-default {
+  background: var(--text);
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--text) 18%, transparent);
+}
+
+.dlg-title {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-lg);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: var(--lh-tight);
+  color: var(--text);
+}
+.dlg-title.dlg-title-danger {
+  color: var(--danger);
+}
+
+.dlg-hint-chip {
+  padding: 2px 6px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.dlg-body {
+  color: var(--text-dim);
+  line-height: var(--lh-ui);
+  text-wrap: pretty;
+}
+
+/* Optional children slot */
+.dlg-children {
+  padding: 12px 20px 0;
+}
+
+/* Mono consequence line */
+.dlg-meta {
+  margin: 14px 20px 0;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  white-space: pre-wrap;
+}
+
+/* Action row */
+.dlg-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 18px;
+  padding: 13px 20px;
+  border-top: 1px solid var(--border);
+}
+.dlg-actions-spacer {
+  flex: 1;
+}
+
+/* Buttons */
+.dlg-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 13px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  transition: transform var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+.dlg-btn:hover {
+  transform: translateY(-1px);
+}
+
+.dlg-btn-quiet {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-weight: 500;
+}
+.dlg-btn-quiet:hover {
+  background: var(--bg-overlay);
+}
+
+.dlg-btn-accent {
+  background: color-mix(in oklab, var(--accent) 88%, transparent);
+  border: 1px solid transparent;
+  color: var(--on-accent);
+  font-weight: 600;
+}
+.dlg-btn-accent:hover {
+  background: var(--accent);
+}
+
+.dlg-btn-danger {
+  background: color-mix(in oklab, var(--danger) 88%, transparent);
+  border: 1px solid transparent;
+  color: var(--on-accent);
+  font-weight: 600;
+}
+.dlg-btn-danger:hover {
+  background: var(--danger);
+}
+
+.dlg-btn-hint {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  opacity: 0.65;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---------- confirm dialog (destructive / outward-facing actions) ---------- */

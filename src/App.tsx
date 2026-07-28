@@ -54,6 +54,7 @@ import { AboutDialog } from "./components/AboutDialog";
 import { Dictation } from "./components/Dictation";
 import { Onboarding } from "./components/Onboarding";
 import { Welcome } from "./components/Welcome";
+import { Dialog } from "./components/Dialog";
 import { shouldOnboard, markOnboarded } from "./onboarding";
 import { isSelftest, setSelftestMode } from "./selftest/mode";
 import { startBrowserWatchdog } from "./browserWatchdog";
@@ -135,6 +136,7 @@ export default function App() {
   // One delete confirm for every entry point (manager, Welcome) — deleting a
   // project was a bare single click before, one misclick from losing a setup.
   const [confirmDelete, setConfirmDelete] = useState<Project | null>(null);
+  const [confirmClose, setConfirmClose] = useState<Project | null>(null);
   const [hookPath, setHookPath] = useState<string | null>(null);
   const [zen, setZen] = useState(false);
   // Transient "110%" chip shown for ~1s after a zoom change, then cleared.
@@ -1539,8 +1541,11 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKeydown, true);
   }, []);
   const handleCloseProject = useCallback(
-    (id: string) => void closeProject(id),
-    [closeProject],
+    (id: string) => {
+      const project = wsRef.current.projects.find((p) => p.id === id);
+      if (project) setConfirmClose(project);
+    },
+    [],
   );
   const stopCollab = useCallback(() => {
     collab.current?.stopAll();
@@ -1776,6 +1781,7 @@ export default function App() {
         pendingCount={pendingCount}
         collabActive={collabTick >= 0 && (collab.current?.activeCount ?? 0) > 0}
         tabDragId={tabDrag.dragId}
+        tabDragOffsetX={tabDrag.dragOffsetX}
         tabDragItemProps={tabDrag.itemProps}
         hibernated={hibernated}
         showHints={projectHints}
@@ -1910,6 +1916,51 @@ export default function App() {
           onClose={() => setManager(false)}
         />
       )}
+
+      {confirmClose && (() => {
+        const roots = confirmClose.components.map((c) => c.path);
+        const activeAgents = pendingForRoots(allPending, roots).filter((i) => i.kind !== "idle");
+        const isAsleep = confirmClose.id in hibernated;
+        const metaLine = confirmClose.components
+          .map((c) => `${c.label}  ${c.path}`)
+          .join("\n");
+        const extraActions: import("./components/Dialog").DialogAction[] = [];
+        if (!isAsleep) {
+          extraActions.push({
+            label: "❄ Hibernate",
+            onClick: () => {
+              const id = confirmClose.id;
+              setConfirmClose(null);
+              hibernateProject(id);
+            },
+          });
+        }
+        extraActions.push({
+          label: "Close project",
+          primary: true,
+          onClick: () => {
+            const id = confirmClose.id;
+            setConfirmClose(null);
+            void closeProject(id);
+          },
+        });
+        return (
+          <Dialog
+            key={confirmClose.id}
+            variant="danger"
+            title={`Close ${confirmClose.name}?`}
+            body={
+              activeAgents.length > 0
+                ? `${activeAgents.length === 1 ? "1 agent is actively working" : `${activeAgents.length} agents are actively working`} — closing will interrupt ${activeAgents.length === 1 ? "it" : "them"}. All terminals and servers will be stopped.`
+                : "All terminals, agents, and servers in this project will be stopped."
+            }
+            meta={metaLine}
+            dismissLabel="Keep open"
+            onDismiss={() => setConfirmClose(null)}
+            actions={extraActions}
+          />
+        );
+      })()}
 
       {confirmDelete && (
         <div
