@@ -38,20 +38,14 @@ pub struct BrowserManager {
 struct ViewState {
     label: String,
     visible: bool,
-    /// Where the frontend last said this view goes, in window points. Held
-    /// because a parked view (below) is standing somewhere else and has to be
-    /// put back exactly where the placeholder is.
+    /// Where the frontend last said this view goes, in window points — the
+    /// rect a blank view is nudged away from and back to.
     bounds: Rect,
-    /// Parked: wanted hidden, but kept on screen off to the side because the
-    /// page has not painted yet. See `park` for why hiding it would be worse.
-    parked: bool,
-    /// Has this view's current page ever committed a frame? A hidden WKWebView
-    /// does not render, and WebKit does not go back and paint a document whose
-    /// first commit never happened — it waits for the next navigation. So a
-    /// page that loaded entirely while hidden comes back blank-white when it
-    /// is finally shown, which is what the pane looked like whenever a preview
-    /// was opened with a panel over it.
-    painted: bool,
+    /// Whether this document has already had a repaint forced on it. One
+    /// attempt per document: a page that stays blank through both remedies is
+    /// not going to be talked round by a third, and reloading in a loop would
+    /// be worse than the blank it is trying to fix.
+    repaint_tried: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -323,17 +317,21 @@ fn create(
                 drain(nav_app.clone(), nav_tab.clone());
                 return false;
             }
-            arm_repaint(&nav_app, &nav_tab);
+            // A new document gets its own chance to be rescued.
+            if let Some(v) = nav_app
+                .state::<BrowserManager>()
+                .views
+                .lock()
+                .unwrap()
+                .get_mut(&nav_tab)
+            {
+                v.repaint_tried = false;
+            }
             emit_nav(&nav_app, &nav_tab, url.as_str(), true);
             true
         })
         .on_page_load(move |_wv, payload| {
             if matches!(payload.event(), PageLoadEvent::Finished) {
-                // The page has a document to paint, so the reason for parking
-                // is over: settle the view where the frontend actually wanted
-                // it. Before the nav is announced, so nothing that reacts to
-                // the load can race the placement.
-                settle_parked(&load_app, &load_tab);
                 emit_nav(&load_app, &load_tab, payload.url().as_str(), false);
                 drain(load_app.clone(), load_tab.clone());
             }
@@ -380,8 +378,7 @@ fn create(
         tab_id,
         ViewState {
             bounds: initial,
-            parked: false,
-            painted: false,
+            repaint_tried: false,
             label,
             visible: true,
         },
@@ -435,90 +432,6 @@ pub async fn browser_navigate(
 }
 
 /// What a view should do when the frontend asks for a visibility.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Placement {
-    /// On screen where the placeholder is.
-    Show,
-    /// Off the window's visible area, still rendering.
-    Park,
-    /// Genuinely hidden — the page has painted, so it will paint again.
-    Hide,
-}
-
-/// The rule in one place: only a page that has never painted is parked rather
-/// than hidden. Everything else is the plain answer, because a view WebKit has
-/// already drawn once comes back drawn.
-fn placement(want_visible: bool, painted: bool) -> Placement {
-    match (want_visible, painted) {
-        (true, _) => Placement::Show,
-        (false, true) => Placement::Hide,
-        (false, false) => Placement::Park,
-    }
-}
-
-/// A new document is on its way, so the frame in hand is about to stop being
-/// this page's. If the view is hidden, park it — WebKit renders a parked view
-/// and does not render a hidden one, and the alternative is the blank-white
-/// pane you get from a page that loaded entirely out of sight.
-///
-/// This is why the fix is not only about the first load: an agent driving a
-/// background preview navigates it exactly this way.
-fn arm_repaint<R: tauri::Runtime>(app: &tauri::AppHandle<R>, tab_id: &str) {
-    let Ok(wv) = webview(app, tab_id) else { return };
-    let Some((bounds, park_it)) = ({
-        let mgr = app.state::<BrowserManager>();
-        let mut views = mgr.views.lock().unwrap();
-        views.get_mut(tab_id).map(|v| {
-            v.painted = false;
-            let park_it = !v.visible && !v.parked;
-            if park_it {
-                v.parked = true;
-            }
-            (v.bounds, park_it)
-        })
-    }) else {
-        return;
-    };
-    if park_it {
-        let _ = park(&wv, bounds);
-        let _ = wv.show();
-    }
-}
-
-/// A parked view's page has finished loading, so it has painted: put the view
-/// back where the placeholder is and apply the visibility that was asked for
-/// while it was parked.
-///
-/// Called from the page-load hook, which runs whatever the view's state — a
-/// view that was never parked settles to exactly what it already was.
-fn settle_parked<R: tauri::Runtime>(app: &tauri::AppHandle<R>, tab_id: &str) {
-    let Ok(wv) = webview(app, tab_id) else { return };
-    let Some((bounds, visible, was_parked)) = ({
-        let mgr = app.state::<BrowserManager>();
-        let mut views = mgr.views.lock().unwrap();
-        views.get_mut(tab_id).map(|v| {
-            let was = v.parked;
-            v.painted = true;
-            v.parked = false;
-            (v.bounds, v.visible, was)
-        })
-    }) else {
-        return;
-    };
-    if !was_parked {
-        return;
-    }
-    // Hide before restoring the position when it should not be seen; the
-    // other order puts the page on screen over whatever asked it to leave.
-    if !visible {
-        let _ = wv.hide();
-    }
-    let _ = place(&wv, bounds);
-    if visible {
-        let _ = wv.show();
-    }
-}
-
 /// Put a view where the frontend says it goes.
 fn place<R: tauri::Runtime>(wv: &tauri::webview::Webview<R>, r: Rect) -> Result<(), String> {
     wv.set_bounds(tauri::Rect {
@@ -528,22 +441,76 @@ fn place<R: tauri::Runtime>(wv: &tauri::webview::Webview<R>, r: Rect) -> Result<
     .map_err(|e| e.to_string())
 }
 
-/// Stand a view off the left edge of the window, its own width clear of it.
+/// How long a freshly shown view gets to paint itself before it is treated as
+/// blank. Long enough that an ordinary page wins on its own; short enough that
+/// nobody sits looking at white.
+const PAINT_GRACE: std::time::Duration = std::time::Duration::from_millis(350);
+
+/// …and how long the cheap remedy gets before the expensive one.
+const NUDGE_GRACE: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Whether the page has drawn a frame. See `browser_painted` — the page
+/// answers from its own first requestAnimationFrame, which is the one signal
+/// that does not force the render it is measuring.
+async fn has_painted(app: &tauri::AppHandle, tab_id: &str) -> bool {
+    eval_json(app, tab_id, "window.__canopyPainted || 0".into())
+        .await
+        .ok()
+        .and_then(|v| v.as_f64())
+        .is_some_and(|n| n > 0.0)
+}
+
+/// A view has just been shown. If its document loaded while the view was off
+/// screen, WebKit never drew it and will not draw it now — the pane is blank
+/// white until something forces a new render. That is the bug users hit by
+/// opening a preview with a panel over it, and the reason the only fix they
+/// had was pressing reload.
 ///
-/// This is what "hidden" means for a page that has not painted yet. WebKit
-/// renders a view that is on screen but out of frame, and does not render one
-/// that is `hidden` — and a document whose first commit never happened does
-/// not get painted later just because the view came back, it waits for the
-/// next navigation. Parking keeps the page rendering, at its real size, where
-/// nobody can see it; the window clips it, so there is nothing to look at.
-fn park<R: tauri::Runtime>(wv: &tauri::webview::Webview<R>, r: Rect) -> Result<(), String> {
-    place(
-        wv,
-        Rect {
-            x: -(r.width.max(1.0) + 32.0),
-            ..r
-        },
-    )
+/// Two remedies, cheapest first, because the expensive one costs page state:
+/// resizing the view by a pixel makes WebKit recompute what is visible and
+/// build tiles for it, and a reload rebuilds the document outright. Neither
+/// runs unless the page itself reports that it has never painted, so an
+/// ordinary show — which is almost all of them — does nothing at all.
+fn repaint_if_blank(app: tauri::AppHandle, tab_id: String) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(PAINT_GRACE).await;
+        // Still the state we were called for? A view hidden again in the
+        // meantime is not blank on screen, and rendering it would be work
+        // nobody asked for.
+        let bounds = {
+            let mgr = app.state::<BrowserManager>();
+            let mut views = mgr.views.lock().unwrap();
+            match views.get_mut(&tab_id) {
+                Some(v) if v.visible && !v.repaint_tried => {
+                    v.repaint_tried = true;
+                    v.bounds
+                }
+                _ => return,
+            }
+        };
+        if has_painted(&app, &tab_id).await {
+            return;
+        }
+        let Ok(wv) = webview(&app, &tab_id) else {
+            return;
+        };
+        let _ = place(
+            &wv,
+            Rect {
+                width: (bounds.width - 1.0).max(1.0),
+                ..bounds
+            },
+        );
+        let _ = place(&wv, bounds);
+        tokio::time::sleep(NUDGE_GRACE).await;
+        if has_painted(&app, &tab_id).await {
+            return;
+        }
+        // Nothing cheap worked, so do what the user was doing by hand. A page
+        // that has never rendered has nothing on screen to lose.
+        let _ = app.emit("browser:repaint", serde_json::json!({ "tabId": tab_id }));
+        let _ = wv.reload();
+    });
 }
 
 #[tauri::command]
@@ -562,24 +529,16 @@ pub fn browser_set_bounds(
         width,
         height,
     };
-    let parked = {
-        let mgr = app.state::<BrowserManager>();
-        let mut views = mgr.views.lock().unwrap();
-        match views.get_mut(&tab_id) {
-            Some(v) => {
-                v.bounds = rect;
-                v.parked
-            }
-            None => false,
-        }
-    };
-    // A parked view keeps its size — the page should lay out exactly as it
-    // will be seen — but not its position, which is the point of parking.
-    if parked {
-        park(&wv, rect)
-    } else {
-        place(&wv, rect)
+    if let Some(v) = app
+        .state::<BrowserManager>()
+        .views
+        .lock()
+        .unwrap()
+        .get_mut(&tab_id)
+    {
+        v.bounds = rect;
     }
+    place(&wv, rect)
 }
 
 /// Show or hide the view. This is the single lever every overlap rule pulls —
@@ -591,41 +550,21 @@ pub fn browser_set_visible(
     visible: bool,
 ) -> Result<(), String> {
     let wv = webview(&app, &tab_id)?;
-    let (bounds, park_it, unpark) = {
+    {
         let mgr = app.state::<BrowserManager>();
         let mut views = mgr.views.lock().unwrap();
         match views.get_mut(&tab_id) {
-            Some(v) if v.visible == visible && !v.parked => return Ok(()),
-            Some(v) => {
-                v.visible = visible;
-                let park_it = placement(visible, v.painted) == Placement::Park;
-                let unpark = v.parked && !park_it;
-                v.parked = park_it;
-                (v.bounds, park_it, unpark)
-            }
-            None => (Rect::default(), false, false),
+            Some(v) if v.visible == visible => return Ok(()),
+            Some(v) => v.visible = visible,
+            None => {}
         }
-    };
-    if park_it {
-        // Ordered so the page is off screen before anything else: it is still
-        // a shown view, and moving it after would flash it over the overlay
-        // that asked for it to go away.
-        park(&wv, bounds)?;
-        return wv.show().map_err(|e| e.to_string());
     }
-    if unpark {
-        // Put it back where the placeholder is. When the answer is "hidden",
-        // hide first so the restored position is never seen.
-        if !visible {
-            wv.hide().map_err(|e| e.to_string())?;
-        }
-        place(&wv, bounds)?;
+    if !visible {
+        return wv.hide().map_err(|e| e.to_string());
     }
-    if visible {
-        wv.show().map_err(|e| e.to_string())
-    } else {
-        wv.hide().map_err(|e| e.to_string())
-    }
+    wv.show().map_err(|e| e.to_string())?;
+    repaint_if_blank(app, tab_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -677,6 +616,20 @@ pub async fn browser_command(
         serde_json::to_string(&message).map_err(|e| e.to_string())?
     );
     eval_json(&app, &tab_id, code).await.map(|_| ())
+}
+
+/// Has this view's current document ever rendered a frame?
+///
+/// Not the same question as "has it loaded", which is the whole bug: a page
+/// that loads while its view is hidden finishes loading and never paints, and
+/// WebKit does not go back and paint it afterwards. The page answers from its
+/// own first `requestAnimationFrame` (preview_picker.js), a callback that only
+/// runs when the view is actually being drawn. Asked with an eval because a
+/// snapshot would force the very render it is trying to detect — which is why
+/// this bug survived a suite that takes pictures.
+#[tauri::command]
+pub async fn browser_painted(app: tauri::AppHandle, tab_id: String) -> Result<bool, String> {
+    Ok(has_painted(&app, &tab_id).await)
 }
 
 /// Where the page thinks it is. The page-load hook covers real navigations;
@@ -731,38 +684,26 @@ mod tests {
         assert_eq!(label_for(""), "canopy-browser-");
     }
 
-    /// The blank-white pane: a preview opened with a panel over it loaded
-    /// entirely while hidden, and WebKit never paints a document whose first
-    /// commit didn't happen — so revealing it showed an empty webview until
-    /// the user reloaded by hand. A page that hasn't painted is parked, never
-    /// hidden.
+    /// The nudge has to change the size WebKit is asked to fill — that is
+    /// what makes it recompute the visible rect and build tiles — while
+    /// leaving the view where the placeholder is.
     #[test]
-    fn a_page_that_has_never_painted_is_parked_rather_than_hidden() {
-        assert_eq!(placement(false, false), Placement::Park);
-        assert_eq!(placement(false, true), Placement::Hide);
-        // Wanting it visible is always just that, painted or not.
-        assert_eq!(placement(true, false), Placement::Show);
-        assert_eq!(placement(true, true), Placement::Show);
-    }
-
-    /// Parking keeps the page's real size — it has to lay out as it will be
-    /// seen — and only moves it clear of the window's left edge.
-    #[test]
-    fn parking_moves_a_view_off_screen_at_its_own_size() {
+    fn the_nudge_changes_the_size_and_keeps_the_position() {
         let r = Rect {
             x: 120.0,
             y: 60.0,
             width: 800.0,
             height: 600.0,
         };
-        let parked = Rect {
-            x: -(r.width + 32.0),
+        let nudged = Rect {
+            width: (r.width - 1.0).max(1.0),
             ..r
         };
-        assert!(parked.x + parked.width < 0.0, "no part of it is on screen");
-        assert_eq!(parked.y, r.y);
-        assert_eq!(parked.width, r.width);
-        assert_eq!(parked.height, r.height);
+        assert_ne!(nudged.width, r.width);
+        assert_eq!((nudged.x, nudged.y), (r.x, r.y));
+        // A collapsed pane must not nudge itself to nothing.
+        let tiny = Rect { width: 1.0, ..r };
+        assert_eq!((tiny.width - 1.0f64).max(1.0), 1.0);
     }
 
     #[test]
@@ -802,8 +743,7 @@ mod tests {
                 label: label.clone(),
                 visible: true,
                 bounds: Rect::default(),
-                parked: false,
-                painted: false,
+                repaint_tried: false,
             },
         );
 

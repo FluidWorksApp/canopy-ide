@@ -340,6 +340,11 @@ export const browserSetPassthrough = (
   pass: Array<{ x: number; y: number; width: number; height: number }>,
   block: Array<{ x: number; y: number; width: number; height: number }>,
 ) => invoke<void>("browser_set_passthrough", { pass, block });
+/** Whether the page has ever rendered a frame — which "loaded" does not
+ *  imply. A page that loads while its view is hidden never paints, and shows
+ *  blank when the view finally appears. */
+export const browserPainted = (tabId: string) =>
+  invoke<boolean>("browser_painted", { tabId });
 
 export const browserClose = (tabId: string) =>
   invoke<void>("browser_close", { tabId }).catch(() => {});

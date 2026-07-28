@@ -29,7 +29,11 @@ import {
   type OverlaySurface,
 } from "../overlaySurfaces";
 import { BROWSER_INPUT_EVENT } from "../components/PreviewView";
-import { lastPassthrough, refreshBrowserViews } from "../browserHost";
+import {
+  lastPassthrough,
+  refreshBrowserViews,
+  suppressBrowserViews,
+} from "../browserHost";
 import { updateSettings } from "../settings";
 import {
   startBrowserWatchdog,
@@ -400,6 +404,55 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
         viewSays,
       ).then((ms) => `first frame after ${ms}ms`),
     );
+
+    // The reported bug, as a step. Opening a preview with a panel over it
+    // showed a blank white pane, and only a manual reload fixed it: the page
+    // loaded entirely while its view was hidden, and a hidden WKWebView does
+    // not render — nor does WebKit go back and paint a document whose first
+    // commit never happened.
+    //
+    // "Loaded" cannot answer this and neither can a snapshot, which forces the
+    // render it would be measuring. The page is asked instead, from its own
+    // first requestAnimationFrame (preview_picker.js) — a callback that only
+    // runs when the view is actually being drawn.
+    await step("hidden-load", "A page loaded while the view is hidden paints when it returns", async () => {
+      const v = view();
+      if (!v) throw new StepFailure("no view");
+      // Hidden imperatively rather than by opening a panel: the mechanism
+      // under test is "the view was off screen while the document loaded",
+      // and driving that through the app's own surfaces makes the
+      // measurement depend on whichever of them happens to be open already.
+      const release = suppressBrowserViews();
+      let released = false;
+      try {
+        if (!(await settle(() => view()?.shown === false))) {
+          throw new StepFailure("the view never went hidden");
+        }
+        await ipc.browserNavigate(v.tabId, `${cfg.url}?hidden=1`);
+        await sleep(2500);
+        const whileHidden = await ipc.browserPainted(v.tabId).catch(() => false);
+        release();
+        released = true;
+        await until(
+          "the page never came back on screen",
+          view,
+          (s) => s?.shown === true,
+          DEADLINE.show,
+          viewSays,
+        );
+        // Being shown is its own chance to paint; give it one before judging.
+        await sleep(1200);
+        const afterShow = await ipc.browserPainted(v.tabId).catch(() => false);
+        if (!afterShow) {
+          throw new StepFailure(
+            `the page never rendered a frame — a blank pane (painted while hidden: ${whileHidden})`,
+          );
+        }
+        return `painted — while hidden: ${whileHidden}, after reveal: ${afterShow}`;
+      } finally {
+        if (!released) release();
+      }
+    });
 
     // ---- every registered overlay surface ----
     for (const surface of drivableSurfaces()) {
