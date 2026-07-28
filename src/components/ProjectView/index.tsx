@@ -4567,6 +4567,14 @@ export const ProjectView = memo(function ProjectView({
         case "open-task-run":
           openTaskHistory(action.runId);
           return;
+        // A registered source's own opener (see registerSpotSource). It ran
+        // from a click, so a rejection here is the source's to report — this
+        // only keeps it from surfacing as an unhandled rejection.
+        case "custom":
+          void Promise.resolve()
+            .then(action.run)
+            .catch((err) => console.warn("[spot] custom action failed", err));
+          return;
       }
     },
     [

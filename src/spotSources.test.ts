@@ -1,5 +1,17 @@
-import { describe, expect, it } from "vitest";
-import { actionRows, sessionRows, tabRows, type SpotContext } from "./spotSources";
+import { describe, expect, it, vi } from "vitest";
+import {
+  actionRows,
+  deferredRows,
+  instantRows,
+  registerSpotSource,
+  sessionRows,
+  spotGroupOrder,
+  spotSources,
+  tabRows,
+  type SpotContext,
+  type SpotQuery,
+  type SpotRow,
+} from "./spotSources";
 import type { SubTab } from "./components/ProjectView/helpers";
 
 const term = (id: string, title: string, ptyId: number): SubTab => ({
@@ -79,5 +91,111 @@ describe("sessionRows", () => {
       type: "open-session",
       digest: { session_id: "s1" },
     });
+  });
+});
+
+// ---------- the registry ----------
+// What a plugin gets. Every test here registers through the same door a
+// third-party source would and unregisters in the same breath — a leaked
+// source would show up in every later test's rows.
+
+const req = (query: string, over: Partial<SpotQuery> = {}): SpotQuery => ({
+  query,
+  ctx: ctx(),
+  corpus: [],
+  roots: ["/repo"],
+  ...over,
+});
+
+const row = (id: string, group: string): SpotRow => ({
+  id,
+  group,
+  title: id,
+  score: 0,
+  action: { type: "custom", run: () => {} },
+});
+
+describe("the source registry", () => {
+  it("asks a registered instant source on every keystroke", () => {
+    const rows = vi.fn(() => [row("plug:1", "Plugin")]);
+    const off = registerSpotSource({
+      id: "plug",
+      group: "Plugin",
+      timing: "instant",
+      rows,
+    });
+    try {
+      expect(instantRows(req("anything")).map((r) => r.id)).toContain("plug:1");
+      expect(rows).toHaveBeenCalledWith(expect.objectContaining({ query: "anything" }));
+    } finally {
+      off();
+    }
+    expect(instantRows(req("anything")).map((r) => r.id)).not.toContain("plug:1");
+  });
+
+  it("places a source before another one, and the section order follows", () => {
+    const off = registerSpotSource(
+      { id: "plug", group: "Plugin", timing: "instant", rows: () => [] },
+      { before: "tabs" },
+    );
+    try {
+      const order = spotGroupOrder();
+      expect(order.indexOf("Plugin")).toBeLessThan(order.indexOf("Open Tabs"));
+      expect(order.indexOf("Plugin")).toBeGreaterThan(order.indexOf("Actions"));
+    } finally {
+      off();
+    }
+    expect(spotGroupOrder()).not.toContain("Plugin");
+  });
+
+  it("honours minQuery rather than asking on an empty box", () => {
+    const rows = vi.fn(() => []);
+    const off = registerSpotSource({
+      id: "plug",
+      group: "Plugin",
+      timing: "instant",
+      minQuery: 3,
+      rows,
+    });
+    try {
+      instantRows(req("ab"));
+      expect(rows).not.toHaveBeenCalled();
+      instantRows(req("abc"));
+      expect(rows).toHaveBeenCalledOnce();
+    } finally {
+      off();
+    }
+  });
+
+  it("keeps the palette alive when a source throws or rejects", async () => {
+    const offSync = registerSpotSource({
+      id: "bad-sync",
+      group: "Bad",
+      timing: "instant",
+      rows: () => {
+        throw new Error("boom");
+      },
+    });
+    const offAsync = registerSpotSource({
+      id: "bad-async",
+      group: "Bad",
+      timing: "deferred",
+      rows: () => Promise.reject(new Error("boom")),
+    });
+    try {
+      // The built-in instant sources still answer around the bad one.
+      expect(instantRows(req("dev")).some((r) => r.action.type === "focus-tab")).toBe(true);
+      await expect(deferredRows(req("dev"))).resolves.toEqual(expect.any(Array));
+    } finally {
+      offSync();
+      offAsync();
+    }
+  });
+
+  it("registers every built-in through the same door", () => {
+    // No privileged path: if this drifts, something started bypassing the
+    // registry and the palette stopped being extensible in that spot.
+    expect(spotSources().map((s) => s.id)).toContain("actions");
+    expect(spotSources().every((s) => typeof s.rows === "function")).toBe(true);
   });
 });

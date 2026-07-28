@@ -630,6 +630,29 @@ export function StopwatchIcon({ size = 12, className }: IconProps) {
   );
 }
 
+/** Magnifier: a hit found by searching inside something, as opposed to the
+ *  thing itself. SpotSearch leans on the pair — DocumentIcon is the file,
+ *  this is a line inside it. */
+export function SearchIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.9}>
+      <circle cx="10.5" cy="10.5" r="6.5" />
+      <path d="m15.4 15.4 4.6 4.6" />
+    </svg>
+  );
+}
+
+/** Angle brackets around a stem: a code symbol from the language server. */
+export function SymbolIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.9}>
+      <path d="m7.5 8-3.5 4 3.5 4" />
+      <path d="m16.5 8 3.5 4-3.5 4" />
+      <path d="M13.5 6.5 10.5 17.5" />
+    </svg>
+  );
+}
+
 // Broadcast/live: a solid core with signal arcs, for sharing a file or project
 // live with the team.
 export function LiveShareIcon({ size = 14, className }: IconProps) {

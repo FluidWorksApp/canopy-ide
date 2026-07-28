@@ -18,3 +18,24 @@ export function fuzzy(needle: string, hay: string): number | null {
   }
   return score;
 }
+
+/** Where the match landed, as merged [start, end) ranges into `hay` — the same
+ *  walk as `fuzzy`, kept beside it so what a palette highlights can never
+ *  disagree with what it ranked. Null when it doesn't match; empty for an empty
+ *  needle. */
+export function fuzzyRanges(needle: string, hay: string): [number, number][] | null {
+  if (!needle) return [];
+  const n = needle.toLowerCase();
+  const h = hay.toLowerCase();
+  const out: [number, number][] = [];
+  let hi = 0;
+  for (const ch of n) {
+    const found = h.indexOf(ch, hi);
+    if (found === -1) return null;
+    const prev = out[out.length - 1];
+    if (prev && prev[1] === found) prev[1] = found + ch.length;
+    else out.push([found, found + ch.length]);
+    hi = found + ch.length;
+  }
+  return out;
+}

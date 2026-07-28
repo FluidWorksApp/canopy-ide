@@ -3,7 +3,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SpotSearch } from "./SpotSearch";
 import { mockCommands } from "../test/setup";
-import type { SpotContext } from "../spotSources";
+import { registerSpotSource, type SpotContext } from "../spotSources";
 import type { SubTab } from "./ProjectView/helpers";
 
 const term = (id: string, title: string, ptyId: number): SubTab => ({
@@ -80,6 +80,64 @@ describe("SpotSearch", () => {
     await userEvent.keyboard("{Escape}");
     expect(onClose).toHaveBeenCalledOnce();
     expect(onAction).not.toHaveBeenCalled();
+  });
+
+  it("wraps the cursor at both ends", async () => {
+    const { onAction } = open();
+    // Up from the first row lands on the last one — the fastest way to the
+    // bottom of a long list is one keypress.
+    await userEvent.keyboard("{ArrowUp}{Enter}");
+    expect(onAction).toHaveBeenCalledWith({ type: "focus-tab", tabId: "t1" });
+  });
+
+  it("marks where the query matched in a title", async () => {
+    open();
+    await userEvent.keyboard("shell");
+    const row = screen.getByRole("option", { name: /New Shell/ });
+    expect(
+      [...row.querySelectorAll(".spot-mark")].map((m) => m.textContent).join(""),
+    ).toBe("Shell");
+  });
+
+  it("counts each section, and the results, without lying about either", () => {
+    open();
+    // Shell, Preview and the one installed CLI, then the one open tab.
+    const actions = screen.getByText("Actions").parentElement;
+    expect(actions?.querySelector(".spot-group-count")?.textContent).toBe("3");
+    expect(screen.getAllByRole("option")).toHaveLength(4);
+    expect(screen.getByText(/results?$/)).toHaveTextContent("4 results");
+  });
+
+  it("shows rows from a registered source and lets it open them itself", async () => {
+    const run = vi.fn();
+    const off = registerSpotSource({
+      id: "notes",
+      group: "Notes",
+      timing: "instant",
+      rows: ({ query }) =>
+        query.includes("note")
+          ? [
+              {
+                id: "note:1",
+                group: "Notes",
+                kind: "file",
+                title: "standup note",
+                score: 0,
+                action: { type: "custom", run },
+              },
+            ]
+          : [],
+    });
+    try {
+      const { onAction } = open();
+      await userEvent.keyboard("note");
+      expect(screen.getByText("Notes")).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("option", { name: /standup note/ }));
+      // The palette dispatches; ProjectView is what calls run().
+      expect(onAction).toHaveBeenCalledWith({ type: "custom", run });
+    } finally {
+      off();
+    }
   });
 
   it("surfaces agent sessions by their prompts", async () => {
