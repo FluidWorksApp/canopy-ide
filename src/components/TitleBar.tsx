@@ -54,6 +54,8 @@ interface TitleBarProps {
   collabActive: boolean;
   /** Which project pill is currently being dragged (null if none). */
   tabDragId: string | null;
+  /** Current translateX offset of the dragged pill, in px. */
+  tabDragOffsetX: number;
   /** Returns pointer-event props for a draggable pill by project id. */
   tabDragItemProps: TabDrag["itemProps"];
   /** Projects that are asleep — their pill wears the frost and the menu offers
@@ -81,6 +83,7 @@ function TitleBarImpl({
   pendingCount,
   collabActive,
   tabDragId,
+  tabDragOffsetX,
   tabDragItemProps,
   hibernated,
   showHints,
@@ -119,6 +122,7 @@ function TitleBarImpl({
             className={`project-tab ${p.id === activeId ? "project-tab-active" : ""} ${
               p.id === tabDragId ? "tab-dragging" : ""
             } ${asleep ? "project-tab-asleep" : ""}`}
+            style={p.id === tabDragId && tabDragOffsetX !== 0 ? { transform: `translateX(${tabDragOffsetX}px)` } : undefined}
             {...tabDragItemProps(p.id)}
             onClick={() => onSelectProject(p.id)}
             onContextMenu={(e) =>
