@@ -1015,7 +1015,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
               <>
                 <Item
                   name="Engine"
-                  desc="How preview tabs show a page. The embedded browser loads the real URL at its real origin in its own webview, on a profile that persists — log into a site once and you stay logged in, exactly as in Safari. The loopback proxy serves every site from 127.0.0.1 instead, which no session survives, but it is the only engine that exists off macOS."
+                  desc="How preview tabs show a page. The loopback proxy shows it as an ordinary part of the window, so panels and menus draw over it and nothing has to be hidden for anything — at the cost of serving every site from one origin, which no login survives. The embedded browser keeps real origins and real logins, but macOS composites it above the whole window with no way to layer anything over it, and will not draw it while it is covered — so it disappears behind panels and menus, and needs forcing back."
                 >
                   {browserOk ? (
                     <div className="set-checks">
@@ -1023,24 +1023,26 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                         <input
                           type="radio"
                           name="browser-engine"
-                          checked={s.browserEngine === "webview"}
-                          onChange={() => patch({ browserEngine: "webview" })}
+                          checked={s.previewEngine === "proxy"}
+                          onChange={() => patch({ previewEngine: "proxy" })}
                         />
                         <span>
-                          Embedded browser
-                          <em>Real origins, real cookies, sessions that survive a restart.</em>
+                          Loopback proxy
+                          <em>Always visible, always screenshot-able. One shared session, and it
+                          logs every request it forwards.</em>
                         </span>
                       </label>
                       <label className="set-inline-check">
                         <input
                           type="radio"
                           name="browser-engine"
-                          checked={s.browserEngine === "proxy"}
-                          onChange={() => patch({ browserEngine: "proxy" })}
+                          checked={s.previewEngine === "webview"}
+                          onChange={() => patch({ previewEngine: "webview" })}
                         />
                         <span>
-                          Loopback proxy
-                          <em>The older engine. No sessions, but it logs every request it forwards.</em>
+                          Embedded browser
+                          <em>Real origins and real logins, kept across restarts. Disappears while
+                          a panel or menu covers it.</em>
                         </span>
                       </label>
                       <p className="set-item-desc">
@@ -1055,39 +1057,6 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     </p>
                   )}
                 </Item>
-                {browserOk && (
-                  <Item
-                    name="Layering (experimental)"
-                    desc="How the embedded browser sits against the app. Overlay floats the page above the window and freezes it behind a still whenever a panel or menu opens over it. Punch-through puts the page underneath instead, so panels and menus genuinely slide over the live page — new, and still being proven."
-                  >
-                    <div className="set-checks">
-                      <label className="set-inline-check">
-                        <input
-                          type="radio"
-                          name="browser-layering"
-                          checked={s.browserLayering !== "punch"}
-                          onChange={() => patch({ browserLayering: "overlay" })}
-                        />
-                        <span>
-                          Overlay
-                          <em>The shipped behaviour: hide under overlays, show a freeze-frame.</em>
-                        </span>
-                      </label>
-                      <label className="set-inline-check">
-                        <input
-                          type="radio"
-                          name="browser-layering"
-                          checked={s.browserLayering === "punch"}
-                          onChange={() => patch({ browserLayering: "punch" })}
-                        />
-                        <span>
-                          Punch-through
-                          <em>The live page stays visible under panels and menus.</em>
-                        </span>
-                      </label>
-                    </div>
-                  </Item>
-                )}
                 <Item
                   name="Browsing data"
                   desc="One profile is shared by every preview tab, which is what keeps you signed in across them — so clearing it signs you out of everything at once, like a browser's own “clear browsing data”. Cookies, local storage and caches; nothing else on this machine is touched."

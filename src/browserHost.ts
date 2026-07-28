@@ -303,7 +303,13 @@ function apply() {
   const zoom = currentZoom();
   const viewport = { width: window.innerWidth, height: window.innerHeight };
   const anyWanted = [...views.values()].some((e) => e.wanted);
-  const punch = getSettings().browserLayering === "punch";
+  // Punch-through is off regardless of the stored setting. It tried to put
+  // the page UNDER a see-through app webview so overlays could paint over it;
+  // a child webview cannot be placed below the app's own through any
+  // supported API (tauri-apps/tauri#9798), and the AppKit reordering it used
+  // leaves the page blank. Read and ignored, so a profile that has it enabled
+  // recovers on its own rather than staying broken.
+  const punch = false;
   if (anyWanted) ensureLayering(punch);
   /** Punch-through: where events fall through to the page, and where an
    *  overlay keeps them in the app. Rebuilt every pass, synced when changed. */
@@ -702,7 +708,7 @@ export function useBrowserEngine(): BrowserEngine | null {
       live = false;
     };
   }, []);
-  return supported === null ? null : chooseEngine(getSettings().browserEngine, supported);
+  return supported === null ? null : chooseEngine(getSettings().previewEngine, supported);
 }
 
 /** Test seam: drop all state between cases. */

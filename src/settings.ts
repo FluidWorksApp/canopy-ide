@@ -231,19 +231,42 @@ export interface Settings {
   remoteTunnelProvider: string;
 
   // ---- Embedded browser ----
-  /** Which engine preview tabs run on. "webview" is a real child webview at
-   *  the page's real origin, with a persistent profile — you log into a site
-   *  once and stay logged in. "proxy" is the older loopback reverse proxy,
-   *  which keeps no session at all but is the only engine that exists off
-   *  macOS; chooseEngine() falls back to it there whatever this says. */
-  browserEngine: BrowserEngine;
+  /** Which engine preview tabs run on.
+   *
+   *  "proxy" is an iframe on a loopback reverse proxy: ordinary DOM, so
+   *  panels and menus paint over it, screenshots see it, and nothing has to
+   *  be hidden for anything. The cost is that every site is served from one
+   *  origin, so sessions are shared and do not survive a restart.
+   *
+   *  "webview" is a real child webview at the page's real origin with a
+   *  persistent profile — log into a site once and stay logged in. It buys
+   *  that with two limits neither this app nor Tauri can lift:
+   *
+   *    * a child webview is composited ABOVE the whole window and there is no
+   *      z-order API for it (tauri-apps/tauri#9798; Electron's BrowserView is
+   *      the same), so anything drawn over it forces the page off screen;
+   *    * a hidden WKWebView does not render and cannot be made to — Apple
+   *      exposes no API for offscreen rendering — so a page that loads behind
+   *      a panel comes back blank until something forces a repaint.
+   *
+   *  Everything in browserHost.ts, browserFrame.ts and the freeze-frame
+   *  machinery exists to soften those two facts. Hence the default: the
+   *  engine that needs none of it. VS Code's Simple Browser is an iframe for
+   *  the same reason.
+   *
+   *  Named apart from the old `browserEngine` on purpose — a stored setting
+   *  overrides a default (see getSettings), so flipping the default alone
+   *  would have changed nothing for anyone already running. */
+  previewEngine: BrowserEngine;
 
   /** How the webview engine layers the page against the app (experimental).
    *  "overlay" is the shipped behaviour: the page floats above the whole
    *  window and hides behind a freeze-frame whenever anything opens over it.
-   *  "punch" inverts the stack — the page sits UNDER a see-through app
-   *  webview, so panels and menus genuinely paint over it, like an iframe
-   *  would. macOS webview engine only; ignored elsewhere. */
+   *  "punch" tried to invert the stack so panels would paint over a live
+   *  page. It does not work — a child webview cannot be put below the app's
+   *  own webview through any supported API, and the AppKit reordering it
+   *  used leaves the page blank. Kept only so an enabled setting can be read
+   *  and ignored; do not turn it on. */
   browserLayering: "overlay" | "punch";
 
   // ---- Crash reporting ----
@@ -292,7 +315,7 @@ const DEFAULTS: Settings = {
   dictationLanguage: "",
   remoteReach: "local",
   remoteTunnelProvider: "cloudflare",
-  browserEngine: "webview",
+  previewEngine: "proxy",
   browserLayering: "overlay",
   crashReporting: false,
 };
