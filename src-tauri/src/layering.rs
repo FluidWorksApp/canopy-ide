@@ -70,10 +70,7 @@ fn pass_through_at(x: f64, y: f64) -> bool {
 /// The frontend's current answer to "where is the page, and what covers it",
 /// in window-client logical points (the browser_set_bounds space).
 #[tauri::command]
-pub fn browser_set_passthrough(
-    pass: Vec<PassRect>,
-    block: Vec<PassRect>,
-) -> Result<(), String> {
+pub fn browser_set_passthrough(pass: Vec<PassRect>, block: Vec<PassRect>) -> Result<(), String> {
     let mut r = REGION.lock().unwrap();
     r.pass = pass;
     r.block = block;
@@ -134,11 +131,7 @@ mod native {
     /// converting through the view itself accounts for flippedness, and the
     /// app webview fills the window, so local coordinates ARE the
     /// window-client points the frontend syncs.
-    extern "C-unwind" fn hit_test(
-        view: &NSView,
-        _cmd: Sel,
-        point: NSPoint,
-    ) -> *mut NSView {
+    extern "C-unwind" fn hit_test(view: &NSView, _cmd: Sel, point: NSPoint) -> *mut NSView {
         unsafe {
             let local = view.convertPoint_fromView(point, view.superview().as_deref());
             let y = if view.isFlipped() {
@@ -163,14 +156,21 @@ mod native {
     unsafe fn install_hit_test(view: &WKWebView) {
         let view: &AnyObject = view;
         let orig = view.class();
-        if orig.name().to_str().is_ok_and(|n| n.starts_with("CanopyPunch_")) {
+        if orig
+            .name()
+            .to_str()
+            .is_ok_and(|n| n.starts_with("CanopyPunch_"))
+        {
             return;
         }
-        let name = CString::new(format!("CanopyPunch_{}", orig.name().to_str().unwrap_or("WKWebView")))
-            .expect("class name has no NUL");
+        let name = CString::new(format!(
+            "CanopyPunch_{}",
+            orig.name().to_str().unwrap_or("WKWebView")
+        ))
+        .expect("class name has no NUL");
         let cls = AnyClass::get(&name).unwrap_or_else(|| {
-            let mut builder = ClassBuilder::new(&name, orig)
-                .expect("punch-through subclass name collision");
+            let mut builder =
+                ClassBuilder::new(&name, orig).expect("punch-through subclass name collision");
             unsafe {
                 builder.add_method(
                     sel!(hitTest:),
@@ -180,7 +180,9 @@ mod native {
             builder.register()
         });
         let _ = ORIGINAL_CLASS.set(orig);
-        unsafe { objc2::ffi::object_setClass(view as *const _ as *mut _, (cls as *const AnyClass).cast()) };
+        unsafe {
+            objc2::ffi::object_setClass(view as *const _ as *mut _, (cls as *const AnyClass).cast())
+        };
     }
 
     /// Everything the mode needs from the app webview and its window: the
@@ -233,9 +235,11 @@ mod native {
             let ptr = platform.inner() as *mut WKWebView;
             let Some(wk) = ptr.as_ref() else { return };
             let v: &NSView = wk;
-            let Some(superview) = v.superview() else { return };
-            let held = objc2::rc::Retained::retain(ptr.cast::<NSView>())
-                .expect("view pointer is live");
+            let Some(superview) = v.superview() else {
+                return;
+            };
+            let held =
+                objc2::rc::Retained::retain(ptr.cast::<NSView>()).expect("view pointer is live");
             v.removeFromSuperview();
             superview.addSubview_positioned_relativeTo(&held, order, None);
         });
@@ -265,7 +269,12 @@ mod tests {
     use super::*;
 
     fn rect(x: f64, y: f64, width: f64, height: f64) -> PassRect {
-        PassRect { x, y, width, height }
+        PassRect {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     /// One test rather than several: the statics are process-wide and cargo
@@ -277,7 +286,10 @@ mod tests {
             vec![rect(0.0, 0.0, 40.0, 100.0)],
         )
         .unwrap();
-        assert!(!pass_through_at(60.0, 50.0), "mode off: nothing falls through");
+        assert!(
+            !pass_through_at(60.0, 50.0),
+            "mode off: nothing falls through"
+        );
         ENABLED.store(true, Ordering::Relaxed);
         assert!(!pass_through_at(20.0, 50.0), "under the overlay");
         assert!(pass_through_at(60.0, 50.0), "clear of the overlay");
