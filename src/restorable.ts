@@ -12,8 +12,9 @@ export interface Restorable {
   agentId: string;
   /** Directory the resume command must run in — see resume_cwd in agents.rs. */
   cwd: string;
-  /** The command that reopens it, or null when the CLI can't reopen by id. */
-  command: string | null;
+  /** The command that reopens it. Never null: a session with no way back is
+   *  filtered out rather than listed as an offer you can't take. */
+  command: string;
   /** Recognisable label: the last thing the human actually typed. */
   prompt: string;
 }
@@ -164,5 +165,12 @@ export function restorableFrom(
           digest.resumable === false ? null : restoreCommand(agentId, digest.session_id),
         prompt: lastHumanPrompt(digest.prompts) ?? "",
       };
-    });
+    })
+    // No command, no offer. Both surfaces that read this are lists of things
+    // you can pick back up — a row whose only working control is "forget" is
+    // asking to be dismissed, not resumed. The session isn't lost: it stays in
+    // the digests, and comes back here the moment it's resumable again (a
+    // transcript written under a directory we can reach, a CLI that learns to
+    // reopen by id).
+    .filter((r): r is Restorable => r.command !== null);
 }
