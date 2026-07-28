@@ -446,6 +446,8 @@ body,
    tab" anymore. Inactive pills are quiet text; the active pill lifts onto the
    raised surface with a strong border and shadow-1. */
 .project-tab {
+  /* Containing block for the ⌥-held number badge — see .tab-hint. */
+  position: relative;
   display: flex;
   align-items: center;
   gap: 5px;
@@ -2526,6 +2528,9 @@ body,
 }
 
 .tab {
+  /* Containing block for the ⌘-held number badge, which overlays the tab
+     rather than taking a slot in it. */
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -2714,16 +2719,21 @@ body.dragging-tab * {
   color: var(--warn);
 }
 
-/* The digit a tab (or project pill) answers to while ⌘/⌥ is held. It sits in
-   the right-hand slot, next to the close ✕, and fades in so a held modifier
-   reads as a layer settling over the strip rather than a jolt. */
+/* The digit a tab (or project pill) answers to while ⌘/⌥ is held.
+   Absolutely positioned, in the close ✕'s slot: an in-flow badge widened every
+   tab the moment the key went down and let them snap back together on release,
+   which read as the strip collapsing in on itself. Out of flow, the hints are
+   a layer that settles over a strip that never moves. */
 .tab-hint {
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  z-index: 2;
   display: grid;
   place-items: center;
   min-width: 16px;
   height: 16px;
   padding: 0 4px;
-  flex: 0 0 auto;
   font-size: 10px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
@@ -2731,17 +2741,28 @@ body.dragging-tab * {
   background: var(--accent);
   border-radius: var(--r-xs);
   corner-shape: squircle;
+  /* Lifted off the tab it labels — the same "floating over, not part of"
+     reading as the panel overlays. */
+  box-shadow: var(--shadow-2);
+  transform: translateY(-50%);
   animation: tab-hint-in var(--dur-fast) var(--ease-out);
+}
+
+/* The ✕ is underneath the badge, so it steps aside — hidden rather than
+   removed, because removing it is exactly the reflow this avoids. */
+.tab:has(.tab-hint) .tab-close,
+.project-tab:has(.tab-hint) .tab-close {
+  visibility: hidden;
 }
 
 @keyframes tab-hint-in {
   from {
     opacity: 0;
-    transform: scale(0.8);
+    transform: translateY(-50%) scale(0.8);
   }
   to {
     opacity: 1;
-    transform: scale(1);
+    transform: translateY(-50%) scale(1);
   }
 }
 
