@@ -1917,8 +1917,7 @@ export default function App() {
         />
       )}
 
-      {(() => {
-        if (!confirmClose) return null;
+      {confirmClose && (() => {
         const roots = confirmClose.components.map((c) => c.path);
         const activeAgents = pendingForRoots(allPending, roots).filter((i) => i.kind !== "idle");
         const isAsleep = confirmClose.id in hibernated;
@@ -1947,7 +1946,7 @@ export default function App() {
         });
         return (
           <Dialog
-            open={Boolean(confirmClose)}
+            key={confirmClose.id}
             variant="danger"
             title={`Close ${confirmClose.name}?`}
             body={
