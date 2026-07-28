@@ -19,6 +19,8 @@ const healthy = (o: Partial<Sample> = {}): Sample => ({
   loading: false,
   settled: true,
   lastCaptureOkAt: 99_500,
+  capturableSince: 60_000,
+  punch: false,
   drift: 0,
   unacked: [],
   ...o,
@@ -190,6 +192,69 @@ describe("I5 — no frame captured from a settled page", () => {
     const at = 100_000;
     const samples = held(healthy({ at, lastCaptureOkAt: at, visible: false }), 30_000);
     expect(run(samples).opened).toEqual([]);
+  });
+
+  // The false alarm this cost a user: a tab in the background for half a minute
+  // has correctly not photographed itself for half a minute, and the capture it
+  // triggers on the way back lands tens of milliseconds AFTER the first sample.
+  it("does not blame a view for the time it spent off screen", () => {
+    const at = 100_000;
+    const back = healthy({ at, lastCaptureOkAt: at - 26_000, capturableSince: at });
+    expect(run(held(back, 5_000)).opened).toEqual([]);
+  });
+
+  it("still fires if nothing arrives once it is back", () => {
+    const at = 100_000;
+    const back = healthy({ at, lastCaptureOkAt: at - 26_000, capturableSince: at });
+    expect(run(held(back, 11_000)).codes).toEqual(["I5"]);
+  });
+
+  it("starts the clock when a long load settles, not before", () => {
+    const at = 100_000;
+    // Twenty seconds of loading with the view up, then a settled page: the
+    // budget begins at the moment it became photographable.
+    const loading = held(healthy({ at, lastCaptureOkAt: at, settled: false }), 20_000);
+    const settled = held(
+      healthy({ at: at + 20_050, lastCaptureOkAt: at, capturableSince: at + 20_050 }),
+      5_000,
+    );
+    expect(run([...loading, ...settled]).opened).toEqual([]);
+  });
+});
+
+// Punch-through inverts the contract: the page sits under a see-through app
+// webview, so an overlay is SUPPOSED to paint over a view that stays on screen,
+// and no freeze-frame is taken at all. Every invariant written about the
+// overlay arrangement is silent here, or the mode cannot be switched on without
+// the watchdog shouting through it.
+describe("punch-through layering", () => {
+  it("says nothing about an overlay over a page that is meant to stay up", () => {
+    const base = healthy({ punch: true, occluder: "side-peek (div.side-peek)" });
+    expect(run(held(base, 5_000)).opened).toEqual([]);
+  });
+
+  it("does not ask for a freeze-frame nobody takes", () => {
+    const at = 100_000;
+    const base = healthy({
+      at,
+      punch: true,
+      lastCaptureOkAt: 0,
+      capturableSince: at,
+      hasFrame: false,
+    });
+    expect(run(held(base, 30_000)).opened).toEqual([]);
+  });
+
+  it("does not report a hidden view with no frame held", () => {
+    const base = healthy({ punch: true, visible: false, occluder: "side-peek", hasFrame: false });
+    expect(run(held(base, 2_000)).opened).toEqual([]);
+  });
+
+  it("still holds the invariants that do not depend on hiding", () => {
+    const at = 100_000;
+    const unacked = [{ seq: 3, visible: true, at }];
+    const { codes } = run(held(healthy({ at, punch: true, drift: 40, unacked }), 900));
+    expect(new Set(codes)).toEqual(new Set(["I2", "I4"]));
   });
 });
 
