@@ -366,7 +366,6 @@ fn create(
             tint(&view, [r, g, b]);
         }
     }
-    crate::layering::place_new_view(&view);
 
     let initial = Rect {
         x,

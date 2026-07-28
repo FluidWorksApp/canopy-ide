@@ -20,7 +20,6 @@ const healthy = (o: Partial<Sample> = {}): Sample => ({
   settled: true,
   lastCaptureOkAt: 99_500,
   capturableSince: 60_000,
-  punch: false,
   drift: 0,
   unacked: [],
   ...o,
@@ -222,41 +221,6 @@ describe("I5 — no frame captured from a settled page", () => {
   });
 });
 
-// Punch-through inverts the contract: the page sits under a see-through app
-// webview, so an overlay is SUPPOSED to paint over a view that stays on screen,
-// and no freeze-frame is taken at all. Every invariant written about the
-// overlay arrangement is silent here, or the mode cannot be switched on without
-// the watchdog shouting through it.
-describe("punch-through layering", () => {
-  it("says nothing about an overlay over a page that is meant to stay up", () => {
-    const base = healthy({ punch: true, occluder: "side-peek (div.side-peek)" });
-    expect(run(held(base, 5_000)).opened).toEqual([]);
-  });
-
-  it("does not ask for a freeze-frame nobody takes", () => {
-    const at = 100_000;
-    const base = healthy({
-      at,
-      punch: true,
-      lastCaptureOkAt: 0,
-      capturableSince: at,
-      hasFrame: false,
-    });
-    expect(run(held(base, 30_000)).opened).toEqual([]);
-  });
-
-  it("does not report a hidden view with no frame held", () => {
-    const base = healthy({ punch: true, visible: false, occluder: "side-peek", hasFrame: false });
-    expect(run(held(base, 2_000)).opened).toEqual([]);
-  });
-
-  it("still holds the invariants that do not depend on hiding", () => {
-    const at = 100_000;
-    const unacked = [{ seq: 3, visible: true, at }];
-    const { codes } = run(held(healthy({ at, punch: true, drift: 40, unacked }), 900));
-    expect(new Set(codes)).toEqual(new Set(["I2", "I4"]));
-  });
-});
 
 describe("bookkeeping", () => {
   it("reports one breach once, however long it lasts", () => {

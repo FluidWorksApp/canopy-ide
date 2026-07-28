@@ -14,7 +14,6 @@ mod dictation;
 mod fsx;
 mod git;
 mod instructions;
-mod layering;
 mod lsp;
 mod portal;
 mod preview;
@@ -519,8 +518,6 @@ pub fn run() {
             browser::browser_painted,
             browser::browser_set_bounds,
             browser::browser_set_visible,
-            layering::browser_set_layering,
-            layering::browser_set_passthrough,
             browser::browser_close,
             browser::browser_run_op,
             browser::browser_command,

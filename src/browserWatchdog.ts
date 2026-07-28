@@ -89,11 +89,6 @@ export interface Sample {
    *  breach the instant it came back, milliseconds before the capture it just
    *  triggered lands. The budget runs from the opportunity, not from the frame. */
   capturableSince: number;
-  /** Punch-through layering: the page is UNDER a see-through app webview, so
-   *  overlays are meant to paint over a view that stays on screen and no
-   *  freeze-frame is taken at all. Three of the five invariants below describe
-   *  the overlay contract and say nothing true about this one. */
-  punch: boolean;
   /** Largest edge divergence between the bounds the host pushed and the
    *  placeholder as it is right now, in CSS pixels. Null when the comparison
    *  isn't meaningful (clipped, collapsed, nothing pushed yet). */
@@ -133,11 +128,8 @@ export function conditionsFor(s: Sample, limits: WatchdogLimits): Condition[] {
   const t = s.tabId;
 
   // I1 — the original bug, and the one the DOM can prove on its own: something
-  // is drawn over a view the host still believes is on screen. Under
-  // punch-through that is the intended arrangement rather than a fault — the
-  // overlay paints over the page, and what has to be checked instead (the
-  // click pass-through region excluding the overlay) is the selftest's job.
-  if (!s.punch && s.visible && s.occluder) {
+  // is drawn over a view the host still believes is on screen.
+  if (s.visible && s.occluder) {
     out.push({
       code: "I1",
       key: `I1:${t}:${s.occluder}`,
@@ -163,7 +155,7 @@ export function conditionsFor(s: Sample, limits: WatchdogLimits): Condition[] {
   // I3 — hidden for an overlay with nothing to put in its place. This is what
   // the whole freeze-frame exists to prevent, and what a stuck capture gate
   // silently undoes.
-  if (!s.punch && s.wanted && !s.visible && s.occluder && !s.hasFrame && !s.loading) {
+  if (s.wanted && !s.visible && s.occluder && !s.hasFrame && !s.loading) {
     out.push({
       code: "I3",
       key: `I3:${t}`,
@@ -184,11 +176,10 @@ export function conditionsFor(s: Sample, limits: WatchdogLimits): Condition[] {
   }
 
   // I5 — the capture path is dead. Costs nothing while it works, and would
-  // have named the fault within ten seconds of the build that broke it.
-  // Punch-through takes no pictures by design, so there is nothing here to be
-  // dead. The clock starts at whichever came last: the frame in hand, or the
-  // moment this view could first have been photographed.
-  if (!s.punch && s.visible && s.settled) {
+  // have named the fault within ten seconds of the build that broke it. The
+  // clock starts at whichever came last: the frame in hand, or the moment
+  // this view could first have been photographed.
+  if (s.visible && s.settled) {
     const since = s.at - Math.max(s.lastCaptureOkAt, s.capturableSince);
     if (since > limits.captureMs) {
       out.push({
@@ -471,19 +462,12 @@ export function startBrowserWatchdog(force = false): () => void {
 
   const timer = window.setInterval(() => {
     const at = Date.now();
-    // Which layering is in force, read off the DOM the host stamped rather than
-    // out of settings — the class is what the CSS and the native side are
-    // actually behaving as, which is the thing the invariants describe.
-    const punch = document.documentElement.classList.contains("punch-through");
     for (const v of browserViewSnapshots()) {
       const rect = v.hostRect;
       const host = v.host;
       const visible = v.shown === true;
       const settled = !v.loading && at - (navAt.get(v.tabId) ?? at) > LIMITS.settleMs;
-      // Punch-through counts as no opportunity at all, not just as an excused
-      // one: it takes no pictures for as long as it is engaged, and switching
-      // back to overlay must not arrive already a minute overdue.
-      if (!visible || !settled || punch) capturable.delete(v.tabId);
+      if (!visible || !settled) capturable.delete(v.tabId);
       else if (!capturable.has(v.tabId)) capturable.set(v.tabId, at);
       take(
         dog.observe({
@@ -497,7 +481,6 @@ export function startBrowserWatchdog(force = false): () => void {
           settled,
           lastCaptureOkAt: Math.max(v.lastCaptureOkAt, captured.get(v.tabId) ?? 0),
           capturableSince: capturable.get(v.tabId) ?? at,
-          punch,
           drift: v.bounds && rect ? driftOf(v.bounds, rect, v.zoom) : null,
           unacked: unacked.get(v.tabId) ?? [],
         }),

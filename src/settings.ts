@@ -260,16 +260,6 @@ export interface Settings {
    *  would cover it, which is the case that actually bit. */
   browserEngine: BrowserEngine;
 
-  /** How the webview engine layers the page against the app (experimental).
-   *  "overlay" is the shipped behaviour: the page floats above the whole
-   *  window and hides behind a freeze-frame whenever anything opens over it.
-   *  "punch" tried to invert the stack so panels would paint over a live
-   *  page. It does not work — a child webview cannot be put below the app's
-   *  own webview through any supported API, and the AppKit reordering it
-   *  used leaves the page blank. Kept only so an enabled setting can be read
-   *  and ignored; do not turn it on. */
-  browserLayering: "overlay" | "punch";
-
   // ---- Crash reporting ----
   /** Opt-in, default off: when a panel crashes (or a native panic is found on
    *  the next launch), offer to send an anonymous report — message + stack,
@@ -317,7 +307,6 @@ const DEFAULTS: Settings = {
   remoteReach: "local",
   remoteTunnelProvider: "cloudflare",
   browserEngine: "webview",
-  browserLayering: "overlay",
   crashReporting: false,
 };
 
