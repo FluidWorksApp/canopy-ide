@@ -475,6 +475,40 @@ export const fsListFiles = (roots: string[], limit?: number) =>
 export const fsSearch = (roots: string[], query: string, limit?: number) =>
   invoke<SearchHit[]>("fs_search", { roots, query, limit });
 
+// ---------- SpotSearch index (spot.rs) ----------
+// The persistent half of the palette: FTS5 over agent transcripts and terminal
+// scrollback. Everything else SpotSearch shows is queried live in the frontend.
+
+export interface SpotIndexHit {
+  /** "transcript" | "terminal". */
+  kind: string;
+  /** Session id for a transcript, "pty:<id>" for a terminal. */
+  key: string;
+  /** Cwd (transcript) or tab title (terminal). */
+  title: string;
+  snippet: string;
+  /** Transcript path (transcript) or cwd (terminal). */
+  meta: string;
+  ts: number;
+}
+
+export interface SpotIngestReport {
+  more: boolean;
+  messages: number;
+  terminals: number;
+}
+
+/** Bring the index up to date; call again while `more`. */
+export const spotIngest = () => invoke<SpotIngestReport>("spot_ingest");
+
+export const spotSearch = (query: string, limit?: number) =>
+  invoke<SpotIndexHit[]>("spot_search", { query, limit });
+
+/** Persist a captured page screenshot under `<dir>/.canopy/spot/` so a task
+ *  brief can point an agent at it. Returns the absolute path. */
+export const spotSaveContextImage = (dir: string, base64Png: string) =>
+  invoke<string>("spot_save_context_image", { dir, base64Png });
+
 // ---------- file management ----------
 
 export const fsCreateFile = (path: string) =>

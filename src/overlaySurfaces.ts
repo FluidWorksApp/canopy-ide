@@ -103,6 +103,18 @@ export const OVERLAY_SURFACES: OverlaySurface[] = [
         ?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })),
   },
   {
+    id: "spot-search",
+    label: "SpotSearch",
+    selector: ".palette-backdrop",
+    kind: "persistent",
+    covers: "center",
+    open: () => fire("menu:spot-search"),
+    close: () =>
+      document
+        .querySelector(".palette-backdrop")
+        ?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })),
+  },
+  {
     id: "settings-dialog",
     label: "Settings",
     selector: ".confirm-backdrop",

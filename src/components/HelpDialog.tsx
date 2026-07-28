@@ -25,6 +25,7 @@ const SHORTCUTS: [string, string][] = [
   ["⌘⇧W", "Close project"],
   ["⌘P", "Quick-open a file"],
   ["⌘⇧F", "Find in files"],
+  ["⌘K", "SpotSearch — search everything, or run what you type as a task"],
   ["⌘B", "Toggle sidebar"],
   ["⌘⇧Enter", "Focus mode (Esc leaves)"],
   ["⌘D", "Voice dictation — speak, press again to insert (Esc cancels)"],
