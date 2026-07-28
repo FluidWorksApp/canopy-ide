@@ -1023,8 +1023,8 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                         <input
                           type="radio"
                           name="browser-engine"
-                          checked={s.previewEngine === "proxy"}
-                          onChange={() => patch({ previewEngine: "proxy" })}
+                          checked={s.browserEngine === "proxy"}
+                          onChange={() => patch({ browserEngine: "proxy" })}
                         />
                         <span>
                           Loopback proxy
@@ -1036,8 +1036,8 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                         <input
                           type="radio"
                           name="browser-engine"
-                          checked={s.previewEngine === "webview"}
-                          onChange={() => patch({ previewEngine: "webview" })}
+                          checked={s.browserEngine === "webview"}
+                          onChange={() => patch({ browserEngine: "webview" })}
                         />
                         <span>
                           Embedded browser

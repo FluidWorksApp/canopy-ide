@@ -708,7 +708,7 @@ export function useBrowserEngine(): BrowserEngine | null {
       live = false;
     };
   }, []);
-  return supported === null ? null : chooseEngine(getSettings().previewEngine, supported);
+  return supported === null ? null : chooseEngine(getSettings().browserEngine, supported);
 }
 
 /** Test seam: drop all state between cases. */

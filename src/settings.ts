@@ -250,14 +250,15 @@ export interface Settings {
    *      a panel comes back blank until something forces a repaint.
    *
    *  Everything in browserHost.ts, browserFrame.ts and the freeze-frame
-   *  machinery exists to soften those two facts. Hence the default: the
-   *  engine that needs none of it. VS Code's Simple Browser is an iframe for
-   *  the same reason.
+   *  machinery exists to soften those two facts. The proxy needs none of it —
+   *  VS Code's Simple Browser is an iframe for exactly that reason — which is
+   *  what makes it the right fallback when a session does not matter.
    *
-   *  Named apart from the old `browserEngine` on purpose — a stored setting
-   *  overrides a default (see getSettings), so flipping the default alone
-   *  would have changed nothing for anyone already running. */
-  previewEngine: BrowserEngine;
+   *  The default, because a preview of your own app is usually a preview of
+   *  it logged in, and that is the only engine that can hold a session. The
+   *  compensation above is the price; opening a preview closes the panel that
+   *  would cover it, which is the case that actually bit. */
+  browserEngine: BrowserEngine;
 
   /** How the webview engine layers the page against the app (experimental).
    *  "overlay" is the shipped behaviour: the page floats above the whole
@@ -315,7 +316,7 @@ const DEFAULTS: Settings = {
   dictationLanguage: "",
   remoteReach: "local",
   remoteTunnelProvider: "cloudflare",
-  previewEngine: "proxy",
+  browserEngine: "webview",
   browserLayering: "overlay",
   crashReporting: false,
 };

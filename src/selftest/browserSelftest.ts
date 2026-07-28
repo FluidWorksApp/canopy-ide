@@ -320,7 +320,7 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
       // is no longer the default — so it is asked for by name. Without this
       // the whole scenario would quietly pass by testing nothing, which is
       // the failure mode this suite exists to prevent.
-      updateSettings({ previewEngine: "webview" });
+      updateSettings({ browserEngine: "webview" });
       refreshBrowserViews();
     });
 
@@ -508,7 +508,14 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
     await step("dismiss", "A press in the page closes the panel covering it", async () => {
       const surface = OVERLAY_SURFACES.find((s) => s.id === "side-peek");
       if (!surface?.open) throw new StepFailure("no side panel to open");
-      const up = () => !!document.querySelector(surface.selector);
+      // On screen, not merely present. The panel is always in the DOM — closed
+      // is a class that translates it off to the left — so asking whether the
+      // element exists is asking a question whose answer is always yes. It
+      // made this step fail on every run, and the `finally` below then toggled
+      // the panel back OPEN over the page, taking the next three steps with
+      // it. A red step that fabricates its own failure and poisons its
+      // neighbours is worse than no step.
+      const up = () => painting(surface.selector);
       await surface.open();
       if (!(await settle(up))) throw new StepFailure("the panel never opened");
       try {
@@ -569,20 +576,30 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
         DEADLINE.frame,
         viewSays,
       );
+      // Asserted on the signal stream rather than by polling for the moment
+      // the frame is null. That window is real but tiny — the host drops the
+      // frame and the next pass photographs the new page ~16ms later — so a
+      // 25ms poll usually misses it, and the step then failed for a contract
+      // that had in fact been kept. The signals are the record, and what
+      // actually matters is the order: the old frame went, and the frame now
+      // on screen was taken after the navigation, not before it.
+      const mark = signals.length;
       await ipc.browserNavigate(v.tabId, `${cfg.url}?again=1`);
       await until(
-        "the stale frame was kept across a navigation",
-        view,
-        (s) => s?.hasFrame === false,
+        "the page never reported the navigation",
+        () => since(mark).some((s) => s.t === "nav" && s.loading),
+        (seen) => seen,
         DEADLINE.nav,
-        viewSays,
+        () => viewSays(view()),
       );
       const ms = await until(
         "no frame was captured after the navigation",
-        view,
-        (s) => s?.hasFrame === true,
+        () =>
+          since(mark).some((s) => s.t === "capture" && s.result === "ok") &&
+          view()?.hasFrame === true,
+        (ok) => ok,
         DEADLINE.nav,
-        viewSays,
+        () => viewSays(view()),
       );
       return `re-captured after ${ms}ms`;
     });
@@ -637,8 +654,12 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
     // Measured on pixels rather than state, because there is no view state to
     // read: under the proxy there is nothing to hide, which IS the claim.
     await step("proxy-default", "Under the default engine a panel does not blank the page", async () => {
-      updateSettings({ previewEngine: "proxy" });
+      updateSettings({ browserEngine: "proxy" });
       refreshBrowserViews();
+      // Let the native views go before framing anything. An iframe drawn over
+      // a live child webview is a real fault the watchdog is right to report;
+      // here it would only be this step changing engines underneath itself.
+      await settle(() => browserViewSnapshots().length === 0, 10_000);
       window.dispatchEvent(
         new CustomEvent("canopy:agent-action", {
           detail: { projectId, action: { kind: "open_preview", url: `${cfg.url}?proxy=1` } },
