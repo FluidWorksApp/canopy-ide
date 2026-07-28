@@ -210,6 +210,26 @@ function attributionFallback(authors) {
   return names.length ? [`Copyright ${names.join(", ")} (per package manifest; the distributed license file carries no copyright line)`] : [];
 }
 
+/** The manifest's rights holder, from whichever copy of the package is on disk.
+ *  pnpm only links a transitive dependency into the store, so the path the
+ *  lockfile names often doesn't exist — the license *file* was already read
+ *  from the store, and the author has to be, or a package whose attribution
+ *  lives only in its manifest silently loses it depending on the installer. */
+function authorFrom(dirs) {
+  for (const dir of dirs) {
+    const file = join(dir, "package.json");
+    if (!existsSync(file)) continue;
+    try {
+      const manifest = JSON.parse(readFileSync(file, "utf8"));
+      const author = manifest.author ?? manifest.contributors;
+      if (author) return author;
+    } catch {
+      // A package.json we can't parse is not an attribution; keep looking.
+    }
+  }
+  return undefined;
+}
+
 function normaliseLicense(name, raw) {
   const key = LICENSE_OVERRIDES[name] ?? raw;
   if (!key) return "UNKNOWN";
@@ -344,7 +364,8 @@ function collectNpm() {
   return [...byIdentity.values()].map((c) => {
     const dirs = [...c.paths.map((p) => join(ROOT, p)), pnpmDirFor(c.name, c.version)].filter(Boolean);
     const copyrights = dirs.map(copyrightsFor).find((r) => r.length) ?? [];
-    return { ...c, copyrights: copyrights.length ? copyrights : attributionFallback(c.author) };
+    const author = c.author ?? authorFrom(dirs);
+    return { ...c, author, copyrights: copyrights.length ? copyrights : attributionFallback(author) };
   });
 }
 
