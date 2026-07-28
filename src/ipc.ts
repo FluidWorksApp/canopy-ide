@@ -326,6 +326,21 @@ export const browserSetBounds = (
 export const browserSetVisible = (tabId: string, visible: boolean) =>
   invoke<void>("browser_set_visible", { tabId, visible });
 
+/** Switch between the overlay layering (browser views above the window) and
+ *  punch-through (views under a see-through app webview). `background` is the
+ *  app's --bg as [r,g,b], painted on the window behind the now-transparent
+ *  DOM. */
+export const browserSetLayering = (punch: boolean, background?: number[]) =>
+  invoke<void>("browser_set_layering", { punch, background });
+
+/** Where events fall through the app webview to the page beneath it, in the
+ *  same window-client points as {@link browserSetBounds}: inside a pass rect
+ *  and outside every block rect. Only consulted in punch-through layering. */
+export const browserSetPassthrough = (
+  pass: Array<{ x: number; y: number; width: number; height: number }>,
+  block: Array<{ x: number; y: number; width: number; height: number }>,
+) => invoke<void>("browser_set_passthrough", { pass, block });
+
 export const browserClose = (tabId: string) =>
   invoke<void>("browser_close", { tabId }).catch(() => {});
 

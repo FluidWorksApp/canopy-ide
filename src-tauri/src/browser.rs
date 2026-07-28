@@ -340,6 +340,7 @@ fn create(
             tint(&view, [r, g, b]);
         }
     }
+    crate::layering::place_new_view(&view);
 
     app.state::<BrowserManager>().views.lock().unwrap().insert(
         tab_id,

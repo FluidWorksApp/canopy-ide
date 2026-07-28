@@ -238,6 +238,14 @@ export interface Settings {
    *  macOS; chooseEngine() falls back to it there whatever this says. */
   browserEngine: BrowserEngine;
 
+  /** How the webview engine layers the page against the app (experimental).
+   *  "overlay" is the shipped behaviour: the page floats above the whole
+   *  window and hides behind a freeze-frame whenever anything opens over it.
+   *  "punch" inverts the stack — the page sits UNDER a see-through app
+   *  webview, so panels and menus genuinely paint over it, like an iframe
+   *  would. macOS webview engine only; ignored elsewhere. */
+  browserLayering: "overlay" | "punch";
+
   // ---- Crash reporting ----
   /** Opt-in, default off: when a panel crashes (or a native panic is found on
    *  the next launch), offer to send an anonymous report — message + stack,
@@ -285,6 +293,7 @@ const DEFAULTS: Settings = {
   remoteReach: "local",
   remoteTunnelProvider: "cloudflare",
   browserEngine: "webview",
+  browserLayering: "overlay",
   crashReporting: false,
 };
 
