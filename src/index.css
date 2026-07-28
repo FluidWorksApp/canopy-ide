@@ -8692,12 +8692,6 @@ textarea,
   gap: 6px;
 }
 
-.restore-unsupported {
-  color: var(--text-dim);
-  font-size: 10px;
-  font-style: italic;
-}
-
 /* ---------- issue trackers panel ---------- */
 
 .tracker-section {
@@ -9716,12 +9710,6 @@ textarea,
 
 .resume-row .btn-mini {
   margin-top: 0;
-}
-
-.resume-unsupported {
-  font-size: 10px;
-  color: var(--text-dim);
-  font-style: italic;
 }
 
 /* Recoverable crash panel — shown by ErrorBoundary instead of a blank window. */
