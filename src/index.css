@@ -43,6 +43,9 @@
   --r-md: 12px; /* tabs, cards, panels */
   --r-lg: 16px; /* palette, dialogs, toasts */
 
+  /* ---- pane-bar rails — one width so the right edge never moves ---- */
+  --rail-chip-w: 172px;
+
   /* ---- elevation — layered, cool-black ---- */
   --shadow-1: 0 1px 2px rgba(6, 8, 18, 0.28);
   --shadow-2: 0 4px 14px rgba(6, 8, 18, 0.35), 0 1px 3px rgba(6, 8, 18, 0.3);
@@ -1301,11 +1304,36 @@ body,
   color: var(--text-dim);
 }
 
-/* Resource breakdown popup: project -> sessions -> processes. */
+/* Resource breakdown popup: project -> sessions -> processes.
+   Fixed width, not min-width: cpu/mem/token figures re-render every couple of
+   seconds and a shrink-to-fit panel jumped a few pixels wider or narrower on
+   each tick (and again whenever a session with a long title appeared). The
+   width is now the panel's, and the content fits itself into it. */
 .status-breakdown {
-  min-width: 330px;
+  width: 430px;
+  max-width: calc(100vw - 24px);
   max-height: 55vh;
   overflow-y: auto;
+  overflow-x: hidden;
+  /* Reserved so crossing the scroll threshold doesn't nudge the content. */
+  scrollbar-gutter: stable;
+}
+
+/* Labels take the slack and ellipsis; the figures keep their own column, so a
+   row that gains a digit can't push the label around. */
+.bd-row > span:first-child,
+.bd-head > span:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bd-row > .bd-nums,
+.bd-head > .bd-nums {
+  min-width: 88px;
+  text-align: right;
 }
 
 /* Stats chip: an icon button in the corner that opens the all-CLI usage popup. */
@@ -2851,7 +2879,9 @@ body.dragging-tab * {
   color: var(--text);
   opacity: 0.85;
 }
-.run-rail:not(.pane-section-dim) .run-chip-active {
+/* Not the menu's rows: growing the active one there gave it its own padding and
+   font size, so its ✕ sat a few px off the column the others line up on. */
+.run-rail:not(.pane-section-dim) .run-chip-active:not(.rail-menu-chip) {
   padding: 4px 10px;
   font-size: 12px;
   font-weight: 550;
@@ -2879,8 +2909,23 @@ body.dragging-tab * {
   overflow: visible;
 }
 
-.rail-toggle {
-  max-width: 200px;
+/* Fixed width, not shrink-to-fit: the rail sits at the right edge, so a chip
+   that sizes to the run's name shoves everything beside it sideways every time
+   the active run changes. One width for the collapsed toggle and for the lone
+   chip of a single-run rail; long names ellipsis inside it. */
+.rail-toggle,
+.run-rail > .run-chip {
+  width: var(--rail-chip-w);
+  max-width: var(--rail-chip-w);
+}
+
+/* The name takes the slack, so the count/caret (and, on a lone chip, the ✕)
+   always land on the same right edge. */
+.rail-toggle .run-chip-title,
+.run-rail > .run-chip .run-chip-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
 }
 
 .rail-count {
@@ -2897,8 +2942,12 @@ body.dragging-tab * {
   line-height: 1;
 }
 
-/* Many runs shouldn't grow a menu taller than the window. */
+/* Many runs shouldn't grow a menu taller than the window. A fixed width keeps
+   every row the same shape whatever the runs are called, so the menu doesn't
+   resize under the cursor as runs come and go. */
 .rail-menu {
+  width: 260px;
+  max-width: calc(100vw - 24px);
   max-height: 60vh;
   overflow-y: auto;
   display: flex;
@@ -2906,10 +2955,25 @@ body.dragging-tab * {
   gap: 2px;
 }
 
-/* Inside the menu the chips are rows, not a scrolling strip. */
-.rail-menu-chip {
+/* Inside the menu the chips are rows, not a scrolling strip. Qualified by the
+   menu because `.run-chip`'s max-width:150px is declared later in this file and
+   wins at equal specificity — which left every row 150px wide inside a wider
+   menu, with a dead gutter down its right side. */
+.rail-menu .rail-menu-chip {
   max-width: none;
   width: 100%;
+}
+
+/* The name absorbs the row's slack so the restart/close controls sit on one
+   right edge down the column, instead of trailing each name at its own x. */
+.rail-menu-chip .run-chip-title {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.rail-menu-chip .run-chip-btn,
+.rail-menu-chip .tab-close {
+  flex: 0 0 auto;
 }
 
 /* ---- endpoints a shell is serving ------------------------------------- */
