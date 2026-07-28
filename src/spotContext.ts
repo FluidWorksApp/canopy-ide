@@ -49,13 +49,7 @@ export async function capturePageContext(input: SpotCaptureInput): Promise<strin
   }
   if (input.rect && input.rect.width > 0 && input.rect.height > 0) {
     try {
-      const png = await ipc.webviewSnapshot(
-        input.rect.x,
-        input.rect.y,
-        input.rect.width,
-        input.rect.height,
-        1400,
-      );
+      const png = await capturePixels(input);
       const path = await ipc.spotSaveContextImage(input.dir, png);
       parts.push(
         `A screenshot of the page is saved at ${path} — read it if visual context helps.`,
@@ -65,6 +59,24 @@ export async function capturePageContext(input: SpotCaptureInput): Promise<strin
     }
   }
   return oneLine(parts.join(" "));
+}
+
+/** The pixels of the pane, base64 PNG. A preview tab's page lives in a native
+ *  child webview composited over the app's DOM — a rect capture of the main
+ *  webview there is a picture of the empty placeholder underneath it — so
+ *  preview tabs are asked through the browser view's own snapshot first, and
+ *  the rect capture stands as the fallback for the proxy engine (an iframe in
+ *  the main webview) and for every other kind of tab. */
+export async function capturePixels(input: SpotCaptureInput): Promise<string> {
+  const rect = input.rect!;
+  if (input.activeTab?.type === "preview") {
+    try {
+      return await ipc.browserSnapshot(input.activeTab.id, 1400);
+    } catch {
+      // No native view behind this tab (proxy engine) — fall through.
+    }
+  }
+  return ipc.webviewSnapshot(rect.x, rect.y, rect.width, rect.height, 1400);
 }
 
 /** The full brief for the one-shot agent: what the user typed, grounded in
