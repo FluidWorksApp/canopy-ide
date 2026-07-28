@@ -29,12 +29,23 @@ export type SpotAction =
   | { type: "open-ticket"; source: string; ticket: ipc.TicketInfo }
   | { type: "open-pr"; repo: string; pr: ipc.PrInfo }
   | { type: "open-server"; path: string; tabId: string | null }
-  | { type: "open-task-run"; runId: string };
+  | { type: "open-task-run"; runId: string }
+  /** The escape hatch for registered sources: the row does its own opening.
+   *  Still bound by the rule above — `run` must land the user on something
+   *  native, not open a browser and call it a result. */
+  | { type: "custom"; run: () => void | Promise<void> };
 
 export interface SpotRow {
   id: string;
   /** Section heading the palette groups under. */
   group: string;
+  /** What this row *is*, for the palette's icon column — a tab type, or one of
+   *  the parametric forms `cli:<id>` / `agent:<id>` / `tracker:<id>`. Naming the
+   *  kind rather than picking a glyph here keeps the mark the palette's choice
+   *  (see rowIcon in SpotSearch). */
+  kind?: string;
+  /** A literal glyph, for rows that carry their own (task runs). Only used when
+   *  `kind` maps to nothing. */
   icon?: string;
   title: string;
   detail?: string;
@@ -86,7 +97,7 @@ export function actionRows(query: string, ctx: SpotContext): SpotRow[] {
       row: {
         id: "act:shell",
         group: "Actions",
-        icon: ">_",
+        kind: "shell",
         title: "New Shell",
         score: 0,
         action: { type: "new-shell" },
@@ -97,7 +108,7 @@ export function actionRows(query: string, ctx: SpotContext): SpotRow[] {
       row: {
         id: "act:preview",
         group: "Actions",
-        icon: "○",
+        kind: "preview",
         title: "New Preview",
         score: 0,
         action: { type: "new-preview" },
@@ -108,7 +119,7 @@ export function actionRows(query: string, ctx: SpotContext): SpotRow[] {
       row: {
         id: `act:cli:${cli.id}`,
         group: "Actions",
-        icon: "✳",
+        kind: `cli:${cli.id}`,
         title: `New ${cli.name}`,
         score: 0,
         action: { type: "launch-cli", cliId: cli.id } as SpotAction,
@@ -120,7 +131,7 @@ export function actionRows(query: string, ctx: SpotContext): SpotRow[] {
     rows.unshift({
       id: "act:run-task",
       group: "Actions",
-      icon: "⚡",
+      kind: "run-task",
       title: `Run task: “${q}”`,
       detail: "one-shot agent · current page as context",
       score: -1,
@@ -140,6 +151,7 @@ export function tabRows(query: string, ctx: SpotContext): SpotRow[] {
         row: {
           id: `tab:${t.id}`,
           group: "Open Tabs",
+          kind: t.type,
           title: label,
           detail: t.type,
           score: 0,
@@ -157,6 +169,7 @@ export function serverRows(query: string, ctx: SpotContext): SpotRow[] {
       row: {
         id: `srv:${g.path}:${e.key}`,
         group: "Servers",
+        kind: "server",
         title: e.name,
         detail:
           e.state === "running"
@@ -183,6 +196,7 @@ export function sessionRows(query: string, ctx: SpotContext): SpotRow[] {
         row: {
           id: `ses:${d.session_id}`,
           group: "Agent Sessions",
+          kind: `agent:${d.agent ?? ""}`,
           title: `${d.agent ?? "agent"}${d.branch ? ` · ${d.branch}` : ""}`,
           detail: prompt,
           score: 0,
@@ -202,6 +216,7 @@ export function taskRows(query: string, ctx: SpotContext): SpotRow[] {
       row: {
         id: `run:${r.id}`,
         group: "Task History",
+        kind: "task",
         icon: r.icon,
         title: r.label,
         detail: r.summary ?? r.status,
@@ -222,6 +237,7 @@ export function prRows(query: string): SpotRow[] {
       row: {
         id: `pr:${r.nwo}#${r.number}`,
         group: "Pull Requests",
+        kind: "pr",
         title: `#${r.number} ${r.title}`,
         detail: r.branch,
         score: 0,
@@ -244,6 +260,7 @@ export async function fileRows(query: string, corpus: string[]): Promise<SpotRow
     .map((r) => ({
       id: `file:${r.p}`,
       group: "Files",
+      kind: "file",
       title: base(r.p),
       detail: r.p,
       score: r.s,
@@ -257,6 +274,7 @@ export async function contentRows(query: string, roots: string[]): Promise<SpotR
   return hits.slice(0, CAP).map((h) => ({
     id: `hit:${h.path}:${h.line}`,
     group: "In Files",
+    kind: "match",
     title: `${h.path.slice(h.path.lastIndexOf("/") + 1)}:${h.line}`,
     detail: h.text.trim(),
     score: 0,
@@ -287,6 +305,7 @@ export async function codeSymbolRows(query: string, roots: string[]): Promise<Sp
     .map((s) => ({
       id: `sym:${s.path}:${s.line}:${s.name}`,
       group: "Symbols",
+      kind: "symbol",
       title: s.name,
       detail: `${s.kind} · ${s.path.slice(s.path.lastIndexOf("/") + 1)}:${s.line}`,
       score: 0,
@@ -311,6 +330,7 @@ export async function indexRows(query: string, ctx: SpotContext): Promise<SpotRo
       out.push({
         id: `spot:${h.kind}:${h.key}`,
         group: "Terminal Output",
+        kind: "terminal",
         title: tabDisplayLabel(tab),
         detail: h.snippet,
         score: 0,
@@ -322,6 +342,7 @@ export async function indexRows(query: string, ctx: SpotContext): Promise<SpotRo
       out.push({
         id: `spot:${h.kind}:${h.key}`,
         group: "Agent Sessions",
+        kind: `agent:${digest.agent ?? ""}`,
         title: `${digest.agent ?? "agent"}${digest.branch ? ` · ${digest.branch}` : ""}`,
         detail: h.snippet,
         score: 0,
@@ -366,6 +387,7 @@ export async function ticketRows(query: string, repos: string[]): Promise<SpotRo
       row: {
         id: `tik:${source}:${ticket.id}`,
         group: "Tickets",
+        kind: `tracker:${source}`,
         title: `${ticket.id} ${ticket.title}`,
         detail: ticket.state,
         score: 0,
@@ -375,18 +397,146 @@ export async function ticketRows(query: string, repos: string[]): Promise<SpotRo
   );
 }
 
-/** Section order the palette renders in — actions first, then what's already
- *  open, then the progressively-further-away sources. */
-export const SPOT_GROUP_ORDER = [
-  "Actions",
-  "Open Tabs",
-  "Files",
-  "Symbols",
-  "In Files",
-  "Terminal Output",
-  "Agent Sessions",
-  "Tickets",
-  "Pull Requests",
-  "Servers",
-  "Task History",
+// ---------- the registry ----------
+//
+// The palette doesn't know this file's functions — it asks the registry below,
+// so a new kind of thing to search is a `registerSpotSource` call and nothing
+// else. Everything above is registered through the same door a plugin uses;
+// there is no privileged built-in path, which is the only version that stays
+// honest as sources are added.
+//
+//   registerSpotSource({
+//     id: "notes",
+//     group: "Notes",
+//     timing: "deferred",
+//     minQuery: 2,
+//     rows: async ({ query }) => (await findNotes(query)).map((n) => ({
+//       id: `note:${n.id}`,
+//       group: "Notes",
+//       kind: "file",
+//       title: n.title,
+//       score: 0,
+//       action: { type: "custom", run: () => openNote(n.id) },
+//     })),
+//   });
+//
+// Sections render in registration order, so where a source is registered is
+// where its rows appear. A source that throws (or rejects) is dropped for that
+// keystroke — one bad source must not empty the palette.
+
+/** What a source is handed. `corpus` and `roots` are computed once when the
+ *  palette opens, so a source never walks the tree itself. */
+export interface SpotQuery {
+  query: string;
+  ctx: SpotContext;
+  /** Every file under the project's components. */
+  corpus: string[];
+  /** Component roots, in order. */
+  roots: string[];
+}
+
+export interface SpotSource {
+  /** Stable id — also what `before` in registration points at. */
+  id: string;
+  /** Section heading its rows land under. Rows carry their own `group`, so a
+   *  source may fill more than one; this one decides its place in the order. */
+  group: string;
+  /** `instant` runs on every keystroke and must return synchronously — no IO.
+   *  `deferred` is debounced (180ms) and may await. */
+  timing: "instant" | "deferred";
+  /** Below this query length the source isn't asked. Deferred sources default
+   *  to 1: a round trip per keystroke on an empty box helps nobody. */
+  minQuery?: number;
+  rows: (q: SpotQuery) => SpotRow[] | Promise<SpotRow[]>;
+}
+
+const SOURCES: SpotSource[] = [
+  { id: "actions", group: "Actions", timing: "instant", rows: (q) => actionRows(q.query, q.ctx) },
+  { id: "tabs", group: "Open Tabs", timing: "instant", rows: (q) => tabRows(q.query, q.ctx) },
+  { id: "files", group: "Files", timing: "deferred", rows: (q) => fileRows(q.query, q.corpus) },
+  { id: "symbols", group: "Symbols", timing: "deferred", minQuery: 2, rows: (q) => codeSymbolRows(q.query, q.roots) },
+  { id: "content", group: "In Files", timing: "deferred", minQuery: 2, rows: (q) => contentRows(q.query, q.roots) },
+  // One source, two sections: the persistent index answers for terminal
+  // scrollback and transcripts in the same query.
+  { id: "index", group: "Terminal Output", timing: "deferred", minQuery: 2, rows: (q) => indexRows(q.query, q.ctx) },
+  { id: "sessions", group: "Agent Sessions", timing: "instant", rows: (q) => sessionRows(q.query, q.ctx) },
+  { id: "tickets", group: "Tickets", timing: "deferred", rows: (q) => ticketRows(q.query, q.roots) },
+  { id: "prs", group: "Pull Requests", timing: "instant", rows: (q) => prRows(q.query) },
+  { id: "servers", group: "Servers", timing: "instant", rows: (q) => serverRows(q.query, q.ctx) },
+  { id: "tasks", group: "Task History", timing: "instant", rows: (q) => taskRows(q.query, q.ctx) },
 ];
+
+/** Add a source. Returns the undo — call it when whatever registered the source
+ *  goes away, or the palette keeps asking a dead thing for rows. */
+export function registerSpotSource(
+  source: SpotSource,
+  opts: { before?: string } = {},
+): () => void {
+  const at = opts.before ? SOURCES.findIndex((s) => s.id === opts.before) : -1;
+  if (at === -1) SOURCES.push(source);
+  else SOURCES.splice(at, 0, source);
+  return () => {
+    const i = SOURCES.indexOf(source);
+    if (i !== -1) SOURCES.splice(i, 1);
+  };
+}
+
+/** The registry as it stands — for tests and for anything that wants to show
+ *  what the palette can search. */
+export function spotSources(): readonly SpotSource[] {
+  return SOURCES;
+}
+
+/** Section order the palette renders in: registration order, deduped. Actions
+ *  first, then what's already open, then the progressively-further-away
+ *  sources — and whatever was registered after them, after them. */
+export function spotGroupOrder(): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const s of SOURCES) {
+    // The section a source declares, plus any its rows actually filled and
+    // that nothing else claims (the index source's second section).
+    if (!seen.has(s.group)) {
+      seen.add(s.group);
+      out.push(s.group);
+    }
+  }
+  return out;
+}
+
+const asks = (s: SpotSource, query: string) =>
+  query.trim().length >= (s.minQuery ?? (s.timing === "deferred" ? 1 : 0));
+
+/** The synchronous sources, on every keystroke. A throwing source costs its own
+ *  rows and nothing else. */
+export function instantRows(q: SpotQuery): SpotRow[] {
+  const out: SpotRow[] = [];
+  for (const s of SOURCES) {
+    if (s.timing !== "instant" || !asks(s, q.query)) continue;
+    try {
+      const rows = s.rows(q);
+      if (Array.isArray(rows)) out.push(...rows);
+      else if (import.meta.env?.DEV) {
+        console.warn(`[spot] instant source "${s.id}" returned a promise`);
+      }
+    } catch (err) {
+      if (import.meta.env?.DEV) console.warn(`[spot] source "${s.id}" threw`, err);
+    }
+  }
+  return out;
+}
+
+/** The debounced ones, all in flight together. */
+export async function deferredRows(q: SpotQuery): Promise<SpotRow[]> {
+  const lists = await Promise.all(
+    SOURCES.filter((s) => s.timing === "deferred" && asks(s, q.query)).map((s) =>
+      Promise.resolve()
+        .then(() => s.rows(q))
+        .catch((err) => {
+          if (import.meta.env?.DEV) console.warn(`[spot] source "${s.id}" failed`, err);
+          return [] as SpotRow[];
+        }),
+    ),
+  );
+  return lists.flat();
+}

@@ -57,12 +57,13 @@ terms govern use of the model:
 - **SenseVoice Small (int8)** — FunASR MODEL_LICENSE (custom) — <https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE>, by FunAudioLLM / Alibaba. <https://huggingface.co/FunAudioLLM/SenseVoiceSmall>
 - **Moonshine Base** — MIT, by Useful Sensors. <https://huggingface.co/UsefulSensors/moonshine>
 
-## Rust crates (672)
+## Rust crates (679)
 
-### MIT — 617
+### MIT — 624
 
 - **adler2 2.0.1** — Copyright (C) Jonas Schievink <jonasschievink@gmail.com>
 - **aead 0.5.2** — Copyright (c) 2019 The RustCrypto Project Developers; Copyright (c) 2019 MobileCoin, LLC
+- **ahash 0.8.12** — Copyright (c) 2018 Tom Kaitchuck
 - **aho-corasick 1.1.4** — Copyright (c) 2015 Andrew Gallant
 - **alsa 0.9.1** — Copyright (c) 2015-2021 David Henningsson, and other contributors
 - **alsa-sys 0.3.1** — Copyright (c) 2018 diwic
@@ -186,6 +187,8 @@ terms govern use of the model:
 - **errno 0.3.14** — Copyright (c) 2014 Chris Wong
 - **event-listener 5.4.1** — Copyright Stjepan Glavina, John Nunley (per package manifest; the distributed license file carries no copyright line)
 - **event-listener-strategy 0.5.4** — Copyright John Nunley (per package manifest; the distributed license file carries no copyright line)
+- **fallible-iterator 0.3.0** — Copyright (c) 2015 The rust-openssl-verify Developers
+- **fallible-streaming-iterator 0.1.9** — Copyright (c) 2016 The fallible-streaming-iterator Developers
 - **fastrand 2.4.1** — Copyright Stjepan Glavina (per package manifest; the distributed license file carries no copyright line)
 - **fdeflate 0.3.7** — Copyright The image-rs Developers (per package manifest; the distributed license file carries no copyright line)
 - **fern 0.7.1** — Copyright (c) 2014-2017 David Ross
@@ -234,7 +237,9 @@ terms govern use of the model:
 - **gtk-sys 0.18.2** — Copyright The gtk-rs Project Developers (per package manifest; the distributed license file carries no copyright line)
 - **gtk3-macros 0.18.2** — Copyright The gtk-rs Project Developers (per package manifest; the distributed license file carries no copyright line)
 - **hashbrown 0.12.3** — Copyright (c) 2016 Amanieu d'Antras
+- **hashbrown 0.14.5** — Copyright (c) 2016 Amanieu d'Antras
 - **hashbrown 0.17.1** — Copyright (c) 2016 Amanieu d'Antras
+- **hashlink 0.9.1** — Copyright kyren (per package manifest; the distributed license file carries no copyright line)
 - **heck 0.4.1** — Copyright (c) 2015 The Rust Project Developers
 - **heck 0.5.0** — Copyright (c) 2015 The Rust Project Developers
 - **hermit-abi 0.5.2** — Copyright Stefan Lankes (per package manifest; the distributed license file carries no copyright line)
@@ -288,6 +293,7 @@ terms govern use of the model:
 - **libc 0.2.186** — Copyright (c) The Rust Project Developers
 - **libdbus-sys 0.2.7** — Copyright (c) 2014-2018 David Henningsson <diwic@ubuntu.com> and other contributors
 - **libredox 0.1.18** — Copyright (c) 2023 4lDO2
+- **libsqlite3-sys 0.30.1** — Copyright (c) 2014-2021 The rusqlite developers
 - **linux-raw-sys 0.12.1** — Copyright Dan Gohman (per package manifest; the distributed license file carries no copyright line)
 - **lock_api 0.4.14** — Copyright (c) 2016 The Rust Project Developers
 - **log 0.4.33** — Copyright (c) 2014 The Rust Project Developers
@@ -422,6 +428,7 @@ terms govern use of the model:
 - **reqwest 0.13.4** — Copyright (c) 2016-2026 Sean McArthur
 - **rfd 0.16.0** — Copyright (c) 2022 Bartłomiej Maryńczak
 - **rubato 0.16.2** — Copyright (c) 2020 Henrik Enquist
+- **rusqlite 0.32.1** — Copyright (c) 2014-2021 The rusqlite developers
 - **rustc_version 0.4.1** — Copyright (c) 2016 The Rust Project Developers
 - **rustc-hash 2.1.3** — no copyright line in the distributed license file
 - **rustfft 6.4.1** — Copyright (c) 2015 The RustFFT Developers

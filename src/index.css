@@ -5712,23 +5712,89 @@ body.dragging-tab * {
   padding-top: 14vh;
   /* Shell-tinted, blurred: the palette floats over a frosted window, not a
      flat black scrim. */
-  background: color-mix(in srgb, var(--bg-deep) 55%, transparent);
-  backdrop-filter: blur(5px);
-  -webkit-backdrop-filter: blur(5px);
+  background: color-mix(in srgb, var(--bg-deep) 48%, transparent);
+  backdrop-filter: blur(9px) saturate(115%);
+  -webkit-backdrop-filter: blur(9px) saturate(115%);
+  animation: palette-backdrop-in 120ms ease-out;
 }
 
+/* The same glass as the side panel's frost (see .side-peek-frost), on the same
+   four knobs, so the two overlays read as one material. Two differences, both
+   deliberate: the palette is a lit sheet with content ON it rather than behind
+   it, so the tint runs thicker — text over a preview or a diff has to stay
+   readable whatever is behind it — and the specular rakes from the top edge
+   rather than the leading one, because this sheet is lifted, not slid in. */
 .palette {
+  position: relative;
   width: min(680px, 88vw);
   display: flex;
   flex-direction: column;
-  /* Overlay surface + strong border + deep shadow with a top sheen — reads as
-     a lifted glass panel. */
-  background: var(--bg-overlay);
-  border: 1px solid var(--border-strong);
+
+  --glass-base: var(--bg-overlay);
+  --glass-sheen: rgba(255, 255, 255, 0.1);
+  --glass-lip: rgba(255, 255, 255, 0.08);
+  --glass-tint: 86%;
+
+  background:
+    radial-gradient(
+      120% 90% at 22% 0%,
+      var(--glass-sheen),
+      color-mix(in srgb, var(--glass-sheen) 25%, transparent) 32%,
+      transparent 68%
+    ),
+    radial-gradient(
+      120% 60% at 100% 0%,
+      color-mix(in srgb, var(--accent) 7%, transparent),
+      transparent 70%
+    ),
+    color-mix(in srgb, var(--glass-base) var(--glass-tint), transparent);
+
+  /* Saturation alongside the blur, for the same reason as the frost: without
+     it whatever is behind goes muddy grey and this looks like fog. */
+  backdrop-filter: blur(30px) saturate(180%);
+  -webkit-backdrop-filter: blur(30px) saturate(180%);
+  border: 1px solid color-mix(in srgb, var(--border-strong) 75%, transparent);
   border-radius: var(--r-lg);
   corner-shape: squircle;
-  box-shadow: var(--shadow-3), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  box-shadow:
+    var(--shadow-3),
+    inset 0 1px 0 var(--glass-lip),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.14);
   overflow: hidden;
+  animation: palette-in 150ms cubic-bezier(0.2, 0.85, 0.25, 1);
+}
+
+/* Daylight's surface is already bright: a white sheen doesn't register on it
+   and the tint has to be heavier or the list loses contrast against the page
+   behind. Same overrides the frost takes. */
+:root[data-theme="daylight"] .palette {
+  --glass-sheen: rgba(255, 255, 255, 0.7);
+  --glass-lip: rgba(255, 255, 255, 0.9);
+  --glass-tint: 90%;
+  box-shadow:
+    var(--shadow-3),
+    inset 0 1px 0 var(--glass-lip),
+    inset 0 -1px 0 rgba(28, 31, 38, 0.06);
+}
+
+@keyframes palette-in {
+  from {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.985);
+  }
+}
+
+@keyframes palette-backdrop-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .palette,
+  .palette-backdrop {
+    animation: none;
+  }
 }
 
 .palette-input {
@@ -5760,8 +5826,28 @@ body.dragging-tab * {
   white-space: nowrap;
 }
 
+/* The cursor: an accent wash that falls off to the right, a hairline ring to
+   give it an edge on glass, and a bar down the leading edge. The flat
+   accent-soft fill alone read as a smudge once the panel went translucent. */
 .palette-row-active {
-  background: var(--accent-soft);
+  position: relative;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--accent) 20%, transparent),
+    color-mix(in srgb, var(--accent) 8%, transparent)
+  );
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.palette-row-active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 5px;
+  bottom: 5px;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent);
 }
 
 .palette-name {
@@ -5809,25 +5895,251 @@ body.dragging-tab * {
    quiet group headers between them. */
 .spot-palette .palette-list {
   max-height: 56vh;
+  scroll-padding-block: 26px; /* a row scrolled to never lands under a header */
 }
 
+/* The input, with the magnifier in front of it and a clear button after —
+   the placeholder alone had to carry what this box was for. */
+.spot-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-left: 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+
+.spot-field-icon {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+}
+
+.spot-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-left: 0;
+  border-bottom: none;
+}
+
+.spot-clear {
+  flex: 0 0 auto;
+  margin-right: 10px;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--text-dim) 18%, transparent);
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.spot-clear:hover {
+  background: color-mix(in srgb, var(--text-dim) 30%, transparent);
+  color: var(--text);
+}
+
+/* The slow sources are out. A hairline that sweeps rather than a spinner: it
+   sits exactly where results will appear, and costs no layout when idle. */
+.spot-progress {
+  height: 1px;
+  opacity: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--accent),
+    transparent
+  );
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  transition: opacity 120ms linear;
+}
+
+.spot-progress-on {
+  opacity: 0.85;
+  animation: spot-sweep 900ms linear infinite;
+}
+
+@keyframes spot-sweep {
+  from {
+    background-position: -40% 0;
+  }
+  to {
+    background-position: 140% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spot-progress-on {
+    animation: none;
+    background: color-mix(in srgb, var(--accent) 50%, transparent);
+  }
+}
+
+/* Headers stick: scrolled ten rows into Agent Sessions, the section you're in
+   is still named. Frosted so rows pass under it rather than through it. */
 .spot-group {
-  padding: 8px 14px 3px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px 4px;
   color: var(--text-dim);
   font-size: 10px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   user-select: none;
+  /* Denser than the panel it sits on. A nested backdrop-filter is smearing an
+     already-composited layer, so the blur alone can't be trusted to hide the
+     row passing underneath — the opacity is what carries it. */
+  background: color-mix(in srgb, var(--glass-base, var(--bg-overlay)) 96%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.spot-group-count {
+  color: var(--text-faint);
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.spot-row {
+  align-items: center;
+  gap: 9px;
 }
 
 .spot-icon {
   display: inline-flex;
+  align-items: center;
   justify-content: center;
   width: 16px;
   flex: 0 0 16px;
   color: var(--text-dim);
   font-size: 11px;
+}
+
+.palette-row-active .spot-icon {
+  color: var(--accent);
+}
+
+/* A row that has no mark of its own still holds the column — a list whose
+   titles start at two different x positions reads as broken. */
+.spot-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.5;
+}
+
+.spot-glyph {
+  font-size: 12px;
+  line-height: 1;
+}
+
+/* The detail gives way, never the title: a row is found by its name, and a
+   long prompt shrinking "claude · fix/keep-tabs-mounted" down to "claude · m…"
+   costs the one thing the row is for. Basis 0 on the detail means it takes
+   what's left over rather than bidding for space against the title. */
+.spot-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.spot-detail {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.spot-mark {
+  background: none;
+  color: var(--accent);
+  font-weight: 650;
+}
+
+.palette-row-active .spot-mark {
+  color: var(--text);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  text-underline-offset: 2px;
+}
+
+/* Short status tokens — a tab's type, a server's state — as a chip pushed to
+   the right, so states can be skimmed down a column instead of read. */
+.spot-chip {
+  margin-left: auto;
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  corner-shape: squircle;
+  background: color-mix(in srgb, var(--text-dim) 14%, transparent);
+  color: var(--text-dim);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+
+/* The Enter hint on the cursor row: says what the highlight means the first
+   time, invisible every other row. */
+.spot-enter {
+  margin-left: auto;
+  flex: 0 0 auto;
+  padding-left: 8px;
+  color: var(--accent);
+  font-size: 11px;
+  opacity: 0;
+}
+
+.spot-chip + .spot-enter {
+  margin-left: 0;
+}
+
+.palette-row-active .spot-enter {
+  opacity: 0.9;
+}
+
+.spot-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.spot-empty-hint {
+  color: var(--text-faint);
+}
+
+.spot-foot-left,
+.spot-hints {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.spot-count {
+  color: var(--text-faint);
+}
+
+.spot-count::before {
+  content: "·";
+  padding-right: 6px;
+}
+
+.spot-key {
+  padding: 1px 5px;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 70%, transparent);
+  border-radius: 4px;
+  corner-shape: squircle;
+  background: color-mix(in srgb, var(--text-dim) 10%, transparent);
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 1.4;
 }
 
 /* ⌘N launcher rows: same palette shell, but each row leads with the launcher's
