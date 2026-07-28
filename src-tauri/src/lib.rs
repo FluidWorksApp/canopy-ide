@@ -516,6 +516,7 @@ pub fn run() {
             browser::browser_supported,
             browser::browser_open,
             browser::browser_navigate,
+            browser::browser_painted,
             browser::browser_set_bounds,
             browser::browser_set_visible,
             layering::browser_set_layering,

@@ -27,6 +27,19 @@
   if (window.__canopyPicker || (!NATIVE && window.top === window)) return;
   window.__canopyPicker = true;
 
+  // Did this document ever actually render? requestAnimationFrame only runs
+  // when the view is being drawn, so the first callback landing is proof that
+  // a frame was produced — and asking for it later costs nothing and, unlike
+  // a snapshot, does not itself force a render (which would answer its own
+  // question). This is how the host tells "loaded" from "painted": a page
+  // that loads while its view is hidden does neither, and comes back blank.
+  window.__canopyPainted = 0;
+  try {
+    requestAnimationFrame(function () {
+      window.__canopyPainted = Date.now();
+    });
+  } catch (_) {}
+
   var picking = false;
   var marks = []; // {n, selector, el|null, badge}
   var Z = 2147483000;
