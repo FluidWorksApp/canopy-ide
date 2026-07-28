@@ -14,10 +14,11 @@
 //              to the canopy-drain: scheme is the doorbell — see signal().
 //
 // Protocol (all messages tagged { canopy: <type> }):
-//   host -> page: mode {on}, navigate {delta|url}, sync {marks: [{n, selector}]},
+//   host -> page: mode {on}, region {on}, navigate {delta|url},
+//                 sync {marks: [{n, selector}]},
 //                 agent {id, op, ...} (browser-control ops from MCP agents)
 //   page -> host: ready {url, title}, nav {url, title}, annotation {payload},
-//                 agent-result {id, ok, data}
+//                 region-done {rect} / region-cancel, agent-result {id, ok, data}
 (function () {
   "use strict";
   var NATIVE = !!window.__canopyNativeBrowser;
@@ -392,6 +393,113 @@
   function clearMarks() {
     marks.forEach(function (m) { m.badge.remove(); });
     marks = [];
+  }
+
+  // ---------- region select ----------
+  // Drawn in the page, not in the app window, for the same reason the hover box
+  // is: under the webview engine this document is a native view composited over
+  // Canopy, so an overlay in Canopy's DOM would be behind the thing it is
+  // asking the user to point at. The backdrop swallows the drag, so the page
+  // itself never sees it.
+
+  var regionOn = false;
+  var regionFrom = null;
+  var backdrop = null;
+  var marquee = null;
+
+  function ensureRegionChrome() {
+    if (!backdrop) {
+      backdrop = document.createElement("div");
+      backdrop.style.cssText =
+        "position:fixed;inset:0;z-index:" + (Z + 3) + ";cursor:crosshair;" +
+        "background:rgba(10,12,16,.30);";
+      marquee = document.createElement("div");
+      marquee.style.cssText =
+        "position:fixed;display:none;pointer-events:none;z-index:" + (Z + 4) + ";" +
+        "border:1px solid #4f8ef7;background:rgba(79,142,247,.14);" +
+        "box-shadow:0 0 0 9999px rgba(10,12,16,.18);";
+    }
+    if (!backdrop.isConnected) document.documentElement.appendChild(backdrop);
+    if (!marquee.isConnected) document.documentElement.appendChild(marquee);
+  }
+
+  /** The drag so far, clamped to the viewport, in CSS pixels. */
+  function regionRect(e) {
+    var x1 = Math.max(0, Math.min(regionFrom.x, window.innerWidth));
+    var y1 = Math.max(0, Math.min(regionFrom.y, window.innerHeight));
+    var x2 = Math.max(0, Math.min(e.clientX, window.innerWidth));
+    var y2 = Math.max(0, Math.min(e.clientY, window.innerHeight));
+    return {
+      x: Math.min(x1, x2),
+      y: Math.min(y1, y2),
+      w: Math.abs(x2 - x1),
+      h: Math.abs(y2 - y1),
+    };
+  }
+
+  function onRegionDown(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    regionFrom = { x: e.clientX, y: e.clientY };
+    marquee.style.display = "block";
+    onRegionMove(e);
+  }
+
+  function onRegionMove(e) {
+    if (!regionFrom) return;
+    e.preventDefault();
+    var r = regionRect(e);
+    marquee.style.left = r.x + "px";
+    marquee.style.top = r.y + "px";
+    marquee.style.width = r.w + "px";
+    marquee.style.height = r.h + "px";
+  }
+
+  function onRegionUp(e) {
+    if (!regionFrom) return;
+    e.preventDefault();
+    e.stopPropagation();
+    var r = regionRect(e);
+    // Torn down BEFORE the answer goes out: the host takes its snapshot as soon
+    // as it hears, and a picture of the dimming overlay is not a screenshot.
+    setRegion(false);
+    if (r.w < 4 || r.h < 4) send({ canopy: "region-cancel" });
+    else send({ canopy: "region-done", rect: r });
+  }
+
+  function onRegionKey(e) {
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    e.stopPropagation();
+    setRegion(false);
+    send({ canopy: "region-cancel" });
+  }
+
+  function setRegion(on) {
+    if (regionOn === on) return;
+    regionOn = on;
+    if (on) {
+      ensureRegionChrome();
+      // One pointing mode at a time — a crosshair that means two things is a
+      // crosshair that means neither. The host turns its own Annotate toggle
+      // off to match; it is not restored afterwards, because the user asked
+      // for the other tool.
+      setPicking(false);
+      regionFrom = null;
+      marquee.style.display = "none";
+      backdrop.addEventListener("mousedown", onRegionDown, true);
+      document.addEventListener("mousemove", onRegionMove, true);
+      document.addEventListener("mouseup", onRegionUp, true);
+      document.addEventListener("keydown", onRegionKey, true);
+    } else {
+      backdrop.removeEventListener("mousedown", onRegionDown, true);
+      document.removeEventListener("mousemove", onRegionMove, true);
+      document.removeEventListener("mouseup", onRegionUp, true);
+      document.removeEventListener("keydown", onRegionKey, true);
+      regionFrom = null;
+      if (backdrop) backdrop.remove();
+      if (marquee) marquee.remove();
+    }
   }
 
   // Restore badges the app still holds (after a reload / tab revisit).
@@ -810,6 +918,7 @@
   function onHostMessage(d) {
     if (!d || typeof d !== "object") return;
     if (d.canopy === "mode") setPicking(!!d.on);
+    else if (d.canopy === "region") setRegion(!!d.on);
     else if (d.canopy === "sync") syncMarks(d.marks);
     else if (d.canopy === "agent") onAgentMessage(d);
     else if (d.canopy === "navigate") {

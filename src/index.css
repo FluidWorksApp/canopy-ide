@@ -10742,6 +10742,15 @@ a.btn-mini {
   padding-right: 8px;
 }
 
+/* The same control at toolbar scale, where the neighbours are btn-mini and an
+   accent split button would shout. The caret divider goes to the border colour
+   because these buttons aren't filled — a black hairline just looks like a gap. */
+.split-btn-mini > .split-btn-caret {
+  border-left-color: var(--border);
+  padding-left: 5px;
+  padding-right: 5px;
+}
+
 /* Nested menu panel ("New agent ›") and section headings. */
 /* The row that opens a submenu. Flex, not a bare block: a <button> is
  * inline-block, so inside a plain wrapper it shrank to its label and the
@@ -12828,6 +12837,18 @@ a.btn-mini {
   border-top: 1px solid var(--border);
   display: flex;
   justify-content: flex-end;
+  gap: 6px;
+}
+/* The captured pixels, at panel width. Dark backing so a screenshot with
+   transparency reads as an image rather than a hole in the panel. */
+.preview-shot-thumb {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  background: var(--bg);
 }
 .preview-empty {
   height: 100%;

@@ -3817,7 +3817,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   /** The same rows as `taskMenu`, without the "Tasks ▸" hop — for a control
    *  that is already the task menu. */
   const taskRows = useCallback(
-    (seed: string, dir: string, runnable?: TaskChoice[]) =>
+    (seed: string, dir: string, runnable?: TaskChoice[], query = "") =>
       taskMenuItems({
         seed,
         runnable,
@@ -3826,7 +3826,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
         onOneOff: (brief) => openTaskComposer(brief, "once"),
         // In the directory the surface is about, not the first root: the bar
         // sits on one repo's changes and that is where its tasks belong.
-        onRunSaved: (t) => void startMicroTask(customTaskDef(t), { dir }, ""),
+        // `query` is what a saved task is told about this particular item —
+        // empty for a surface whose seed is only a prefix ("About the changes
+        // in `x`: "), the whole brief for one that already has the full story.
+        onRunSaved: (t) => void startMicroTask(customTaskDef(t), { dir }, query),
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [seedTaskFrom, openTaskComposer, startMicroTask, project.customTasks],
@@ -4973,6 +4976,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
             tabId={tab.id}
             url={tab.url}
             annotations={tab.annotations}
+            shots={tab.shots ?? []}
+            dir={componentsRef.current[0]?.path ?? firstRoot}
             visible={tab.id === activeTabId && visible}
             onPatch={(patch) => patchTabRaw(tab.id, patch as Partial<SubTab>)}
             servers={previewServers}
@@ -4989,6 +4994,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               }
               startAgentInDir(dir, agentId, text, "Preview feedback");
             }}
+            taskRows={(brief, dir) => taskRows(brief, dir, undefined, brief)}
             onNotice={onNotice}
           />
         );
