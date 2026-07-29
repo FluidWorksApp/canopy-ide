@@ -25,6 +25,7 @@ mod relay;
 mod selftest;
 mod snapshot;
 mod spot;
+mod stores;
 mod tunnel;
 mod winproc;
 mod wsbridge;
@@ -401,6 +402,8 @@ pub fn run() {
             pty::instance_id,
             spot::spot_ingest,
             spot::spot_search,
+            spot::spot_index_stats,
+            spot::spot_index_clear,
             spot::spot_save_context_image,
             fsx::workspace_add,
             fsx::workspace_remove,

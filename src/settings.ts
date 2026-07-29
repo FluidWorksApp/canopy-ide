@@ -209,6 +209,29 @@ export interface Settings {
    *  a disabled tool costs the agent no context at all. */
   disabledTools: string[];
 
+  // ---- SpotSearch (⌘K) ----
+  /** Sources the omnibox must not ask (ids from spotSources.ts). Stored as the
+   *  exceptions, like `disabledTools`, so a source added in a later version is
+   *  searched by default rather than invisible to everyone who has ever opened
+   *  this screen. */
+  spotDisabledSources: string[];
+  /** Agent CLIs whose conversations must not be indexed, by registry id. Also
+   *  exceptions-only, so an agent Canopy learns to read later is covered
+   *  without anyone revisiting this screen. Switching one off purges what is
+   *  already indexed on the next ingest — "don't index my conversations with X"
+   *  has to mean the ones already in there too. */
+  spotDisabledAgents: string[];
+  /** Index live terminal scrollback. Same purge-on-off rule. */
+  spotIndexTerminals: boolean;
+  /** Search every project's history, not just the one you have open. Off by
+   *  default: a palette floating over one project that answers from another is
+   *  surprising, and the rows open a directory you weren't in. */
+  spotSearchAllProjects: boolean;
+  /** Drop indexed messages older than this many days. 0 keeps everything,
+   *  which is the default — this is a search index over your own work, not a
+   *  log to be rotated. */
+  spotRetentionDays: number;
+
   // ---- Voice dictation ----
   /** Hotkey that toggles dictation (start/insert). */
   dictationHotkey: Hotkey;
@@ -287,6 +310,11 @@ const DEFAULTS: Settings = {
   editorCursorStyle: "bar",
   editorCursorBlink: true,
   fileAssociations: {},
+  spotDisabledSources: [],
+  spotDisabledAgents: [],
+  spotIndexTerminals: true,
+  spotSearchAllProjects: false,
+  spotRetentionDays: 0,
   dictationHotkey: DEFAULT_DICTATION_HOTKEY,
   dictationModel: "",
   dictationLanguage: "",

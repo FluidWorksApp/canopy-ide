@@ -35,6 +35,8 @@ import {
   type CustomAgentCli,
 } from "../projects";
 import { AGENT_TOOL_GROUPS, ALL_AGENT_TOOLS } from "../agentTools";
+import { spotSources } from "../spotSources";
+import { INDEXABLE_AGENTS, fmtBytes, runIngest } from "../spotIndex";
 import {
   BUILTIN_MAP,
   EXTRA_ASSOCIATIONS,
@@ -49,6 +51,7 @@ export type SettingsTab =
   | "agents"
   | "editor"
   | "terminal"
+  | "spotsearch"
   | "dictation"
   | "integrations"
   | "browser"
@@ -65,6 +68,7 @@ const TABS: { id: SettingsTab; label: string }[] = [
   { id: "agents", label: "Agents" },
   { id: "editor", label: "Editor" },
   { id: "terminal", label: "Terminal" },
+  { id: "spotsearch", label: "SpotSearch" },
   { id: "dictation", label: "Dictation" },
   { id: "integrations", label: "Integrations" },
   { id: "browser", label: "Browser" },
@@ -989,6 +993,8 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
               </>
             )}
 
+            {tab === "spotsearch" && <SpotSearchSettings s={s} patch={patch} />}
+
             {tab === "dictation" && dictationOk && <DictationSettings />}
 
             {tab === "remote" && <RemoteSettings runInTerminal={runInTerminal} />}
@@ -1793,6 +1799,212 @@ function HotkeyCapture({ value, onChange }: { value: Hotkey; onChange: (h: Hotke
         Reset
       </button>
     </span>
+  );
+}
+
+/**
+ * SpotSearch: what ⌘K looks through, and what the index on disk is allowed to
+ * keep.
+ *
+ * Two different questions, deliberately separated. The first list is *search*
+ * — which sources the palette asks; switching one off costs you rows and
+ * nothing else. The second is *indexing* — what Canopy reads off disk and keeps
+ * in a database; switching one off deletes what it already read, because
+ * anything less would mean the setting said one thing and the file said
+ * another.
+ */
+function SpotSearchSettings({
+  s,
+  patch,
+}: {
+  s: Settings;
+  patch: (p: Partial<Settings>) => void;
+}) {
+  const [stats, setStats] = useState<ipc.SpotIndexStats | null>(null);
+  const [busy, setBusy] = useState<"" | "reindex" | "clear">("");
+  const sources = spotSources();
+
+  const refresh = useCallback(() => {
+    void ipc
+      .spotIndexStats()
+      .then(setStats)
+      .catch(() => setStats(null));
+  }, []);
+  useEffect(refresh, [refresh]);
+
+  // The screen has no project context of its own; the index is machine-wide
+  // and its per-project stores are picked up by whichever palette opens next.
+  const roots: string[] = [];
+  const toggle = (list: string[], id: string) =>
+    list.includes(id) ? list.filter((x) => x !== id) : [...list, id];
+
+  const byAgent = new Map(stats?.by_agent ?? []);
+
+  return (
+    <>
+      <Item
+        name="What ⌘K searches"
+        desc="Every kind of result the omnibox can offer. Switching one off only stops it being asked — nothing is deleted, and it comes back the moment you switch it on."
+      >
+        <div className="spot-set-list">
+          {sources.map((src) => {
+            const on = !s.spotDisabledSources.includes(src.id);
+            return (
+              <label key={src.id} className="spot-set-row" title={src.id}>
+                <input
+                  type="checkbox"
+                  checked={on}
+                  onChange={() =>
+                    patch({
+                      spotDisabledSources: toggle(s.spotDisabledSources, src.id),
+                    })
+                  }
+                />
+                <span className="spot-set-name">{src.group}</span>
+                <span className="spot-set-note">{src.blurb ?? ""}</span>
+              </label>
+            );
+          })}
+        </div>
+      </Item>
+
+      <Item
+        name="Conversations to index"
+        desc="Canopy reads each agent CLI's own session files and keeps a full-text index of them, so ⌘K can find a conversation by something said in it. Switching an agent off deletes what it already indexed, on the next search."
+      >
+        <div className="spot-set-list" style={{ ["--spot-set-name-w" as string]: "150px" }}>
+          {INDEXABLE_AGENTS.map((agent) => {
+            const on = !s.spotDisabledAgents.includes(agent.id);
+            const n = byAgent.get(agent.id) ?? 0;
+            return (
+              <label key={agent.id} className="spot-set-row" title={agent.store}>
+                <input
+                  type="checkbox"
+                  checked={on}
+                  onChange={() =>
+                    patch({
+                      spotDisabledAgents: toggle(s.spotDisabledAgents, agent.id),
+                    })
+                  }
+                />
+                <span className="spot-set-name">
+                  <AgentIcon id={agent.id} size={13} className="cli-icon" />{" "}
+                  {agent.label}
+                </span>
+                <span className="spot-set-note">
+                  <code>{agent.store}</code>
+                  {agent.note ? ` — ${agent.note}` : ""}
+                  {n > 0 ? ` · ${n.toLocaleString()} indexed` : ""}
+                </span>
+              </label>
+            );
+          })}
+          <p className="set-item-desc">
+            Amp is not listed because there is nothing local to read: its threads
+            live on Sourcegraph's servers.
+          </p>
+        </div>
+      </Item>
+
+      <Item
+        name="Terminal scrollback"
+        desc="What your live terminals have printed, searchable while they are open. A terminal that closes is dropped from the index — its pty is gone, so there would be nothing for the row to open."
+      >
+        <label className="set-inline-check">
+          <input
+            type="checkbox"
+            checked={s.spotIndexTerminals}
+            onChange={(e) => patch({ spotIndexTerminals: e.target.checked })}
+          />
+          <span>Index open terminals' scrollback</span>
+        </label>
+      </Item>
+
+      <Item
+        name="Scope"
+        desc="By default the index answers for the project the palette is floating over. Widen it and a search reaches every project on this machine — useful when you remember the conversation but not where it happened."
+      >
+        <label className="set-inline-check">
+          <input
+            type="checkbox"
+            checked={s.spotSearchAllProjects}
+            onChange={(e) => patch({ spotSearchAllProjects: e.target.checked })}
+          />
+          <span>Search every project, not just this one</span>
+        </label>
+      </Item>
+
+      <Item
+        name="Keep history for"
+        desc="Indexed messages older than this are dropped. Zero keeps everything — the transcripts on disk are the real record, and this only decides how far back ⌘K can see."
+      >
+        <div className="spot-set-days">
+          <input
+            type="number"
+            min={0}
+            max={3650}
+            step={30}
+            value={s.spotRetentionDays}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isFinite(v) && v >= 0)
+                patch({ spotRetentionDays: Math.floor(v) });
+            }}
+          />
+          <span className="set-item-desc">
+            days{s.spotRetentionDays === 0 ? " — keep everything" : ""}
+          </span>
+        </div>
+      </Item>
+
+      <Item
+        name="The index"
+        desc="A SQLite database in ~/.canopy. Everything in it is derived from files that still exist, so clearing it costs recall until the next search and nothing else."
+      >
+        <div className="spot-set-index">
+          <p className="set-item-desc">
+            {stats
+              ? `${stats.messages.toLocaleString()} messages from ${stats.sessions.toLocaleString()} conversations, ${stats.terminals} terminal${
+                  stats.terminals === 1 ? "" : "s"
+                } · ${fmtBytes(stats.bytes)}`
+              : "Not built yet — it fills the first time you open ⌘K."}
+          </p>
+          <div className="tool-bulk">
+            <button
+              className="btn btn-small"
+              disabled={busy !== ""}
+              onClick={() => {
+                setBusy("reindex");
+                void runIngest(roots)
+                  .catch(() => {})
+                  .finally(() => {
+                    setBusy("");
+                    refresh();
+                  });
+              }}
+            >
+              {busy === "reindex" ? "Reading…" : "Update now"}
+            </button>
+            <button
+              className="btn btn-small"
+              disabled={busy !== ""}
+              onClick={() => {
+                setBusy("clear");
+                void ipc
+                  .spotIndexClear()
+                  .catch(() => {})
+                  .finally(() => {
+                    setBusy("");
+                    refresh();
+                  });
+              }}
+            >
+              {busy === "clear" ? "Clearing…" : "Clear index"}
+            </button>
+          </div>
+        </div>
+      </Item>
+    </>
   );
 }
 

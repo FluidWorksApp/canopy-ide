@@ -1026,7 +1026,7 @@ export const ProjectView = memo(function ProjectView({
   useEffect(() => {
     const load = () =>
       void ipc
-        .sessionDigests()
+        .sessionDigests(rootsRef.current)
         .then((d) => {
           const mine = d.filter((x) =>
             rootsRef.current.some(
@@ -1059,7 +1059,7 @@ export const ProjectView = memo(function ProjectView({
     let live = true;
     const load = () =>
       void ipc
-        .sessionDigests()
+        .sessionDigests(rootsRef.current)
         .then((d) => {
           if (!live) return;
           const mine = d.filter((x) =>

@@ -16,6 +16,7 @@ import { completedTaskRuns, type TaskRun } from "./taskHistory";
 import { TRACKERS } from "./trackers";
 import { getSnapshot as prSnapshot } from "./prWatchStore";
 import { toPrInfo } from "./prInbox";
+import { getSettings } from "./settings";
 
 /** What Enter does on a row — ProjectView owns the dispatch, this names it. */
 export type SpotAction =
@@ -316,10 +317,14 @@ export async function codeSymbolRows(query: string, roots: string[]): Promise<Sp
 /** Hits from the persistent index (transcripts + terminal scrollback), mapped
  *  back to something openable: a terminal hit to its live tab, a transcript hit
  *  to its session digest. A hit whose container is gone is dropped, not shown. */
-export async function indexRows(query: string, ctx: SpotContext): Promise<SpotRow[]> {
+export async function indexRows(query: string, ctx: SpotContext, roots: string[]): Promise<SpotRow[]> {
   if (query.trim().length < 2) return [];
-  const hits = await ipc.spotSearch(query, 14).catch(() => []);
+  const { spotSearchAllProjects } = getSettings();
+  const hits = await ipc
+    .spotSearch(query, 14, roots, spotSearchAllProjects)
+    .catch(() => []);
   const out: SpotRow[] = [];
+  const dir = (p: string) => p.slice(p.lastIndexOf("/") + 1);
   for (const h of hits) {
     if (h.kind === "terminal") {
       const ptyId = Number(h.key.slice("pty:".length));
@@ -336,19 +341,49 @@ export async function indexRows(query: string, ctx: SpotContext): Promise<SpotRo
         score: 0,
         action: { type: "focus-tab", tabId: tab.id },
       });
-    } else {
-      const digest = ctx.digests.find((d) => d.session_id === h.key);
-      if (!digest) continue;
+      continue;
+    }
+    // Aider keeps its history as a file in the repo and has no session to
+    // reopen — so the row opens the history itself. Every other agent's
+    // conversation opens as a session.
+    if (h.agent === "aider") {
       out.push({
         id: `spot:${h.kind}:${h.key}`,
         group: "Agent Sessions",
-        kind: `agent:${digest.agent ?? ""}`,
-        title: `${digest.agent ?? "agent"}${digest.branch ? ` · ${digest.branch}` : ""}`,
+        kind: "agent:aider",
+        title: `aider · ${dir(h.cwd)}`,
         detail: h.snippet,
         score: 0,
-        action: { type: "open-session", digest },
+        action: { type: "open-file", path: h.meta },
       });
+      continue;
     }
+    // A digest is the richer record (branch, files, the surface it ran on), but
+    // its absence must not lose the row: the hit already carries what opening
+    // a session needs, and dropping it was how whole agents went missing from
+    // search while their conversations sat in the index.
+    const digest: ipc.SessionDigest = ctx.digests.find(
+      (d) => d.session_id === h.key,
+    ) ?? {
+      session_id: h.key,
+      agent: h.agent,
+      cwd: h.cwd,
+      launch_cwd: h.cwd,
+      resume_cwd: h.cwd,
+      updated: h.ts,
+      prompts: [],
+    };
+    out.push({
+      id: `spot:${h.kind}:${h.key}`,
+      group: "Agent Sessions",
+      kind: `agent:${digest.agent ?? h.agent}`,
+      title: `${digest.agent ?? h.agent}${
+        digest.branch ? ` · ${digest.branch}` : h.cwd ? ` · ${dir(h.cwd)}` : ""
+      }`,
+      detail: h.snippet,
+      score: 0,
+      action: { type: "open-session", digest },
+    });
   }
   return out.slice(0, CAP);
 }
@@ -436,11 +471,16 @@ export interface SpotQuery {
 }
 
 export interface SpotSource {
-  /** Stable id — also what `before` in registration points at. */
+  /** Stable id — also what `before` in registration points at, and the key
+   *  Settings → SpotSearch stores when it's switched off. */
   id: string;
   /** Section heading its rows land under. Rows carry their own `group`, so a
    *  source may fill more than one; this one decides its place in the order. */
   group: string;
+  /** One line for the settings screen: what this source actually searches.
+   *  Optional so a registered source needn't write copy to exist — it lists
+   *  under its group name alone. */
+  blurb?: string;
   /** `instant` runs on every keystroke and must return synchronously — no IO.
    *  `deferred` is debounced (180ms) and may await. */
   timing: "instant" | "deferred";
@@ -451,19 +491,19 @@ export interface SpotSource {
 }
 
 const SOURCES: SpotSource[] = [
-  { id: "actions", group: "Actions", timing: "instant", rows: (q) => actionRows(q.query, q.ctx) },
-  { id: "tabs", group: "Open Tabs", timing: "instant", rows: (q) => tabRows(q.query, q.ctx) },
-  { id: "files", group: "Files", timing: "deferred", rows: (q) => fileRows(q.query, q.corpus) },
-  { id: "symbols", group: "Symbols", timing: "deferred", minQuery: 2, rows: (q) => codeSymbolRows(q.query, q.roots) },
-  { id: "content", group: "In Files", timing: "deferred", minQuery: 2, rows: (q) => contentRows(q.query, q.roots) },
+  { id: "actions", group: "Actions", blurb: "The launcher entries, and running what you typed as a one-shot task.", timing: "instant", rows: (q) => actionRows(q.query, q.ctx) },
+  { id: "tabs", group: "Open Tabs", blurb: "Everything open in this project's tab strip.", timing: "instant", rows: (q) => tabRows(q.query, q.ctx) },
+  { id: "files", group: "Files", blurb: "File names under the project's components.", timing: "deferred", rows: (q) => fileRows(q.query, q.corpus) },
+  { id: "symbols", group: "Symbols", blurb: "Workspace symbols from language servers already running — never starts one.", timing: "deferred", minQuery: 2, rows: (q) => codeSymbolRows(q.query, q.roots) },
+  { id: "content", group: "In Files", blurb: "Text inside the project's files (ripgrep, live per query).", timing: "deferred", minQuery: 2, rows: (q) => contentRows(q.query, q.roots) },
   // One source, two sections: the persistent index answers for terminal
   // scrollback and transcripts in the same query.
-  { id: "index", group: "Terminal Output", timing: "deferred", minQuery: 2, rows: (q) => indexRows(q.query, q.ctx) },
-  { id: "sessions", group: "Agent Sessions", timing: "instant", rows: (q) => sessionRows(q.query, q.ctx) },
-  { id: "tickets", group: "Tickets", timing: "deferred", rows: (q) => ticketRows(q.query, q.roots) },
-  { id: "prs", group: "Pull Requests", timing: "instant", rows: (q) => prRows(q.query) },
-  { id: "servers", group: "Servers", timing: "instant", rows: (q) => serverRows(q.query, q.ctx) },
-  { id: "tasks", group: "Task History", timing: "instant", rows: (q) => taskRows(q.query, q.ctx) },
+  { id: "index", group: "Terminal Output", blurb: "The persistent index: every agent's conversations and live terminal scrollback. What it holds is set below.", timing: "deferred", minQuery: 2, rows: (q) => indexRows(q.query, q.ctx, q.roots) },
+  { id: "sessions", group: "Agent Sessions", blurb: "Agent sessions by prompt, branch and files touched (from their digests).", timing: "instant", rows: (q) => sessionRows(q.query, q.ctx) },
+  { id: "tickets", group: "Tickets", blurb: "Issues from the configured trackers. Fetches over the network, cached 60s.", timing: "deferred", rows: (q) => ticketRows(q.query, q.roots) },
+  { id: "prs", group: "Pull Requests", blurb: "Open PRs the watcher has already fetched — no round trip here.", timing: "instant", rows: (q) => prRows(q.query) },
+  { id: "servers", group: "Servers", blurb: "Every command this project can run, and what's up right now.", timing: "instant", rows: (q) => serverRows(q.query, q.ctx) },
+  { id: "tasks", group: "Task History", blurb: "One-shot tasks that have finished, and what they reported.", timing: "instant", rows: (q) => taskRows(q.query, q.ctx) },
 ];
 
 /** Add a source. Returns the undo — call it when whatever registered the source
@@ -504,15 +544,28 @@ export function spotGroupOrder(): string[] {
   return out;
 }
 
-const asks = (s: SpotSource, query: string) =>
+/** Sources the user switched off in Settings → SpotSearch. Read per query
+ *  rather than cached: settings are a localStorage read behind a cache, and a
+ *  palette that only honours the setting after a restart is a bug report. */
+const disabled = (): string[] => {
+  try {
+    return getSettings().spotDisabledSources;
+  } catch {
+    return [];
+  }
+};
+
+const asks = (s: SpotSource, query: string, off: string[]) =>
+  !off.includes(s.id) &&
   query.trim().length >= (s.minQuery ?? (s.timing === "deferred" ? 1 : 0));
 
 /** The synchronous sources, on every keystroke. A throwing source costs its own
  *  rows and nothing else. */
 export function instantRows(q: SpotQuery): SpotRow[] {
   const out: SpotRow[] = [];
+  const off = disabled();
   for (const s of SOURCES) {
-    if (s.timing !== "instant" || !asks(s, q.query)) continue;
+    if (s.timing !== "instant" || !asks(s, q.query, off)) continue;
     try {
       const rows = s.rows(q);
       if (Array.isArray(rows)) out.push(...rows);
@@ -528,8 +581,9 @@ export function instantRows(q: SpotQuery): SpotRow[] {
 
 /** The debounced ones, all in flight together. */
 export async function deferredRows(q: SpotQuery): Promise<SpotRow[]> {
+  const off = disabled();
   const lists = await Promise.all(
-    SOURCES.filter((s) => s.timing === "deferred" && asks(s, q.query)).map((s) =>
+    SOURCES.filter((s) => s.timing === "deferred" && asks(s, q.query, off)).map((s) =>
       Promise.resolve()
         .then(() => s.rows(q))
         .catch((err) => {

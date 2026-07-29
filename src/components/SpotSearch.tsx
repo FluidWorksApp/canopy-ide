@@ -18,6 +18,7 @@ import * as ipc from "../ipc";
 import { fuzzyRanges } from "../fuzzy";
 import { SearchIcon } from "./icons";
 import { SpotRowIcon } from "./spotIcons";
+import { runIngest } from "../spotIndex";
 import {
   deferredRows,
   instantRows,
@@ -116,16 +117,10 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
   // while `more` is bounded so a cold index can't hold the palette hostage.
   useEffect(() => {
     void ipc.fsListFiles(roots).then(setCorpus).catch(() => setCorpus([]));
-    let cancelled = false;
-    void (async () => {
-      for (let i = 0; i < 8 && !cancelled; i++) {
-        const report = await ipc.spotIngest().catch(() => null);
-        if (!report?.more) break;
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    // What the index holds is opt-out (Settings → SpotSearch); the call is made
+    // either way, because it is also what purges an agent just switched off —
+    // skipping it entirely would leave the old content searchable.
+    void runIngest(roots);
   }, [roots.join("\n")]);
 
   // ProjectView hands down a fresh ctx object on every render (pty stats tick

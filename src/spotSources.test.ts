@@ -1,6 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as ipc from "./ipc";
+import type * as ipcTypes from "./ipc";
 import {
   actionRows,
+  indexRows,
   deferredRows,
   instantRows,
   registerSpotSource,
@@ -13,6 +16,8 @@ import {
   type SpotRow,
 } from "./spotSources";
 import type { SubTab } from "./components/ProjectView/helpers";
+
+afterEach(() => vi.restoreAllMocks());
 
 const term = (id: string, title: string, ptyId: number): SubTab => ({
   id,
@@ -197,5 +202,129 @@ describe("the source registry", () => {
     // registry and the palette stopped being extensible in that spot.
     expect(spotSources().map((s) => s.id)).toContain("actions");
     expect(spotSources().every((s) => typeof s.rows === "function")).toBe(true);
+  });
+});
+
+describe("what the user switched off", () => {
+  it("stops asking a disabled source, and asks it again when re-enabled", () => {
+    const rows = vi.fn(() => []);
+    const off = registerSpotSource({
+      id: "plug-off",
+      group: "Plugin",
+      timing: "instant",
+      rows,
+    });
+    try {
+      localStorage.setItem(
+        "canopy.settings",
+        JSON.stringify({ spotDisabledSources: ["plug-off"] }),
+      );
+      instantRows(req("dev"));
+      expect(rows).not.toHaveBeenCalled();
+      // The rest of the palette is unaffected — one source off is not the
+      // palette off.
+      expect(instantRows(req("dev")).some((r) => r.action.type === "focus-tab")).toBe(true);
+
+      localStorage.setItem("canopy.settings", JSON.stringify({ spotDisabledSources: [] }));
+      instantRows(req("dev"));
+      expect(rows).toHaveBeenCalled();
+    } finally {
+      off();
+      localStorage.clear();
+    }
+  });
+
+  it("drops a disabled deferred source without touching its neighbours", async () => {
+    const rows = vi.fn(async () => []);
+    const off = registerSpotSource({
+      id: "plug-slow",
+      group: "Plugin",
+      timing: "deferred",
+      rows,
+    });
+    try {
+      localStorage.setItem(
+        "canopy.settings",
+        JSON.stringify({ spotDisabledSources: ["plug-slow"] }),
+      );
+      await deferredRows(req("dev"));
+      expect(rows).not.toHaveBeenCalled();
+    } finally {
+      off();
+      localStorage.clear();
+    }
+  });
+});
+
+describe("indexRows", () => {
+  const hit = (over: Partial<ipcTypes.SpotIndexHit> = {}): ipcTypes.SpotIndexHit => ({
+    kind: "transcript",
+    key: "s-1",
+    agent: "codex",
+    cwd: "/repo",
+    title: "",
+    snippet: "the retry loop",
+    meta: "/Users/dev/.codex/sessions/2026/07/29/rollout-x.jsonl",
+    ts: 1000,
+    ...over,
+  });
+
+  it("opens a conversation even when no digest describes it", async () => {
+    // The whole point of indexing every agent: a hit whose session Canopy has
+    // no hook record for used to be dropped, which is how entire CLIs went
+    // missing from search while their transcripts sat in the index.
+    vi.spyOn(ipc, "spotSearch").mockResolvedValue([hit()]);
+    const rows = await indexRows("retry", ctx(), ["/repo"]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].action).toMatchObject({
+      type: "open-session",
+      digest: { session_id: "s-1", agent: "codex", cwd: "/repo" },
+    });
+    expect(rows[0].kind).toBe("agent:codex");
+  });
+
+  it("prefers the digest when there is one", async () => {
+    vi.spyOn(ipc, "spotSearch").mockResolvedValue([hit()]);
+    const digest = {
+      session_id: "s-1",
+      agent: "codex",
+      cwd: "/repo",
+      branch: "feat/retry",
+    } as ipcTypes.SessionDigest;
+    const rows = await indexRows("retry", ctx({ digests: [digest] }), ["/repo"]);
+    expect(rows[0].title).toContain("feat/retry");
+    expect((rows[0].action as { digest: ipcTypes.SessionDigest }).digest).toBe(digest);
+  });
+
+  it("opens aider's history file, which is all aider has", async () => {
+    vi.spyOn(ipc, "spotSearch").mockResolvedValue([
+      hit({ agent: "aider", key: "/repo/.aider.chat.history.md#2026", meta: "/repo/.aider.chat.history.md" }),
+    ]);
+    const rows = await indexRows("retry", ctx(), ["/repo"]);
+    expect(rows[0].action).toEqual({
+      type: "open-file",
+      path: "/repo/.aider.chat.history.md",
+    });
+  });
+
+  it("drops a terminal hit whose tab is gone rather than showing a dead row", async () => {
+    vi.spyOn(ipc, "spotSearch").mockResolvedValue([
+      hit({ kind: "terminal", key: "pty:99", agent: "terminal" }),
+    ]);
+    expect(await indexRows("retry", ctx(), ["/repo"])).toEqual([]);
+  });
+
+  it("scopes to the open project unless told otherwise", async () => {
+    const spy = vi.spyOn(ipc, "spotSearch").mockResolvedValue([]);
+    await indexRows("retry", ctx(), ["/repo"]);
+    expect(spy).toHaveBeenCalledWith("retry", 14, ["/repo"], false);
+
+    localStorage.setItem(
+      "canopy.settings",
+      JSON.stringify({ spotSearchAllProjects: true }),
+    );
+    await indexRows("retry", ctx(), ["/repo"]);
+    expect(spy).toHaveBeenLastCalledWith("retry", 14, ["/repo"], true);
+    localStorage.clear();
   });
 });
