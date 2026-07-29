@@ -1948,6 +1948,33 @@ pub async fn gh_pr_body(
     run_net(&mut cmd)
 }
 
+/// One PR's state: "OPEN", "MERGED" or "CLOSED".
+///
+/// The PR watcher only ever holds *open* pull requests, so a linked PR that has
+/// vanished from its list could equally have merged, been closed, or simply not
+/// been polled. Research asks this instead: marking a finding "implemented"
+/// because a PR stopped being open would be inferring the one fact that matters
+/// from the one signal that cannot carry it.
+#[tauri::command]
+pub async fn gh_pr_state(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    number: u32,
+) -> Result<String, String> {
+    let top = repo_path(&state, &repo)?;
+    let mut cmd = gh_in(&top);
+    cmd.args([
+        "pr",
+        "view",
+        &number.to_string(),
+        "--json",
+        "state",
+        "--jq",
+        ".state",
+    ]);
+    run_net(&mut cmd).map(|s| s.trim().to_uppercase())
+}
+
 /// Submit a review. This is outward-facing and visible to other people on a
 /// real repository, so the UI confirms before it ever reaches here — and the
 /// action is never inferred, only taken when explicitly chosen.

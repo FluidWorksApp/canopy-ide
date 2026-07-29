@@ -225,6 +225,8 @@ describe("addressPrCommentsTask", () => {
 describe("MICRO_TASKS", () => {
   it("registers every built-in with a unique id and a surface to run from", () => {
     expect(MICRO_TASKS.map((t) => t.id)).toEqual([
+      "research",
+      "implement-research",
       "raise-pr",
       "review-pr",
       "address-pr-comments",
@@ -258,12 +260,21 @@ describe("MICRO_TASKS", () => {
     // The grouping is a promise about consequence; these are the three that
     // change the branch, and the isolation flag is the independent evidence.
     const pushes = MICRO_TASKS.filter((t) => t.effect === "pushes").map((t) => t.id);
-    expect(pushes).toEqual(["address-pr-comments", "pr-resolve-conflicts", "pr-fix-ci"]);
+    expect(pushes).toEqual([
+      "implement-research",
+      "address-pr-comments",
+      "pr-resolve-conflicts",
+      "pr-fix-ci",
+    ]);
+    // Every one of them gets a workspace of its own. Which kind depends on
+    // what there is to start from — a PR's head for work that already has one,
+    // a fresh branch for work that does not (implementing research) — but
+    // "edits code in the shared checkout" is not on the menu either way.
     for (const t of MICRO_TASKS.filter((x) => x.effect === "pushes"))
       expect(
         t.isolation?.kind,
         `${t.id} edits code, so it needs its own worktree`,
-      ).toBe("pr-worktree");
+      ).toMatch(/^(pr|branch)-worktree$/);
     // Nothing that only reads may carry a brief that posts a review.
     for (const t of MICRO_TASKS.filter((x) => x.effect === "reads"))
       expect(t.id).not.toBe("review-pr");

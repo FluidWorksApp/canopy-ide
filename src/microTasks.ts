@@ -19,6 +19,16 @@ export interface PrWorktreeIsolation<P> {
   target(payload: P): { repo: string; pr: ipc.PrInfo };
 }
 
+/** The same protection for work that has no PR yet: a branch of its own, in a
+ *  workspace of its own. Implementing research is the case — there is nothing
+ *  to check out, only something to start. */
+export interface BranchWorktreeIsolation<P> {
+  kind: "branch-worktree";
+  target(payload: P): { repo: string; branch: string };
+}
+
+export type TaskIsolation<P> = PrWorktreeIsolation<P> | BranchWorktreeIsolation<P>;
+
 /** What the launcher resolved before seeding the agent. Today just the
  *  throwaway worktree it made, which the brief has to tell the agent to tear
  *  down; absent when the run needed no isolation or reused a real worktree. */
@@ -50,7 +60,11 @@ export interface MicroTaskDef<P> {
    *  public under your name, `pushes` changes code on the branch. */
   effect?: TaskEffect;
   /** Set by tasks that mutate files; the launcher prepares the checkout. */
-  isolation?: PrWorktreeIsolation<P>;
+  isolation?: TaskIsolation<P>;
+  /** Extra environment for the session, on top of CANOPY_MICRO_TASK. Research
+   *  runs use it to name the entry they are bound to — which is what the
+   *  PreToolUse harness in canopy_hook reads to decide where prose may land. */
+  env?(payload: P): [string, string][];
   /** The milestones this task reports, in order. Declaring them is the whole
    *  opt-in: the launcher appends the reporting protocol to the brief, and any
    *  surface showing the run renders the rail. A task without them is one whose
@@ -702,10 +716,112 @@ export const followUpsTask: MicroTaskDef<ReviewPrPayload> = {
   },
 };
 
+// ---------- research ----------
+//
+// The two halves of the loop. A research run answers a question and changes
+// nothing; an implement run takes the answer and builds it. They are separate
+// tasks rather than one with a flag because they want opposite things: research
+// wants the shared checkout and no isolation (it only reads), implementation
+// wants a branch of its own.
+
+export interface ResearchRunPayload {
+  /** Where to run — the project directory, read-only as far as this task goes. */
+  dir: string;
+  entryId: string;
+  /** The entry's directory on disk: the one place this session may write prose,
+   *  and what the PreToolUse gate compares against. */
+  entryDir: string;
+  title: string;
+  question: string;
+}
+
+/** Investigate a question and leave the answer somewhere it can be found.
+ *
+ *  The brief spells out the protocol the harness enforces anyway. That is not
+ *  belt-and-braces: an agent that knows findings go in the entry writes them
+ *  there as it goes, while an agent that discovers the rule through a denied
+ *  write has already composed a file it now has to re-do. */
+export const researchTask: MicroTaskDef<ResearchRunPayload> = {
+  id: "research",
+  label: "Research",
+  icon: "◍",
+  placeholder: "anything else it should focus on…",
+  blurb: "Investigate a question and record the finding. Changes no code.",
+  effect: "reads",
+  surfaceNote: "from the Research panel, or by typing a question into ⌘K",
+  cwd: (p) => p.dir,
+  env: (p) => [
+    ["CANOPY_RESEARCH", p.entryId],
+    ["CANOPY_RESEARCH_DIR", p.entryDir],
+  ],
+  buildContext: (p, query) =>
+    oneLine(
+      `Research this question and record what you find in Canopy: ${p.question}` +
+        ` Your research entry already exists — id ${p.entryId} ("${p.title}").` +
+        ` Use the canopy_research_write tool against it: action "append" for findings as you` +
+        ` go, action "source" for anything long you want kept (file dumps, command output,` +
+        ` fetched pages), and when you are done, action "digest" with the one paragraph` +
+        ` another agent should read instead of the whole entry, plus a recommendation and` +
+        ` any open questions. Start by calling canopy_research with action "search" —` +
+        ` someone may have answered this already, and if they have, say so and stop.` +
+        ` Read the code, run things, look at logs; change no code — this is a read-only` +
+        ` investigation. Do NOT write your findings into files: writes outside the entry` +
+        ` are refused, and anything you leave elsewhere is lost when this session ends.` +
+        (query ? ` The user adds: "${query}".` : ""),
+    ),
+};
+
+export interface ImplementResearchPayload {
+  dir: string;
+  repo: string;
+  /** The branch this work gets, created in a workspace of its own. */
+  branch: string;
+  entryId: string;
+  title: string;
+  /** Digest and recommendation only — see researchContext in research.ts for
+   *  why the body deliberately does not travel with it. */
+  brief: string;
+}
+
+/** Build what the research recommended, on a branch of its own, and link the PR
+ *  back so the entry records what shipped from it. */
+export const implementResearchTask: MicroTaskDef<ImplementResearchPayload> = {
+  id: "implement-research",
+  label: "Implement research",
+  icon: "◈",
+  placeholder: "anything to steer the implementation…",
+  blurb: "Build what a research entry recommended, and link the PR back to it.",
+  effect: "pushes",
+  surfaceNote: "on a research tab, from the Implement button",
+  cwd: (p) => p.dir,
+  isolation: {
+    kind: "branch-worktree",
+    target: (p) => ({ repo: p.repo, branch: p.branch }),
+  },
+  env: (p) => [["CANOPY_RESEARCH", p.entryId]],
+  buildContext: (p, query, env) =>
+    oneLine(
+      `${p.brief}` +
+        ` Work on branch ${p.branch}. Implement the recommendation, commit, push, and open a` +
+        ` pull request. Then call canopy_research_write with action "link" and the PR` +
+        ` ({ repo, number, url, state }) so the entry records what implemented it — that link` +
+        ` is what later marks the research done when the PR merges, so it is not optional.` +
+        ` If the research turns out to be wrong once you are in the code, do not force it:` +
+        ` call canopy_research_write with action "status" set to "researched" and a note` +
+        ` saying what did not hold, and stop.` +
+        (env?.cleanup
+          ? cleanupLine(env.cleanup.repo, env.cleanup.worktree)
+          : "") +
+        (query ? ` The user adds: "${query}".` : ""),
+    ),
+};
+
 /** Every built-in micro-task a CTA can launch. These are surface-bound: their
  *  payload comes from where the button lives (see each task's surfaceNote),
  *  which is why the Tasks panel lists them read-only — run them from there. */
 export const MICRO_TASKS: MicroTaskDef<never>[] = [
+  researchTask as MicroTaskDef<never>,
+  implementResearchTask as MicroTaskDef<never>,
   raisePrTask as MicroTaskDef<never>,
   reviewPrTask as MicroTaskDef<never>,
   addressPrCommentsTask as MicroTaskDef<never>,

@@ -126,6 +126,7 @@ pub fn start(app: tauri::AppHandle) {
             .route("/ctx/ui", post(ui_op))
             .route("/ctx/wait", get(wait))
             .route("/ctx/claims", get(claims_list).post(claims_post))
+            .route("/ctx/research", post(research_op))
             .route("/ctx/tools", get(tools))
             .with_state(app.clone());
         let _ = axum::serve(listener, router).await;
@@ -264,6 +265,241 @@ async fn editor(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (Sta
         StatusCode::OK,
         serde_json::json!({ "projects": states }).to_string(),
     )
+}
+
+// ---- research -------------------------------------------------------------
+//
+// Research is scoped to one project, and this handler is the only door an agent
+// has to it. That scoping is not a filter applied to a global result — it is
+// the first thing that happens: the caller's cwd resolves to exactly one open
+// project, every action runs against that project's directory, and there is no
+// argument an agent can pass to reach another one. A cwd inside no open project
+// is an error, never a machine-wide list.
+
+/// Which open project owns this directory. The longest matching component path
+/// wins, so a component nested inside another (a sub-package registered in its
+/// own right) resolves to the nearer one rather than to whichever was published
+/// first.
+fn project_for_cwd(app: &tauri::AppHandle, cwd: &str) -> Option<ProjectCandidate> {
+    let bridge = app.state::<ContextBridge>();
+    let snapshots = bridge.snapshots.lock().unwrap();
+    let candidates: Vec<ProjectCandidate> = snapshots
+        .values()
+        .filter_map(|snap| {
+            let id = snap.get("id").and_then(|v| v.as_str())?;
+            if id.is_empty() {
+                return None;
+            }
+            let name = snap
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let roots: Vec<String> = snap
+                .get("components")
+                .and_then(|v| v.as_array())
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|c| c.get("path").and_then(|p| p.as_str()))
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some((id.to_string(), name, roots))
+        })
+        .collect();
+    pick_project(&candidates, cwd)
+}
+
+/// A project a directory can resolve to: its id, its display name, and the
+/// component paths that decide whether a directory belongs to it.
+type ProjectCandidate = (String, String, Vec<String>);
+
+/// The scoping rule itself, separated from where the snapshots came from so it
+/// can be tested: longest containing component path wins.
+fn pick_project(candidates: &[ProjectCandidate], cwd: &str) -> Option<ProjectCandidate> {
+    let mut best: Option<(usize, &ProjectCandidate)> = None;
+    for cand in candidates {
+        for root in &cand.2 {
+            let r = root.trim_end_matches('/');
+            // Directory containment, not string prefix: /repo-old must not
+            // resolve to /repo.
+            if r.is_empty() || !(cwd == r || cwd.starts_with(&format!("{r}/"))) {
+                continue;
+            }
+            // Spelled out rather than `is_none_or`, which is stable only since
+            // 1.82 and this crate's MSRV is 1.77.2.
+            let better = match best {
+                Some((n, _)) => r.len() > n,
+                None => true,
+            };
+            if better {
+                best = Some((r.len(), cand));
+            }
+        }
+    }
+    best.map(|(_, c)| c.clone())
+}
+
+#[derive(serde::Deserialize)]
+struct ResearchReq {
+    action: String,
+    cwd: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    question: Option<String>,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    statuses: Option<Vec<String>>,
+    #[serde(default)]
+    digest: Option<String>,
+    #[serde(default)]
+    recommendation: Option<String>,
+    #[serde(default)]
+    open_questions: Option<Vec<String>>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    origin: Option<String>,
+    #[serde(default)]
+    note: Option<String>,
+    #[serde(default)]
+    by: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    pty_id: Option<u64>,
+    #[serde(default)]
+    pr: Option<crate::research::PrLink>,
+    #[serde(default)]
+    ticket: Option<crate::research::TicketLink>,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    files: Option<Vec<String>>,
+    #[serde(default)]
+    supersedes: Option<String>,
+}
+
+async fn research_op(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+    Json(req): Json<ResearchReq>,
+) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let Some((project_id, project_name, roots)) = project_for_cwd(&app, &req.cwd) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "{} is not inside any project open in Canopy, and research is scoped to a \
+                 project. Open the project (or run from inside one of its components) and \
+                 try again.",
+                req.cwd
+            ),
+        );
+    };
+    let store = app.state::<crate::research::ResearchStore>();
+    let need_id = |r: &ResearchReq| -> Result<String, String> {
+        r.id.clone()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "this action needs an id — call list to see them".to_string())
+    };
+
+    let out: Result<serde_json::Value, String> = (|| match req.action.as_str() {
+        "list" => {
+            crate::research::research_list(project_id.clone(), req.statuses.clone(), req.limit)
+                .map(|rows| serde_json::json!({ "research": rows }))
+        }
+        "search" => crate::research::research_search(
+            project_id.clone(),
+            req.query.clone().unwrap_or_default(),
+            req.limit,
+        )
+        .map(|rows| serde_json::json!({ "research": rows })),
+        "get" => crate::research::research_get(project_id.clone(), need_id(&req)?)
+            .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
+        "start" => crate::research::research_start(
+            store.clone(),
+            project_id.clone(),
+            Some(project_name.clone()),
+            Some(roots.clone()),
+            req.title.clone().unwrap_or_default(),
+            req.question.clone(),
+            req.agent.clone(),
+            Some(req.cwd.clone()),
+            req.pty_id,
+            req.tags.clone(),
+        )
+        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        // digest and append are the same command; naming them separately at the
+        // tool boundary is what stops an agent treating the digest as somewhere
+        // to put the whole finding.
+        "digest" | "update" | "append" => crate::research::research_update(
+            store.clone(),
+            project_id.clone(),
+            need_id(&req)?,
+            req.title.clone(),
+            req.digest.clone(),
+            req.recommendation.clone(),
+            req.open_questions.clone(),
+            req.tags.clone(),
+            (req.action == "append").then(|| req.text.clone().unwrap_or_default()),
+            None,
+        )
+        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        "source" => crate::research::research_add_source(
+            store.clone(),
+            project_id.clone(),
+            need_id(&req)?,
+            req.title.clone().unwrap_or_default(),
+            req.text.clone().unwrap_or_default(),
+            req.origin.clone(),
+        )
+        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        "status" => crate::research::research_set_status(
+            store.clone(),
+            project_id.clone(),
+            need_id(&req)?,
+            req.status.clone().unwrap_or_default(),
+            req.by.clone(),
+            req.note.clone(),
+        )
+        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        "link" | "supersede" => crate::research::research_link(
+            store.clone(),
+            project_id.clone(),
+            need_id(&req)?,
+            req.pr.clone(),
+            req.ticket.clone(),
+            req.branch.clone(),
+            req.files.clone(),
+            req.supersedes.clone(),
+        )
+        .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
+        other => Err(format!(
+            "unknown research action: {other} — one of list, search, get, start, digest, \
+             append, source, status, link"
+        )),
+    })();
+
+    match out {
+        Ok(value) => (StatusCode::OK, value.to_string()),
+        // A tool failure, not a protocol failure: the agent reads the text and
+        // corrects itself (a cap it exceeded, a transition it may not make).
+        Err(text) => (StatusCode::BAD_REQUEST, text),
+    }
 }
 
 /// The tool switches from Settings → Agents. Answered even when nothing has
@@ -1658,5 +1894,44 @@ mod tests {
         assert_eq!(tail_lines(&text, 3), "8\n9\n10");
         assert_eq!(tail_lines("only", 5), "only");
         assert_eq!(tail_lines("", 5), "");
+    }
+
+    fn proj(id: &str, roots: &[&str]) -> (String, String, Vec<String>) {
+        (
+            id.into(),
+            id.to_uppercase(),
+            roots.iter().map(|r| r.to_string()).collect(),
+        )
+    }
+
+    #[test]
+    fn research_resolves_to_exactly_one_project() {
+        let projects = vec![
+            proj("app", &["/Users/dev/app"]),
+            proj("other", &["/Users/dev/other"]),
+            // A sub-package registered as a component in its own right.
+            proj("pkg", &["/Users/dev/app/packages/ui"]),
+        ];
+
+        let id = |cwd: &str| pick_project(&projects, cwd).map(|(id, ..)| id);
+        assert_eq!(id("/Users/dev/app"), Some("app".into()));
+        assert_eq!(id("/Users/dev/app/src/components"), Some("app".into()));
+        // The nearer component wins, so a nested package's research does not
+        // land in its parent's list.
+        assert_eq!(id("/Users/dev/app/packages/ui/src"), Some("pkg".into()));
+        // A sibling sharing a textual prefix is a different project.
+        assert_eq!(id("/Users/dev/app-old"), None);
+        // Outside every project there is no answer — the handler turns this
+        // into an error rather than a machine-wide list, which is the whole
+        // scoping rule.
+        assert_eq!(id("/tmp/somewhere"), None);
+    }
+
+    #[test]
+    fn a_project_with_no_components_claims_nothing() {
+        let projects = vec![proj("empty", &[]), proj("blank", &[""])];
+        assert!(pick_project(&projects, "/Users/dev/app").is_none());
+        // An empty root must not match every directory on the machine.
+        assert!(pick_project(&projects, "/").is_none());
     }
 }

@@ -14,6 +14,7 @@ import type { SubTab, TermSubTab } from "./components/ProjectView/helpers";
 import { tabDisplayLabel } from "./components/ProjectView/helpers";
 import { completedTaskRuns, type TaskRun } from "./taskHistory";
 import { TRACKERS } from "./trackers";
+import { cached as researchCached, STATUS_LABELS as RESEARCH_STATUS_LABELS } from "./research";
 import { getSnapshot as prSnapshot } from "./prWatchStore";
 import { toPrInfo } from "./prInbox";
 import { getSettings } from "./settings";
@@ -30,6 +31,12 @@ export type SpotAction =
   | { type: "focus-tab"; tabId: string }
   | { type: "open-session"; digest: ipc.SessionDigest }
   | { type: "open-ticket"; source: string; ticket: ipc.TicketInfo }
+  | { type: "open-research"; id: string }
+  /** Send what was typed off as a research run — the sibling of `run-task`.
+   *  Named rather than run through `custom` for the same reason
+   *  `switch-branch` is: creating the entry and launching the agent has to
+   *  reach ProjectView's launcher, and a module-level closure cannot. */
+  | { type: "start-research"; question: string }
   | { type: "open-pr"; repo: string; pr: ipc.PrInfo }
   | { type: "open-server"; path: string; tabId: string | null }
   | { type: "open-task-run"; runId: string }
@@ -147,17 +154,62 @@ export function actionRows(query: string, ctx: SpotContext): SpotRow[] {
   ];
   const rows = ranked(query, launchers, 4);
   if (q) {
-    rows.unshift({
-      id: "act:run-task",
-      group: "Actions",
-      kind: "run-task",
-      title: `Run task: “${q}”`,
-      detail: "one-shot agent · current page as context",
-      score: -1,
-      action: { type: "run-task", brief: q },
-    });
+    // The two things you can send a typed sentence off as, side by side. They
+    // are genuinely different jobs — one changes the code and disappears, the
+    // other answers a question and leaves the answer behind — and asking which
+    // one you meant is cheaper than guessing from the wording.
+    rows.unshift(
+      {
+        id: "act:run-task",
+        group: "Actions",
+        kind: "run-task",
+        title: `Run task: “${q}”`,
+        detail: "one-shot agent · current page as context",
+        score: -2,
+        action: { type: "run-task", brief: q },
+      },
+      {
+        id: "act:research",
+        group: "Actions",
+        kind: "research",
+        title: `Research: “${q}”`,
+        detail: "investigate and record it · nothing is changed",
+        score: -1,
+        action: { type: "start-research", question: q },
+      },
+    );
   }
   return rows;
+}
+
+/** Research already recorded in this project. Instant, from the cache
+ *  research.ts keeps — so an entry that answers what you are typing shows up on
+ *  the first keystroke, which is the only version of "findable" that stops
+ *  someone researching it twice. */
+export function researchRows(query: string, projectId: string): SpotRow[] {
+  return ranked(
+    query,
+    researchCached(projectId).map((entry) => ({
+      hay: `${entry.title} ${entry.digest} ${entry.tags.join(" ")}`,
+      row: {
+        id: `research:${entry.id}`,
+        group: "Research",
+        kind: "research",
+        title: entry.title,
+        // Status leads: whether this is a finding nobody has acted on or one
+        // that already shipped changes what you do with it, and that is worth
+        // knowing before the click rather than after.
+        detail: [
+          RESEARCH_STATUS_LABELS[entry.status] ?? entry.status,
+          entry.digest,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+        score: 0,
+        action: { type: "open-research", id: entry.id } as SpotAction,
+      },
+    })),
+  );
 }
 
 export function tabRows(query: string, ctx: SpotContext): SpotRow[] {
@@ -576,6 +628,9 @@ const SOURCES: SpotSource[] = [
   // scrollback and transcripts in the same query.
   { id: "index", group: "Terminal Output", blurb: "The persistent index: every agent's conversations and live terminal scrollback. What it holds is set below.", timing: "deferred", minQuery: 2, rows: (q) => indexRows(q.query, q.ctx, q.roots) },
   { id: "sessions", group: "Agent Sessions", blurb: "Agent sessions by prompt, branch and files touched (from their digests).", timing: "instant", rows: (q) => sessionRows(q.query, q.ctx) },
+  // Above tickets and PRs deliberately: if what you are about to go and find
+  // out has already been found out, that is the most useful row on the page.
+  { id: "research", group: "Research", blurb: "Findings recorded in this project — what was investigated, and what shipped from it.", timing: "instant", rows: (q) => researchRows(q.query, q.ctx.projectId) },
   { id: "tickets", group: "Tickets", blurb: "Issues from the configured trackers. Fetches over the network, cached 60s.", timing: "deferred", rows: (q) => ticketRows(q.query, q.roots) },
   { id: "prs", group: "Pull Requests", blurb: "Open PRs the watcher has already fetched — no round trip here.", timing: "instant", rows: (q) => prRows(q.query) },
   { id: "branches", group: "Branches", blurb: "Branches in this project's repos, local and remote. Enter switches this repo to one.", timing: "deferred", rows: (q) => branchRows(q.query, q.roots) },

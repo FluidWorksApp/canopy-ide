@@ -95,6 +95,21 @@ export const AGENT_TOOL_GROUPS: AgentToolGroup[] = [
       { name: "canopy_reviews", label: "Reviews", note: "Relay review requests and open PRs" },
     ],
   },
+  {
+    id: "research",
+    label: "Research",
+    blurb:
+      "Findings that outlive the session that produced them — scoped to this project, " +
+      "and the only place an agent's research is kept.",
+    tools: [
+      { name: "canopy_research", label: "Read research", note: "What's been investigated already" },
+      {
+        name: "canopy_research_write",
+        label: "Record research",
+        note: "Open an entry, add findings, link the PR",
+      },
+    ],
+  },
 ];
 
 export const ALL_AGENT_TOOLS = AGENT_TOOL_GROUPS.flatMap((g) => g.tools.map((t) => t.name));

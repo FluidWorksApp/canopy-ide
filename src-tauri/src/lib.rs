@@ -24,6 +24,7 @@ mod prwatch;
 mod pty;
 mod punch;
 mod relay;
+mod research;
 mod selftest;
 mod snapshot;
 mod spot;
@@ -325,6 +326,7 @@ pub fn run() {
         .manage(dictation::DictationManager::default())
         .manage(selftest::SelftestState::default())
         .manage(spot::SpotIndex::default())
+        .manage(research::ResearchStore::default())
         .manage(cli::pending_from_env())
         .setup(|app| {
             // ONNX Runtime is loaded dynamically on every platform (Cargo.toml
@@ -423,6 +425,17 @@ pub fn run() {
             spot::spot_index_stats,
             spot::spot_index_clear,
             spot::spot_save_context_image,
+            research::research_list,
+            research::research_search,
+            research::research_get,
+            research::research_start,
+            research::research_update,
+            research::research_add_source,
+            research::research_set_status,
+            research::research_link,
+            research::research_read_file,
+            research::research_dir,
+            research::research_delete,
             fsx::workspace_add,
             fsx::workspace_remove,
             fsx::workspace_list,
@@ -483,6 +496,7 @@ pub fn run() {
             git::gh_pr_list,
             git::gh_pr_diff,
             git::gh_pr_body,
+            git::gh_pr_state,
             git::gh_pr_review,
             git::gh_pr_checkout,
             git::gh_pr_merge,

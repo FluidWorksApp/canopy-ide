@@ -328,15 +328,35 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = update_digest(&session_id, &cwd, &event, &hook_event);
     }
 
+    // Inside a research session, prose belongs in the entry and nowhere else.
+    // Computed once here because both the verdict arms below and the Stop
+    // relocation need it.
+    let research_dir = research_entry_dir();
+    let research_denial_for = |event: &serde_json::Value| -> Option<String> {
+        let dir = research_dir.as_ref()?;
+        if hook_event != "PreToolUse" {
+            return None;
+        }
+        let path = edited_path(event)?;
+        denied_research_write(path, dir, &home()).then(|| research_denial(path, dir))
+    };
+
     match agent_override.as_deref() {
         // Antigravity requires PreToolUse hooks to answer with an allow/deny
-        // verdict on stdout; we only observe, so always allow. Its other
-        // events ignore stdout. No peer-context printing: the
-        // hookSpecificOutput contract below is Claude's, and feeding it to
-        // agy would at best be ignored and at worst confuse its parser.
+        // verdict on stdout; outside a research session we only observe, so
+        // always allow. Its other events ignore stdout. No peer-context
+        // printing: the hookSpecificOutput contract below is Claude's, and
+        // feeding it to agy would at best be ignored and at worst confuse its
+        // parser.
         Some("agy") => {
             if event["agy_event"].as_str() == Some("PreToolUse") {
-                println!("{}", serde_json::json!({ "allow_tool": true }));
+                match research_denial_for(&event) {
+                    Some(reason) => println!(
+                        "{}",
+                        serde_json::json!({ "allow_tool": false, "reason": reason })
+                    ),
+                    None => println!("{}", serde_json::json!({ "allow_tool": true })),
+                }
             }
         }
         // Claude and Codex share the injection contract — Codex's hooks
@@ -344,6 +364,27 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
         // hookSpecificOutput.additionalContext shape for SessionStart /
         // UserPromptSubmit context. Anything else: observation only.
         None | Some("codex") => {
+            // Claude only, for the same reason the PostToolUse block below is:
+            // this deny shape is proven on Claude's wire and nowhere else, and
+            // a hook that guesses wrong about a CLI's stdout contract breaks
+            // the session it is attached to. Codex research sessions fall back
+            // to the instruction plus the Stop relocation — softer, but never
+            // broken. Revisit when Codex's PreToolUse contract is verified.
+            if agent_override.is_none() {
+                if let Some(reason) = research_denial_for(&event) {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "hookSpecificOutput": {
+                                "hookEventName": "PreToolUse",
+                                "permissionDecision": "deny",
+                                "permissionDecisionReason": reason,
+                            }
+                        })
+                    );
+                    return Ok(());
+                }
+            }
             if hook_event == "UserPromptSubmit" || hook_event == "SessionStart" {
                 if let Some(context) = peer_context(&session_id, &cwd) {
                     let out = serde_json::json!({
@@ -371,6 +412,17 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Some(_) => {}
+    }
+
+    // The session is over: anything it wrote outside the entry is about to stop
+    // being findable, so pull it in now. After the verdict arms, because a
+    // denied write never happened and there is nothing to move.
+    if hook_event == "Stop" {
+        if let Some(dir) = research_dir.as_ref() {
+            if !session_id.is_empty() {
+                relocate_stray_research(&session_id, dir);
+            }
+        }
     }
     Ok(())
 }
@@ -1156,6 +1208,140 @@ fn edit_diagnostics(event: &serde_json::Value) -> Option<String> {
 // that no IDE is around, instead of the process refusing to run (which the
 // agent CLI would surface as a broken MCP server).
 
+// ---- the research harness -------------------------------------------------
+//
+// Instructions alone do not hold. An agent told "put research in the store"
+// still reaches for Write when it wants somewhere to think, and the finding
+// ends up in a scratch file that outlives nothing. So inside a research session
+// — and only there — writing prose anywhere except the entry is refused, with
+// the alternative named in the refusal.
+//
+// The blast radius is deliberately small: it needs CANOPY_RESEARCH_DIR, which
+// only the research launcher sets, and it only ever looks at prose extensions.
+// A research session that reads code, edits code, runs tests and starts servers
+// is completely unaffected — the harness is about where findings land, not
+// about restricting the work.
+
+/// The entry this session is bound to, from the env the launcher exported.
+/// Absent outside a research session, which is the common case and means "do
+/// nothing at all".
+fn research_entry_dir() -> Option<std::path::PathBuf> {
+    std::env::var("CANOPY_RESEARCH_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+/// Extensions that carry findings. Source files are not on this list on
+/// purpose: research sessions edit code all the time, and a gate that stopped
+/// them would be a gate the user turns off.
+const PROSE_EXT: &[&str] = &["md", "markdown", "txt", "rst", "org", "adoc"];
+
+fn is_prose(path: &str) -> bool {
+    path.rsplit('.')
+        .next()
+        .map(|e| e.to_ascii_lowercase())
+        .is_some_and(|e| PROSE_EXT.contains(&e.as_str()))
+}
+
+/// Whether a prose write in a research session should be refused.
+///
+/// Allowed: anywhere inside the entry, anywhere else under Canopy's own store,
+/// and the agent CLIs' private directories — a plan file or a memory note is
+/// the agent's own bookkeeping, not research output, and denying those would
+/// break the session to no purpose.
+fn denied_research_write(path: &str, entry_dir: &std::path::Path, home: &str) -> bool {
+    if !is_prose(path) {
+        return false;
+    }
+    let under =
+        |base: &str| !base.is_empty() && (path == base || path.starts_with(&format!("{base}/")));
+    if under(&entry_dir.to_string_lossy()) {
+        return false;
+    }
+    // Note what is *not* on this list: the rest of the research store. Writing
+    // into another entry's directory would put a finding somewhere its own
+    // meta.json never mentions — lost in a subtler way, but lost. The store is
+    // reached through the tool or not at all.
+    for private in [".claude", ".codex", ".gemini", ".config"] {
+        if under(&format!("{home}/{private}")) {
+            return false;
+        }
+    }
+    true
+}
+
+/// What the agent is told instead. Naming the two actions matters — a bare
+/// refusal produces a retry at a different path, not a call to the right tool.
+fn research_denial(path: &str, entry_dir: &std::path::Path) -> String {
+    format!(
+        "Canopy research harness: {path} is outside this research entry, and research \
+         written outside it is lost when the session ends.\n\n\
+         Use `canopy_research_write` instead:\n\
+         - action \"append\" for findings (the body other agents read)\n\
+         - action \"source\" for long raw material — file dumps, logs, fetched pages\n\n\
+         If you genuinely need a file on disk, write it under {}/sources/ .",
+        entry_dir.display()
+    )
+}
+
+/// Move prose this session wrote outside the entry into it, and record each as a
+/// source. Runs once, at Stop.
+///
+/// This is the backstop for what the gate cannot catch: sessions on a CLI whose
+/// deny contract we do not emit (see the Stop/PreToolUse arms below), and any
+/// tool that is not an edit tool. It is journal-backed — only files this
+/// session's own edit tools reported — so it can never sweep up a file that was
+/// already there. Note the honest gap: a file created by a shell redirect never
+/// enters the journal and is not relocated; the gate and the instructions are
+/// what cover that path.
+fn relocate_stray_research(session_id: &str, entry_dir: &std::path::Path) {
+    let home = home();
+    let digest_path = format!("{home}/.canopy/sessions/{session_id}.json");
+    let Some(digest) = std::fs::read_to_string(&digest_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    else {
+        return;
+    };
+    let launch_cwd = digest["launch_cwd"].as_str().unwrap_or("");
+    let Some(files) = digest["files"].as_array() else {
+        return;
+    };
+    for rel in files.iter().filter_map(|f| f.as_str()) {
+        let abs = if rel.starts_with('/') {
+            rel.to_string()
+        } else if launch_cwd.is_empty() {
+            continue;
+        } else {
+            format!("{launch_cwd}/{rel}")
+        };
+        if !denied_research_write(&abs, entry_dir, &home) {
+            continue;
+        }
+        let Ok(body) = std::fs::read_to_string(&abs) else {
+            continue;
+        };
+        let title = abs.rsplit('/').next().unwrap_or("stray note").to_string();
+        // Through the store, not straight onto disk: the source cap, the
+        // manifest entry and the updated timestamp all come for free, and an
+        // over-cap file fails here and is left exactly where it is.
+        if research_op(
+            "source",
+            &serde_json::json!({
+                "id": std::env::var("CANOPY_RESEARCH").unwrap_or_default(),
+                "title": title,
+                "text": body,
+                "origin": format!("relocated from {abs}"),
+            }),
+        )
+        .is_ok()
+        {
+            let _ = std::fs::remove_file(&abs);
+        }
+    }
+}
+
 /// Server instructions, injected into the agent's system prompt by the client.
 /// Deliberately a routing table, not a feature tour: the failure it exists to
 /// stop is an agent defaulting to the shell (`npm run dev`, `open <url>`,
@@ -1198,6 +1384,13 @@ results stay inspectable:
   or contrast)
 - Working in a checkout that other agents share -> canopy_agents first, \
   canopy_claim on the files you're taking
+
+- Investigating anything worth writing down (how does X work, which approach, \
+  what would break) -> canopy_research search FIRST, someone may already have \
+  answered it; then canopy_research_write start, and put the findings there as \
+  you go. Never leave research in a scratch markdown file — it is lost the \
+  moment the session ends. Long raw material (file dumps, logs, fetched pages) \
+  goes in `source`, not in the body: the body is what the next agent reads.
 
 Call canopy_project first for component paths, configured run commands, \
 terminal ids, and the ports servers are listening on. Fall back to the shell \
@@ -1536,6 +1729,7 @@ fn rpc_err(id: serde_json::Value, code: i32, message: &str) -> serde_json::Value
 
 /// What a tool answers with. Text for almost everything; a picture for the one
 /// tool whose whole point is pixels.
+#[derive(Debug)]
 enum ToolOutput {
     Text(String),
     Image {
@@ -1598,6 +1792,7 @@ const STRUCTURED_TOOLS: &[&str] = &[
     "canopy_agents",
     "canopy_device_list",
     "canopy_device_snapshot",
+    "canopy_research",
 ];
 
 /// The tools this session gets: everything below, minus whatever the user
@@ -1617,6 +1812,7 @@ fn tools_list() -> serde_json::Value {
         serde_json::Value::Array(list) => list,
         _ => Vec::new(),
     };
+    tools.extend(research_tool_defs());
     // canopy_job_done is on by default everywhere (reporting an outcome is
     // core product), and inside a micro-task session (CANOPY_MICRO_TASK=1 on
     // the launch command) it survives even the Settings disable list — a
@@ -1674,6 +1870,7 @@ const READ_ONLY_TOOLS: &[&str] = &[
     "canopy_tickets",
     "canopy_reviews",
     "canopy_agents",
+    "canopy_research",
     "canopy_wait_for",
     "canopy_screenshot",
     "canopy_browser_snapshot",
@@ -1739,6 +1936,10 @@ fn output_schema(name: &str) -> Option<serde_json::Value> {
             "agents": { "type": "array" },
             "claims": { "type": "array" }
         }),
+        // list/search answer with `research`; get answers with one entry. Loose
+        // on purpose — one schema has to cover both without making the other a
+        // protocol violation.
+        "canopy_research" => serde_json::json!({ "research": { "type": "array" } }),
         _ => return None,
     };
     Some(serde_json::json!({
@@ -1746,6 +1947,49 @@ fn output_schema(name: &str) -> Option<serde_json::Value> {
         "properties": properties,
         "additionalProperties": true,
     }))
+}
+
+/// The research pair, kept out of the array below purely for the compiler:
+/// `json!` expands recursively and the combined literal exceeds the default
+/// recursion limit. Splitting is the cheaper fix than raising it, and it leaves
+/// room for the next addition.
+fn research_tool_defs() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "name": "canopy_research",
+            "description": "Read this project's research: findings other sessions recorded, what they concluded, and whether anything shipped from them. Call `search` or `list` BEFORE investigating anything substantial — the question may already be answered. `list` returns one-paragraph digests only; `get` returns one entry in full. Scoped to the project you are working in.",
+            "inputSchema": { "type": "object", "properties": {
+                "action": { "type": "string", "enum": ["list", "search", "get"], "description": "list = current entries, newest first; search = match on title, digest, question and body; get = one entry in full" },
+                "id": { "type": "string", "description": "Entry id for get, e.g. 0007-index-staleness" },
+                "query": { "type": "string", "description": "Search text" },
+                "statuses": { "type": "array", "items": { "type": "string" }, "description": "Filter list to these: open, researching, researched, implementing, implemented, blocked, superseded, archived. Default hides archived and superseded." },
+                "limit": { "type": "integer", "description": "Max rows (default 20, max 50)" }
+            }, "required": ["action"], "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_research_write",
+            "description": "Record research in Canopy's research store — the ONLY place research output belongs. `start` opens an entry (do this before investigating, not after); `append` adds findings to its body; `source` stores long raw material (file dumps, logs, fetched pages) that must not sit in the body; `digest` sets the one paragraph every other agent reads instead of the whole entry; `status` moves it along; `link` ties it to the PR that implements it. Caps are enforced: an over-long digest or body is rejected, and the error says where the text belongs.",
+            "inputSchema": { "type": "object", "properties": {
+                "action": { "type": "string", "enum": ["start", "digest", "append", "source", "status", "link"], "description": "start | digest | append | source | status | link" },
+                "id": { "type": "string", "description": "Entry id — required by everything except start" },
+                "title": { "type": "string", "description": "start: the question in a few words. source: what this capture is." },
+                "question": { "type": "string", "description": "start: what is being investigated and why" },
+                "text": { "type": "string", "description": "append: markdown to add to the body. source: the raw material." },
+                "origin": { "type": "string", "description": "source: where it came from — a file path, URL or command" },
+                "digest": { "type": "string", "description": "One paragraph: the finding itself. This is what other agents read." },
+                "recommendation": { "type": "string", "description": "What to do about it, in a sentence or two" },
+                "open_questions": { "type": "array", "items": { "type": "string" }, "description": "What is still unresolved" },
+                "tags": { "type": "array", "items": { "type": "string" } },
+                "status": { "type": "string", "description": "status: researching | researched | implementing | implemented | blocked | superseded | archived" },
+                "note": { "type": "string", "description": "status: why it moved" },
+                "pr": { "type": "object", "description": "link: { repo, number, url, state } — the PR implementing this" },
+                "ticket": { "type": "object", "description": "link: { id, title, url }" },
+                "branch": { "type": "string", "description": "link: branch carrying the work" },
+                "files": { "type": "array", "items": { "type": "string" }, "description": "link: files this research is about" },
+                "supersedes": { "type": "string", "description": "link: id of an earlier entry this replaces" }
+            }, "required": ["action"], "additionalProperties": false }
+        }),
+    ]
 }
 
 fn tool_defs() -> serde_json::Value {
@@ -2263,6 +2507,43 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
         "canopy_symbols" => text(ui_op("symbols", args, 25)),
         "canopy_tickets" => text(ui_op("tickets", args, 25)),
         "canopy_reviews" => text(ui_op("reviews", args, 25)),
+        "canopy_research" | "canopy_research_write" => {
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .ok_or("missing required argument: action")?;
+            // The read tool cannot reach a write action by naming one. Splitting
+            // the tools is what lets the read side be annotated read-only (and
+            // so auto-approved); that annotation has to stay true.
+            let reads = ["list", "search", "get"];
+            let writes = ["start", "digest", "append", "source", "status", "link"];
+            let allowed: &[&str] = if name == "canopy_research" {
+                &reads
+            } else {
+                &writes
+            };
+            if !allowed.contains(&action) {
+                return Err(format!(
+                    "canopy_research{} has no action \"{action}\" — use {}",
+                    if name == "canopy_research" {
+                        ""
+                    } else {
+                        "_write"
+                    },
+                    allowed.join(", ")
+                ));
+            }
+            // `is_none_or` would read better but is stable only since 1.82,
+            // and this crate's MSRV is 1.77.2.
+            let titled = args
+                .get("title")
+                .and_then(|v| v.as_str())
+                .is_some_and(|t| !t.is_empty());
+            if name == "canopy_research_write" && action == "start" && !titled {
+                return Err("start needs a title — the question in a few words".into());
+            }
+            text(research_op(action, args))
+        }
         "canopy_ask_user" => {
             if args
                 .get("question")
@@ -2930,6 +3211,42 @@ fn browser_op(op: &str, args: &serde_json::Value) -> Result<String, String> {
     .map(pretty)
 }
 
+/// A research action, against the project this directory belongs to.
+///
+/// `cwd` is the whole scoping story: the bridge resolves it to exactly one open
+/// project and runs there. There is deliberately no project argument — a tool
+/// that could name another project would be a tool that reads another project's
+/// research, and the agent has no business doing that.
+fn research_op(action: &str, args: &serde_json::Value) -> Result<String, String> {
+    let mut body = args.clone();
+    if !body.is_object() {
+        body = serde_json::json!({});
+    }
+    // Never taken from the caller, whatever it passed.
+    body.as_object_mut().map(|o| o.remove("project_id"));
+    body["action"] = serde_json::json!(action);
+    body["cwd"] = serde_json::json!(cwd());
+    if let Ok(pty) = std::env::var("CANOPY_PTY") {
+        if let Ok(n) = pty.parse::<u64>() {
+            body["pty_id"] = serde_json::json!(n);
+        }
+    }
+    // No agent id: the MCP sidecar is registered user-globally and nothing in
+    // its environment says which CLI invoked it. Entries started from a CTA get
+    // the id from the launcher, which does know; entries an agent starts on its
+    // own are attributed by `by` below instead of guessed at here.
+    if body.get("by").is_none() {
+        body["by"] = serde_json::json!(claim_owner());
+    }
+    ctx_request_with_timeout(
+        "POST",
+        "/ctx/research",
+        Some(body.to_string()),
+        std::time::Duration::from_secs(20),
+    )
+    .map(pretty)
+}
+
 /// The sidecar's working directory — inherited from the agent CLI, so it's the
 /// agent's cwd, which routes an action to the right project.
 fn cwd() -> String {
@@ -3407,5 +3724,139 @@ mod tests {
             diag_context("/w/a.ts", &[]),
             "/w/a.ts: previous errors resolved.\n"
         );
+    }
+
+    // ---- research tools ---------------------------------------------------
+
+    #[test]
+    fn the_read_tool_cannot_reach_a_write_action() {
+        // canopy_research is annotated readOnlyHint, which is what lets a host
+        // auto-approve it. If naming a write action through it worked, that
+        // annotation would be a lie and the approval would be a bypass.
+        let err = call_tool(
+            "canopy_research",
+            &serde_json::json!({ "action": "start", "title": "sneak" }),
+        )
+        .unwrap_err();
+        assert!(err.contains("no action"), "{err}");
+        assert!(
+            err.contains("list"),
+            "the error should name what is allowed"
+        );
+
+        // And the write tool is not a way to read.
+        let err = call_tool(
+            "canopy_research_write",
+            &serde_json::json!({ "action": "get" }),
+        )
+        .unwrap_err();
+        assert!(err.contains("no action"), "{err}");
+    }
+
+    #[test]
+    fn research_actions_are_required_and_start_needs_a_title() {
+        let err = call_tool("canopy_research", &serde_json::json!({})).unwrap_err();
+        assert!(err.contains("action"), "{err}");
+
+        // Caught here rather than after a round trip, so the agent's correction
+        // costs nothing.
+        let err = call_tool(
+            "canopy_research_write",
+            &serde_json::json!({ "action": "start" }),
+        )
+        .unwrap_err();
+        assert!(err.contains("title"), "{err}");
+    }
+
+    #[test]
+    fn research_tools_are_annotated_and_only_the_reader_is_read_only() {
+        let names: Vec<String> = research_tool_defs()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(str::to_string))
+            .collect();
+        assert_eq!(names, ["canopy_research", "canopy_research_write"]);
+        assert!(READ_ONLY_TOOLS.contains(&"canopy_research"));
+        assert!(!READ_ONLY_TOOLS.contains(&"canopy_research_write"));
+        // Writing research changes nothing anyone else can lose, so it is not
+        // destructive either — it only ever adds.
+        assert!(!DESTRUCTIVE_TOOLS.contains(&"canopy_research_write"));
+    }
+
+    #[test]
+    fn the_gate_refuses_stray_prose_and_leaves_the_work_alone() {
+        let entry = std::path::PathBuf::from("/Users/dev/.canopy/research/p1/0007-thing");
+        let home = "/Users/dev";
+        let denied = |p: &str| denied_research_write(p, &entry, home);
+
+        // The whole point: a scratch note anywhere else is refused.
+        assert!(denied("/repo/notes.md"));
+        assert!(denied("/repo/docs/findings.md"));
+        assert!(denied("/tmp/scratch.txt"));
+        assert!(denied("/repo/RESEARCH.md"));
+
+        // Inside the entry is where it belongs.
+        assert!(!denied(
+            "/Users/dev/.canopy/research/p1/0007-thing/research.md"
+        ));
+        assert!(!denied(
+            "/Users/dev/.canopy/research/p1/0007-thing/sources/01-capture.md"
+        ));
+
+        // Code is untouched — a research session edits, tests and runs like any
+        // other, and a gate that stopped that is a gate the user switches off.
+        assert!(!denied("/repo/src/spot.rs"));
+        assert!(!denied("/repo/src/App.tsx"));
+        assert!(!denied("/repo/package.json"));
+
+        // The agent's own bookkeeping is not research output.
+        assert!(!denied("/Users/dev/.claude/plans/some-plan.md"));
+        assert!(!denied("/Users/dev/.codex/notes.md"));
+
+        // A sibling directory sharing a textual prefix is still outside.
+        assert!(denied(
+            "/Users/dev/.canopy/research/p1/0007-thing-old/research.md"
+        ));
+    }
+
+    #[test]
+    fn the_gate_is_inert_outside_a_research_session() {
+        // No CANOPY_RESEARCH_DIR means no entry, and the arms above then never
+        // call the predicate at all. This asserts the door itself.
+        std::env::remove_var("CANOPY_RESEARCH_DIR");
+        assert!(research_entry_dir().is_none());
+        std::env::set_var("CANOPY_RESEARCH_DIR", "");
+        assert!(research_entry_dir().is_none(), "empty is not a session");
+        std::env::remove_var("CANOPY_RESEARCH_DIR");
+    }
+
+    #[test]
+    fn the_denial_names_the_tool_that_should_have_been_used() {
+        // A bare refusal produces a retry at a different path; naming the
+        // actions is what turns the denial into a correction.
+        let entry = std::path::PathBuf::from("/Users/dev/.canopy/research/p1/0007-thing");
+        let msg = research_denial("/repo/notes.md", &entry);
+        assert!(msg.contains("canopy_research_write"));
+        assert!(msg.contains("append"));
+        assert!(msg.contains("source"));
+        assert!(msg.contains("/0007-thing/sources/"));
+    }
+
+    #[test]
+    fn prose_is_recognised_by_extension_only() {
+        assert!(is_prose("/a/b.md"));
+        assert!(is_prose("/a/b.MD"));
+        assert!(is_prose("/a/b.txt"));
+        assert!(!is_prose("/a/b.rs"));
+        assert!(!is_prose("/a/markdown"));
+        assert!(!is_prose("/a/b"));
+    }
+
+    #[test]
+    fn the_instructions_send_research_to_the_store_and_not_to_a_file() {
+        // This block is the only channel that makes the tools *chosen*. Without
+        // the "never a scratch file" clause an agent still reaches for Write.
+        assert!(INSTRUCTIONS.contains("canopy_research search FIRST"));
+        assert!(INSTRUCTIONS.contains("canopy_research_write start"));
+        assert!(INSTRUCTIONS.contains("scratch markdown file"));
     }
 }

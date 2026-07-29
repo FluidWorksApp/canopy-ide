@@ -506,6 +506,8 @@ export interface SpotIngestReport {
   more: boolean;
   messages: number;
   terminals: number;
+  /** Research entries in the index after this call. */
+  research: number;
   /** Documents dropped: vanished files, disabled agents, retention. */
   pruned: number;
 }
@@ -550,6 +552,170 @@ export const spotSearch = (
 
 /** What the index holds right now (Settings → SpotSearch). */
 export const spotIndexStats = () => invoke<SpotIndexStats>("spot_index_stats");
+
+// ---------- Research ----------
+//
+// Every one of these carries a projectId, and the backend resolves nothing on
+// its own: research is scoped to one project by construction, on this side as
+// on the agents' (see /ctx/research in context.rs).
+
+export type ResearchStatus =
+  | "open"
+  | "researching"
+  | "researched"
+  | "implementing"
+  | "implemented"
+  | "blocked"
+  | "superseded"
+  | "archived";
+
+export interface ResearchPrLink {
+  repo: string;
+  number: number;
+  url: string;
+  /** "open" | "merged" | "closed" — kept current by the PR watcher, which is
+   *  what lets an entry reach `implemented` without anyone asserting it. */
+  state: string;
+}
+
+export interface ResearchTicketLink {
+  id: string;
+  title: string;
+  url: string;
+}
+
+export interface ResearchLinks {
+  tickets: ResearchTicketLink[];
+  prs: ResearchPrLink[];
+  branches: string[];
+  files: string[];
+  supersedes: string[];
+  superseded_by: string | null;
+}
+
+export interface ResearchSource {
+  /** Relative to the entry directory, always under `sources/`. */
+  file: string;
+  title: string;
+  origin: string;
+  bytes: number;
+}
+
+export interface ResearchHistory {
+  at: number;
+  from: string;
+  to: string;
+  by: string;
+  note: string;
+}
+
+/** A list row — the one paragraph, never the whole entry. */
+export interface ResearchSummary {
+  id: string;
+  title: string;
+  status: ResearchStatus;
+  digest: string;
+  tags: string[];
+  agent: string;
+  created_at: number;
+  updated_at: number;
+  source_count: number;
+  pr_count: number;
+  superseded_by: string | null;
+}
+
+export interface ResearchDetail extends ResearchSummary {
+  question: string;
+  recommendation: string;
+  open_questions: string[];
+  body: string;
+  sources: ResearchSource[];
+  links: ResearchLinks;
+  history: ResearchHistory[];
+  /** Absolute path to the entry directory. */
+  dir: string;
+}
+
+export const researchList = (
+  projectId: string,
+  status?: ResearchStatus[],
+  limit?: number,
+) => invoke<ResearchSummary[]>("research_list", { projectId, status, limit });
+
+export const researchSearch = (projectId: string, query: string, limit?: number) =>
+  invoke<ResearchSummary[]>("research_search", { projectId, query, limit });
+
+export const researchGet = (projectId: string, id: string) =>
+  invoke<ResearchDetail>("research_get", { projectId, id });
+
+export interface ResearchStartArgs {
+  projectId: string;
+  projectName?: string;
+  roots?: string[];
+  title: string;
+  question?: string;
+  agent?: string;
+  cwd?: string;
+  ptyId?: number;
+  tags?: string[];
+}
+
+export const researchStart = (args: ResearchStartArgs) =>
+  invoke<ResearchSummary>("research_start", { ...args });
+
+export interface ResearchUpdateArgs {
+  projectId: string;
+  id: string;
+  title?: string;
+  digest?: string;
+  recommendation?: string;
+  openQuestions?: string[];
+  tags?: string[];
+  append?: string;
+  body?: string;
+}
+
+export const researchUpdate = (args: ResearchUpdateArgs) =>
+  invoke<ResearchSummary>("research_update", { ...args });
+
+export const researchSetStatus = (
+  projectId: string,
+  id: string,
+  status: ResearchStatus,
+  by?: string,
+  note?: string,
+) => invoke<ResearchSummary>("research_set_status", { projectId, id, status, by, note });
+
+export interface ResearchLinkArgs {
+  projectId: string;
+  id: string;
+  pr?: ResearchPrLink;
+  ticket?: ResearchTicketLink;
+  branch?: string;
+  files?: string[];
+  supersedes?: string;
+}
+
+export const researchLink = (args: ResearchLinkArgs) =>
+  invoke<ResearchDetail>("research_link", { ...args });
+
+/** Read a source or artifact. The store lives outside every registered
+ *  workspace root, so fs_read_file cannot reach it — this is the only reader. */
+export const researchReadFile = (projectId: string, id: string, path: string) =>
+  invoke<string>("research_read_file", { projectId, id, path });
+
+/** Where an entry lives — exported to a research session as
+ *  CANOPY_RESEARCH_DIR, which is what the PreToolUse gate compares against. */
+export const researchDir = (projectId: string, id: string) =>
+  invoke<string>("research_dir", { projectId, id });
+
+export const researchDelete = (projectId: string, id: string) =>
+  invoke<void>("research_delete", { projectId, id });
+
+/** One PR's state — "OPEN", "MERGED" or "CLOSED". The watcher only holds open
+ *  PRs, so this is the only way to tell a merge from a close. */
+export const ghPrState = (repo: string, number: number) =>
+  invoke<string>("gh_pr_state", { repo, number });
 
 /** Empty the index. Everything in it is derived, so this costs recall until
  *  the next ingest and nothing else. */

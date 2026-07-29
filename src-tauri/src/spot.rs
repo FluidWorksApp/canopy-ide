@@ -209,6 +209,8 @@ pub struct SpotIngestReport {
     pub messages: usize,
     /// Terminals whose scrollback was (re)indexed this call.
     pub terminals: usize,
+    /// Research entries in the index after this call.
+    pub research: usize,
     /// Documents dropped: vanished files, disabled agents, retention.
     pub pruned: usize,
 }
@@ -551,10 +553,47 @@ pub async fn spot_ingest(
             }
         }
 
+        // ---- research ----
+        // Small, and rewritten in place rather than appended to, so it is
+        // re-read whole on every ingest and the doc set is replaced outright.
+        // That also makes deletion free: an entry the user threw away simply
+        // isn't in the new set. Cheap enough to be unconditional — tens of
+        // entries, each a few KB, against transcripts measured in megabytes.
+        let docs = crate::research::index_docs();
+        conn.execute("DELETE FROM docs WHERE kind = 'research'", [])
+            .map_err(|e| e.to_string())?;
+        for doc in &docs {
+            conn.execute(
+                "INSERT INTO docs (kind, key, agent, cwd, title, body, meta, ts)
+                 VALUES ('research', ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    // Project-qualified, because entry numbers restart per
+                    // project and `key` has to be unique across the index.
+                    format!("{}/{}", doc.project_id, doc.id),
+                    if doc.agent.is_empty() {
+                        "research"
+                    } else {
+                        doc.agent.as_str()
+                    },
+                    // The cwd the research was done in, which is what
+                    // under_roots() scopes a hit by — research inherits the
+                    // project scoping the rest of the index already has.
+                    doc.cwd,
+                    doc.title,
+                    doc.body,
+                    doc.dir,
+                    doc.ts.max(0),
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        let research = docs.len();
+
         Ok(SpotIngestReport {
             more,
             messages,
             terminals,
+            research,
             pruned,
         })
     })
