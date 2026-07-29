@@ -281,7 +281,7 @@ export interface ProjectViewProps {
   hookPath: string | null;
   /** Every open project (name + roots) — the resource breakdown groups the
    *  machine-wide session stats by project, which one project can't know. */
-  allProjects: { name: string; roots: string[] }[];
+  allProjects: { name: string; roots: string[]; asleep?: boolean }[];
   /** Pending-card keys the user dismissed (held app-wide so badges agree). */
   dismissedPending: Set<string>;
   onDismissPending: (key: string) => void;

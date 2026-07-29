@@ -2352,3 +2352,96 @@ export const androidDescribe = (projectDir: string) =>
 
 export const androidRun = (projectDir: string, apk: string, serial: string) =>
   invoke<string>("android_run", { projectDir, apk, serial });
+
+// ---------------------------------------------------------------------------
+// Cleanup: reclaiming the disk the projects only borrowed (cleanup.rs).
+
+export interface CleanupTarget {
+  path: string;
+  /** The allowlist entry that matched — "node_modules", "target". */
+  name: string;
+  /** Where it sits inside its checkout ("packages/web/node_modules"). */
+  rel: string;
+  category: "cache" | "build" | "deps";
+  bytes: number;
+  files: number;
+  /** Days since the newest file inside was written — when the build last ran. */
+  idle_days: number;
+  /** What brings it back. Shown, never run. */
+  regenerate: string;
+  workspace: string;
+  recommended: boolean;
+  /** Why it isn't recommended, in words the row shows as-is. */
+  hold: string | null;
+  /** Its size is a floor: the file count hit the scan's budget. */
+  partial: boolean;
+}
+
+export interface CleanupWorkspace {
+  path: string;
+  name: string;
+  branch: string | null;
+  main: boolean;
+  dirty: number;
+  busy: boolean;
+  asleep: boolean;
+  idle_days: number | null;
+  /** Its work is already in the base branch, and how we know ("already merged
+   *  into origin/main"). The reason a workspace this new is being offered. */
+  landed: string | null;
+  bytes: number;
+  recommended_bytes: number;
+}
+
+export interface CleanupScan {
+  workspaces: CleanupWorkspace[];
+  targets: CleanupTarget[];
+  bytes: number;
+  recommended_bytes: number;
+  skipped: string[];
+  truncated: boolean;
+}
+
+export interface CleanupOutcome {
+  removed: string[];
+  bytes: number;
+  failed: [string, string][];
+  refused: string[];
+  trashed: boolean;
+}
+
+/** Find disposable directories under the open projects. `busy` is every cwd
+ *  something live is running in and `asleep` the roots of hibernating projects:
+ *  both only ever take rows *out* of the default selection. */
+export const cleanupScan = (roots: string[], busy: string[], asleep: string[]) =>
+  invoke<CleanupScan>("cleanup_scan", { roots, busy, asleep });
+
+/** Delete the chosen directories. Every path is re-checked against the
+ *  allowlist in Rust, so this can only ever remove what a scan would produce. */
+export const cleanupRun = (paths: string[], trash: boolean) =>
+  invoke<CleanupOutcome>("cleanup_run", { paths, trash });
+
+export interface CleanupProgress {
+  workspace: string;
+  done: number;
+  total: number;
+}
+
+/** One event per checkout the scan finishes, so the dialog can say where it is
+ *  instead of showing a spinner for a minute. */
+export const onCleanupProgress = (
+  cb: (p: CleanupProgress) => void,
+): Promise<UnlistenFn> =>
+  listen<CleanupProgress>("cleanup:progress", (e) => cb(e.payload));
+
+export interface DiskUsage {
+  mount: string;
+  label: string;
+  total_bytes: number;
+  free_bytes: number;
+}
+
+/** The volumes the open projects live on. A statfs per mount — no walking, so
+ *  the usage panel can poll it like it polls plan limits. */
+export const cleanupDisk = (roots: string[]) =>
+  invoke<DiskUsage[]>("cleanup_disk", { roots });

@@ -158,6 +158,12 @@ pub fn workspace_list(state: State<'_, WorkspaceManager>) -> Vec<String> {
         .collect()
 }
 
+/// The registered roots as paths, for the callers that need to re-check a path
+/// against them away from `State` (cleanup.rs validates on a worker thread).
+pub(crate) fn roots_of(state: &State<'_, WorkspaceManager>) -> Vec<PathBuf> {
+    state.roots.lock().unwrap().clone()
+}
+
 #[tauri::command]
 pub async fn fs_read_dir(
     state: State<'_, WorkspaceManager>,
