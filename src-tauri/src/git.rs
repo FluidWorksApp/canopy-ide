@@ -3071,6 +3071,179 @@ pub async fn git_worktree_add_pr(
     }
 }
 
+/// What a fresh worktree needs before it can build, and what we managed to give
+/// it. `install` is the one thing this command deliberately does *not* run: it
+/// takes minutes and belongs in the RUNS rail where its output is readable, so
+/// it comes back as a command for the frontend to start.
+#[derive(Serialize, Default)]
+pub struct BootstrapReport {
+    /// Gitignored config carried over from the main checkout (`.env` and kin).
+    pub carried: Vec<String>,
+    /// Dependency directories cloned instead of reinstalled.
+    pub cloned: Vec<String>,
+    /// Set when nothing could be cloned: the install to run in the new worktree.
+    pub install: Option<String>,
+    /// Why the clone didn't happen, when it didn't. Small print, not an error.
+    pub note: Option<String>,
+}
+
+/// Ignored entries worth carrying into a new worktree: the local config a
+/// checkout can't run without and git will never hand you. Deliberately narrow
+/// — a `.env` is the file people forget, `dist/` is not.
+fn is_carryable(entry: &str) -> bool {
+    let name = entry.rsplit('/').next().unwrap_or(entry);
+    name.starts_with(".env") || name == ".envrc" || name == ".tool-versions"
+}
+
+/// Copy-on-write clone of a directory. Near-free on APFS and on reflink-capable
+/// Linux filesystems, which is what makes cloning 40k files of `node_modules`
+/// preferable to a five-minute reinstall. Fails loudly (rather than falling back
+/// to a real copy) so the caller can offer the install instead — a slow deep
+/// copy is the worst of both.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn clone_dir(src: &Path, dst: &Path) -> Result<(), String> {
+    let mut cmd = Command::new("cp");
+    #[cfg(target_os = "macos")]
+    cmd.arg("-c").arg("-R");
+    #[cfg(target_os = "linux")]
+    cmd.arg("--reflink=always").arg("-r");
+    cmd.arg(src).arg(dst);
+    cmd.no_console_window();
+    let out = cmd.output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn clone_dir(_src: &Path, _dst: &Path) -> Result<(), String> {
+    Err("copy-on-write clone is not available on this platform".into())
+}
+
+/// The install a checkout of this repo would need, read off whichever lockfile
+/// is committed. `npm ci` over `npm install` on purpose: a worktree is a fresh
+/// checkout, and the lockfile is the whole point of one.
+fn install_command(top: &Path) -> Option<String> {
+    for (lock, cmd) in [
+        ("pnpm-lock.yaml", "pnpm install"),
+        ("yarn.lock", "yarn install"),
+        ("bun.lockb", "bun install"),
+        ("package-lock.json", "npm ci"),
+    ] {
+        if top.join(lock).exists() {
+            return Some(cmd.into());
+        }
+    }
+    top.join("package.json")
+        .exists()
+        .then(|| "npm install".into())
+}
+
+/// Make a just-created worktree runnable.
+///
+/// `git worktree add` gives you tracked files and nothing else, which is why a
+/// new workspace has always died on its first `npm run dev`: no `node_modules`,
+/// no `.env`. This closes that gap in the two ways that are actually fast —
+/// copy-on-write clone the dependency directories, copy the ignored config —
+/// and reports an install command for the case where cloning isn't possible.
+///
+/// Ignored entries come from git itself (`ls-files --others --ignored
+/// --directory`), so a monorepo's nested `node_modules` are found without this
+/// having to know anything about the project's layout.
+#[tauri::command]
+pub async fn git_worktree_bootstrap(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    path: String,
+) -> Result<BootstrapReport, String> {
+    let top = repo_path(&state, &repo)?;
+    let dst_root = PathBuf::from(&path);
+    if !dst_root.is_dir() {
+        return Err(format!("{path} is not a directory"));
+    }
+    let listing = run(git(&top).args([
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+    ]))
+    .unwrap_or_default();
+
+    let mut report = BootstrapReport::default();
+    let mut clone_failure: Option<String> = None;
+    let mut wanted_deps = false;
+
+    for entry in listing.lines().map(str::trim).filter(|e| !e.is_empty()) {
+        let rel = entry.trim_end_matches('/');
+        // `..` can't appear in git's own output, but this is a path we join
+        // against a root, so it is checked rather than assumed.
+        if rel.is_empty() || rel.split('/').any(|p| p == ".." || p == ".git") {
+            continue;
+        }
+        let src = top.join(rel);
+        let dst = dst_root.join(rel);
+        if dst.exists() {
+            continue;
+        }
+        let is_dir = entry.ends_with('/');
+        let name = rel.rsplit('/').next().unwrap_or(rel);
+
+        if is_dir && name == "node_modules" {
+            wanted_deps = true;
+            if let Some(parent) = dst.parent() {
+                if std::fs::create_dir_all(parent).is_err() {
+                    continue;
+                }
+            }
+            match clone_dir(&src, &dst) {
+                Ok(()) => report.cloned.push(rel.to_string()),
+                Err(err) => {
+                    // One reason is enough; the rest fail for the same one.
+                    clone_failure.get_or_insert(err);
+                    let _ = std::fs::remove_dir_all(&dst);
+                }
+            }
+        } else if !is_dir && is_carryable(rel) {
+            // A secret this size is a mistake, not a config file. Skipping it
+            // beats silently duplicating something large into a throwaway dir.
+            let too_big = std::fs::metadata(&src)
+                .map(|m| m.len() > 512 * 1024)
+                .unwrap_or(true);
+            if too_big {
+                continue;
+            }
+            if let Some(parent) = dst.parent() {
+                if std::fs::create_dir_all(parent).is_err() {
+                    continue;
+                }
+            }
+            if std::fs::copy(&src, &dst).is_ok() {
+                report.carried.push(rel.to_string());
+            }
+        }
+    }
+
+    // The install is offered when cloning produced nothing usable — either it
+    // failed, or the main checkout had no dependencies to clone in the first
+    // place. A worktree that cloned everything needs no install at all.
+    if report.cloned.is_empty() {
+        report.install = install_command(&top);
+        report.note = match (&clone_failure, wanted_deps) {
+            (Some(err), _) => Some(format!("Couldn't clone dependencies: {err}")),
+            (None, false) if report.install.is_some() => {
+                Some("No dependencies installed in the main checkout to clone from.".into())
+            }
+            _ => None,
+        };
+    } else if let Some(err) = clone_failure {
+        report.note = Some(format!("Some dependencies couldn't be cloned: {err}"));
+    }
+
+    Ok(report)
+}
+
 /// Remove a worktree. Destructive when it holds uncommitted work, so `force` is
 /// only ever raised after the UI has confirmed with the dirty count in hand.
 ///
@@ -5241,5 +5414,79 @@ index 333..444 100644
         // A worktree the user made themselves is not an agent's.
         assert!(!is_agent_worktree("/Users/dev/repo-wt-feature"));
         assert!(!is_agent_worktree("/Users/dev/claude/worktrees/thing"));
+    }
+
+    #[test]
+    fn only_local_config_is_carried_into_a_new_workspace() {
+        // The files a checkout cannot run without and git will never give you.
+        assert!(is_carryable(".env"));
+        assert!(is_carryable(".env.local"));
+        assert!(is_carryable("api/.env.development"));
+        assert!(is_carryable(".envrc"));
+        assert!(is_carryable(".tool-versions"));
+        // Build output and dependencies are not config. `dist/` in particular
+        // would be a stale copy that looks current, which is worse than absent.
+        assert!(!is_carryable("dist"));
+        assert!(!is_carryable("node_modules"));
+        assert!(!is_carryable("target"));
+        assert!(!is_carryable("coverage/index.html"));
+        // A name that merely starts the same way isn't one of ours.
+        assert!(!is_carryable("environment.ts"));
+    }
+
+    #[test]
+    fn the_install_follows_the_committed_lockfile() {
+        let root = std::env::temp_dir().join(format!("canopy-boot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        // Nothing to install at all.
+        assert_eq!(install_command(&root), None);
+
+        // A package.json with no lockfile can only be `npm install`.
+        std::fs::write(root.join("package.json"), "{}").unwrap();
+        assert_eq!(install_command(&root).as_deref(), Some("npm install"));
+
+        // With a lockfile, the install that respects it — `npm ci`, not
+        // `npm install`, because a worktree is a fresh checkout.
+        std::fs::write(root.join("package-lock.json"), "{}").unwrap();
+        assert_eq!(install_command(&root).as_deref(), Some("npm ci"));
+
+        // pnpm outranks npm's lockfile when both are present: a repo that has
+        // both is a repo mid-migration, and pnpm's is the one being written.
+        std::fs::write(root.join("pnpm-lock.yaml"), "").unwrap();
+        assert_eq!(install_command(&root).as_deref(), Some("pnpm install"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cloning_a_directory_reproduces_it() {
+        let root = std::env::temp_dir().join(format!("canopy-clone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src/nested")).unwrap();
+        std::fs::write(root.join("src/a.js"), "one").unwrap();
+        std::fs::write(root.join("src/nested/b.js"), "two").unwrap();
+
+        clone_dir(&root.join("src"), &root.join("dst")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("dst/a.js")).unwrap(),
+            "one"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("dst/nested/b.js")).unwrap(),
+            "two"
+        );
+
+        // A clone is a copy, not a link: writing through one must not be
+        // visible through the other, or two workspaces would share deps.
+        std::fs::write(root.join("dst/a.js"), "changed").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/a.js")).unwrap(),
+            "one"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

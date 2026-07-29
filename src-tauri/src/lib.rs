@@ -511,6 +511,7 @@ pub fn run() {
             git::agent_edits,
             git::git_worktree_add,
             git::git_worktree_add_pr,
+            git::git_worktree_bootstrap,
             git::git_worktree_remove,
             git::git_worktree_prune,
             git::gh_available,
