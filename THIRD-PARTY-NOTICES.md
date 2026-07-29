@@ -57,9 +57,9 @@ terms govern use of the model:
 - **SenseVoice Small (int8)** — FunASR MODEL_LICENSE (custom) — <https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE>, by FunAudioLLM / Alibaba. <https://huggingface.co/FunAudioLLM/SenseVoiceSmall>
 - **Moonshine Base** — MIT, by Useful Sensors. <https://huggingface.co/UsefulSensors/moonshine>
 
-## Rust crates (679)
+## Rust crates (682)
 
-### MIT — 624
+### MIT — 627
 
 - **adler2 2.0.1** — Copyright (C) Jonas Schievink <jonasschievink@gmail.com>
 - **aead 0.5.2** — Copyright (c) 2019 The RustCrypto Project Developers; Copyright (c) 2019 MobileCoin, LLC
@@ -100,6 +100,7 @@ terms govern use of the model:
 - **blocking 1.6.2** — Copyright Stjepan Glavina (per package manifest; the distributed license file carries no copyright line)
 - **brotli-decompressor 5.0.3** — Copyright (c) 2016 Dropbox, Inc
 - **bs58 0.5.1** — Copyright (c) 2016 The roaring-rs developers
+- **bstr 1.13.0** — Copyright (c) 2018-2019 Andrew Gallant
 - **bumpalo 3.20.3** — Copyright (c) 2019 Nick Fitzgerald
 - **bytemuck 1.25.1** — Copyright (c) 2019 Daniel "Lokathor" Gee
 - **byteorder 1.5.0** — Copyright (c) 2015 Andrew Gallant
@@ -232,6 +233,7 @@ terms govern use of the model:
 - **glib-macros 0.18.5** — Copyright The gtk-rs Project Developers (per package manifest; the distributed license file carries no copyright line)
 - **glib-sys 0.18.1** — Copyright The gtk-rs Project Developers (per package manifest; the distributed license file carries no copyright line)
 - **glob 0.3.3** — Copyright (c) 2014 The Rust Project Developers
+- **globset 0.4.19** — Copyright (c) 2015 Andrew Gallant
 - **gobject-sys 0.18.0** — Copyright The gtk-rs Project Developers (per package manifest; the distributed license file carries no copyright line)
 - **gtk 0.18.2** — Copyright The gtk-rs Project Developers (per package manifest; the distributed license file carries no copyright line)
 - **gtk-sys 0.18.2** — Copyright The gtk-rs Project Developers (per package manifest; the distributed license file carries no copyright line)
@@ -262,6 +264,7 @@ terms govern use of the model:
 - **ident_case 1.0.1** — Copyright Ted Driggs (per package manifest; the distributed license file carries no copyright line)
 - **idna 1.1.0** — Copyright (c) 2013-2025 The rust-url developers
 - **idna_adapter 1.2.2** — Copyright (c) The rust-url developers
+- **ignore 0.4.31** — Copyright (c) 2015 Andrew Gallant
 - **include_dir 0.7.4** — Copyright Michael Bryan (per package manifest; the distributed license file carries no copyright line)
 - **include_dir_macros 0.7.4** — Copyright Michael Bryan (per package manifest; the distributed license file carries no copyright line)
 - **indexmap 1.9.3** — Copyright (c) 2016--2017
