@@ -128,13 +128,17 @@ export function GitPanel({
   // never the state from whenever you last looked. `version` is the funnel
   // saying something moved: a switch answered in its dialog lands here without
   // the funnel having to know this panel exists.
+  //
+  // Watched, not polled. This ran three git subprocesses every five seconds for
+  // as long as the panel was open, whether or not anything had happened; the
+  // fs:change subscription beside it couldn't replace them, because a commit or
+  // a branch switch writes only inside .git, which that event filters out.
+  // `git:change` is the signal that covers both, already debounced in Rust.
   useEffect(() => {
     if (!repo || !visible) return;
     void refresh();
-    const sub = ipc.onFsChange(() => void refresh());
-    const poll = setInterval(() => void refresh(), 5000);
+    const sub = ipc.onGitChange(() => void refresh());
     return () => {
-      clearInterval(poll);
       void sub.then((fn) => fn());
     };
   }, [repo, refresh, visible, version]);

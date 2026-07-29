@@ -256,9 +256,10 @@ export const StatusBar = memo(function StatusBar({
     return activePtyId != null && anyStamped ? null : projectLatest;
   }, [events, roots, activePtyId]);
 
-  // Both pollers gate on `visible`: each spawns a git subprocess / transcript
-  // read per tick per project, and a backgrounded project doesn't need either.
-  // Switching back re-runs the effect, which refreshes immediately.
+  // Gated on `visible`: a backgrounded project's chip is not on screen, and
+  // asking git about it costs a subprocess. Switching back re-runs the effect,
+  // which refreshes immediately. (The transcript reader below is still a
+  // poller — that one is reading a file an agent appends to, not git.)
   useEffect(() => {
     if (!roots[0] || !visible) return;
     let cancelled = false;
@@ -273,13 +274,17 @@ export const StatusBar = memo(function StatusBar({
         .catch(() => {});
     };
     refresh();
-    const timer = setInterval(refresh, 10_000);
+    // Was a `git status` subprocess every ten seconds per visible project. The
+    // watcher says when there is something to ask about, so an idle project now
+    // spawns nothing at all — and a change shows up in a beat rather than up to
+    // ten seconds late.
+    const sub = ipc.onGitChange(refresh);
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      void sub.then((fn) => fn());
     };
     // `version` bumps whenever the funnel moves a ref, so the chip catches up
-    // with a switch immediately instead of at the next ten-second tick.
+    // with a switch immediately instead of waiting on the watcher.
   }, [roots[0], visible, version]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // The branch list behind the chip's menu. Deliberately NOT on the status

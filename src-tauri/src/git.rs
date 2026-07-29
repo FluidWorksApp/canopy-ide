@@ -12,6 +12,7 @@
 //!     would hang the command forever. Failing fast with git's own error is the
 //!     honest outcome.
 
+use crate::blocking;
 use crate::winproc::NoConsoleWindow;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -128,7 +129,10 @@ pub(crate) fn git(repo: &Path) -> Command {
 /// 'x' is ambiguous.`, the sparse-checkout note. All exit 0, so a caller that
 /// only reads stdout tells the user "done" and drops the warning on the floor.
 fn run_verbose(cmd: &mut Command) -> Result<(String, String), String> {
-    let out = cmd.output().map_err(|e| e.to_string())?;
+    // The choke point for ~100 call sites, and the reason `blocking::io` exists:
+    // waiting on a subprocess from an async command otherwise parks a runtime
+    // worker for the whole of it. See blocking.rs.
+    let out = blocking::io(|| cmd.output()).map_err(|e| e.to_string())?;
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
     if out.status.success() {
@@ -165,10 +169,7 @@ fn repo_path(state: &State<'_, WorkspaceManager>, path: &str) -> Result<PathBuf,
 }
 
 fn toplevel_of(dir: &Path) -> Option<PathBuf> {
-    let out = git(dir)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
+    let out = blocking::io(|| git(dir).args(["rev-parse", "--show-toplevel"]).output()).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -178,6 +179,30 @@ fn toplevel_of(dir: &Path) -> Option<PathBuf> {
     } else {
         Some(PathBuf::from(s))
     }
+}
+
+/// Where this checkout's git state actually lives — `<repo>/.git` normally,
+/// and the *main* checkout's `.git` for a linked worktree, whose own `.git` is
+/// a one-line file pointing there. That's the directory to watch: refs, HEAD
+/// and the index of every worktree hang off it. `None` when the path isn't a
+/// repo at all.
+pub(crate) fn common_dir(dir: &Path) -> Option<PathBuf> {
+    let out = blocking::io(|| git(dir).args(["rev-parse", "--git-common-dir"]).output()).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+    // It answers with a relative path (".git") when asked from the top level.
+    let path = Path::new(&raw);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        dir.join(path)
+    };
+    path.canonicalize().ok()
 }
 
 fn head_branch(repo: &Path) -> (Option<String>, bool) {
@@ -1355,6 +1380,13 @@ pub(crate) fn run_net(cmd: &mut Command) -> Result<String, String> {
 /// write() until the child drains it, and the child can't drain while we're
 /// blocked. A review with a dozen findings clears 64KB easily.
 pub(crate) fn run_net_with_input(cmd: &mut Command, input: Option<&str>) -> Result<String, String> {
+    // The longest block in the file: this waits on a remote for up to
+    // NET_TIMEOUT_SECS, polling in 80ms sleeps. Holding a runtime worker for
+    // two minutes is what `blocking::io` exists to prevent.
+    blocking::io(move || run_net_blocking(cmd, input))
+}
+
+fn run_net_blocking(cmd: &mut Command, input: Option<&str>) -> Result<String, String> {
     use std::io::{Read, Write};
     use std::process::Stdio;
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -1565,7 +1597,7 @@ pub async fn git_diff(
         let mut c = git(&top);
         c.args(["diff", "--no-color", "--no-index", "--", "/dev/null", &path]);
         // --no-index exits 1 when files differ, which is the normal case here.
-        if let Ok(o) = c.output() {
+        if let Ok(o) = blocking::io(|| c.output()) {
             let text = String::from_utf8_lossy(&o.stdout).to_string();
             if !text.trim().is_empty() {
                 return Ok(text);
@@ -1704,17 +1736,20 @@ pub(crate) fn tool_path(tool: &'static str) -> String {
     // `command -v` is a shell builtin, so this works even where `which` isn't
     // installed. -l loads the profile that sets PATH in the first place.
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    let resolved = std::process::Command::new(shell)
-        .no_console_window()
-        .args(["-lc", &format!("command -v {tool}")])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|p| !p.is_empty())
-        // Fall back to the bare name: if it IS on the inherited PATH this
-        // still works, and if it isn't the caller reports it as missing.
-        .unwrap_or_else(|| tool.to_string());
+    // A login shell has a whole profile to source before it answers.
+    let resolved = blocking::io(|| {
+        std::process::Command::new(shell)
+            .no_console_window()
+            .args(["-lc", &format!("command -v {tool}")])
+            .output()
+    })
+    .ok()
+    .filter(|o| o.status.success())
+    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    .filter(|p| !p.is_empty())
+    // Fall back to the bare name: if it IS on the inherited PATH this
+    // still works, and if it isn't the caller reports it as missing.
+    .unwrap_or_else(|| tool.to_string());
     cache.lock().unwrap().insert(tool, resolved.clone());
     resolved
 }
@@ -1743,12 +1778,14 @@ pub(crate) fn gh_anywhere() -> Command {
 
 #[tauri::command]
 pub async fn gh_available() -> bool {
-    Command::new(gh_bin())
-        .no_console_window()
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    blocking::io(|| {
+        Command::new(gh_bin())
+            .no_console_window()
+            .arg("--version")
+            .output()
+    })
+    .map(|o| o.status.success())
+    .unwrap_or(false)
 }
 
 #[tauri::command]
@@ -3543,12 +3580,14 @@ pub struct GhAuth {
 #[tauri::command]
 pub async fn gh_auth() -> Result<GhAuth, String> {
     let bin = gh_bin();
-    let installed = Command::new(&bin)
-        .no_console_window()
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let installed = blocking::io(|| {
+        Command::new(&bin)
+            .no_console_window()
+            .arg("--version")
+            .output()
+    })
+    .map(|o| o.status.success())
+    .unwrap_or(false);
     if !installed {
         return Ok(GhAuth {
             installed: false,
@@ -3565,7 +3604,8 @@ pub async fn gh_auth() -> Result<GhAuth, String> {
     cmd.env("GH_PROMPT_DISABLED", "1");
     cmd.no_console_window();
     cmd.args(["api", "user", "--jq", ".login"]);
-    let (authenticated, account, detail) = match cmd.output() {
+    // A network round-trip to GitHub, on the runtime's worker without this.
+    let (authenticated, account, detail) = match blocking::io(|| cmd.output()) {
         Ok(o) if o.status.success() => (
             true,
             String::from_utf8_lossy(&o.stdout).trim().to_string(),
@@ -3583,23 +3623,25 @@ pub async fn gh_auth() -> Result<GhAuth, String> {
         ),
         Err(e) => (false, String::new(), e.to_string()),
     };
-    let host = Command::new(&bin)
-        .no_console_window()
-        .args(["auth", "status"])
-        .output()
-        .ok()
-        .map(|o| {
-            let text = format!(
-                "{}{}",
-                String::from_utf8_lossy(&o.stdout),
-                String::from_utf8_lossy(&o.stderr)
-            );
-            text.lines()
-                .find(|l| l.trim_start().starts_with("Logged in to"))
-                .and_then(|l| l.split_whitespace().nth(3).map(String::from))
-                .unwrap_or_default()
-        })
-        .unwrap_or_default();
+    let host = blocking::io(|| {
+        Command::new(&bin)
+            .no_console_window()
+            .args(["auth", "status"])
+            .output()
+    })
+    .ok()
+    .map(|o| {
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        );
+        text.lines()
+            .find(|l| l.trim_start().starts_with("Logged in to"))
+            .and_then(|l| l.split_whitespace().nth(3).map(String::from))
+            .unwrap_or_default()
+    })
+    .unwrap_or_default();
     Ok(GhAuth {
         installed: true,
         path: bin,
@@ -4344,11 +4386,13 @@ fn workspace_join(
                 behind = n.next().and_then(|v| v.parse().ok()).unwrap_or(0);
                 ahead = n.next().and_then(|v| v.parse().ok()).unwrap_or(0);
             }
-            merged = git(top)
-                .args(["merge-base", "--is-ancestor", &b, &base])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
+            merged = blocking::io(|| {
+                git(top)
+                    .args(["merge-base", "--is-ancestor", &b, &base])
+                    .output()
+            })
+            .map(|o| o.status.success())
+            .unwrap_or(false);
             commits = branch_commits_of(top, &base, &b);
         }
     }
@@ -4456,10 +4500,11 @@ pub async fn git_branch_patch(
             // inlined as base85 and dwarf the text this pane exists to show.
             // Plain --no-index prints "Binary files ... differ", which is the
             // useful fact — the file is there and it is new.
-            if let Ok(out) = git(&dir)
-                .args(["diff", "--no-index", "--", "/dev/null", file])
-                .output()
-            {
+            if let Ok(out) = blocking::io(|| {
+                git(&dir)
+                    .args(["diff", "--no-index", "--", "/dev/null", file])
+                    .output()
+            }) {
                 p.push_str(&String::from_utf8_lossy(&out.stdout));
             }
         }
@@ -4622,7 +4667,8 @@ pub async fn linear_issues(api_key: String) -> Result<Vec<TicketInfo>, String> {
         .ok_or("curl stdin unavailable")?
         .write_all(format!("header = \"Authorization: {}\"\n", api_key.trim()).as_bytes())
         .map_err(|e| e.to_string())?;
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    // Up to 15s of Linear's API (--max-time), so off the worker it goes.
+    let out = blocking::io(|| child.wait_with_output()).map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(format!(
             "Linear request failed: {}",

@@ -10,7 +10,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, State};
 
 #[derive(Default)]
@@ -31,6 +31,94 @@ pub struct FsChange {
     pub root: String,
     pub paths: Vec<String>,
     pub kind: String,
+}
+
+/// "Whatever git would say about this root just changed." One event, one
+/// debounce, one place — rather than a `setInterval` per panel.
+#[derive(Serialize, Clone)]
+pub struct GitChange {
+    pub root: String,
+}
+
+// ---------- git state: watched, not polled ----------
+
+/// How long the watcher waits for the writes to stop before saying so.
+///
+/// A single `git commit` is a burst: index.lock, index, COMMIT_EDITMSG, the
+/// ref, the reflog. Emitting per event would run `git status` five times
+/// against a repo that is still mid-write; the debounce turns the burst into
+/// one refresh, after it settles. (Zed uses 100ms for the same job in
+/// `git_store.rs`; 150 buys a little more room for a rebase's ref churn.)
+const GIT_SETTLE_MS: u64 = 150;
+
+/// Root -> how many bursts we have seen. The delayed emit compares the
+/// generation it captured against this; a later event supersedes it, so a long
+/// operation emits once at the end instead of once per file it touched.
+fn git_pulse() -> &'static Mutex<HashMap<String, u64>> {
+    static PULSE: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    PULSE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Does this path mean git's own state moved?
+///
+/// A commit, a stage, a branch switch or a fetch lands as writes inside `.git`
+/// — which is exactly what the file-change feed filters out, so this is the
+/// only place they can be noticed. Three kinds of churn are skipped: object
+/// writes (an agent's blob is not a state change any panel can see), reflogs
+/// (they follow the ref that already fired), and `.lock` files — git writes
+/// `index.lock` before `index`, and reacting to the lock means asking a repo
+/// that is mid-write, and racing the very write we are watching.
+pub(crate) fn touches_git_state(path: &str) -> bool {
+    let Some((_, rest)) = path.rsplit_once("/.git/") else {
+        return false;
+    };
+    // A linked worktree's HEAD and index live at
+    // `<main>/.git/worktrees/<name>/HEAD`; strip that middle so the same match
+    // covers worktrees, which is most of Canopy's usage.
+    let rest = rest
+        .strip_prefix("worktrees/")
+        .and_then(|r| r.split_once('/'))
+        .map(|(_, r)| r)
+        .unwrap_or(rest);
+    if rest.ends_with(".lock") || rest.starts_with("objects/") || rest.starts_with("logs/") {
+        return false;
+    }
+    rest.starts_with("refs/")
+        || rest.starts_with("rebase-merge/")
+        || rest.starts_with("rebase-apply/")
+        || matches!(
+            rest,
+            "HEAD"
+                | "index"
+                | "packed-refs"
+                | "FETCH_HEAD"
+                | "ORIG_HEAD"
+                | "MERGE_HEAD"
+                | "REBASE_HEAD"
+                | "CHERRY_PICK_HEAD"
+                | "REVERT_HEAD"
+                | "BISECT_LOG"
+        )
+}
+
+/// Note that this root's git state moved, and say so once the writes stop.
+fn pulse_git<R: tauri::Runtime>(app: &AppHandle<R>, root: &str) {
+    let generation = {
+        let mut pulse = git_pulse().lock().unwrap();
+        let counter = pulse.entry(root.to_string()).or_insert(0);
+        *counter = counter.wrapping_add(1);
+        *counter
+    };
+    let app = app.clone();
+    let root = root.to_string();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(GIT_SETTLE_MS)).await;
+        // Something newer is already waiting its turn — let that one speak.
+        if git_pulse().lock().unwrap().get(&root) != Some(&generation) {
+            return;
+        }
+        let _ = app.emit("git:change", GitChange { root });
+    });
 }
 
 pub(crate) fn check_scope(
@@ -103,13 +191,24 @@ pub async fn workspace_add(
                 notify::EventKind::Remove(_) => "remove",
                 _ => "other",
             };
-            let paths: Vec<String> = event
+            let touched: Vec<String> = event
                 .paths
                 .iter()
                 .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            let paths: Vec<String> = touched
+                .iter()
                 // node_modules / .git churn would flood the UI
                 .filter(|p| !p.contains("/node_modules/") && !p.contains("/.git/"))
+                .cloned()
                 .collect();
+            // The panels that used to poll git want both halves: a write to a
+            // tracked file changes what `status` says, and a write inside .git
+            // is a commit, a stage or a branch switch — the half that never
+            // reaches fs:change at all.
+            if !paths.is_empty() || touched.iter().any(|p| touches_git_state(p)) {
+                pulse_git(&app, &emit_root);
+            }
             if !paths.is_empty() {
                 let _ = app.emit(
                     "fs:change",
@@ -126,6 +225,18 @@ pub async fn workspace_add(
     watcher
         .watch(&canonical, RecursiveMode::Recursive)
         .map_err(|e| e.to_string())?;
+    // A linked worktree keeps no state of its own: its `.git` is a file, and
+    // HEAD, the index and every ref live in the main checkout's `.git`, outside
+    // this root. Without a second watch there, a branch switch or a commit made
+    // in a worktree — which is how Canopy is normally used — would be invisible
+    // to the watcher, and the panels would be back to polling for it.
+    if let Some(git_dir) = crate::git::common_dir(&canonical) {
+        if !git_dir.starts_with(&canonical) {
+            // Best-effort: a repo we can't watch just means git state settles a
+            // beat later, when a worktree file next changes.
+            let _ = watcher.watch(&git_dir, RecursiveMode::Recursive);
+        }
+    }
     state.watchers.lock().unwrap().insert(canonical, watcher);
     Ok(root_str)
 }
@@ -781,6 +892,75 @@ mod tests {
     fn write(path: &Path, text: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
+    }
+
+    /// The other half of replacing the polls: a burst has to arrive as one
+    /// event. A commit writes five files inside `.git` in a few milliseconds,
+    /// and one refresh per write would be worse than the 5s poll it replaced —
+    /// several `git status` runs against a repo that is still mid-commit.
+    #[test]
+    fn a_burst_of_writes_is_one_event_once_it_settles() {
+        use tauri::Listener;
+        let app = tauri::test::mock_app();
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = seen.clone();
+        app.handle().listen("git:change", move |_| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        let root = "/w/repo";
+        for _ in 0..5 {
+            pulse_git(app.handle(), root);
+        }
+        // Long enough for every one of the five to have fired had they not
+        // superseded each other.
+        std::thread::sleep(std::time::Duration::from_millis(GIT_SETTLE_MS * 5));
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // And the next burst is still heard: the generation supersedes, it
+        // doesn't latch.
+        pulse_git(app.handle(), root);
+        std::thread::sleep(std::time::Duration::from_millis(GIT_SETTLE_MS * 5));
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// What the panels stopped polling for. Everything a commit, a stage, a
+    /// switch or a fetch writes has to be in the first list, or the git panel
+    /// goes stale until someone touches a file; everything git writes *in
+    /// passing* has to be in the second, or a single `git gc` re-runs status a
+    /// thousand times.
+    #[test]
+    fn git_state_is_noticed_and_gits_own_churn_is_not() {
+        for p in [
+            "/w/repo/.git/HEAD",
+            "/w/repo/.git/index",
+            "/w/repo/.git/refs/heads/main",
+            "/w/repo/.git/packed-refs",
+            "/w/repo/.git/MERGE_HEAD",
+            "/w/repo/.git/FETCH_HEAD",
+            "/w/repo/.git/rebase-merge/done",
+            // A linked worktree's own HEAD, in the main checkout's .git.
+            "/w/repo/.git/worktrees/feature/HEAD",
+            "/w/repo/.git/worktrees/feature/index",
+        ] {
+            assert!(touches_git_state(p), "should have noticed {p}");
+        }
+
+        for p in [
+            // The lock is written *before* the file it guards: reacting to it
+            // means asking a repo that is still mid-write.
+            "/w/repo/.git/index.lock",
+            "/w/repo/.git/refs/heads/main.lock",
+            "/w/repo/.git/objects/ab/cdef0123",
+            "/w/repo/.git/objects/pack/pack-1.idx",
+            "/w/repo/.git/logs/HEAD",
+            "/w/repo/.git/worktrees/feature/index.lock",
+            // Ordinary files are the *other* signal (fs:change), not this one.
+            "/w/repo/src/main.rs",
+            "/w/repo/.gitignore",
+        ] {
+            assert!(!touches_git_state(p), "should have ignored {p}");
+        }
     }
 
     /// The corpus behind quick-open, find-in-files and SpotSearch's file and

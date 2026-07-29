@@ -8,6 +8,7 @@ import type { AgentEventEntry } from "../types";
 
 vi.mock("../ipc", () => ({
   gitStatus: vi.fn(),
+  onGitChange: vi.fn(),
   gitBranches: vi.fn(),
   gitCheckout: vi.fn(),
   claudeSessionStats: vi.fn(),
@@ -35,6 +36,7 @@ beforeEach(() => {
     message: "Switched to feat/x",
     path: null,
   } as never);
+  vi.mocked(ipc.onGitChange).mockImplementation(noSub as never);
   vi.mocked(ipc.onAppStats).mockImplementation(noSub as never);
   vi.mocked(ipc.onPtyStats).mockImplementation(noSub as never);
   vi.mocked(ipc.agentUsage).mockResolvedValue([]);

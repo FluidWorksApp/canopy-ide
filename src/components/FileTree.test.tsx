@@ -4,13 +4,14 @@ import userEvent from "@testing-library/user-event";
 import { FileTree } from "./FileTree";
 import * as ipc from "../ipc";
 
-// FileTree loads directories lazily through ipc. Mock the three calls it makes:
-// fsReadDir (directory contents), gitStatus (overlay — no repo here), and
-// onFsChange (the watcher — a no-op unsubscribe).
+// FileTree loads directories lazily through ipc. Mock the calls it makes:
+// fsReadDir (directory contents), gitStatus (overlay — no repo here), and the
+// two watchers, onFsChange and onGitChange (no-op unsubscribes).
 vi.mock("../ipc", () => ({
   fsReadDir: vi.fn(),
   gitStatus: vi.fn(),
   onFsChange: vi.fn(),
+  onGitChange: vi.fn(),
   fsReveal: vi.fn(),
 }));
 
@@ -33,6 +34,7 @@ beforeEach(() => {
   vi.mocked(ipc.fsReadDir).mockImplementation(async (p: string) => TREE[p] ?? []);
   vi.mocked(ipc.gitStatus).mockResolvedValue({ is_repo: false, entries: [] } as never);
   vi.mocked(ipc.onFsChange).mockResolvedValue(() => {});
+  vi.mocked(ipc.onGitChange).mockResolvedValue(() => {});
 });
 
 // The root auto-expands on mount (loadDir is async); wait for its entries.

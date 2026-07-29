@@ -3247,13 +3247,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
     void refreshChanges();
   }, [refreshChanges, rootsKey]);
 
-  // The fs watcher no longer *builds* the feed — it only triggers a debounced
-  // re-query of git, and live-diffs files that are already open in a tab.
+  // The fs watcher no longer *builds* the feed — it only live-diffs files that
+  // are already open in a tab. Re-querying git is `git:change`'s job: it fires
+  // for the same edits *and* for the commits, stages and switches an agent
+  // makes in a terminal, which write inside .git and so never reach fs:change
+  // at all. Its debounce is the Rust one, replacing the 400ms timer here.
   useEffect(() => {
-    let gitTimer: ReturnType<typeof setTimeout> | undefined;
+    const gitSub = ipc.onGitChange(() => void refreshChanges());
     const unlisten = ipc.onFsChange(async (e) => {
-      clearTimeout(gitTimer);
-      gitTimer = setTimeout(() => void refreshChanges(), 400);
       const now = Date.now();
       for (const path of e.paths) {
         if (!roots.some((r) => path.startsWith(r + "/"))) continue;
@@ -3283,8 +3284,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       }
     });
     return () => {
-      clearTimeout(gitTimer);
       void unlisten.then((fn) => fn());
+      void gitSub.then((fn) => fn());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rootsKey, patchFile, refreshChanges]);

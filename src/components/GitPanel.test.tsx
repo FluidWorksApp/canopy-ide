@@ -19,7 +19,7 @@ const ipc = vi.hoisted(() => ({
   gitWorktreeBootstrap: vi.fn(),
   gitWorktreeRemove: vi.fn(),
   workspaceRemove: vi.fn(),
-  onFsChange: vi.fn(),
+  onGitChange: vi.fn(),
   fsReveal: vi.fn(),
   gitPull: vi.fn(),
   gitPush: vi.fn(),
@@ -86,7 +86,7 @@ function panel(
   ipc.gitBranches.mockResolvedValue(branches);
   ipc.gitLog.mockResolvedValue([]);
   ipc.gitWorktrees.mockResolvedValue(worktrees);
-  ipc.onFsChange.mockResolvedValue(() => {});
+  ipc.onGitChange.mockResolvedValue(() => {});
   render(
     <GitPanel
       visible
