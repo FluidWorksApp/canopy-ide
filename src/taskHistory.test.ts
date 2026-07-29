@@ -10,6 +10,7 @@ import {
   taskRuns,
   updateTaskRun,
   type TaskRun,
+  researchEntryForFile,
   resolveTaskFile,
   tidyOutput,
 } from "./taskHistory";
@@ -230,6 +231,28 @@ describe("resolveTaskFile", () => {
   const wt = "/Users/me/code/canopy-wt-pr-177";
   const repo = "/Users/me/code/canopy";
 
+  it("makes a relative path absolute, or the chip opens nothing", () => {
+    // The hook records a file relative to the session cwd when it is under it,
+    // and absolutely when it is not, so `files` is a mix. Nothing joined the
+    // relative half back on — and fs_stat rejects a relative path — so every
+    // chip for a file the run edited inside its own project failed, silently.
+    expect(resolveTaskFile("src/microTasks.ts", repo)).toBe(
+      "/Users/me/code/canopy/src/microTasks.ts",
+    );
+    // An absolute one is already answerable and must not be mangled.
+    expect(resolveTaskFile("/tmp/scratch/notes.md", repo)).toBe(
+      "/tmp/scratch/notes.md",
+    );
+    // No cwd recorded: better to hand back what we have than to invent a root.
+    expect(resolveTaskFile("src/a.ts", "")).toBe("src/a.ts");
+  });
+
+  it("still maps a relative path out of a throwaway worktree", () => {
+    // Both rules at once: join it on, then map the deleted worktree back to
+    // the repo that still has the committed file.
+    expect(resolveTaskFile("src/git.rs", wt)).toBe(`${repo}/src/git.rs`);
+  });
+
   it("maps a throwaway worktree's path back onto the repo", () => {
     // The brief's last step deletes the worktree, so this path is gone by the
     // time anyone clicks it — but the agent committed and pushed the file, so
@@ -310,5 +333,32 @@ describe("completedTaskRuns ordering", () => {
     const labels = completedTaskRuns("p1").map((r) => r.label);
     expect(labels).toContain("Ended");
     expect(labels).toContain("Swept");
+  });
+});
+
+
+describe("researchEntryForFile", () => {
+  it("recognises a research artifact and names its entry", () => {
+    // These live outside every registered workspace root by design, so the
+    // editor's reader cannot open them — the chip has to lead to the entry,
+    // which is where the file means anything.
+    expect(
+      researchEntryForFile(
+        "/Users/me/.canopy/research/p-123/0007-index-staleness/research.md",
+      ),
+    ).toEqual({ projectId: "p-123", id: "0007-index-staleness" });
+    expect(
+      researchEntryForFile(
+        "/Users/me/.canopy/research/p-123/0007-index-staleness/sources/01-x.md",
+      ),
+    ).toEqual({ projectId: "p-123", id: "0007-index-staleness" });
+  });
+
+  it("leaves ordinary files to the editor", () => {
+    expect(researchEntryForFile("/Users/me/code/canopy/src/a.ts")).toBeNull();
+    // Shaped like the store but not it — a repo that happens to have the word.
+    expect(researchEntryForFile("/Users/me/code/research/notes.md")).toBeNull();
+    // The store's own root, with no entry in the path.
+    expect(researchEntryForFile("/Users/me/.canopy/research/p-123/")).toBeNull();
   });
 });

@@ -229,12 +229,32 @@ export function clearTaskHistory(): void {
  *  (see startPrAgent), which is what lets this map back. A worktree the user
  *  made themselves is left alone — it is still on disk, and its copy is the one
  *  the agent actually worked in. */
+/*  The hook records a file *relative* to the session's cwd when it sits under
+ *  it, and absolutely when it does not — so `files` is a mix, and the relative
+ *  half arrived here as "src/foo.ts". Nothing joined it back on, so every chip
+ *  for a file the run edited inside its own project opened nothing: fs_stat
+ *  rejects a relative path, and openFile logs and returns. That was most of
+ *  them, and it failed in silence.  */
 export function resolveTaskFile(file: string, cwd: string): string {
+  const absolute = file.startsWith("/") ? file : cwd ? `${cwd}/${file}` : file;
   const wt = /^(.*)-wt-pr-\d+$/.exec(cwd);
-  if (!wt) return file;
+  if (!wt) return absolute;
   const repo = wt[1];
-  if (!file.startsWith(`${cwd}/`)) return file;
-  return `${repo}/${file.slice(cwd.length + 1)}`;
+  if (!absolute.startsWith(`${cwd}/`)) return absolute;
+  return `${repo}/${absolute.slice(cwd.length + 1)}`;
+}
+
+/** Is this path inside Canopy's research store?
+ *
+ *  Those artifacts are real and worth opening, but they live outside every
+ *  registered workspace root by design, so the editor's reader cannot reach
+ *  them — a chip pointing at one has to open the research entry instead, which
+ *  is where the file means something anyway. */
+export function researchEntryForFile(
+  file: string,
+): { projectId: string; id: string } | null {
+  const m = /\/\.canopy\/research\/([^/]+)\/(\d{4}-[a-z0-9-]+)\//.exec(file);
+  return m ? { projectId: m[1], id: m[2] } : null;
 }
 
 /** The terminal tail with its dead space taken out.

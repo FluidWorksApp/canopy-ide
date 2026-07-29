@@ -102,6 +102,7 @@ import {
   endAbandonedRun,
   recordTaskEnd,
   recordTaskStart,
+  researchEntryForFile,
   updateTaskRun,
   type TaskRun,
 } from "../../taskHistory";
@@ -2856,7 +2857,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
           }
         }
       } catch (err) {
+        // Silence here is what made the task-history chips look inert: a path
+        // that had been deleted with its worktree, or that sits outside every
+        // registered root, logged to a console nobody has open and returned.
+        // Say which of the two it was, because they need different things of
+        // the user.
         console.warn("open failed", path, err);
+        onNotice(
+          `Can't open ${path.split("/").pop()} — ${
+            String(err).includes("outside")
+              ? "it's outside this project's folders."
+              : "it may have been moved or deleted."
+          }`,
+          "error",
+        );
         return;
       }
       // Proper diff for changed files: baseline is git HEAD. Any text-ish file
@@ -5192,7 +5206,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
               )
             }
             onOpenPr={(pr) => void openPrByNumber(pr.repo, pr.number, pr.url)}
-            onOpenFile={(path) => void openFile(path)}
+            onOpenFile={(path) => {
+              const entry = researchEntryForFile(path);
+              if (entry) openResearch(entry.id, entry.id);
+              else void openFile(path);
+            }}
             onClosed={() => closeTab(tab.id)}
             onNotice={onNotice}
           />
