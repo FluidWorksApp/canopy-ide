@@ -134,6 +134,16 @@ export interface InstructionsSubTab {
   focus?: string;
 }
 
+/** One MCP server, opened from the Tools panel: its consumers, its tools, and a
+ *  way to call them. Carries the whole row rather than just the key so the
+ *  header renders before the connection does — the configured facts are known
+ *  the moment the tab opens, and only the tools have to be waited for. */
+export interface McpSubTab {
+  id: string;
+  type: "mcp";
+  server: ipc.McpServer;
+}
+
 export interface ChatSubTab {
   id: string;
   type: "chat";
@@ -207,6 +217,7 @@ export type SubTab =
   | AgentSubTab
   | TaskHistorySubTab
   | InstructionsSubTab
+  | McpSubTab
   | ChatSubTab;
 
 /** Every tab that isn't a terminal — the "document" tabs, rendered together
@@ -301,6 +312,8 @@ export function describeTab(tab: SubTab | undefined) {
       return { kind: "task-history", label: "Completed tasks" };
     case "instructions":
       return { kind: "instructions", label: "Agent instructions" };
+    case "mcp":
+      return { kind: "mcp", label: tab.server.name };
     default:
       return { kind: tab.type };
   }
@@ -352,6 +365,8 @@ export function tabDisplayLabel(t: SubTab): string {
       return "Completed tasks";
     case "instructions":
       return "Agent instructions";
+    case "mcp":
+      return t.server.name;
     case "shared-project":
       return t.name;
     case "preview":

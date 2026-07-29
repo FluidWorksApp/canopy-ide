@@ -17,6 +17,7 @@ mod git;
 mod instructions;
 mod lsp;
 mod mcp;
+mod mcp_client;
 mod portal;
 mod preview;
 mod prwatch;
@@ -517,6 +518,10 @@ pub fn run() {
             agents::agent_integration_health,
             agents::agent_health_report,
             mcp::mcp_servers,
+            mcp_client::mcp_connect,
+            mcp_client::mcp_call_tool,
+            mcp_client::mcp_disconnect,
+            mcp_client::mcp_connected,
             agents::claude_session_stats,
             agents::agent_usage,
             agents::plan_usage,

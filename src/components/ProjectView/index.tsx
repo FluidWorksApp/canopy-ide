@@ -178,6 +178,7 @@ import { PrView } from "../PrView";
 import { ErrorBoundary } from "../ErrorBoundary";
 import { TeamPanel } from "../TeamPanel";
 import { McpToolsPanel } from "../McpToolsPanel";
+import { McpView } from "../McpView";
 import { ChatView } from "../ChatView";
 import { Coachmark } from "../Coachmark";
 import { shouldShowTip, markTipSeen, type CoachTip } from "../../coachmarks";
@@ -205,6 +206,7 @@ import {
   type AgentSubTab,
   type TaskHistorySubTab,
   type InstructionsSubTab,
+  type McpSubTab,
   type ChatSubTab,
   type CollabSubTab,
   type SharedProjectSubTab,
@@ -228,6 +230,7 @@ export type {
   AgentSubTab,
   TaskHistorySubTab,
   InstructionsSubTab,
+  McpSubTab,
   ChatSubTab,
   CollabSubTab,
   SharedProjectSubTab,
@@ -1618,6 +1621,27 @@ const ProjectViewBody = memo(function ProjectViewBody({
       }
       const id = tabId();
       setTabs((prev) => [...prev, { id, type: "instructions", focus }]);
+      setActiveTabId(id);
+    },
+    [patchTabRaw],
+  );
+
+  /** Open one MCP server as its own tab, reusing the one already open for it.
+   *  Identity is the server key — the same server reached through two CLIs is
+   *  one server, and opening it from either row should land on one tab. */
+  const openMcpServer = useCallback(
+    (server: ipc.McpServer) => {
+      const existing = tabsRef.current.find(
+        (t): t is McpSubTab => t.type === "mcp" && t.server.key === server.key,
+      );
+      if (existing) {
+        // The panel's copy is the fresher read of the configs.
+        patchTabRaw(existing.id, { server } as Partial<SubTab>);
+        setActiveTabId(existing.id);
+        return;
+      }
+      const id = tabId();
+      setTabs((prev) => [...prev, { id, type: "mcp", server }]);
       setActiveTabId(id);
     },
     [patchTabRaw],
@@ -3063,6 +3087,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
           return push({ id: tabId(), type: "task-history" });
         case "instructions":
           return push({ id: tabId(), type: "instructions", focus: t.focus });
+        case "mcp":
+          return push({ id: tabId(), type: "mcp", server: t.server });
         case "chat":
           return push({
             id: tabId(),
@@ -5005,6 +5031,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
             focus={tab.focus}
           />
         );
+      case "mcp":
+        return <McpView server={tab.server} onNotice={onNotice} />;
       case "instructions":
         return (
           <InstructionsView
@@ -6188,6 +6216,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         <McpToolsPanel
           rootsKey={rootsKey}
           visible={sideTab === "tools" && visible && sideOpen}
+          onOpen={openMcpServer}
         />
       ))}
     </div>

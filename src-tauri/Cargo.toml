@@ -47,7 +47,8 @@ dictation = [
 ]
 
 [dependencies]
-tokio = { version = "1", features = ["rt", "sync", "time", "macros", "process", "net"] }
+# io-util: the MCP client reads its stdio servers a line at a time (AsyncBufReadExt).
+tokio = { version = "1", features = ["rt", "sync", "time", "macros", "process", "net", "io-util"] }
 # Canopy Remote: an embedded HTTP + WebSocket server that serves the mobile
 # control portal and bridges it to the local command surface (projects, agent
 # status, PTY I/O). axum is the tokio-native choice and reuses the runtime Tauri
