@@ -43,6 +43,9 @@
   --r-md: 12px; /* tabs, cards, panels */
   --r-lg: 16px; /* palette, dialogs, toasts */
 
+  /* ---- pane-bar rails — one width so the right edge never moves ---- */
+  --rail-chip-w: 172px;
+
   /* ---- elevation — layered, cool-black ---- */
   --shadow-1: 0 1px 2px rgba(6, 8, 18, 0.28);
   --shadow-2: 0 4px 14px rgba(6, 8, 18, 0.35), 0 1px 3px rgba(6, 8, 18, 0.3);
@@ -1252,6 +1255,26 @@ body,
   font-weight: 600;
 }
 
+/* Plan headroom. Quiet by default — it is ambient information most of the
+   time — and only takes colour as a window fills, so the tray does not cry
+   wolf at 20%. Colour is never the only signal: the percentage is right there
+   in the text, which is what makes this readable to a colour-blind user. */
+.status-plan {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+
+.status-plan.is-warn {
+  color: var(--warn, #d89614);
+  font-weight: 600;
+}
+
+.status-plan.is-critical {
+  background: var(--danger-soft, rgba(220, 76, 70, 0.16));
+  color: var(--danger, #dc4c46);
+  font-weight: 600;
+}
+
 .status-spacer {
   flex: 1;
 }
@@ -1301,11 +1324,36 @@ body,
   color: var(--text-dim);
 }
 
-/* Resource breakdown popup: project -> sessions -> processes. */
+/* Resource breakdown popup: project -> sessions -> processes.
+   Fixed width, not min-width: cpu/mem/token figures re-render every couple of
+   seconds and a shrink-to-fit panel jumped a few pixels wider or narrower on
+   each tick (and again whenever a session with a long title appeared). The
+   width is now the panel's, and the content fits itself into it. */
 .status-breakdown {
-  min-width: 330px;
+  width: 430px;
+  max-width: calc(100vw - 24px);
   max-height: 55vh;
   overflow-y: auto;
+  overflow-x: hidden;
+  /* Reserved so crossing the scroll threshold doesn't nudge the content. */
+  scrollbar-gutter: stable;
+}
+
+/* Labels take the slack and ellipsis; the figures keep their own column, so a
+   row that gains a digit can't push the label around. */
+.bd-row > span:first-child,
+.bd-head > span:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bd-row > .bd-nums,
+.bd-head > .bd-nums {
+  min-width: 88px;
+  text-align: right;
 }
 
 /* Stats chip: an icon button in the corner that opens the all-CLI usage popup. */
@@ -1471,6 +1519,96 @@ body,
   margin-top: 4px;
   border-top: 1px solid var(--border);
   padding-top: 8px;
+}
+
+/* Plan limits: one group per CLI, one bar per rolling window. */
+.plan-list {
+  padding: 6px 12px 2px;
+}
+
+.plan-group + .plan-group {
+  margin-top: 10px;
+}
+
+.plan-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 5px;
+}
+
+.plan-agent {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.plan-tier {
+  font-size: 10px;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+/* Pushed right: the age of a reading is a caveat on the row, not a headline. */
+.plan-stale {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.plan-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 1.9;
+}
+
+.plan-window {
+  width: 26px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.plan-track {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.plan-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+.plan-fill[data-tone="warn"] {
+  background: var(--warn);
+}
+
+.plan-fill[data-tone="critical"] {
+  background: var(--danger);
+}
+
+.plan-pct {
+  width: 34px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.plan-reset {
+  width: 108px;
+  color: var(--text-dim);
+  font-size: 10px;
+  text-align: right;
+  white-space: nowrap;
 }
 
 .stats-empty,
@@ -1782,6 +1920,153 @@ body,
 
 .servers-empty p {
   margin: 0 0 6px;
+}
+
+/* ---------- MCP tools panel ---------- */
+
+.mcp-panel {
+  overflow-y: auto;
+  flex: 1;
+}
+
+.mcp-count {
+  font-size: 10px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-dim);
+}
+
+.mcp-error {
+  padding: 8px 12px;
+  color: var(--danger);
+  font-size: 11.5px;
+}
+
+.mcp-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.mcp-row:hover {
+  background: var(--bg-raised);
+}
+
+/* Configured everywhere but switched off everywhere: still worth listing —
+   "why can't the agent see this" is the question the row answers. */
+.mcp-row-off {
+  opacity: 0.55;
+}
+
+.mcp-row-icon {
+  color: var(--text-dim);
+  flex: none;
+}
+
+.mcp-name {
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mcp-transport {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--bg-deep);
+  color: var(--text-dim);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+/* Pushed right and dimmed: which CLIs have it is the answer you scan for once
+   you have found the row, not what you scan the list by. */
+.mcp-agents {
+  margin-left: auto;
+  flex: none;
+  max-width: 46%;
+  color: var(--text-dim);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mcp-detail {
+  padding: 2px 10px 8px 26px;
+  font-size: 11px;
+}
+
+.mcp-launch {
+  padding: 3px 0 5px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+}
+
+.mcp-env {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding-bottom: 6px;
+}
+
+.mcp-env-key {
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 15px;
+}
+
+.mcp-source {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  line-height: 18px;
+}
+
+.mcp-source-label {
+  color: var(--text);
+}
+
+.mcp-source-name {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mcp-source-status {
+  margin-left: auto;
+  flex: none;
+  color: var(--warn);
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.mcp-source-disabled .mcp-source-label,
+.mcp-source-disabled .mcp-source-name {
+  opacity: 0.6;
+}
+
+.mcp-pending-note {
+  padding: 10px 12px 12px;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  line-height: 1.45;
 }
 
 /* Live, not urgent: a running server is the good case. */
@@ -2851,7 +3136,9 @@ body.dragging-tab * {
   color: var(--text);
   opacity: 0.85;
 }
-.run-rail:not(.pane-section-dim) .run-chip-active {
+/* Not the menu's rows: growing the active one there gave it its own padding and
+   font size, so its ✕ sat a few px off the column the others line up on. */
+.run-rail:not(.pane-section-dim) .run-chip-active:not(.rail-menu-chip) {
   padding: 4px 10px;
   font-size: 12px;
   font-weight: 550;
@@ -2879,8 +3166,23 @@ body.dragging-tab * {
   overflow: visible;
 }
 
-.rail-toggle {
-  max-width: 200px;
+/* Fixed width, not shrink-to-fit: the rail sits at the right edge, so a chip
+   that sizes to the run's name shoves everything beside it sideways every time
+   the active run changes. One width for the collapsed toggle and for the lone
+   chip of a single-run rail; long names ellipsis inside it. */
+.rail-toggle,
+.run-rail > .run-chip {
+  width: var(--rail-chip-w);
+  max-width: var(--rail-chip-w);
+}
+
+/* The name takes the slack, so the count/caret (and, on a lone chip, the ✕)
+   always land on the same right edge. */
+.rail-toggle .run-chip-title,
+.run-rail > .run-chip .run-chip-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
 }
 
 .rail-count {
@@ -2897,8 +3199,12 @@ body.dragging-tab * {
   line-height: 1;
 }
 
-/* Many runs shouldn't grow a menu taller than the window. */
+/* Many runs shouldn't grow a menu taller than the window. A fixed width keeps
+   every row the same shape whatever the runs are called, so the menu doesn't
+   resize under the cursor as runs come and go. */
 .rail-menu {
+  width: 260px;
+  max-width: calc(100vw - 24px);
   max-height: 60vh;
   overflow-y: auto;
   display: flex;
@@ -2906,10 +3212,25 @@ body.dragging-tab * {
   gap: 2px;
 }
 
-/* Inside the menu the chips are rows, not a scrolling strip. */
-.rail-menu-chip {
+/* Inside the menu the chips are rows, not a scrolling strip. Qualified by the
+   menu because `.run-chip`'s max-width:150px is declared later in this file and
+   wins at equal specificity — which left every row 150px wide inside a wider
+   menu, with a dead gutter down its right side. */
+.rail-menu .rail-menu-chip {
   max-width: none;
   width: 100%;
+}
+
+/* The name absorbs the row's slack so the restart/close controls sit on one
+   right edge down the column, instead of trailing each name at its own x. */
+.rail-menu-chip .run-chip-title {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.rail-menu-chip .run-chip-btn,
+.rail-menu-chip .tab-close {
+  flex: 0 0 auto;
 }
 
 /* ---- endpoints a shell is serving ------------------------------------- */
@@ -3917,8 +4238,19 @@ body.dragging-tab * {
   min-width: 0;
 }
 
+/* A row is named after its tab now, so the name is a sentence ("Fix the login
+   redirect") rather than a word ("claude"). Capped and ellipsized: left to
+   grow it would push the timer, directory and branch chips onto a second
+   line, and those chips are what tell two rows apart when the names are
+   similar. */
 .agent-name {
   font-weight: 600;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Lifecycle dot: one glance tells working from waiting-on-you from finished. */
@@ -8628,12 +8960,6 @@ textarea,
   gap: 6px;
 }
 
-.restore-unsupported {
-  color: var(--text-dim);
-  font-size: 10px;
-  font-style: italic;
-}
-
 /* ---------- issue trackers panel ---------- */
 
 .tracker-section {
@@ -9652,12 +9978,6 @@ textarea,
 
 .resume-row .btn-mini {
   margin-top: 0;
-}
-
-.resume-unsupported {
-  font-size: 10px;
-  color: var(--text-dim);
-  font-style: italic;
 }
 
 /* Recoverable crash panel — shown by ErrorBoundary instead of a blank window. */
@@ -11803,18 +12123,6 @@ a.btn-mini {
   background: var(--bg);
   position: relative;
   overflow: hidden;
-}
-/* Punch-through layering (experimental): the page's native view sits UNDER
-   the app webview instead of over it, and the backend stops this webview
-   drawing its background — so the page shows wherever the DOM doesn't paint.
-   These are the only boxes that paint inside the pane's rectangle, and they
-   must stop; every other region keeps its own surface colour, and the window
-   itself is painted in --bg by the backend so nothing flashes the platform
-   default. */
-html.punch-through #root,
-html.punch-through .preview-frame-wrap,
-html.punch-through .preview-webview-host {
-  background: transparent;
 }
 /* The last picture of the page, standing in for it while an overlay has the
    view pushed off screen — so a menu opening looks like the page pausing

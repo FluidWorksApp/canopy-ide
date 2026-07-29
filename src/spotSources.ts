@@ -17,6 +17,7 @@ import { TRACKERS } from "./trackers";
 import { getSnapshot as prSnapshot } from "./prWatchStore";
 import { toPrInfo } from "./prInbox";
 import { getSettings } from "./settings";
+import { heldBadge, heldBranches } from "./branchSwitch";
 
 /** What Enter does on a row — ProjectView owns the dispatch, this names it. */
 export type SpotAction =
@@ -31,6 +32,11 @@ export type SpotAction =
   | { type: "open-pr"; repo: string; pr: ipc.PrInfo }
   | { type: "open-server"; path: string; tabId: string | null }
   | { type: "open-task-run"; runId: string }
+  /** Switch this repo to a branch. Named here rather than run through `custom`
+   *  because the switch has to reach the shared funnel (useBranchSwitch), and a
+   *  module-level closure can't — only ProjectView's dispatch is inside the
+   *  provider. */
+  | { type: "switch-branch"; repo: string; branch: string }
   /** The escape hatch for registered sources: the row does its own opening.
    *  Still bound by the rule above — `run` must land the user on something
    *  native, not open a browser and call it a result. */
@@ -432,6 +438,64 @@ export async function ticketRows(query: string, repos: string[]): Promise<SpotRo
   );
 }
 
+/** Branches, so "switch to the thing I'm thinking of" works from wherever the
+ *  user is rather than only from the Git panel. Cached like tickets: two git
+ *  processes per repo (the branches, and the workspaces that already hold some
+ *  of them) is not a per-keystroke cost. */
+let branchCache: {
+  at: number;
+  key: string;
+  rows: { repo: string; branch: ipc.BranchInfo; held: ipc.WorktreeInfo | undefined }[];
+} | null = null;
+const BRANCH_TTL = 15_000;
+
+export async function branchRows(query: string, repos: string[]): Promise<SpotRow[]> {
+  if (!query.trim()) return [];
+  const key = repos.join("\n");
+  if (!branchCache || branchCache.key !== key || Date.now() - branchCache.at > BRANCH_TTL) {
+    const lists = await Promise.all(
+      repos.map(async (repo) => {
+        const [branches, worktrees] = await Promise.all([
+          ipc.gitBranches(repo).catch(() => [] as ipc.BranchInfo[]),
+          ipc.gitWorktrees(repo).catch(() => [] as ipc.WorktreeInfo[]),
+        ]);
+        const held = heldBranches(worktrees, repo);
+        return (
+          branches
+            // Switching to where you already are is not a result.
+            .filter((branch) => !branch.current)
+            .map((branch) => ({ repo, branch, held: held.get(branch.name) }))
+        );
+      }),
+    );
+    branchCache = { at: Date.now(), key, rows: lists.flat() };
+  }
+  return ranked(
+    query,
+    branchCache.rows.map(({ repo, branch, held }) => ({
+      hay: `${branch.name} ${branch.subject}`,
+      row: {
+        id: `br:${repo}:${branch.name}`,
+        group: "Branches",
+        kind: "branch",
+        title: branch.name,
+        // The badge leads: a long subject truncates, and knowing another
+        // workspace has this branch is worth more before the click than after
+        // — the same courtesy the Git panel's rows give.
+        detail: [
+          held ? heldBadge(held).label : null,
+          branch.remote_only ? "not here yet" : null,
+          branch.subject,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+        score: 0,
+        action: { type: "switch-branch", repo, branch: branch.name } as SpotAction,
+      },
+    })),
+  );
+}
+
 // ---------- the registry ----------
 //
 // The palette doesn't know this file's functions — it asks the registry below,
@@ -502,6 +566,7 @@ const SOURCES: SpotSource[] = [
   { id: "sessions", group: "Agent Sessions", blurb: "Agent sessions by prompt, branch and files touched (from their digests).", timing: "instant", rows: (q) => sessionRows(q.query, q.ctx) },
   { id: "tickets", group: "Tickets", blurb: "Issues from the configured trackers. Fetches over the network, cached 60s.", timing: "deferred", rows: (q) => ticketRows(q.query, q.roots) },
   { id: "prs", group: "Pull Requests", blurb: "Open PRs the watcher has already fetched — no round trip here.", timing: "instant", rows: (q) => prRows(q.query) },
+  { id: "branches", group: "Branches", blurb: "Branches in this project's repos, local and remote. Enter switches this repo to one.", timing: "deferred", rows: (q) => branchRows(q.query, q.roots) },
   { id: "servers", group: "Servers", blurb: "Every command this project can run, and what's up right now.", timing: "instant", rows: (q) => serverRows(q.query, q.ctx) },
   { id: "tasks", group: "Task History", blurb: "One-shot tasks that have finished, and what they reported.", timing: "instant", rows: (q) => taskRows(q.query, q.ctx) },
 ];

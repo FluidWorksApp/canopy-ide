@@ -152,43 +152,6 @@ export function themeRgb(): [number, number, number] | undefined {
   return undefined;
 }
 
-/** Which layering the backend was last told, with the window colour it was
- *  told alongside — so a theme change re-sends and everything else stays
- *  quiet. Null until the first pass. */
-let toldLayering: string | null = null;
-
-/** Punch-through is the experimental inversion: browser views UNDER a
- *  see-through app webview, so overlays genuinely paint over the page and
- *  none of the hide/freeze machinery below is needed. The native side needs
- *  to know (transparency, z-order, hitTest), and the DOM needs the
- *  `punch-through` class for the boxes that must stop painting the pane's
- *  rectangle (index.css). */
-function ensureLayering(punch: boolean) {
-  const rgb = themeRgb();
-  const now = `${punch}:${rgb?.join(",") ?? ""}`;
-  if (toldLayering === now) return;
-  toldLayering = now;
-  document.documentElement.classList.toggle("punch-through", punch);
-  void ipc.browserSetLayering(punch, rgb).catch((err) => {
-    // A backend that can't re-layer (non-macOS, or an older build) leaves the
-    // overlay behaviour in place, which still works — but never silently.
-    toldLayering = null;
-    void ipc.jsLog("warn", `browser: layering not applied: ${String(err)}`);
-  });
-}
-
-/** What the backend's pass-through region was last told, as JSON. */
-let toldPassthrough: string | null = null;
-
-/** The last pass-through region synced to the backend — a reading of what was
- *  told, for the selftest to hold against what the DOM says. Null until punch
- *  layering has synced once. */
-export function lastPassthrough(): { pass: Bounds[]; block: Bounds[] } | null {
-  if (!toldPassthrough) return null;
-  const [pass, block] = JSON.parse(toldPassthrough) as [Bounds[], Bounds[]];
-  return { pass, block };
-}
-
 /** Cmd +/- scales CSS pixels against the window's points (see zoom.ts), and a
  *  webview is positioned in points. applyZoom stamps the level here. */
 function currentZoom(): number {
@@ -303,12 +266,6 @@ function apply() {
   const zoom = currentZoom();
   const viewport = { width: window.innerWidth, height: window.innerHeight };
   const anyWanted = [...views.values()].some((e) => e.wanted);
-  const punch = getSettings().browserLayering === "punch";
-  if (anyWanted) ensureLayering(punch);
-  /** Punch-through: where events fall through to the page, and where an
-   *  overlay keeps them in the app. Rebuilt every pass, synced when changed. */
-  const pass: Bounds[] = [];
-  const block: Bounds[] = [];
 
   for (const [tabId, e] of views) {
     const host = e.wanted ? e.host() : null;
@@ -321,18 +278,10 @@ function apply() {
         .browserSetBounds(tabId, bounds.x, bounds.y, bounds.width, bounds.height)
         .catch(() => {});
     }
-    // The walk still runs under punch-through — occluders no longer hide the
-    // view, but their rectangles are exactly where clicks must NOT fall
-    // through to the page.
+    // Only pay for the walk when this view would otherwise be on screen.
     const over = host && rect && bounds && showable(bounds) ? occludersOver(host, rect) : null;
     const clear = !!over && over.length === 0;
-    const visible = punch
-      ? e.wanted && suppressed === 0 && !!bounds && showable(bounds)
-      : e.wanted && suppressed === 0 && clear;
-    if (punch && visible && bounds) {
-      pass.push(bounds);
-      for (const c of over ?? []) block.push(webviewBounds(c.rect, viewport, zoom));
-    }
+    const visible = e.wanted && suppressed === 0 && clear;
     if (visible !== e.shown) {
       e.shown = visible;
       const seq = ++visibilitySeq;
@@ -369,10 +318,8 @@ function apply() {
     }
     // Take the picture while the view is still up. A hidden WKWebView
     // snapshots to nothing, so the instant the frame is needed is the instant
-    // it can no longer be taken — it has to already be in hand. Punch-through
-    // never hides the view for an overlay, so it never needs the picture.
+    // it can no longer be taken — it has to already be in hand.
     if (
-      !punch &&
       shouldCapture({
         native: true,
         shown: e.shown === true,
@@ -385,15 +332,6 @@ function apply() {
       capture(tabId, e);
     }
     publish(tabId, e);
-  }
-  if (punch) {
-    const next = JSON.stringify([pass, block]);
-    if (toldPassthrough !== next) {
-      toldPassthrough = next;
-      void ipc.browserSetPassthrough(pass, block).catch(() => {
-        toldPassthrough = null;
-      });
-    }
   }
   watch(anyWanted);
 }
@@ -709,8 +647,6 @@ export function useBrowserEngine(): BrowserEngine | null {
 export function resetBrowserHost() {
   views.clear();
   suppressed = 0;
-  toldLayering = null;
-  toldPassthrough = null;
   if (scheduled) window.clearTimeout(scheduled);
   scheduled = 0;
   watch(false);

@@ -44,6 +44,16 @@ describe("restorableFrom", () => {
     expect(restorableFrom([digest()], [], ["s-1"])).toHaveLength(1);
   });
 
+  it("drops sessions with no way back, rather than offering an unusable row", () => {
+    // No transcript found on disk for this id (resume_location said so), so
+    // every --resume against it fails.
+    expect(restorableFrom([digest({ resumable: false })], [], [])).toHaveLength(0);
+    // Same for a CLI that can't reopen a specific session by id at all.
+    expect(restorableFrom([digest({ agent: "aider" })], [], [])).toHaveLength(0);
+    // Every row that survives carries the command that reopens it.
+    expect(restorableFrom([digest()], [], [])[0].command).toContain("s-1");
+  });
+
   it("drops a promptless claude session, which could only fail to resume", () => {
     expect(restorableFrom([digest({ prompts: [] })], [], [])).toHaveLength(0);
     // Other CLIs capture prompts best-effort, so an empty list means nothing.

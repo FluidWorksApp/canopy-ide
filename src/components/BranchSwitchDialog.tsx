@@ -23,9 +23,11 @@ export function BranchSwitchDialog({
         <p className="branch-switch-title">{dialog.title}</p>
         <p className="branch-switch-body">{dialog.body}</p>
         <div className="branch-switch-choices">
-          {dialog.choices.map((c) => (
+          {dialog.choices.map((c, i) => (
             <button
-              key={c.action}
+              // Keyed by position, not by action: a question built with
+              // askDialog can legitimately offer the same action twice.
+              key={`${c.action}-${i}`}
               className={`branch-switch-choice ${
                 c.recommended ? "branch-switch-choice-lead" : ""
               }`}

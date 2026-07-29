@@ -29,11 +29,7 @@ import {
   type OverlaySurface,
 } from "../overlaySurfaces";
 import { BROWSER_INPUT_EVENT } from "../components/PreviewView";
-import {
-  lastPassthrough,
-  refreshBrowserViews,
-  suppressBrowserViews,
-} from "../browserHost";
+import { refreshBrowserViews, suppressBrowserViews } from "../browserHost";
 import { updateSettings } from "../settings";
 import {
   startBrowserWatchdog,
@@ -320,6 +316,12 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
   try {
     await step("stage", "Clear anything already on screen", async () => {
       await clearTheStage();
+      // Everything below tests the webview engine's contract, and that engine
+      // is no longer the default — so it is asked for by name. Without this
+      // the whole scenario would quietly pass by testing nothing, which is
+      // the failure mode this suite exists to prevent.
+      updateSettings({ browserEngine: "webview" });
+      refreshBrowserViews();
     });
 
     await step("project", "Open the scratch project", async () => {
@@ -477,48 +479,6 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
       });
     }
 
-    // ---- the same surfaces, under punch-through layering ----
-    // The contract inverts: the browser view sits UNDER the app webview, so
-    // an overlay must NOT hide the page — it paints over it — and the
-    // overlay's rectangle must be excluded from the click pass-through region.
-    updateSettings({ browserLayering: "punch" });
-    refreshBrowserViews();
-    try {
-      const engaged = await settle(() => {
-        const told = lastPassthrough();
-        return !!told && told.pass.length > 0 && view()?.shown === true;
-      });
-      if (!engaged) {
-        surfaces.push({
-          id: "punch:engage",
-          label: "Punch-through layering engages",
-          kind: "persistent",
-          covers: "center",
-          ok: false,
-          detail: `pass region never synced with the page on screen — ${viewSays(view())}`,
-        });
-      } else {
-        for (const surface of drivableSurfaces()) {
-          const report = await exercisePunchSurface(surface, since, () => signals.length);
-          void ipc.jsLog(
-            report.ok ? "info" : "error",
-            `browser:SELFTEST surface ${report.id} ${
-              report.skipped
-                ? `skipped (${report.why})`
-                : report.ok
-                  ? "ok"
-                  : `FAILED — ${report.detail}`
-            }`,
-          );
-          surfaces.push(report);
-        }
-      }
-    } finally {
-      updateSettings({ browserLayering: "overlay" });
-      refreshBrowserViews();
-      // Let the shipped layering settle back before anything samples pixels.
-      await settle(() => view()?.shown === true);
-    }
 
     // ---- pixel sanity, advisory ----
     await step("pixels", "The hidden pane shows the page, not a white hole", async () => {
@@ -548,7 +508,14 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
     await step("dismiss", "A press in the page closes the panel covering it", async () => {
       const surface = OVERLAY_SURFACES.find((s) => s.id === "side-peek");
       if (!surface?.open) throw new StepFailure("no side panel to open");
-      const up = () => !!document.querySelector(surface.selector);
+      // On screen, not merely present. The panel is always in the DOM — closed
+      // is a class that translates it off to the left — so asking whether the
+      // element exists is asking a question whose answer is always yes. It
+      // made this step fail on every run, and the `finally` below then toggled
+      // the panel back OPEN over the page, taking the next three steps with
+      // it. A red step that fabricates its own failure and poisons its
+      // neighbours is worse than no step.
+      const up = () => painting(surface.selector);
       await surface.open();
       if (!(await settle(up))) throw new StepFailure("the panel never opened");
       try {
@@ -609,20 +576,30 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
         DEADLINE.frame,
         viewSays,
       );
+      // Asserted on the signal stream rather than by polling for the moment
+      // the frame is null. That window is real but tiny — the host drops the
+      // frame and the next pass photographs the new page ~16ms later — so a
+      // 25ms poll usually misses it, and the step then failed for a contract
+      // that had in fact been kept. The signals are the record, and what
+      // actually matters is the order: the old frame went, and the frame now
+      // on screen was taken after the navigation, not before it.
+      const mark = signals.length;
       await ipc.browserNavigate(v.tabId, `${cfg.url}?again=1`);
       await until(
-        "the stale frame was kept across a navigation",
-        view,
-        (s) => s?.hasFrame === false,
+        "the page never reported the navigation",
+        () => since(mark).some((s) => s.t === "nav" && s.loading),
+        (seen) => seen,
         DEADLINE.nav,
-        viewSays,
+        () => viewSays(view()),
       );
       const ms = await until(
         "no frame was captured after the navigation",
-        view,
-        (s) => s?.hasFrame === true,
+        () =>
+          since(mark).some((s) => s.t === "capture" && s.result === "ok") &&
+          view()?.hasFrame === true,
+        (ok) => ok,
         DEADLINE.nav,
-        viewSays,
+        () => viewSays(view()),
       );
       return `re-captured after ${ms}ms`;
     });
@@ -665,6 +642,54 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
       await sleep(400);
       return `converged in ${ms}ms`;
     });
+
+    // ---- the default engine ----
+    // Everything above is the webview engine, asked for by name. This is the
+    // one people actually get, and the reason it is the default: an iframe is
+    // ordinary DOM, so a panel over it covers the part it covers and the rest
+    // of the page stays on screen. The webview engine cannot do that at all —
+    // a child webview is composited above the window with no z-order API, and
+    // is not drawn while it is covered.
+    //
+    // Measured on pixels rather than state, because there is no view state to
+    // read: under the proxy there is nothing to hide, which IS the claim.
+    await step("proxy-default", "Under the default engine a panel does not blank the page", async () => {
+      updateSettings({ browserEngine: "proxy" });
+      refreshBrowserViews();
+      // Let the native views go before framing anything. An iframe drawn over
+      // a live child webview is a real fault the watchdog is right to report;
+      // here it would only be this step changing engines underneath itself.
+      await settle(() => browserViewSnapshots().length === 0, 10_000);
+      window.dispatchEvent(
+        new CustomEvent("canopy:agent-action", {
+          detail: { projectId, action: { kind: "open_preview", url: `${cfg.url}?proxy=1` } },
+        }),
+      );
+      const frame = await settle(
+        () => !!document.querySelector<HTMLIFrameElement>("iframe.preview-frame"),
+        20_000,
+      );
+      if (!frame) return "skipped — no proxy preview came up to measure";
+      await sleep(2500);
+      const el = document.querySelector<HTMLIFrameElement>("iframe.preview-frame")!;
+      const peek = OVERLAY_SURFACES.find((s) => s.id === "side-peek");
+      await peek?.open?.();
+      await sleep(900);
+      const covered = await samplePane(el.getBoundingClientRect());
+      if (peek) await ensureClosed(peek);
+      if (typeof covered === "string") {
+        notes.push(`advisory: proxy pixels not sampled — ${covered}`);
+        return `not sampled (${covered})`;
+      }
+      const pct = (n: number) => `${Math.round(n * 100)}%`;
+      if (covered.page <= 0.02) {
+        throw new StepFailure(
+          `the page was not on screen with a panel open — page=${pct(covered.page)} white=${pct(covered.white)}`,
+        );
+      }
+      return `page=${pct(covered.page)} white=${pct(covered.white)} with a panel open`;
+    });
+
   } catch (err) {
     steps.push({
       id: "scenario",
@@ -812,103 +837,7 @@ async function exerciseSurface(
   }
 }
 
-/** One overlay surface under punch-through: the page must stay on screen
- *  while the surface paints over it, and the surface's rectangle must be in
- *  the block region so clicks on it stay in the app. The freeze-frame
- *  machinery is asserted absent rather than present. */
-async function exercisePunchSurface(
-  surface: OverlaySurface,
-  since: (mark: number) => BrowserSignal[],
-  mark: () => number,
-): Promise<SurfaceReport> {
-  const base: SurfaceReport = {
-    id: `punch:${surface.id}`,
-    label: `${surface.label} (punch-through)`,
-    kind: surface.kind,
-    covers: surface.covers,
-    ok: true,
-  };
-  const v0 = view();
-  if (!v0 || v0.shown !== true) {
-    return { ...base, skipped: true, why: "the page was not on screen to be covered" };
-  }
-  const pane = v0.hostRect;
-  const m = mark();
-  try {
-    await surface.open?.();
-    const appeared = await settle(() => painting(surface.selector));
-    if (!appeared) {
-      await ensureClosed(surface, true);
-      return { ...base, skipped: true, why: surface.why ?? "the surface never appeared" };
-    }
-    const over = await settle(() => coversPane(surface.selector, pane));
-    if (!over) {
-      await ensureClosed(surface, true);
-      return {
-        ...base,
-        skipped: true,
-        why: "it opened clear of the pane, so there was nothing to block",
-      };
-    }
-    // The whole point of the mode: the overlay arrives and the page stays.
-    // Wait as long as a hide would take to be issued, then ask for one.
-    await sleep(1200);
-    const hide = hideIssued(since(m));
-    if (hide) {
-      throw new StepFailure("the page was hidden for an overlay that should paint over it");
-    }
-    if (view()?.shown !== true) {
-      throw new StepFailure(`the page left the screen — ${viewSays(view())}`);
-    }
-    // Clicks under the overlay must stay in the app. The block region is in
-    // window points; the selftest runs unzoomed, so CSS pixels compare 1:1.
-    const blockMs = await until(
-      "the overlay never entered the click block region",
-      () => blockCovers(surface.selector),
-      (b) => b,
-      DEADLINE.hide,
-      () => JSON.stringify(lastPassthrough()?.block ?? null),
-    );
 
-    await ensureClosed(surface);
-    const clearMs = await until(
-      "the block region kept the overlay after it closed",
-      () => !painting(surface.selector) || !blockCovers(surface.selector),
-      (b) => b,
-      DEADLINE.show,
-      () => JSON.stringify(lastPassthrough()?.block ?? null),
-    );
-    if (view()?.shown !== true) {
-      throw new StepFailure("the page left the screen after the overlay closed");
-    }
-    return { ...base, hideMs: blockMs, showMs: clearMs };
-  } catch (err) {
-    return {
-      ...base,
-      ok: false,
-      detail: err instanceof Error ? err.message : String(err),
-    };
-  } finally {
-    await ensureClosed(surface);
-  }
-}
-
-/** Whether any painted box matching `selector` overlaps a rect in the synced
- *  block region. */
-function blockCovers(selector: string): boolean {
-  const told = lastPassthrough();
-  if (!told) return false;
-  for (const el of document.querySelectorAll(selector)) {
-    const r = el.getBoundingClientRect();
-    if (r.width < 2 || r.height < 2) continue;
-    for (const b of told.block) {
-      const w = Math.min(r.right, b.x + b.width) - Math.max(r.left, b.x);
-      const h = Math.min(r.bottom, b.y + b.height) - Math.max(r.top, b.y);
-      if (w > 1 && h > 1) return true;
-    }
-  }
-  return false;
-}
 
 /** Whether anything matching `selector` is actually over the pane. */
 function coversPane(selector: string, pane: DOMRect | null): boolean {

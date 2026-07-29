@@ -109,8 +109,11 @@ import { FileTree } from "../FileTree";
 import { FileView } from "../FileView";
 import { ChangesPanel, type ChangeGroup } from "../ChangesPanel";
 import { useEscape } from "../../useEscape";
+import { BranchSwitchProvider, useBranchSwitch } from "../../useBranchSwitch";
+import { askDialog } from "../../branchSwitch";
 import { useTabDrag, applyOrder } from "../../tabDrag";
 import { agentIdForCommand, identifyAgent } from "../../agentIdentity";
+import { tabNamesByPty } from "../../agentDisplayName";
 import { modelCommandLine, modelSwitchFor } from "../../agentModels";
 import { AgentsPanel, digestBySurface } from "../AgentsPanel";
 import { StatusBar } from "../StatusBar";
@@ -142,7 +145,7 @@ import { dispatchBrowserOp } from "../../previewAgent";
 import { useBrowserEngine } from "../../browserHost";
 import { serverForUrl } from "../../preview";
 import { ticketBranch, ticketContext, ticketWorktree } from "../../trackers";
-import { prConflictContext, prReviewContext, prWorktree } from "../../prs";
+import { prConflictContext, prReviewContext } from "../../prs";
 import {
   fileDiffContext,
   reviewContext,
@@ -173,6 +176,7 @@ import {
 import { PrView } from "../PrView";
 import { ErrorBoundary } from "../ErrorBoundary";
 import { TeamPanel } from "../TeamPanel";
+import { McpToolsPanel } from "../McpToolsPanel";
 import { ChatView } from "../ChatView";
 import { Coachmark } from "../Coachmark";
 import { shouldShowTip, markTipSeen, type CoachTip } from "../../coachmarks";
@@ -319,11 +323,20 @@ const SIDE_DEFAULT_W = 300;
 const SIDE_MIN_W = 200;
 const SIDE_MAX_W = 560;
 
+/** How the body hands its "point the files at this workspace" action up to the
+ *  funnel that wraps it. A ref rather than lifted state: `worktreeEnv` and the
+ *  side panel belong to the body, a provider can't be consumed by the component
+ *  that renders it, and this file already passes closeTab and openFile back up
+ *  the same way. */
+type UseWorktreeRef = {
+  current: (repo: string, path: string, branch: string) => void;
+};
+
 // Memoized: App re-renders on every agent event, relay tick and toast, and
 // every open project's view — visible or not — used to re-render with it.
 // Every prop is either data that should re-render this view or a handler App
 // keeps identity-stable.
-export const ProjectView = memo(function ProjectView({
+const ProjectViewBody = memo(function ProjectViewBody({
   project,
   visible,
   zen,
@@ -340,7 +353,8 @@ export const ProjectView = memo(function ProjectView({
   restore,
   onRestoreStep,
   onRestored,
-}: ProjectViewProps) {
+  useWorktreeRef,
+}: ProjectViewProps & { useWorktreeRef: UseWorktreeRef }) {
   // Which engine preview tabs run on — it decides how a backgrounded preview
   // has to be hidden, which is a layout question, so it belongs up here.
   const browserEngine = useBrowserEngine();
@@ -350,6 +364,10 @@ export const ProjectView = memo(function ProjectView({
   // that the debounce below retracts. Either one shows it.
   const [pinned, setPinned] = useState(false);
   const [peeking, setPeeking] = useState(false);
+  /** Close the side panel, whatever is holding it open. Kept in a ref because
+   *  the thing that needs it most — opening a preview — is defined long before
+   *  the peek timers it has to cancel. */
+  const dismissPeekRef = useRef<() => void>(() => {});
   /** How the user wants the panel to behave (Settings → Appearance). Held in
    *  state rather than read inline: these decide what effects are registered,
    *  and a change has to take hold without reopening the project. */
@@ -412,6 +430,102 @@ export const ProjectView = memo(function ProjectView({
     path: string;
     branch: string;
   } | null>(null);
+  // The one funnel, mounted by the wrapper below this component. Every route
+  // into a ref that moves goes through it, so a refusal arrives as a question
+  // in one dialog instead of raw stderr in a toast.
+  const { switchTo, ask } = useBranchSwitch();
+  /** Perform the redirection: the project's files, search and new terminals
+   *  come from this workspace instead of the main checkout. The funnel owns the
+   *  label and the notice, which is why every surface calls its `openThere` and
+   *  nothing calls this directly. */
+  const useWorktreeHere = useCallback(
+    (repo: string, path: string, branch: string) => {
+      void ipc.workspaceAdd(path).catch(() => {});
+      setWorktreeEnv({ repo, path, branch });
+      setSideTab("files");
+    },
+    [],
+  );
+  useWorktreeRef.current = useWorktreeHere;
+  /** The only way out of that redirection, and it used to be silent: a bare ✕
+   *  that moved the file tree, the search index and every new terminal back
+   *  without a word, while the editors and terminals already open stayed rooted
+   *  where they were. Asked in the same dialog as everything else.
+   *
+   *  ("move-here" is the funnel's id for "bring it back to this checkout"; ids
+   *  never reach the screen, only labels do.) */
+  const leaveWorktreeEnv = useCallback(
+    async (env: { path: string }) => {
+      const name = env.path.split("/").pop() || env.path;
+      const action = await ask(
+        askDialog({
+          title: "Go back to your own checkout?",
+          body: `Files, search and new terminals stop coming from ${name}. Anything already open there stays open.`,
+          detail: env.path,
+          choices: [
+            {
+              action: "move-here",
+              label: "Go back",
+              sub: "Nothing there is changed or removed — this only stops pointing at it.",
+              recommended: true,
+            },
+            { action: "cancel", label: "Stay here" },
+          ],
+        }),
+      );
+      if (action === "move-here") setWorktreeEnv(null);
+    },
+    [ask],
+  );
+  /** Coming back from hibernation, a stored redirection is a claim about a
+   *  folder we haven't looked at since the project went to sleep — it may have
+   *  been removed, pruned, or moved to another branch in the meantime. Restore
+   *  it only if it is still there and still on the branch it was on; otherwise
+   *  say so, because the alternative is a file tree rooted at a path that no
+   *  longer resolves and nothing on screen explaining why. */
+  const wakeWorktreeEnv = useCallback(
+    async (env: { repo: string; path: string; branch: string }) => {
+      const worktrees = await ipc
+        .gitWorktrees(env.repo)
+        .catch(() => [] as ipc.WorktreeInfo[]);
+      const still = worktrees.some(
+        (w) => w.path === env.path && w.branch === env.branch,
+      );
+      if (still) {
+        setWorktreeEnv(env);
+        return;
+      }
+      const action = await ask(
+        askDialog({
+          title: "The workspace this project was using is gone",
+          body: `${env.path.split("/").pop() || env.path} isn't there any more, so this project's files come from your own checkout. Nothing you had open has been touched.`,
+          detail: `${env.path} — was on ${env.branch}`,
+          choices: [
+            {
+              action: "cancel",
+              label: "Work in the main checkout",
+              sub: "Files, search and new terminals come from this project's own checkout.",
+              recommended: true,
+            },
+            {
+              action: "open-there",
+              label: "Show me what's there",
+              sub: "Opens the list of workspaces this project has.",
+            },
+          ],
+        }),
+      );
+      if (action === "open-there") {
+        setSideTab("git");
+        setPinned(true);
+      }
+    },
+    [ask],
+  );
+  /** Read by the wake effect, which must not take these as dependencies: a new
+   *  identity there would tear down a restore that is halfway through. */
+  const wakeWorktreeEnvRef = useRef(wakeWorktreeEnv);
+  wakeWorktreeEnvRef.current = wakeWorktreeEnv;
 
   const baselines = useRef(new Map<string, string>());
   const recentSaves = useRef(new Map<string, number>());
@@ -690,6 +804,11 @@ export const ProjectView = memo(function ProjectView({
     const id = tabId();
     setTabs((prev) => [...prev, { id, type: "preview", url, annotations: [] }]);
     setActiveTabId(id);
+    // The panel that opened this is almost always still over the pane, and a
+    // browser view cannot be drawn under it — so the page you just asked for
+    // would be hidden by the thing you asked with. Closing it is what the user
+    // was about to do anyway.
+    dismissPeekRef.current();
     return id;
   }, []);
 
@@ -1219,49 +1338,51 @@ export const ProjectView = memo(function ProjectView({
         void ipc.ptyWrite(pty, ticketContext(ticket));
         setTimeout(() => void ipc.ptyWrite(pty, "\r"), 250);
       };
-      try {
-        const worktrees = await ipc
-          .gitWorktrees(repo)
-          .catch(() => [] as ipc.WorktreeInfo[]);
-        const existing = ticketWorktree(ticket, worktrees);
-        const title = `${ticket.id} · ${cli.name}`;
-        if (existing) {
-          const id = addTerminal(existing.path, start.command, title, cli.icon);
-          setTicketWorktrees(worktrees);
-          if (id) setTimeout(() => seed(id), 2500);
-          return;
-        }
-        const branch = ticketBranch(ticket);
-        const path = `${repo}-wt-${branch.replace(/\//g, "-")}`;
-        const branches = await ipc
-          .gitBranches(repo)
-          .catch(() => [] as ipc.BranchInfo[]);
-        await ipc.gitWorktreeAdd(
-          repo,
-          path,
-          branch,
-          !branches.some((b) => b.name === branch),
-        );
-        await ipc.workspaceAdd(path).catch(() => {});
-        setTicketWorktrees(await ipc.gitWorktrees(repo).catch(() => worktrees));
-        const id = addTerminal(path, start.command, title, cli.icon);
+      const worktrees = await ipc
+        .gitWorktrees(repo)
+        .catch(() => [] as ipc.WorktreeInfo[]);
+      const existing = ticketWorktree(ticket, worktrees);
+      const title = `${ticket.id} · ${cli.name}`;
+      if (existing) {
+        const id = addTerminal(existing.path, start.command, title, cli.icon);
+        setTicketWorktrees(worktrees);
         if (id) setTimeout(() => seed(id), 2500);
-      } catch (err) {
-        onNotice(`Couldn't start work on ${ticket.id}: ${String(err)}`);
+        return;
       }
+      // The funnel owns where a workspace goes and what to do when git won't
+      // make one — a branch another workspace already holds, a folder already
+      // at that name, a checkout mid-merge. Each of those used to arrive here
+      // as raw stderr behind "Couldn't start work on".
+      //
+      // A ticket you have never started has no branch yet, so `create` is what
+      // makes "start work on this" mean it. Without it the funnel asks whether
+      // to look for the branch on GitHub — a question about a branch that was
+      // never meant to exist before this click.
+      const branch = ticketBranch(ticket);
+      const branches = await ipc
+        .gitBranches(repo)
+        .catch(() => [] as ipc.BranchInfo[]);
+      const r = await switchTo(
+        repo,
+        { kind: "workspace", branch, create: !branches.some((b) => b.name === branch) },
+        { because: `the ticket ${ticket.id}` },
+      );
+      if (r.kind !== "settled") return; // already asked and answered on screen
+      setTicketWorktrees(await ipc.gitWorktrees(repo).catch(() => worktrees));
+      const id = addTerminal(r.path, start.command, title, cli.icon);
+      if (id) setTimeout(() => seed(id), 2500);
     },
-    [ticketRepo, addTerminal, onNotice, getInstalled],
+    [ticketRepo, addTerminal, onNotice, getInstalled, switchTo],
   );
 
-  /** Check out a PR's head branch in a worktree (reusing one already on it)
+  /** Put a PR's head in a workspace of its own (reusing one already holding it)
    *  and start an agent there to review it. The mirror of startTicketWork —
-   *  same worktree-then-agent shape — but the PR already carries its branch, so
-   *  there's nothing to invent, and the branch already exists upstream, so we
-   *  only ever check it out (create=false, letting git DWIM the remote branch),
-   *  never `-b` a fresh one off HEAD (which would "review" empty changes). */
-  // Start an agent on a PR in its own worktree. `mode` only swaps the prompt it
-  // is seeded with (review vs. resolve-the-conflicts) and the error wording —
-  // the worktree checkout/reuse and seeding are identical.
+   *  same workspace-then-agent shape — but the PR already carries its branch,
+   *  so there's nothing to invent, and the workspace stays at the PR's head
+   *  rather than claiming the branch: git allows a branch in one place at a
+   *  time, and that place is usually this checkout already. */
+  // `mode` only swaps the prompt it is seeded with (review vs.
+  // resolve-the-conflicts); the workspace and the seeding are identical.
   const startPrAgent = useCallback(
     async (
       mode: "review" | "resolve",
@@ -1269,8 +1390,6 @@ export const ProjectView = memo(function ProjectView({
       pr: ipc.PrInfo,
       agentId?: string,
     ) => {
-      const noun =
-        mode === "resolve" ? "conflict resolution on" : "a review of";
       const installedClis = AGENT_CLIS.filter((c) => getInstalled()[c.bin]);
       const preferred = getSettings().defaultAgent;
       const agent =
@@ -1285,52 +1404,41 @@ export const ProjectView = memo(function ProjectView({
         onNotice(`Unknown agent "${agent}".`);
         return;
       }
-      try {
-        // Reuse a worktree already holding this PR's branch; otherwise make an
-        // ephemeral one — fetching the PR head (fork-safe, and without switching
-        // the main checkout's branch) so it works even for a PR you've never
-        // checked out. Only a worktree WE created is disposable, so only then do
-        // we tell the agent to remove it and skip registering it as a component.
-        const worktrees = await ipc
-          .gitWorktrees(repo)
-          .catch(() => [] as ipc.WorktreeInfo[]);
-        const existing = prWorktree(pr, worktrees);
-        const path = existing?.path ?? `${repo}-wt-pr-${pr.number}`;
-        const cleanup = existing ? undefined : { repo, worktree: path };
-        const context =
-          mode === "resolve"
-            ? prConflictContext(pr, cleanup)
-            : prReviewContext(pr, cleanup);
-        const start = startCommand(agent, context);
-        if (!start) {
-          onNotice(`Unknown agent "${agent}".`);
-          return;
-        }
-        if (!existing) {
-          await ipc.gitWorktreeAddPr(repo, path, pr.number, pr.branch);
-        }
-        const title = `PR #${pr.number} · ${cli.name}`;
-        const id = addTerminal(path, start.command, title, cli.icon);
-        if (id && start.typePrompt) {
-          setTimeout(() => {
-            const pty = tabsRef.current.find(
-              (t): t is TermSubTab => t.id === id && t.type === "terminal",
-            )?.ptyId;
-            if (pty == null) return;
-            void ipc.ptyWrite(pty, context);
-            setTimeout(() => void ipc.ptyWrite(pty, "\r"), 250);
-          }, 2500);
-        }
-      } catch (err) {
-        // A private fork you can't fetch is the one case even pull/<n>/head
-        // can't reach; "Checkout" (gh pr checkout) authenticates and fetches it.
-        onNotice(
-          `Couldn't start ${noun} PR #${pr.number}: ${String(err)}. ` +
-            `If it's from a private fork you can't fetch, click Checkout first.`,
-        );
+      // The funnel reuses a workspace already holding this PR and otherwise
+      // makes an ephemeral one at the PR's head — fork-safe, and without moving
+      // the main checkout's branch. Only a workspace IT created is disposable,
+      // which is exactly what `created` says, so only then do we tell the agent
+      // to remove it.
+      const r = await switchTo(repo, {
+        kind: "pr-workspace",
+        number: pr.number,
+        branch: pr.branch,
+      });
+      if (r.kind !== "settled") return; // already asked and answered on screen
+      const cleanup = r.created ? { repo, worktree: r.path } : undefined;
+      const context =
+        mode === "resolve"
+          ? prConflictContext(pr, cleanup)
+          : prReviewContext(pr, cleanup);
+      const start = startCommand(agent, context);
+      if (!start) {
+        onNotice(`Unknown agent "${agent}".`);
+        return;
+      }
+      const title = `PR #${pr.number} · ${cli.name}`;
+      const id = addTerminal(r.path, start.command, title, cli.icon);
+      if (id && start.typePrompt) {
+        setTimeout(() => {
+          const pty = tabsRef.current.find(
+            (t): t is TermSubTab => t.id === id && t.type === "terminal",
+          )?.ptyId;
+          if (pty == null) return;
+          void ipc.ptyWrite(pty, context);
+          setTimeout(() => void ipc.ptyWrite(pty, "\r"), 250);
+        }, 2500);
       }
     },
-    [addTerminal, onNotice, getInstalled],
+    [addTerminal, onNotice, getInstalled, switchTo],
   );
   const startPrReview = useCallback(
     (repo: string, pr: ipc.PrInfo, agentId?: string) =>
@@ -1655,24 +1763,19 @@ export const ProjectView = memo(function ProjectView({
       let env: MicroTaskEnv | undefined;
       if (def.isolation) {
         const { repo, pr } = def.isolation.target(payload);
-        try {
-          const worktrees = await ipc
-            .gitWorktrees(repo)
-            .catch(() => [] as ipc.WorktreeInfo[]);
-          const existing = prWorktree(pr, worktrees);
-          const path = existing?.path ?? `${repo}-wt-pr-${pr.number}`;
-          if (!existing)
-            await ipc.gitWorktreeAddPr(repo, path, pr.number, pr.branch);
-          dir = path;
-          env = existing ? undefined : { cleanup: { repo, worktree: path } };
-        } catch (err) {
-          onNotice(
-            `Couldn't check PR #${pr.number} out for "${def.label}": ${String(err)}. ` +
-              `If it's from a private fork you can't fetch, click Checkout first.`,
-            "error",
-          );
-          return false;
-        }
+        // `because` matters here: a task can arm itself with no click at all
+        // (the review loop), so a dialog appearing out of nowhere has to say
+        // what wanted it.
+        const r = await switchTo(
+          repo,
+          { kind: "pr-workspace", number: pr.number, branch: pr.branch },
+          { because: `the "${def.label}" task` },
+        );
+        // Not settled means the question was asked and answered on screen —
+        // and the caller still needs the `false` to clear its pending pill.
+        if (r.kind !== "settled") return false;
+        dir = r.path;
+        env = r.created ? { cleanup: { repo, worktree: r.path } } : undefined;
       }
       const seed = oneLine(
         `${def.buildContext(payload, userQuery, env)} ${progressBrief(def, payload)} ${microTaskProtocol()}`,
@@ -1764,6 +1867,7 @@ export const ProjectView = memo(function ProjectView({
       getInstalled,
       canReportDone,
       updateMicroRuns,
+      switchTo,
     ],
   );
 
@@ -2714,6 +2818,10 @@ export const ProjectView = memo(function ProjectView({
   // The pty of the terminal tab in front, so the Agents panel can highlight its
   // row — relating the tab you're looking at back to its entry in the list.
   const activePty = activeTab?.type === "terminal" ? activeTab.ptyId : null;
+  // Every running pty's tab name, so the Agents panel can name its rows the
+  // way the tab strip does: the CLI's own title for the tab, or the user's
+  // rename over it.
+  const tabNames = useMemo(() => tabNamesByPty(tabs), [tabs]);
   const runTabs = useMemo(
     () =>
       tabs.filter(
@@ -2960,7 +3068,11 @@ export const ProjectView = memo(function ProjectView({
     void (async () => {
       const steps = wakeSteps(restore);
       restoreStepRef.current?.(0, steps.length, steps[0]?.label ?? "Ready");
-      if (restore.worktree) setWorktreeEnv(restore.worktree);
+      // Checked before it is trusted — the snapshot's shape is unchanged, but a
+      // workspace can be removed or moved to another branch while a project
+      // sleeps, and restoring one that is gone points the whole file surface at
+      // a path that no longer resolves.
+      if (restore.worktree) void wakeWorktreeEnvRef.current(restore.worktree);
       setSideTab(restore.sideTab);
       setPinned(restore.sidePinned);
       const ids: (string | null)[] = [];
@@ -3158,6 +3270,15 @@ export const ProjectView = memo(function ProjectView({
       openTimer.current = null;
     }
   }, []);
+  // One way to close the panel, shared by everything that closes it: a press
+  // in the page, a press outside it, and opening a preview it would cover.
+  // Assigned on every render so it always closes over current state.
+  dismissPeekRef.current = () => {
+    cancelPeekOpen();
+    cancelPeekClose();
+    setPeeking(false);
+    setPinned(false);
+  };
   useEffect(
     () => () => {
       if (openTimer.current !== null) window.clearTimeout(openTimer.current);
@@ -3213,12 +3334,7 @@ export const ProjectView = memo(function ProjectView({
     // choice once the panel is docked: a pane that isn't covering anything has
     // no reason to close because you clicked in the editor.
     if (!sideOpen || !sidePrefs.clickOutsideCloses) return;
-    const dismiss = () => {
-      cancelPeekOpen();
-      cancelPeekClose();
-      setPeeking(false);
-      setPinned(false);
-    };
+    const dismiss = dismissPeekRef.current;
     const onDown = (e: PointerEvent) => {
       const target = e.target;
       if (
@@ -3510,6 +3626,17 @@ export const ProjectView = memo(function ProjectView({
   }, [tabs, activeTabId, projectStats]);
   const modelTargetRef = useRef(modelTarget);
   modelTargetRef.current = modelTarget;
+
+  // Which CLI the front terminal is running, resolved independently of
+  // modelTarget: that one is null for any CLI Canopy can't switch models on
+  // (Codex among them), and the plan chip has to work there too.
+  const activeAgentId = useMemo(() => {
+    const termTabs = tabs.filter((t): t is TermSubTab => t.type === "terminal");
+    const active = termTabs.find((t) => t.id === activeTabId) ?? termTabs[0];
+    if (!active || active.ptyId == null) return null;
+    const s = projectStats.find((x) => x.id === active.ptyId);
+    return s ? (identifyAgent(s.agent_hint)?.id ?? null) : null;
+  }, [tabs, activeTabId, projectStats]);
 
   // Change that session's model by typing the CLI's own command into its
   // terminal — the same thing the user would type, so the CLI's confirmations,
@@ -4557,6 +4684,11 @@ export const ProjectView = memo(function ProjectView({
         case "open-ticket":
           openTicket(action.ticket, action.source);
           return;
+        case "switch-branch":
+          // Straight into the funnel: a branch the palette offers is a branch
+          // git may well refuse, and that refusal is a question like any other.
+          void switchTo(action.repo, { kind: "branch", branch: action.branch });
+          return;
         case "open-pr":
           openPr(action.repo, action.pr);
           return;
@@ -4588,6 +4720,7 @@ export const ProjectView = memo(function ProjectView({
       selectSideTab,
       openTaskHistory,
       runAdhocTask,
+      switchTo,
     ],
   );
 
@@ -5223,7 +5356,7 @@ export const ProjectView = memo(function ProjectView({
                 {restorable.map((r) => (
                   <div
                     key={r.digest.session_id}
-                    className={`resume-row ${r.command ? "resume-row-click" : ""}`}
+                    className="resume-row resume-row-click"
                     title={`${r.agentId} · ${r.cwd}`}
                     onClick={() => resumeSession(r)}
                   >
@@ -5238,20 +5371,16 @@ export const ProjectView = memo(function ProjectView({
                       <span className="resume-branch">⑂ {r.digest.branch}</span>
                     )}
                     <span className="resume-age">{ago(r.digest.updated)}</span>
-                    {r.command ? (
-                      <button
-                        className="btn-mini btn-accent"
-                        title={r.command}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          resumeSession(r);
-                        }}
-                      >
-                        Resume
-                      </button>
-                    ) : (
-                      <span className="resume-unsupported">can't resume</span>
-                    )}
+                    <button
+                      className="btn-mini btn-accent"
+                      title={r.command}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        resumeSession(r);
+                      }}
+                    >
+                      Resume
+                    </button>
                     <button
                       className="btn-icon resume-forget"
                       title="Forget this session — stops it resurfacing unless it's used again"
@@ -5593,8 +5722,8 @@ export const ProjectView = memo(function ProjectView({
               <span className="wt-env-branch">{worktreeEnv.branch}</span>
               <button
                 className="icon-btn"
-                title="Leave this worktree — go back to the main checkout"
-                onClick={() => setWorktreeEnv(null)}
+                title="Go back to your own checkout"
+                onClick={() => void leaveWorktreeEnv(worktreeEnv)}
               >
                 ✕
               </button>
@@ -5785,11 +5914,6 @@ export const ProjectView = memo(function ProjectView({
             path: c.path,
           }))}
           activeWorktree={worktreeEnv?.path ?? null}
-          onUseWorktree={(repo, path, branch) => {
-            void ipc.workspaceAdd(path).catch(() => {});
-            setWorktreeEnv({ repo, path, branch });
-            setSideTab("files");
-          }}
           onOpenCommit={openCommit}
           onOpenBranch={openBranch}
           onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
@@ -5968,6 +6092,7 @@ export const ProjectView = memo(function ProjectView({
           onPreviewUrl={openPreview}
           onOpenAgent={(p) => void openAgent(p)}
           activePty={activePty}
+          tabNames={tabNames}
           roots={roots}
           shareContext={Boolean(project.shareContext)}
           onShareContext={onShareContext}
@@ -5983,6 +6108,12 @@ export const ProjectView = memo(function ProjectView({
           onNotice={onNotice}
           onOpenInstructions={openInstructions}
           installed={installed}
+        />
+      ))}
+      {sidePane("tools", () => (
+        <McpToolsPanel
+          rootsKey={rootsKey}
+          visible={sideTab === "tools" && visible && sideOpen}
         />
       ))}
     </div>
@@ -6087,6 +6218,7 @@ export const ProjectView = memo(function ProjectView({
         onSetModel={modelTarget ? setAgentModel : undefined}
         modelSwitch={modelTarget?.sw ?? null}
         agentLabel={modelTarget?.label}
+        agentId={activeAgentId}
         activePtyId={activeTab?.type === "terminal" ? activeTab.ptyId : null}
       />
       {launcherOpen && visible && (
@@ -6137,6 +6269,44 @@ export const ProjectView = memo(function ProjectView({
           onDismiss={dismissCoach}
         />
       )}
+    </div>
+  );
+});
+
+/** One project, wrapped in the one branch-switch funnel.
+ *
+ *  The provider is mounted here rather than inside the body for two reasons.
+ *  A component can't consume the context it renders, and the body is what calls
+ *  switchTo. And the question a switch asks has to outlive the surface that
+ *  asked it: a PR tab's "check it out locally" stays answerable while the Git
+ *  panel this logic used to live inside isn't even mounted.
+ *
+ *  Mounted per open project, which is right — a switch is scoped to a repo, and
+ *  only one project is on screen at a time. */
+export const ProjectView = memo(function ProjectView(props: ProjectViewProps) {
+  // The redirection itself stays with the body (it owns worktreeEnv and the
+  // side panel); the funnel only asks for it, and owns the label and notice.
+  const useWorktreeRef = useRef<UseWorktreeRef["current"]>(() => {});
+  const onUseWorktree = useCallback(
+    (repo: string, path: string, branch: string) =>
+      useWorktreeRef.current(repo, path, branch),
+    [],
+  );
+  return (
+    // The dialog is a sibling of this project's view, not a child of it, so the
+    // view hiding itself is not enough: a switch started in a project that
+    // isn't on screen (the review loop arming itself in a background project)
+    // would put its question over whichever project the user IS looking at.
+    // `display: contents` while visible leaves the layout exactly as it was —
+    // the view stays a flex item of App's row — and `none` takes the whole
+    // project, question included, off screen with it.
+    <div style={{ display: props.visible ? "contents" : "none" }}>
+      <BranchSwitchProvider
+        onNotice={props.onNotice}
+        onUseWorktree={onUseWorktree}
+      >
+        <ProjectViewBody {...props} useWorktreeRef={useWorktreeRef} />
+      </BranchSwitchProvider>
     </div>
   );
 });

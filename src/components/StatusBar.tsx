@@ -5,10 +5,18 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { fmtTokens } from "../format";
 import * as ipc from "../ipc";
 import { estimateCost, sessionCost } from "../pricing";
+import { chipText, planFor, planTone, tooltip } from "../planUsage";
 import { StatsPanel } from "./StatsPanel";
+import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { HeartIcon, StatsIcon } from "./icons";
 import type { AgentEventEntry } from "../types";
 import { modelCommandLine, type ModelSwitch } from "../agentModels";
+import { useBranchSwitch } from "../useBranchSwitch";
+
+/** How many branches the tray's menu offers. It is a shortcut to the handful
+ *  you are actually moving between — `for-each-ref` hands them back newest
+ *  first, so this is "the ones you touched recently", not an arbitrary slice. */
+const BRANCH_MENU_LIMIT = 12;
 
 const fmtMem = (bytes: number) =>
   bytes >= 1024 * 1024 * 1024
@@ -40,6 +48,10 @@ interface StatusBarProps {
   modelSwitch?: ModelSwitch | null;
   /** What to call the CLI in front in the switch dialog ("Codex CLI"). */
   agentLabel?: string;
+  /** Registry id of the CLI in front ("claude", "codex"), used to pick which
+   *  plan's headroom the chip shows. Separate from agentLabel because that one
+   *  is absent for CLIs Canopy can't switch models on. */
+  agentId?: string | null;
   /** The pty of the active terminal tab — the model/token tray follows THIS
    *  tab's session, not whichever session in the project spoke last. */
   activePtyId?: number | null;
@@ -54,10 +66,14 @@ export const StatusBar = memo(function StatusBar({
   onSetModel,
   modelSwitch,
   agentLabel,
+  agentId,
   activePtyId,
 }: StatusBarProps) {
   const [branch, setBranch] = useState<string | null>(null);
   const [dirty, setDirty] = useState(0);
+  const [branches, setBranches] = useState<ipc.BranchInfo[]>([]);
+  const { switchTo, version } = useBranchSwitch();
+  const branchMenu = useContextMenu();
   const [app, setApp] = useState<ipc.AppStats | null>(null);
   const [stats, setStats] = useState<ipc.ClaudeSessionStats | null>(null);
   const [modelMenu, setModelMenu] = useState(false);
@@ -149,6 +165,30 @@ export const StatusBar = memo(function StatusBar({
     return () => void sub.then((fn) => fn());
   }, [visible]);
 
+  // Subscription headroom. Visible-gated like everything else here, and slow:
+  // these are rolling windows measured in hours, so a minute of lag is
+  // invisible while a tighter poll would re-scan Codex's rollout files for
+  // nothing.
+  const [plans, setPlans] = useState<ipc.PlanUsage[]>([]);
+  useEffect(() => {
+    if (!visible) return;
+    let cancelled = false;
+    const pull = () =>
+      void ipc
+        .planUsage()
+        .then((p) => {
+          if (!cancelled) setPlans(p);
+        })
+        .catch(() => {});
+    pull();
+    const timer = setInterval(pull, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [visible]);
+  const plan = useMemo(() => planFor(plans, agentId), [plans, agentId]);
+
   // The transcript whose model/tokens the tray shows. Per-TAB first: prefer
   // the latest event stamped with the active terminal's pty, so switching
   // tabs switches the tray immediately instead of showing whichever session
@@ -204,7 +244,25 @@ export const StatusBar = memo(function StatusBar({
       cancelled = true;
       clearInterval(timer);
     };
-  }, [roots[0], visible]); // eslint-disable-line react-hooks/exhaustive-deps
+    // `version` bumps whenever the funnel moves a ref, so the chip catches up
+    // with a switch immediately instead of at the next ten-second tick.
+  }, [roots[0], visible, version]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The branch list behind the chip's menu. Deliberately NOT on the status
+  // poll's timer: one `for-each-ref` when the project appears and again after
+  // anything moves a ref is enough, and a third git process every ten seconds
+  // per project is exactly the cost this component is careful about.
+  useEffect(() => {
+    if (!roots[0] || !visible) return;
+    let cancelled = false;
+    void ipc
+      .gitBranches(roots[0])
+      .then((b) => !cancelled && setBranches(b))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [roots[0], visible, version]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     // Cached value first (or nothing if this session was never seen) — the
@@ -231,15 +289,61 @@ export const StatusBar = memo(function StatusBar({
 
   const cost = stats ? estimateCost(stats) : null;
 
+  // `rev-parse --abbrev-ref HEAD` answers a literal "HEAD" off a branch, which
+  // the tray used to print as if it were one. It is the snapshot state the Git
+  // panel already names, and the one place a person most needs the way back.
+  const detached = branch === "HEAD";
+  const files = `${dirty} changed ${dirty === 1 ? "file" : "files"}`;
+
+  /** The chip's menu: somewhere to go, always. Every row is a switch through
+   *  the one funnel, so a branch held by another workspace asks its question
+   *  here exactly as it does in the Git panel. */
+  const branchItems = (): MenuItem[] => {
+    const repo = roots[0];
+    const items: MenuItem[] = [];
+    if (detached)
+      items.push({
+        separator: true,
+        label:
+          "You're looking at a snapshot. Pick a branch to go back — nothing you had is lost.",
+      });
+    const rest = branches.filter((b) => !b.current);
+    if (!repo || rest.length === 0) {
+      items.push({ label: "Nowhere else to go yet", disabled: true });
+      return items;
+    }
+    for (const b of rest.slice(0, BRANCH_MENU_LIMIT))
+      items.push({
+        label: b.name,
+        hint: b.remote_only ? "on the remote" : undefined,
+        onClick: () => void switchTo(repo, { kind: "branch", branch: b.name }),
+      });
+    if (rest.length > BRANCH_MENU_LIMIT)
+      items.push({
+        label: `${rest.length - BRANCH_MENU_LIMIT} more in the Git panel`,
+        disabled: true,
+      });
+    return items;
+  };
+
   return (
     <div className="status-bar">
       {branch && (
-        <span
-          className="status-item status-branch"
-          title={`git branch (${dirty} changed files)`}
-        >
-          ⎇ {branch}
-          {dirty > 0 && <span className="status-dirty"> ±{dirty}</span>}
+        <span className="status-item status-branch">
+          <button
+            className="status-model-btn"
+            title={
+              detached
+                ? `You're looking at a snapshot of the code · ${files}. Click to go back.`
+                : `On ${branch} · ${files}. Click to switch.`
+            }
+            // The tray sits on the bottom edge, so the menu grows upward from
+            // the chip rather than off the end of the window.
+            onClick={(e) => branchMenu.openAbove(e, branchItems())}
+          >
+            {detached ? "⚠ snapshot" : `⎇ ${branch}`}
+            {dirty > 0 && <span className="status-dirty"> ±{dirty}</span>}
+          </button>
         </span>
       )}
       {agents.length > 0 && (
@@ -551,6 +655,19 @@ export const StatusBar = memo(function StatusBar({
           ~${cost.toFixed(2)}
         </span>
       )}
+      {/* Plan headroom, right of spend: the two answer different questions —
+          what this session cost vs how much of the subscription is left — and
+          only the CLIs that genuinely report limits get a chip. A CLI with no
+          plan concept, or one that has not seen an API response yet, shows
+          nothing rather than a 0% that would read as "plenty left". */}
+      {plan && plan.windows.length > 0 && (
+        <span
+          className={`status-item status-plan is-${planTone(plan)}`}
+          title={tooltip(plan)}
+        >
+          {chipText(plan)}
+        </span>
+      )}
       {/* Between the spend and the stats: the two things either side of it are
           what Canopy costs you and what it is doing, which is exactly where
           asking for support belongs. Opens in the system browser — a donate
@@ -584,6 +701,9 @@ export const StatusBar = memo(function StatusBar({
           </div>
         )}
       </span>
+      {branchMenu.menu && (
+        <ContextMenu {...branchMenu.menu} onClose={branchMenu.close} />
+      )}
     </div>
   );
 });

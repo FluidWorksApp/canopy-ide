@@ -14,8 +14,8 @@ mod dictation;
 mod fsx;
 mod git;
 mod instructions;
-mod layering;
 mod lsp;
+mod mcp;
 mod portal;
 mod preview;
 mod prwatch;
@@ -432,6 +432,8 @@ pub fn run() {
             git::git_checkout_detached,
             git::git_checkout_carry,
             git::git_branch_release,
+            git::git_operation_quit,
+            git::git_branch_at,
             git::git_stage,
             git::git_unstage,
             git::git_discard,
@@ -497,8 +499,10 @@ pub fn run() {
             agents::agent_hooks_installed,
             agents::agent_integration_health,
             agents::agent_health_report,
+            mcp::mcp_servers,
             agents::claude_session_stats,
             agents::agent_usage,
+            agents::plan_usage,
             agents::hook_bridge_path,
             agents::set_context_scopes,
             agents::session_digests,
@@ -522,8 +526,6 @@ pub fn run() {
             browser::browser_painted,
             browser::browser_set_bounds,
             browser::browser_set_visible,
-            layering::browser_set_layering,
-            layering::browser_set_passthrough,
             browser::browser_close,
             browser::browser_run_op,
             browser::browser_command,
