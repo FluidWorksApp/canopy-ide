@@ -449,8 +449,76 @@ const SKIP_DIRS: &[&str] = &[
     ".idea",
 ];
 
-fn walk(dir: &Path, out: &mut Vec<PathBuf>, limit: usize, depth: usize) {
-    if out.len() >= limit || depth > 12 {
+/// Canopy's own directory inside a project — screenshots a micro-task was
+/// briefed with, the briefs themselves. Projects gitignore it, and they are
+/// right to: it is generated. But it is generated *by the user's own actions in
+/// this app*, so it is the one ignored tree that has to stay findable, and it
+/// is walked separately below for exactly that reason.
+const CANOPY_DIR: &str = ".canopy";
+
+/// Deepest directory worth descending into. Not a correctness bound — the
+/// ignore rules do that work — but a floor under pathological trees.
+const MAX_DEPTH: usize = 12;
+
+/// Files under `dir`, honouring .gitignore.
+///
+/// Ignored means ignored: a build output, a vendored dependency, a downloaded
+/// model, another checkout parked under .claude/worktrees. Quick-open and
+/// find-in-files used to walk all of it, filtered only by a hardcoded list of
+/// directory names, which caught node_modules and target and nothing a project
+/// ignored for its own reasons. The list stays as the fallback for a tree with
+/// no ignore file at all.
+///
+/// The cost, stated plainly: a gitignored file is now unfindable here even when
+/// it is the one you want — `.env` being the case that comes up. That is the
+/// same trade every editor's quick-open makes, and the escape hatch is the same
+/// one: open it by path.
+fn walk(dir: &Path, out: &mut Vec<PathBuf>, limit: usize) {
+    if out.len() >= limit {
+        return;
+    }
+    let mut builder = ignore::WalkBuilder::new(dir);
+    builder
+        // Dotfiles are files. Skipping every name starting with '.' meant
+        // .env, .gitignore, .prettierrc and every CI config were invisible to
+        // quick-open AND to find-in-files — searchable content the editor
+        // could open perfectly well once you got to it another way.
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        // A component can be a subdirectory of the repo that ignores it, so the
+        // ignore files above the walk root count too.
+        .parents(true)
+        // ...and a directory with a .gitignore but no .git yet — a fresh
+        // project, a template — means it just as much as a repo does.
+        .require_git(false)
+        .follow_links(false)
+        .max_depth(Some(MAX_DEPTH))
+        .filter_entry(|e| {
+            if !e.file_type().is_some_and(|t| t.is_dir()) {
+                return true;
+            }
+            let name = e.file_name().to_string_lossy().to_string();
+            // .canopy is dropped here and walked whole afterwards, so that it
+            // arrives exactly once whether or not the project ignores it.
+            name != CANOPY_DIR && !SKIP_DIRS.contains(&name.as_str())
+        });
+    for entry in builder.build().flatten() {
+        if out.len() >= limit {
+            return;
+        }
+        if entry.file_type().is_some_and(|t| t.is_file()) {
+            out.push(entry.into_path());
+        }
+    }
+    walk_plain(&dir.join(CANOPY_DIR), out, limit, 0);
+}
+
+/// Everything under `dir`, ignore files disregarded. Only Canopy's own
+/// directory is walked this way.
+fn walk_plain(dir: &Path, out: &mut Vec<PathBuf>, limit: usize, depth: usize) {
+    if out.len() >= limit || depth > MAX_DEPTH {
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -460,21 +528,10 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>, limit: usize, depth: usize) {
         if out.len() >= limit {
             return;
         }
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
         let path = entry.path();
         if path.is_dir() {
-            // Directories are filtered by name (SKIP_DIRS), never by a leading
-            // dot: .github and .claude hold real work.
-            if SKIP_DIRS.contains(&name.as_ref()) {
-                continue;
-            }
-            walk(&path, out, limit, depth + 1);
+            walk_plain(&path, out, limit, depth + 1);
         } else {
-            // Dotfiles are files. Skipping every name starting with '.' meant
-            // .env, .gitignore, .prettierrc and every CI config were invisible
-            // to quick-open AND to find-in-files — searchable content the
-            // editor could open perfectly well once you got to it another way.
             out.push(path);
         }
     }
@@ -492,7 +549,7 @@ pub async fn fs_list_files(
     let mut out: Vec<PathBuf> = Vec::new();
     for root in roots {
         let dir = check_scope(&state, Path::new(&root))?;
-        walk(&dir, &mut out, limit, 0);
+        walk(&dir, &mut out, limit);
     }
     Ok(out
         .iter()
@@ -524,7 +581,7 @@ pub async fn fs_search(
     let mut files: Vec<PathBuf> = Vec::new();
     for root in roots {
         let dir = check_scope(&state, Path::new(&root))?;
-        walk(&dir, &mut files, 20_000, 0);
+        walk(&dir, &mut files, 20_000);
     }
 
     let mut hits = Vec::new();
@@ -709,4 +766,86 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(path: &Path, text: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    /// The corpus behind quick-open, find-in-files and SpotSearch's file and
+    /// content sources. What it holds is what those three can find.
+    #[test]
+    fn the_corpus_is_what_git_tracks_plus_canopys_own_directory() {
+        let root = std::env::temp_dir().join(format!("canopy-walk-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        write(
+            &root.join(".gitignore"),
+            "dist/\nsecret.txt\n.canopy/\nnode_modules/\n",
+        );
+        write(&root.join("src/main.rs"), "fn main() {}");
+        write(&root.join(".env"), "KEY=1");
+        write(&root.join("dist/app.js"), "built");
+        write(&root.join("secret.txt"), "shhh");
+        write(&root.join("node_modules/pkg/index.js"), "dep");
+        write(&root.join(".git/config"), "[core]");
+        // Canopy's own: a screenshot a micro-task was briefed with. Ignored by
+        // the project, and findable anyway — the user made it from in here.
+        write(&root.join(".canopy/spot/brief-1700.md"), "the brief");
+
+        let mut out = Vec::new();
+        walk(&root, &mut out, 1000);
+        let names: Vec<String> = out
+            .iter()
+            .map(|p| {
+                p.strip_prefix(&root)
+                    .unwrap_or(p)
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        let has = |s: &str| names.iter().any(|n| n == s);
+
+        assert!(has("src/main.rs"));
+        // Dotfiles are files: a tracked .env, .gitignore, CI config stay
+        // findable. Only *ignored* content goes.
+        assert!(has(".env"));
+        assert!(has(".gitignore"));
+        assert!(has(".canopy/spot/brief-1700.md"));
+
+        assert!(!has("dist/app.js"), "gitignored build output");
+        assert!(!has("secret.txt"), "gitignored file");
+        assert!(!has("node_modules/pkg/index.js"), "gitignored dependency");
+        assert!(!has(".git/config"), "git's own directory");
+        // And exactly once, whether or not .canopy is ignored.
+        assert_eq!(
+            names.iter().filter(|n| n.starts_with(".canopy/")).count(),
+            1
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_tree_with_no_ignore_file_still_stops_at_the_generated_directories() {
+        let root = std::env::temp_dir().join(format!("canopy-walk-plain-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        write(&root.join("index.js"), "app");
+        write(&root.join("node_modules/pkg/index.js"), "dep");
+        write(&root.join("target/debug/thing"), "built");
+
+        let mut out = Vec::new();
+        walk(&root, &mut out, 1000);
+        let names: Vec<String> = out
+            .iter()
+            .map(|p| p.strip_prefix(&root).unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["index.js".to_string()]);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 }
