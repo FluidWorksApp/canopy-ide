@@ -4473,7 +4473,8 @@ body.dragging-tab * {
   background: var(--bg-alt);
 }
 
-/* "⌘ click" over a hovered terminal link. The app tooltip's bubble, but placed
+/* "Open link" (plus the chord, when one is required) over a hovered terminal
+   link. The app tooltip's bubble, but placed
    imperatively — xterm owns this surface and reports hover through callbacks,
    not React. See terminalLinks.ts. */
 .term-link-hint {

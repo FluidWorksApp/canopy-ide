@@ -170,15 +170,18 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // and the click dies silently. The opener plugin's default scope already
     // allows http/https, which is all the addon's URL matcher produces.
     //
-    // ⌘-click, never a bare click — see terminalLinks.ts for why, and for the
-    // hint that keeps a hovered link from looking like a dead one. A click
-    // without the modifier falls through untouched: xterm's link handling is
-    // additive, so selecting and focusing still behave as they always did.
-    const linkHint = createLinkHint(el);
+    // A bare click by default, ⌘-click if Settings → Terminal says so — see
+    // terminalLinks.ts, and for the hint that keeps a hovered link from looking
+    // like a dead one. A gesture that isn't a follow falls through untouched:
+    // xterm's link handling is additive, so selecting and focusing still behave
+    // as they always did. The mode is read here, per event, so changing it
+    // reaches terminals that are already open.
+    const linkMode = () => getSettings().terminalLinkClick;
+    const linkHint = createLinkHint(el, linkMode);
     term.loadAddon(
       new WebLinksAddon(
         (event, uri) => {
-          if (!opensLink(event)) return;
+          if (!opensLink(event, linkMode(), term.hasSelection())) return;
           linkHint.hide();
           void openUrl(uri);
         },

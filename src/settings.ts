@@ -46,6 +46,12 @@ export const THEMES: { id: Theme; label: string }[] = [
  *  engine actually wants. */
 export type CursorStyle = "block" | "underline" | "bar";
 
+/** What it takes to follow a link in the terminal. "click" — a bare left click
+ *  opens it, the way a link behaves everywhere else. "modifier" — ⌘ (Ctrl off
+ *  macOS) must be held, the chord VS Code and iTerm2 use, which keeps a click
+ *  on a URL somebody else printed from navigating. See terminalLinks.ts. */
+export type LinkClickMode = "click" | "modifier";
+
 /** A dictation hotkey as captured from a keydown: the modifier flags plus the
  *  physical `KeyboardEvent.code` (layout-independent, so it survives non-US
  *  keyboards). */
@@ -154,6 +160,11 @@ export interface Settings {
   terminalFontFamily: string;
   terminalCursorStyle: CursorStyle;
   terminalCursorBlink: boolean;
+  /** Whether following a terminal link takes the modifier. Defaults to "click":
+   *  a hovered, underlined link that ignores a click reads as a broken one, and
+   *  it is a new key, so the default reaches existing installs too. Read live at
+   *  click time — no terminal remount. */
+  terminalLinkClick: LinkClickMode;
   editorFontFamily: string;
   editorFontSize: number;
   editorCursorStyle: CursorStyle;
@@ -326,6 +337,7 @@ const DEFAULTS: Settings = {
   terminalFontFamily: TERMINAL_FONT_DEFAULT,
   terminalCursorStyle: "block",
   terminalCursorBlink: true,
+  terminalLinkClick: "click",
   editorFontFamily: EDITOR_FONT_DEFAULT,
   editorFontSize: 13,
   editorCursorStyle: "bar",

@@ -14,9 +14,11 @@ import {
   DEFAULT_DICTATION_HOTKEY,
   type CursorStyle,
   type Hotkey,
+  type LinkClickMode,
   type Settings,
   type Theme,
 } from "../settings";
+import { LINK_CHORD } from "../terminalLinks";
 import { useEscape } from "../useEscape";
 import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
 import * as ipc from "../ipc";
@@ -973,6 +975,20 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 </Item>
                 <Item name="Cursor">
                   {cursorControls("terminalCursorStyle", "terminalCursorBlink")}
+                </Item>
+                <Item
+                  name="Link click"
+                  desc="How to follow a URL in terminal output. Requiring the modifier keeps a click on a link an agent printed from navigating."
+                >
+                  <select
+                    value={s.terminalLinkClick}
+                    onChange={(e) =>
+                      patch({ terminalLinkClick: e.target.value as LinkClickMode })
+                    }
+                  >
+                    <option value="click">Click opens the link</option>
+                    <option value="modifier">{`${LINK_CHORD} opens the link`}</option>
+                  </select>
                 </Item>
                 <Item
                   name="Scrollback"
