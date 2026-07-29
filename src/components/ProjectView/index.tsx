@@ -24,6 +24,7 @@ import { GuestSession, OwnerSession } from "../../collab";
 import { CollabView } from "../CollabView";
 import { SharedProjectView } from "../SharedProjectView";
 import type { AgentCli } from "../../projects";
+import { startCommandParked } from "../../agentSeed";
 import {
   AGENT_CLIS,
   announceCliInstallsChanged,
@@ -34,7 +35,6 @@ import {
   restoreCommand,
   resumeSessionId,
   shellBin,
-  startCommand,
   updateCommand,
 } from "../../projects";
 import {
@@ -1388,7 +1388,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
           AGENT_CLIS[0]
         )?.id;
       const cli = AGENT_CLIS.find((c) => c.id === agent);
-      const start = startCommand(agent, ticketContext(ticket));
+      // Parked in `repo` rather than the workspace, which does not exist yet:
+      // the pointer is an absolute path, so it reads the same from either.
+      const start = await startCommandParked(agent, ticketContext(ticket), repo);
       if (!cli || !start) {
         onNotice(`Unknown agent "${agent}".`);
         return;
@@ -1487,7 +1489,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         mode === "resolve"
           ? prConflictContext(pr, cleanup)
           : prReviewContext(pr, cleanup);
-      const start = startCommand(agent, context);
+      const start = await startCommandParked(agent, context, r.path);
       if (!start) {
         onNotice(`Unknown agent "${agent}".`);
         return;
@@ -1755,7 +1757,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  the agent just opens in the existing checkout. Same resolve-CLI-then-seed
    *  shape as startTicketWork/startPrAgent. */
   const startAgentInDir = useCallback(
-    (dir: string, agentId: string | undefined, seed: string, title: string) => {
+    async (dir: string, agentId: string | undefined, seed: string, title: string) => {
       const installedClis = AGENT_CLIS.filter((c) => getInstalled()[c.bin]);
       const preferred = getSettings().defaultAgent;
       const agent =
@@ -1766,7 +1768,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           AGENT_CLIS[0]
         )?.id;
       const cli = AGENT_CLIS.find((c) => c.id === agent);
-      const start = agent ? startCommand(agent, seed) : null;
+      const start = agent ? await startCommandParked(agent, seed, dir) : null;
       if (!cli || !start) {
         onNotice(`Unknown agent "${agent}".`);
         return;
@@ -1905,7 +1907,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const seed = oneLine(
         `${def.buildContext(payload, userQuery, env)} ${progressBrief(def, payload)} ${microTaskProtocol()}`,
       );
-      const start = startCommand(agent, seed);
+      const start = await startCommandParked(agent, seed, dir);
       if (!start) {
         onNotice(`No agent CLI installed to run "${def.label}".`);
         return false;
@@ -5285,7 +5287,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
               }
               startAgentInDir(dir, agentId, text, "Preview feedback");
             }}
-            taskRows={(brief, dir) => taskRows(brief, dir, undefined, brief)}
+            onRunOneOff={(brief, dir) =>
+              // Named, so the Tasks list says what it is rather than opening
+              // with the first line of a brief about four screenshots.
+              runAdhocTask(brief, dir, "Preview screenshots")
+            }
             onNotice={onNotice}
           />
         );

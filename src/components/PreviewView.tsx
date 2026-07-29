@@ -51,9 +51,10 @@ import {
 import { getSettings, updateSettings } from "../settings";
 import { IS_MAC } from "../platform";
 import { registerBrowserTarget } from "../previewAgent";
+import { agentMenuItems } from "../agentMenu";
 import { AgentLaunchButton } from "./AgentLaunchButton";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
-import { LiveDot } from "./icons";
+import { AgentsIcon, LiveDot } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
 
 /** A trusted press landed inside a previewed page, forwarded out of it by the
@@ -95,10 +96,11 @@ interface PreviewViewProps {
   onSendToAgent: (target: AgentTarget, text: string) => void;
   /** `cwd` is the serving component's directory when the URL is linked to one. */
   onStartNew: (agentId: string, text: string, cwd: string | null) => void;
-  /** The shared task rows — "New Task… / One-off task… / Custom / Built-in",
-   *  built by ProjectView because it owns the task registry and the launcher.
-   *  Same rows the "Tasks ▸" submenu shows everywhere else. */
-  taskRows: (seed: string, dir: string) => MenuItem[];
+  /** Run a one-off task on this brief, now. The preview knows which component
+   *  serves the page, so there is nothing left to ask: opening a composer
+   *  pre-filled with the brief and a directory the tab already knows made the
+   *  user confirm our own answer. */
+  onRunOneOff: (brief: string, dir: string) => void;
   onNotice: (msg: string) => void;
 }
 
@@ -140,7 +142,7 @@ export function PreviewView({
   installed,
   onSendToAgent,
   onStartNew,
-  taskRows,
+  onRunOneOff,
   onNotice,
 }: PreviewViewProps) {
   const engine = useBrowserEngine();
@@ -839,12 +841,36 @@ export function PreviewView({
   const shotBrief = () =>
     previewShotContext(urlRef.current, shotsRef.current, serverForUrl(urlRef.current, servers));
 
-  /** The same "Tasks ▸" rows the rest of the app shows, seeded with the
-   *  screenshot brief so a composer opens pre-filled and a saved task runs with
-   *  it as its user query. */
-  const taskMenu = useContextMenu();
-  const openTaskMenu = (e: React.MouseEvent) =>
-    taskMenu.open(e, taskRows(shotBrief(), linked?.componentPath ?? dir));
+  /** One control, two destinations. It was two buttons — "Send screenshot ▾"
+   *  beside "Send to task ▾" — which read as two unrelated features rather than
+   *  one question with two answers: who should look at this?
+   *
+   *  Agent opens the menu every other surface opens (running agents, or a fresh
+   *  CLI). One-off task runs immediately: the tab knows the page, the brief and
+   *  the component serving it, so a composer would only be asking the user to
+   *  confirm what we already filled in. */
+  const sendMenu = useContextMenu();
+  const sendItems = (brief: () => string, newAgentLabel: string): MenuItem[] => {
+    const where = linked?.componentPath ?? dir;
+    return [
+      {
+        label: "Agent",
+        icon: <AgentsIcon size={14} />,
+        submenu: agentMenuItems({
+          targets: agentTargets,
+          installed,
+          newLabel: newAgentLabel,
+          onSend: (target) => onSendToAgent(target, brief()),
+          onStart: (agentId) => onStartNew(agentId, brief(), linked?.componentPath ?? null),
+        }),
+      },
+      {
+        label: "⚡ One-off task",
+        hint: linked?.componentLabel ?? undefined,
+        onClick: () => onRunOneOff(brief(), where),
+      },
+    ];
+  };
 
   const go = (delta: -1 | 0 | 1) => {
     if (native) {
@@ -958,12 +984,12 @@ export function PreviewView({
           onClose={captureMenu.close}
         />
       )}
-      {taskMenu.menu && (
+      {sendMenu.menu && (
         <ContextMenu
-          x={taskMenu.menu.x}
-          y={taskMenu.menu.y}
-          items={taskMenu.menu.items}
-          onClose={taskMenu.close}
+          x={sendMenu.menu.x}
+          y={sendMenu.menu.y}
+          items={sendMenu.menu.items}
+          onClose={sendMenu.close}
         />
       )}
       <div className="preview-toolbar">
@@ -1077,27 +1103,22 @@ export function PreviewView({
                   ))}
                 </div>
                 <div className="preview-panel-foot">
-                  <AgentLaunchButton
-                    variant="mini"
-                    label="Send screenshot"
-                    agentTargets={agentTargets}
-                    installed={installed}
-                    newAgentLabel={
-                      linked?.componentLabel
-                        ? `New agent in ${linked.componentLabel}`
-                        : "New agent on this screenshot"
-                    }
-                    onStart={(agentId) =>
-                      onStartNew(agentId, shotBrief(), linked?.componentPath ?? null)
-                    }
-                    onSend={(target) => onSendToAgent(target, shotBrief())}
-                  />
                   <button
                     className="btn-mini"
-                    title="Run a task on this screenshot — a new one, a one-off, or one you saved"
-                    onClick={openTaskMenu}
+                    title="Hand these screenshots to an agent, or run them as a one-off task"
+                    onClick={(e) =>
+                      sendMenu.open(
+                        e,
+                        sendItems(
+                          shotBrief,
+                          linked?.componentLabel
+                            ? `New agent in ${linked.componentLabel}`
+                            : "New agent on this screenshot",
+                        ),
+                      )
+                    }
                   >
-                    ◆ Send to task ▾
+                    ▲ Send screenshot ▾
                   </button>
                 </div>
               </>
