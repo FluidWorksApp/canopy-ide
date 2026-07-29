@@ -445,9 +445,7 @@ pub enum CheckoutOutcome {
         path: Option<String>,
     },
     /// Another worktree holds the branch.
-    BranchInWorktree {
-        holder: BranchHolder,
-    },
+    BranchInWorktree { holder: BranchHolder },
     /// Uncommitted work here would be overwritten; `files` is git's own list.
     LocalChanges {
         files: Vec<String>,
@@ -456,17 +454,11 @@ pub enum CheckoutOutcome {
     },
     /// The switch happened, but the set-aside changes wouldn't reapply. They
     /// are still saved — this outcome exists so the UI can say where.
-    ChangesStashed {
-        stash: String,
-        detail: String,
-    },
+    ChangesStashed { stash: String, detail: String },
     /// A half-finished merge/rebase/cherry-pick/revert/am, or another git
     /// process holding the index. `operation` is one of "merge", "rebase",
     /// "cherry-pick", "revert", "am", "another-command".
-    RepoBusy {
-        operation: String,
-        detail: String,
-    },
+    RepoBusy { operation: String, detail: String },
     /// No branch, tag or commit of that name is here. `can_create` says the
     /// name is a legal one and nothing already holds it, so starting it here is
     /// a real way out.
@@ -477,10 +469,7 @@ pub enum CheckoutOutcome {
     },
     /// A create-shaped request refused because the name is taken. Distinct from
     /// `Failed` so nothing offers to look at a branch that doesn't exist.
-    NameTaken {
-        branch: String,
-        detail: String,
-    },
+    NameTaken { branch: String, detail: String },
     /// A workspace couldn't go there — something is already at that path.
     /// `usable` means it is a worktree of *this* repo, so opening it is safe.
     PathInUse {
@@ -489,10 +478,7 @@ pub enum CheckoutOutcome {
         detail: String,
     },
     /// GitHub couldn't be reached, or doesn't have what we asked it for.
-    RemoteUnreachable {
-        summary: String,
-        detail: String,
-    },
+    RemoteUnreachable { summary: String, detail: String },
     /// The switch worked, but it left a detached HEAD's commits on no branch.
     /// Git says this on stderr and exits 0, so nothing else would ever mention
     /// it. `commits` is "<short> <subject>", newest first.
@@ -503,10 +489,7 @@ pub enum CheckoutOutcome {
     },
     /// Nothing we recognise. Still carries a human first line so the raw text
     /// is never the whole message.
-    Failed {
-        summary: String,
-        detail: String,
-    },
+    Failed { summary: String, detail: String },
 }
 
 fn is_agent_worktree(path: &str) -> bool {
@@ -754,13 +737,10 @@ fn holder_at(top: &Path, branch: &str, path: &str) -> BranchHolder {
     if let Some(h) = branch_holder(top, branch) {
         return h;
     }
-    if let Some(w) = scan_worktrees(top)
-        .ok()
-        .and_then(|ws| {
-            ws.into_iter()
-                .find(|w| same_dir(Path::new(&w.path), Path::new(path)))
-        })
-    {
+    if let Some(w) = scan_worktrees(top).ok().and_then(|ws| {
+        ws.into_iter()
+            .find(|w| same_dir(Path::new(&w.path), Path::new(path)))
+    }) {
         return BranchHolder {
             branch: branch.to_string(),
             agent: is_agent_worktree(&w.path),
@@ -848,10 +828,10 @@ fn remote_unreachable_for(err: &str, pr: Option<u32>) -> CheckoutOutcome {
         || l.contains("authentication failed")
     {
         "Canopy couldn't reach GitHub with the sign-in it has.".to_string()
-    } else if l.contains("no git remotes found") || l.contains("does not appear to be a git repo")
-    {
+    } else if l.contains("no git remotes found") || l.contains("does not appear to be a git repo") {
         "This project has no remote to fetch from.".to_string()
-    } else if l.contains("couldn't find remote ref") || l.contains("could not resolve to a pullrequest")
+    } else if l.contains("couldn't find remote ref")
+        || l.contains("could not resolve to a pullrequest")
     {
         match pr {
             Some(n) => format!(
@@ -1154,13 +1134,7 @@ pub async fn git_branch_release(
         // `prune` skips locked entries silently, so a locked-and-missing one
         // needs the record removed by force first — nothing on disk to lose.
         if holder.locked.is_some() {
-            let _ = run(git(&top).args([
-                "worktree",
-                "remove",
-                "--force",
-                "--force",
-                &holder.path,
-            ]));
+            let _ = run(git(&top).args(["worktree", "remove", "--force", "--force", &holder.path]));
         }
         run(git(&top).args(["worktree", "prune"]))?;
         return Ok(if branch_holder(&top, &branch).is_some() {
@@ -1180,7 +1154,9 @@ pub async fn git_branch_release(
         Ok(_) => Ok(free()),
         // The directory went away between the listing and now — same situation
         // as prunable, so take the same way out.
-        Err(err) if err.contains("cannot change to '") || err.contains("No such file or directory") => {
+        Err(err)
+            if err.contains("cannot change to '") || err.contains("No such file or directory") =>
+        {
             run(git(&top).args(["worktree", "prune"]))?;
             Ok(free())
         }
@@ -2876,10 +2852,7 @@ fn scan_worktrees(top: &Path) -> Result<Vec<WorktreeInfo>, String> {
 /// caller knows both: it needs clearing, and clearing it takes force.
 fn mark_missing(list: &mut [WorktreeInfo]) {
     for w in list.iter_mut() {
-        if w.prunable.is_none()
-            && w.locked.is_some()
-            && !w.is_main
-            && !Path::new(&w.path).exists()
+        if w.prunable.is_none() && w.locked.is_some() && !w.is_main && !Path::new(&w.path).exists()
         {
             w.prunable = Some("its folder is gone".into());
         }
@@ -4979,9 +4952,7 @@ index 333..444 100644
         // And that combined text still classifies.
         assert_eq!(
             classify_extra(&err),
-            Some(ExtraRefusal::MidOperation {
-                op: RepoOp::Merge
-            })
+            Some(ExtraRefusal::MidOperation { op: RepoOp::Merge })
         );
     }
 
@@ -5036,9 +5007,7 @@ index 333..444 100644
         let err = "error: you need to resolve your current index first";
         assert_eq!(
             classify_extra(err),
-            Some(ExtraRefusal::MidOperation {
-                op: RepoOp::Merge
-            })
+            Some(ExtraRefusal::MidOperation { op: RepoOp::Merge })
         );
     }
 
@@ -5062,17 +5031,13 @@ index 333..444 100644
     fn extra_recognises_a_name_that_is_not_here() {
         // git 2.31 dropped this line's trailing period; both forms must match.
         assert_eq!(
-            classify_extra(
-                "error: pathspec 'feat/x' did not match any file(s) known to git"
-            ),
+            classify_extra("error: pathspec 'feat/x' did not match any file(s) known to git"),
             Some(ExtraRefusal::NothingCalled {
                 name: "feat/x".into()
             })
         );
         assert_eq!(
-            classify_extra(
-                "error: pathspec 'feat/x' did not match any file(s) known to git."
-            ),
+            classify_extra("error: pathspec 'feat/x' did not match any file(s) known to git."),
             Some(ExtraRefusal::NothingCalled {
                 name: "feat/x".into()
             })
@@ -5108,7 +5073,10 @@ index 333..444 100644
     #[test]
     fn extra_recognises_another_git_holding_the_index() {
         let err = "fatal: Unable to create '/Users/dev/repo/.git/index.lock': File exists.\n\nAnother git process seems to be running in this repository, e.g.\nan editor opened by 'git commit'. Please make sure all processes\nare terminated then try again.";
-        assert_eq!(classify_extra(err), Some(ExtraRefusal::AnotherCommandRunning));
+        assert_eq!(
+            classify_extra(err),
+            Some(ExtraRefusal::AnotherCommandRunning)
+        );
     }
 
     #[test]
@@ -5144,15 +5112,20 @@ index 333..444 100644
             _ => unreachable!(),
         };
         assert_eq!(
-            body("To get started with GitHub CLI, please run: gh auth login", None),
+            body(
+                "To get started with GitHub CLI, please run: gh auth login",
+                None
+            ),
             "Canopy couldn't reach GitHub with the sign-in it has."
         );
         assert_eq!(
             body("no git remotes found", None),
             "This project has no remote to fetch from."
         );
-        assert!(body("fatal: couldn't find remote ref pull/142/head", Some(142))
-            .starts_with("GitHub doesn't have a copy of #142's changes"));
+        assert!(
+            body("fatal: couldn't find remote ref pull/142/head", Some(142))
+                .starts_with("GitHub doesn't have a copy of #142's changes")
+        );
     }
 
     #[test]

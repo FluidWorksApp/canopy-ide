@@ -289,7 +289,7 @@ export function GitPanel({
   /** "Use" on a workspace whose folder is gone would point the project at
    *  nothing. Ask through the flow instead — the branch that workspace still
    *  claims is exactly what the cleanup question is about. */
-  const useWorkspace = (w: ipc.WorktreeInfo) => {
+  const adoptWorkspace = (w: ipc.WorktreeInfo) => {
     if (!repo) return;
     if (w.prunable && w.branch) void switchTo(repo, { kind: "branch", branch: w.branch });
     else void openThere(repo, w.path, w.branch ?? w.name);
@@ -426,7 +426,7 @@ export function GitPanel({
     if (activeWorktree !== w.path && !w.bare) {
       items.push({
         label: "Use as project files",
-        onClick: () => useWorkspace(w),
+        onClick: () => adoptWorkspace(w),
       });
     }
     items.push({
@@ -739,7 +739,7 @@ export function GitPanel({
                     <button
                       className="btn-mini"
                       title="Point this project's files, search and new terminals at this workspace"
-                      onClick={() => useWorkspace(w)}
+                      onClick={() => adoptWorkspace(w)}
                     >
                       Use
                     </button>
