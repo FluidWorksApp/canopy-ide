@@ -1068,8 +1068,14 @@ body,
 /* Docked, not floating: the panel is part of the row, so the main area sizes
    itself around it. No frost and no slide — glass and a spring entrance are how
    an overlay says "I'm in front of your work"; a column that pushed the editor
-   aside is simply part of the layout. */
-.side-dock {
+   aside is simply part of the layout.
+
+   Selector qualified by the parent on purpose: `.project-body > *:not(.rail)`
+   above is a two-class selector and outranked a bare `.side-dock`, so the
+   panel was handed `flex: 1 1 0` and grew to share the row with the editor —
+   its width came from the flex line, not from the pixels the drag was
+   writing, which is what made the docked panel unresizable. */
+.project-body > .side-dock {
   position: relative;
   z-index: 1;
   flex: 0 0 auto;
@@ -1083,14 +1089,39 @@ body,
 }
 
 /* Closed is width 0, not gone: the panel stays mounted so reopening it doesn't
-   re-run every panel's first fetch. Nothing of it may show — including the
-   resize grip, which would otherwise sit over the rail's edge. */
+   re-run every panel's first fetch. Nothing of it may show. */
 .side-dock:not(.open) {
   border-right: none;
 }
 
-.side-dock:not(.open) .side-peek-grip {
-  display: none;
+/* The docked panel's resize handle, positioned against .project-body rather
+   than parented to the dock: .side-dock clips its children (that is what lets
+   it collapse to width 0), and a handle inside it was clipped to a 3px sliver
+   lying under the border — enough for the panel to read as fixed-width. Here it
+   straddles the seam, 4px either side, and the whole 8px is hittable. */
+.side-dock-grip {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  z-index: 20;
+  cursor: col-resize;
+  background: transparent;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.side-dock-grip:hover,
+.side-dock-grip:focus-visible {
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+  outline: none;
+}
+
+/* While a column is being dragged the whole window says so, and nothing the
+   pointer sweeps across starts selecting text — same as a tab in flight. */
+body.resizing-side,
+body.resizing-side * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 
 /* A peek is pointer-driven; someone who has turned motion down still needs the
