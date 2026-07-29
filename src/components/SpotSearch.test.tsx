@@ -208,10 +208,18 @@ describe("SpotSearch as a composer", () => {
     await screen.findByText("ctx-1785293237.png");
     await userEvent.keyboard("why does this look wrong?");
     await userEvent.keyboard("{Enter}");
-    const brief = onAction.mock.calls[0][0].brief as string;
-    expect(brief).toContain("why does this look wrong?");
-    expect(brief).toContain("/repo/.canopy/spot/ctx-1785293237.png");
-    expect(brief).toContain("open them with your file tools");
+    expect(onAction).toHaveBeenCalledWith({
+      type: "run-task",
+      brief: expect.stringContaining("why does this look wrong?"),
+    });
+    expect(onAction).toHaveBeenCalledWith({
+      type: "run-task",
+      brief: expect.stringContaining("/repo/.canopy/spot/ctx-1785293237.png"),
+    });
+    expect(onAction).toHaveBeenCalledWith({
+      type: "run-task",
+      brief: expect.stringContaining("open them with your file tools"),
+    });
   });
 
   it("an image alone is enough to send", async () => {
@@ -220,7 +228,10 @@ describe("SpotSearch as a composer", () => {
     paste([png()]);
     await screen.findByText("ctx-1785293237.png");
     await userEvent.keyboard("{Enter}");
-    expect(onAction.mock.calls[0][0].brief).toContain("ctx-1785293237.png");
+    expect(onAction).toHaveBeenCalledWith({
+      type: "run-task",
+      brief: expect.stringContaining("ctx-1785293237.png"),
+    });
   });
 
   it("takes the last attachment back on Backspace", async () => {
