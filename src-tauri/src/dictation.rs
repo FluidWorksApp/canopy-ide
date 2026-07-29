@@ -717,6 +717,7 @@ pub async fn dictation_start(
     model_id: String,
     streaming: Option<bool>,
     language: Option<String>,
+    mute_output: Option<bool>,
 ) -> Result<String, String> {
     let def = find_def(&model_id)?;
     {
@@ -763,7 +764,19 @@ pub async fn dictation_start(
         *inner.engine.lock().unwrap() = Some(engine);
         inner.loaded_model = Some(def.id.to_string());
     }
-    let rec = start_capture(app.clone())?;
+    // Only after the model is resident: muting during a 30s first-use download
+    // would leave the speakers off for the whole wait.
+    if mute_output.unwrap_or(false) {
+        crate::sysaudio::mute();
+    }
+    let rec = match start_capture(app.clone()) {
+        Ok(rec) => rec,
+        Err(e) => {
+            // A mic that never opened must not leave the speakers muted.
+            crate::sysaudio::restore();
+            return Err(e);
+        }
+    };
     let (engine, samples, rate) = {
         let mut inner = state.0.lock().unwrap();
         let shared = (inner.engine.clone(), rec.samples.clone(), rec.sample_rate);
@@ -784,6 +797,9 @@ pub async fn dictation_stop(
     state: tauri::State<'_, DictationManager>,
     language: Option<String>,
 ) -> Result<String, String> {
+    // Speakers come back the moment the mic closes, not after transcription —
+    // the decode can take seconds and there is nothing to protect by then.
+    crate::sysaudio::restore();
     // End the preview loop before touching the engine: it can be mid-decode,
     // and the final pass needs the same lock.
     let streaming = state.0.lock().unwrap().streaming.take();
@@ -877,6 +893,7 @@ pub async fn dictation_stop(
 /// Abandon the current recording without transcribing.
 #[tauri::command]
 pub fn dictation_cancel(state: tauri::State<'_, DictationManager>) {
+    crate::sysaudio::restore();
     let streaming = state.0.lock().unwrap().streaming.take();
     halt_streaming(streaming);
     if let Some(rec) = state.0.lock().unwrap().recording.take() {

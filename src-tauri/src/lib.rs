@@ -30,6 +30,7 @@ mod selftest;
 mod snapshot;
 mod spot;
 mod stores;
+mod sysaudio;
 mod tunnel;
 mod winproc;
 mod wsbridge;
@@ -601,6 +602,10 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
+                // Before anything else: never leave the speakers muted because
+                // the app quit mid-dictation. Cheap, and the one piece of state
+                // here that outlives the process.
+                sysaudio::restore();
                 // Guarantee no child processes outlive the app.
                 app.state::<pty::PtyManager>().kill_all();
                 app.state::<lsp::LspManager>().kill_all();

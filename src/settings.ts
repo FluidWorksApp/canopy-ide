@@ -343,6 +343,11 @@ export interface Settings {
   dictationStreaming: boolean;
   /** Which visualiser the recording pill draws. */
   dictationWaveStyle: DictationWaveStyle;
+  /** Silence the speakers while the mic is open, so whatever is playing does
+   *  not end up in the transcript. Mutes the default output device — it cannot
+   *  pause a player, and it is system-wide, not just Canopy. Restored the
+   *  moment recording ends. */
+  dictationMuteOutput: boolean;
 
   // ---- Remote access ----
   /** Reach for the remote control panel: "local" (this network only) or
@@ -445,6 +450,7 @@ const DEFAULTS: Settings = {
   dictationLanguage: "",
   dictationStreaming: false,
   dictationWaveStyle: "classic",
+  dictationMuteOutput: true,
   remoteReach: "local",
   remoteTunnelProvider: "cloudflare",
   browserEngine: "webview",

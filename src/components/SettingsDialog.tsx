@@ -2164,7 +2164,7 @@ function DictationSettings() {
 
       <Item
         name="Live preview"
-        desc="Show words in the pill as you speak. Costs a CPU core while recording; the inserted text is unaffected — it always comes from one clean pass over the whole recording."
+        desc="Words appear in the text box as you speak, and are corrected in place as the decoder settles. Terminals and the code editor show the preview in the pill instead — text there can't be taken back. Costs a CPU core while recording; the final text is unaffected either way."
       >
         <label className="set-inline-check">
           <input
@@ -2173,6 +2173,20 @@ function DictationSettings() {
             onChange={(e) => patch({ dictationStreaming: e.target.checked })}
           />
           <span>Stream as I talk</span>
+        </label>
+      </Item>
+
+      <Item
+        name="Mute while recording"
+        desc="Silence the speakers for as long as the mic is open, so what's playing doesn't end up in the transcript. Mutes the system output device — it can't pause a player, and it affects everything, not just Canopy. Restored as soon as recording ends. macOS only for now."
+      >
+        <label className="set-inline-check">
+          <input
+            type="checkbox"
+            checked={s.dictationMuteOutput}
+            onChange={(e) => patch({ dictationMuteOutput: e.target.checked })}
+          />
+          <span>Mute other audio</span>
         </label>
       </Item>
 

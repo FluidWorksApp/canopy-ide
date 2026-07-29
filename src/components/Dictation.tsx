@@ -18,6 +18,13 @@ import {
 } from "../settings";
 import { DictationTrigger, describeTrigger } from "../dictationTrigger";
 import { drawWave, normalizeLevel, smoothLevel } from "../waveStyles";
+import {
+  applyEdit,
+  hasCollapsedCaret,
+  liveInsertTarget,
+  planFinalEdit,
+  planLiveEdit,
+} from "../dictationInsert";
 
 type Phase =
   | "idle"
@@ -99,6 +106,11 @@ export function Dictation() {
    *  easily be shorter than a cold model load, and without this the key-up
    *  would be dropped and the recording would run on with nothing to end it. */
   const pendingStop = useRef(false);
+  /** The field the live preview is being typed into, and the exact text we
+   *  have put there. Null target = no eligible field had focus (a terminal, a
+   *  code editor, nothing at all), so the preview stays in the pill. */
+  const liveField = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
+  const liveWritten = useRef("");
   // Dictation needs the bundled ONNX Runtime, which unsupported builds (Intel
   // macOS) lack. Default true so the trigger works the instant the app mounts on
   // every supported platform; go quiet only once we confirm it's unavailable.
@@ -121,6 +133,17 @@ export function Dictation() {
       })
       .catch(() => {});
 
+    /** Undo everything the live preview typed, leaving the field as it was. */
+    const rollbackLive = () => {
+      const field = liveField.current;
+      const written = liveWritten.current;
+      liveField.current = null;
+      liveWritten.current = "";
+      if (!field || !written || !hasCollapsedCaret(field)) return;
+      const edit = planFinalEdit(field.value, field.selectionStart ?? 0, written, "");
+      if (edit) applyEdit(field, edit);
+    };
+
     const stop = async () => {
       if (phaseRef.current === "loading") {
         pendingStop.current = true;
@@ -131,9 +154,24 @@ export function Dictation() {
       try {
         // Read the language hint fresh, so a Settings change applies to the
         // very next transcription without a reload.
-        insertText(await ipc.dictationStop(getSettings().dictationLanguage));
+        const text = await ipc.dictationStop(getSettings().dictationLanguage);
+        const field = liveField.current;
+        const written = liveWritten.current;
+        liveField.current = null;
+        liveWritten.current = "";
+        // Swap the streamed guess for the authoritative decode in one edit, so
+        // the field never shows the preview and the final text side by side.
+        // If the field drifted under us, planFinalEdit declines and we fall
+        // back to a plain insert rather than overwriting text we no longer own.
+        const edit =
+          field && document.activeElement === field && hasCollapsedCaret(field)
+            ? planFinalEdit(field.value, field.selectionStart ?? 0, written, text)
+            : null;
+        if (field && edit) applyEdit(field, edit);
+        else insertText(text);
         setPhase("idle");
       } catch (e) {
+        rollbackLive();
         notice(String(e));
       }
       setPartial(null);
@@ -149,12 +187,20 @@ export function Dictation() {
       setPartial(null);
       pendingStop.current = false;
       level.current = 0;
+      liveWritten.current = "";
       try {
         const s = getSettings();
+        // Claim the focused field now, before the await: by the time the mic is
+        // open the user may have clicked elsewhere, and the field they were in
+        // when they pressed the key is the one they meant to dictate into.
+        liveField.current = s.dictationStreaming
+          ? liveInsertTarget(document.activeElement)
+          : null;
         const r = await ipc.dictationStart(
           s.dictationModel,
           s.dictationStreaming,
           s.dictationLanguage,
+          s.dictationMuteOutput,
         );
         if (r !== "recording") {
           setPhase("downloading");
@@ -174,6 +220,7 @@ export function Dictation() {
     const cancel = () => {
       pendingStop.current = false;
       void ipc.dictationCancel();
+      rollbackLive();
       setPartial(null);
       setPhase("idle");
     };
@@ -257,7 +304,30 @@ export function Dictation() {
     const levels = ipc.onDictationLevel((rms) => {
       level.current = normalizeLevel(rms);
     });
-    const partials = ipc.onDictationPartial((p) => setPartial(p));
+    const partials = ipc.onDictationPartial((p) => {
+      const field = liveField.current;
+      if (!field) {
+        setPartial(p);
+        return;
+      }
+      // Type it where it is going. The unconfirmed tail is included: holding it
+      // back until it settles makes the text lag a word or two behind the
+      // voice, and the next pass rewrites it in place anyway.
+      const next = [p.confirmed, p.unconfirmed].filter(Boolean).join(" ");
+      if (document.activeElement !== field || !hasCollapsedCaret(field)) {
+        // Focus or caret moved — stop writing and keep what is already there.
+        // Whatever we have written stays owned by us, so the final swap can
+        // still replace it if the user comes back to the same spot.
+        return;
+      }
+      const edit = planLiveEdit(
+        field.value,
+        field.selectionStart ?? 0,
+        liveWritten.current,
+        next,
+      );
+      if (edit && applyEdit(field, edit)) liveWritten.current = next;
+    });
 
     return () => {
       window.removeEventListener("keydown", onKey, true);

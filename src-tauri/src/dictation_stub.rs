@@ -75,6 +75,7 @@ pub async fn dictation_start(
     _model_id: String,
     _streaming: Option<bool>,
     _language: Option<String>,
+    _mute_output: Option<bool>,
 ) -> Result<String, String> {
     Err(UNAVAILABLE.into())
 }
