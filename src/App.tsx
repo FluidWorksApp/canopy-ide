@@ -58,6 +58,7 @@ import { Dialog } from "./components/Dialog";
 import { shouldOnboard, markOnboarded } from "./onboarding";
 import { isSelftest, setSelftestMode } from "./selftest/mode";
 import { startBrowserWatchdog } from "./browserWatchdog";
+import { startSpotIndexJob } from "./spotIndexJob";
 import { loadZoom, setZoom, applyZoom, STEP } from "./zoom";
 import { stopWorkspaceServers } from "./lsp/client";
 import { sweepStaleRuns } from "./taskHistory";
@@ -1200,6 +1201,17 @@ export default function App() {
   useEffect(() => {
     prWatch.setPaths(watchedPaths);
   }, [watchedPaths]);
+
+  // SpotSearch's index, kept up to date and pruned while the app runs rather
+  // than only when someone opens ⌘K (see spotIndexJob.ts). Every project the
+  // user has, not just the open ones: the index is machine-wide, and a store
+  // that files itself per project can only be found by handing over the path.
+  const spotRoots = useRef<string[]>([]);
+  spotRoots.current = useMemo(
+    () => ws.projects.flatMap((p) => p.components.map((c) => c.path)),
+    [ws.projects],
+  );
+  useEffect(() => startSpotIndexJob(() => spotRoots.current), []);
 
   // A PTY opened from the phone (spawn_headless emits pty:spawned). Route it to
   // the project whose component path most-specifically contains its cwd, open

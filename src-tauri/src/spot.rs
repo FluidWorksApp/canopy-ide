@@ -201,10 +201,53 @@ fn age_penalty(ts: i64, now: i64) -> f64 {
     (1.0 + days).ln() * 0.35
 }
 
+/// Drop documents left in the pre-agent-column shape, and unbookmark the files
+/// they came from. Returns how many rows went.
+///
+/// Two builds of Canopy can be running against one `~/.canopy` — a packaged app
+/// and a dev build — and the older one's `CREATE TABLE IF NOT EXISTS` accepts
+/// the newer table happily, so its six-column insert lands with agent and cwd
+/// NULL. Nothing else here can clean that up: search drops such a row (a NULL
+/// cwd cannot be scoped to a project) while `spot_index_stats` still counts it,
+/// so the index reports messages it can never return; and the per-agent purge
+/// looks for agents by name, which NULL is not. The bookmark goes with the row
+/// because re-reading the file from zero is the only way that text comes back.
+fn purge_legacy_shape(conn: &Connection) -> Result<usize, String> {
+    let mut pruned = 0usize;
+    let mut stmt = conn
+        .prepare("SELECT path FROM sources WHERE agent = ''")
+        .map_err(|e| e.to_string())?;
+    let legacy: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    drop(stmt);
+    for path in legacy {
+        pruned += conn
+            .execute("DELETE FROM docs WHERE meta = ?1", [&path])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM sources WHERE path = ?1", [&path])
+            .map_err(|e| e.to_string())?;
+    }
+    pruned += conn
+        .execute(
+            "DELETE FROM docs WHERE kind = 'transcript'
+             AND (agent IS NULL OR cwd IS NULL)",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(pruned)
+}
+
 #[derive(Serialize)]
 pub struct SpotIngestReport {
     /// The transcript budget ran out with files still unread — call again.
     pub more: bool,
+    /// Transcript bytes still unread when this call returned. The one number
+    /// that tells a catching-up index apart from a broken one: a count that
+    /// climbs on every press is progress while this is falling.
+    pub pending: u64,
     /// Transcript messages added this call.
     pub messages: usize,
     /// Terminals whose scrollback was (re)indexed this call.
@@ -269,6 +312,7 @@ pub async fn spot_ingest(
         let mut terminals = 0usize;
         let mut pruned = 0usize;
         let mut more = false;
+        let mut pending = 0u64;
         let mut budget = INGEST_BUDGET;
         let now = now_secs();
 
@@ -330,6 +374,7 @@ pub async fn spot_ingest(
                     .map_err(|e| e.to_string())?;
             }
         }
+        pruned += purge_legacy_shape(conn)?;
         // Retention: 0 means keep everything, which is the default — this is a
         // search index over the user's own work, not a log to be rotated.
         if retention > 0 {
@@ -377,9 +422,13 @@ pub async fn spot_ingest(
                     if seen == stamp {
                         continue;
                     }
+                    // Out of budget, but keep walking: the rest of the list is
+                    // what "how much is left" is measured from, and the stat
+                    // for it has already been paid for above.
                     if budget == 0 {
                         more = true;
-                        break;
+                        pending += len;
+                        continue;
                     }
                     budget = budget.saturating_sub(len.min(budget));
                     conn.execute("DELETE FROM docs WHERE meta = ?1", [&path_str])
@@ -437,7 +486,8 @@ pub async fn spot_ingest(
                     }
                     if budget == 0 {
                         more = true;
-                        break;
+                        pending += len - offset;
+                        continue;
                     }
                     use std::io::{Read, Seek, SeekFrom};
                     let Ok(mut fh) = std::fs::File::open(&f.path) else {
@@ -455,6 +505,7 @@ pub async fn spot_ingest(
                     budget = budget.saturating_sub(read as u64);
                     if (read as u64) < len - offset {
                         more = true;
+                        pending += len - offset - read as u64;
                     }
                     let text = String::from_utf8_lossy(&raw);
                     // Only complete lines: the writer may be mid-append, and a
@@ -591,6 +642,7 @@ pub async fn spot_ingest(
 
         Ok(SpotIngestReport {
             more,
+            pending,
             messages,
             terminals,
             research,
@@ -867,6 +919,59 @@ mod tests {
             dir.join("brief-1700-2.md")
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rows_from_an_older_build_are_dropped_and_their_files_rewound() {
+        let conn = Connection::open_in_memory().unwrap();
+        create(&conn).unwrap();
+        // What the pre-agent-column build writes into this table: six columns,
+        // so agent and cwd come out NULL, and a source row with no agent.
+        conn.execute(
+            "INSERT INTO docs (kind, key, title, body, meta, ts)
+             VALUES ('transcript', 'sess-old', '/Users/dev/app', 'old text', '/t/old.jsonl', 10)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sources (path, offset) VALUES ('/t/old.jsonl', 4096)",
+            [],
+        )
+        .unwrap();
+        // And a well-formed row, which must survive untouched.
+        conn.execute(
+            "INSERT INTO docs (kind, key, agent, cwd, title, body, meta, ts)
+             VALUES ('transcript', 'sess-new', 'claude', '/Users/dev/app', '', 'new text', '/t/new.jsonl', 20)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sources (path, agent, offset, stamp) VALUES ('/t/new.jsonl', 'claude', 99, 0)",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(purge_legacy_shape(&conn).unwrap(), 1);
+        let left: Vec<String> = conn
+            .prepare("SELECT key FROM docs")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(left, vec!["sess-new".to_string()]);
+        // The old file loses its bookmark so it is read again from zero; the
+        // good one keeps its offset, or every ingest would re-read everything.
+        let paths: Vec<(String, i64)> = conn
+            .prepare("SELECT path, offset FROM sources")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(paths, vec![("/t/new.jsonl".to_string(), 99)]);
+        // Idempotent: a clean index is left alone.
+        assert_eq!(purge_legacy_shape(&conn).unwrap(), 0);
     }
 
     #[test]

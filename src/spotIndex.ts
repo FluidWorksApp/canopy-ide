@@ -80,13 +80,42 @@ export function ingestOptions(roots: string[]): ipc.SpotIngestOptions {
 }
 
 /** Bring the index up to date, looping while the backend reports more to read.
- *  Bounded so a cold index can't hold its caller hostage. */
-export async function runIngest(roots: string[], passes = 8): Promise<void> {
+ *  Bounded so a cold index can't hold its caller hostage.
+ *
+ *  Returns the last report, whose `pending` is how much transcript is still
+ *  unread — a machine with years of history needs many of these before the
+ *  index stops growing, and a caller that shows a message count without that
+ *  number is showing a number that climbs for no visible reason. */
+export async function runIngest(
+  roots: string[],
+  passes = 8,
+): Promise<ipc.SpotIngestReport | null> {
+  // One run at a time, shared by whoever asks while it is going: the
+  // background job (spotIndexJob.ts), the palette opening, and the Settings
+  // button all mean the same thing by "bring the index up to date", and two of
+  // them at once would just split one budget over two sets of reads. A joiner
+  // gets the running call's roots, which is only ever a difference in the
+  // per-project stores, and the next pass is along shortly.
+  if (inFlight) return inFlight;
+  inFlight = ingestPasses(roots, passes).finally(() => {
+    inFlight = null;
+  });
+  return inFlight;
+}
+
+let inFlight: Promise<ipc.SpotIngestReport | null> | null = null;
+
+async function ingestPasses(
+  roots: string[],
+  passes: number,
+): Promise<ipc.SpotIngestReport | null> {
   const opts = ingestOptions(roots);
+  let last: ipc.SpotIngestReport | null = null;
   for (let i = 0; i < passes; i++) {
-    const report = await ipc.spotIngest(opts).catch(() => null);
-    if (!report?.more) return;
+    last = await ipc.spotIngest(opts).catch(() => null);
+    if (!last?.more) return last;
   }
+  return last;
 }
 
 /** "1.2 MB" — the index's size is the one number that makes it real. */

@@ -504,6 +504,9 @@ export interface SpotIndexHit {
 
 export interface SpotIngestReport {
   more: boolean;
+  /** Transcript bytes still unread when the call returned — what makes a
+   *  catching-up index legible as progress rather than as a rising number. */
+  pending: number;
   messages: number;
   terminals: number;
   /** Research entries in the index after this call. */
