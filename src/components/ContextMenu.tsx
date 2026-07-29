@@ -34,30 +34,6 @@ interface ContextMenuProps {
 export function ContextMenu({ x, y, items, above, onClose }: ContextMenuProps) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ x, y });
-  const [openSub, setOpenSub] = useState<number | null>(null);
-  const subRef = useRef<HTMLDivElement>(null);
-  // The attached panel is positioned relative to its row, so it inherits none
-  // of the parent's viewport clamping — near the bottom or right edge it ran
-  // straight off screen. Measure the real rect once it opens and pull it back.
-  const [subFix, setSubFix] = useState<{ top: number; flip: boolean }>({
-    top: 0,
-    flip: false,
-  });
-  useLayoutEffect(() => {
-    if (openSub == null) {
-      setSubFix({ top: 0, flip: false });
-      return;
-    }
-    const el = subRef.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    const margin = 8;
-    // Lift it just enough to fit; never push it above the top edge.
-    const overflowY = r.bottom - (window.innerHeight - margin);
-    const top = overflowY > 0 ? -Math.min(overflowY, Math.max(0, r.top - margin)) : 0;
-    const flip = r.right > window.innerWidth - margin;
-    setSubFix({ top, flip });
-  }, [openSub]);
 
   // Keep the menu inside the window — near the bottom/right edge it would
   // otherwise open off-screen and be unusable.
@@ -106,6 +82,57 @@ export function ContextMenu({ x, y, items, above, onClose }: ContextMenuProps) {
       style={{ left: pos.x, top: pos.y }}
       onContextMenu={(e) => e.preventDefault()}
     >
+      <MenuRows items={items} onClose={onClose} />
+    </div>
+  );
+}
+
+/** One level of a menu: the rows, and whichever of their panels is open.
+ *
+ *  Recursive, because `submenu` is a property of a MenuItem at any depth and
+ *  the type has always said so. It used to be rendered only one level down —
+ *  a submenu's rows were drawn as plain buttons that ignored their own
+ *  `submenu` and closed the menu on click. Composing two menus that each
+ *  worked alone therefore produced a row that looked live, highlighted on
+ *  hover, and did nothing at all: "Send screenshot ▸ Agent ▸ New agent in
+ *  canopy-website" was dead the moment it moved one level deeper.
+ *
+ *  Each level owns its own open-panel state, so opening a child never closes
+ *  the parent that contains it. */
+function MenuRows({
+  items,
+  onClose,
+}: {
+  items: MenuItem[];
+  onClose: () => void;
+}) {
+  const [openSub, setOpenSub] = useState<number | null>(null);
+  const subRef = useRef<HTMLDivElement>(null);
+  // The attached panel is positioned relative to its row, so it inherits none
+  // of the parent's viewport clamping — near the bottom or right edge it ran
+  // straight off screen. Measure the real rect once it opens and pull it back.
+  const [subFix, setSubFix] = useState<{ top: number; flip: boolean }>({
+    top: 0,
+    flip: false,
+  });
+  useLayoutEffect(() => {
+    if (openSub == null) {
+      setSubFix({ top: 0, flip: false });
+      return;
+    }
+    const el = subRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const margin = 8;
+    // Lift it just enough to fit; never push it above the top edge.
+    const overflowY = r.bottom - (window.innerHeight - margin);
+    const top = overflowY > 0 ? -Math.min(overflowY, Math.max(0, r.top - margin)) : 0;
+    const flip = r.right > window.innerWidth - margin;
+    setSubFix({ top, flip });
+  }, [openSub]);
+
+  return (
+    <>
       {items.map((item, i) =>
         item.separator ? (
           // A separator with a label is a section heading, which is how the
@@ -142,31 +169,7 @@ export function ContextMenu({ x, y, items, above, onClose }: ContextMenuProps) {
                 className={`ctx-menu ctx-submenu ${subFix.flip ? "ctx-submenu-left" : ""}`}
                 style={{ marginTop: subFix.top }}
               >
-                {item.submenu.map((sub, j) =>
-                  sub.separator ? (
-                    sub.label ? (
-                      <div key={j} className="ctx-heading">
-                        {sub.label}
-                      </div>
-                    ) : (
-                      <div key={j} className="ctx-sep" />
-                    )
-                  ) : (
-                    <button
-                      key={j}
-                      className={`ctx-item ${sub.danger ? "ctx-danger" : ""}`}
-                      disabled={sub.disabled}
-                      onClick={() => {
-                        sub.onClick?.();
-                        onClose();
-                      }}
-                    >
-                      {sub.icon != null && <span className="ctx-icon">{sub.icon}</span>}
-                      <span className="ctx-label">{sub.label}</span>
-                      {sub.hint && <span className="ctx-hint">{sub.hint}</span>}
-                    </button>
-                  ),
-                )}
+                <MenuRows items={item.submenu} onClose={onClose} />
               </div>
             )}
           </div>
@@ -186,7 +189,7 @@ export function ContextMenu({ x, y, items, above, onClose }: ContextMenuProps) {
           </button>
         ),
       )}
-    </div>
+    </>
   );
 }
 
