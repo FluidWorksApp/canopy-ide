@@ -14536,11 +14536,12 @@ a.btn-mini {
   color: var(--text-dim);
 }
 
+/* Note left, control hard right — the shape every other footer in the app
+   has, and why the eye finds the action without reading the sentence first. */
 .research-actions {
   display: flex;
   flex: 0 0 auto;
-  flex-wrap: wrap;
-  gap: 8px;
+  gap: 12px;
   align-items: center;
   padding: 10px 18px;
   background: var(--bg-alt);

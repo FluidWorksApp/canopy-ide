@@ -102,16 +102,21 @@ describe("ResearchView", () => {
         projectId="p1"
         researchId="0007-index-staleness"
         onImplement={onImplement}
+        installed={{ claude: true }}
       />,
     );
-    // The one action that matters, accented, and alone at the foot — the bar
-    // used to be six equal buttons with this buried among five state moves.
-    const cta = await screen.findByRole("button", { name: "Implement this" });
+    // Accented, rightmost, and a split button — starting an agent is always a
+    // choice of *which* agent, and every other surface that starts one asks it
+    // that way. Its name carries the resolved CLI, hence the regex.
+    const cta = await screen.findByRole("button", { name: /Implement this/ });
     expect(cta).toHaveClass("btn-accent");
-    // Alone at the foot: the bar used to be six equal-weight buttons with this
-    // buried among five state moves, which are marks in the header now.
+    // The state moves are marks in the header now, so the foot holds only this
+    // control: its primary and its caret, and nothing else.
     const bar = cta.closest(".research-actions")!;
-    expect(bar.querySelectorAll("button")).toHaveLength(1);
+    expect(bar.querySelectorAll("button")).toHaveLength(2);
+    // The note comes first and the control last, which is what puts the action
+    // where the eye goes.
+    expect(bar.firstElementChild).toHaveClass("research-actions-note");
     unmount();
 
     // Still being researched: there is no finding to build yet, so the button
