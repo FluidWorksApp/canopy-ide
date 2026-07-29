@@ -3135,7 +3135,9 @@ fn install_command(top: &Path) -> Option<String> {
             return Some(cmd.into());
         }
     }
-    top.join("package.json").exists().then(|| "npm install".into())
+    top.join("package.json")
+        .exists()
+        .then(|| "npm install".into())
 }
 
 /// Make a just-created worktree runnable.
@@ -5468,7 +5470,10 @@ index 333..444 100644
         std::fs::write(root.join("src/nested/b.js"), "two").unwrap();
 
         clone_dir(&root.join("src"), &root.join("dst")).unwrap();
-        assert_eq!(std::fs::read_to_string(root.join("dst/a.js")).unwrap(), "one");
+        assert_eq!(
+            std::fs::read_to_string(root.join("dst/a.js")).unwrap(),
+            "one"
+        );
         assert_eq!(
             std::fs::read_to_string(root.join("dst/nested/b.js")).unwrap(),
             "two"
@@ -5477,7 +5482,10 @@ index 333..444 100644
         // A clone is a copy, not a link: writing through one must not be
         // visible through the other, or two workspaces would share deps.
         std::fs::write(root.join("dst/a.js"), "changed").unwrap();
-        assert_eq!(std::fs::read_to_string(root.join("src/a.js")).unwrap(), "one");
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/a.js")).unwrap(),
+            "one"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
