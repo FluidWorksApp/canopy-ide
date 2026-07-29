@@ -1208,11 +1208,6 @@ fn edit_diagnostics(event: &serde_json::Value) -> Option<String> {
 // that no IDE is around, instead of the process refusing to run (which the
 // agent CLI would surface as a broken MCP server).
 
-/// Server instructions, injected into the agent's system prompt by the client.
-/// Deliberately a routing table, not a feature tour: the failure it exists to
-/// stop is an agent defaulting to the shell (`npm run dev`, `open <url>`,
-/// `kill`) when the IDE it is running inside can do the same thing visibly,
-/// with the output and the preview staying available afterwards.
 // ---- the research harness -------------------------------------------------
 //
 // Instructions alone do not hold. An agent told "put research in the store"
@@ -1259,9 +1254,8 @@ fn denied_research_write(path: &str, entry_dir: &std::path::Path, home: &str) ->
     if !is_prose(path) {
         return false;
     }
-    let under = |base: &str| {
-        !base.is_empty() && (path == base || path.starts_with(&format!("{base}/")))
-    };
+    let under =
+        |base: &str| !base.is_empty() && (path == base || path.starts_with(&format!("{base}/")));
     if under(&entry_dir.to_string_lossy()) {
         return false;
     }
@@ -1318,7 +1312,7 @@ fn relocate_stray_research(session_id: &str, entry_dir: &std::path::Path) {
         let abs = if rel.starts_with('/') {
             rel.to_string()
         } else if launch_cwd.is_empty() {
-            continue
+            continue;
         } else {
             format!("{launch_cwd}/{rel}")
         };
@@ -1348,6 +1342,11 @@ fn relocate_stray_research(session_id: &str, entry_dir: &std::path::Path) {
     }
 }
 
+/// Server instructions, injected into the agent's system prompt by the client.
+/// Deliberately a routing table, not a feature tour: the failure it exists to
+/// stop is an agent defaulting to the shell (`npm run dev`, `open <url>`,
+/// `kill`) when the IDE it is running inside can do the same thing visibly,
+/// with the output and the preview staying available afterwards.
 const INSTRUCTIONS: &str = "\
 This session runs inside the Canopy IDE. Prefer these tools over shell or \
 system equivalents — they act in the IDE the user is watching, and their \
@@ -2526,18 +2525,22 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
             if !allowed.contains(&action) {
                 return Err(format!(
                     "canopy_research{} has no action \"{action}\" — use {}",
-                    if name == "canopy_research" { "" } else { "_write" },
+                    if name == "canopy_research" {
+                        ""
+                    } else {
+                        "_write"
+                    },
                     allowed.join(", ")
                 ));
             }
-            if name == "canopy_research_write" && action == "start" {
-                if args
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .is_none_or(str::is_empty)
-                {
-                    return Err("start needs a title — the question in a few words".into());
-                }
+            // `is_none_or` would read better but is stable only since 1.82,
+            // and this crate's MSRV is 1.77.2.
+            let titled = args
+                .get("title")
+                .and_then(|v| v.as_str())
+                .is_some_and(|t| !t.is_empty());
+            if name == "canopy_research_write" && action == "start" && !titled {
+                return Err("start needs a title — the question in a few words".into());
             }
             text(research_op(action, args))
         }
@@ -3736,11 +3739,17 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("no action"), "{err}");
-        assert!(err.contains("list"), "the error should name what is allowed");
+        assert!(
+            err.contains("list"),
+            "the error should name what is allowed"
+        );
 
         // And the write tool is not a way to read.
-        let err = call_tool("canopy_research_write", &serde_json::json!({ "action": "get" }))
-            .unwrap_err();
+        let err = call_tool(
+            "canopy_research_write",
+            &serde_json::json!({ "action": "get" }),
+        )
+        .unwrap_err();
         assert!(err.contains("no action"), "{err}");
     }
 

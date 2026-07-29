@@ -433,10 +433,7 @@ fn write_atomic(path: &Path, body: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let tmp = path.with_extension(format!(
-        "tmp{}",
-        std::process::id()
-    ));
+    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
     std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
@@ -673,7 +670,12 @@ fn start_impl(
     if title.is_empty() {
         return Err("a research entry needs a title — the question in a few words".into());
     }
-    cap("title", &title, TITLE_MAX, "Put the detail in the question.")?;
+    cap(
+        "title",
+        &title,
+        TITLE_MAX,
+        "Put the detail in the question.",
+    )?;
     let question = question.unwrap_or_default();
     cap(
         "question",
@@ -902,7 +904,11 @@ fn add_source_impl(
     } else {
         title
     };
-    let file = format!("sources/{:02}-{}.md", meta.sources.len() + 1, slugify(&title));
+    let file = format!(
+        "sources/{:02}-{}.md",
+        meta.sources.len() + 1,
+        slugify(&title)
+    );
     write_atomic(&dir.join(&file), &body)?;
     let source = SourceRef {
         file,
@@ -1071,11 +1077,7 @@ fn link_impl(
 /// outside every registered workspace root, so `fsx::check_scope` cannot reach
 /// it and this is the only reader the UI has for these paths.
 #[tauri::command]
-pub fn research_read_file(
-    project_id: String,
-    id: String,
-    path: String,
-) -> Result<String, String> {
+pub fn research_read_file(project_id: String, id: String, path: String) -> Result<String, String> {
     let file = entry_file(&project_id, &id, &path)?;
     let bytes = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
     if bytes as usize > SOURCE_MAX {
@@ -1135,7 +1137,10 @@ pub fn index_docs() -> Vec<IndexDoc> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    for p in projects.filter_map(Result::ok).filter(|p| p.path().is_dir()) {
+    for p in projects
+        .filter_map(Result::ok)
+        .filter(|p| p.path().is_dir())
+    {
         let project_id = p.file_name().to_string_lossy().to_string();
         // The project's own roots are the honest cwd for an entry whose agent
         // never recorded one (created from the panel, say).
@@ -1220,7 +1225,10 @@ mod tests {
 
     #[test]
     fn slugs_are_short_lowercase_and_never_empty() {
-        assert_eq!(slugify("SpotSearch index staleness"), "spotsearch-index-staleness");
+        assert_eq!(
+            slugify("SpotSearch index staleness"),
+            "spotsearch-index-staleness"
+        );
         assert_eq!(slugify("  !!!  "), "untitled");
         assert!(slugify(&"x".repeat(200)).len() <= 48);
     }
@@ -1301,10 +1309,8 @@ mod tests {
 
     impl TempHome {
         fn new(tag: &str) -> TempHome {
-            let dir = std::env::temp_dir().join(format!(
-                "canopy-research-test-{tag}-{}",
-                std::process::id()
-            ));
+            let dir = std::env::temp_dir()
+                .join(format!("canopy-research-test-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             std::env::set_var("CANOPY_RESEARCH_HOME", &dir);
@@ -1447,8 +1453,7 @@ mod tests {
         assert_eq!(rows[0].id, a.id);
         assert_eq!(rows[0].digest, "alpha digest");
         // Asking for it explicitly still finds it.
-        let archived =
-            research_list("p1".into(), Some(vec!["archived".into()]), None).unwrap();
+        let archived = research_list("p1".into(), Some(vec!["archived".into()]), None).unwrap();
         assert_eq!(archived.len(), 1);
         assert_eq!(archived[0].id, b.id);
 

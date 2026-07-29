@@ -280,10 +280,10 @@ async fn editor(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (Sta
 /// wins, so a component nested inside another (a sub-package registered in its
 /// own right) resolves to the nearer one rather than to whichever was published
 /// first.
-fn project_for_cwd(app: &tauri::AppHandle, cwd: &str) -> Option<(String, String, Vec<String>)> {
+fn project_for_cwd(app: &tauri::AppHandle, cwd: &str) -> Option<ProjectCandidate> {
     let bridge = app.state::<ContextBridge>();
     let snapshots = bridge.snapshots.lock().unwrap();
-    let candidates: Vec<(String, String, Vec<String>)> = snapshots
+    let candidates: Vec<ProjectCandidate> = snapshots
         .values()
         .filter_map(|snap| {
             let id = snap.get("id").and_then(|v| v.as_str())?;
@@ -311,25 +311,30 @@ fn project_for_cwd(app: &tauri::AppHandle, cwd: &str) -> Option<(String, String,
     pick_project(&candidates, cwd)
 }
 
+/// A project a directory can resolve to: its id, its display name, and the
+/// component paths that decide whether a directory belongs to it.
+type ProjectCandidate = (String, String, Vec<String>);
+
 /// The scoping rule itself, separated from where the snapshots came from so it
 /// can be tested: longest containing component path wins.
-fn pick_project(
-    candidates: &[(String, String, Vec<String>)],
-    cwd: &str,
-) -> Option<(String, String, Vec<String>)> {
-    let mut best: Option<(usize, &(String, String, Vec<String>))> = None;
+fn pick_project(candidates: &[ProjectCandidate], cwd: &str) -> Option<ProjectCandidate> {
+    let mut best: Option<(usize, &ProjectCandidate)> = None;
     for cand in candidates {
         for root in &cand.2 {
             let r = root.trim_end_matches('/');
-            if r.is_empty() {
-                continue;
-            }
             // Directory containment, not string prefix: /repo-old must not
             // resolve to /repo.
-            if cwd == r || cwd.starts_with(&format!("{r}/")) {
-                if best.is_none_or(|(n, _)| r.len() > n) {
-                    best = Some((r.len(), cand));
-                }
+            if r.is_empty() || !(cwd == r || cwd.starts_with(&format!("{r}/"))) {
+                continue;
+            }
+            // Spelled out rather than `is_none_or`, which is stable only since
+            // 1.82 and this crate's MSRV is 1.77.2.
+            let better = match best {
+                Some((n, _)) => r.len() > n,
+                None => true,
+            };
+            if better {
+                best = Some((r.len(), cand));
             }
         }
     }
@@ -413,8 +418,10 @@ async fn research_op(
     };
 
     let out: Result<serde_json::Value, String> = (|| match req.action.as_str() {
-        "list" => crate::research::research_list(project_id.clone(), req.statuses.clone(), req.limit)
-            .map(|rows| serde_json::json!({ "research": rows })),
+        "list" => {
+            crate::research::research_list(project_id.clone(), req.statuses.clone(), req.limit)
+                .map(|rows| serde_json::json!({ "research": rows }))
+        }
         "search" => crate::research::research_search(
             project_id.clone(),
             req.query.clone().unwrap_or_default(),
