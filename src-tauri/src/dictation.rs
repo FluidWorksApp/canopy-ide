@@ -10,7 +10,7 @@
 // who never press the shortcut pay nothing.
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 use transcribe_rs::onnx::moonshine::{MoonshineModel, MoonshineVariant};
@@ -101,12 +101,20 @@ fn find_def(id: &str) -> Result<&'static ModelDef, String> {
 #[derive(Default)]
 pub struct DictationManager(Mutex<Inner>);
 
+/// The loaded model, shared rather than owned, because the streaming preview
+/// decodes on its own thread while the manager lock has to stay free for
+/// status polls and — the one that matters — the stop that ends the recording.
+/// Holding the manager lock across a half-second inference would make stop
+/// wait for it.
+type SharedEngine = Arc<Mutex<Option<Box<dyn SpeechModel>>>>;
+
 #[derive(Default)]
 struct Inner {
-    engine: Option<Box<dyn SpeechModel>>,
+    engine: SharedEngine,
     loaded_model: Option<String>,
     recording: Option<Recording>,
     downloading: Option<String>,
+    streaming: Option<StreamHandle>,
 }
 
 struct Recording {
@@ -114,6 +122,26 @@ struct Recording {
     samples: Arc<Mutex<Vec<f32>>>,
     sample_rate: u32,
     join: std::thread::JoinHandle<()>,
+}
+
+struct StreamHandle {
+    stop: Arc<AtomicBool>,
+    join: std::thread::JoinHandle<()>,
+}
+
+/// Latest input loudness, as f32 bits — written by the audio callback, read by
+/// the capture thread that emits it. An atomic rather than a lock because the
+/// writer is CoreAudio's realtime thread, which must never block.
+#[derive(Default)]
+struct LevelMeter(AtomicU32);
+
+impl LevelMeter {
+    fn set(&self, v: f32) {
+        self.0.store(v.to_bits(), Ordering::Relaxed);
+    }
+    fn get(&self) -> f32 {
+        f32::from_bits(self.0.load(Ordering::Relaxed))
+    }
 }
 
 fn models_root() -> Result<PathBuf, String> {
@@ -255,12 +283,13 @@ fn load_engine(def: &ModelDef) -> Result<Box<dyn SpeechModel>, String> {
 /// Send) and accumulate mono samples at the device's native rate until told
 /// to stop. Returns once the stream is actually capturing, so "Listening"
 /// in the UI never lies about a mic that failed to open.
-fn start_capture() -> Result<Recording, String> {
+fn start_capture(app: tauri::AppHandle) -> Result<Recording, String> {
     let stop = Arc::new(AtomicBool::new(false));
     let samples = Arc::new(Mutex::new(Vec::<f32>::new()));
     let (tx, rx) = std::sync::mpsc::channel::<Result<u32, String>>();
     let thread_stop = stop.clone();
     let thread_samples = samples.clone();
+    let thread_meter = Arc::new(LevelMeter::default());
 
     let join = std::thread::spawn(move || {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -278,20 +307,22 @@ fn start_capture() -> Result<Recording, String> {
             let stream = match config.sample_format() {
                 cpal::SampleFormat::F32 => {
                     let sink = thread_samples.clone();
+                    let m = thread_meter.clone();
                     device.build_input_stream(
                         &config.into(),
-                        move |data: &[f32], _: &_| push_mono(&sink, data, channels, cap),
+                        move |data: &[f32], _: &_| push_mono(&sink, data, channels, cap, &m),
                         err_fn,
                         None,
                     )
                 }
                 cpal::SampleFormat::I16 => {
                     let sink = thread_samples.clone();
+                    let m = thread_meter.clone();
                     device.build_input_stream(
                         &config.into(),
                         move |data: &[i16], _: &_| {
                             let f: Vec<f32> = data.iter().map(|s| *s as f32 / 32768.0).collect();
-                            push_mono(&sink, &f, channels, cap);
+                            push_mono(&sink, &f, channels, cap, &m);
                         },
                         err_fn,
                         None,
@@ -299,12 +330,13 @@ fn start_capture() -> Result<Recording, String> {
                 }
                 cpal::SampleFormat::U16 => {
                     let sink = thread_samples.clone();
+                    let m = thread_meter.clone();
                     device.build_input_stream(
                         &config.into(),
                         move |data: &[u16], _: &_| {
                             let f: Vec<f32> =
                                 data.iter().map(|s| *s as f32 / 32768.0 - 1.0).collect();
-                            push_mono(&sink, &f, channels, cap);
+                            push_mono(&sink, &f, channels, cap, &m);
                         },
                         err_fn,
                         None,
@@ -324,8 +356,13 @@ fn start_capture() -> Result<Recording, String> {
             }
             Ok((stream, rate)) => {
                 let _ = tx.send(Ok(rate));
+                // This thread exists only to own the (non-Send) cpal stream and
+                // notice the stop flag, so it is also the right place to publish
+                // the meter: it already ticks at 30ms, and unlike the audio
+                // callback it is allowed to allocate and cross into Tauri's IPC.
                 while !thread_stop.load(Ordering::Relaxed) {
-                    std::thread::sleep(std::time::Duration::from_millis(30));
+                    std::thread::sleep(std::time::Duration::from_millis(33));
+                    let _ = app.emit("dictation:level", thread_meter.get());
                 }
                 drop(stream);
             }
@@ -353,7 +390,19 @@ fn start_capture() -> Result<Recording, String> {
     })
 }
 
-fn push_mono(sink: &Arc<Mutex<Vec<f32>>>, data: &[f32], channels: usize, cap: usize) {
+fn push_mono(
+    sink: &Arc<Mutex<Vec<f32>>>,
+    data: &[f32],
+    channels: usize,
+    cap: usize,
+    meter: &LevelMeter,
+) {
+    // Metered before the cap check, so the visualiser keeps responding even
+    // once a very long recording has stopped accumulating.
+    if !data.is_empty() {
+        let sum_sq: f32 = data.iter().map(|s| s * s).sum();
+        meter.set((sum_sq / data.len() as f32).sqrt());
+    }
     let mut buf = sink.lock().unwrap();
     if buf.len() >= cap {
         return;
@@ -409,6 +458,139 @@ fn resample(input: Vec<f32>, from: u32) -> Result<Vec<f32>, String> {
         .map_err(|e| format!("resample: {e}"))?;
     out.extend_from_slice(&res[0]);
     Ok(out)
+}
+
+// ---- Streaming preview ----
+//
+// A second decode loop that runs while you speak, purely so the pill can show
+// words appearing. It is NOT the path the final text comes from: dictation_stop
+// still decodes the whole recording once, cleanly, and that is what gets
+// inserted. Keeping the preview off the critical path is what lets it take the
+// cheap shortcuts below without costing any accuracy.
+//
+// The shortcut that matters: each pass re-decodes only the last
+// STREAM_WINDOW_SECS of audio, so cost is flat no matter how long you talk.
+// Text that scrolls out of that window is gone from the preview — which is
+// fine, because the preview is a marquee of what you just said, and the full
+// text arrives at the end regardless.
+
+/// How much trailing audio each preview pass decodes. Long enough for the
+/// model to have real context, short enough that a pass stays well under a
+/// second on CPU.
+const STREAM_WINDOW_SECS: f32 = 12.0;
+/// Below this there is not enough audio for a useful hypothesis.
+const STREAM_MIN_SECS: f32 = 0.8;
+/// Floor on the gap between passes. The real gap is whichever is longer, this
+/// or the time the last decode took, so a slow machine backs itself off
+/// instead of queueing work it cannot keep up with.
+const STREAM_MIN_INTERVAL_MS: u64 = 400;
+
+/// How many leading words two hypotheses agree on.
+fn common_prefix_len(a: &[String], b: &[String]) -> usize {
+    a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
+}
+
+/// Re-decode the trailing window until told to stop, emitting `dictation:partial`.
+///
+/// Successive passes disagree about the last few words — the model revises its
+/// guess as more audio arrives — and rendering that raw makes the text flicker
+/// and rewrite itself. So each hypothesis is split at the point where it stops
+/// agreeing with the previous one: the agreed prefix is "confirmed" and stays
+/// put, the tail is "unconfirmed" and is drawn dimmed. This is the
+/// LocalAgreement rule from the whisper-streaming literature, and it is the
+/// difference between a preview that reads and one that twitches.
+fn spawn_streaming(
+    app: tauri::AppHandle,
+    engine: SharedEngine,
+    samples: Arc<Mutex<Vec<f32>>>,
+    sample_rate: u32,
+    language: Option<String>,
+) -> StreamHandle {
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = stop.clone();
+    let join = std::thread::spawn(move || {
+        let window = (STREAM_WINDOW_SECS * sample_rate as f32) as usize;
+        let min_samples = (STREAM_MIN_SECS * sample_rate as f32) as usize;
+        let mut prev: Vec<String> = Vec::new();
+        let mut interval = STREAM_MIN_INTERVAL_MS;
+
+        loop {
+            // Sleep in short slices so stop is noticed promptly rather than
+            // after a whole interval.
+            let mut slept = 0;
+            while slept < interval {
+                if thread_stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                slept += 25;
+            }
+
+            // Copy the tail and get out of the lock immediately — the audio
+            // callback contends for this same mutex and must never wait.
+            let tail: Vec<f32> = {
+                let buf = samples.lock().unwrap();
+                if buf.len() < min_samples {
+                    continue;
+                }
+                buf[buf.len().saturating_sub(window)..].to_vec()
+            };
+
+            let started = std::time::Instant::now();
+            let resampled = match resample(tail, sample_rate) {
+                Ok(v) => v,
+                Err(e) => {
+                    log::warn!("dictation: streaming resample failed: {e}");
+                    continue;
+                }
+            };
+            let options = TranscribeOptions {
+                language: language.clone().filter(|l| !l.is_empty()),
+                ..Default::default()
+            };
+            let text = {
+                let mut guard = engine.lock().unwrap();
+                let Some(model) = guard.as_mut() else {
+                    return;
+                };
+                match model.transcribe(&resampled, &options) {
+                    Ok(r) => r.text,
+                    Err(e) => {
+                        log::warn!("dictation: streaming pass failed: {e}");
+                        continue;
+                    }
+                }
+            };
+            if thread_stop.load(Ordering::Relaxed) {
+                return;
+            }
+
+            let words: Vec<String> = text.split_whitespace().map(|s| s.to_string()).collect();
+            let agreed = common_prefix_len(&prev, &words);
+            let _ = app.emit(
+                "dictation:partial",
+                serde_json::json!({
+                    "confirmed": words[..agreed].join(" "),
+                    "unconfirmed": words[agreed..].join(" "),
+                }),
+            );
+            prev = words;
+
+            let elapsed = started.elapsed().as_millis() as u64;
+            interval = elapsed.max(STREAM_MIN_INTERVAL_MS);
+        }
+    });
+    StreamHandle { stop, join }
+}
+
+/// Stop the preview loop and wait for its in-flight decode to finish, so the
+/// engine lock is free before the caller reaches for it. Must be called with
+/// no manager lock held — the worker can be mid-inference for a few hundred ms.
+fn halt_streaming(handle: Option<StreamHandle>) {
+    if let Some(h) = handle {
+        h.stop.store(true, Ordering::Relaxed);
+        let _ = h.join.join();
+    }
 }
 
 // ---- Tauri commands ----
@@ -515,7 +697,7 @@ pub fn dictation_delete_model(
             return Err("Download in progress".into());
         }
         if inner.loaded_model.as_deref() == Some(def.id) {
-            inner.engine = None;
+            *inner.engine.lock().unwrap() = None;
             inner.loaded_model = None;
         }
     }
@@ -533,6 +715,8 @@ pub async fn dictation_start(
     app: tauri::AppHandle,
     state: tauri::State<'_, DictationManager>,
     model_id: String,
+    streaming: Option<bool>,
+    language: Option<String>,
 ) -> Result<String, String> {
     let def = find_def(&model_id)?;
     {
@@ -576,11 +760,20 @@ pub async fn dictation_start(
             }
         };
         let mut inner = state.0.lock().unwrap();
-        inner.engine = Some(engine);
+        *inner.engine.lock().unwrap() = Some(engine);
         inner.loaded_model = Some(def.id.to_string());
     }
-    let rec = start_capture()?;
-    state.0.lock().unwrap().recording = Some(rec);
+    let rec = start_capture(app.clone())?;
+    let (engine, samples, rate) = {
+        let mut inner = state.0.lock().unwrap();
+        let shared = (inner.engine.clone(), rec.samples.clone(), rec.sample_rate);
+        inner.recording = Some(rec);
+        shared
+    };
+    if streaming.unwrap_or(false) {
+        let handle = spawn_streaming(app, engine, samples, rate, language);
+        state.0.lock().unwrap().streaming = Some(handle);
+    }
     Ok("recording".into())
 }
 
@@ -591,6 +784,10 @@ pub async fn dictation_stop(
     state: tauri::State<'_, DictationManager>,
     language: Option<String>,
 ) -> Result<String, String> {
+    // End the preview loop before touching the engine: it can be mid-decode,
+    // and the final pass needs the same lock.
+    let streaming = state.0.lock().unwrap().streaming.take();
+    halt_streaming(streaming);
     let rec = state
         .0
         .lock()
@@ -653,31 +850,23 @@ pub async fn dictation_stop(
         samples
     };
 
-    let (engine, loaded) = {
-        let mut inner = state.0.lock().unwrap();
-        (inner.engine.take(), inner.loaded_model.clone())
-    };
-    let mut engine = engine.ok_or("Voice model not loaded")?;
+    // The authoritative decode: the whole recording, in one pass, with full
+    // context. Whatever the streaming preview showed has no bearing on it.
+    let engine = state.0.lock().unwrap().engine.clone();
     let options = TranscribeOptions {
         language: language.filter(|l| !l.is_empty()),
         ..Default::default()
     };
-    let (engine, result) = tauri::async_runtime::spawn_blocking(move || {
-        let result = engine
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = engine.lock().unwrap();
+        let model = guard.as_mut().ok_or("Voice model not loaded")?;
+        model
             .transcribe(&samples, &options)
             .map(|r| r.text)
-            .map_err(|e| format!("Transcription failed: {e}"));
-        (engine, result)
+            .map_err(|e| format!("Transcription failed: {e}"))
     })
     .await
     .map_err(|e| e.to_string())?;
-    {
-        let mut inner = state.0.lock().unwrap();
-        // Only restore if nothing else swapped the model while we were busy.
-        if inner.loaded_model == loaded {
-            inner.engine = Some(engine);
-        }
-    }
     let text = result?.trim().to_string();
     if text.is_empty() {
         return Err("No speech detected".into());
@@ -688,6 +877,8 @@ pub async fn dictation_stop(
 /// Abandon the current recording without transcribing.
 #[tauri::command]
 pub fn dictation_cancel(state: tauri::State<'_, DictationManager>) {
+    let streaming = state.0.lock().unwrap().streaming.take();
+    halt_streaming(streaming);
     if let Some(rec) = state.0.lock().unwrap().recording.take() {
         rec.stop.store(true, Ordering::Relaxed);
         // The capture thread notices within one 30ms tick and exits; nothing

@@ -150,6 +150,7 @@ import { TicketsPanel, type AgentTarget } from "../TicketsPanel";
 import { PrsPanel } from "../PrsPanel";
 import { ServersPanel } from "../ServersPanel";
 import { groupServers, runningCount, type ServerEntry } from "../../servers";
+import { ensureLeases, portEnv, portForPath } from "../../workspaces";
 import { needsYouCount } from "../../prInbox";
 import { usePrWatch } from "../../usePrWatch";
 import { TicketView } from "../TicketView";
@@ -491,7 +492,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // The one funnel, mounted by the wrapper below this component. Every route
   // into a ref that moves goes through it, so a refusal arrives as a question
   // in one dialog instead of raw stderr in a toast.
-  const { switchTo, ask } = useBranchSwitch();
+  const { switchTo, ask, version: switchVersion } = useBranchSwitch();
   /** Perform the redirection: the project's files, search and new terminals
    *  come from this workspace instead of the main checkout. The funnel owns the
    *  label and the notice, which is why every surface calls its `openThere` and
@@ -754,6 +755,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
       run = false,
     ) => {
       const id = tabId();
+      // Every terminal opened inside a workspace gets that workspace's port,
+      // not just the ones started from the Servers panel — an agent told to
+      // "run the dev server and check it" is the case that matters most, and it
+      // types the command itself. Derived from the path alone (see
+      // workspaces.portForPath) so this stays a synchronous, IPC-free lookup.
+      const env = portEnv(portForPath(cwd));
       setTabs((prev) => [
         ...prev,
         {
@@ -764,6 +771,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           ptyId: null,
           command,
           icon,
+          env: env.length ? env : undefined,
           run,
         },
       ]);
@@ -1205,6 +1213,42 @@ const ProjectViewBody = memo(function ProjectViewBody({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [componentKey]);
+
+  // Every workspace of every repo this project spans. Loaded when the set can
+  // actually have changed — the component set, or the switch funnel saying it
+  // moved something — never polled: listing costs a `git status` per workspace
+  // and a repo can easily have twenty.
+  //
+  // This is what makes the Servers panel able to offer a workspace's dev server
+  // without you having to switch into that workspace first, which is the whole
+  // of "run two features side by side".
+  const [allWorktrees, setAllWorktrees] = useState<
+    { repo: string; trees: ipc.WorktreeInfo[] }[]
+  >([]);
+  const repoKey = repoPaths.join("|");
+  useEffect(() => {
+    if (repoPaths.length === 0) {
+      setAllWorktrees([]);
+      return;
+    }
+    let live = true;
+    void Promise.all(
+      repoPaths.map((repo) =>
+        ipc
+          .gitWorktrees(repo)
+          .then((trees) => ({ repo, trees }))
+          .catch(() => ({ repo, trees: [] as ipc.WorktreeInfo[] })),
+      ),
+    ).then((all) => {
+      if (!live) return;
+      setAllWorktrees(all);
+      for (const { repo, trees } of all) ensureLeases(repo, trees);
+    });
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repoKey, switchVersion]);
 
   // The rail badge counts what THIS project's panel would show — the badge and
   // the list must agree, or the badge is just noise you can't clear from here.
@@ -3789,7 +3833,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const target = e.target;
       if (
         target instanceof Element &&
-        target.closest(".side-peek, .side-dock, .rail")
+        // The docked grip is a sibling of the panel, not a child of it, so it
+        // has to be named here too — pressing it is the start of a resize, not
+        // a click past the panel.
+        target.closest(".side-peek, .side-dock, .side-dock-grip, .rail")
       )
         return;
       dismiss();
@@ -3835,29 +3882,77 @@ const ProjectViewBody = memo(function ProjectViewBody({
     setPeeking(false);
   }, [cancelPeekClose, cancelPeekOpen]);
 
-  /** Drag the panel's right edge. The overlay is out of flow, so the old
-   *  PanelGroup percentage no longer applies — the width is plain pixels. */
-  const startSideResize = useCallback((e: React.PointerEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = sideWidthRef.current;
-    resizing.current = true;
-    const move = (ev: PointerEvent) => {
-      const w = Math.max(
-        SIDE_MIN_W,
-        Math.min(SIDE_MAX_W, startW + ev.clientX - startX),
-      );
-      sideWidthRef.current = w;
-      setSideWidth(w);
-    };
-    const up = () => {
-      resizing.current = false;
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+  /** The one place the panel's width is written. Neither mode is in the
+   *  PanelGroup any more — the overlay is out of flow and the dock is a
+   *  fixed-width column — so the width is plain pixels in both. */
+  const applySideWidth = useCallback((w: number) => {
+    const next = Math.max(SIDE_MIN_W, Math.min(SIDE_MAX_W, Math.round(w)));
+    sideWidthRef.current = next;
+    setSideWidth(next);
   }, []);
+
+  /** Drag the panel's right edge, in either mode. */
+  const startSideResize = useCallback(
+    (e: React.PointerEvent) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startW = sideWidthRef.current;
+      const grip = e.currentTarget;
+      // Docked, the drag is over the editor from its first pixel — without the
+      // capture the gesture is lost to whatever the pointer lands on.
+      grip.setPointerCapture?.(e.pointerId);
+      resizing.current = true;
+      document.body.classList.add("resizing-side");
+      let frame = 0;
+      let pending = startW;
+      const move = (ev: PointerEvent) => {
+        pending = startW + ev.clientX - startX;
+        // Coalesced to one write per frame: docked, every width change reflows
+        // the main area, and that re-wraps every terminal in it. A pointermove
+        // stream is faster than the frames it would be drawn on.
+        if (frame) return;
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          applySideWidth(pending);
+        });
+      };
+      const up = () => {
+        resizing.current = false;
+        document.body.classList.remove("resizing-side");
+        if (frame) {
+          cancelAnimationFrame(frame);
+          frame = 0;
+        }
+        applySideWidth(pending);
+        if (grip.hasPointerCapture?.(e.pointerId))
+          grip.releasePointerCapture(e.pointerId);
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        window.removeEventListener("pointercancel", up);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      window.addEventListener("pointercancel", up);
+    },
+    [applySideWidth],
+  );
+
+  /** The separator is focusable, so it answers the arrow keys too — a width
+   *  that can only be set by dragging an 8px strip is one a keyboard can't
+   *  reach at all. */
+  const onSideResizeKey = useCallback(
+    (e: React.KeyboardEvent) => {
+      const step = e.shiftKey ? 48 : 16;
+      if (e.key === "ArrowLeft") applySideWidth(sideWidthRef.current - step);
+      else if (e.key === "ArrowRight")
+        applySideWidth(sideWidthRef.current + step);
+      else if (e.key === "Home") applySideWidth(SIDE_MIN_W);
+      else if (e.key === "End") applySideWidth(SIDE_MAX_W);
+      else return;
+      e.preventDefault();
+    },
+    [applySideWidth],
+  );
 
   // Jump to the terminal running the agent that raised the item: prefer a
   // terminal whose PTY tree contains an agent process, then match by cwd.
@@ -4645,16 +4740,66 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // to the run tabs and the ports they turned out to be listening on. Memoized
   // on its three inputs — the stats poller ticks every 2s and this must not
   // rebuild the panel's rows on ticks that changed no port.
+  // Each component, once per workspace that has a copy of it. A worktree
+  // mirrors its repo's tree, so a component inside the repo maps to the same
+  // relative path inside every workspace — the same remap the file surface does
+  // for the active one, done for all of them at once.
+  //
+  // This is deliberately not gated on which workspace is "active": you cannot
+  // test two branches side by side if starting the second one's server means
+  // first moving your whole file tree onto it.
+  const serverComponents = useMemo(() => {
+    const out = components.map((c) => ({ ...c }));
+    for (const { repo, trees } of allWorktrees) {
+      for (const w of trees) {
+        if (w.is_main || w.bare || w.prunable) continue;
+        for (const c of project.components) {
+          if (c.path !== repo && !c.path.startsWith(`${repo}/`)) continue;
+          const path = w.path + c.path.slice(repo.length);
+          // The active workspace's components are already in the list under
+          // their own paths — adding them twice would double every row.
+          if (out.some((x) => x.path === path)) continue;
+          out.push({
+            ...c,
+            label: `${c.label} · ${w.branch ?? w.name}`,
+            path,
+          });
+        }
+      }
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [components, allWorktrees, project.components]);
+
   const serverGroups = useMemo(
     () =>
-      groupServers(components, runTabs, (ptyId) =>
+      groupServers(serverComponents, runTabs, (ptyId) =>
         ptyId == null
           ? []
           : (projectStats.find((s) => s.id === ptyId)?.ports ?? []),
       ),
-    [components, runTabs, projectStats],
+    [serverComponents, runTabs, projectStats],
   );
   const serversRunning = runningCount(serverGroups);
+
+  // What's alive and where, for the Git panel's one list: a workspace row can
+  // say "a server is up in here, an agent is working in here" without the panel
+  // having to know anything about tabs. Only live ones — a run tab that has
+  // exited is output you can still read, not a server.
+  const serverCwds = useMemo(
+    () => runTabs.filter((t) => !t.exited).map((t) => t.cwd),
+    [runTabs],
+  );
+  const agentCwds = useMemo(
+    () =>
+      tabs
+        .filter(
+          (t): t is TermSubTab =>
+            t.type === "terminal" && !t.run && !t.exited && Boolean(t.command),
+        )
+        .map((t) => t.cwd),
+    [tabs],
+  );
 
   /** Start a configured run command, from the Servers panel. Same call the
    *  files panel's run rows make, so both surfaces drive one tab. */
@@ -5714,6 +5859,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     ? tab.command
                     : undefined
                 }
+                env={tab.env}
                 onSpawned={(ptyId) =>
                   // A freshly spawned pty is alive by definition, so clear any
                   // stale exited/failed state. Restart kills the old pty and
@@ -6464,6 +6610,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
             path: c.path,
           }))}
           activeWorktree={worktreeEnv?.path ?? null}
+          serverCwds={serverCwds}
+          agentCwds={agentCwds}
+          onOpenPreview={(url) => openPreview(url)}
           onOpenCommit={openCommit}
           onOpenBranch={openBranch}
           onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
@@ -6727,8 +6876,33 @@ const ProjectViewBody = memo(function ProjectViewBody({
             onMouseLeave={() => schedulePeekClose()}
           >
             {sidePanel}
-            <div className="side-peek-grip" onPointerDown={startSideResize} />
           </div>
+        )}
+        {/* The docked panel's grip is a sibling, not a child. .side-dock clips
+            its contents — that is how it collapses to nothing without
+            unmounting — so a handle inside it was clipped to a 3px strip lying
+            on the border, invisible and all but unhittable, which is why the
+            docked panel read as fixed-width. Out here it straddles the seam at
+            its full width and nothing clips it. */}
+        {!zen && !sidePrefs.overlay && sideOpen && (
+          <div
+            className="side-dock-grip"
+            style={{ left: RAIL_W + sideWidth - 4 }}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize side panel"
+            aria-valuenow={sideWidth}
+            aria-valuemin={SIDE_MIN_W}
+            aria-valuemax={SIDE_MAX_W}
+            tabIndex={0}
+            onPointerDown={startSideResize}
+            onKeyDown={onSideResizeKey}
+            // The grip sits outside the panel, so reaching for it is a mouseleave
+            // as far as the dock is concerned — without this a hover-opened panel
+            // starts retracting the moment you go to resize it.
+            onMouseEnter={cancelPeekClose}
+            onMouseLeave={() => schedulePeekClose()}
+          />
         )}
         {/* The PanelGroup renders in every mode on purpose. Swapping mainArea
             between a bare child and a <Panel> changes its element type, which

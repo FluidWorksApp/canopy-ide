@@ -110,6 +110,21 @@ hkdf = "0.12"
 chacha20poly1305 = "0.10"
 # Compact text encoding for binary file chunks tunnelled as JSON relay frames.
 base64 = "0.22"
+# The browser credential vault (vault.rs). Argon2id turns the user's passphrase
+# into a key — memory-hard, so a stolen vault file is not a wordlist away from
+# opening — and zeroize wipes that key and the secrets it protected when the
+# vault locks, rather than leaving them in a freed allocation. The AEAD itself
+# (XChaCha20-Poly1305) and the CSPRNG are already here for the relay.
+argon2 = "0.5"
+zeroize = "1"
+# Importing an existing password set. KDBX is the format every other manager
+# exports — KeePassXC, Bitwarden, 1Password, Strongbox — so reading it is the
+# difference between "start typing your logins in again" and "bring them over".
+# Read only: the crate's KDBX writing is marked experimental, and the file that
+# holds someone's passwords is not the place to find out what that means. The
+# writing feature is enabled for dev only, so the tests can build a real
+# database to parse instead of checking in an opaque binary fixture.
+keepass = { version = "0.13", default-features = false }
 # SpotSearch's persistent index (spot.rs): FTS5 over agent transcripts and
 # terminal scrollback. Bundled so the shipped app never depends on the OS
 # sqlite (macOS's system copy predates the FTS5 fixes we rely on) — it compiles
@@ -187,6 +202,7 @@ lto = "thin"
 codegen-units = 1
 
 [dev-dependencies]
+keepass = { version = "0.13", default-features = false, features = ["save_kdbx4"] }
 # `test` feature enables tauri::test::mock_app for exercising PTY spawn/attach
 # against a mock runtime. Dev-only, so the release build is unaffected.
 tauri = { version = "2.11.3", features = ["test", "unstable"] }

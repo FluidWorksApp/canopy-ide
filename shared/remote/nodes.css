@@ -1,0 +1,167 @@
+/* Styles for the generic node renderer. Same rules as agents.css: every colour
+ * is a Canopy theme variable so both shells match the IDE skin, flat surfaces,
+ * hairline borders, no gradients or glows. Rows are sized for a thumb — the
+ * desktop's 26px density is a mouse affordance and does not travel. */
+
+.node-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.node-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 8px 12px;
+  color: var(--text, #ededed);
+  background: var(--bg-raised, #1a1a1a);
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 10px;
+}
+.node-row.click {
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.node-row.click:active,
+.node-row.on {
+  border-color: var(--accent, #d8a23a);
+  background: color-mix(in srgb, var(--accent, #d8a23a) 8%, var(--bg-raised, #1a1a1a));
+}
+
+.node-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.node-title {
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.node-sub {
+  font-size: 12px;
+  color: var(--text-dim, #8a8a8a);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--text-dim, #8a8a8a);
+}
+.node-dot.live {
+  background: var(--ok, #4bb543);
+}
+.node-dot.failed {
+  background: var(--danger, #e5484d);
+}
+.node-dot.done {
+  background: var(--accent, #d8a23a);
+}
+.node-dot.asleep {
+  background: transparent;
+  border: 1px solid var(--text-dim, #8a8a8a);
+}
+
+.node-badge {
+  flex: none;
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: var(--text-dim, #8a8a8a);
+  border: 1px solid var(--border, #2a2a2a);
+}
+.node-badge.dot {
+  padding: 0;
+  width: 8px;
+  height: 8px;
+  border: none;
+  background: var(--accent, #d8a23a);
+}
+
+.node-acts {
+  display: flex;
+  gap: 6px;
+  flex: none;
+}
+.node-act {
+  min-height: 32px;
+  padding: 0 12px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text, #ededed);
+  background: transparent;
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 8px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.node-act:active {
+  border-color: var(--accent, #d8a23a);
+}
+
+.node-empty,
+.node-more {
+  padding: 12px;
+  font-size: 12px;
+  color: var(--text-dim, #8a8a8a);
+  text-align: center;
+}
+
+.node-unavailable {
+  padding: 14px;
+  border: 1px dashed var(--border, #2a2a2a);
+  border-radius: 10px;
+  background: var(--bg-alt, #141414);
+}
+.node-unavailable-title {
+  font-size: 14px;
+  color: var(--text, #ededed);
+  margin-bottom: 4px;
+}
+.node-unavailable-why {
+  font-size: 12px;
+  color: var(--text-dim, #8a8a8a);
+  line-height: 1.45;
+}
+
+.node-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.node-detail-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.node-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+}
+.node-field {
+  display: flex;
+  gap: 10px;
+  font-size: 12px;
+}
+.node-field dt {
+  color: var(--text-dim, #8a8a8a);
+  min-width: 96px;
+  flex: none;
+}
+.node-field dd {
+  margin: 0;
+  color: var(--text, #ededed);
+  word-break: break-word;
+}

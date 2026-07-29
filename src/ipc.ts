@@ -28,6 +28,9 @@ export async function ptySpawn(
      *  passed as shell args (correct on cmd.exe / PowerShell / POSIX) rather
      *  than typed with a Bourne-only `; exit $?`. */
     runCommand?: string;
+    /** Stamped onto the child. A run inside a workspace carries that
+     *  workspace's port lease here, so two checkouts can serve at once. */
+    env?: [string, string][];
   },
   onData: (bytes: Uint8Array) => void,
 ): Promise<SpawnResult> {
@@ -228,7 +231,8 @@ export interface AgentUiOp {
     | "symbols"
     | "tickets"
     | "reviews"
-    | "ask";
+    | "ask"
+    | "vault";
   route: string;
   path?: string | null;
   line?: number | null;
@@ -238,6 +242,10 @@ export interface AgentUiOp {
   query?: string | null;
   question?: string | null;
   options?: string[];
+  /** vault: list | fill | read. */
+  vaultOp?: string | null;
+  /** vault: a specific entry, when the agent already listed them. */
+  entryId?: string | null;
   /** diagnostics: how long the caller will hold. A hook firing after every
    *  edit can't sit through a cold server's first index. */
   waitMs?: number | null;
@@ -574,6 +582,103 @@ export const spotSearch = (
 
 /** What the index holds right now (Settings → SpotSearch). */
 export const spotIndexStats = () => invoke<SpotIndexStats>("spot_index_stats");
+
+// ---------- Credential vault ----------
+//
+// The password never crosses this boundary in the fill direction: `vaultFill`
+// sends two ids and the backend puts the value into the page itself. Only
+// `vaultReveal` (the user's own click in Settings) and `vaultRead` (an entry
+// the user marked readable, after an approval prompt) ever return plaintext.
+
+export interface VaultStatus {
+  /** A vault file exists on disk — "unlock" rather than "create one". */
+  exists: boolean;
+  unlocked: boolean;
+  entries: number;
+  auto_lock_minutes: number;
+}
+
+/** An entry without its password — what the UI lists and what agents are told. */
+export interface VaultItem {
+  id: string;
+  label: string;
+  domain: string;
+  username: string;
+  readable: boolean;
+  notes: string;
+  updated: number;
+}
+
+export interface VaultApproval {
+  domain: string;
+  fill: boolean;
+  read: boolean;
+  granted: number;
+}
+
+/** What a fill did — which fields took a value, never the value. */
+export interface VaultFillReport {
+  filled: string[];
+  label: string;
+  domain: string;
+  form: boolean;
+}
+
+export const vaultStatus = () => invoke<VaultStatus>("vault_status");
+export const vaultCreate = (passphrase: string) =>
+  invoke<void>("vault_create", { passphrase });
+export const vaultUnlock = (passphrase: string) =>
+  invoke<void>("vault_unlock", { passphrase });
+export const vaultLock = () => invoke<void>("vault_lock");
+export const vaultChangePassphrase = (old: string, next: string) =>
+  invoke<void>("vault_change_passphrase", { old, new: next });
+export const vaultList = () => invoke<VaultItem[]>("vault_list");
+/** Entries whose domain covers this URL's host, most specific first. */
+export const vaultMatches = (url: string) =>
+  invoke<VaultItem[]>("vault_matches", { url });
+export const vaultSave = (entry: {
+  id?: string;
+  label: string;
+  domain: string;
+  username: string;
+  /** Omitted means "keep the stored password" — editing a label never has to
+   *  hold the secret. */
+  password?: string;
+  readable?: boolean;
+  notes?: string;
+}) => invoke<string>("vault_save", entry);
+export const vaultDelete = (id: string) => invoke<void>("vault_delete", { id });
+/** Plaintext for the user's own eyes, from Settings. */
+export const vaultReveal = (id: string) => invoke<string>("vault_reveal", { id });
+/** Plaintext for an agent — only for an entry marked readable. */
+export const vaultRead = (id: string) =>
+  invoke<{ username: string; password: string }>("vault_read", { id });
+/** Put an entry into the page in `tabId`. Returns which fields took a value. */
+export const vaultFill = (tabId: string, id: string) =>
+  invoke<VaultFillReport>("vault_fill", { tabId, id });
+/** One row a .kdbx import could not take, and why. */
+export interface VaultSkipped {
+  title: string;
+  why: string;
+}
+
+export interface VaultImportReport {
+  imported: number;
+  /** Already in the vault under the same site and username. */
+  duplicates: number;
+  skipped: VaultSkipped[];
+}
+
+/** Merge a KeePass export into the vault. Existing entries are never
+ *  overwritten, and imported ones are always fill-only. */
+export const vaultImportKdbx = (path: string, password: string) =>
+  invoke<VaultImportReport>("vault_import_kdbx", { path, password });
+
+export const vaultApprovals = () => invoke<VaultApproval[]>("vault_approvals");
+export const vaultApprove = (domain: string, op: "fill" | "read") =>
+  invoke<void>("vault_approve", { domain, op });
+export const vaultRevoke = (domain: string) =>
+  invoke<void>("vault_revoke", { domain });
 
 // ---------- Research ----------
 //
@@ -1529,6 +1634,18 @@ export const gitWorktreeAddPr = (
     number,
     branch,
   });
+/** What a fresh workspace was given so it can actually build, and the install
+ *  to run when cloning the dependencies wasn't possible. */
+export interface BootstrapReport {
+  carried: string[];
+  cloned: string[];
+  install: string | null;
+  note: string | null;
+}
+/** Give a just-created workspace the two things `git worktree add` leaves out:
+ *  the gitignored config, and the dependencies. */
+export const gitWorktreeBootstrap = (repo: string, path: string) =>
+  invoke<BootstrapReport>("git_worktree_bootstrap", { repo, path });
 /** `force` counts rather than toggles: 1 drops uncommitted work, 2 also clears
  *  a locked workspace — git needs `remove -f -f` for that and says so. */
 export const gitWorktreeRemove = (repo: string, path: string, force: 0 | 1 | 2) =>
@@ -2098,9 +2215,19 @@ export const dictationDownload = (modelId: string) =>
   invoke<void>("dictation_download", { modelId });
 export const dictationDeleteModel = (modelId: string) =>
   invoke<void>("dictation_delete_model", { modelId });
-/** Resolves to "recording" (mic live) or "downloading" (model fetch started). */
-export const dictationStart = (modelId: string) =>
-  invoke<string>("dictation_start", { modelId });
+/** Resolves to "recording" (mic live) or "downloading" (model fetch started).
+ *  `streaming` turns on the live preview loop (dictation:partial events); it
+ *  costs a core while recording and does not change the final text. */
+export const dictationStart = (
+  modelId: string,
+  streaming?: boolean,
+  language?: string,
+) =>
+  invoke<string>("dictation_start", {
+    modelId,
+    streaming: streaming ?? false,
+    language: language || null,
+  });
 /** Stops the mic and resolves to the transcribed text. `language` is an
  *  optional BCP-47 hint (empty/undefined = auto-detect). */
 export const dictationStop = (language?: string) =>
@@ -2113,6 +2240,26 @@ export const onDictationProgress = (
   cb: (p: DictationProgress) => void,
 ): Promise<UnlistenFn> =>
   listen<DictationProgress>("dictation:progress", (e) => cb(e.payload));
+
+/** Live transcription while the mic is open, split into the part successive
+ *  decodes agree on and the tail they don't (see dictation.rs). Only fires
+ *  when dictation_start was passed streaming: true. */
+export interface DictationPartial {
+  confirmed: string;
+  unconfirmed: string;
+}
+export const onDictationPartial = (
+  cb: (p: DictationPartial) => void,
+): Promise<UnlistenFn> =>
+  listen<DictationPartial>("dictation:partial", (e) => cb(e.payload));
+
+/** Input loudness as RMS in 0..1, ~30 times a second while recording. Drives
+ *  the pill's visualiser. Raw, not normalised — speech sits around 0.02–0.2,
+ *  so callers scale it themselves. */
+export const onDictationLevel = (
+  cb: (rms: number) => void,
+): Promise<UnlistenFn> =>
+  listen<number>("dictation:level", (e) => cb(e.payload));
 
 // ---------- Android ----------
 

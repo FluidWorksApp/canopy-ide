@@ -50,9 +50,12 @@ export function ChatView({ peer, title, relay, onNotice }: ChatViewProps) {
       const cy = y / dpr;
       return !!r && r.width > 0 && cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom;
     };
-    void import("@tauri-apps/api/webview")
-      .then(({ getCurrentWebview }) =>
-        getCurrentWebview().onDragDropEvent((event) => {
+    // The window, not the webview — a second webview (any open preview) moves
+    // the drop event to the Window target, which a webview listener misses.
+    // See the note in Term.tsx.
+    void import("@tauri-apps/api/window")
+      .then(({ getCurrentWindow }) =>
+        getCurrentWindow().onDragDropEvent((event) => {
           const p = event.payload;
           if (p.type === "over") {
             setDropActive(canDropRef.current && inside(p.position.x, p.position.y));

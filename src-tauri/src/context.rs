@@ -308,7 +308,7 @@ fn project_for_cwd(app: &tauri::AppHandle, cwd: &str) -> Option<ProjectCandidate
             Some((id.to_string(), name, roots))
         })
         .collect();
-    pick_project(&candidates, cwd)
+    resolve_project(&candidates, cwd, main_worktree)
 }
 
 /// A project a directory can resolve to: its id, its display name, and the
@@ -317,6 +317,64 @@ type ProjectCandidate = (String, String, Vec<String>);
 
 /// The scoping rule itself, separated from where the snapshots came from so it
 /// can be tested: longest containing component path wins.
+/// The main checkout behind a directory, when that directory is a linked
+/// worktree. `--git-common-dir` is the shared `.git` every worktree of a repo
+/// points at, so its parent is the original checkout — which is the thing
+/// actually registered as a project component.
+///
+/// A subprocess, on a path that only runs when the direct match already
+/// failed. Research calls are a handful per session, not per tool call, so the
+/// few milliseconds buy correctness cheaply.
+fn main_worktree(cwd: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args([
+            "-C",
+            cwd,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let git_dir = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    if git_dir.is_empty() {
+        return None;
+    }
+    let root = std::path::Path::new(&git_dir).parent()?;
+    Some(root.to_string_lossy().to_string())
+}
+
+/// Which project owns this directory, falling back to the repo it is a
+/// worktree of.
+///
+/// Agents work in worktrees constantly — it is how every isolated micro-task
+/// runs, including the one that implements research — and a worktree created
+/// as `<repo>-wt-<branch>` is a *sibling* of the checkout, so no component path
+/// contains it. Research therefore refused exactly the sessions most likely to
+/// produce any, and an agent with no legitimate place to write improvised one
+/// by hand-writing the store. Resolving through git is what removes the reason
+/// to improvise.
+///
+/// `main_of` is injected so the rule can be tested without a repo on disk.
+fn resolve_project(
+    candidates: &[ProjectCandidate],
+    cwd: &str,
+    main_of: impl Fn(&str) -> Option<String>,
+) -> Option<ProjectCandidate> {
+    if let Some(hit) = pick_project(candidates, cwd) {
+        return Some(hit);
+    }
+    let root = main_of(cwd)?;
+    // Only worth a second look if git actually moved us somewhere else.
+    if root == cwd {
+        return None;
+    }
+    pick_project(candidates, &root)
+}
+
 fn pick_project(candidates: &[ProjectCandidate], cwd: &str) -> Option<ProjectCandidate> {
     let mut best: Option<(usize, &ProjectCandidate)> = None;
     for cand in candidates {
@@ -408,8 +466,10 @@ async fn research_op(
             StatusCode::BAD_REQUEST,
             format!(
                 "{} is not inside any project open in Canopy, and research is scoped to a \
-                 project. Open the project (or run from inside one of its components) and \
-                 try again.",
+                 project. A worktree resolves to the checkout it came from, so this means \
+                 neither is open here — open the project and try again. Do not write to the \
+                 research store by hand: an entry made that way skips the status rules, the \
+                 size limits and the history.",
                 req.cwd
             ),
         );
@@ -1299,6 +1359,12 @@ struct UiOp {
     options: Vec<String>,
     #[serde(rename = "timeoutMs")]
     timeout_ms: Option<u64>,
+    /// vault: list | fill | read.
+    #[serde(rename = "vaultOp")]
+    vault_op: Option<String>,
+    /// vault: a specific entry, when the agent has already listed them.
+    #[serde(rename = "entryId")]
+    entry_id: Option<String>,
 }
 
 const UI_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
@@ -1346,6 +1412,20 @@ async fn ui_op(
                 .unwrap_or(std::time::Duration::from_secs(120))
                 .min(MAX_ASK_TIMEOUT)
         }
+        "vault" => {
+            match op.vault_op.as_deref().unwrap_or("list") {
+                "list" | "fill" | "read" => {}
+                other => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!("unknown vault op: {other} (list, fill or read)"),
+                    )
+                }
+            }
+            // A fill the user has not approved yet puts a prompt on screen, so
+            // this waits on a person exactly like `ask` does.
+            MAX_ASK_TIMEOUT
+        }
         other => return (StatusCode::BAD_REQUEST, format!("unknown ui op: {other}")),
     };
 
@@ -1368,6 +1448,8 @@ async fn ui_op(
             "waitMs": op.wait_ms,
             "question": op.question,
             "options": op.options,
+            "vaultOp": op.vault_op,
+            "entryId": op.entry_id,
         }),
     );
 
@@ -1384,7 +1466,7 @@ async fn ui_op(
                 .lock()
                 .unwrap()
                 .remove(&id);
-            let why = if op.op == "ask" {
+            let why = if op.op == "ask" || op.op == "vault" {
                 "The user didn't answer in time — carry on without them, or ask again."
             } else {
                 "Canopy didn't answer in time. The window may be busy, or the language server \
@@ -1949,6 +2031,54 @@ mod tests {
         // into an error rather than a machine-wide list, which is the whole
         // scoping rule.
         assert_eq!(id("/tmp/somewhere"), None);
+    }
+
+    #[test]
+    fn a_worktree_resolves_to_the_checkout_it_came_from() {
+        // The bug this fixes: agents work in worktrees constantly — it is how
+        // every isolated micro-task runs, including the one that implements
+        // research — and `<repo>-wt-<branch>` is a *sibling* of the checkout,
+        // so no component path contains it. Research refused exactly the
+        // sessions most likely to produce any, and an agent with nowhere legal
+        // to write hand-wrote the store instead.
+        let projects = vec![proj("app", &["/Users/dev/app"])];
+        let wt = "/Users/dev/app-wt-feat-x";
+        // Unresolvable on its own — this is the refusal that was happening.
+        assert!(pick_project(&projects, wt).is_none());
+        // Resolved through git, it lands on the project that owns it.
+        let id =
+            resolve_project(&projects, wt, |_| Some("/Users/dev/app".into())).map(|(id, ..)| id);
+        assert_eq!(id, Some("app".into()));
+    }
+
+    #[test]
+    fn resolving_through_git_never_invents_a_project() {
+        let projects = vec![proj("app", &["/Users/dev/app"])];
+        // Not a repo at all: git answers nothing and so do we.
+        assert!(resolve_project(&projects, "/tmp/elsewhere", |_| None).is_none());
+        // A repo, but not one that is open here — the checkout it resolves to
+        // still has to be a project, or this would attach research to whatever
+        // happened to be first in the list.
+        assert!(
+            resolve_project(&projects, "/Users/dev/other-wt-x", |_| Some(
+                "/Users/dev/other".into()
+            ))
+            .is_none()
+        );
+        // git pointing back at the same directory is not a second chance.
+        assert!(resolve_project(&projects, "/tmp/elsewhere", |c| Some(c.to_string())).is_none());
+    }
+
+    #[test]
+    fn a_direct_hit_never_pays_for_the_git_call() {
+        // The fallback is a subprocess; it must not run when the cwd already
+        // answers, which is the overwhelming majority of calls.
+        let projects = vec![proj("app", &["/Users/dev/app"])];
+        let id = resolve_project(&projects, "/Users/dev/app/src", |_| {
+            panic!("git was consulted for a directory that already resolved")
+        })
+        .map(|(id, ..)| id);
+        assert_eq!(id, Some("app".into()));
     }
 
     #[test]

@@ -26,12 +26,15 @@ mod prwatch;
 mod pty;
 mod punch;
 mod relay;
+mod remote;
 mod research;
 mod selftest;
 mod snapshot;
 mod spot;
 mod stores;
 mod tunnel;
+mod vault;
+mod vault_kdbx;
 mod winproc;
 mod wsbridge;
 
@@ -329,6 +332,7 @@ pub fn run() {
         .manage(selftest::SelftestState::default())
         .manage(spot::SpotIndex::default())
         .manage(research::ResearchStore::default())
+        .manage(vault::Vault::default())
         .manage(cli::pending_from_env())
         .setup(|app| {
             // ONNX Runtime is loaded dynamically on every platform (Cargo.toml
@@ -428,6 +432,22 @@ pub fn run() {
             spot::spot_index_stats,
             spot::spot_index_clear,
             spot::spot_save_context_image,
+            vault::vault_status,
+            vault::vault_create,
+            vault::vault_unlock,
+            vault::vault_lock,
+            vault::vault_change_passphrase,
+            vault::vault_list,
+            vault::vault_matches,
+            vault::vault_save,
+            vault::vault_delete,
+            vault::vault_reveal,
+            vault::vault_fill,
+            vault::vault_read,
+            vault::vault_approve,
+            vault::vault_import_kdbx,
+            vault::vault_approvals,
+            vault::vault_revoke,
             research::research_list,
             research::research_search,
             research::research_get,
@@ -493,6 +513,7 @@ pub fn run() {
             git::agent_edits,
             git::git_worktree_add,
             git::git_worktree_add_pr,
+            git::git_worktree_bootstrap,
             git::git_worktree_remove,
             git::git_worktree_prune,
             git::gh_available,

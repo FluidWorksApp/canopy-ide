@@ -441,6 +441,10 @@ pub fn pty_spawn(
     shell: Option<String>,
     high_water: Option<usize>,
     run_command: Option<String>,
+    // A run started inside a workspace carries that workspace's port lease, so
+    // several checkouts of the same repo can serve at once instead of fighting
+    // over one hard-coded port.
+    env: Option<Vec<(String, String)>>,
     on_data: Channel<InvokeResponseBody>,
 ) -> Result<SpawnResult, String> {
     state.spawn(
@@ -452,7 +456,7 @@ pub fn pty_spawn(
         high_water,
         run_command,
         Some(on_data),
-        None,
+        env,
     )
 }
 

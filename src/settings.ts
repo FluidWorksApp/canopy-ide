@@ -69,6 +69,83 @@ export const DEFAULT_DICTATION_HOTKEY: Hotkey = IS_MAC
   ? { meta: true, ctrl: false, alt: false, shift: false, code: "KeyD" }
   : { meta: false, ctrl: false, alt: true, shift: false, code: "KeyD" };
 
+/** How dictation is triggered.
+ *
+ *  "combo" — the original two-key chord (⌘D), pressed to start and again to
+ *  insert. Still the default: it is what every existing install has bound, and
+ *  it is the only mode that cannot possibly collide with ordinary typing.
+ *
+ *  "hold" — push-to-talk on ONE bare modifier: hold it, speak, release and the
+ *  text lands. Double-tapping the same key instead latches recording on so you
+ *  can let go (SuprFlow's "hands-free"); the next tap ends it.
+ *
+ *  "doubleTap" — two quick taps of one bare modifier starts a latched
+ *  recording, a single tap ends it. Nothing is held while you speak.
+ *
+ *  The bare-modifier modes exist because a modifier is the only key you can
+ *  press on its own without also typing something. They are safe to bind
+ *  because of the pollution rule in dictationTrigger.ts: a modifier that had
+ *  any other key pressed while it was down was being used as a modifier, and
+ *  never triggers. That is what keeps ⇧A from starting a recording. */
+export type DictationTriggerMode = "combo" | "hold" | "doubleTap";
+
+/** A single modifier that can carry a bare-key trigger. The bare names match
+ *  either side of the keyboard; the sided ones (…Left/…Right) match exactly,
+ *  which is how you bind a key you never otherwise touch. CapsLock is offered
+ *  because it is dead weight for most people — but note it is a LATCHING key,
+ *  so "hold CapsLock" means "caps on for as long as you speak". */
+export type DictationModKey =
+  | "Shift"
+  | "ShiftLeft"
+  | "ShiftRight"
+  | "Control"
+  | "ControlLeft"
+  | "ControlRight"
+  | "Alt"
+  | "AltLeft"
+  | "AltRight"
+  | "Meta"
+  | "MetaLeft"
+  | "MetaRight"
+  | "CapsLock";
+
+/** Right ⌘ on macOS, right Ctrl elsewhere — the modifier a touch typist is
+ *  least likely to press on its own, so the pollution guard has the least work
+ *  to do. Only consulted once someone leaves "combo" mode. */
+export const DEFAULT_DICTATION_MOD_KEY: DictationModKey = IS_MAC
+  ? "MetaRight"
+  : "ControlRight";
+
+/** Display label for a bare-modifier trigger key. */
+export function modKeyLabel(k: DictationModKey): string {
+  const side = k.endsWith("Left") ? "Left " : k.endsWith("Right") ? "Right " : "";
+  const base = k.replace(/(Left|Right)$/, "");
+  if (base === "CapsLock") return "Caps Lock";
+  const glyph: Record<string, string> = IS_MAC
+    ? { Shift: "⇧ Shift", Control: "⌃ Control", Alt: "⌥ Option", Meta: "⌘ Command" }
+    : { Shift: "Shift", Control: "Ctrl", Alt: "Alt", Meta: "Win" };
+  return side + (glyph[base] ?? base);
+}
+
+/** The visualiser drawn in the recording pill while the mic is live. Ported
+ *  from SuprFlow's wave styles; each is a canvas renderer in waveStyles.ts. */
+export type DictationWaveStyle =
+  | "classic"
+  | "equalizer"
+  | "particle"
+  | "ribbon"
+  | "pulse"
+  | "neon";
+
+export const DICTATION_WAVE_STYLES: { id: DictationWaveStyle; label: string; hint: string }[] = [
+  { id: "classic", label: "Classic", hint: "Simple animated bars" },
+  { id: "equalizer", label: "Equalizer", hint: "Audio bars with reflection" },
+  { id: "particle", label: "Particle", hint: "Flowing wave with particles" },
+  { id: "ribbon", label: "Ribbon", hint: "Filled gradient ribbon" },
+  { id: "pulse", label: "Pulse", hint: "Concentric pulsing rings" },
+  { id: "neon", label: "Neon", hint: "Glowing double sine" },
+];
+
 /** Render a hotkey for display, e.g. "⌘D" or "Alt+Shift+D". */
 export function formatHotkey(h: Hotkey): string {
   const parts: string[] = [];
@@ -245,14 +322,27 @@ export interface Settings {
   spotRetentionDays: number;
 
   // ---- Voice dictation ----
-  /** Hotkey that toggles dictation (start/insert). */
+  /** Hotkey that toggles dictation (start/insert). Used by "combo" mode. */
   dictationHotkey: Hotkey;
+  /** How the mic is armed — see DictationTriggerMode. Defaults to "combo" so
+   *  an upgrade never silently rebinds a modifier someone types with. */
+  dictationTriggerMode: DictationTriggerMode;
+  /** Which bare modifier carries the trigger in "hold"/"doubleTap" mode. */
+  dictationModKey: DictationModKey;
   /** Registry id of the ASR model to use (see dictation.rs MODELS). Empty
    *  means "the default model" so a stored blank never pins a missing id. */
   dictationModel: string;
   /** Optional BCP-47 language hint passed at transcription time. Empty =
    *  auto-detect (what multilingual models do anyway). */
   dictationLanguage: string;
+  /** Re-decode a rolling tail of the audio while you speak and show it in the
+   *  pill. Off by default: it is a second inference loop running the whole
+   *  time you talk, which costs a core. It changes nothing about the text that
+   *  finally lands — that always comes from one clean decode of the whole
+   *  recording. This is a preview, not a faster path. */
+  dictationStreaming: boolean;
+  /** Which visualiser the recording pill draws. */
+  dictationWaveStyle: DictationWaveStyle;
 
   // ---- Remote access ----
   /** Reach for the remote control panel: "local" (this network only) or
@@ -300,6 +390,19 @@ export interface Settings {
    *  almost always the one you want next, and a mode chooser you have to
    *  re-answer every time is a mode chooser nobody uses. */
   previewCaptureMode: CaptureMode;
+
+  // ---- Workspaces ----
+  /** The number the repo's own checkout serves on. Workspaces lease offsets
+   *  from it, so a second checkout of the same repo can run its dev server
+   *  alongside the first instead of losing the port race. */
+  workspaceBasePort: number;
+  /** Leased offsets, `repo path -> workspace path -> offset`. Persisted because
+   *  a port that moves between restarts is a bookmark that stops working. */
+  workspacePorts: Record<string, Record<string, number>>;
+  /** Carry the gitignored config and clone the dependencies into a new
+   *  workspace, so it can build the moment it exists. Off means a bare
+   *  `git worktree add`, which is what this used to do. */
+  workspaceBootstrap: boolean;
 
   // ---- Crash reporting ----
   /** Opt-in, default off: when a panel crashes (or a native panic is found on
@@ -349,12 +452,19 @@ const DEFAULTS: Settings = {
   spotSearchAllProjects: false,
   spotRetentionDays: 0,
   dictationHotkey: DEFAULT_DICTATION_HOTKEY,
+  dictationTriggerMode: "combo",
+  dictationModKey: DEFAULT_DICTATION_MOD_KEY,
   dictationModel: "",
   dictationLanguage: "",
+  dictationStreaming: false,
+  dictationWaveStyle: "classic",
   remoteReach: "local",
   remoteTunnelProvider: "cloudflare",
   browserEngine: "webview",
   previewCaptureMode: "visible",
+  workspaceBasePort: 5173,
+  workspacePorts: {},
+  workspaceBootstrap: true,
   crashReporting: false,
 };
 

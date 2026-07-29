@@ -35,6 +35,11 @@ export interface TermSubTab {
   attachId?: number;
   command?: string;
   icon?: string;
+  /** Stamped onto the shell at spawn. Carries the port lease of the workspace
+   *  this terminal's cwd is in, so a run there serves on its own number.
+   *  Restored with the tab, or a woken project's servers would all come back
+   *  fighting for the same port. */
+  env?: [string, string][];
   /** Launched from a component run command — lives in the run rail, not the
    *  terminal strip. */
   run?: boolean;

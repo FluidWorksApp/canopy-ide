@@ -64,6 +64,7 @@ import { Dialog } from "./components/Dialog";
 import { shouldOnboard, markOnboarded } from "./onboarding";
 import { isSelftest, setSelftestMode } from "./selftest/mode";
 import { startBrowserWatchdog } from "./browserWatchdog";
+import { browserViewSnapshots } from "./browserSignals";
 import { startSpotIndexJob } from "./spotIndexJob";
 import { loadZoom, setZoom, applyZoom, STEP } from "./zoom";
 import { stopWorkspaceServers } from "./lsp/client";
@@ -1589,6 +1590,16 @@ export default function App() {
               new Promise<string>((resolve) => {
                 setAsk({ id: op.id, question, options, resolve });
               }),
+            // The page an agent's browser ops are driving, for the vault ops.
+            // The tab id comes from the view snapshots; the URL comes from the
+            // page itself, because a redirect (every login flow has one) moves
+            // it without anything on this side re-rendering.
+            preview: async () => {
+              const tabId = browserViewSnapshots().find((v) => v.wanted)?.tabId;
+              if (!tabId) return null;
+              const here = await ipc.browserHere(tabId).catch(() => null);
+              return here?.url ? { tabId, url: here.url } : null;
+            },
           });
           void ipc.browserResult(op.id, true, data);
         } catch (err) {
