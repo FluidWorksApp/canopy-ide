@@ -379,6 +379,13 @@ pub async fn vault_status(state: State<'_, Vault>) -> Result<VaultStatus, String
 /// only copy of everything in it.
 #[tauri::command]
 pub async fn vault_create(state: State<'_, Vault>, passphrase: String) -> Result<(), String> {
+    // Wiped when it drops, on every path out including the `?`s below. This
+    // takes the longest-lived copy out of the process; it does not make the
+    // process clean, because the passphrase also exists in the IPC message
+    // buffer serde parsed it from, and that allocation belongs to Tauri. The
+    // honest description is "one fewer copy that lives for the life of the
+    // app", not "the passphrase is gone".
+    let passphrase = zeroize::Zeroizing::new(passphrase);
     if passphrase.chars().count() < MIN_PASSPHRASE {
         return Err(format!(
             "a passphrase needs at least {MIN_PASSPHRASE} characters"
@@ -405,6 +412,7 @@ pub async fn vault_create(state: State<'_, Vault>, passphrase: String) -> Result
 
 #[tauri::command]
 pub async fn vault_unlock(state: State<'_, Vault>, passphrase: String) -> Result<(), String> {
+    let passphrase = zeroize::Zeroizing::new(passphrase);
     let raw = std::fs::read(vault_path()?)
         .map_err(|_| "there is no vault on this machine yet".to_string())?;
     let (key, salt, data) = open(&raw, &passphrase)?;
@@ -431,6 +439,8 @@ pub async fn vault_change_passphrase(
     old: String,
     new: String,
 ) -> Result<(), String> {
+    let old = zeroize::Zeroizing::new(old);
+    let new = zeroize::Zeroizing::new(new);
     if new.chars().count() < MIN_PASSPHRASE {
         return Err(format!(
             "a passphrase needs at least {MIN_PASSPHRASE} characters"
@@ -743,6 +753,7 @@ pub async fn vault_import_kdbx(
     path: String,
     password: String,
 ) -> Result<crate::vault_kdbx::ImportReport, String> {
+    let password = zeroize::Zeroizing::new(password);
     let now = now_secs();
     let (candidates, skipped) =
         crate::vault_kdbx::read_kdbx(std::path::Path::new(&path), &password, now)?;

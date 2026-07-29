@@ -548,6 +548,10 @@ export function VaultSettings() {
             <input
               autoFocus
               type="password"
+              // The webview will offer to remember this otherwise — the one
+              // passphrase that opens every other password, saved by the thing
+              // it protects.
+              autoComplete="off"
               value={passphrase}
               onChange={(e) => setPassphrase(e.target.value)}
             />
