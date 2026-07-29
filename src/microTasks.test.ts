@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  RESEARCH_STEPS,
+  researchTask,
+  runLabelFor,
   addressPrCommentsTask,
   adhocLabel,
   adhocTaskDef,
@@ -278,6 +281,96 @@ describe("MICRO_TASKS", () => {
     // Nothing that only reads may carry a brief that posts a review.
     for (const t of MICRO_TASKS.filter((x) => x.effect === "reads"))
       expect(t.id).not.toBe("review-pr");
+  });
+});
+
+describe("run names", () => {
+  it("names a run by what it is, not by what kind of job it is", () => {
+    // Three research runs and four PR reviews used to render as "Research,
+    // Research, Research, Review PR, Review PR…" — a history you cannot pick
+    // out of, which is the whole reason runLabel exists.
+    const a = runLabelFor(researchTask, {
+      dir: "/repo",
+      entryId: "0001-x",
+      entryDir: "/e",
+      title: "t",
+      question: "can we tier donations and tag GitHub users who give",
+      projectName: "Canopy",
+      components: [],
+    });
+    const b = runLabelFor(researchTask, {
+      dir: "/repo",
+      entryId: "0002-y",
+      entryDir: "/e",
+      title: "t",
+      question: "why is the spot index going stale between launches",
+      projectName: "Canopy",
+      components: [],
+    });
+    expect(a).not.toBe(b);
+    expect(a).not.toBe(researchTask.label);
+    expect(a.length).toBeLessThanOrEqual(33);
+  });
+
+  it("falls back to the task name when a run has nothing to distinguish it", () => {
+    const plain = { ...researchTask, runLabel: undefined };
+    expect(
+      runLabelFor(plain, {
+        dir: "",
+        entryId: "",
+        entryDir: "",
+        title: "",
+        question: "",
+        projectName: "",
+        components: [],
+      }),
+    ).toBe("Research");
+  });
+
+  it("gives every built-in a way to say which run it is", () => {
+    // A built-in without one is a row that will read the same as its siblings.
+    for (const t of MICRO_TASKS) {
+      expect(typeof t.runLabel, `${t.id} has no runLabel`).toBe("function");
+    }
+  });
+});
+
+describe("the research brief", () => {
+  const payload = {
+    dir: "/repo",
+    entryId: "0007-thing",
+    entryDir: "/entry",
+    title: "Tiered donations",
+    question: "can we tier donations and tag GitHub users",
+    projectName: "Canopy",
+    components: [
+      { label: "app", path: "/repo" },
+      { label: "api", path: "/repo/api" },
+    ],
+  };
+
+  it("says which project the question is about, and what is in it", () => {
+    // Without this the agent has a working directory and no idea what it is,
+    // and answers a product question as general software design.
+    const ctx = researchTask.buildContext(payload, "");
+    expect(ctx).toContain('"Canopy" project');
+    expect(ctx).toContain("app (/repo)");
+    expect(ctx).toContain("api (/repo/api)");
+    expect(ctx).toContain("canopy_project");
+    expect(ctx).toContain("about this project, not about the topic in general");
+  });
+
+  it("still reads as a sentence when the project has no components", () => {
+    const ctx = researchTask.buildContext({ ...payload, components: [] }, "");
+    expect(ctx).toContain('"Canopy" project');
+    expect(ctx).not.toContain("The project is .");
+    expect(ctx).not.toContain("undefined");
+  });
+
+  it("reports its stages, so the rail has something to move on", () => {
+    expect(researchTask.steps).toBe(RESEARCH_STEPS);
+    // Inside the entry — the one directory the harness lets it write to.
+    expect(researchTask.progressPath?.(payload)).toBe("/entry/progress.txt");
   });
 });
 

@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import * as ipc from "./ipc";
 import {
+  settleIfRunning,
   ACTIVE_STATUSES,
   NEXT_STATUSES,
   STATUS_BLURBS,
@@ -9,7 +11,6 @@ import {
   implementContext,
   researchContext,
 } from "./research";
-import type * as ipc from "./ipc";
 
 const STATUSES = STATUS_ORDER;
 
@@ -179,5 +180,47 @@ describe("the brief a research run opens with", () => {
   it("says the run changes no code", () => {
     const ctx = researchContext(summary, "anything");
     expect(ctx.toLowerCase()).toContain("change none of it");
+  });
+});
+
+
+describe("settling a run that ended badly", () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  const entryWith = (status: ipc.ResearchStatus) =>
+    vi.spyOn(ipc, "researchGet").mockResolvedValue(entry({ status }));
+
+  it("marks a still-running entry blocked when its run dies unreported", async () => {
+    // The bug this fixes: a research entry stayed "researching" forever once
+    // its agent stopped, because job_done was the only thing that ever moved
+    // it and a dead run never sends one.
+    entryWith("researching");
+    const set = vi.spyOn(ipc, "researchSetStatus").mockResolvedValue({} as never);
+    await settleIfRunning("p1", "0007-x", "blocked", "the run ended without reporting");
+    expect(set).toHaveBeenCalledWith(
+      "p1",
+      "0007-x",
+      "blocked",
+      "Canopy",
+      "the run ended without reporting",
+    );
+  });
+
+  it("leaves an entry that already reached a conclusion alone", async () => {
+    // A process exiting is the last thing that happens either way, so this
+    // fires *after* a successful job_done has marked the entry researched.
+    // The store would accept researched → blocked quite happily, which is
+    // exactly why the guard lives here.
+    entryWith("researched");
+    const set = vi.spyOn(ipc, "researchSetStatus").mockResolvedValue({} as never);
+    await settleIfRunning("p1", "0007-x", "blocked", "the run ended without reporting");
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it("says nothing about an entry it cannot read", async () => {
+    vi.spyOn(ipc, "researchGet").mockRejectedValue(new Error("gone"));
+    const set = vi.spyOn(ipc, "researchSetStatus").mockResolvedValue({} as never);
+    await settleIfRunning("p1", "0007-x", "blocked", "n/a");
+    expect(set).not.toHaveBeenCalled();
   });
 });

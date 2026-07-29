@@ -557,7 +557,10 @@ pub fn setup_agent(agent: &str, home: &str) -> Result<SetupReport, String> {
             ("mcp", setup_opencode_mcp(home)),
         ],
         "omp" => vec![("hooks", setup_omp_hook(home))],
-        "amp" => vec![("hooks", setup_amp_plugin(home))],
+        "amp" => vec![
+            ("hooks", setup_amp_plugin(home)),
+            ("mcp", setup_amp_mcp(home)),
+        ],
         _ => return Err(format!("auto-setup not supported for {agent} yet")),
     };
     let steps: Vec<SetupStep> = steps
@@ -740,6 +743,38 @@ export const CanopyBridge = async ({ directory }) => {
             break
         }
       } catch {}
+    },
+    // The research harness. Only a session Canopy launched as a research run
+    // has CANOPY_RESEARCH_DIR, so every other session returns on the first
+    // line and pays nothing — this sits in front of every tool call and must
+    // not be felt. Throwing is how an OpenCode plugin refuses a tool, and the
+    // message is what the agent reads, so it names the tool to use instead.
+    "tool.execute.before": async (input, output) => {
+      try {
+        const entry = process.env.CANOPY_RESEARCH_DIR
+        if (!entry) return
+        const tool = String(input?.tool ?? "")
+        if (!/^(write|edit|multiedit|notebookedit|patch)$/i.test(tool)) return
+        const args = output?.args ?? {}
+        const path = String(args.filePath ?? args.file_path ?? args.path ?? "")
+        if (!/\.(md|markdown|txt|rst|org|adoc)$/i.test(path)) return
+        if (path === entry || path.startsWith(entry + "/")) return
+        const home = process.env.HOME ?? ""
+        for (const p of [".claude", ".codex", ".gemini", ".config"]) {
+          if (home && path.startsWith(home + "/" + p + "/")) return
+        }
+        throw new Error(
+          `Canopy research harness: ${path} is outside this research entry, and ` +
+            `research written outside it is lost when the session ends. Use the ` +
+            `canopy_research_write tool instead — action "append" for findings, ` +
+            `action "source" for long raw material. If you genuinely need a file ` +
+            `on disk, write it under ${entry}/sources/ .`,
+        )
+      } catch (e) {
+        // Our own refusal must reach the agent; anything else (a shape we did
+        // not expect) must not break the session.
+        if (e instanceof Error && e.message.startsWith("Canopy research harness:")) throw e
+      }
     },
     "tool.execute.after": async (input) => {
       try {
@@ -996,6 +1031,13 @@ fn setup_agy_hooks(home: &str) -> Result<String, String> {
 /// alone. Add to this list on any future rename. Shared by the claude and
 /// codex installers.
 const MARKERS: &[&str] = &["agent-events.jsonl", "canopy-hook", ".canopy/"];
+
+/// The tools that put a file on disk, as a Claude/Codex hook matcher regex.
+/// This is what scopes the research harness's PreToolUse registration: the gate
+/// only ever has an opinion about writes, so it should only ever be woken by
+/// one. Keep in step with EDIT_TOOLS in bin/canopy_hook.rs, which decides what
+/// the gate then does with the event.
+const WRITE_TOOLS_MATCHER: &str = "Write|Edit|MultiEdit|NotebookEdit";
 
 /// Where the hook helper lives once installed. Hooks reference this stable path
 /// rather than the app bundle, so they keep working across upgrades and don't
@@ -1302,6 +1344,12 @@ fn setup_claude_hooks(home: &str, bridge: &str) -> Result<String, String> {
         .or_insert_with(|| serde_json::json!({}));
     let hooks = hooks.as_object_mut().ok_or("hooks is not an object")?;
     let mut changed = 0;
+    // Grouped per event rather than installed entry by entry: PreToolUse now
+    // carries two of ours (the questionnaire capture and the research write
+    // gate), and the retain below — which drops our previous install so an
+    // upgrade replaces rather than stacks — would otherwise uninstall the
+    // first the moment it installed the second.
+    let mut wanted: Vec<(&str, Vec<Option<&str>>)> = Vec::new();
     // PreToolUse:AskUserQuestion captures questionnaires before they block.
     // UserPromptSubmit and SessionStart are the only two events that can inject
     // context back into a session — the rest are observation only. SessionEnd
@@ -1309,6 +1357,14 @@ fn setup_claude_hooks(home: &str, bridge: &str) -> Result<String, String> {
     // stale process; PreCompact marks the context reset so the token tray can
     // start a fresh count. Neither fires per tool call, so they add no
     // hot-path spawns the way a general PreToolUse would.
+    //
+    // The write tools are the exception, and a deliberate one: the research
+    // harness can only refuse a stray findings file *before* it is written, and
+    // a hook that is not registered is a gate that never runs. Narrowed to the
+    // four tools that put prose on disk rather than registered wholesale — a
+    // bare PreToolUse would spawn the helper on every Read, Grep and Bash,
+    // which is the cost the rest of this list exists to avoid. Outside a
+    // research session the helper looks at one env var and exits.
     for (event, matcher) in [
         ("PostToolUse", None),
         ("Stop", None),
@@ -1319,23 +1375,33 @@ fn setup_claude_hooks(home: &str, bridge: &str) -> Result<String, String> {
         ("PreCompact", None),
         ("SubagentStop", None),
         ("PreToolUse", Some("AskUserQuestion")),
+        ("PreToolUse", Some(WRITE_TOOLS_MATCHER)),
     ] {
+        match wanted.iter_mut().find(|(e, _)| *e == event) {
+            Some((_, matchers)) => matchers.push(matcher),
+            None => wanted.push((event, vec![matcher])),
+        }
+    }
+
+    let is_ours = |e: &serde_json::Value| {
+        let s = e.to_string();
+        MARKERS.iter().any(|m| s.contains(m))
+    };
+    for (event, matchers) in wanted {
         let list = hooks.entry(event).or_insert_with(|| serde_json::json!([]));
         let Some(arr) = list.as_array_mut() else {
             continue;
         };
-        let want = make_entry(matcher);
-        if arr.iter().any(|e| e == &want) {
+        let want: Vec<serde_json::Value> = matchers.into_iter().map(make_entry).collect();
+        let ours = arr.iter().filter(|e| is_ours(e)).count();
+        if ours == want.len() && want.iter().all(|w| arr.contains(w)) {
             continue; // already exactly what we install
         }
         // Drop any older bridge hook of ours (see MARKERS) and reinstall the
-        // current one, so an upgrade replaces its predecessor rather than
+        // current set, so an upgrade replaces its predecessor rather than
         // stacking a dead hook beside it.
-        arr.retain(|e| {
-            let s = e.to_string();
-            !MARKERS.iter().any(|m| s.contains(m))
-        });
-        arr.push(want);
+        arr.retain(|e| !is_ours(e));
+        arr.extend(want);
         changed += 1;
     }
     changed += install_claude_statusline(&mut settings, &command);
@@ -1730,6 +1796,59 @@ fn setup_opencode_mcp(home: &str) -> Result<String, String> {
         is_canopy_mcp_entry,
     )?;
     Ok(registered_msg(changed, "opencode"))
+}
+
+/// Amp keeps its MCP servers under a *dotted* key inside a flat settings
+/// object — `"amp.mcpServers"` is one key, not a path — which is why this
+/// cannot go through upsert_json_mcp's nested lookup. The registry table in
+/// mcp.rs already described this file; nothing registered into it until now,
+/// so Amp sessions could see Canopy's tools listed in the Tools panel and
+/// never actually have them.
+fn setup_amp_mcp(home: &str) -> Result<String, String> {
+    let helper = require_helper(home, "MCP server not registered")?;
+    let path = std::path::PathBuf::from(home).join(".config/amp/settings.json");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut settings: serde_json::Value = match std::fs::read_to_string(&path) {
+        Ok(raw) if !raw.trim().is_empty() => serde_json::from_str(&raw)
+            .map_err(|e| format!("{} is not valid JSON: {e}", path.display()))?,
+        _ => serde_json::json!({}),
+    };
+    let want = serde_json::json!({
+        "command": helper.to_string_lossy(),
+        "args": ["--mcp"],
+    });
+    let obj = settings
+        .as_object_mut()
+        .ok_or("settings.json is not an object")?;
+    let servers = obj
+        .entry("amp.mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+    let servers = servers
+        .as_object_mut()
+        .ok_or("amp.mcpServers is not an object")?;
+    // Someone else's "canopy" is theirs; report rather than overwrite, the same
+    // rule the other registrars follow.
+    if let Some(existing) = servers.get("canopy") {
+        if existing == &want {
+            return Ok(registered_msg(false, "amp"));
+        }
+        if !is_canopy_mcp_entry(existing) {
+            return Err(format!(
+                "{} already has an MCP server called canopy that isn't ours — \
+                 rename it, or point it at canopy-hook --mcp yourself",
+                path.display()
+            ));
+        }
+    }
+    servers.insert("canopy".into(), want);
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(registered_msg(true, "amp"))
 }
 
 // ---------------------------------------------------------------------------
@@ -3607,6 +3726,129 @@ mod integration_tests {
     #[test]
     fn an_unknown_agent_is_an_error_not_an_empty_report() {
         assert!(setup_agent("emacs", "/nowhere").is_err());
+    }
+
+    // ---- the research harness reaches the CLIs that can carry it ----------
+
+    #[test]
+    fn claude_is_woken_for_writes_so_the_research_gate_can_run() {
+        // The gate in bin/canopy_hook.rs can only refuse a stray findings file
+        // before it lands, and a hook that is not registered never runs. This
+        // shipped once with PreToolUse registered for AskUserQuestion alone,
+        // which meant the gate was dead code in every real Claude session —
+        // so what is asserted here is the registration, not the predicate.
+        let home = scratch_home("claude-writes");
+        setup_agent("claude", home.to_str().unwrap()).unwrap();
+        let raw = std::fs::read_to_string(home.join(".claude/settings.json")).unwrap();
+        let cfg: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let pre = cfg["hooks"]["PreToolUse"].as_array().unwrap();
+
+        let matchers: Vec<&str> = pre.iter().filter_map(|e| e["matcher"].as_str()).collect();
+        assert!(
+            matchers.contains(&WRITE_TOOLS_MATCHER),
+            "no write-tool matcher registered: {matchers:?}"
+        );
+        // The questionnaire hook is a separate concern and must survive.
+        assert!(matchers.contains(&"AskUserQuestion"), "{matchers:?}");
+        // Narrow on purpose: a bare PreToolUse would spawn the helper on every
+        // Read, Grep and Bash, which is the cost the rest of the event list is
+        // written to avoid.
+        assert!(
+            !pre.iter().any(|e| e["matcher"].is_null()),
+            "an unmatched PreToolUse puts the helper in front of every tool call"
+        );
+    }
+
+    #[test]
+    fn the_write_matcher_names_the_tools_the_gate_acts_on() {
+        // canopy_hook decides what to do with the event; this decides whether
+        // the event arrives. If they disagree, the gate is either dead for a
+        // tool or woken for nothing.
+        for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit"] {
+            assert!(
+                WRITE_TOOLS_MATCHER.split('|').any(|m| m == tool),
+                "{tool} is an edit tool in canopy_hook but not in the matcher"
+            );
+        }
+        assert!(!WRITE_TOOLS_MATCHER.split('|').any(|m| m == "Read"));
+        assert!(!WRITE_TOOLS_MATCHER.split('|').any(|m| m == "Bash"));
+    }
+
+    #[test]
+    fn opencodes_plugin_refuses_stray_prose_and_costs_nothing_otherwise() {
+        let home = scratch_home("opencode-gate");
+        setup_agent("opencode", home.to_str().unwrap()).unwrap();
+        let src = std::fs::read_to_string(home.join(".config/opencode/plugin/canopy.ts")).unwrap();
+        // Throwing is how an OpenCode plugin refuses a tool.
+        assert!(src.contains("tool.execute.before"));
+        assert!(src.contains("Canopy research harness:"));
+        assert!(src.contains("canopy_research_write"));
+        // The env check has to come before any work, or every tool call in
+        // every session pays for a feature it is not using.
+        let hook = src.split("tool.execute.before").nth(1).unwrap();
+        let env_at = hook.find("CANOPY_RESEARCH_DIR").unwrap();
+        let throw_at = hook.find("throw new Error").unwrap();
+        assert!(env_at < throw_at);
+    }
+
+    #[test]
+    fn amp_gets_the_mcp_registration_it_never_had() {
+        // mcp.rs has described ~/.config/amp/settings.json since before this,
+        // but nothing wrote to it — so Amp could see Canopy's tools listed and
+        // never actually have them.
+        let home = scratch_home("amp-mcp");
+        let report = setup_agent("amp", home.to_str().unwrap()).unwrap();
+        assert!(report.ok, "{report:?}");
+        let raw = std::fs::read_to_string(home.join(".config/amp/settings.json")).unwrap();
+        let cfg: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        // A dotted key, not a path: "amp.mcpServers" is one key.
+        let server = &cfg["amp.mcpServers"]["canopy"];
+        assert_eq!(server["args"][0], "--mcp");
+        assert!(server["command"].as_str().unwrap().contains("canopy-hook"));
+    }
+
+    #[test]
+    fn amps_mcp_setup_is_idempotent_and_leaves_a_stranger_alone() {
+        let home = scratch_home("amp-mcp-twice");
+        let h = home.to_str().unwrap();
+        setup_agent("amp", h).unwrap();
+        let first = std::fs::read_to_string(home.join(".config/amp/settings.json")).unwrap();
+        setup_agent("amp", h).unwrap();
+        assert_eq!(
+            first,
+            std::fs::read_to_string(home.join(".config/amp/settings.json")).unwrap(),
+            "setup runs on every launch; it must not churn the file"
+        );
+
+        // Someone else's "canopy" is theirs — reported, never overwritten.
+        let path = home.join(".config/amp/settings.json");
+        std::fs::write(
+            &path,
+            r#"{"amp.mcpServers":{"canopy":{"command":"/usr/bin/somethingelse"}}}"#,
+        )
+        .unwrap();
+        assert!(setup_amp_mcp(h).is_err());
+    }
+
+    #[test]
+    fn amp_setup_preserves_the_rest_of_the_settings_file() {
+        let home = scratch_home("amp-preserve");
+        let path = home.join(".config/amp/settings.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"amp.theme":"dark","amp.mcpServers":{"mine":{}}}"#,
+        )
+        .unwrap();
+        setup_amp_mcp(home.to_str().unwrap()).unwrap();
+        let cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(cfg["amp.theme"], "dark");
+        assert!(
+            cfg["amp.mcpServers"]["mine"].is_object(),
+            "clobbered a peer"
+        );
+        assert!(cfg["amp.mcpServers"]["canopy"].is_object());
     }
 
     // ---- health + startup repair -----------------------------------------

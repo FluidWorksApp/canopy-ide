@@ -148,6 +148,26 @@ export async function setStatus(
   await refresh(projectId);
 }
 
+/** Move an entry only if it is still running.
+ *
+ *  The two "the run ended badly" paths — stopped by the user, died without
+ *  reporting — can fire *after* a successful job_done has already marked the
+ *  entry researched, because a process exiting is the last thing that happens
+ *  either way. The store would accept researched → blocked quite happily, so
+ *  the guard has to be here: settle what is still in flight, and leave anything
+ *  that already reached a conclusion alone. */
+export async function settleIfRunning(
+  projectId: string,
+  id: string,
+  status: ResearchStatus,
+  note: string,
+): Promise<void> {
+  const entry = await ipc.researchGet(projectId, id).catch(() => null);
+  if (!entry) return;
+  if (entry.status !== "researching" && entry.status !== "implementing") return;
+  await setStatus(projectId, id, status, "Canopy", note).catch(() => {});
+}
+
 export async function remove(projectId: string, id: string): Promise<void> {
   await ipc.researchDelete(projectId, id);
   await refresh(projectId);

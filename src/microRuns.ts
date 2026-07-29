@@ -25,6 +25,11 @@ export interface MicroRun {
   cwd: string;
   /** Agent CLI registry id, for the row's tooltip. */
   agent: string;
+  /** The research entry this run is working on, when it is working on one.
+   *  Carried on the run so that when it reports done, the entry can be moved
+   *  off "researching" — a finished run whose entry still says it is being
+   *  researched is the state a research list exists to not have. */
+  researchId?: string;
   startedAt: number;
   /** The agent called job_done with "blocked": it wants the user. The run is
    *  still going — answering it is what the terminal is for — so this marks the

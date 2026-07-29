@@ -379,6 +379,10 @@ struct ResearchReq {
     agent: Option<String>,
     #[serde(default)]
     pty_id: Option<u64>,
+    /// Which app launch the calling terminal belongs to — pty ids restart with
+    /// the app, so the session binding is keyed by both.
+    #[serde(default)]
+    instance: Option<String>,
     #[serde(default)]
     pr: Option<crate::research::PrLink>,
     #[serde(default)]
@@ -441,6 +445,7 @@ async fn research_op(
             Some(req.cwd.clone()),
             req.pty_id,
             req.tags.clone(),
+            req.instance.clone(),
         )
         .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
         // digest and append are the same command; naming them separately at the

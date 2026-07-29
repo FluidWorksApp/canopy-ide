@@ -639,6 +639,7 @@ pub fn research_start(
     cwd: Option<String>,
     pty_id: Option<u64>,
     tags: Option<Vec<String>>,
+    instance: Option<String>,
 ) -> Result<Summary, String> {
     let _guard = store.0.lock().unwrap();
     start_impl(
@@ -651,6 +652,7 @@ pub fn research_start(
         cwd,
         pty_id,
         tags,
+        instance,
     )
 }
 
@@ -665,6 +667,7 @@ fn start_impl(
     cwd: Option<String>,
     pty_id: Option<u64>,
     tags: Option<Vec<String>>,
+    instance: Option<String>,
 ) -> Result<Summary, String> {
     let title = title.trim().to_string();
     if title.is_empty() {
@@ -747,6 +750,14 @@ fn start_impl(
     };
     write_meta(&dir, &meta)?;
     write_atomic(&body_path(&dir), &format!("# {}\n\n", meta.title))?;
+    // From here on this terminal is doing research, whoever launched it. A run
+    // Canopy started already had the env; this is what brings the harness to
+    // one that opened an entry on its own initiative.
+    bind_session(
+        instance.as_deref(),
+        pty_id.map(|p| p.to_string()).as_deref(),
+        &dir,
+    );
     Ok(summarize(&meta))
 }
 
@@ -1095,6 +1106,60 @@ pub fn research_dir(project_id: String, id: String) -> Result<String, String> {
     entry_dir(&project_id, &id).map(|d| d.to_string_lossy().to_string())
 }
 
+// ---- self-binding ---------------------------------------------------------
+//
+// Research does not only happen in runs Canopy launched. An agent asked "work
+// out how our auth works" does research too, and the MCP instructions already
+// tell it to record that here — so it opens an entry mid-session, with no
+// CANOPY_RESEARCH_DIR on its environment because nothing knew at spawn time
+// that this would become research.
+//
+// Such a session got the tools and none of the harness: it could still scatter
+// findings into files the gate never saw. Env cannot be set on a process that
+// is already running, so the binding is a file instead — written when an entry
+// is started or appended to, and read by the PreToolUse gate, which knows its
+// own terminal from CANOPY_PTY. One small local read on write tools only,
+// which is affordable where a bridge round trip on every tool call was not.
+
+/// Keyed by instance *and* terminal, not terminal alone. Pty ids restart from
+/// zero with the app, so a binding left behind by a crash would otherwise
+/// attach to whatever session inherited the number next launch — and refuse
+/// its writes for an entry it has never heard of. The instance token is unique
+/// per launch, so a stale file simply never matches again.
+///
+/// The name is built the same way on both sides; canopy_hook reads it straight
+/// from its own env rather than calling back, because this sits in front of
+/// write tools and a round trip there is what the env fast path exists to
+/// avoid.
+pub fn binding_file(instance: &str, pty: &str) -> Option<String> {
+    let safe = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 64
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    };
+    (safe(instance) && safe(pty)).then(|| format!("{instance}-{pty}.json"))
+}
+
+/// Bind a terminal to an entry, so the harness starts applying to a session
+/// that talked its way into research rather than being launched into it.
+fn bind_session(instance: Option<&str>, pty: Option<&str>, dir: &Path) {
+    let (Some(instance), Some(pty)) = (instance, pty) else {
+        return;
+    };
+    let Some(name) = binding_file(instance, pty) else {
+        return;
+    };
+    let Ok(sessions) = root().map(|r| r.join("sessions")) else {
+        return;
+    };
+    if std::fs::create_dir_all(&sessions).is_err() {
+        return;
+    }
+    let body = serde_json::json!({ "dir": dir.to_string_lossy(), "at": now_secs() });
+    let _ = write_atomic(&sessions.join(name), &body.to_string());
+}
+
 /// Remove an entry and everything under it. Deliberately real: the whole point
 /// of a research list is that the user can throw things out of it.
 #[tauri::command]
@@ -1336,6 +1401,7 @@ mod tests {
             Some("/repo".into()),
             Some(12),
             None,
+            Some("inst1".into()),
         )
         .unwrap()
     }
@@ -1573,6 +1639,36 @@ mod tests {
         assert!(doc.body.contains("findable digest"));
         assert!(doc.body.contains("body text"));
         assert!(doc.title.contains("researching"));
+    }
+
+    #[test]
+    fn starting_an_entry_binds_the_terminal_that_started_it() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempHome::new("binding");
+
+        let s = start("p1", "Something an agent chose to research");
+        // The point: a session that talked its way into research — rather than
+        // being launched into it — has no CANOPY_RESEARCH_DIR on its
+        // environment, and an environment cannot be changed after the fact. The
+        // binding file is what brings the harness to it.
+        let name = binding_file("inst1", "12").expect("a valid binding name");
+        let path = home.0.join("sessions").join(&name);
+        let raw = std::fs::read_to_string(&path).expect("binding written");
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(value["dir"].as_str().unwrap().ends_with(&s.id));
+    }
+
+    #[test]
+    fn a_binding_is_keyed_by_launch_as_well_as_terminal() {
+        // Pty ids restart with the app, so a binding keyed by terminal alone
+        // would attach to whatever session inherited the number next launch
+        // and refuse its writes for an entry it never heard of.
+        assert_ne!(binding_file("instA", "12"), binding_file("instB", "12"));
+        assert_eq!(binding_file("instA", "12").unwrap(), "instA-12.json");
+        // And nothing that could climb out of the sessions directory.
+        assert!(binding_file("../evil", "12").is_none());
+        assert!(binding_file("inst", "12/../..").is_none());
+        assert!(binding_file("", "12").is_none());
     }
 
     #[test]

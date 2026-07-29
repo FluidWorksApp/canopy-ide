@@ -1222,14 +1222,34 @@ fn edit_diagnostics(event: &serde_json::Value) -> Option<String> {
 // is completely unaffected — the harness is about where findings land, not
 // about restricting the work.
 
-/// The entry this session is bound to, from the env the launcher exported.
-/// Absent outside a research session, which is the common case and means "do
-/// nothing at all".
+/// The entry this session is bound to.
+///
+/// Two ways to be doing research, and both have to gate. A run Canopy launched
+/// carries the entry on its environment. A session that was doing something
+/// else and opened an entry mid-flight — which the MCP instructions tell every
+/// agent to do — cannot have its environment changed after the fact, so the
+/// store writes a binding file keyed by terminal and this reads it.
+///
+/// Absent means "not research", which is the common case and the safe answer:
+/// the gate then allows. The env is checked first because it costs nothing.
 fn research_entry_dir() -> Option<std::path::PathBuf> {
-    std::env::var("CANOPY_RESEARCH_DIR")
+    if let Some(dir) = std::env::var("CANOPY_RESEARCH_DIR")
         .ok()
         .filter(|s| !s.is_empty())
-        .map(std::path::PathBuf::from)
+    {
+        return Some(std::path::PathBuf::from(dir));
+    }
+    let pty = std::env::var("CANOPY_PTY").ok()?;
+    let instance = std::env::var("CANOPY_INSTANCE").ok()?;
+    let path = std::path::PathBuf::from(home())
+        .join(".canopy/research/sessions")
+        .join(format!("{instance}-{pty}.json"));
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let dir = std::path::PathBuf::from(value.get("dir")?.as_str()?);
+    // A binding that outlived its entry (deleted from the panel) must not keep
+    // refusing writes for a session that now has nowhere to put them.
+    dir.join("meta.json").exists().then_some(dir)
 }
 
 /// Extensions that carry findings. Source files are not on this list on
@@ -1251,6 +1271,15 @@ fn is_prose(path: &str) -> bool {
 /// the agent's own bookkeeping, not research output, and denying those would
 /// break the session to no purpose.
 fn denied_research_write(path: &str, entry_dir: &std::path::Path, home: &str) -> bool {
+    // The store's own record, and never the agent's to edit. An agent whose
+    // canopy_research_write tool is missing — a sidecar older than the research
+    // module, say — will cheerfully hand-write this file instead, skipping the
+    // state machine, the size limits and the history, and leaving an entry that
+    // claims a status nothing granted it. Checked before the prose test,
+    // because a .json would never have reached it.
+    if is_entry_meta(path, entry_dir) {
+        return true;
+    }
     if !is_prose(path) {
         return false;
     }
@@ -1273,7 +1302,24 @@ fn denied_research_write(path: &str, entry_dir: &std::path::Path, home: &str) ->
 
 /// What the agent is told instead. Naming the two actions matters — a bare
 /// refusal produces a retry at a different path, not a call to the right tool.
+/// Is this the entry's own `meta.json`? One place, because the gate and the
+/// message it produces have to agree about what they are refusing.
+fn is_entry_meta(path: &str, entry_dir: &std::path::Path) -> bool {
+    path == entry_dir.join("meta.json").to_string_lossy()
+}
+
 fn research_denial(path: &str, entry_dir: &std::path::Path) -> String {
+    if is_entry_meta(path, entry_dir) {
+        return format!(
+            "Canopy research harness: meta.json is the research store's own record and is \
+             not writable directly — editing it skips the status rules, the size limits and \
+             the history.\n\n\
+             Use `canopy_research_write`: action \"digest\" for the finding and \
+             recommendation, action \"status\" to move the entry along, action \"append\" \
+             for the write-up. If that tool is not available to you, say so and stop rather \
+             than writing the file — Canopy will record the outcome when your run ends."
+        );
+    }
     format!(
         "Canopy research harness: {path} is outside this research entry, and research \
          written outside it is lost when the session ends.\n\n\
@@ -3231,6 +3277,11 @@ fn research_op(action: &str, args: &serde_json::Value) -> Result<String, String>
             body["pty_id"] = serde_json::json!(n);
         }
     }
+    // Pty ids restart with the app, so the session binding this may create is
+    // keyed by launch as well as by terminal.
+    if let Ok(instance) = std::env::var("CANOPY_INSTANCE") {
+        body["instance"] = serde_json::json!(instance);
+    }
     // No agent id: the MCP sidecar is registered user-globally and nothing in
     // its environment says which CLI invoked it. Entries started from a CTA get
     // the id from the launcher, which does know; entries an agent starts on its
@@ -3815,6 +3866,45 @@ mod tests {
         // A sibling directory sharing a textual prefix is still outside.
         assert!(denied(
             "/Users/dev/.canopy/research/p1/0007-thing-old/research.md"
+        ));
+    }
+
+    #[test]
+    fn the_stores_own_record_is_not_the_agents_to_write() {
+        // An agent whose canopy_research_write tool is missing will hand-write
+        // meta.json instead — which is how an entry ends up claiming a status
+        // the state machine never granted it. Refused regardless of extension:
+        // the prose check would never have looked at a .json.
+        let entry = std::path::PathBuf::from("/Users/dev/.canopy/research/p1/0007-thing");
+        let home = "/Users/dev";
+        assert!(denied_research_write(
+            "/Users/dev/.canopy/research/p1/0007-thing/meta.json",
+            &entry,
+            home
+        ));
+        let msg = research_denial(
+            "/Users/dev/.canopy/research/p1/0007-thing/meta.json",
+            &entry,
+        );
+        assert!(msg.contains("not writable directly"), "{msg}");
+        assert!(msg.contains("canopy_research_write"), "{msg}");
+        // Everything else the agent legitimately owns inside the entry stays
+        // writable — the write-up, its captures, its progress.
+        for ok in ["research.md", "sources/01-x.md", "progress.txt"] {
+            assert!(
+                !denied_research_write(
+                    &format!("/Users/dev/.canopy/research/p1/0007-thing/{ok}"),
+                    &entry,
+                    home
+                ),
+                "{ok} should be writable"
+            );
+        }
+        // Another entry's meta.json is out of bounds for the ordinary reason.
+        assert!(denied_research_write(
+            "/Users/dev/.canopy/research/p1/0008-other/research.md",
+            &entry,
+            home
         ));
     }
 
