@@ -1,6 +1,7 @@
 mod agentid;
 mod agents;
 mod android;
+mod blocking;
 mod browser;
 mod cli;
 mod context;

@@ -833,6 +833,22 @@ export interface FsChange {
 export const onFsChange = (cb: (e: FsChange) => void): Promise<UnlistenFn> =>
   listen<FsChange>("fs:change", (event) => cb(event.payload));
 
+export interface GitChange {
+  root: string;
+}
+/** "Whatever git would say about this root just changed" — a commit, a stage,
+ *  a branch switch, a fetch, or a plain edit to a tracked file.
+ *
+ *  This is what replaced the git polls. `fs:change` can't do the job: the
+ *  watcher filters `.git` out of it (and must — the file tree does not want
+ *  object churn), so everything an agent does with git in a terminal was
+ *  invisible to it, which is precisely why every git surface kept a
+ *  `setInterval` running. The debounce lives in Rust, once, so a burst like a
+ *  commit's five writes is one event here rather than five refreshes per
+ *  panel. */
+export const onGitChange = (cb: (e: GitChange) => void): Promise<UnlistenFn> =>
+  listen<GitChange>("git:change", (event) => cb(event.payload));
+
 // ---------- Context bridge (agent-facing MCP context) ----------
 
 /** Publish a project's live context snapshot (components, run servers,

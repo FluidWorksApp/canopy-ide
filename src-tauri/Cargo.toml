@@ -48,7 +48,11 @@ dictation = [
 
 [dependencies]
 # io-util: the MCP client reads its stdio servers a line at a time (AsyncBufReadExt).
-tokio = { version = "1", features = ["rt", "sync", "time", "macros", "process", "net", "io-util"] }
+# rt-multi-thread: Tauri already builds its shared runtime multi-threaded, but
+# `blocking::io` names `tokio::task::block_in_place`, which only exists behind
+# this feature — relying on Tauri's own feature set to enable it would compile
+# today and break the day Tauri changes it.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "process", "net", "io-util"] }
 # Canopy Remote: an embedded HTTP + WebSocket server that serves the mobile
 # control portal and bridges it to the local command surface (projects, agent
 # status, PTY I/O). axum is the tokio-native choice and reuses the runtime Tauri
@@ -169,6 +173,18 @@ objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKSnapshotConfigura
 # second notification stack — but reaching it directly is the only way to learn
 # that a notification was clicked, which is what deep links are routed on.
 mac-notification-sys = "0.6"
+
+# Release builds took cargo's defaults until now: no LTO, 16 codegen units. The
+# app's own crate is ~33k lines against a very large dependency graph, so most
+# of what ships is cross-crate code that thin LTO can inline and dead-strip —
+# which is binary size and startup work, both of which SPEC's 60-150 MB idle
+# target cares about. `codegen-units = 1` is the same trade in the other
+# direction: a slower release build for a smaller, faster binary. Neither
+# changes behaviour, and debug/dev builds are untouched, so `tauri dev` is as
+# fast as it was.
+[profile.release]
+lto = "thin"
+codegen-units = 1
 
 [dev-dependencies]
 # `test` feature enables tauri::test::mock_app for exercising PTY spawn/attach

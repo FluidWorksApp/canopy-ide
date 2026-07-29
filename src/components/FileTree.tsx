@@ -425,13 +425,19 @@ export function FileTree({
       timer = setTimeout(() => {
         for (const dir of pending) void loadDir(dir);
         pending = new Set();
-        // file changes shift git state too
-        for (const root of roots) void loadGit(root);
       }, 300);
+    });
+    // Row colouring follows git, not the fs: a commit or a stash made in a
+    // terminal changes what is modified without touching a single file, and
+    // used to leave the tree showing yesterday's dirty rows until something
+    // else happened to be saved. This event covers both, already debounced.
+    const gitSub = ipc.onGitChange(() => {
+      for (const root of roots) void loadGit(root);
     });
     return () => {
       clearTimeout(timer);
       void unlisten.then((fn) => fn());
+      void gitSub.then((fn) => fn());
     };
   }, [loadDir, readOnly]);
 
