@@ -11,7 +11,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import * as ipc from "../ipc";
 import { getSettings, THEME_CHANGE_EVENT, type Settings } from "../settings";
@@ -500,8 +500,17 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // term.paste(), which takes xterm's ordered input path (like the key
     // handler above) and wraps the text in bracketed-paste markers, so zsh and
     // TUIs treat it as pasted text rather than typed keystrokes.
+    //
+    // The WINDOW, not the webview. Tauri picks the target by how many webviews
+    // the window has: one, and the drop goes to `AnyLabel` (which every kind of
+    // listener matches); more than one, and it goes to the `Window` target,
+    // which a webview listener does not match at all. Opening a preview adds a
+    // second webview — so a webview listener here meant that dropping a file
+    // onto ANY terminal, in ANY project, silently did nothing for as long as a
+    // browser tab existed anywhere in the window. A window listener is correct
+    // in both states.
     let unlistenDrop: (() => void) | undefined;
-    void getCurrentWebview()
+    void getCurrentWindow()
       .onDragDropEvent((e) => {
         if (e.payload.type !== "drop" || !activeRef.current) return;
         const paths = e.payload.paths;
