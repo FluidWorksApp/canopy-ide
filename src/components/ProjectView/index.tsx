@@ -2072,6 +2072,55 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [project.id, project.name, roots, startMicroTask, openResearch, onNotice],
   );
 
+  /** Put an agent back on an entry that already exists.
+   *
+   *  Deliberately the same entry rather than a new one: the point of continuing
+   *  is to go further on this question, and a second entry would split the
+   *  answer across two rows that each look complete. The run is bound to it the
+   *  same way a first run is, so the harness, the stage rail and the settling
+   *  on job_done all apply unchanged — and the steer the user typed rides in as
+   *  the run's user context, which is where every other task puts it. */
+  const continueResearch = useCallback(
+    async (entry: ipc.ResearchDetail, steer: string) => {
+      try {
+        const entryDir = await ipc.researchDir(project.id, entry.id);
+        // Back to researching, so the rail and the polling wake up — and so a
+        // finished entry does not sit at "researched" while an agent works.
+        if (entry.status !== "researching")
+          await researchSetStatus(project.id, entry.id, "researching", "you",
+            steer ? `continued — ${steer}` : "continued");
+        await startMicroTask(
+          researchTask,
+          {
+            dir: roots[0] ?? "",
+            entryId: entry.id,
+            entryDir,
+            title: entry.title,
+            question: entry.question || entry.title,
+            projectName: project.name,
+            components: componentsRef.current.map((c) => ({
+              label: c.label,
+              path: c.path,
+            })),
+          },
+          // What is already recorded is in the entry, which the brief tells it
+          // to read — so this carries only what is new: where to go next.
+          [
+            `This continues research ${entry.id}, which already has findings —`,
+            `read it with canopy_research get before adding anything, and build on`,
+            `it rather than starting over.`,
+            steer,
+          ]
+            .filter(Boolean)
+            .join(" "),
+        );
+      } catch (err) {
+        onNotice(`Couldn't continue research: ${String(err)}`, "error");
+      }
+    },
+    [project.id, project.name, roots, startMicroTask, onNotice],
+  );
+
   /** Hand a finished finding to an agent that will build it, on a branch of its
    *  own. Flips the entry to `implementing` — the PR the agent links is what
    *  later carries it the rest of the way. */
@@ -5199,11 +5248,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
             projectId={project.id}
             researchId={tab.researchId}
             onImplement={(entry) => void implementResearch(entry)}
-            onContinue={(entry) =>
-              void startResearch(
-                entry.question || entry.title,
-                `This continues research ${entry.id}; read it first with canopy_research get.`,
-              )
+            // Continuing works on the same entry rather than opening a new
+            // one — the point is to go further on this question, not to ask it
+            // again — so the steer is passed through as the run's user context.
+            onContinue={(entry, steer) =>
+              void continueResearch(entry, steer)
             }
             onOpenPr={(pr) => void openPrByNumber(pr.repo, pr.number, pr.url)}
             onOpenFile={(path) => {
@@ -5212,6 +5261,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
               else void openFile(path);
             }}
             onClosed={() => closeTab(tab.id)}
+            // The tab strip keeps its own copy of the title so it has a label
+            // before the first read; a rename has to reach it or the tab keeps
+            // showing the name the entry no longer has.
+            onRenamed={(title) => patchTabRaw(tab.id, { title } as Partial<SubTab>)}
             onNotice={onNotice}
           />
         );

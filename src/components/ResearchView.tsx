@@ -11,12 +11,13 @@
 // agent appends to it while it is on screen, and the PR watcher can move its
 // status from under you; a copy on the tab would be a second truth going stale
 // in front of the user.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { renderMarkdown } from "../markdown";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import * as ipc from "../ipc";
 import {
   NEXT_STATUSES,
+  rename as renameResearch,
   RESEARCH_EVENT,
   STATUS_BLURBS,
   STATUS_LABELS,
@@ -25,6 +26,14 @@ import {
   setStatus,
 } from "../research";
 import { ago } from "./ProjectView/helpers";
+import {
+  ArchiveIcon,
+  BlockedIcon,
+  CheckIcon,
+  ExchangeIcon,
+  RestartIcon,
+  TrashIcon,
+} from "./icons";
 import { TaskProgress } from "./TaskProgress";
 import { RESEARCH_STEPS, stepsDone } from "../microTasks";
 
@@ -34,11 +43,15 @@ interface ResearchViewProps {
   /** Hand this entry to an agent to build. Absent while no CLI is installed. */
   onImplement?: (entry: ipc.ResearchDetail) => void;
   /** Reopen the question with a fresh agent, carrying the entry. */
-  onContinue?: (entry: ipc.ResearchDetail) => void;
+  /** Put an agent back on it. `steer` is what the user typed into the popover
+   *  — continuing with nothing extra is allowed, and is the empty string. */
+  onContinue?: (entry: ipc.ResearchDetail, steer: string) => void;
   /** Follow a link out to the thing it points at, natively. */
   onOpenPr?: (pr: ipc.ResearchPrLink) => void;
   onOpenFile?: (path: string) => void;
   onClosed?: () => void;
+  /** The title changed — the tab strip holds its own copy of it. */
+  onRenamed?: (title: string) => void;
   onNotice?: (text: string, level?: "info" | "error") => void;
 }
 
@@ -50,6 +63,7 @@ export function ResearchView({
   onOpenPr,
   onOpenFile,
   onClosed,
+  onRenamed,
   onNotice,
 }: ResearchViewProps) {
   const [entry, setEntry] = useState<ipc.ResearchDetail | null>(null);
@@ -61,6 +75,46 @@ export function ResearchView({
   /** The one expanded capture, and its text. One at a time on purpose. */
   const [open, setOpen] = useState<string | null>(null);
   const [sourceText, setSourceText] = useState<string | null>(null);
+  /** The title being edited, or null when it is not. An entry names itself
+   *  from the question, shortened, which is the only thing available when it is
+   *  created and rarely what it should be called afterwards. */
+  const [draft, setDraft] = useState<string | null>(null);
+  const titleInput = useRef<HTMLInputElement>(null);
+  /** The steering box for "continue research". Open with an empty string —
+   *  null is closed — because continuing with no extra direction is a perfectly
+   *  good answer and must stay one keypress away. */
+  const [steer, setSteer] = useState<string | null>(null);
+  const steerInput = useRef<HTMLInputElement>(null);
+
+  const steering = steer !== null;
+  useEffect(() => {
+    if (steering) setTimeout(() => steerInput.current?.focus(), 0);
+  }, [steering]);
+
+  // Whole thing selected, not a caret parked at the end: a rename here replaces
+  // the auto-title far more often than it edits it. Same call the tab strip
+  // makes for the same reason.
+  // Keyed on whether it is open, not on the draft — re-selecting on every
+  // keystroke would make the field impossible to type in.
+  const renaming = draft !== null;
+  useEffect(() => {
+    if (!renaming) return;
+    const el = titleInput.current;
+    el?.focus();
+    el?.select();
+  }, [renaming]);
+
+  const commitRename = () => {
+    const next = (draft ?? "").trim();
+    setDraft(null);
+    if (!entry || !next || next === entry.title) return;
+    void renameResearch(projectId, researchId, next)
+      .then(() => {
+        onRenamed?.(next);
+        load();
+      })
+      .catch((e) => onNotice?.(String(e), "error"));
+  };
 
   const toggleSource = (source: ipc.ResearchSource) => {
     if (open === source.file) {
@@ -143,6 +197,7 @@ export function ResearchView({
   if (!entry) return <div className="research-view" />;
 
   const moves = NEXT_STATUSES[entry.status] ?? [];
+
   const step = STATUS_STEP[entry.status] ?? 0;
 
   const move = (to: ipc.ResearchStatus) => {
@@ -162,7 +217,32 @@ export function ResearchView({
       <div className="research-head">
         <div className="research-title">
           <span className="research-num">{entry.id.split("-")[0]}</span>
-          <span>{entry.title}</span>
+          {draft !== null ? (
+            <input
+              ref={titleInput}
+              className="research-title-input"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onBlur={commitRename}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commitRename();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  setDraft(null);
+                }
+              }}
+            />
+          ) : (
+            <span
+              className="research-title-text"
+              title="Double-click to rename"
+              onDoubleClick={() => setDraft(entry.title)}
+            >
+              {entry.title}
+            </span>
+          )}
         </div>
         <div className="research-meta">
           <span className={`research-status research-status-${entry.status}`}>
@@ -184,6 +264,113 @@ export function ResearchView({
               {t}
             </span>
           ))}
+
+          <span className="status-spacer" />
+
+          {/* Continuing is a different act from every other thing here — it
+              starts an agent — so it keeps a word on it while the state moves
+              below become icons. The popover is the point: continuing without
+              saying what changed is how you get the same answer twice. */}
+          {onContinue && (
+            <div className="research-steer">
+              <button
+                className="btn btn-mini"
+                onClick={() => setSteer(steer === null ? "" : null)}
+                title="Put an agent back on this, with a nudge"
+              >
+                Continue research
+              </button>
+              {steer !== null && (
+                <div className="cli-menu research-steer-menu">
+                  <input
+                    ref={steerInput}
+                    className="agent-query-input"
+                    placeholder="Anything to steer it? (optional)"
+                    value={steer}
+                    onChange={(e) => setSteer(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        onContinue(entry, steer.trim());
+                        setSteer(null);
+                      }
+                      if (e.key === "Escape") setSteer(null);
+                    }}
+                  />
+                  <p className="research-steer-note">
+                    It gets this entry and everything already recorded in it.
+                    Say what to focus on, or what the last run got wrong.
+                  </p>
+                  <button
+                    className="btn btn-mini btn-accent"
+                    onClick={() => {
+                      onContinue(entry, steer.trim());
+                      setSteer(null);
+                    }}
+                  >
+                    Continue
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Every state move, plus the two destructive ones, as marks. They
+              are the CRUD of an entry — frequent, small, and not worth six
+              same-sized words competing with the one action that matters. */}
+          <span className="research-crud">
+            {moves.includes("researched") && (
+              <button
+                className="btn-icon"
+                title="Mark researched — there is a finding here"
+                onClick={() => move("researched")}
+              >
+                <CheckIcon />
+              </button>
+            )}
+            {moves.includes("researching") && (
+              <button
+                className="btn-icon"
+                title="Reopen — put it back to being researched"
+                onClick={() => move("researching")}
+              >
+                <RestartIcon />
+              </button>
+            )}
+            {moves.includes("blocked") && (
+              <button
+                className="btn-icon"
+                title="Mark blocked — it is waiting on you"
+                onClick={() => move("blocked")}
+              >
+                <BlockedIcon />
+              </button>
+            )}
+            {moves.includes("superseded") && (
+              <button
+                className="btn-icon"
+                title="Mark superseded — a later entry replaced this"
+                onClick={() => move("superseded")}
+              >
+                <ExchangeIcon />
+              </button>
+            )}
+            {moves.includes("archived") && (
+              <button
+                className="btn-icon"
+                title="Archive — put it down without deleting it"
+                onClick={() => move("archived")}
+              >
+                <ArchiveIcon />
+              </button>
+            )}
+            <button
+              className="btn-icon btn-icon-danger"
+              title={`Delete this entry and everything in it (${entry.dir})`}
+              onClick={del}
+            >
+              <TrashIcon />
+            </button>
+          </span>
         </div>
       </div>
 
@@ -359,41 +546,21 @@ export function ResearchView({
         )}
       </div>
 
-      <div className="research-actions">
-        {/* Implementing is the point of a finished finding, so it leads — and
-            only when the state machine actually allows the move. */}
-        {moves.includes("implementing") && onImplement && (
-          <button className="btn btn-primary" onClick={() => onImplement(entry)}>
+      {/* One button, and only when there is one thing to do. The bar used to
+          be six equal-weight buttons with the action that matters buried among
+          five state moves; those are marks in the header now, and this is the
+          accented CTA the PR surfaces use for the same job. */}
+      {moves.includes("implementing") && onImplement && (
+        <div className="research-actions">
+          <button className="btn btn-accent" onClick={() => onImplement(entry)}>
             Implement this
           </button>
-        )}
-        {onContinue && (
-          <button className="btn" onClick={() => onContinue(entry)}>
-            Continue research
-          </button>
-        )}
-        {moves
-          .filter((m) => m !== "implementing" && m !== "archived")
-          .map((m) => (
-            <button
-              key={m}
-              className="btn"
-              title={STATUS_BLURBS[m]}
-              onClick={() => move(m)}
-            >
-              Mark {STATUS_LABELS[m].toLowerCase()}
-            </button>
-          ))}
-        <span className="status-spacer" />
-        {moves.includes("archived") && (
-          <button className="btn" title={STATUS_BLURBS.archived} onClick={() => move("archived")}>
-            Archive
-          </button>
-        )}
-        <button className="btn btn-danger" onClick={del} title={`Deletes ${entry.dir}`}>
-          Delete
-        </button>
-      </div>
+          <span className="research-actions-note">
+            Starts an agent on a branch of its own. The pull request it raises
+            is what marks this implemented.
+          </span>
+        </div>
+      )}
     </div>
   );
 }

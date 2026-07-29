@@ -334,6 +334,29 @@ export function ResearchIcon({ size = 18, className }: IconProps) {
   );
 }
 
+/** Archive: a lidded box. The lid is what separates it from a plain rectangle
+ *  at 14px, and from the document mark it sits beside. */
+export function ArchiveIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <rect x="3" y="4" width="18" height="4.5" rx="1" />
+      <path d="M4.8 8.5v10a1.5 1.5 0 0 0 1.5 1.5h11.4a1.5 1.5 0 0 0 1.5-1.5v-10" />
+      <path d="M10 12.5h4" />
+    </svg>
+  );
+}
+
+/** Blocked: a hand, palm out. Not a pause bar — pause reads as "I stopped
+ *  this", and blocked means the run is waiting on the person looking at it. */
+export function BlockedIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M6.2 6.2l11.6 11.6" />
+    </svg>
+  );
+}
+
 /** Agents: a bot head. Distinct from every CLI brand mark on purpose. */
 export function AgentsIcon({ size = 18, className }: IconProps) {
   return (

@@ -104,8 +104,14 @@ describe("ResearchView", () => {
         onImplement={onImplement}
       />,
     );
-    expect(await screen.findByRole("button", { name: "Implement this" }))
-      .toBeInTheDocument();
+    // The one action that matters, accented, and alone at the foot — the bar
+    // used to be six equal buttons with this buried among five state moves.
+    const cta = await screen.findByRole("button", { name: "Implement this" });
+    expect(cta).toHaveClass("btn-accent");
+    // Alone at the foot: the bar used to be six equal-weight buttons with this
+    // buried among five state moves, which are marks in the header now.
+    const bar = cta.closest(".research-actions")!;
+    expect(bar.querySelectorAll("button")).toHaveLength(1);
     unmount();
 
     // Still being researched: there is no finding to build yet, so the button
@@ -161,6 +167,91 @@ describe("ResearchView", () => {
     render(<ResearchView projectId="p1" researchId="0007-index-staleness" />);
     await screen.findByText("Researched");
     expect(screen.queryByText("Digging into it")).toBeNull();
+  });
+
+  it("continues research with whatever direction the user adds", async () => {
+    // Continuing with no steer is a fine answer and must stay one keypress
+    // away; the box exists because continuing without saying what changed is
+    // how you get the same answer twice.
+    mockCommands({ research_get: () => detail() });
+    const onContinue = vi.fn();
+    render(
+      <ResearchView
+        projectId="p1"
+        researchId="0007-index-staleness"
+        onContinue={onContinue}
+      />,
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Continue research" }),
+    );
+    await userEvent.type(
+      screen.getByPlaceholderText(/steer it/i),
+      "focus on the GitHub Sponsors side{Enter}",
+    );
+    expect(onContinue).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "0007-index-staleness" }),
+      "focus on the GitHub Sponsors side",
+    );
+  });
+
+  it("puts the state moves and the destructive pair behind marks", async () => {
+    mockCommands({ research_get: () => detail() });
+    render(<ResearchView projectId="p1" researchId="0007-index-staleness" />);
+    // Titles rather than labels: these are icons, and the title is the only
+    // thing telling anyone what they do.
+    expect(await screen.findByTitle(/^Mark blocked/)).toBeInTheDocument();
+    expect(screen.getByTitle(/^Archive/)).toBeInTheDocument();
+    expect(screen.getByTitle(/^Delete this entry/)).toBeInTheDocument();
+    expect(screen.getByTitle(/^Reopen/)).toBeInTheDocument();
+  });
+
+  it("renames the entry, and tells the tab strip", async () => {
+    // An entry titles itself from the question, shortened — the only thing
+    // available when it is created, and rarely what it should be called once
+    // anyone knows what the research turned out to be about.
+    const update = vi.fn((_args: Record<string, unknown>) => ({}));
+    mockCommands({ research_get: () => detail(), research_update: update });
+    const onRenamed = vi.fn();
+    render(
+      <ResearchView
+        projectId="p1"
+        researchId="0007-index-staleness"
+        onRenamed={onRenamed}
+      />,
+    );
+
+    await userEvent.dblClick(await screen.findByText("Index staleness"));
+    const box = screen.getByRole("textbox");
+    // The whole name starts selected: this replaces far more often than edits.
+    expect((box as HTMLInputElement).selectionStart).toBe(0);
+    expect((box as HTMLInputElement).selectionEnd).toBe("Index staleness".length);
+
+    await userEvent.keyboard("Why the index lags{Enter}");
+    await waitFor(() => expect(update).toHaveBeenCalled());
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "Why the index lags" }),
+    );
+    // The tab holds its own copy of the title and would otherwise keep showing
+    // the name the entry no longer has.
+    expect(onRenamed).toHaveBeenCalledWith("Why the index lags");
+  });
+
+  it("keeps the old title when a rename is escaped or emptied", async () => {
+    const update = vi.fn(() => ({}));
+    mockCommands({ research_get: () => detail(), research_update: update });
+    render(<ResearchView projectId="p1" researchId="0007-index-staleness" />);
+
+    await userEvent.dblClick(await screen.findByText("Index staleness"));
+    await userEvent.keyboard("something else{Escape}");
+    expect(update).not.toHaveBeenCalled();
+    expect(screen.getByText("Index staleness")).toBeInTheDocument();
+
+    // An empty name is refused rather than stored — a row with no name is
+    // worse than a clumsy one.
+    await userEvent.dblClick(screen.getByText("Index staleness"));
+    await userEvent.keyboard("   {Enter}");
+    expect(update).not.toHaveBeenCalled();
   });
 
   it("says so rather than rendering blank when the entry is gone", async () => {
