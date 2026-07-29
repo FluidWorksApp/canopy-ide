@@ -24,6 +24,7 @@ export type SpotAction =
   | { type: "run-task"; brief: string }
   | { type: "new-shell" }
   | { type: "new-preview" }
+  | { type: "new-device" }
   | { type: "launch-cli"; cliId: string }
   | { type: "open-file"; path: string; line?: number }
   | { type: "focus-tab"; tabId: string }
@@ -119,6 +120,17 @@ export function actionRows(query: string, ctx: SpotContext): SpotRow[] {
         title: "New Preview",
         score: 0,
         action: { type: "new-preview" },
+      },
+    },
+    {
+      hay: "new android device emulator preview",
+      row: {
+        id: "act:device",
+        group: "Actions",
+        kind: "device",
+        title: "New Android Device",
+        score: 0,
+        action: { type: "new-device" },
       },
     },
     ...ctx.clis.map((cli) => ({

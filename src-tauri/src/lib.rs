@@ -1,5 +1,6 @@
 mod agentid;
 mod agents;
+mod android;
 mod browser;
 mod cli;
 mod context;
@@ -400,6 +401,22 @@ pub fn run() {
             pty::pty_kill_all,
             pty::pty_set_title,
             pty::instance_id,
+            android::android_sdk_status,
+            android::android_devices,
+            android::android_avds,
+            android::android_emulator_start,
+            android::android_emulator_stop,
+            android::android_screencap,
+            android::android_ui_dump,
+            android::android_layout,
+            android::android_foreground,
+            android::android_tap,
+            android::android_text,
+            android::android_swipe,
+            android::android_key,
+            android::android_logcat,
+            android::android_describe,
+            android::android_run,
             spot::spot_ingest,
             spot::spot_search,
             spot::spot_index_stats,

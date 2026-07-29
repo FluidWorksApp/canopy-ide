@@ -20,7 +20,7 @@ import type {
   TermSubTab,
   RailChip,
 } from "./ProjectView";
-import { tabDisplayLabel, previewLabel } from "./ProjectView";
+import { tabDisplayLabel, previewLabel, deviceLabel } from "./ProjectView";
 
 export type { SubTab, RailChip };
 
@@ -39,6 +39,7 @@ function tabTitle(tab: SubTab): string {
     case "instructions": return "CLAUDE.md, AGENTS.md, skills and subagents — what every agent reads first";
     case "shared-project": return `${tab.name} — shared live by ${tab.ownerName}`;
     case "preview": return tab.url || "Preview";
+    case "device": return tab.serial ? `Android device ${tab.serial}` : "Android device";
     case "file": return tab.file.path;
   }
 }
@@ -58,6 +59,7 @@ function tabText(tab: SubTab): string {
     case "instructions": return "Agent instructions";
     case "shared-project": return tab.name;
     case "preview": return previewLabel(tab.url);
+    case "device": return deviceLabel(tab.serial);
     case "file": return `${tab.file.name}${tab.file.dirty ? " •" : ""}`;
   }
 }

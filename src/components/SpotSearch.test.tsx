@@ -101,11 +101,11 @@ describe("SpotSearch", () => {
 
   it("counts each section, and the results, without lying about either", () => {
     open();
-    // Shell, Preview and the one installed CLI, then the one open tab.
+    // Shell, Preview, Device and the one installed CLI, then the one open tab.
     const actions = screen.getByText("Actions").parentElement;
-    expect(actions?.querySelector(".spot-group-count")?.textContent).toBe("3");
-    expect(screen.getAllByRole("option")).toHaveLength(4);
-    expect(screen.getByText(/results?$/)).toHaveTextContent("4 results");
+    expect(actions?.querySelector(".spot-group-count")?.textContent).toBe("4");
+    expect(screen.getAllByRole("option")).toHaveLength(5);
+    expect(screen.getByText(/results?$/)).toHaveTextContent("5 results");
   });
 
   it("shows rows from a registered source and lets it open them itself", async () => {

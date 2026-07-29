@@ -1693,7 +1693,7 @@ fn roll_up_checks(rollup: &serde_json::Value) -> (String, String) {
 /// where `gh` is plainly installed and every other git feature worked.
 /// Resolved once per tool per run: spawning a login shell is expensive, and
 /// a tool's location doesn't move while the app is open.
-fn tool_path(tool: &'static str) -> String {
+pub(crate) fn tool_path(tool: &'static str) -> String {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     static CACHE: OnceLock<Mutex<HashMap<&'static str, String>>> = OnceLock::new();

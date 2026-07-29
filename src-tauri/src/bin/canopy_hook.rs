@@ -1177,7 +1177,13 @@ results stay inspectable:
   kill/pkill)
 - See what's running, CPU, memory -> canopy_resources (not ps/top/lsof)
 - Read a running server's logs -> canopy_server_output (don't re-run the command)
-- The user's marked-up feedback on a page -> canopy_annotations
+- The user's marked-up feedback on a page or a device -> canopy_annotations
+- Run or look at an Android app -> canopy_device_list first, then \
+  canopy_device_run / _screenshot / _snapshot (not adb in bash; these pick the \
+  device and the launcher activity for you)
+- Interact with an Android app -> canopy_device_tap / _type / _key / _swipe \
+  (coordinates from canopy_device_snapshot, never guessed off a screenshot); \
+  diagnose with canopy_device_logcat
 
 - \"this\", \"here\", \"the other one\" in the user's request -> canopy_editor_state \
   (the file they have open, their caret and selection) before guessing
@@ -1590,6 +1596,8 @@ const STRUCTURED_TOOLS: &[&str] = &[
     "canopy_tickets",
     "canopy_reviews",
     "canopy_agents",
+    "canopy_device_list",
+    "canopy_device_snapshot",
 ];
 
 /// The tools this session gets: everything below, minus whatever the user
@@ -1671,6 +1679,11 @@ const READ_ONLY_TOOLS: &[&str] = &[
     "canopy_browser_snapshot",
     "canopy_browser_console",
     "canopy_browser_network",
+    "canopy_device_list",
+    "canopy_device_describe",
+    "canopy_device_screenshot",
+    "canopy_device_snapshot",
+    "canopy_device_logcat",
 ];
 
 /// Tools that can take something away from someone: a killed process, another
@@ -1692,6 +1705,12 @@ fn output_schema(name: &str) -> Option<serde_json::Value> {
             "truncated": { "type": "boolean" }
         }),
         "canopy_annotations" => serde_json::json!({ "annotations": { "type": "array" } }),
+        "canopy_device_list" => serde_json::json!({
+            "devices": { "type": "array" },
+            "emulators": { "type": "array", "items": { "type": "string" } },
+            "missing": { "type": "array", "items": { "type": "string" } }
+        }),
+        "canopy_device_snapshot" => serde_json::json!({ "layout": { "type": "string" } }),
         "canopy_resources" => serde_json::json!({ "terminals": { "type": "array" } }),
         "canopy_diagnostics" => serde_json::json!({
             "path": { "type": "string" },
@@ -1734,7 +1753,7 @@ fn tool_defs() -> serde_json::Value {
     // agent's context on each session. Which tool to reach for is established
     // once, in INSTRUCTIONS above; these only need to say what the tool does
     // and how to call it correctly.
-    serde_json::json!([
+    let mut tools = serde_json::json!([
         {
             "name": "canopy_project",
             "description": "The IDE's live project map: components (labels + absolute paths), their configured run commands, running servers (terminal id, listening ports, exit state), open previews, and other agents. Call first to orient.",
@@ -2013,6 +2032,115 @@ fn tool_defs() -> serde_json::Value {
                 "url": { "type": "string", "description": "The artifact's URL if the job produced one (e.g. the pull request)" }
             }, "required": ["status", "summary"], "additionalProperties": false }
         }
+    ]);
+    // Split out rather than one literal: `json!` blows its recursion limit
+    // around this many entries, and the device tools are a coherent group.
+    if let (Some(list), Some(devices)) = (tools.as_array_mut(), device_tool_defs().as_array_mut()) {
+        list.append(devices);
+    }
+    tools
+}
+
+/// The Android device tools. Same shape as the rest; kept in their own literal
+/// so neither array approaches the macro's expansion limit.
+fn device_tool_defs() -> serde_json::Value {
+    serde_json::json!([
+        {
+            "name": "canopy_device_list",
+            "description": "Android devices and emulators this machine can reach, plus any SDK piece that still needs installing. Call it first for Android work — everything else takes a serial from here, and with exactly one device attached you can omit the serial entirely.",
+            "inputSchema": { "type": "object", "properties": {
+                "projectDir": { "type": "string", "description": "An Android project directory; its local.properties pins which SDK to use" }
+            }, "additionalProperties": false }
+        },
+        {
+            "name": "canopy_device_start",
+            "description": "Boot an emulator by name (from canopy_device_list) and return its serial. Blocks until the device is genuinely usable, so the next call can act on it immediately.",
+            "inputSchema": { "type": "object", "properties": {
+                "name": { "type": "string", "description": "Emulator name from canopy_device_list" },
+                "projectDir": { "type": "string" }
+            }, "required": ["name"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_device_describe",
+            "description": "An Android project's build targets and where each variant's APK lands. Run it before canopy_device_run so you install the APK Gradle actually produced rather than a guessed path.",
+            "inputSchema": { "type": "object", "properties": {
+                "projectDir": { "type": "string", "description": "The Gradle project directory" }
+            }, "required": ["projectDir"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_device_run",
+            "description": "Install an APK on a device and launch it. The launcher activity is resolved for you, so no manifest parsing is needed.",
+            "inputSchema": { "type": "object", "properties": {
+                "projectDir": { "type": "string" },
+                "apk": { "type": "string", "description": "Path to the APK (see canopy_device_describe)" },
+                "serial": { "type": "string" }
+            }, "required": ["projectDir", "apk"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_device_screenshot",
+            "description": "A picture of the device screen, returned as an image. Use it whenever the question is how something LOOKS. Unlike the web preview's screenshot this reads the device's own framebuffer, so it works on every platform and whether or not a device tab is open.",
+            "inputSchema": { "type": "object", "properties": {
+                "serial": { "type": "string", "description": "Device serial; optional when only one is attached" },
+                "projectDir": { "type": "string" }
+            }, "additionalProperties": false }
+        },
+        {
+            "name": "canopy_device_snapshot",
+            "description": "The app's accessibility tree as JSON: every node's text, resource id where the toolkit publishes one, and the centre coordinates to tap. This is the device's equivalent of canopy_browser_snapshot. Jetpack Compose publishes no resource ids, so under Compose match on text instead.",
+            "inputSchema": { "type": "object", "properties": {
+                "serial": { "type": "string" },
+                "projectDir": { "type": "string" }
+            }, "additionalProperties": false }
+        },
+        {
+            "name": "canopy_device_tap",
+            "description": "Tap a point on the device, in device pixels. Take the coordinates from canopy_device_snapshot's centre values rather than estimating them from a screenshot.",
+            "inputSchema": { "type": "object", "properties": {
+                "x": { "type": "integer" },
+                "y": { "type": "integer" },
+                "serial": { "type": "string" },
+                "projectDir": { "type": "string" }
+            }, "required": ["x", "y"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_device_type",
+            "description": "Type text into whatever has focus on the device. Tap the field first.",
+            "inputSchema": { "type": "object", "properties": {
+                "text": { "type": "string" },
+                "serial": { "type": "string" },
+                "projectDir": { "type": "string" }
+            }, "required": ["text"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_device_key",
+            "description": "Press a hardware or IME key by keyevent name, e.g. BACK, HOME, ENTER, TAB.",
+            "inputSchema": { "type": "object", "properties": {
+                "key": { "type": "string", "description": "Keyevent name, uppercase (BACK, ENTER, KEYCODE_DPAD_DOWN)" },
+                "serial": { "type": "string" },
+                "projectDir": { "type": "string" }
+            }, "required": ["key"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_device_swipe",
+            "description": "Swipe or scroll between two points on the device, in device pixels.",
+            "inputSchema": { "type": "object", "properties": {
+                "x": { "type": "integer" }, "y": { "type": "integer" },
+                "x2": { "type": "integer" }, "y2": { "type": "integer" },
+                "ms": { "type": "integer", "description": "Duration in milliseconds (default 300)" },
+                "serial": { "type": "string" },
+                "projectDir": { "type": "string" }
+            }, "required": ["x", "y", "x2", "y2"], "additionalProperties": false }
+        },
+        {
+            "name": "canopy_device_logcat",
+            "description": "The app's logcat — the device's equivalent of canopy_browser_console. Pass a package to filter to that app's own output, which is almost always what you want.",
+            "inputSchema": { "type": "object", "properties": {
+                "package": { "type": "string", "description": "Application id, e.g. com.example.app" },
+                "lines": { "type": "integer", "description": "How many recent lines (default 200)" },
+                "serial": { "type": "string" },
+                "projectDir": { "type": "string" }
+            }, "additionalProperties": false }
+        }
     ])
 }
 
@@ -2259,6 +2387,36 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 "summary": summary,
                 "url": args.get("url").and_then(|v| v.as_str()),
             })))
+        }
+        "canopy_device_list" => text(device_op("list", args)),
+        "canopy_device_start" => text(device_op("emulator_start", args)),
+        "canopy_device_describe" => text(device_op("describe", args)),
+        "canopy_device_run" => text(device_op("run", args)),
+        "canopy_device_snapshot" => text(device_op("snapshot", args)),
+        "canopy_device_tap" => text(device_op("tap", args)),
+        "canopy_device_type" => text(device_op("type", args)),
+        "canopy_device_key" => text(device_op("key", args)),
+        "canopy_device_swipe" => text(device_op("swipe", args)),
+        "canopy_device_logcat" => text(device_op("logcat", args)),
+        "canopy_device_screenshot" => {
+            let body = device_op("screenshot", args)?;
+            let value: serde_json::Value = serde_json::from_str(&body)
+                .map_err(|_| "the device returned something that isn't an image".to_string())?;
+            let data = value
+                .get("image")
+                .and_then(|v| v.as_str())
+                .ok_or("the device returned no image")?;
+            Ok(ToolOutput::Image {
+                data: data.to_string(),
+                mime: "image/png".to_string(),
+                caption: format!(
+                    "The screen of {} right now.",
+                    value
+                        .get("serial")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("the device"),
+                ),
+            })
         }
         "canopy_browser_navigate" => {
             if args.get("url").is_none() && args.get("action").is_none() {
@@ -2740,6 +2898,22 @@ fn clip(text: &str, max: usize) -> String {
 /// POST a browser-control op to the bridge: the tool's arguments ride along
 /// verbatim, plus the op name and our cwd for project routing. Browser ops wait
 /// on a real page round-trip, so they get a longer timeout than plain reads.
+/// An Android device op. Longer timeout than a browser op: an emulator cold
+/// boot is minutes, and `android run` builds nothing but still installs.
+fn device_op(op: &str, args: &serde_json::Value) -> Result<String, String> {
+    let mut body = args.clone();
+    if !body.is_object() {
+        body = serde_json::json!({});
+    }
+    body["op"] = serde_json::json!(op);
+    let timeout = match op {
+        "emulator_start" => std::time::Duration::from_secs(600),
+        "run" | "describe" => std::time::Duration::from_secs(600),
+        _ => std::time::Duration::from_secs(60),
+    };
+    ctx_request_with_timeout("POST", "/ctx/device", Some(body.to_string()), timeout).map(pretty)
+}
+
 fn browser_op(op: &str, args: &serde_json::Value) -> Result<String, String> {
     let mut body = args.clone();
     if !body.is_object() {

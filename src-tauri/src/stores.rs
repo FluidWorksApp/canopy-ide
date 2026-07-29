@@ -68,7 +68,9 @@ pub struct StoreSession {
 /// Agents this module can read, in registry-id form. `amp` is not one of them
 /// (see the header) — nor is claude, whose transcripts spot.rs reads through
 /// this same door but whose digests come from the hook.
-pub const STORE_AGENTS: &[&str] = &["claude", "codex", "omp", "gemini", "agy", "opencode", "aider"];
+pub const STORE_AGENTS: &[&str] = &[
+    "claude", "codex", "omp", "gemini", "agy", "opencode", "aider",
+];
 
 fn home() -> String {
     std::env::var("HOME").unwrap_or_default()
@@ -125,12 +127,21 @@ pub fn source_files(roots: &[String], wanted: &dyn Fn(&str) -> bool) -> Vec<Sour
     let home = PathBuf::from(home());
     let mut out: Vec<SourceFile> = Vec::new();
     let mut push = |agent: &'static str, path: PathBuf, layout: Layout| {
-        out.push(SourceFile { agent, path, layout });
+        out.push(SourceFile {
+            agent,
+            path,
+            layout,
+        });
     };
 
     if wanted("claude") {
         let mut files = Vec::new();
-        walk(&home.join(".claude/projects"), 1, &|p| has_ext(p, "jsonl"), &mut files);
+        walk(
+            &home.join(".claude/projects"),
+            1,
+            &|p| has_ext(p, "jsonl"),
+            &mut files,
+        );
         for f in files {
             push("claude", f, Layout::Append);
         }
@@ -138,7 +149,12 @@ pub fn source_files(roots: &[String], wanted: &dyn Fn(&str) -> bool) -> Vec<Sour
     if wanted("codex") {
         // Bucketed YYYY/MM/DD, so three levels below the root.
         let mut files = Vec::new();
-        walk(&home.join(".codex/sessions"), 3, &|p| has_ext(p, "jsonl"), &mut files);
+        walk(
+            &home.join(".codex/sessions"),
+            3,
+            &|p| has_ext(p, "jsonl"),
+            &mut files,
+        );
         for f in files {
             push("codex", f, Layout::Append);
         }
@@ -149,7 +165,12 @@ pub fn source_files(roots: &[String], wanted: &dyn Fn(&str) -> bool) -> Vec<Sour
         // conversation — worth searching, and attributed to its parent so a hit
         // opens the session that spawned it (see append_meta).
         let mut files = Vec::new();
-        walk(&home.join(".omp/agent/sessions"), 2, &|p| has_ext(p, "jsonl"), &mut files);
+        walk(
+            &home.join(".omp/agent/sessions"),
+            2,
+            &|p| has_ext(p, "jsonl"),
+            &mut files,
+        );
         for f in files {
             push("omp", f, Layout::Append);
         }
@@ -160,7 +181,12 @@ pub fn source_files(roots: &[String], wanted: &dyn Fn(&str) -> bool) -> Vec<Sour
         for root in project_hashes(roots) {
             let bucket = home.join(".gemini/tmp").join(&root);
             let mut files = Vec::new();
-            walk(&bucket.join("chats"), 0, &|p| has_ext(p, "json"), &mut files);
+            walk(
+                &bucket.join("chats"),
+                0,
+                &|p| has_ext(p, "json"),
+                &mut files,
+            );
             // Saved chats are the sessions the user chose to keep; logs.json is
             // every prompt typed in that project, including the sessions that
             // were never saved. Both, or half the history is missing.
@@ -175,7 +201,12 @@ pub fn source_files(roots: &[String], wanted: &dyn Fn(&str) -> bool) -> Vec<Sour
     }
     if wanted("agy") {
         let mut files = Vec::new();
-        walk(&home.join(".gemini/antigravity-cli/conversations"), 0, &|p| has_ext(p, "db"), &mut files);
+        walk(
+            &home.join(".gemini/antigravity-cli/conversations"),
+            0,
+            &|p| has_ext(p, "db"),
+            &mut files,
+        );
         for f in files {
             push("agy", f, Layout::Whole);
         }
@@ -465,7 +496,11 @@ fn gemini_sessions(path: &Path, roots: &[String]) -> Vec<StoreSession> {
     };
     let is_log = path.file_name().map(|n| n == "logs.json").unwrap_or(false);
     // chats/<file> is two levels under the bucket; logs.json is one.
-    let bucket_dir = if is_log { path.parent() } else { path.parent().and_then(|p| p.parent()) };
+    let bucket_dir = if is_log {
+        path.parent()
+    } else {
+        path.parent().and_then(|p| p.parent())
+    };
     let bucket = bucket_dir
         .and_then(|p| p.file_name())
         .map(|s| s.to_string_lossy().to_string())
@@ -558,9 +593,9 @@ fn opencode_sessions(path: &Path) -> Vec<StoreSession> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT id, directory, COALESCE(title,''), COALESCE(time_updated,0) FROM session",
-    ) else {
+    let Ok(mut stmt) = conn
+        .prepare("SELECT id, directory, COALESCE(title,''), COALESCE(time_updated,0) FROM session")
+    else {
         return out;
     };
     let rows = stmt.query_map([], |r| {
@@ -582,9 +617,9 @@ fn opencode_sessions(path: &Path) -> Vec<StoreSession> {
             updated: updated / 1000,
             bodies: Vec::new(),
         };
-        if let Ok(mut parts) = conn.prepare(
-            "SELECT data FROM part WHERE session_id = ?1 ORDER BY time_created LIMIT 2000",
-        ) {
+        if let Ok(mut parts) = conn
+            .prepare("SELECT data FROM part WHERE session_id = ?1 ORDER BY time_created LIMIT 2000")
+        {
             if let Ok(rows) = parts.query_map([&id], |r| r.get::<_, String>(0)) {
                 for data in rows.flatten() {
                     let Ok(v) = serde_json::from_str::<Value>(&data) else {
@@ -625,9 +660,11 @@ fn agy_sessions(path: &Path) -> Vec<StoreSession> {
         .unwrap_or_default();
     // The metadata blob opens with the workspace as a file:// URL.
     let cwd = conn
-        .query_row("SELECT data FROM trajectory_metadata_blob LIMIT 1", [], |r| {
-            r.get::<_, Vec<u8>>(0)
-        })
+        .query_row(
+            "SELECT data FROM trajectory_metadata_blob LIMIT 1",
+            [],
+            |r| r.get::<_, Vec<u8>>(0),
+        )
         .ok()
         .and_then(|b| first_file_url(&b))
         .unwrap_or_default();
@@ -896,11 +933,17 @@ mod tests {
     #[test]
     fn claude_and_codex_lines_read_the_same_way() {
         let claude = r#"{"type":"user","cwd":"/repo","message":{"content":"fix the test"}}"#;
-        assert_eq!(append_line_text("claude", claude).as_deref(), Some("fix the test"));
+        assert_eq!(
+            append_line_text("claude", claude).as_deref(),
+            Some("fix the test")
+        );
 
         let codex = r#"{"type":"response_item","payload":{"type":"message","role":"user",
             "content":[{"type":"input_text","text":"add a flag"}]}}"#;
-        assert_eq!(append_line_text("codex", codex).as_deref(), Some("add a flag"));
+        assert_eq!(
+            append_line_text("codex", codex).as_deref(),
+            Some("add a flag")
+        );
 
         // codex's own instruction channel is not the conversation.
         let dev = r#"{"type":"response_item","payload":{"type":"message","role":"developer",
@@ -908,7 +951,8 @@ mod tests {
         assert_eq!(append_line_text("codex", dev), None);
 
         // Injected context — every CLI wraps its own in angle brackets.
-        let injected = r#"{"type":"user","message":{"content":"<system-reminder>hi</system-reminder>"}}"#;
+        let injected =
+            r#"{"type":"user","message":{"content":"<system-reminder>hi</system-reminder>"}}"#;
         assert_eq!(append_line_text("claude", injected), None);
     }
 
@@ -1008,10 +1052,7 @@ mod live {
         let digests = digests(&roots, &|_| true, &|_| false);
         println!("digests: {}", digests.len());
         for d in digests.iter().take(4) {
-            println!(
-                "  {} {} {}",
-                d["agent"], d["cwd"], d["prompts"][0]
-            );
+            println!("  {} {} {}", d["agent"], d["cwd"], d["prompts"][0]);
         }
     }
 }

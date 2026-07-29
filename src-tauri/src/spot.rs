@@ -231,9 +231,8 @@ pub async fn spot_ingest(
     roots: Option<Vec<String>>,
     retention_days: Option<i64>,
 ) -> Result<SpotIngestReport, String> {
-    let want_agents: Vec<String> = agents.unwrap_or_else(|| {
-        stores::STORE_AGENTS.iter().map(|s| s.to_string()).collect()
-    });
+    let want_agents: Vec<String> =
+        agents.unwrap_or_else(|| stores::STORE_AGENTS.iter().map(|s| s.to_string()).collect());
     let want_terminals = terminals.unwrap_or(true);
     let roots = roots.unwrap_or_default();
     let retention = retention_days.unwrap_or(0).max(0);
@@ -288,7 +287,10 @@ pub async fn spot_ingest(
                     continue;
                 }
                 pruned += conn
-                    .execute("DELETE FROM docs WHERE kind = 'transcript' AND agent = ?1", [&agent])
+                    .execute(
+                        "DELETE FROM docs WHERE kind = 'transcript' AND agent = ?1",
+                        [&agent],
+                    )
                     .map_err(|e| e.to_string())?;
                 conn.execute("DELETE FROM sources WHERE agent = ?1", [&agent])
                     .map_err(|e| e.to_string())?;
@@ -364,9 +366,11 @@ pub async fn spot_ingest(
                     // bookmark is (size, mtime) and a change re-reads the file.
                     let stamp = (len as i64) ^ (mtime << 20);
                     let seen: i64 = conn
-                        .query_row("SELECT stamp FROM sources WHERE path = ?1", [&path_str], |r| {
-                            r.get(0)
-                        })
+                        .query_row(
+                            "SELECT stamp FROM sources WHERE path = ?1",
+                            [&path_str],
+                            |r| r.get(0),
+                        )
                         .unwrap_or(-1);
                     if seen == stamp {
                         continue;
@@ -392,7 +396,11 @@ pub async fn spot_ingest(
                                 session.cwd,
                                 body,
                                 path_str,
-                                if session.updated > 0 { session.updated } else { mtime },
+                                if session.updated > 0 {
+                                    session.updated
+                                } else {
+                                    mtime
+                                },
                             ])
                             .map_err(|e| e.to_string())?;
                             written += 1;
@@ -408,9 +416,11 @@ pub async fn spot_ingest(
                 }
                 Layout::Append => {
                     let mut offset: u64 = conn
-                        .query_row("SELECT offset FROM sources WHERE path = ?1", [&path_str], |r| {
-                            r.get::<_, i64>(0)
-                        })
+                        .query_row(
+                            "SELECT offset FROM sources WHERE path = ?1",
+                            [&path_str],
+                            |r| r.get::<_, i64>(0),
+                        )
                         .map(|v| v as u64)
                         .unwrap_or(0);
                     if len < offset {
@@ -498,8 +508,11 @@ pub async fn spot_ingest(
             drop(stale);
             for key in existing {
                 if !live_keys.contains(&key) {
-                    conn.execute("DELETE FROM docs WHERE kind = 'terminal' AND key = ?1", [&key])
-                        .map_err(|e| e.to_string())?;
+                    conn.execute(
+                        "DELETE FROM docs WHERE kind = 'terminal' AND key = ?1",
+                        [&key],
+                    )
+                    .map_err(|e| e.to_string())?;
                     conn.execute("DELETE FROM sources WHERE path = ?1", [&key])
                         .map_err(|e| e.to_string())?;
                     pruned += 1;
@@ -508,14 +521,19 @@ pub async fn spot_ingest(
             for (id, title, cwd, tail) in tails {
                 let key = format!("pty:{id}");
                 let seen: i64 = conn
-                    .query_row("SELECT offset FROM sources WHERE path = ?1", [&key], |r| r.get(0))
+                    .query_row("SELECT offset FROM sources WHERE path = ?1", [&key], |r| {
+                        r.get(0)
+                    })
                     .unwrap_or(-1);
                 if seen == tail.len() as i64 {
                     continue;
                 }
                 let body: String = strip_ansi(&tail).chars().take(MAX_SCROLLBACK).collect();
-                conn.execute("DELETE FROM docs WHERE kind = 'terminal' AND key = ?1", [&key])
-                    .map_err(|e| e.to_string())?;
+                conn.execute(
+                    "DELETE FROM docs WHERE kind = 'terminal' AND key = ?1",
+                    [&key],
+                )
+                .map_err(|e| e.to_string())?;
                 conn.execute(
                     "INSERT INTO docs (kind, key, agent, cwd, title, body, meta, ts)
                      VALUES ('terminal', ?1, 'terminal', ?2, ?3, ?4, ?2, ?5)",
@@ -602,21 +620,24 @@ pub async fn spot_search(
         // happen on this side: the best row for a project can sit behind
         // another project's better text match.
         let rows = stmt
-            .query_map(rusqlite::params![match_q, (cap * 20).max(200) as i64], |r| {
-                Ok((
-                    SpotHit {
-                        kind: r.get(0)?,
-                        key: r.get(1)?,
-                        agent: r.get(2)?,
-                        cwd: r.get(3)?,
-                        title: r.get(4)?,
-                        snippet: r.get(5)?,
-                        meta: r.get(6)?,
-                        ts: r.get::<_, Option<i64>>(7)?.unwrap_or(0),
-                    },
-                    r.get::<_, f64>(8)?,
-                ))
-            })
+            .query_map(
+                rusqlite::params![match_q, (cap * 20).max(200) as i64],
+                |r| {
+                    Ok((
+                        SpotHit {
+                            kind: r.get(0)?,
+                            key: r.get(1)?,
+                            agent: r.get(2)?,
+                            cwd: r.get(3)?,
+                            title: r.get(4)?,
+                            snippet: r.get(5)?,
+                            meta: r.get(6)?,
+                            ts: r.get::<_, Option<i64>>(7)?.unwrap_or(0),
+                        },
+                        r.get::<_, f64>(8)?,
+                    ))
+                },
+            )
             .map_err(|e| e.to_string())?;
         let mut scored: Vec<(SpotHit, f64)> = Vec::new();
         for (hit, rank) in rows.filter_map(Result::ok) {
@@ -676,7 +697,9 @@ pub async fn spot_index_stats(state: State<'_, SpotIndex>) -> Result<SpotIndexSt
             )
             .map_err(|e| e.to_string())?;
         let by_agent: Vec<(String, usize)> = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize)))
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize))
+            })
             .map_err(|e| e.to_string())?
             .filter_map(Result::ok)
             .collect();

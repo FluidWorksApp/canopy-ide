@@ -140,6 +140,7 @@ import { ReviewView, type ReviewPayload } from "../ReviewView";
 import { BranchView } from "../BranchView";
 import { AgentWorkspaceView } from "../AgentWorkspaceView";
 import { BROWSER_INPUT_EVENT, PreviewView } from "../PreviewView";
+import DeviceView from "../DeviceView";
 import type { PreviewServer } from "../../preview";
 import { dispatchBrowserOp } from "../../previewAgent";
 import { useBrowserEngine } from "../../browserHost";
@@ -187,6 +188,7 @@ import { useCliLauncher } from "./hooks/useCliLauncher";
 import {
   ago,
   describeTab,
+  deviceLabel,
   previewLabel,
   tabDisplayLabel,
   tabId,
@@ -207,11 +209,12 @@ import {
   type CollabSubTab,
   type SharedProjectSubTab,
   type PreviewSubTab,
+  type DeviceSubTab,
   type RailChip,
   type ProjectViewProps,
   sidebarPrefs,
 } from "./helpers";
-export { tabDisplayLabel, previewLabel };
+export { tabDisplayLabel, previewLabel, deviceLabel };
 export type {
   SideTab,
   SubTab,
@@ -229,6 +232,7 @@ export type {
   CollabSubTab,
   SharedProjectSubTab,
   PreviewSubTab,
+  DeviceSubTab,
   RailChip,
 };
 
@@ -808,6 +812,26 @@ const ProjectViewBody = memo(function ProjectViewBody({
     // browser view cannot be drawn under it — so the page you just asked for
     // would be hidden by the thing you asked with. Closing it is what the user
     // was about to do anyway.
+    dismissPeekRef.current();
+    return id;
+  }, []);
+
+  /** Open an Android device tab. With no serial it opens on the pick-a-device
+   *  form; the project defaults to the first component, which is what resolves
+   *  the SDK (a project's local.properties pins one). */
+  const openDevice = useCallback((serial = "") => {
+    const id = tabId();
+    setTabs((prev) => [
+      ...prev,
+      {
+        id,
+        type: "device",
+        serial,
+        projectDir: componentsRef.current[0]?.path ?? "",
+        annotations: [],
+      },
+    ]);
+    setActiveTabId(id);
     dismissPeekRef.current();
     return id;
   }, []);
@@ -4255,24 +4279,48 @@ const ProjectViewBody = memo(function ProjectViewBody({
           title: a.title,
           dir: a.dir,
         })),
-        // Preview annotations, so canopy_annotations can serve the visual
-        // feedback the user marked — element, comment, and serving component.
-        annotations: tabs
-          .filter((t): t is PreviewSubTab => t.type === "preview")
-          .flatMap((t) => {
-            const server = serverForUrl(t.url, previewServers);
-            return t.annotations.map((a) => ({
-              n: a.n,
-              selector: a.selector,
-              component: a.components[0] ?? null,
-              tag: a.tag,
-              text: a.text,
-              comment: a.comment,
-              pageUrl: a.pageUrl || t.url,
-              servingComponent: server?.componentLabel ?? null,
-              servingComponentPath: server?.componentPath ?? null,
-            }));
-          }),
+        // Preview and device annotations, so canopy_annotations serves every
+        // surface the user can mark up rather than only the web one. `surface`
+        // says which kind an entry is; the fields either carries are the ones
+        // that actually locate it (a selector on a page, a resource id or the
+        // visible text on a device).
+        annotations: [
+          ...tabs
+            .filter((t): t is PreviewSubTab => t.type === "preview")
+            .flatMap((t) => {
+              const server = serverForUrl(t.url, previewServers);
+              return t.annotations.map((a) => ({
+                surface: "preview",
+                n: a.n,
+                selector: a.selector,
+                component: a.components[0] ?? null,
+                tag: a.tag,
+                text: a.text,
+                comment: a.comment,
+                pageUrl: a.pageUrl || t.url,
+                servingComponent: server?.componentLabel ?? null,
+                servingComponentPath: server?.componentPath ?? null,
+              }));
+            }),
+          ...tabs
+            .filter((t): t is DeviceSubTab => t.type === "device")
+            .flatMap((t) =>
+              t.annotations.map((a) => ({
+                surface: "device",
+                n: a.n,
+                serial: a.serial,
+                // Absent under Jetpack Compose, which publishes no ids — the
+                // text is the anchor there, and saying so beats implying a
+                // precision the tree does not have.
+                resourceId: a.resourceId || null,
+                className: a.className,
+                text: a.text,
+                comment: a.comment,
+                appComponent: a.component || null,
+                servingComponentPath: t.projectDir || null,
+              })),
+            ),
+        ],
         // Open preview tabs, so agents know what the browser-control tools
         // (canopy_browser_*) are currently pointed at.
         previews: tabs
@@ -4654,6 +4702,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
         case "new-preview":
           openPreview();
           return;
+        case "new-device":
+          openDevice();
+          return;
         case "launch-cli": {
           const cli = AGENT_CLIS.find((c) => c.id === action.cliId);
           if (cli) launchCli(cli);
@@ -4712,6 +4763,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [
       onNewShell,
       openPreview,
+      openDevice,
       launchCli,
       openFile,
       openAgent,
@@ -4913,6 +4965,28 @@ const ProjectViewBody = memo(function ProjectViewBody({
               startAgentInDir(dir, agentId, text, "Preview feedback");
             }}
             onNotice={onNotice}
+          />
+        );
+      case "device":
+        return (
+          <DeviceView
+            serial={tab.serial}
+            projectDir={tab.projectDir}
+            annotations={tab.annotations}
+            visible={tab.id === activeTabId && visible}
+            onPatch={(patch) => patchTabRaw(tab.id, patch as Partial<SubTab>)}
+            agentTargets={agentTargets}
+            installed={installed}
+            onSendToAgent={sendTicketToAgent}
+            onStartNew={(agentId, text, cwd) => {
+              const dir = cwd ?? componentsRef.current[0]?.path;
+              if (!dir) {
+                onNotice("No project directory to start the agent in.");
+                return;
+              }
+              startAgentInDir(dir, agentId, text, "Device feedback");
+            }}
+            projects={components.map((c) => ({ label: c.label, path: c.path }))}
           />
         );
       case "task-history":
