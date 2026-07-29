@@ -1495,7 +1495,7 @@ fn canopy_mcp_command(helper: &std::path::Path) -> serde_json::Value {
 /// corruption made setup fail on machines where nothing was wrong. Content we
 /// can't parse is still refused, because overwriting it would destroy
 /// configuration somebody else wrote.
-fn read_json_config(path: &std::path::Path) -> Result<serde_json::Value, String> {
+pub(crate) fn read_json_config(path: &std::path::Path) -> Result<serde_json::Value, String> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(serde_json::json!({})),

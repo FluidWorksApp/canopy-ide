@@ -14,7 +14,8 @@ export type SideTab =
   | "trackers"
   | "tasks"
   | "agents"
-  | "team";
+  | "team"
+  | "tools";
 
 export interface TermSubTab {
   id: string;
