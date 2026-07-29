@@ -57,12 +57,13 @@ terms govern use of the model:
 - **SenseVoice Small (int8)** — FunASR MODEL_LICENSE (custom) — <https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE>, by FunAudioLLM / Alibaba. <https://huggingface.co/FunAudioLLM/SenseVoiceSmall>
 - **Moonshine Base** — MIT, by Useful Sensors. <https://huggingface.co/UsefulSensors/moonshine>
 
-## Rust crates (682)
+## Rust crates (712)
 
-### MIT — 627
+### MIT — 655
 
 - **adler2 2.0.1** — Copyright (C) Jonas Schievink <jonasschievink@gmail.com>
 - **aead 0.5.2** — Copyright (c) 2019 The RustCrypto Project Developers; Copyright (c) 2019 MobileCoin, LLC
+- **aes 0.9.2** — Copyright (c) 2018-2024 The RustCrypto Project Developers; Copyright (c) 2018 Artyom Pavlov
 - **ahash 0.8.12** — Copyright (c) 2018 Tom Kaitchuck
 - **aho-corasick 1.1.4** — Copyright (c) 2015 Andrew Gallant
 - **alsa 0.9.1** — Copyright (c) 2015-2021 David Henningsson, and other contributors
@@ -72,6 +73,8 @@ terms govern use of the model:
 - **android_system_properties 0.1.5** — Copyright 2016 Nicolas Silva
 - **anyhow 1.0.103** — Copyright David Tolnay (per package manifest; the distributed license file carries no copyright line)
 - **arbitrary 1.4.2** — Copyright (c) 2019 Manish Goregaokar
+- **argon2 0.5.3** — Copyright (c) 2021-2024 The RustCrypto Project Developers
+- **arrayvec 0.7.8** — Copyright (c) Ulrik Sverdrup "bluss" 2015-2023
 - **async-broadcast 0.7.2** — Copyright (c) 2020 Yoshua Wuyts
 - **async-channel 2.5.0** — Copyright Stjepan Glavina (per package manifest; the distributed license file carries no copyright line)
 - **async-executor 1.14.0** — Copyright Stjepan Glavina, John Nunley (per package manifest; the distributed license file carries no copyright line)
@@ -95,7 +98,12 @@ terms govern use of the model:
 - **bit-vec 0.8.0** — Copyright (c) 2023 The Rust Project Developers
 - **bitflags 1.3.2** — Copyright (c) 2014 The Rust Project Developers
 - **bitflags 2.13.1** — Copyright (c) 2014 The Rust Project Developers
+- **blake2 0.10.6** — Copyright (c) 2015-2016 The blake2-rfc Developers, Cesar Barros; Copyright (c) 2017 Artyom Pavlov
+- **blake2b_simd 1.0.4** — Copyright Jack O'Connor (per package manifest; the distributed license file carries no copyright line)
 - **block-buffer 0.10.4** — Copyright (c) 2018-2019 The RustCrypto Project Developers
+- **block-buffer 0.12.1** — Copyright (c) 2018-2025 The RustCrypto Project Developers
+- **block-modes 0.9.1** — Copyright RustCrypto Developers (per package manifest; the distributed license file carries no copyright line)
+- **block-padding 0.4.2** — Copyright (c) 2018-2025 The RustCrypto Project Developers
 - **block2 0.6.2** — Copyright Mads Marquart (per package manifest; the distributed license file carries no copyright line)
 - **blocking 1.6.2** — Copyright Stjepan Glavina (per package manifest; the distributed license file carries no copyright line)
 - **brotli-decompressor 5.0.3** — Copyright (c) 2016 Dropbox, Inc
@@ -111,6 +119,7 @@ terms govern use of the model:
 - **cargo_metadata 0.19.2** — Copyright Oliver Schneider (per package manifest; the distributed license file carries no copyright line)
 - **cargo_toml 0.22.3** — Copyright Kornel (per package manifest; the distributed license file carries no copyright line)
 - **cargo-platform 0.1.9** — no copyright line in the distributed license file
+- **cbc 0.2.1** — Copyright (c) 2018-2022 RustCrypto Developers; Copyright (c) 2018 Artyom Pavlov
 - **cc 1.2.67** — Copyright (c) 2014 Alex Crichton
 - **cesu8 1.1.0** — Copyright (C) 2000-2010 Julian Seward. All rights
 - **cfb 0.7.3** — Copyright (c) 2017 Matthew D. Steele
@@ -123,8 +132,11 @@ terms govern use of the model:
 - **chacha20poly1305 0.10.1** — Copyright (c) 2019 The RustCrypto Project Developers
 - **chrono 0.4.45** — Copyright (c) 2014, Kang Seonghoon
 - **cipher 0.4.4** — Copyright (c) 2016-2020 RustCrypto Developers
+- **cipher 0.5.2** — Copyright (c) 2016-2025 RustCrypto Developers
+- **cmov 0.5.4** — Copyright (c) 2022-2026 The RustCrypto Project Developers
 - **combine 4.6.7** — Copyright (c) 2015 Markus Westerlind
 - **concurrent-queue 2.5.0** — Copyright Stjepan Glavina, Taiki Endo, John Nunley (per package manifest; the distributed license file carries no copyright line)
+- **const-oid 0.10.2** — Copyright (c) 2020-2026 The RustCrypto Project Developers
 - **const-oid 0.9.6** — Copyright (c) 2020-2022 The RustCrypto Project Developers
 - **cookie 0.18.1** — Copyright (c) 2017 Sergio Benitez; Copyright (c) 2014 Alex Crichton
 - **core-foundation 0.10.1** — Copyright The Servo Project Developers (per package manifest; the distributed license file carries no copyright line)
@@ -132,6 +144,7 @@ terms govern use of the model:
 - **core-graphics 0.25.0** — Copyright The Servo Project Developers (per package manifest; the distributed license file carries no copyright line)
 - **core-graphics-types 0.2.0** — Copyright The Servo Project Developers (per package manifest; the distributed license file carries no copyright line)
 - **coreaudio-rs 0.13.0** — Copyright (c) 2015
+- **cpubits 0.1.1** — Copyright (c) 2023-2026 The RustCrypto Project Developers
 - **cpufeatures 0.2.17** — Copyright (c) 2020-2025 The RustCrypto Project Developers
 - **cpufeatures 0.3.0** — Copyright (c) 2020-2025 The RustCrypto Project Developers
 - **crc32fast 1.5.0** — Copyright (c) 2018 Sam Rijs, Alex Crichton and contributors
@@ -140,8 +153,10 @@ terms govern use of the model:
 - **crossbeam-epoch 0.9.20** — Copyright (c) 2019 The Crossbeam Project Developers
 - **crossbeam-utils 0.8.22** — Copyright (c) 2019 The Crossbeam Project Developers
 - **crypto-common 0.1.7** — Copyright (c) 2021 RustCrypto Developers
+- **crypto-common 0.2.2** — Copyright (c) 2021-2026 RustCrypto Developers
 - **ctor 0.8.0** — Copyright Matt Mastracci (per package manifest; the distributed license file carries no copyright line)
 - **ctor-proc-macro 0.0.7** — Copyright Matt Mastracci (per package manifest; the distributed license file carries no copyright line)
+- **ctutils 0.4.2** — Copyright (c) 2025-2026 The RustCrypto Project Developers
 - **curve25519-dalek-derive 0.1.1** — no copyright line in the distributed license file
 - **darling 0.20.11** — Copyright (c) 2017 Ted Driggs
 - **darling 0.23.0** — Copyright (c) 2017 Ted Driggs
@@ -162,6 +177,7 @@ terms govern use of the model:
 - **derive_more 2.1.1** — Copyright (c) 2016 Jelte Fennema
 - **derive_more-impl 2.1.1** — Copyright (c) 2016 Jelte Fennema
 - **digest 0.10.7** — Copyright (c) 2017 Artyom Pavlov
+- **digest 0.11.3** — Copyright (c) 2017-2025 RustCrypto Developers; Copyright (c) 2017 Artyom Pavlov
 - **dirs 6.0.0** — Copyright (c) 2018-2019 dirs-rs contributors
 - **dirs-sys 0.5.0** — Copyright (c) 2018-2019 dirs-rs contributors
 - **dispatch2 0.3.1** — Copyright Mads Marquart, Mary (per package manifest; the distributed license file carries no copyright line)
@@ -246,8 +262,10 @@ terms govern use of the model:
 - **heck 0.5.0** — Copyright (c) 2015 The Rust Project Developers
 - **hermit-abi 0.5.2** — Copyright Stefan Lankes (per package manifest; the distributed license file carries no copyright line)
 - **hex 0.4.3** — Copyright (c) 2013-2014 The Rust Project Developers; Copyright (c) 2015-2020 The rust-hex Developers
+- **hex-literal 1.1.0** — Copyright (c) 2018-2025 The RustCrypto Project Developers; Copyright (c) 2018 Artyom Pavlov
 - **hkdf 0.12.4** — Copyright (c) 2015-2018 Vlad Filippov; Copyright (c) 2018-2021 RustCrypto Developers
 - **hmac 0.12.1** — Copyright (c) 2017 Artyom Pavlov
+- **hmac 0.13.0** — Copyright (c) 2017 Artyom Pavlov
 - **html5ever 0.38.0** — Copyright (c) 2014 The html5ever Project Developers
 - **http 1.4.2** — Copyright (c) 2017 http-rs authors
 - **http-body 1.1.0** — Copyright (c) 2019-2026 Sean McArthur & Hyper Contributors
@@ -255,6 +273,7 @@ terms govern use of the model:
 - **httparse 1.10.1** — Copyright (c) 2015-2025 Sean McArthur
 - **httpdate 1.0.3** — Copyright (c) 2016 Pyfisch
 - **humantime 2.4.0** — Copyright (c) 2016 The humantime Developers; Copyright (c) 2016 Pyfisch; Copyright © 2005-2013 Rich Felker
+- **hybrid-array 0.4.13** — Copyright (c) 2022-2026 The RustCrypto Project Developers
 - **hyper 1.10.1** — Copyright (c) 2014-2026 Sean McArthur
 - **hyper-rustls 0.27.9** — Copyright (c) 2016, Joseph Birr-Pixton <jpixton@gmail.com>
 - **hyper-util 0.1.20** — Copyright (c) 2023-2025 Sean McArthur
@@ -271,6 +290,7 @@ terms govern use of the model:
 - **indexmap 2.14.0** — Copyright (c) 2016--2017
 - **infer 0.19.0** — Copyright (c) 2019 Bojan
 - **inout 0.1.4** — Copyright (c) 2022 The RustCrypto Project Developers; Copyright (c) 2022 Artyom Pavlov
+- **inout 0.2.2** — Copyright (c) 2022-2025 The RustCrypto Project Developers; Copyright (c) 2022 Artyom Pavlov
 - **ipnet 2.12.0** — Copyright 2017 Juniper Networks, Inc
 - **is-docker 0.2.0** — Copyright (c) 2023 Sean Larkin
 - **is-terminal 0.4.17** — Copyright (c) 2015-2019 Doug Tangren
@@ -287,6 +307,7 @@ terms govern use of the model:
 - **js-sys 0.3.103** — Copyright (c) 2014 Alex Crichton
 - **json-patch 3.0.1** — Copyright (c) 2017 Ivan Dubrov
 - **jsonptr 0.6.3** — Copyright (c) 2022 Chance Dinkins
+- **keepass 0.13.18** — Copyright (c) 2019 Stefan Seemayer
 - **keyboard-types 0.7.0** — Copyright (c) 2017 Pyfisch
 - **kqueue 1.2.0** — Copyright (c) 2016 William Orr <will@worrbase.com>
 - **kqueue-sys 1.1.2** — Copyright (c) 2016 William Orr <will@worrbase.com>
@@ -369,6 +390,7 @@ terms govern use of the model:
 - **parking 2.2.1** — Copyright 2014-2020 The Rust Project Developers
 - **parking_lot 0.12.5** — Copyright (c) 2016 The Rust Project Developers
 - **parking_lot_core 0.9.12** — Copyright (c) 2016 The Rust Project Developers
+- **password-hash 0.5.0** — Copyright (c) 2020-2023 RustCrypto Developers
 - **pem-rfc7468 1.0.0** — Copyright (c) 2021-2025 The RustCrypto Project Developers
 - **percent-encoding 2.3.2** — Copyright (c) 2013-2025 The rust-url developers
 - **phf 0.13.1** — Copyright (c) 2014-2022 Steven Fackler, Yuki Okushi
@@ -432,6 +454,7 @@ terms govern use of the model:
 - **rfd 0.16.0** — Copyright (c) 2022 Bartłomiej Maryńczak
 - **rubato 0.16.2** — Copyright (c) 2020 Henrik Enquist
 - **rusqlite 0.32.1** — Copyright (c) 2014-2021 The rusqlite developers
+- **rust-argon2 3.0.0** — Copyright (c) 2017 Martijn Rijkeboer <mrr@sru-systems.com>
 - **rustc_version 0.4.1** — Copyright (c) 2016 The Rust Project Developers
 - **rustc-hash 2.1.3** — no copyright line in the distributed license file
 - **rustfft 6.4.1** — Copyright (c) 2015 The RustFFT Developers
@@ -442,6 +465,7 @@ terms govern use of the model:
 - **rustls-platform-verifier 0.7.0** — Copyright (c) 2022 1Password
 - **rustls-platform-verifier-android 0.1.1** — no copyright line in the distributed license file
 - **rustversion 1.0.23** — Copyright David Tolnay (per package manifest; the distributed license file carries no copyright line)
+- **salsa20 0.11.0** — Copyright (c) 2019-2026 The RustCrypto Project Developers; Copyright (c) 2019 Eric McCorkle
 - **same-file 1.0.6** — Copyright (c) 2017 Andrew Gallant
 - **schannel 0.1.29** — Copyright (c) 2015 steffengy
 - **schemars 0.8.22** — Copyright (c) 2019 Graham Esau
@@ -449,6 +473,7 @@ terms govern use of the model:
 - **schemars 1.2.1** — Copyright (c) 2019 Graham Esau
 - **schemars_derive 0.8.22** — Copyright (c) 2019 Graham Esau
 - **scopeguard 1.2.0** — Copyright (c) 2016-2019 Ulrik Sverdrup "bluss" and scopeguard developers
+- **secrecy 0.10.3** — Copyright (c) 2019-2024 iqlusion
 - **security-framework 3.7.0** — Copyright (c) 2015 Steven Fackler
 - **security-framework-sys 2.17.0** — Copyright (c) 2015 Steven Fackler
 - **semver 1.0.28** — Copyright David Tolnay (per package manifest; the distributed license file carries no copyright line)
@@ -470,6 +495,7 @@ terms govern use of the model:
 - **servo_arc 0.4.3** — Copyright The Servo Project Developers (per package manifest; the distributed license file carries no copyright line)
 - **sha1 0.10.7** — Copyright (c) 2006-2009 Graydon Hoare; Copyright (c) 2016 Artyom Pavlov
 - **sha2 0.10.9** — Copyright (c) 2006-2009 Graydon Hoare; Copyright (c) 2016 Artyom Pavlov
+- **sha2 0.11.0** — Copyright (c) 2016-2026 The RustCrypto Project Developers; Copyright (c) 2016 Artyom Pavlov; Copyright (c) 2006-2009 Graydon Hoare
 - **shared_library 0.1.9** — Copyright (c) 2017 Pierre Krieger
 - **shell-words 1.1.1** — Copyright (c) 2016 Tomasz Miąsko
 - **shlex 2.0.1** — Copyright 2015 Nicholas Allegra (comex)
@@ -561,6 +587,7 @@ terms govern use of the model:
 - **tray-icon 0.24.1** — Copyright (c) 2022-2022 Tauri Programme within The Commons Conservancy
 - **try-lock 0.2.5** — Copyright (c) 2018-2023 Sean McArthur; Copyright (c) 2016 Alex Crichton
 - **tungstenite 0.24.0** — Copyright (c) 2017 Alexey Galakhov; Copyright (c) 2016 Jason Housley
+- **twofish 0.8.0** — Copyright (c) 2017-2024 The RustCrypto Project Developers; Copyright (c) 2017 Alexander Krotov
 - **typeid 1.0.3** — Copyright David Tolnay (per package manifest; the distributed license file carries no copyright line)
 - **typenum 1.20.1** — Copyright (c) 2014 Paho Lurie-Gregg
 - **uds_windows 1.2.1** — Copyright (c) Microsoft Corporation. All rights reserved
@@ -683,6 +710,7 @@ terms govern use of the model:
 - **zerocopy 0.8.54** — Copyright 2019 The Fuchsia Authors
 - **zerocopy-derive 0.8.54** — Copyright 2019 The Fuchsia Authors
 - **zeroize 1.9.0** — Copyright (c) 2018-2026 The RustCrypto Project Developers
+- **zeroize_derive 1.5.0** — Copyright (c) 2019-2026 The RustCrypto Project Developers
 - **zip 4.6.1** — Copyright (c) 2014 Mathijs van de Nes
 - **zmij 1.0.23** — Copyright David Tolnay (per package manifest; the distributed license file carries no copyright line)
 - **zvariant 5.13.1** — Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors
@@ -752,10 +780,20 @@ terms govern use of the model:
 - **webpki-roots 0.26.11** — no copyright line in the distributed license file
 - **webpki-roots 1.0.9** — no copyright line in the distributed license file
 
+### BSD-2-Clause — 2
+
+- **arrayref 0.3.9** — Copyright (c) 2015 David Roundy <roundyd@physics.oregonstate.edu>
+- **serial2 0.2.37** — Copyright 2021, Maarten de Vries <maarten@de-vri.es>
+
 ### BSD-3-Clause AND MIT — 2
 
 - **brotli 8.0.4** — Copyright (c) 2016 Dropbox, Inc
 - **matchit 0.7.3** — Copyright (c) 2022 Ibraheem Ahmed
+
+### MIT-0 — 2
+
+- **constant_time_eq 0.4.2** — Copyright Cesar Eduardo Barros (per package manifest; the distributed license file carries no copyright line)
+- **dunce 1.0.5** — Copyright Kornel (per package manifest; the distributed license file carries no copyright line)
 
 ### Apache-2.0 AND ISC — 1
 
@@ -769,10 +807,6 @@ terms govern use of the model:
 
 - **target-lexicon 0.12.16** — Copyright Dan Gohman (per package manifest; the distributed license file carries no copyright line)
 
-### BSD-2-Clause — 1
-
-- **serial2 0.2.37** — Copyright 2021, Maarten de Vries <maarten@de-vri.es>
-
 ### CC0-1.0 — 1
 
 - **notify 8.2.0** — Copyright Félix Saparelli, Daniel Faust, Aron Heinecke (per package manifest; the distributed license file carries no copyright line)
@@ -780,10 +814,6 @@ terms govern use of the model:
 ### MIT AND Unicode-3.0 — 1
 
 - **unicode-ident 1.0.24** — Copyright © 1991-2023 Unicode, Inc
-
-### MIT-0 — 1
-
-- **dunce 1.0.5** — Copyright Kornel (per package manifest; the distributed license file carries no copyright line)
 
 ### Zlib — 1
 
