@@ -20,31 +20,59 @@ const click = (mods: Partial<MouseEvent> = {}) =>
 const linkMod = IS_MAC ? { metaKey: true } : { ctrlKey: true };
 const otherMod = IS_MAC ? { ctrlKey: true } : { metaKey: true };
 
-describe("opensLink", () => {
+describe("opensLink in modifier mode", () => {
   it("follows a link on the platform's modifier", () => {
-    expect(opensLink(click(linkMod))).toBe(true);
+    expect(opensLink(click(linkMod), "modifier")).toBe(true);
   });
 
   it("ignores a bare click — the whole point of #178", () => {
-    expect(opensLink(click())).toBe(false);
+    expect(opensLink(click(), "modifier")).toBe(false);
   });
 
   it("ignores the other platform's modifier", () => {
-    expect(opensLink(click(otherMod))).toBe(false);
-    expect(opensLink(click({ ...linkMod, ...otherMod }))).toBe(false);
+    expect(opensLink(click(otherMod), "modifier")).toBe(false);
+    expect(opensLink(click({ ...linkMod, ...otherMod }), "modifier")).toBe(false);
   });
 
   it("ignores every button but the left one", () => {
     // xterm activates on any mouseup over a link, so right-click used to open
     // the URL *and* the context menu.
-    expect(opensLink(click({ ...linkMod, button: 2 }))).toBe(false);
-    expect(opensLink(click({ ...linkMod, button: 1 }))).toBe(false);
-    expect(opensLink(click({ button: 2 }))).toBe(false);
+    expect(opensLink(click({ ...linkMod, button: 2 }), "modifier")).toBe(false);
+    expect(opensLink(click({ ...linkMod, button: 1 }), "modifier")).toBe(false);
+    expect(opensLink(click({ button: 2 }), "modifier")).toBe(false);
   });
 
   it("tolerates Shift and Alt riding along", () => {
-    expect(opensLink(click({ ...linkMod, shiftKey: true }))).toBe(true);
-    expect(opensLink(click({ ...linkMod, altKey: true }))).toBe(true);
+    expect(opensLink(click({ ...linkMod, shiftKey: true }), "modifier")).toBe(true);
+    expect(opensLink(click({ ...linkMod, altKey: true }), "modifier")).toBe(true);
+  });
+
+  it("is what a caller that names no mode gets", () => {
+    expect(opensLink(click())).toBe(false);
+    expect(opensLink(click(linkMod))).toBe(true);
+  });
+});
+
+describe("opensLink in click mode", () => {
+  it("follows a link on a bare click", () => {
+    expect(opensLink(click(), "click")).toBe(true);
+  });
+
+  it("still follows one when the modifier rides along", () => {
+    // Muscle memory from the chord must not stop working under the default.
+    expect(opensLink(click(linkMod), "click")).toBe(true);
+  });
+
+  it("leaves a click that ended a selection alone", () => {
+    // Same button, same gesture: a drag across a link ends over the link.
+    expect(opensLink(click(), "click", true)).toBe(false);
+    expect(opensLink(click(linkMod), "click", true)).toBe(false);
+  });
+
+  it("ignores the other platform's modifier and every other button", () => {
+    expect(opensLink(click(otherMod), "click")).toBe(false);
+    expect(opensLink(click({ button: 2 }), "click")).toBe(false);
+    expect(opensLink(click({ button: 1 }), "click")).toBe(false);
   });
 });
 
@@ -64,11 +92,33 @@ describe("createLinkHint", () => {
   });
 
   it("waits before showing, then names the chord", () => {
-    const hint = createLinkHint(host);
+    const hint = createLinkHint(host, () => "modifier");
     hint.show(click());
     expect(bubble()).toBeNull();
     vi.advanceTimersByTime(300);
     expect(bubble()?.textContent).toContain(LINK_CHORD);
+    hint.dispose();
+  });
+
+  it("names no chord when a plain click is enough", () => {
+    const hint = createLinkHint(host, () => "click");
+    hint.show(click());
+    vi.advanceTimersByTime(300);
+    expect(bubble()?.textContent).toBe("Open link");
+    hint.dispose();
+  });
+
+  it("follows a mode that changes under an open terminal", () => {
+    let mode: "click" | "modifier" = "modifier";
+    const hint = createLinkHint(host, () => mode);
+    hint.show(click());
+    vi.advanceTimersByTime(300);
+    expect(bubble()?.textContent).toContain(LINK_CHORD);
+    hint.hide();
+    mode = "click";
+    hint.show(click());
+    vi.advanceTimersByTime(300);
+    expect(bubble()?.textContent).toBe("Open link");
     hint.dispose();
   });
 
