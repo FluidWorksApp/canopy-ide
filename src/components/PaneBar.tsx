@@ -256,6 +256,21 @@ function PaneBarImpl({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // A rename replaces the name far more often than it edits it, so start with
+  // the whole thing selected — autoFocus alone parks the caret at the end and
+  // leaves you to clear the name by hand. An effect rather than a ref that
+  // focuses during the commit: FileTree's rename prompt needed one to stop the
+  // closing context menu winning the focus race, and this input mounts from a
+  // context menu too. Keyed on the tab, so typing never re-selects the draft.
+  const renameInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (renamingTabId == null) return;
+    const el = renameInputRef.current;
+    if (!el) return;
+    el.focus();
+    el.select();
+  }, [renamingTabId]);
+
   // Numbered left to right across every group, so a hint matches what the eye
   // counts: the agent/doc split is a visual grouping, not a numbering reset.
   // Only the first nine — ⌘0 is zoom reset, and nobody counts past a row.
@@ -339,7 +354,7 @@ function PaneBarImpl({
                   {tab.type === "terminal" && renamingTabId === tab.id ? (
                     <input
                       className="tab-rename-input"
-                      autoFocus
+                      ref={renameInputRef}
                       value={renameDraft}
                       onClick={(e) => e.stopPropagation()}
                       onChange={(e) => onRenameDraftChange(e.target.value)}
