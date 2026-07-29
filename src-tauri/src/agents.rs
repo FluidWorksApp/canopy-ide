@@ -3770,7 +3770,12 @@ mod tests {
         // The ordinary case still resolves to the launch dir, even though the
         // agent has since cd'd into a subdirectory.
         assert_eq!(
-            resume_dir(root, "/Users/dev/Projects/app/src/api", &claude_bucket(root)).as_deref(),
+            resume_dir(
+                root,
+                "/Users/dev/Projects/app/src/api",
+                &claude_bucket(root)
+            )
+            .as_deref(),
             Some(root)
         );
         // An agent that cd'd somewhere unrelated: the launch dir's own bucket
