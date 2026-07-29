@@ -16,6 +16,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import * as ipc from "../ipc";
 import { getSettings, THEME_CHANGE_EVENT, type Settings } from "../settings";
 import { terminalTheme } from "../terminalThemes";
+import { createLinkHint, opensLink } from "../terminalLinks";
 
 /** Quote a dropped path for the shell, the way iTerm2/Terminal.app do. Paths
  *  that are pure safe chars pass through bare; anything else is single-quoted,
@@ -168,7 +169,22 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // support, so the addon's default handler gets null back from window.open()
     // and the click dies silently. The opener plugin's default scope already
     // allows http/https, which is all the addon's URL matcher produces.
-    term.loadAddon(new WebLinksAddon((_event, uri) => void openUrl(uri)));
+    //
+    // ⌘-click, never a bare click — see terminalLinks.ts for why, and for the
+    // hint that keeps a hovered link from looking like a dead one. A click
+    // without the modifier falls through untouched: xterm's link handling is
+    // additive, so selecting and focusing still behave as they always did.
+    const linkHint = createLinkHint(el);
+    term.loadAddon(
+      new WebLinksAddon(
+        (event, uri) => {
+          if (!opensLink(event)) return;
+          linkHint.hide();
+          void openUrl(uri);
+        },
+        { hover: (event) => linkHint.show(event), leave: () => linkHint.hide() },
+      ),
+    );
     term.open(el);
 
     // No WebGL renderer. @xterm/addon-webgl 0.19.0 corrupts rendering on
@@ -530,6 +546,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       window.removeEventListener(THEME_CHANGE_EVENT, onThemeChange);
       window.removeEventListener("focus", onFocus);
       window.removeEventListener("canopy:dictation-text", onDictationText);
+      linkHint.dispose();
       dataSub.dispose();
       titleSub.dispose();
       oscSubs.forEach((s) => s.dispose());
