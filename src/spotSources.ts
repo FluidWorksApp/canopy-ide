@@ -104,7 +104,7 @@ function ranked(
 /** The launcher entries (LaunchPalette's set, folded in) plus the one row that
  *  is always offered on a non-empty query: run what you typed as a one-shot
  *  agent task with the current page as context. */
-export function actionRows(query: string, ctx: SpotContext): SpotRow[] {
+export function actionRows(query: string, ctx: SpotContext, attachments = 0): SpotRow[] {
   const q = query.trim();
   const launchers: { row: SpotRow; hay: string }[] = [
     {
@@ -153,7 +153,10 @@ export function actionRows(query: string, ctx: SpotContext): SpotRow[] {
     })),
   ];
   const rows = ranked(query, launchers, 4);
-  if (q) {
+  // A pasted image is a thing to send even with nothing typed — offering only
+  // "New Shell" to someone who just pasted a screenshot answers a question
+  // nobody asked.
+  if (q || attachments > 0) {
     // The two things you can send a typed sentence off as, side by side. They
     // are genuinely different jobs — one changes the code and disappears, the
     // other answers a question and leaves the answer behind — and asking which
@@ -163,8 +166,8 @@ export function actionRows(query: string, ctx: SpotContext): SpotRow[] {
         id: "act:run-task",
         group: "Actions",
         kind: "run-task",
-        title: `Run task: “${q}”`,
-        detail: "one-shot agent · current page as context",
+        title: q ? `Run task: “${q}”` : "Run task on the pasted image",
+        detail: attachments > 0 ? "one-shot agent · with the image" : "one-shot agent · current page as context",
         score: -2,
         action: { type: "run-task", brief: q },
       },
@@ -172,7 +175,7 @@ export function actionRows(query: string, ctx: SpotContext): SpotRow[] {
         id: "act:research",
         group: "Actions",
         kind: "research",
-        title: `Research: “${q}”`,
+        title: q ? `Research: “${q}”` : "Research the pasted image",
         detail: "investigate and record it · nothing is changed",
         score: -1,
         action: { type: "start-research", question: q },
@@ -596,6 +599,10 @@ export interface SpotQuery {
   corpus: string[];
   /** Component roots, in order. */
   roots: string[];
+  /** Images pasted into the field. Only the count reaches here: the palette
+   *  owns the files, and the sources only need to know that a bare Enter has
+   *  something to send even with nothing typed. */
+  attachments?: number;
 }
 
 export interface SpotSource {
@@ -619,7 +626,7 @@ export interface SpotSource {
 }
 
 const SOURCES: SpotSource[] = [
-  { id: "actions", group: "Actions", blurb: "The launcher entries, and running what you typed as a one-shot task.", timing: "instant", rows: (q) => actionRows(q.query, q.ctx) },
+  { id: "actions", group: "Actions", blurb: "The launcher entries, and running what you typed as a one-shot task.", timing: "instant", rows: (q) => actionRows(q.query, q.ctx, q.attachments) },
   { id: "tabs", group: "Open Tabs", blurb: "Everything open in this project's tab strip.", timing: "instant", rows: (q) => tabRows(q.query, q.ctx) },
   { id: "files", group: "Files", blurb: "File names under the project's components.", timing: "deferred", rows: (q) => fileRows(q.query, q.corpus) },
   { id: "symbols", group: "Symbols", blurb: "Workspace symbols from language servers already running — never starts one.", timing: "deferred", minQuery: 2, rows: (q) => codeSymbolRows(q.query, q.roots) },

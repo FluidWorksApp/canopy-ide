@@ -6821,11 +6821,94 @@ body.dragging-tab * {
   color: var(--text-faint);
 }
 
+/* A textarea rather than an input, so a prompt can be several lines — sized in
+   rows by what is typed (spotCompose.composerRows). At one row it has to be
+   indistinguishable from the input it replaced: same padding, same font, no
+   resize grip, no scrollbar until it stops growing. */
 .spot-input {
   flex: 1 1 auto;
   min-width: 0;
   padding-left: 0;
   border-bottom: none;
+  width: 100%;
+  resize: none;
+  font-family: inherit;
+  line-height: 20px;
+  /* The row count is the height; leave the browser's textarea default out of
+     it or a one-row field sits taller than the search icon beside it. */
+  display: block;
+}
+
+/* The field stacks (chips over text) rather than sitting in one row, so the
+   thumbnails read as belonging to what is being written. */
+.spot-field-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Composing: the field is the subject now, so it gets the weight. */
+.spot-field-composing {
+  align-items: flex-start;
+}
+.spot-field-composing .spot-field-icon {
+  margin-top: 13px;
+}
+
+.spot-shots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 0 0;
+}
+
+/* One pasted image: a thumbnail, its name, and a way to take it back. */
+.spot-shot {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 3px 6px 3px 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  background: var(--bg-raised);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.spot-shot-thumb {
+  width: 28px;
+  height: 20px;
+  object-fit: cover;
+  border-radius: 2px;
+  display: block;
+}
+
+/* The image is on disk but too big to have thumbnailed in time; the chip still
+   has to hold its place rather than jump when the picture lands. */
+.spot-shot-blank {
+  background: var(--bg-alt);
+}
+
+.spot-shot-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spot-shot-drop {
+  border: none;
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 13px;
+  line-height: 1;
+}
+.spot-shot-drop:hover {
+  color: var(--text);
 }
 
 .spot-clear {
