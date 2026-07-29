@@ -5,6 +5,7 @@ import {
   isNit,
   isTrusted,
   alreadyPosted,
+  livePr,
   fabAction,
   nextMove,
   parseSuggestions,
@@ -57,6 +58,7 @@ const conv = (over: Partial<ipc.PrConversation> = {}): ipc.PrConversation => ({
   viewer: "me",
   review_decision: "",
   mergeable: "MERGEABLE",
+  state: "OPEN",
   checks: "PASS",
   auto_merge: false,
   draft: false,
@@ -261,6 +263,40 @@ describe("nextMove", () => {
 
   it("stops offering anything once the PR has landed", () => {
     expect(nextMove(pr({ state: "MERGED" }), conv(), { actionable: 0 }).id).toBe("landed");
+  });
+
+  it("calls it landed the moment the merge here answered, not a refresh later", () => {
+    // The tab's PrInfo still says OPEN — it is the row the list handed over and
+    // it never changes. Merging from the tab must still turn the header over.
+    const m = nextMove(livePr(pr(), conv(), "MERGED"), conv(), { actionable: 0 });
+    expect(m.id).toBe("landed");
+    expect(m.label).toBe("Merged");
+  });
+});
+
+describe("livePr", () => {
+  it("keeps the same object while nothing has changed", () => {
+    // Identity matters: this feeds memoised derivations on every render.
+    const p = pr();
+    expect(livePr(p, conv())).toBe(p);
+    expect(livePr(p, null)).toBe(p);
+  });
+
+  it("believes the conversation over the row the tab opened with", () => {
+    // Merged on github.com while the tab sat open.
+    expect(livePr(pr(), conv({ state: "MERGED" })).state).toBe("MERGED");
+    expect(livePr(pr(), conv({ state: "CLOSED" })).state).toBe("CLOSED");
+  });
+
+  it("believes a merge or close performed here over both", () => {
+    // The mutation came back clean; the refresh behind it hasn't landed yet.
+    expect(livePr(pr(), conv(), "MERGED").state).toBe("MERGED");
+    expect(livePr(pr(), conv({ state: "OPEN" }), "CLOSED").state).toBe("CLOSED");
+  });
+
+  it("falls back to the row when the conversation could not be fetched", () => {
+    expect(livePr(pr({ state: "CLOSED" }), null).state).toBe("CLOSED");
+    expect(livePr(pr(), conv({ state: "" })).state).toBe("OPEN");
   });
 });
 

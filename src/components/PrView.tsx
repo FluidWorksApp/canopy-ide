@@ -58,6 +58,7 @@ import {
   type FabActionId,
   fileNote,
   isNit,
+  livePr as livePrOf,
   nextMove,
   patchLines,
   resolvePath,
@@ -312,6 +313,10 @@ export function PrView({
   const [mergeConfirm, setMergeConfirm] = useState<MergeMethod | null>(null);
   const [closeConfirm, setCloseConfirm] = useState(false);
   const [closeDelBranch, setCloseDelBranch] = useState(false);
+  /** What merging or closing it here answered — MERGED or CLOSED. Believed at
+   *  once, without waiting for the refresh behind it: the mutation came back
+   *  clean, so the toast and the header have to turn over together. */
+  const [landed, setLanded] = useState<string | null>(null);
 
   // The conversation: comments, verdicts, inline threads, per-file viewed state.
   // Its own request, independent of the patch, so it paints while a 28k-line
@@ -746,23 +751,34 @@ export function PrView({
   const liveChecks = conv?.checks || pr.checks;
   const decision = conv?.review_decision || pr.review_decision;
   const conflicting = (conv?.mergeable || pr.mergeable) === "CONFLICTING";
-  const role = roleFor(pr, conv);
-  const gate = useMemo(() => roundGate(pr, conv, loop), [pr, conv, loop]);
+
+  /** The PR as it is now, not as the list saw it: everything that decides what
+   *  you can still do to it reads this, never the frozen `pr` prop. */
+  const livePr = useMemo(
+    () => livePrOf(pr, conv, landed),
+    [pr, conv, landed],
+  );
+
+  const role = roleFor(livePr, conv);
+  const gate = useMemo(
+    () => roundGate(livePr, conv, loop),
+    [livePr, conv, loop],
+  );
   const move: NextMove = useMemo(
     () =>
-      nextMove(pr, conv, {
+      nextMove(livePr, conv, {
         actionable: act?.count ?? 0,
         loopBusy: loop.status === "working",
         autoMerge: conv?.auto_merge,
       }),
-    [pr, conv, act, loop.status],
+    [livePr, conv, act, loop.status],
   );
 
   /** The floating button's default action — its own four states, not the next
    *  move bar's list. See fabAction() for why they are deliberately different. */
   const fab = useMemo(
-    () => fabAction(pr, conv, { actionable: act?.count ?? 0 }),
-    [pr, conv, act?.count],
+    () => fabAction(livePr, conv, { actionable: act?.count ?? 0 }),
+    [livePr, conv, act?.count],
   );
 
   /** Moves whose button already exists two controls to the right. Now that the
@@ -781,7 +797,7 @@ export function PrView({
         // watcher starts round one the moment review comments land. Every other
         // reason (a red build, conflicts, a round already running) is a real
         // no, and says so.
-        if (gate.reason === "no comments to address" && pr.state === "OPEN") {
+        if (gate.reason === "no comments to address" && livePr.state === "OPEN") {
           persist({ ...loop, auto: true });
           onNotice(
             "Armed — a round starts by itself when review comments arrive.",
@@ -802,7 +818,7 @@ export function PrView({
         }.`,
       );
     },
-    [onMicroTask, gate, loop, conv, repo, pr, persist, onNotice],
+    [onMicroTask, gate, loop, conv, repo, pr, livePr, persist, onNotice],
   );
 
   /** What the button says while its job runs — the job's own name, so a glance
@@ -926,7 +942,7 @@ export function PrView({
       if (!live || !c) return;
       const fresh = newSinceHandled(c, loop);
       if (fresh.length && loop.auto) {
-        const g = roundGate(pr, c, loop);
+        const g = roundGate(livePr, c, loop);
         if (g.ok) {
           launch(addressPrCommentsTask, { repo, pr });
           persist(beginRound(loop, g.ids, c.head_sha));
@@ -958,7 +974,7 @@ export function PrView({
       unsubscribe();
       window.clearInterval(id);
     };
-  }, [loop, pr, repo, refreshConv, onMicroTask, persist, onNotice]);
+  }, [loop, pr, livePr, repo, refreshConv, onMicroTask, persist, onNotice]);
 
   // Only fetched when it's the move being offered: one API call, and only for
   // the PR where the answer is about to be shown.
@@ -1026,7 +1042,13 @@ export function PrView({
       const msg = await ipc.ghPrMerge(repo, pr.number, method);
       setDone(msg);
       onNotice(msg, "success");
+      // The whole header turns over with the toast: it landed, so Merge, the
+      // next move, the agent tasks and the review box all stop offering things
+      // you can no longer do. The refresh behind it is confirmation, not the
+      // trigger — waiting for a round trip is what left the button armed.
+      setLanded("MERGED");
       persist(markDone(loop));
+      void refreshConv();
     } catch (err) {
       onNotice(String(err), "error");
     } finally {
@@ -1040,7 +1062,9 @@ export function PrView({
       const msg = await ipc.ghPrClose(repo, pr.number, deleteBranch);
       setDone(msg);
       onNotice(msg, "success");
+      setLanded("CLOSED");
       persist(markDone(loop));
+      void refreshConv();
     } catch (err) {
       onNotice(String(err), "error");
     } finally {
@@ -1446,7 +1470,7 @@ export function PrView({
     setDrafts((prev) => [...prev, d]);
   }, []);
 
-  const prOpen = pr.state === "OPEN";
+  const prOpen = livePr.state === "OPEN";
   const canSuggest = !!onMicroTask;
   const renderExtendLine = useCallback(
     ({ data }: { data: LineData }) => (
@@ -1567,7 +1591,7 @@ export function PrView({
         disabled: isBusyTask(prReviewTask.id),
         onClick: () => launch(prReviewTask, { repo, pr }),
       });
-      if (pr.state === "OPEN") {
+      if (livePr.state === "OPEN") {
         items.push({
           label: act?.count
             ? `${addressPrCommentsTask.label} (${act.count})`
@@ -1649,7 +1673,7 @@ export function PrView({
           ),
       },
     ];
-    if (pr.state === "OPEN") {
+    if (livePr.state === "OPEN") {
       items.push({
         label: "Sync with base branch",
         hint: "gh pr update-branch",
@@ -1687,7 +1711,7 @@ export function PrView({
         hint: `${loop.cycle} round(s) recorded`,
         onClick: () => persist(resetLoop(loop)),
       });
-    if (pr.state === "OPEN")
+    if (livePr.state === "OPEN")
       items.push(
         { separator: true },
         {
@@ -1778,7 +1802,7 @@ export function PrView({
           <div className="pr-actions">
             {/* Agent used to sit here and now floats bottom-right, where it
                 follows you down the diff. Two of it would be one too many. */}
-            {pr.draft && pr.state === "OPEN" && (
+            {pr.draft && livePr.state === "OPEN" && (
               <button
                 className="btn-mini btn-accent"
                 title="Take this PR out of draft so it can be reviewed and merged"
@@ -1788,7 +1812,7 @@ export function PrView({
                 Mark ready
               </button>
             )}
-            {!pr.draft && pr.state === "OPEN" && (
+            {!pr.draft && livePr.state === "OPEN" && (
               <div className="cli-menu-anchor">
                 <button
                   className={`btn-mini ${mergeReady ? "btn-accent" : ""}`}
@@ -2132,7 +2156,7 @@ export function PrView({
                       )}
                     </div>
                   ))}
-                  {pr.state === "OPEN" && role === "author" && (
+                  {livePr.state === "OPEN" && role === "author" && (
                     <div className="pr-thread-actions">
                       <button
                         className="btn-mini btn-accent"

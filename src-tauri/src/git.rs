@@ -2208,6 +2208,11 @@ pub struct PrConversation {
     pub viewer: String,
     pub review_decision: String,
     pub mergeable: String,
+    /// OPEN / CLOSED / MERGED, in PrInfo's vocabulary. The tab's PrInfo is the
+    /// snapshot the list handed over when it opened and never learns that the PR
+    /// landed — here, or on github.com — so this is the one that decides whether
+    /// Merge is still a thing you can press.
+    pub state: String,
     /// Live rollup: PASS / FAIL / PENDING / "" — the same vocabulary as PrInfo,
     /// but current rather than whatever the PR list saw when the tab opened.
     pub checks: String,
@@ -2226,7 +2231,7 @@ query($owner:String!,$name:String!,$number:Int!){
   viewer{ login }
   repository(owner:$owner,name:$name){
     pullRequest(number:$number){
-      id body isDraft mergeable reviewDecision
+      id body isDraft mergeable reviewDecision state
       headRefOid
       autoMergeRequest{ enabledAt }
       comments(first:100){nodes{ id author{login} body createdAt url viewerDidAuthor authorAssociation }}
@@ -2452,6 +2457,7 @@ fn parse_conversation(data: &Value, number: u32) -> Result<PrConversation, Strin
         viewer,
         review_decision: s(&pr["reviewDecision"]),
         mergeable: s(&pr["mergeable"]),
+        state: s(&pr["state"]),
         checks,
         auto_merge: !pr["autoMergeRequest"].is_null(),
         draft: pr["isDraft"].as_bool().unwrap_or(false),
@@ -4654,6 +4660,7 @@ index 333..444 100644
             "isDraft": false,
             "mergeable": "MERGEABLE",
             "reviewDecision": "CHANGES_REQUESTED",
+            "state": "OPEN",
             "headRefOid": "headsha",
             "autoMergeRequest": null,
             "comments": { "nodes": [
@@ -4727,6 +4734,21 @@ index 333..444 100644
         // sha2 is mine and submitted; sha1 is someone else's and sha3 is a
         // PENDING review, which has nothing to compare against.
         assert_eq!(c.my_last_review_sha, "sha2");
+    }
+
+    #[test]
+    fn parse_conversation_carries_whether_the_pr_is_still_open() {
+        // The tab's PrInfo is frozen at open time, so this is the only thing
+        // that ever tells it the PR landed — merged here, or on github.com.
+        let c = parse_conversation(&conversation_fixture(), 1).expect("parses");
+        assert_eq!(c.state, "OPEN");
+
+        let mut merged = conversation_fixture();
+        merged["repository"]["pullRequest"]["state"] = json!("MERGED");
+        assert_eq!(
+            parse_conversation(&merged, 1).expect("parses").state,
+            "MERGED"
+        );
     }
 
     #[test]

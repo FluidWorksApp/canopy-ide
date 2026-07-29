@@ -1311,6 +1311,8 @@ export interface PrConversation {
   viewer: string;
   review_decision: string;
   mergeable: string;
+  /** OPEN / CLOSED / MERGED — live, unlike the PrInfo the tab opened with. */
+  state: string;
   /** Live rollup in PrInfo's vocabulary: PASS / FAIL / PENDING / "". */
   checks: string;
   auto_merge: boolean;
