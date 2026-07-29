@@ -891,6 +891,35 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     }}
                   />
                 </Item>
+                <Item
+                  name="Set up new workspaces"
+                  desc="Carry the gitignored config across and clone the dependencies, so a new workspace can build the moment it exists."
+                >
+                  <label className="set-inline-check">
+                    <input
+                      type="checkbox"
+                      checked={s.workspaceBootstrap}
+                      onChange={(e) => patch({ workspaceBootstrap: e.target.checked })}
+                    />
+                    <span>Prepare a workspace when it's created</span>
+                  </label>
+                </Item>
+                <Item
+                  name="Workspace ports"
+                  desc="What your main checkout serves on. Each workspace is held the next free number up, so several branches can run at once."
+                >
+                  <input
+                    type="number"
+                    min={1024}
+                    max={65000}
+                    value={s.workspaceBasePort}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      if (Number.isFinite(v) && v >= 1024 && v <= 65000)
+                        patch({ workspaceBasePort: Math.floor(v) });
+                    }}
+                  />
+                </Item>
               </>
             )}
 

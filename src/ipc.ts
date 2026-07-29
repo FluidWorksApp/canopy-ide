@@ -28,6 +28,9 @@ export async function ptySpawn(
      *  passed as shell args (correct on cmd.exe / PowerShell / POSIX) rather
      *  than typed with a Bourne-only `; exit $?`. */
     runCommand?: string;
+    /** Stamped onto the child. A run inside a workspace carries that
+     *  workspace's port lease here, so two checkouts can serve at once. */
+    env?: [string, string][];
   },
   onData: (bytes: Uint8Array) => void,
 ): Promise<SpawnResult> {
@@ -1513,6 +1516,18 @@ export const gitWorktreeAddPr = (
     number,
     branch,
   });
+/** What a fresh workspace was given so it can actually build, and the install
+ *  to run when cloning the dependencies wasn't possible. */
+export interface BootstrapReport {
+  carried: string[];
+  cloned: string[];
+  install: string | null;
+  note: string | null;
+}
+/** Give a just-created workspace the two things `git worktree add` leaves out:
+ *  the gitignored config, and the dependencies. */
+export const gitWorktreeBootstrap = (repo: string, path: string) =>
+  invoke<BootstrapReport>("git_worktree_bootstrap", { repo, path });
 /** `force` counts rather than toggles: 1 drops uncommitted work, 2 also clears
  *  a locked workspace — git needs `remove -f -f` for that and says so. */
 export const gitWorktreeRemove = (repo: string, path: string, force: 0 | 1 | 2) =>

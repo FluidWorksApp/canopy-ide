@@ -150,6 +150,7 @@ import { TicketsPanel, type AgentTarget } from "../TicketsPanel";
 import { PrsPanel } from "../PrsPanel";
 import { ServersPanel } from "../ServersPanel";
 import { groupServers, runningCount, type ServerEntry } from "../../servers";
+import { ensureLeases, portEnv, portForPath } from "../../workspaces";
 import { needsYouCount } from "../../prInbox";
 import { usePrWatch } from "../../usePrWatch";
 import { TicketView } from "../TicketView";
@@ -491,7 +492,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // The one funnel, mounted by the wrapper below this component. Every route
   // into a ref that moves goes through it, so a refusal arrives as a question
   // in one dialog instead of raw stderr in a toast.
-  const { switchTo, ask } = useBranchSwitch();
+  const { switchTo, ask, version: switchVersion } = useBranchSwitch();
   /** Perform the redirection: the project's files, search and new terminals
    *  come from this workspace instead of the main checkout. The funnel owns the
    *  label and the notice, which is why every surface calls its `openThere` and
@@ -754,6 +755,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
       run = false,
     ) => {
       const id = tabId();
+      // Every terminal opened inside a workspace gets that workspace's port,
+      // not just the ones started from the Servers panel — an agent told to
+      // "run the dev server and check it" is the case that matters most, and it
+      // types the command itself. Derived from the path alone (see
+      // workspaces.portForPath) so this stays a synchronous, IPC-free lookup.
+      const env = portEnv(portForPath(cwd));
       setTabs((prev) => [
         ...prev,
         {
@@ -764,6 +771,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           ptyId: null,
           command,
           icon,
+          env: env.length ? env : undefined,
           run,
         },
       ]);
@@ -1205,6 +1213,42 @@ const ProjectViewBody = memo(function ProjectViewBody({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [componentKey]);
+
+  // Every workspace of every repo this project spans. Loaded when the set can
+  // actually have changed — the component set, or the switch funnel saying it
+  // moved something — never polled: listing costs a `git status` per workspace
+  // and a repo can easily have twenty.
+  //
+  // This is what makes the Servers panel able to offer a workspace's dev server
+  // without you having to switch into that workspace first, which is the whole
+  // of "run two features side by side".
+  const [allWorktrees, setAllWorktrees] = useState<
+    { repo: string; trees: ipc.WorktreeInfo[] }[]
+  >([]);
+  const repoKey = repoPaths.join("|");
+  useEffect(() => {
+    if (repoPaths.length === 0) {
+      setAllWorktrees([]);
+      return;
+    }
+    let live = true;
+    void Promise.all(
+      repoPaths.map((repo) =>
+        ipc
+          .gitWorktrees(repo)
+          .then((trees) => ({ repo, trees }))
+          .catch(() => ({ repo, trees: [] as ipc.WorktreeInfo[] })),
+      ),
+    ).then((all) => {
+      if (!live) return;
+      setAllWorktrees(all);
+      for (const { repo, trees } of all) ensureLeases(repo, trees);
+    });
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repoKey, switchVersion]);
 
   // The rail badge counts what THIS project's panel would show — the badge and
   // the list must agree, or the badge is just noise you can't clear from here.
@@ -4644,16 +4688,66 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // to the run tabs and the ports they turned out to be listening on. Memoized
   // on its three inputs — the stats poller ticks every 2s and this must not
   // rebuild the panel's rows on ticks that changed no port.
+  // Each component, once per workspace that has a copy of it. A worktree
+  // mirrors its repo's tree, so a component inside the repo maps to the same
+  // relative path inside every workspace — the same remap the file surface does
+  // for the active one, done for all of them at once.
+  //
+  // This is deliberately not gated on which workspace is "active": you cannot
+  // test two branches side by side if starting the second one's server means
+  // first moving your whole file tree onto it.
+  const serverComponents = useMemo(() => {
+    const out = components.map((c) => ({ ...c }));
+    for (const { repo, trees } of allWorktrees) {
+      for (const w of trees) {
+        if (w.is_main || w.bare || w.prunable) continue;
+        for (const c of project.components) {
+          if (c.path !== repo && !c.path.startsWith(`${repo}/`)) continue;
+          const path = w.path + c.path.slice(repo.length);
+          // The active workspace's components are already in the list under
+          // their own paths — adding them twice would double every row.
+          if (out.some((x) => x.path === path)) continue;
+          out.push({
+            ...c,
+            label: `${c.label} · ${w.branch ?? w.name}`,
+            path,
+          });
+        }
+      }
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [components, allWorktrees, project.components]);
+
   const serverGroups = useMemo(
     () =>
-      groupServers(components, runTabs, (ptyId) =>
+      groupServers(serverComponents, runTabs, (ptyId) =>
         ptyId == null
           ? []
           : (projectStats.find((s) => s.id === ptyId)?.ports ?? []),
       ),
-    [components, runTabs, projectStats],
+    [serverComponents, runTabs, projectStats],
   );
   const serversRunning = runningCount(serverGroups);
+
+  // What's alive and where, for the Git panel's one list: a workspace row can
+  // say "a server is up in here, an agent is working in here" without the panel
+  // having to know anything about tabs. Only live ones — a run tab that has
+  // exited is output you can still read, not a server.
+  const serverCwds = useMemo(
+    () => runTabs.filter((t) => !t.exited).map((t) => t.cwd),
+    [runTabs],
+  );
+  const agentCwds = useMemo(
+    () =>
+      tabs
+        .filter(
+          (t): t is TermSubTab =>
+            t.type === "terminal" && !t.run && !t.exited && Boolean(t.command),
+        )
+        .map((t) => t.cwd),
+    [tabs],
+  );
 
   /** Start a configured run command, from the Servers panel. Same call the
    *  files panel's run rows make, so both surfaces drive one tab. */
@@ -5713,6 +5807,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     ? tab.command
                     : undefined
                 }
+                env={tab.env}
                 onSpawned={(ptyId) =>
                   // A freshly spawned pty is alive by definition, so clear any
                   // stale exited/failed state. Restart kills the old pty and
@@ -6463,6 +6558,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
             path: c.path,
           }))}
           activeWorktree={worktreeEnv?.path ?? null}
+          serverCwds={serverCwds}
+          agentCwds={agentCwds}
+          onOpenPreview={(url) => openPreview(url)}
           onOpenCommit={openCommit}
           onOpenBranch={openBranch}
           onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}

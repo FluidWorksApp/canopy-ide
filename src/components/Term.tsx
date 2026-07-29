@@ -54,6 +54,10 @@ interface TermProps {
    *  its status (native, per-shell), rather than typing it in. Mutually
    *  exclusive with initialCommand. */
   runCommand?: string;
+  /** Stamped onto the child at spawn. A run inside a workspace carries that
+   *  workspace's port lease here, which is what lets two checkouts of the same
+   *  repo serve at once instead of losing the race for one hard-coded port. */
+  env?: [string, string][];
   /** Attach to an already-running PTY (spawned headless from the remote portal)
    *  instead of spawning a fresh one. The tab mirrors that session's live
    *  output and drives its input; closing the tab detaches, it does not kill the
@@ -67,7 +71,7 @@ interface TermProps {
 }
 
 export const Term = forwardRef<TermHandle, TermProps>(function Term(
-  { cwd, active, initialCommand, runCommand, attachId, onSpawned, onExited, onTitle, onNotify },
+  { cwd, active, initialCommand, runCommand, env, attachId, onSpawned, onExited, onTitle, onNotify },
   ref,
 ) {
   // Frozen once: a Term never switches between spawn and attach mid-life, and
@@ -412,6 +416,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
             cwd,
             highWater: settings.ptyHighWater,
             runCommand,
+            env,
           },
           (bytes) => {
             // Feed xterm's own write buffer and ack once it has consumed the

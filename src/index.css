@@ -2644,6 +2644,21 @@ body,
   border-color: var(--accent);
 }
 
+/* The one action a row of controls is actually offering — "Start", where every
+   other button is a way out. Filled rather than merely outlined, because an
+   accent border alone is what a hover already looks like. */
+.btn-mini-accent {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent, var(--bg));
+}
+.btn-mini-accent:hover {
+  filter: brightness(1.1);
+}
+.btn-mini-accent:disabled {
+  opacity: 0.5;
+}
+
 .cli-icon {
   display: inline-flex;
   align-items: center;
@@ -9260,61 +9275,101 @@ body.dragging-tab * {
   font-size: 12px;
 }
 
-/* ---------- worktrees ---------- */
+/* ---------- workspaces ----------
+   One row per branch, wherever it lives. Deliberately the same 24px height and
+   rhythm as a plain branch row: a branch that happens to have a folder of its
+   own is not a different kind of thing, and making it a card said it was. */
 
-.git-worktree {
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--border);
-  font-size: 12px;
-}
-
-.git-worktree:hover { background: var(--bg-raised); }
-.git-worktree-gone { opacity: 0.6; }
-
-.git-worktree-top {
+.ws-row {
   display: flex;
   align-items: center;
   gap: 6px;
+  height: 24px;
+  padding: 0 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
 }
 
-.git-worktree-mark { flex: 0 0 auto; font-size: 10px; color: var(--accent); }
+.ws-row:hover { background: var(--bg-raised); color: var(--text); }
+.ws-row-remote { opacity: 0.7; }
+.ws-row-gone { opacity: 0.6; }
 
-.git-worktree-branch {
+/* Where your files are coming from right now. The one row you should be able
+   to find without reading. */
+.ws-row-active {
+  background: rgba(122, 162, 247, 0.08);
+  box-shadow: inset 2px 0 0 var(--accent);
   color: var(--text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.git-worktree-tag {
+/* 10px, not the 8px a plain branch row used: ⚠ and ☁ have interior detail that
+   a dot doesn't, and at 8px both collapsed into a smudge. */
+.ws-mark {
+  flex: 0 0 11px;
+  font-size: 10px;
+  line-height: 1;
+  text-align: center;
+}
+.ws-row-active .ws-mark { color: var(--accent); }
+.ws-row-gone .ws-mark { color: var(--warn); }
+.ws-name { white-space: nowrap; }
+
+.ws-tag {
   flex: 0 0 auto;
+  font-size: 9px;
+  padding: 0 5px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  opacity: 0.8;
+}
+.ws-tag-remote { border-color: var(--accent); color: var(--accent); }
+.ws-tag-warn { border-color: var(--warn); color: var(--warn); opacity: 1; }
+
+/* Dirty / agents / port, pushed together against the subject so the eye can
+   scan one column for "what is going on in here". */
+.ws-state {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+}
+
+.ws-dirty { color: var(--warn); }
+.ws-agents { color: var(--accent); }
+
+.ws-port {
+  font-family: ui-monospace, monospace;
+  font-size: 9px;
   padding: 0 4px;
   border: 1px solid var(--border);
   border-radius: var(--r-xs);
   corner-shape: squircle;
-  font-size: 9px;
+  background: none;
   color: var(--text-dim);
+  opacity: 0.65;
 }
 
-.git-tag-warn { color: var(--warn); border-color: var(--warn); }
-.git-worktree-dirty { margin-left: auto; color: var(--warn); font-size: 10px; }
+/* Something is actually answering on it — the chip becomes a button. */
+.ws-port-live {
+  border-color: var(--ok);
+  color: var(--ok);
+  opacity: 1;
+  cursor: pointer;
+}
+.ws-port-live:hover { background: color-mix(in srgb, var(--ok) 15%, transparent); }
 
-.git-worktree-path {
-  margin: 2px 0 4px 16px;
-  font-family: ui-monospace, monospace;
-  font-size: 9px;
-  color: var(--text-dim);
+.ws-subject {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  direction: rtl;
-  text-align: left;
-}
-
-.git-worktree-actions {
-  display: flex;
-  gap: 6px;
-  margin-left: 16px;
+  font-size: 10px;
+  opacity: 0.5;
 }
 
 /* worktree used as the project's working environment */
@@ -9339,20 +9394,6 @@ body.dragging-tab * {
   text-overflow: ellipsis;
   white-space: nowrap;
   flex: 1;
-}
-
-.git-worktree-active {
-  background: rgba(122, 162, 247, 0.08);
-  box-shadow: inset 2px 0 0 var(--accent);
-}
-
-.wt-inuse {
-  font-size: 10px;
-  color: var(--accent);
-  padding: 1px 5px;
-  border: 1px solid var(--accent);
-  border-radius: var(--r-xs);
-  corner-shape: squircle;
 }
 
 .tree-icon-img {

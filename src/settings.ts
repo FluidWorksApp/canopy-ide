@@ -301,6 +301,19 @@ export interface Settings {
    *  re-answer every time is a mode chooser nobody uses. */
   previewCaptureMode: CaptureMode;
 
+  // ---- Workspaces ----
+  /** The number the repo's own checkout serves on. Workspaces lease offsets
+   *  from it, so a second checkout of the same repo can run its dev server
+   *  alongside the first instead of losing the port race. */
+  workspaceBasePort: number;
+  /** Leased offsets, `repo path -> workspace path -> offset`. Persisted because
+   *  a port that moves between restarts is a bookmark that stops working. */
+  workspacePorts: Record<string, Record<string, number>>;
+  /** Carry the gitignored config and clone the dependencies into a new
+   *  workspace, so it can build the moment it exists. Off means a bare
+   *  `git worktree add`, which is what this used to do. */
+  workspaceBootstrap: boolean;
+
   // ---- Crash reporting ----
   /** Opt-in, default off: when a panel crashes (or a native panic is found on
    *  the next launch), offer to send an anonymous report — message + stack,
@@ -355,6 +368,9 @@ const DEFAULTS: Settings = {
   remoteTunnelProvider: "cloudflare",
   browserEngine: "webview",
   previewCaptureMode: "visible",
+  workspaceBasePort: 5173,
+  workspacePorts: {},
+  workspaceBootstrap: true,
   crashReporting: false,
 };
 
