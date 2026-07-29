@@ -2690,12 +2690,22 @@ body,
 .tabs {
   display: flex;
   overflow-x: auto;
+  /* The strip scrolls sideways and only sideways. Left at the default, the
+     `auto` on x makes y `auto` too, and the row's 1px of vertical overflow was
+     enough for a trackpad flick to rubber-band the whole strip up and down and
+     spring back — a bar that visibly wobbles under the pointer. The bleed that
+     caused it now lives on this box's own margin (see .tabs-harbor), so there
+     is nothing left to clip here. */
+  overflow-y: hidden;
   flex: 1;
   /* No visible scrollbar on the tab row: this WebView renders the overlay
      scrollbar as a thick bar under the tabs. The active tab scrolls itself
      into view (see the follow effect) and shift/trackpad wheel still scroll,
      so scrollability isn't lost — just the ugly bar. */
   scrollbar-width: none;
+  /* A sideways flick that runs out of tabs stops here rather than handing the
+     leftover momentum to the pane below. */
+  overscroll-behavior: contain;
 }
 
 .tabs::-webkit-scrollbar {
@@ -2741,6 +2751,12 @@ body,
 .tabs-harbor {
   position: relative;
   align-items: flex-end;
+  /* The row hangs 1px into the pane bar's bottom border, so the docked blob can
+     paint over that hairline and read as fused with the editor below. The pull
+     is on this box rather than on the tabs and the blob inside it: content that
+     overhangs a scroll container is content the container will scroll to, and
+     one scrollable pixel is all a trackpad needs to bounce the strip. */
+  margin-bottom: -1px;
 }
 
 /* In harbor mode the tabs float above the gliding blob; the blob carries the
@@ -2750,7 +2766,6 @@ body,
   z-index: 1;
   height: 34px;
   padding: 0 12px;
-  margin-bottom: -1px;
   border-right: none;
   background: transparent;
   transition:
@@ -2779,7 +2794,7 @@ body,
   position: absolute;
   z-index: 0;
   left: 0;
-  bottom: -1px;
+  bottom: 0;
   height: 34px;
   background: var(--bg);
   border: 1px solid var(--border);

@@ -48,6 +48,7 @@ const conv = (over: Partial<ipc.PrConversation> = {}): ipc.PrConversation => ({
   viewer: "me",
   review_decision: "",
   mergeable: "MERGEABLE",
+  state: "OPEN",
   checks: "PASS",
   auto_merge: false,
   draft: false,

@@ -104,6 +104,24 @@ export const threadSuggestion = (t: ipc.PrThread): string | null => {
   return null;
 };
 
+/** The PR as it is now, rather than as the list saw it.
+ *
+ *  A PR tab holds the `PrInfo` row it was opened with and that row never
+ *  changes again — so a PR merged from the tab itself, or on github.com while
+ *  the tab sat open, went on saying "ready to land" over an armed Merge button
+ *  for as long as the tab stayed open. Two things know better: the conversation
+ *  refresh, which asks GitHub, and `landed` — what a merge or close performed
+ *  right here already answered, believed at once so the header turns over with
+ *  the toast rather than a round trip later. */
+export const livePr = (
+  pr: ipc.PrInfo,
+  conv?: ipc.PrConversation | null,
+  landed?: string | null,
+): ipc.PrInfo => {
+  const state = landed || conv?.state || pr.state;
+  return state === pr.state ? pr : { ...pr, state };
+};
+
 export type Role = "author" | "reviewer";
 
 export const roleFor = (
