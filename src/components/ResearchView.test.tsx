@@ -118,7 +118,11 @@ describe("ResearchView", () => {
         onImplement={onImplement}
       />,
     );
-    await screen.findByText("Researching");
+    // The status pill, specifically — the progress rail names the agent, not
+    // the status, so there is exactly one "Researching" on the page.
+    expect(await screen.findByText("Researching")).toHaveClass(
+      "research-status-researching",
+    );
     expect(screen.queryByRole("button", { name: "Implement this" })).toBeNull();
   });
 
@@ -130,6 +134,33 @@ describe("ResearchView", () => {
     // Acting on a replaced finding is the failure this prevents, so the notice
     // sits above the content rather than in the history at the bottom.
     expect(await screen.findByText(/Superseded by 0009-better/)).toBeInTheDocument();
+  });
+
+  it("shows the stage rail while a run is live, and nothing once it is not", async () => {
+    // The complaint this answers: an entry sat completely still for however
+    // long the research took.
+    mockCommands({
+      research_get: () => detail({ status: "researching", body: "# Title\n\n" }),
+      research_read_file: () => "orient\nsearch\n",
+    });
+    const { unmount } = render(
+      <ResearchView projectId="p1" researchId="0007-index-staleness" />,
+    );
+    // Reported milestones read as done, in the past tense.
+    expect(await screen.findByText("Got its bearings")).toBeInTheDocument();
+    expect(screen.getByText("Checked what's known")).toBeInTheDocument();
+    // The first unreported one is what it is doing now.
+    expect(screen.getByText("Digging into it")).toBeInTheDocument();
+    // And an empty write-up says so rather than looking broken.
+    expect(screen.getByText(/findings appear here/)).toBeInTheDocument();
+    unmount();
+
+    // A finished entry gets no rail — a progress bar on something that ended
+    // is the same lie the spinner told.
+    mockCommands({ research_get: () => detail({ status: "researched" }) });
+    render(<ResearchView projectId="p1" researchId="0007-index-staleness" />);
+    await screen.findByText("Researched");
+    expect(screen.queryByText("Digging into it")).toBeNull();
   });
 
   it("says so rather than rendering blank when the entry is gone", async () => {

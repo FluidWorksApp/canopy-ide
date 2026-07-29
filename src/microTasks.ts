@@ -49,6 +49,19 @@ export interface MicroTaskDef<P> {
   /** The job brief — a single line (PTY prompt contract, see preview.ts). The
    *  completion protocol is appended by the launcher, not here. */
   buildContext(payload: P, userQuery: string, env?: MicroTaskEnv): string;
+  /** What to call *this* run, as opposed to what to call the task.
+   *
+   *  `label` names a kind of job, which is the right thing on a button and the
+   *  wrong thing in a list of runs: three research runs and four PR reviews
+   *  render as "Research, Research, Research, Review PR, Review PR…", and the
+   *  history becomes a list you cannot pick out of. The payload always knows
+   *  which one this is — the question, the PR number — so the run names itself
+   *  from that. Derived rather than asked for: it has to exist at launch, when
+   *  there is no agent to ask yet, and it has to work on every CLI. What the
+   *  agent itself thought lands later, as the job_done summary under the row.
+   *
+   *  Falls back to `label` when a task has nothing distinguishing. */
+  runLabel?(payload: P, userQuery: string): string;
   /** For the Tasks panel's built-in list: where this task's button lives.
    *  Built-ins run from their surface, which is what supplies the payload. */
   surfaceNote?: string;
@@ -256,6 +269,7 @@ export const raisePrTask: MicroTaskDef<RaisePrPayload> = {
   id: "raise-pr",
   label: "Raise PR",
   icon: "⇈",
+  runLabel: (p) => `Raise PR · ${p.branch}`,
   placeholder: "Anything the PR should mention…",
   blurb: "Opens the PR, filling in whatever template the repo asks for.",
   effect: "posts",
@@ -308,6 +322,7 @@ export const reviewPrTask: MicroTaskDef<ReviewPrPayload> = {
   id: "review-pr",
   label: "Review PR",
   icon: "⌕",
+  runLabel: (p) => `Review #${p.pr.number} · ${p.pr.title}`,
   placeholder: "Anything to focus the review on…",
   blurb: "Reviews it and posts the verdict — approves, or lists what's blocking.",
   effect: "posts",
@@ -371,6 +386,7 @@ export const addressPrCommentsTask: MicroTaskDef<AddressPrCommentsPayload> = {
   id: "address-pr-comments",
   label: "Address comments",
   icon: "↩",
+  runLabel: (p) => `Comments on #${p.pr.number}`,
   steps: PR_ADDRESS_STEPS,
   progressPath: (p) => prProgressPath(p.repo, "address-pr-comments", p.pr.number),
   placeholder: "Which comments to focus on…",
@@ -457,6 +473,7 @@ export const prReviewTask: MicroTaskDef<ReviewPrPayload> = {
   id: "pr-review",
   label: "Review",
   icon: "◎",
+  runLabel: (p) => `Review #${p.pr.number} · ${p.pr.title}`,
   steps: PR_REVIEW_STEPS,
   progressPath: (p) => prProgressPath(p.repo, "pr-review", p.pr.number),
   placeholder: "Anything to focus on…",
@@ -521,6 +538,7 @@ export const fixCiTask: MicroTaskDef<ReviewPrPayload> = {
   id: "pr-fix-ci",
   label: "Fix CI",
   icon: "⚒",
+  runLabel: (p) => `Fix CI on #${p.pr.number}`,
   steps: PR_FIX_CI_STEPS,
   progressPath: (p) => prProgressPath(p.repo, "pr-fix-ci", p.pr.number),
   placeholder: "Which check to start with…",
@@ -563,6 +581,7 @@ export const resolveConflictsTask: MicroTaskDef<ReviewPrPayload> = {
   id: "pr-resolve-conflicts",
   label: "Resolve conflicts",
   icon: "⑂",
+  runLabel: (p) => `Conflicts on #${p.pr.number}`,
   steps: PR_RESOLVE_STEPS,
   progressPath: (p) => prProgressPath(p.repo, "pr-resolve-conflicts", p.pr.number),
   placeholder: "Anything to watch for in the merge…",
@@ -651,6 +670,7 @@ export const runItReviewTask: MicroTaskDef<ReviewPrPayload> = {
   id: "pr-run-it",
   label: "Run it & look",
   icon: "▶",
+  runLabel: (p) => `Run #${p.pr.number} · ${p.pr.title}`,
   steps: PR_RUN_IT_STEPS,
   progressPath: (p) => prProgressPath(p.repo, "pr-run-it", p.pr.number),
   placeholder: "Which screen or flow to exercise…",
@@ -688,6 +708,7 @@ export const followUpsTask: MicroTaskDef<ReviewPrPayload> = {
   id: "pr-follow-ups",
   label: "Spin off follow-ups",
   icon: "⤴",
+  runLabel: (p) => `Follow-ups on #${p.pr.number}`,
   steps: PR_FOLLOW_UPS_STEPS,
   progressPath: (p) => prProgressPath(p.repo, "pr-follow-ups", p.pr.number),
   placeholder: "Which ones to spin off…",
@@ -733,7 +754,32 @@ export interface ResearchRunPayload {
   entryDir: string;
   title: string;
   question: string;
+  /** The project the question is being asked *about*. Without this the agent
+   *  has a working directory and no idea what it is — and answers a product
+   *  question as general software design rather than against this codebase. */
+  projectName: string;
+  components: { label: string; path: string }[];
 }
+
+/** The stages a research run moves through, in order.
+ *
+ *  A research run is a black box for as long as it takes, and "an agent is on
+ *  it" says exactly as much at minute four as at second one. These are the four
+ *  points where a run visibly changes character, so the rail says something a
+ *  spinner cannot: whether it is still orienting, or already writing up. */
+export const RESEARCH_STEPS: readonly TaskStep[] = [
+  { id: "orient", doing: "Getting its bearings", done: "Got its bearings" },
+  { id: "search", doing: "Checking what's known", done: "Checked what's known" },
+  { id: "dig", doing: "Digging into it", done: "Dug into it" },
+  { id: "write", doing: "Writing up findings", done: "Wrote up findings" },
+  { id: "digest", doing: "Distilling the answer", done: "Distilled the answer" },
+];
+
+/** Where a research run reports its milestones. Inside the entry, because that
+ *  is the one directory the harness lets the session write to — and because a
+ *  run's progress belongs with the run. */
+export const researchProgressPath = (entryDir: string): string =>
+  `${entryDir}/progress.txt`;
 
 /** Investigate a question and leave the answer somewhere it can be found.
  *
@@ -754,15 +800,35 @@ export const researchTask: MicroTaskDef<ResearchRunPayload> = {
     ["CANOPY_RESEARCH", p.entryId],
     ["CANOPY_RESEARCH_DIR", p.entryDir],
   ],
+  steps: RESEARCH_STEPS,
+  progressPath: (p) => researchProgressPath(p.entryDir),
+  // The question, not "Research" — three runs otherwise render as three
+  // identical rows.
+  runLabel: (p) => adhocLabel(p.question),
   buildContext: (p, query) =>
     oneLine(
-      `Research this question and record what you find in Canopy: ${p.question}` +
+      // The project comes first, and deliberately. A question like "can we tier
+      // donations and tag GitHub users" is a general software-design question
+      // until you say which codebase is being asked about — and an agent given
+      // only a working directory will happily answer the general version.
+      `Research this for the ${p.projectName ? `"${p.projectName}" project` : "project you are in"}: ${p.question}` +
+        (p.components.length
+          ? ` The project is ${p.components
+              .map((c) => `${c.label} (${c.path})`)
+              .join(", ")}.`
+          : "") +
+        ` Before you answer anything, get your bearings in THIS codebase: call canopy_project` +
+        ` for the components, their run commands and what is already running, and read the` +
+        ` project's own agent instructions (CLAUDE.md / AGENTS.md) if it has any. The question` +
+        ` is about this project, not about the topic in general — ground what you say in files,` +
+        ` commands and output you actually looked at here, and mark anything that is a general` +
+        ` observation rather than something this codebase does.` +
         ` Your research entry already exists — id ${p.entryId} ("${p.title}").` +
         ` Use the canopy_research_write tool against it: action "append" for findings as you` +
         ` go, action "source" for anything long you want kept (file dumps, command output,` +
         ` fetched pages), and when you are done, action "digest" with the one paragraph` +
         ` another agent should read instead of the whole entry, plus a recommendation and` +
-        ` any open questions. Start by calling canopy_research with action "search" —` +
+        ` any open questions. Early on, call canopy_research with action "search" —` +
         ` someone may have answered this already, and if they have, say so and stop.` +
         ` Read the code, run things, look at logs; change no code — this is a read-only` +
         ` investigation. Do NOT write your findings into files: writes outside the entry` +
@@ -789,6 +855,7 @@ export const implementResearchTask: MicroTaskDef<ImplementResearchPayload> = {
   id: "implement-research",
   label: "Implement research",
   icon: "◈",
+  runLabel: (p) => `Implement · ${p.title}`,
   placeholder: "anything to steer the implementation…",
   blurb: "Build what a research entry recommended, and link the PR back to it.",
   effect: "pushes",
@@ -865,6 +932,20 @@ export const ADHOC_TASK_ID = "adhoc";
 /** A name for a task nobody named: the head of the brief, cut on a word so the
  *  tab title and the history row still say what the thing was. Saved tasks have
  *  a label because the user typed one; a one-off never gets asked. */
+/** The run label for a task, or the task's own name when it has nothing more
+ *  specific to say. One place, so no surface has to remember the fallback. */
+export function runLabelFor<P>(
+  def: MicroTaskDef<P>,
+  payload: P,
+  userQuery = "",
+): string {
+  const named = def.runLabel?.(payload, userQuery)?.trim();
+  return named || def.label;
+}
+
+/** Trim a sentence down to something that fits a row and still says what the
+ *  job was. Shared by ad-hoc briefs and by the tasks that name themselves from
+ *  a question, so a research run and a one-off read the same length. */
 export function adhocLabel(brief: string): string {
   // A brief pasted from something — an error, a URL, a log line — starts with
   // the thing, not with the ask. Taking the head verbatim then titled the row

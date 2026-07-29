@@ -75,6 +75,7 @@ import {
   microTaskProtocol,
   oneLine,
   progressBrief,
+  runLabelFor,
   raisePrTask,
   researchTask,
   reviewPrTask,
@@ -92,6 +93,7 @@ import {
   reconcileMerged,
   refresh as researchRefresh,
   setStatus as researchSetStatus,
+  settleIfRunning as researchSettleIfRunning,
   start as researchStart,
 } from "../../research";
 import { TaskHistoryView } from "../TaskHistoryView";
@@ -1907,6 +1909,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
         onNotice(`No agent CLI installed to run "${def.label}".`);
         return false;
       }
+      // What to call this particular run — the question, the PR number — rather
+      // than what to call the task. Resolved once so the history row, the
+      // running chip and the tab title cannot disagree about which run this is.
+      const runName = runLabelFor(def, payload, userQuery);
       // Logged at launch, not at completion: a task that is stopped, or whose
       // agent dies without ever reporting, still has to leave a trace — and the
       // brief is only in hand here. The protocol is stripped back off; it is the
@@ -1914,7 +1920,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const record = () =>
         recordTaskStart({
           taskId: def.id,
-          label: def.label,
+          label: runName,
           icon: def.icon,
           agent: cli.id,
           cwd: dir,
@@ -1930,6 +1936,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
       };
 
       const extraEnv: [string, string][] = def.env?.(payload) ?? [];
+      // Which research entry this run is for, taken from the env the task
+      // already declares rather than from a second channel — so the launcher
+      // stays generic and any future task that binds an entry gets this free.
+      const researchId = extraEnv.find(([k]) => k === "CANOPY_RESEARCH")?.[1];
 
       if (await canReportDone(agent)) {
         let pty: number;
@@ -1949,9 +1959,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
             ptyId: pty,
             runId: record(),
             taskId: def.id,
-            label: def.label,
+            label: runName,
             icon: def.icon,
             cwd: dir,
+            researchId,
             agent: cli.id,
             startedAt: Date.now(),
           }),
@@ -1959,7 +1970,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (start.typePrompt) setTimeout(() => seedPrompt(pty), 2500);
         // Said once per launch because the alternative is a click that appears
         // to do nothing: the work is real, it is just not in front of you.
-        onNotice(`“${def.label}” is running — watch it in Tasks.`);
+        onNotice(`“${runName}” is running — watch it in Tasks.`);
         return true;
       }
 
@@ -1972,7 +1983,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const id = addTerminal(
         dir,
         `${envPrefix} ${start.command}`,
-        `${def.label} · ${cli.name}`,
+        `${runName} · ${cli.name}`,
         def.icon,
       );
       if (!id) return false;
@@ -2034,6 +2045,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
             entryDir,
             title: entry.title,
             question: q,
+            // What the question is being asked *about*. Without it the agent
+            // has a working directory and no idea what project it is in, and
+            // answers a product question as general software design.
+            projectName: project.name,
+            components: componentsRef.current.map((c) => ({
+              label: c.label,
+              path: c.path,
+            })),
           },
           userQuery,
         );
@@ -2193,6 +2212,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (!run) return;
       updateMicroRuns((runs) => withoutRun(runs, ptyId));
       const sid = liveSessionByPtyRef.current.get(ptyId);
+      // Called off by the user: the entry is not researched, it is stuck, and
+      // saying so is more use than leaving it looking live forever.
+      if (run.researchId)
+        void researchSettleIfRunning(
+          project.id,
+          run.researchId,
+          "blocked",
+          "the run was stopped before it finished",
+        );
       void captureDetachedOutput(ptyId, run.runId).finally(() => {
         if (run.runId) endAbandonedRun(run.runId);
         void ipc.ptyKill(ptyId).finally(() => {
@@ -2247,6 +2275,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (!run) return;
         updateMicroRuns((runs) => withoutRun(runs, id));
         if (run.runId) endAbandonedRun(run.runId);
+        // The process died without reporting. job_done never arrived, so
+        // nothing else is going to move this entry — and an entry that says
+        // "researching" for a run that is not running is the failure the
+        // status column exists to prevent. Re-entering a state is a no-op, so
+        // a run that did finish and report loses nothing here.
+        if (run.researchId)
+          void researchSettleIfRunning(
+            project.id,
+            run.researchId,
+            "blocked",
+            "the run ended without reporting",
+          );
       })
       .then((u) => {
         un = u;
@@ -2523,6 +2563,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
         const ptyId = tab?.ptyId ?? detached?.ptyId;
         if (ptyId == null) return;
         const runId = tab?.micro?.runId ?? detached?.runId;
+        // A run bound to a research entry has to move it. Nothing else will:
+        // the agent may have finished without calling `status`, or — as
+        // happened with a sidecar older than the research module — may never
+        // have had the tool at all, and an entry that still says "researching"
+        // an hour after its run ended is the exact failure the status column
+        // exists to prevent. Re-entering a state is a no-op in the store, so
+        // an agent that did set it loses nothing here.
+        const bound = detached?.researchId;
+        if (bound) {
+          void researchSetStatus(
+            project.id,
+            bound,
+            a.status === "blocked" ? "blocked" : "researched",
+            "Canopy",
+            a.summary || "the run reported it was finished",
+          ).catch(() => {});
+        }
         // Files the session touched, when a hook wrote a digest for it — the
         // same pty→digest binding the Agents panel uses.
         const files = digestBySurface(

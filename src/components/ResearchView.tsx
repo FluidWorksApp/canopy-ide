@@ -25,6 +25,8 @@ import {
   setStatus,
 } from "../research";
 import { ago } from "./ProjectView/helpers";
+import { TaskProgress } from "./TaskProgress";
+import { RESEARCH_STEPS, stepsDone } from "../microTasks";
 
 interface ResearchViewProps {
   projectId: string;
@@ -52,6 +54,10 @@ export function ResearchView({
 }: ResearchViewProps) {
   const [entry, setEntry] = useState<ipc.ResearchDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** Milestones the run has reported. Polled from a file inside the entry
+   *  rather than pushed, so it works on every CLI with or without the MCP
+   *  bridge — the same arrangement the PR tabs use. */
+  const [done, setDone] = useState<string[]>([]);
   /** The one expanded capture, and its text. One at a time on purpose. */
   const [open, setOpen] = useState<string | null>(null);
   const [sourceText, setSourceText] = useState<string | null>(null);
@@ -84,6 +90,38 @@ export function ResearchView({
     window.addEventListener(RESEARCH_EVENT, load);
     return () => window.removeEventListener(RESEARCH_EVENT, load);
   }, [load]);
+
+  // While an agent is on it, the entry changes under the reader — findings are
+  // appended, sources land, the status moves. Nothing in the window tells us,
+  // so the page asks. Strictly gated on a live state: a poll that outlives what
+  // it was watching is a tab that never goes quiet.
+  const live = entry?.status === "researching" || entry?.status === "implementing";
+  useEffect(() => {
+    if (!live) return;
+    const tick = window.setInterval(load, 2000);
+    return () => window.clearInterval(tick);
+  }, [live, load]);
+
+  useEffect(() => {
+    if (!live) {
+      setDone([]);
+      return;
+    }
+    let alive = true;
+    const read = () =>
+      void ipc
+        .researchReadFile(projectId, researchId, "progress.txt")
+        .then((t) => alive && setDone(stepsDone(t, RESEARCH_STEPS)))
+        // No progress file yet is the normal first seconds of a run, not an
+        // error — the rail simply sits at nothing reported.
+        .catch(() => {});
+    read();
+    const tick = window.setInterval(read, 1500);
+    return () => {
+      alive = false;
+      window.clearInterval(tick);
+    };
+  }, [live, projectId, researchId]);
 
   const html = useMemo(
     () =>
@@ -149,6 +187,26 @@ export function ResearchView({
         </div>
       </div>
 
+      {/* What the run is doing, while it is doing it. A research entry used to
+          sit completely still for however long it took — the same complaint the
+          micro-task rail was built to answer, so it is the same rail. */}
+      {live && (
+        <TaskProgress
+          steps={RESEARCH_STEPS}
+          done={done}
+          active
+          // Not the status word again — the pill above already says that, and
+          // a rail that repeats it spends its one line of prose on nothing.
+          // The steps carry the "what"; this carries the "who".
+          title={
+            entry.status === "implementing"
+              ? `${entry.agent || "An agent"} is building this`
+              : `${entry.agent || "An agent"} is on it`
+          }
+          elapsed={ago(entry.updated_at)}
+        />
+      )}
+
       {/* A superseded entry warns before it is read, not after. Acting on a
           finding someone has already replaced is the failure this prevents. */}
       {entry.superseded_by && (
@@ -191,10 +249,19 @@ export function ResearchView({
 
         <section className="research-section">
           <h3>Write-up</h3>
-          <div
-            className="research-md markdown-body"
-            dangerouslySetInnerHTML={{ __html: html }}
-          />
+          {/* An empty write-up mid-run is the normal first minutes, not an
+              absence — saying so beats a blank panel that reads as broken. */}
+          {live && !entry.body.replace(/^#.*$/m, "").trim() ? (
+            <p className="research-pending">
+              Nothing written up yet — findings appear here as the agent records
+              them.
+            </p>
+          ) : (
+            <div
+              className="research-md markdown-body"
+              dangerouslySetInnerHTML={{ __html: html }}
+            />
+          )}
         </section>
 
         {/* Named, sized, and opened one at a time — the manifest, not the

@@ -14546,3 +14546,19 @@ a.btn-mini {
   background: var(--bg-alt);
   border-top: 1px solid var(--border);
 }
+
+/* The progress rail sits in the detail header, above the scrolling body — a
+   rail you lose the moment you start reading is a rail for the thirty seconds
+   you weren't going to look away anyway. */
+.research-view .task-progress {
+  padding: 10px 18px 12px;
+  background: var(--bg-alt);
+  border-bottom: 1px solid var(--border);
+}
+
+.research-pending {
+  margin: 0;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--text-dim);
+}
