@@ -344,6 +344,21 @@ export function TasksIcon({ size = 18, className }: IconProps) {
   );
 }
 
+/** MCP tools: a plug going into a socket. The rail already has a wrench
+ *  (Servers) and a bot (Agents), so the shape has to say "something external
+ *  connected to the agents" rather than "a tool" in the generic sense — which
+ *  at 22px is the difference between this and a second wrench. */
+export function PlugIcon({ size = 18, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M9 3v5" />
+      <path d="M15 3v5" />
+      <path d="M6 8h12v3a6 6 0 0 1-6 6 6 6 0 0 1-6-6z" />
+      <path d="M12 17v4" />
+    </svg>
+  );
+}
+
 /** Statistics: a bar chart. Reads as "totals & breakdowns" at rail size. */
 export function StatsIcon({ size = 18, className }: IconProps) {
   return (

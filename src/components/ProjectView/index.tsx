@@ -173,6 +173,7 @@ import {
 import { PrView } from "../PrView";
 import { ErrorBoundary } from "../ErrorBoundary";
 import { TeamPanel } from "../TeamPanel";
+import { McpToolsPanel } from "../McpToolsPanel";
 import { ChatView } from "../ChatView";
 import { Coachmark } from "../Coachmark";
 import { shouldShowTip, markTipSeen, type CoachTip } from "../../coachmarks";
@@ -5983,6 +5984,12 @@ export const ProjectView = memo(function ProjectView({
           onNotice={onNotice}
           onOpenInstructions={openInstructions}
           installed={installed}
+        />
+      ))}
+      {sidePane("tools", () => (
+        <McpToolsPanel
+          rootsKey={rootsKey}
+          visible={sideTab === "tools" && visible && sideOpen}
         />
       ))}
     </div>

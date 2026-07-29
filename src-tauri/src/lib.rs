@@ -16,6 +16,7 @@ mod git;
 mod instructions;
 mod layering;
 mod lsp;
+mod mcp;
 mod portal;
 mod preview;
 mod prwatch;
@@ -494,6 +495,7 @@ pub fn run() {
             agents::agent_hooks_installed,
             agents::agent_integration_health,
             agents::agent_health_report,
+            mcp::mcp_servers,
             agents::claude_session_stats,
             agents::agent_usage,
             agents::hook_bridge_path,

@@ -728,6 +728,40 @@ export interface HealthReport {
 }
 export const agentIntegrationHealth = () =>
   invoke<IntegrationHealth[]>("agent_integration_health");
+
+/** One config file's claim on an MCP server. A server configured in four CLIs
+ *  arrives as one McpServer carrying four of these. */
+export interface McpSource {
+  agent: string;
+  /** CLI plus scope, as the panel shows it: "Claude Code (project)". */
+  label: string;
+  /** The name it has in *this* config — CLIs rarely agree. */
+  name: string;
+  config_path: string;
+  scope: "global" | "project";
+  /** "pending" is a `.mcp.json` server nobody has approved or rejected yet. */
+  status: "enabled" | "disabled" | "pending";
+}
+/** One MCP server, folded across every CLI that configures it. Credentials are
+ *  stripped in Rust: `args` is redacted and `env_keys` holds names only, so
+ *  there is no value here to leak. */
+export interface McpServer {
+  key: string;
+  name: string;
+  transport: "stdio" | "http" | "sse";
+  command: string | null;
+  args: string[];
+  url: string | null;
+  env_keys: string[];
+  sources: McpSource[];
+  enabled: boolean;
+}
+/** Every MCP server configured on this machine. Reads config files only — no
+ *  server is started or connected to, so this is cheap to call on panel open.
+ *  Pass the project's component roots to include their `.mcp.json` and the CLIs'
+ *  per-project registries; pass none for the user-scope answer alone. */
+export const mcpServers = (projectDirs: string[] = []) =>
+  invoke<McpServer[]>("mcp_servers", { projectDirs });
 /** The launch's integration report if the pass has already finished. It runs
  *  before the webview does, so the event below can fire with nobody listening —
  *  ask for this on mount and take whichever arrives first. */

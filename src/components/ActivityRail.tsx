@@ -5,6 +5,7 @@ import {
   FilesIcon,
   GitBranchIcon,
   IssueIcon,
+  PlugIcon,
   PullRequestIcon,
   ServersIcon,
   SettingsIcon,
@@ -57,6 +58,14 @@ const RAIL_GROUPS: { name: string; tabs: RailTab[] }[] = [
       { key: "tasks", Icon: TasksIcon, title: "Tasks — one-shot agent jobs" },
       { key: "agents", Icon: AgentsIcon, title: "Agents" },
       { key: "team", Icon: TeamIcon, title: "Team — relay, chat, notifications" },
+      // In the Agents group rather than a group of its own: MCP servers are
+      // reach *for the agents*, and a fourth boundary here would divide the
+      // rail into more groups than it has meanings.
+      {
+        key: "tools",
+        Icon: PlugIcon,
+        title: "Tools — MCP servers your agents can reach, from every CLI",
+      },
     ],
   },
 ];
