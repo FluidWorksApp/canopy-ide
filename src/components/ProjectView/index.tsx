@@ -19,6 +19,7 @@ import * as ipc from "../../ipc";
 import { getSettings, SETTINGS_CHANGE_EVENT } from "../../settings";
 import { modelFor, monaco, languageForPath } from "../../monaco-setup";
 import { getCaret, subscribeCaret } from "../../editorState";
+import { subscribe as prWatchSubscribe } from "../../prWatchStore";
 import { GuestSession, OwnerSession } from "../../collab";
 import { CollabView } from "../CollabView";
 import { SharedProjectView } from "../SharedProjectView";
@@ -70,16 +71,29 @@ import {
   adhocLabel,
   adhocTaskDef,
   customTaskDef,
+  implementResearchTask,
   microTaskProtocol,
   oneLine,
   progressBrief,
   raisePrTask,
+  researchTask,
   reviewPrTask,
   type CustomMicroTask,
   type MicroTaskDef,
   type MicroTaskEnv,
 } from "../../microTasks";
 import { TasksPanel, type RunningMicroTask } from "../TasksPanel";
+import { ResearchPanel } from "../ResearchPanel";
+import { ResearchView } from "../ResearchView";
+import {
+  cached as researchCached,
+  implementContext,
+  link as researchLinkEntry,
+  reconcileMerged,
+  refresh as researchRefresh,
+  setStatus as researchSetStatus,
+  start as researchStart,
+} from "../../research";
 import { TaskHistoryView } from "../TaskHistoryView";
 import { InstructionsView } from "../InstructionsView";
 import {
@@ -199,6 +213,7 @@ import {
   type TermSubTab,
   type FileSubTab,
   type TicketSubTab,
+  type ResearchSubTab,
   type BranchSubTab,
   type CommitSubTab,
   type PrSubTab,
@@ -223,6 +238,7 @@ export type {
   TermSubTab,
   FileSubTab,
   TicketSubTab,
+  ResearchSubTab,
   BranchSubTab,
   CommitSubTab,
   PrSubTab,
@@ -788,6 +804,28 @@ const ProjectViewBody = memo(function ProjectViewBody({
     setTabs((prev) => [...prev, { id, type: "pr", repo, pr }]);
     setActiveTabId(id);
   }, []);
+
+  /** Open a PR we only know the number of — what a research entry's links
+   *  carry. Native tab when the PR is still open (the list the watcher already
+   *  has), and the browser when it is not: a merged PR has no native view here,
+   *  and a link that does nothing is worse than one that leaves the app. */
+  const openPrByNumber = useCallback(
+    async (repo: string, number: number, url?: string) => {
+      const pr = await ipc
+        .ghPrList(repo)
+        .then((list) => list.find((p) => p.number === number))
+        .catch(() => undefined);
+      if (pr) {
+        openPr(repo, pr);
+        return;
+      }
+      if (url)
+        void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
+          openUrl(url),
+        );
+    },
+    [openPr],
+  );
 
   /** Open a code-review request that arrived over the relay — the diff came
    *  with it, so there is nothing to fetch. */
@@ -1675,6 +1713,29 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [patchTabRaw, ticketRepo],
   );
 
+  /** Open a research entry as a tab. One tab per entry: the view re-reads the
+   *  store on every change, so a second tab on the same id would be the same
+   *  thing twice rather than two views of anything. */
+  const openResearch = useCallback(
+    (researchId: string, title: string) => {
+      const existing = tabsRef.current.find(
+        (t): t is ResearchSubTab =>
+          t.type === "research" && t.researchId === researchId,
+      );
+      if (existing) {
+        if (title && title !== existing.title) {
+          patchTabRaw(existing.id, { title } as Partial<SubTab>);
+        }
+        setActiveTabId(existing.id);
+        return;
+      }
+      const id = tabId();
+      setTabs((prev) => [...prev, { id, type: "research", researchId, title }]);
+      setActiveTabId(id);
+    },
+    [patchTabRaw],
+  );
+
   /** Hand ticket context to an agent terminal that is already running. */
   const sendTicketToAgent = useCallback((target: AgentTarget, text: string) => {
     // Same two-write pattern as the model switcher: text, then Enter a beat
@@ -1809,15 +1870,29 @@ const ProjectViewBody = memo(function ProjectViewBody({
       let dir = def.cwd(payload);
       let env: MicroTaskEnv | undefined;
       if (def.isolation) {
-        const { repo, pr } = def.isolation.target(payload);
+        // Both isolation kinds want the same thing — this work, in a workspace
+        // of its own — and differ only in what they start from: a PR's head, or
+        // a branch that does not exist yet.
+        const iso = def.isolation;
+        const { repo } = iso.target(payload);
+        const target =
+          iso.kind === "pr-worktree"
+            ? ({
+                kind: "pr-workspace",
+                number: iso.target(payload).pr.number,
+                branch: iso.target(payload).pr.branch,
+              } as const)
+            : ({
+                kind: "workspace",
+                branch: iso.target(payload).branch,
+                create: true,
+              } as const);
         // `because` matters here: a task can arm itself with no click at all
         // (the review loop), so a dialog appearing out of nowhere has to say
         // what wanted it.
-        const r = await switchTo(
-          repo,
-          { kind: "pr-workspace", number: pr.number, branch: pr.branch },
-          { because: `the "${def.label}" task` },
-        );
+        const r = await switchTo(repo, target, {
+          because: `the "${def.label}" task`,
+        });
         // Not settled means the question was asked and answered on screen —
         // and the caller still needs the `false` to clear its pending pill.
         if (r.kind !== "settled") return false;
@@ -1854,13 +1929,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
         setTimeout(() => void ipc.ptyWrite(pty, "\r"), 250);
       };
 
+      const extraEnv: [string, string][] = def.env?.(payload) ?? [];
+
       if (await canReportDone(agent)) {
         let pty: number;
         try {
           const res = await ipc.ptySpawnDetached({
             cwd: dir,
             command: start.command,
-            env: [["CANOPY_MICRO_TASK", "1"]],
+            env: [["CANOPY_MICRO_TASK", "1"], ...extraEnv],
           });
           pty = res.id;
         } catch (err) {
@@ -1886,9 +1963,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
         return true;
       }
 
+      // The tab path prefixes the same variables onto the command line, since
+      // there is no env channel here — single-quoted so a value with a space
+      // (an entry directory under a path with one) survives the shell.
+      const envPrefix = [["CANOPY_MICRO_TASK", "1"] as [string, string], ...extraEnv]
+        .map(([k, v]) => `${k}='${v.replace(/'/g, `'\\''`)}'`)
+        .join(" ");
       const id = addTerminal(
         dir,
-        `CANOPY_MICRO_TASK=1 ${start.command}`,
+        `${envPrefix} ${start.command}`,
         `${def.label} · ${cli.name}`,
         def.icon,
       );
@@ -1916,6 +1999,88 @@ const ProjectViewBody = memo(function ProjectViewBody({
       updateMicroRuns,
       switchTo,
     ],
+  );
+
+  /** Ask a question and put an agent on it.
+   *
+   *  The entry is created *before* the agent starts, not after it reports, for
+   *  two reasons: the session has to be told which entry it is bound to (that
+   *  binding is the harness), and a run that dies halfway still leaves the
+   *  question and whatever it managed to record, which is the whole complaint
+   *  this module answers. */
+  const startResearch = useCallback(
+    async (question: string, userQuery = "") => {
+      const q = question.trim();
+      if (!q) return;
+      // The title is the question, shortened — an entry is cited by number
+      // anyway, and asking the user to name it before it exists is a form to
+      // fill in before any work has happened.
+      const title = q.length > 80 ? `${q.slice(0, 77).trimEnd()}…` : q;
+      try {
+        const entry = await researchStart({
+          projectId: project.id,
+          projectName: project.name,
+          roots,
+          title,
+          question: q,
+          cwd: roots[0],
+        });
+        const entryDir = await ipc.researchDir(project.id, entry.id);
+        const ok = await startMicroTask(
+          researchTask,
+          {
+            dir: roots[0] ?? "",
+            entryId: entry.id,
+            entryDir,
+            title: entry.title,
+            question: q,
+          },
+          userQuery,
+        );
+        // The agent never started, so nothing will ever move this entry off
+        // "researching". Say so on the entry rather than leaving a row that
+        // looks live forever.
+        if (!ok) {
+          await researchSetStatus(project.id, entry.id, "blocked", "Canopy",
+            "the agent never started");
+        }
+        openResearch(entry.id, entry.title);
+      } catch (err) {
+        onNotice(`Couldn't start research: ${String(err)}`, "error");
+      }
+    },
+    [project.id, project.name, roots, startMicroTask, openResearch, onNotice],
+  );
+
+  /** Hand a finished finding to an agent that will build it, on a branch of its
+   *  own. Flips the entry to `implementing` — the PR the agent links is what
+   *  later carries it the rest of the way. */
+  const implementResearch = useCallback(
+    async (entry: ipc.ResearchDetail, userQuery = "") => {
+      const repo = roots[0];
+      if (!repo) return;
+      const branch = `research/${entry.id}`;
+      try {
+        const ok = await startMicroTask(
+          implementResearchTask,
+          {
+            dir: repo,
+            repo,
+            branch,
+            entryId: entry.id,
+            title: entry.title,
+            brief: implementContext(entry),
+          },
+          userQuery,
+        );
+        if (!ok) return;
+        await researchSetStatus(project.id, entry.id, "implementing", "you");
+        await researchLinkEntry({ projectId: project.id, id: entry.id, branch });
+      } catch (err) {
+        onNotice(`Couldn't start implementation: ${String(err)}`, "error");
+      }
+    },
+    [roots, startMicroTask, project.id, onNotice],
   );
 
   /** Run a brief that was composed on the spot (a diff surface's "ask about
@@ -2996,6 +3161,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
     };
     window.addEventListener(HIBERNATE_EVENT, onHibernate);
     return () => window.removeEventListener(HIBERNATE_EVENT, onHibernate);
+  }, [project.id]);
+
+  // Warm the research cache once per project, so ⌘K can offer "this has
+  // already been looked into" on the first keystroke rather than after a round
+  // trip. One directory read of a few dozen small files.
+  //
+  // Then close the loop: any entry whose linked PRs have merged becomes
+  // "implemented". Driven off the PR watcher's ticks rather than a timer of its
+  // own — it is the thing that already knows when PR state moved — and it costs
+  // one `gh pr view` per linked PR of an entry that is actually mid-flight,
+  // which in practice is none most of the time.
+  useEffect(() => {
+    void researchRefresh(project.id).then(() => reconcileMerged(project.id));
+    return prWatchSubscribe(() => {
+      void reconcileMerged(project.id);
+    });
   }, [project.id]);
 
   /** Rebuild one snapshotted tab and answer with its id, so the tab that was in
@@ -4721,6 +4902,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
           }, 120);
           return;
         }
+        // The sibling of run-task: same typed sentence, sent off to find
+        // something out rather than to change something. No page context is
+        // captured — a research question is about the codebase, not about
+        // whatever happens to be on screen.
+        case "start-research":
+          void startResearch(action.question);
+          return;
+        case "open-research":
+          openResearch(
+            action.id,
+            researchCached(project.id).find((e) => e.id === action.id)?.title ??
+              action.id,
+          );
+          return;
         case "new-shell":
           onNewShell();
           return;
@@ -4798,6 +4993,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
       openTaskHistory,
       runAdhocTask,
       switchTo,
+      startResearch,
+      openResearch,
+      project.id,
     ],
   );
 
@@ -4919,6 +5117,24 @@ const ProjectViewBody = memo(function ProjectViewBody({
             onSendToAgent={(target) =>
               sendTicketToAgent(target, ticketContext(tab.ticket))
             }
+          />
+        );
+      case "research":
+        return (
+          <ResearchView
+            projectId={project.id}
+            researchId={tab.researchId}
+            onImplement={(entry) => void implementResearch(entry)}
+            onContinue={(entry) =>
+              void startResearch(
+                entry.question || entry.title,
+                `This continues research ${entry.id}; read it first with canopy_research get.`,
+              )
+            }
+            onOpenPr={(pr) => void openPrByNumber(pr.repo, pr.number, pr.url)}
+            onOpenFile={(path) => void openFile(path)}
+            onClosed={() => closeTab(tab.id)}
+            onNotice={onNotice}
           />
         );
       case "pr":
@@ -6165,6 +6381,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
           custom={project.customTasks ?? []}
           onSaveCustom={onSaveCustomTasks}
           projectId={project.id}
+        />
+      ))}
+      {sidePane("research", () => (
+        <ResearchPanel
+          projectId={project.id}
+          onOpen={(e) => openResearch(e.id, e.title)}
+          onStart={(q) => void startResearch(q)}
+          canStart={AGENT_CLIS.some((c) => getInstalled()[c.bin])}
         />
       ))}
       {sidePane("agents", () => (

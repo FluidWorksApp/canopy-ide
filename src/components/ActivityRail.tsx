@@ -7,6 +7,7 @@ import {
   IssueIcon,
   PlugIcon,
   PullRequestIcon,
+  ResearchIcon,
   ServersIcon,
   SettingsIcon,
   SidebarIcon,
@@ -56,6 +57,13 @@ const RAIL_GROUPS: { name: string; tabs: RailTab[] }[] = [
     name: "Agents",
     tabs: [
       { key: "tasks", Icon: TasksIcon, title: "Tasks — one-shot agent jobs" },
+      // With the agents rather than with the issues: research is what agents
+      // produce, and its list is a worklist of theirs, not a queue of yours.
+      {
+        key: "research",
+        Icon: ResearchIcon,
+        title: "Research — what's been investigated, and what shipped from it",
+      },
       { key: "agents", Icon: AgentsIcon, title: "Agents" },
       { key: "team", Icon: TeamIcon, title: "Team — relay, chat, notifications" },
       // In the Agents group rather than a group of its own: MCP servers are

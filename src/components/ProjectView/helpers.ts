@@ -14,6 +14,7 @@ export type SideTab =
   | "prs"
   | "trackers"
   | "tasks"
+  | "research"
   | "agents"
   | "team"
   | "tools";
@@ -66,6 +67,18 @@ export interface TicketSubTab {
   type: "ticket";
   ticket: ipc.TicketInfo;
   source: string;
+}
+
+/** One research entry, open. Holds only the id: the entry changes while it is
+ *  on screen (an agent appends to it, the watcher merges its PR) and the view
+ *  re-reads the store on every research event, so a copy on the tab would be
+ *  a second version of the truth going stale in the background. */
+export interface ResearchSubTab {
+  id: string;
+  type: "research";
+  researchId: string;
+  /** Last known title, so the tab strip has a label before the first read. */
+  title: string;
 }
 
 export interface BranchSubTab {
@@ -211,6 +224,7 @@ export type SubTab =
   | FileSubTab
   | PrSubTab
   | TicketSubTab
+  | ResearchSubTab
   | CommitSubTab
   | BranchSubTab
   | ReviewSubTab
@@ -300,6 +314,10 @@ export function describeTab(tab: SubTab | undefined) {
       return { kind: "device", label: tab.serial || "Android device" };
     case "ticket":
       return { kind: "ticket", label: tab.ticket.title };
+    case "research":
+      // The id, not just the title: an agent told the user is looking at
+      // research can call canopy_research get on it.
+      return { kind: "research", label: tab.title, researchId: tab.researchId };
     case "pr":
       return { kind: "pr", label: `#${tab.pr.number} ${tab.pr.title}` };
     case "commit":
@@ -347,6 +365,10 @@ export function tabDisplayLabel(t: SubTab): string {
       return `#${t.pr.number} ${t.pr.title}`;
     case "ticket":
       return `${t.ticket.id} ${t.ticket.title}`;
+    case "research":
+      // Number first, the way the entry is cited everywhere else (a PR body, a
+      // supersedes link), so the tab and the reference read the same.
+      return `${t.researchId.split("-")[0]} ${t.title}`;
     case "commit":
       return `${t.short} ${t.subject}`;
     case "branch":

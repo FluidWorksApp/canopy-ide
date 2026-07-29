@@ -70,8 +70,9 @@ describe("SpotSearch", () => {
   it("navigates with arrows and opens a tab row", async () => {
     const { onAction } = open();
     await userEvent.keyboard("dev ser");
-    // Row 0 is the pinned run-task action; the tab match is next.
-    await userEvent.keyboard("{ArrowDown}{Enter}");
+    // Rows 0 and 1 are the two pinned actions a typed query always offers —
+    // run it as a task, or research it — so the tab match is the third.
+    await userEvent.keyboard("{ArrowDown}{ArrowDown}{Enter}");
     expect(onAction).toHaveBeenCalledWith({ type: "focus-tab", tabId: "t1" });
   });
 
@@ -155,7 +156,8 @@ describe("SpotSearch", () => {
     });
     await userEvent.keyboard("relay handshake");
     expect(screen.getByText("Agent Sessions")).toBeInTheDocument();
-    await userEvent.keyboard("{ArrowDown}{Enter}");
+    // Past both pinned action rows to the session itself.
+    await userEvent.keyboard("{ArrowDown}{ArrowDown}{Enter}");
     expect(onAction).toHaveBeenCalledWith(
       expect.objectContaining({
         type: "open-session",

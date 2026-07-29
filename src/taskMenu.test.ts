@@ -24,10 +24,13 @@ describe("taskGroups", () => {
   it("lists every built-in, even the ones this surface can't run", () => {
     const { builtIn } = taskGroups({ onRunSaved: () => {} });
     expect(builtIn.map((c) => c.id)).toEqual(MICRO_TASKS.map((t) => t.id));
-    // Unrunnable here, but the row says where it does run rather than vanishing.
+    // Unrunnable here, but the row says where it does run rather than
+    // vanishing. The phrasing varies with the surface — "on a branch tab",
+    // "from the Research panel" — so what is checked is that there is a
+    // where at all, not one particular preposition.
     for (const c of builtIn) {
       expect(c.run).toBeUndefined();
-      expect(c.note).toContain("runs on a");
+      expect(c.note, `${c.id} does not say where it runs`).toMatch(/^runs \S+ /);
     }
   });
 

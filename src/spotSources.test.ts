@@ -62,9 +62,27 @@ describe("actionRows", () => {
     expect(Math.min(...rows.map((r) => r.score))).toBe(rows[0].score);
   });
 
-  it("offers no run-task row with nothing typed", () => {
+  it("offers what you typed as either a task or a research run", () => {
+    // The two things a typed sentence can be sent off as, side by side, so the
+    // choice is one keystroke rather than a different surface. They are
+    // genuinely different jobs — one changes code and disappears, the other
+    // answers a question and leaves the answer behind.
+    const rows = actionRows("why is startup slow", ctx());
+    const kinds = rows.slice(0, 2).map((r) => r.action.type);
+    expect(kinds).toEqual(["run-task", "start-research"]);
+    expect(rows[1].action).toEqual({
+      type: "start-research",
+      question: "why is startup slow",
+    });
+    // Both outrank every launcher entry, and the task keeps the top spot.
+    expect(rows[0].score).toBeLessThan(rows[1].score);
+    expect(rows[1].score).toBeLessThan(Math.min(...rows.slice(2).map((r) => r.score)));
+  });
+
+  it("offers neither with nothing typed", () => {
     const rows = actionRows("", ctx());
     expect(rows.some((r) => r.action.type === "run-task")).toBe(false);
+    expect(rows.some((r) => r.action.type === "start-research")).toBe(false);
     expect(rows.some((r) => r.action.type === "new-shell")).toBe(true);
   });
 
@@ -281,6 +299,21 @@ describe("the source registry", () => {
     // registry and the palette stopped being extensible in that spot.
     expect(spotSources().map((s) => s.id)).toContain("actions");
     expect(spotSources().every((s) => typeof s.rows === "function")).toBe(true);
+  });
+
+  it("carries research, and answers instantly so it can pre-empt a duplicate", () => {
+    // The point of research in ⌘K is to catch someone before they go and find
+    // out something already known. A debounced source would land after they
+    // have started typing the question into a task — instant is the whole
+    // value, and the cache research.ts keeps is what makes it affordable.
+    const research = spotSources().find((s) => s.id === "research");
+    expect(research?.group).toBe("Research");
+    expect(research?.timing).toBe("instant");
+    expect(spotGroupOrder()).toContain("Research");
+    // Above tickets and PRs: "we already looked into this" outranks the work
+    // items when both match.
+    const order = spotGroupOrder();
+    expect(order.indexOf("Research")).toBeLessThan(order.indexOf("Tickets"));
   });
 
   it("carries the branch source, debounced like the other git-shaped ones", () => {

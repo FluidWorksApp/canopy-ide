@@ -1,0 +1,1587 @@
+// The research store: Canopy's first-class record of what was investigated,
+// what it concluded, and what shipped because of it.
+//
+// Agents research constantly and, until this module, wrote the results
+// wherever they happened to be standing — a scratch directory, the repo root, a
+// worktree that got removed an hour later. Three things went wrong every time:
+// the finding was lost, nothing distinguished the one-paragraph conclusion from
+// the 40KB of raw capture behind it (so the next agent read all of it), and no
+// one could say whether a finding had been acted on.
+//
+// So this is a harness, not a folder. Three rules make it one:
+//
+//   1. One place. `~/.canopy/research/<project>/<nnnn>-<slug>/`, outside any
+//      repo — several agents share one checkout here (and switch its branches
+//      under each other), and research that lives in the tree is research that
+//      merge-conflicts or disappears with a worktree. Rust owns the directory
+//      the way spot.rs owns its index: one gate, no path from outside it.
+//
+//   2. Enforced tiers. A `digest` of at most DIGEST_MAX characters is what a
+//      list returns; the body is fetched only by id; raw captures live in
+//      `sources/` and are never returned in bulk, only named. Over-cap writes
+//      are *rejected*, with the fix in the message. An agent cannot produce an
+//      entry that floods the next agent's context — not because it was asked
+//      not to, but because the store will not store it.
+//
+//   3. A state machine. Every transition is checked here, so "researched" means
+//      the same thing to an agent six months later as it did to the one that
+//      wrote it, and `implemented` is reached by linking a PR that merged
+//      rather than by an agent asserting it.
+//
+// Everything on disk is plain JSON and markdown: readable without Canopy,
+// greppable, and recoverable by hand. `meta.json` is the source of truth;
+// the SpotSearch index over it (spot.rs, kind = "research") is derived and
+// rebuildable, and no code here reads from it.
+
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use tauri::State;
+
+/// Serializes every write. Several agents in one project routinely hold a
+/// research entry open at once — one advancing status, another linking a PR —
+/// and a read-modify-write of meta.json is exactly the shape that loses one of
+/// them. Cheap: these are millisecond file operations, not held work.
+#[derive(Default)]
+pub struct ResearchStore(Mutex<()>);
+
+// ---- the caps that make tier 1 a tier ------------------------------------
+//
+// Chosen against what they cost a reader, not what feels tidy: a list of 20
+// entries is the realistic ceiling of a project's open research, and 20 digests
+// is ~8KB — affordable in any agent's window. The body is a document one agent
+// reads deliberately. A source is a capture nothing reads whole.
+
+/// The one paragraph every list row carries. One paragraph is the point.
+const DIGEST_MAX: usize = 400;
+/// What to do about it — returned by `get`, not by `list`.
+const RECOMMENDATION_MAX: usize = 600;
+/// `research.md`. Past this the material is a source, not a finding.
+const BODY_MAX: usize = 24 * 1024;
+/// One raw capture. Generous — this is where the long material is *supposed*
+/// to go — but not unbounded, or the store becomes the dumping ground it exists
+/// to replace.
+const SOURCE_MAX: usize = 512 * 1024;
+/// Sources per entry. An entry needing more than this is two entries.
+const MAX_SOURCES: usize = 64;
+const TITLE_MAX: usize = 120;
+const QUESTION_MAX: usize = 600;
+/// Open questions per entry, each capped at DIGEST_MAX.
+const MAX_OPEN_QUESTIONS: usize = 12;
+/// Default and ceiling for `list`. The ceiling matters: an agent that asks for
+/// everything gets the recent everything, not a context flood.
+const LIST_DEFAULT: usize = 20;
+const LIST_MAX: usize = 50;
+
+// ---- status ---------------------------------------------------------------
+
+/// Where an entry is in its life. The two that matter most are the two nothing
+/// else in the IDE could tell you: `researched` (there is a finding, nobody has
+/// acted on it) and `implemented` (a PR carrying it merged).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Status {
+    /// The question is written down; nobody has started.
+    Open,
+    Researching,
+    /// There is a finding. This is the state that used to be invisible.
+    Researched,
+    Implementing,
+    Implemented,
+    /// Stuck and waiting on a human — reachable from either working state,
+    /// and not an ending.
+    Blocked,
+    /// A later entry replaced this one. Kept, because "we looked at this and
+    /// changed our minds" is worth more than a deletion.
+    Superseded,
+    Archived,
+}
+
+impl Status {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Status::Open => "open",
+            Status::Researching => "researching",
+            Status::Researched => "researched",
+            Status::Implementing => "implementing",
+            Status::Implemented => "implemented",
+            Status::Blocked => "blocked",
+            Status::Superseded => "superseded",
+            Status::Archived => "archived",
+        }
+    }
+
+    fn parse(s: &str) -> Result<Status, String> {
+        Ok(match s {
+            "open" => Status::Open,
+            "researching" => Status::Researching,
+            "researched" => Status::Researched,
+            "implementing" => Status::Implementing,
+            "implemented" => Status::Implemented,
+            "blocked" => Status::Blocked,
+            "superseded" => Status::Superseded,
+            "archived" => Status::Archived,
+            other => {
+                return Err(format!(
+                    "unknown status \"{other}\" — one of: open, researching, researched, \
+                     implementing, implemented, blocked, superseded, archived"
+                ))
+            }
+        })
+    }
+
+    /// Where this state may go next. Archiving is always allowed (it is how you
+    /// put something down), and a state may always be re-entered so a repeated
+    /// call is a no-op rather than an error — an agent retrying after a dropped
+    /// reply should not get a failure for the state it already reached.
+    fn next(self) -> &'static [Status] {
+        use Status::*;
+        match self {
+            Open => &[Researching, Archived],
+            Researching => &[Researched, Blocked, Archived],
+            // Blocked remembers nothing about which side it came from, so it
+            // can resume into either. That is deliberate: a human unblocking an
+            // entry knows which it is, and encoding it here would mean a second
+            // state to keep honest for no gain.
+            Blocked => &[Researching, Researched, Implementing, Archived],
+            // Reopening is normal — a finding that did not survive contact with
+            // the code goes back to researching rather than being deleted.
+            Researched => &[Implementing, Researching, Blocked, Superseded, Archived],
+            Implementing => &[Implemented, Researched, Blocked, Archived],
+            Implemented => &[Superseded, Archived],
+            Superseded => &[Archived],
+            Archived => &[],
+        }
+    }
+
+    fn can_move_to(self, to: Status) -> bool {
+        self == to || self.next().contains(&to)
+    }
+}
+
+// ---- the record -----------------------------------------------------------
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct PrLink {
+    pub repo: String,
+    pub number: u64,
+    #[serde(default)]
+    pub url: String,
+    /// "open" | "merged" | "closed" — refreshed by the PR watcher, which is
+    /// what lets `implementing` become `implemented` without anyone asserting
+    /// it.
+    #[serde(default)]
+    pub state: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct TicketLink {
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub url: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct Links {
+    #[serde(default)]
+    pub tickets: Vec<TicketLink>,
+    #[serde(default)]
+    pub prs: Vec<PrLink>,
+    #[serde(default)]
+    pub branches: Vec<String>,
+    /// Files the research is about — the fastest way back into the code.
+    #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub supersedes: Vec<String>,
+    #[serde(default)]
+    pub superseded_by: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SourceRef {
+    /// Relative to the entry directory, always under `sources/`.
+    pub file: String,
+    pub title: String,
+    /// Where it came from — a file path, a URL, a command. Free text, because
+    /// the useful answer varies and a taxonomy here would be guessed.
+    #[serde(default)]
+    pub origin: String,
+    #[serde(default)]
+    pub bytes: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    pub at: i64,
+    pub from: String,
+    pub to: String,
+    /// Who moved it — "claude@pty12", or "user" from the panel.
+    #[serde(default)]
+    pub by: String,
+    #[serde(default)]
+    pub note: String,
+}
+
+/// `meta.json`. Every field defaulted: an entry hand-edited to something
+/// slightly wrong should still open, because the alternative is research that
+/// becomes unreadable through a typo.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Meta {
+    pub id: String,
+    #[serde(default)]
+    pub project_id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub question: String,
+    pub status: Status,
+    #[serde(default)]
+    pub digest: String,
+    #[serde(default)]
+    pub recommendation: String,
+    #[serde(default)]
+    pub open_questions: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub agent: String,
+    #[serde(default)]
+    pub cwd: String,
+    #[serde(default)]
+    pub pty_id: Option<u64>,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub updated_at: i64,
+    #[serde(default)]
+    pub sources: Vec<SourceRef>,
+    #[serde(default)]
+    pub links: Links,
+    #[serde(default)]
+    pub history: Vec<HistoryEntry>,
+}
+
+/// A list row: tier one and nothing else. Deliberately missing the
+/// recommendation, the body and the sources — a list that carried them would be
+/// the context flood this module exists to prevent.
+#[derive(Serialize, Debug)]
+pub struct Summary {
+    pub id: String,
+    pub title: String,
+    pub status: &'static str,
+    pub digest: String,
+    pub tags: Vec<String>,
+    pub agent: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub source_count: usize,
+    pub pr_count: usize,
+    /// Set when a later entry replaced this one, so a reader never acts on a
+    /// superseded finding without being told where the current one is.
+    pub superseded_by: Option<String>,
+}
+
+/// Tier two: the whole record, minus the source bodies. `sources` here is the
+/// manifest — names and origins — so a reader chooses which capture to open
+/// instead of receiving all of them.
+#[derive(Serialize)]
+pub struct Detail {
+    #[serde(flatten)]
+    pub summary: Summary,
+    pub question: String,
+    pub recommendation: String,
+    pub open_questions: Vec<String>,
+    pub body: String,
+    pub sources: Vec<SourceRef>,
+    pub links: Links,
+    pub history: Vec<HistoryEntry>,
+    /// Absolute path to the entry directory. The one place research is allowed
+    /// to write, and what the PreToolUse harness checks against.
+    pub dir: String,
+}
+
+/// A project that has research, for the panel's project switcher. Written
+/// beside the entries so a project removed from the workspace (which changes
+/// its id) leaves something recoverable rather than an orphaned hash.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectRef {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub roots: Vec<String>,
+}
+
+// ---- paths ----------------------------------------------------------------
+
+fn root() -> Result<PathBuf, String> {
+    let home = std::env::var("CANOPY_RESEARCH_HOME")
+        .or_else(|_| std::env::var("HOME"))
+        .map_err(|_| "no home dir".to_string())?;
+    let dir = PathBuf::from(home);
+    // CANOPY_RESEARCH_HOME points straight at the store (tests); HOME needs the
+    // usual ~/.canopy/research.
+    let dir = if std::env::var("CANOPY_RESEARCH_HOME").is_ok() {
+        dir
+    } else {
+        dir.join(".canopy").join("research")
+    };
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+/// Project ids come from the frontend workspace file, so they are trusted-ish —
+/// but "ish" is not a security model when the value becomes a path segment.
+/// Anything that could climb out of the store is rejected outright rather than
+/// sanitised into something that silently addresses the wrong project.
+fn project_dir(project_id: &str) -> Result<PathBuf, String> {
+    let id = project_id.trim();
+    if id.is_empty() {
+        return Err("no project — research is scoped to one project, and this \
+                    directory is not inside an open one"
+            .into());
+    }
+    if id.len() > 128
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains("..")
+        || id.starts_with('.')
+    {
+        return Err(format!("bad project id: {id}"));
+    }
+    Ok(root()?.join(id))
+}
+
+/// Entry ids are minted here (`nnnn-slug`) and never accepted in any other
+/// shape, which is the whole path gate: a value matching this pattern cannot
+/// contain a separator, a dot segment, or anything else that escapes.
+fn valid_id(id: &str) -> bool {
+    let Some((num, slug)) = id.split_once('-') else {
+        return false;
+    };
+    num.len() == 4
+        && num.bytes().all(|b| b.is_ascii_digit())
+        && !slug.is_empty()
+        && slug.len() <= 64
+        && slug
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+fn entry_dir(project_id: &str, id: &str) -> Result<PathBuf, String> {
+    if !valid_id(id) {
+        return Err(format!(
+            "not a research id: \"{id}\" — ids look like 0007-index-staleness \
+             (call list to see them)"
+        ));
+    }
+    Ok(project_dir(project_id)?.join(id))
+}
+
+/// A path inside an entry, for `sources/` and `artifacts/` reads. Resolved and
+/// then checked to be under the entry, so a symlink or a `..` that survived the
+/// textual check still cannot address anything outside it.
+fn entry_file(project_id: &str, id: &str, rel: &str) -> Result<PathBuf, String> {
+    let dir = entry_dir(project_id, id)?;
+    let rel = rel.trim_start_matches('/');
+    if rel.is_empty() || rel.contains("..") {
+        return Err(format!("bad path inside the entry: {rel}"));
+    }
+    let target = dir.join(rel);
+    let base = dir.canonicalize().unwrap_or(dir.clone());
+    let resolved = target.canonicalize().unwrap_or(target.clone());
+    if !resolved.starts_with(&base) {
+        return Err(format!("{rel} is outside the research entry"));
+    }
+    Ok(target)
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Lowercase, dashed, and short enough to read in a tab title.
+fn slugify(s: &str) -> String {
+    let mut out = String::new();
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+        if out.len() >= 48 {
+            break;
+        }
+    }
+    let s = out.trim_matches('-').to_string();
+    if s.is_empty() {
+        "untitled".into()
+    } else {
+        s
+    }
+}
+
+/// Rename over the top rather than truncate-and-write: a crash mid-write leaves
+/// the previous meta.json, not half of one.
+fn write_atomic(path: &Path, body: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let tmp = path.with_extension(format!(
+        "tmp{}",
+        std::process::id()
+    ));
+    std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+// ---- caps -----------------------------------------------------------------
+
+/// Reject with the fix in the message. Every one of these is read by an agent
+/// mid-task, so "too long" alone would just produce a retry at the same length;
+/// naming where the material belongs is what makes the cap productive rather
+/// than obstructive.
+fn cap(field: &str, value: &str, max: usize, fix: &str) -> Result<(), String> {
+    let n = value.chars().count();
+    if n > max {
+        return Err(format!(
+            "{field} is {n} characters; the limit is {max}. {fix}"
+        ));
+    }
+    Ok(())
+}
+
+fn check_digest(v: &str) -> Result<(), String> {
+    cap(
+        "digest",
+        v,
+        DIGEST_MAX,
+        "The digest is the one paragraph every other agent reads instead of the \
+         whole entry — say the finding and stop. Detail belongs in the body \
+         (action \"append\"), long material in sources.",
+    )
+}
+
+// ---- read -----------------------------------------------------------------
+
+fn read_meta(dir: &Path) -> Result<Meta, String> {
+    let raw = std::fs::read_to_string(dir.join("meta.json"))
+        .map_err(|e| format!("no research entry there: {e}"))?;
+    serde_json::from_str(&raw).map_err(|e| format!("meta.json is unreadable: {e}"))
+}
+
+fn write_meta(dir: &Path, meta: &Meta) -> Result<(), String> {
+    let body = serde_json::to_string_pretty(meta).map_err(|e| e.to_string())?;
+    write_atomic(&dir.join("meta.json"), &body)
+}
+
+fn body_path(dir: &Path) -> PathBuf {
+    dir.join("research.md")
+}
+
+fn read_body(dir: &Path) -> String {
+    std::fs::read_to_string(body_path(dir)).unwrap_or_default()
+}
+
+fn summarize(m: &Meta) -> Summary {
+    Summary {
+        id: m.id.clone(),
+        title: m.title.clone(),
+        status: m.status.as_str(),
+        digest: m.digest.clone(),
+        tags: m.tags.clone(),
+        agent: m.agent.clone(),
+        created_at: m.created_at,
+        updated_at: m.updated_at,
+        source_count: m.sources.len(),
+        pr_count: m.links.prs.len(),
+        superseded_by: m.links.superseded_by.clone(),
+    }
+}
+
+/// Every entry of one project, newest first. Unreadable entries are skipped
+/// rather than failing the list — one hand-mangled meta.json must not hide the
+/// other nineteen.
+fn load_project(project_id: &str) -> Result<Vec<Meta>, String> {
+    let dir = project_dir(project_id)?;
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(Vec::new());
+    };
+    let mut out: Vec<Meta> = entries
+        .filter_map(Result::ok)
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            valid_id(&name).then(|| read_meta(&e.path()).ok())?
+        })
+        .collect();
+    out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(out)
+}
+
+// ---- commands -------------------------------------------------------------
+//
+// Each write command is a thin wrapper that takes the serialising lock and
+// delegates to an `*_impl` below. The split is not ceremony: it is what lets
+// the tests at the bottom drive a whole lifecycle — start, cap rejection,
+// illegal transition, supersede — against a real directory, which is the only
+// way the state machine is actually checked rather than merely described.
+
+/// Tier one. `status` filters to the states asked for; without it the archived
+/// and superseded are hidden, because a list is a worklist and those two are
+/// neither current nor actionable.
+#[tauri::command]
+pub fn research_list(
+    project_id: String,
+    status: Option<Vec<String>>,
+    limit: Option<usize>,
+) -> Result<Vec<Summary>, String> {
+    let want: Option<Vec<Status>> = match status {
+        Some(list) if !list.is_empty() => Some(
+            list.iter()
+                .map(|s| Status::parse(s))
+                .collect::<Result<_, _>>()?,
+        ),
+        _ => None,
+    };
+    let cap = limit.unwrap_or(LIST_DEFAULT).clamp(1, LIST_MAX);
+    Ok(load_project(&project_id)?
+        .into_iter()
+        .filter(|m| match &want {
+            Some(w) => w.contains(&m.status),
+            None => !matches!(m.status, Status::Archived | Status::Superseded),
+        })
+        .take(cap)
+        .map(|m| summarize(&m))
+        .collect())
+}
+
+/// Find research in *this project*, by substring over everything tier one
+/// carries plus the question and the body.
+///
+/// Deliberately a scan rather than a query against the SpotSearch index: there
+/// are tens of entries per project, not tens of thousands, and a scan cannot go
+/// stale. The index still carries research (spot.rs, kind = "research") for the
+/// palette, where it competes with transcripts and terminals and a shared
+/// ranking is the point — but an agent asking "has anyone looked at this
+/// already?" deserves an answer from the files themselves.
+#[tauri::command]
+pub fn research_search(
+    project_id: String,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<Summary>, String> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Ok(Vec::new());
+    }
+    let dir = project_dir(&project_id)?;
+    let cap = limit.unwrap_or(LIST_DEFAULT).clamp(1, LIST_MAX);
+    let mut hits: Vec<(u8, Meta)> = Vec::new();
+    for m in load_project(&project_id)? {
+        // Ranked by where the match landed: a title hit is a different kind of
+        // answer than a mention buried in the body.
+        let rank = if m.title.to_lowercase().contains(&needle) {
+            0
+        } else if m.digest.to_lowercase().contains(&needle)
+            || m.recommendation.to_lowercase().contains(&needle)
+            || m.tags.iter().any(|t| t.contains(&needle))
+        {
+            1
+        } else if m.question.to_lowercase().contains(&needle) {
+            2
+        } else if read_body(&dir.join(&m.id)).to_lowercase().contains(&needle) {
+            3
+        } else {
+            continue;
+        };
+        hits.push((rank, m));
+    }
+    hits.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.updated_at.cmp(&a.1.updated_at)));
+    Ok(hits
+        .into_iter()
+        .take(cap)
+        .map(|(_, m)| summarize(&m))
+        .collect())
+}
+
+/// Tier two: one entry, whole, by explicit id. `sources` is the manifest only.
+#[tauri::command]
+pub fn research_get(project_id: String, id: String) -> Result<Detail, String> {
+    let dir = entry_dir(&project_id, &id)?;
+    let meta = read_meta(&dir)?;
+    Ok(Detail {
+        summary: summarize(&meta),
+        question: meta.question.clone(),
+        recommendation: meta.recommendation.clone(),
+        open_questions: meta.open_questions.clone(),
+        body: read_body(&dir),
+        sources: meta.sources.clone(),
+        links: meta.links.clone(),
+        history: meta.history.clone(),
+        dir: dir.to_string_lossy().to_string(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub fn research_start(
+    store: State<'_, ResearchStore>,
+    project_id: String,
+    project_name: Option<String>,
+    roots: Option<Vec<String>>,
+    title: String,
+    question: Option<String>,
+    agent: Option<String>,
+    cwd: Option<String>,
+    pty_id: Option<u64>,
+    tags: Option<Vec<String>>,
+) -> Result<Summary, String> {
+    let _guard = store.0.lock().unwrap();
+    start_impl(
+        project_id,
+        project_name,
+        roots,
+        title,
+        question,
+        agent,
+        cwd,
+        pty_id,
+        tags,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_impl(
+    project_id: String,
+    project_name: Option<String>,
+    roots: Option<Vec<String>>,
+    title: String,
+    question: Option<String>,
+    agent: Option<String>,
+    cwd: Option<String>,
+    pty_id: Option<u64>,
+    tags: Option<Vec<String>>,
+) -> Result<Summary, String> {
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        return Err("a research entry needs a title — the question in a few words".into());
+    }
+    cap("title", &title, TITLE_MAX, "Put the detail in the question.")?;
+    let question = question.unwrap_or_default();
+    cap(
+        "question",
+        &question,
+        QUESTION_MAX,
+        "State what is being investigated; the material goes in the body.",
+    )?;
+
+    let pdir = project_dir(&project_id)?;
+    std::fs::create_dir_all(&pdir).map_err(|e| e.to_string())?;
+    // Written every time rather than once: a project renamed or re-rooted
+    // should be recognisable from its research directory, and this is the only
+    // record of what the id meant.
+    let pref = ProjectRef {
+        id: project_id.clone(),
+        name: project_name.unwrap_or_default(),
+        roots: roots.unwrap_or_default(),
+    };
+    if let Ok(body) = serde_json::to_string_pretty(&pref) {
+        let _ = write_atomic(&pdir.join("project.json"), &body);
+    }
+
+    // Next number is max+1 over what is on disk, including archived entries —
+    // ids are permanent references (a PR body may cite one), so a number is
+    // never reused even after a delete.
+    let next = std::fs::read_dir(&pdir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    name.split_once('-')
+                        .and_then(|(n, _)| n.parse::<u32>().ok())
+                })
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0)
+        + 1;
+    let id = format!("{next:04}-{}", slugify(&title));
+    let dir = pdir.join(&id);
+    std::fs::create_dir_all(dir.join("sources")).map_err(|e| e.to_string())?;
+
+    let now = now_secs();
+    let meta = Meta {
+        id: id.clone(),
+        project_id,
+        title,
+        question,
+        status: Status::Researching,
+        digest: String::new(),
+        recommendation: String::new(),
+        open_questions: Vec::new(),
+        tags: tags.unwrap_or_default(),
+        agent: agent.unwrap_or_default(),
+        cwd: cwd.unwrap_or_default(),
+        pty_id,
+        created_at: now,
+        updated_at: now,
+        sources: Vec::new(),
+        links: Links::default(),
+        history: vec![HistoryEntry {
+            at: now,
+            from: Status::Open.as_str().into(),
+            to: Status::Researching.as_str().into(),
+            by: String::new(),
+            note: "started".into(),
+        }],
+    };
+    write_meta(&dir, &meta)?;
+    write_atomic(&body_path(&dir), &format!("# {}\n\n", meta.title))?;
+    Ok(summarize(&meta))
+}
+
+/// Edit the parts of an entry that are prose. `append` adds to the body (the
+/// common case while research is in flight); `body` replaces it outright.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub fn research_update(
+    store: State<'_, ResearchStore>,
+    project_id: String,
+    id: String,
+    title: Option<String>,
+    digest: Option<String>,
+    recommendation: Option<String>,
+    open_questions: Option<Vec<String>>,
+    tags: Option<Vec<String>>,
+    append: Option<String>,
+    body: Option<String>,
+) -> Result<Summary, String> {
+    let _guard = store.0.lock().unwrap();
+    update_impl(
+        project_id,
+        id,
+        title,
+        digest,
+        recommendation,
+        open_questions,
+        tags,
+        append,
+        body,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_impl(
+    project_id: String,
+    id: String,
+    title: Option<String>,
+    digest: Option<String>,
+    recommendation: Option<String>,
+    open_questions: Option<Vec<String>>,
+    tags: Option<Vec<String>>,
+    append: Option<String>,
+    body: Option<String>,
+) -> Result<Summary, String> {
+    let dir = entry_dir(&project_id, &id)?;
+    let mut meta = read_meta(&dir)?;
+
+    if let Some(v) = title {
+        let v = v.trim().to_string();
+        if !v.is_empty() {
+            cap("title", &v, TITLE_MAX, "Put the detail in the question.")?;
+            meta.title = v;
+        }
+    }
+    if let Some(v) = digest {
+        check_digest(&v)?;
+        meta.digest = v.trim().to_string();
+    }
+    if let Some(v) = recommendation {
+        cap(
+            "recommendation",
+            &v,
+            RECOMMENDATION_MAX,
+            "Say what to do, not why — the reasoning is the body's job.",
+        )?;
+        meta.recommendation = v.trim().to_string();
+    }
+    if let Some(v) = open_questions {
+        if v.len() > MAX_OPEN_QUESTIONS {
+            return Err(format!(
+                "{} open questions; the limit is {MAX_OPEN_QUESTIONS}. Keep the ones \
+                 that block a decision.",
+                v.len()
+            ));
+        }
+        for q in &v {
+            cap("an open question", q, DIGEST_MAX, "One line each.")?;
+        }
+        meta.open_questions = v;
+    }
+    if let Some(v) = tags {
+        meta.tags = v.into_iter().map(|t| t.trim().to_lowercase()).collect();
+    }
+
+    if append.is_some() || body.is_some() {
+        let next = match (append, body) {
+            (Some(add), _) => {
+                let cur = read_body(&dir);
+                if cur.is_empty() {
+                    add
+                } else {
+                    format!("{}\n\n{}", cur.trim_end(), add.trim())
+                }
+            }
+            (None, Some(replacement)) => replacement,
+            _ => unreachable!(),
+        };
+        if next.len() > BODY_MAX {
+            return Err(format!(
+                "the body would be {} bytes; the limit is {BODY_MAX}. This is the \
+                 signal that the material is a source, not a finding: write the long \
+                 text with action \"source\" and keep the body to what you concluded.",
+                next.len()
+            ));
+        }
+        write_atomic(&body_path(&dir), &next)?;
+    }
+
+    meta.updated_at = now_secs();
+    write_meta(&dir, &meta)?;
+    Ok(summarize(&meta))
+}
+
+/// Add a raw capture. This is the pressure valve that makes the body cap
+/// livable — anything long has somewhere to go, and it goes there named.
+#[tauri::command]
+pub fn research_add_source(
+    store: State<'_, ResearchStore>,
+    project_id: String,
+    id: String,
+    title: String,
+    body: String,
+    origin: Option<String>,
+) -> Result<SourceRef, String> {
+    let _guard = store.0.lock().unwrap();
+    add_source_impl(project_id, id, title, body, origin)
+}
+
+fn add_source_impl(
+    project_id: String,
+    id: String,
+    title: String,
+    body: String,
+    origin: Option<String>,
+) -> Result<SourceRef, String> {
+    let dir = entry_dir(&project_id, &id)?;
+    let mut meta = read_meta(&dir)?;
+    if meta.sources.len() >= MAX_SOURCES {
+        return Err(format!(
+            "this entry already has {MAX_SOURCES} sources — that is enough material \
+             for a second research entry rather than more of this one"
+        ));
+    }
+    if body.len() > SOURCE_MAX {
+        return Err(format!(
+            "that source is {} bytes; the limit is {SOURCE_MAX}. Trim it to the part \
+             that matters, or split it across sources.",
+            body.len()
+        ));
+    }
+    let title = title.trim().to_string();
+    let title = if title.is_empty() {
+        "capture".to_string()
+    } else {
+        title
+    };
+    let file = format!("sources/{:02}-{}.md", meta.sources.len() + 1, slugify(&title));
+    write_atomic(&dir.join(&file), &body)?;
+    let source = SourceRef {
+        file,
+        title,
+        origin: origin.unwrap_or_default(),
+        bytes: body.len() as u64,
+    };
+    meta.sources.push(source.clone());
+    meta.updated_at = now_secs();
+    write_meta(&dir, &meta)?;
+    Ok(source)
+}
+
+/// Move the entry along. The transition is checked, so an agent cannot declare
+/// something implemented that was never researched.
+#[tauri::command]
+pub fn research_set_status(
+    store: State<'_, ResearchStore>,
+    project_id: String,
+    id: String,
+    status: String,
+    by: Option<String>,
+    note: Option<String>,
+) -> Result<Summary, String> {
+    let _guard = store.0.lock().unwrap();
+    set_status_impl(project_id, id, status, by, note)
+}
+
+fn set_status_impl(
+    project_id: String,
+    id: String,
+    status: String,
+    by: Option<String>,
+    note: Option<String>,
+) -> Result<Summary, String> {
+    let to = Status::parse(&status)?;
+    let dir = entry_dir(&project_id, &id)?;
+    let mut meta = read_meta(&dir)?;
+    let from = meta.status;
+    if !from.can_move_to(to) {
+        return Err(format!(
+            "{} cannot become {} — from here it can go to: {}",
+            from.as_str(),
+            to.as_str(),
+            from.next()
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if from != to {
+        meta.status = to;
+        meta.history.push(HistoryEntry {
+            at: now_secs(),
+            from: from.as_str().into(),
+            to: to.as_str().into(),
+            by: by.unwrap_or_default(),
+            note: note.unwrap_or_default(),
+        });
+        meta.updated_at = now_secs();
+        write_meta(&dir, &meta)?;
+    }
+    Ok(summarize(&meta))
+}
+
+/// Tie the entry to the work. A PR linked here is what later flips the entry to
+/// `implemented` when it merges (see the reconciler in the frontend), and what
+/// answers "what shipped because of this?" months later.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub fn research_link(
+    store: State<'_, ResearchStore>,
+    project_id: String,
+    id: String,
+    pr: Option<PrLink>,
+    ticket: Option<TicketLink>,
+    branch: Option<String>,
+    files: Option<Vec<String>>,
+    supersedes: Option<String>,
+) -> Result<Detail, String> {
+    let _guard = store.0.lock().unwrap();
+    link_impl(project_id, id, pr, ticket, branch, files, supersedes)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn link_impl(
+    project_id: String,
+    id: String,
+    pr: Option<PrLink>,
+    ticket: Option<TicketLink>,
+    branch: Option<String>,
+    files: Option<Vec<String>>,
+    supersedes: Option<String>,
+) -> Result<Detail, String> {
+    let dir = entry_dir(&project_id, &id)?;
+    let mut meta = read_meta(&dir)?;
+
+    if let Some(pr) = pr {
+        match meta
+            .links
+            .prs
+            .iter_mut()
+            .find(|p| p.repo == pr.repo && p.number == pr.number)
+        {
+            // Re-linking is how the watcher reports a merge, so an existing
+            // link updates rather than duplicating.
+            Some(existing) => *existing = pr,
+            None => meta.links.prs.push(pr),
+        }
+    }
+    if let Some(t) = ticket {
+        if !meta.links.tickets.iter().any(|x| x.id == t.id) {
+            meta.links.tickets.push(t);
+        }
+    }
+    if let Some(b) = branch {
+        let b = b.trim().to_string();
+        if !b.is_empty() && !meta.links.branches.contains(&b) {
+            meta.links.branches.push(b);
+        }
+    }
+    if let Some(list) = files {
+        for f in list {
+            if !f.is_empty() && !meta.links.files.contains(&f) {
+                meta.links.files.push(f);
+            }
+        }
+    }
+    if let Some(other) = supersedes {
+        if !valid_id(&other) {
+            return Err(format!("not a research id: {other}"));
+        }
+        if other == id {
+            return Err("an entry cannot supersede itself".into());
+        }
+        if !meta.links.supersedes.contains(&other) {
+            meta.links.supersedes.push(other.clone());
+        }
+        // Both sides, so the superseded entry can warn its own readers rather
+        // than relying on them to search for a successor.
+        let other_dir = entry_dir(&project_id, &other)?;
+        if let Ok(mut om) = read_meta(&other_dir) {
+            om.links.superseded_by = Some(id.clone());
+            if om.status.can_move_to(Status::Superseded) {
+                om.history.push(HistoryEntry {
+                    at: now_secs(),
+                    from: om.status.as_str().into(),
+                    to: Status::Superseded.as_str().into(),
+                    by: String::new(),
+                    note: format!("superseded by {id}"),
+                });
+                om.status = Status::Superseded;
+            }
+            om.updated_at = now_secs();
+            let _ = write_meta(&other_dir, &om);
+        }
+    }
+
+    meta.updated_at = now_secs();
+    write_meta(&dir, &meta)?;
+    research_get(project_id, id)
+}
+
+/// Read one file inside an entry — a source, an artifact. The store lives
+/// outside every registered workspace root, so `fsx::check_scope` cannot reach
+/// it and this is the only reader the UI has for these paths.
+#[tauri::command]
+pub fn research_read_file(
+    project_id: String,
+    id: String,
+    path: String,
+) -> Result<String, String> {
+    let file = entry_file(&project_id, &id, &path)?;
+    let bytes = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+    if bytes as usize > SOURCE_MAX {
+        return Err(format!("{path} is {bytes} bytes — too large to open here"));
+    }
+    std::fs::read_to_string(&file).map_err(|e| e.to_string())
+}
+
+/// Where an entry lives on disk. The launcher exports this to a research
+/// session as `CANOPY_RESEARCH_DIR`, which is what the PreToolUse gate compares
+/// against — so the gate is string work on every tool call rather than a bridge
+/// round trip.
+#[tauri::command]
+pub fn research_dir(project_id: String, id: String) -> Result<String, String> {
+    entry_dir(&project_id, &id).map(|d| d.to_string_lossy().to_string())
+}
+
+/// Remove an entry and everything under it. Deliberately real: the whole point
+/// of a research list is that the user can throw things out of it.
+#[tauri::command]
+pub fn research_delete(
+    store: State<'_, ResearchStore>,
+    project_id: String,
+    id: String,
+) -> Result<(), String> {
+    let _guard = store.0.lock().unwrap();
+    let dir = entry_dir(&project_id, &id)?;
+    if !dir.join("meta.json").exists() {
+        return Err("no research entry there".into());
+    }
+    std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())
+}
+
+// ---- the harness's view ---------------------------------------------------
+
+/// One indexable document per entry, for spot.rs. `cwd` is where the research
+/// was done, which is what scopes a hit to a project in the existing index —
+/// research inherits SpotSearch's project scoping rather than inventing its own.
+pub struct IndexDoc {
+    pub project_id: String,
+    pub id: String,
+    pub title: String,
+    pub body: String,
+    pub cwd: String,
+    pub agent: String,
+    pub dir: String,
+    pub ts: i64,
+}
+
+/// Everything indexable, across projects. The index scopes by cwd at query
+/// time; nothing here decides who may see what.
+pub fn index_docs() -> Vec<IndexDoc> {
+    let Ok(dir) = root() else {
+        return Vec::new();
+    };
+    let Ok(projects) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for p in projects.filter_map(Result::ok).filter(|p| p.path().is_dir()) {
+        let project_id = p.file_name().to_string_lossy().to_string();
+        // The project's own roots are the honest cwd for an entry whose agent
+        // never recorded one (created from the panel, say).
+        let fallback: String = std::fs::read_to_string(p.path().join("project.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<ProjectRef>(&raw).ok())
+            .and_then(|r| r.roots.first().cloned())
+            .unwrap_or_default();
+        let Ok(entries) = std::fs::read_dir(p.path()) else {
+            continue;
+        };
+        for e in entries.filter_map(Result::ok).filter(|e| e.path().is_dir()) {
+            let id = e.file_name().to_string_lossy().to_string();
+            if !valid_id(&id) {
+                continue;
+            }
+            let Ok(meta) = read_meta(&e.path()) else {
+                continue;
+            };
+            // Titles of sources, not their contents: the index points at the
+            // entry, and the entry names its captures. Indexing the captures
+            // whole would put back exactly the volume this module removes.
+            let sources = meta
+                .sources
+                .iter()
+                .map(|s| s.title.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let body = [
+                meta.question.as_str(),
+                meta.digest.as_str(),
+                meta.recommendation.as_str(),
+                &read_body(&e.path()),
+                &sources,
+                &meta.tags.join(" "),
+            ]
+            .join("\n");
+            out.push(IndexDoc {
+                project_id: project_id.clone(),
+                id: id.clone(),
+                title: format!("{} · {}", meta.title, meta.status.as_str()),
+                body,
+                cwd: if meta.cwd.is_empty() {
+                    fallback.clone()
+                } else {
+                    meta.cwd.clone()
+                },
+                agent: meta.agent.clone(),
+                dir: e.path().to_string_lossy().to_string(),
+                ts: meta.updated_at,
+            });
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ids_are_the_path_gate() {
+        assert!(valid_id("0007-index-staleness"));
+        assert!(valid_id("0001-a"));
+        // Anything that could address something else is simply not an id.
+        assert!(!valid_id("../../etc/passwd"));
+        assert!(!valid_id("0007-Index"));
+        assert!(!valid_id("7-short-number"));
+        assert!(!valid_id("0007"));
+        assert!(!valid_id("0007-"));
+        assert!(!valid_id("0007-a/b"));
+    }
+
+    #[test]
+    fn project_ids_that_could_climb_out_are_refused() {
+        assert!(project_dir("..").is_err());
+        assert!(project_dir("a/b").is_err());
+        assert!(project_dir(".hidden").is_err());
+        assert!(project_dir("").is_err());
+        assert!(project_dir("p-123").is_ok());
+    }
+
+    #[test]
+    fn slugs_are_short_lowercase_and_never_empty() {
+        assert_eq!(slugify("SpotSearch index staleness"), "spotsearch-index-staleness");
+        assert_eq!(slugify("  !!!  "), "untitled");
+        assert!(slugify(&"x".repeat(200)).len() <= 48);
+    }
+
+    #[test]
+    fn the_state_machine_refuses_the_shortcut_that_matters() {
+        // The whole reason for a machine: nothing may claim it shipped without
+        // having been researched and implemented first.
+        assert!(!Status::Open.can_move_to(Status::Implemented));
+        assert!(!Status::Researching.can_move_to(Status::Implementing));
+        assert!(Status::Researched.can_move_to(Status::Implementing));
+        assert!(Status::Implementing.can_move_to(Status::Implemented));
+        // Re-entering a state is a no-op, not a failure — a retried call after
+        // a dropped reply must not look like an error.
+        assert!(Status::Researched.can_move_to(Status::Researched));
+        // Blocked resumes into either side.
+        assert!(Status::Blocked.can_move_to(Status::Researching));
+        assert!(Status::Blocked.can_move_to(Status::Implementing));
+        // Archiving is always available; nothing comes back out.
+        for s in [
+            Status::Open,
+            Status::Researching,
+            Status::Researched,
+            Status::Implementing,
+            Status::Implemented,
+        ] {
+            assert!(s.can_move_to(Status::Archived));
+        }
+        assert_eq!(Status::Archived.next(), &[]);
+    }
+
+    #[test]
+    fn status_round_trips_through_its_wire_name() {
+        for s in [
+            Status::Open,
+            Status::Researching,
+            Status::Researched,
+            Status::Implementing,
+            Status::Implemented,
+            Status::Blocked,
+            Status::Superseded,
+            Status::Archived,
+        ] {
+            assert_eq!(Status::parse(s.as_str()).unwrap(), s);
+        }
+        assert!(Status::parse("done").is_err());
+    }
+
+    #[test]
+    fn caps_reject_and_say_where_the_material_goes() {
+        let long = "x".repeat(DIGEST_MAX + 1);
+        let err = check_digest(&long).unwrap_err();
+        assert!(err.contains(&DIGEST_MAX.to_string()));
+        // The message has to name the alternative, or the agent just retries at
+        // the same length.
+        assert!(err.contains("sources"));
+        assert!(check_digest(&"x".repeat(DIGEST_MAX)).is_ok());
+    }
+
+    #[test]
+    fn caps_count_characters_not_bytes() {
+        // A digest of emoji is not four times shorter than one of ASCII.
+        let s = "é".repeat(DIGEST_MAX);
+        assert!(check_digest(&s).is_ok());
+        assert!(check_digest(&"é".repeat(DIGEST_MAX + 1)).is_err());
+    }
+
+    // ---- lifecycle, against a real directory ------------------------------
+    //
+    // CANOPY_RESEARCH_HOME points the store somewhere disposable. The env var
+    // is process-wide, so these run under one lock and one temp root rather
+    // than as separate #[test]s racing each other's HOME.
+
+    use std::sync::Mutex as StdMutex;
+    static ENV_LOCK: StdMutex<()> = StdMutex::new(());
+
+    struct TempHome(PathBuf);
+
+    impl TempHome {
+        fn new(tag: &str) -> TempHome {
+            let dir = std::env::temp_dir().join(format!(
+                "canopy-research-test-{tag}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::env::set_var("CANOPY_RESEARCH_HOME", &dir);
+            TempHome(dir)
+        }
+    }
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+            std::env::remove_var("CANOPY_RESEARCH_HOME");
+        }
+    }
+
+    fn start(project: &str, title: &str) -> Summary {
+        start_impl(
+            project.into(),
+            Some("Canopy".into()),
+            Some(vec!["/repo".into()]),
+            title.into(),
+            Some("why?".into()),
+            Some("claude".into()),
+            Some("/repo".into()),
+            Some(12),
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn an_entry_goes_from_question_to_shipped() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _home = TempHome::new("lifecycle");
+
+        let s = start("p1", "SpotSearch index staleness");
+        assert_eq!(s.id, "0001-spotsearch-index-staleness");
+        assert_eq!(s.status, "researching");
+
+        // Numbers keep climbing, so an id is a permanent reference.
+        assert_eq!(start("p1", "Second question").id, "0002-second-question");
+
+        update_impl(
+            "p1".into(),
+            s.id.clone(),
+            None,
+            Some("The index lags because ingest is manual.".into()),
+            Some("Ingest on palette open.".into()),
+            None,
+            Some(vec!["Spot".into()]),
+            Some("## Detail\n\nLong-form findings.".into()),
+            None,
+        )
+        .unwrap();
+
+        // Researching cannot jump the queue to implemented.
+        let err = set_status_impl("p1".into(), s.id.clone(), "implemented".into(), None, None)
+            .unwrap_err();
+        assert!(err.contains("cannot become"), "{err}");
+        // And the error says where it *can* go, so the agent can correct itself.
+        assert!(err.contains("researched"), "{err}");
+
+        set_status_impl("p1".into(), s.id.clone(), "researched".into(), None, None).unwrap();
+        set_status_impl("p1".into(), s.id.clone(), "implementing".into(), None, None).unwrap();
+
+        let detail = link_impl(
+            "p1".into(),
+            s.id.clone(),
+            Some(PrLink {
+                repo: "/repo".into(),
+                number: 217,
+                url: "https://example/pr/217".into(),
+                state: "open".into(),
+            }),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(detail.links.prs.len(), 1);
+        // The body starts as a title heading, so an append lands under it
+        // rather than replacing it.
+        assert_eq!(
+            detail.body,
+            "# SpotSearch index staleness\n\n## Detail\n\nLong-form findings."
+        );
+
+        // Re-linking the same PR updates it rather than duplicating — this is
+        // the path the merge watcher takes.
+        let detail = link_impl(
+            "p1".into(),
+            s.id.clone(),
+            Some(PrLink {
+                repo: "/repo".into(),
+                number: 217,
+                url: "https://example/pr/217".into(),
+                state: "merged".into(),
+            }),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(detail.links.prs.len(), 1);
+        assert_eq!(detail.links.prs[0].state, "merged");
+
+        let done =
+            set_status_impl("p1".into(), s.id.clone(), "implemented".into(), None, None).unwrap();
+        assert_eq!(done.status, "implemented");
+        // Every move is on the record, including the one that started it.
+        let detail = research_get("p1".into(), s.id.clone()).unwrap();
+        assert_eq!(detail.history.len(), 4);
+    }
+
+    #[test]
+    fn the_list_is_a_worklist_and_carries_only_tier_one() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _home = TempHome::new("list");
+
+        let a = start("p1", "Alpha");
+        let b = start("p1", "Beta");
+        update_impl(
+            "p1".into(),
+            a.id.clone(),
+            None,
+            Some("alpha digest".into()),
+            None,
+            None,
+            None,
+            Some("a body nobody asked for".into()),
+            None,
+        )
+        .unwrap();
+        set_status_impl("p1".into(), b.id.clone(), "archived".into(), None, None).unwrap();
+
+        let rows = research_list("p1".into(), None, None).unwrap();
+        // Archived is not current work, so it is not in the default list.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, a.id);
+        assert_eq!(rows[0].digest, "alpha digest");
+        // Asking for it explicitly still finds it.
+        let archived =
+            research_list("p1".into(), Some(vec!["archived".into()]), None).unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].id, b.id);
+
+        // Another project sees none of it — scoping is by directory, and there
+        // is no argument that crosses it.
+        assert!(research_list("p2".into(), None, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_over_long_body_is_refused_and_the_source_path_accepts_it() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _home = TempHome::new("caps");
+
+        let s = start("p1", "Big");
+        let huge = "x".repeat(BODY_MAX + 1);
+        let err = update_impl(
+            "p1".into(),
+            s.id.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(huge.clone()),
+        )
+        .unwrap_err();
+        assert!(err.contains("source"), "{err}");
+
+        // The material has somewhere to go, which is what makes the cap fair.
+        let src = add_source_impl(
+            "p1".into(),
+            s.id.clone(),
+            "Raw capture".into(),
+            huge,
+            Some("file:/repo/src/spot.rs".into()),
+        )
+        .unwrap();
+        assert_eq!(src.file, "sources/01-raw-capture.md");
+
+        // `get` names the source but does not hand over its contents.
+        let detail = research_get("p1".into(), s.id.clone()).unwrap();
+        assert_eq!(detail.sources.len(), 1);
+        assert!(detail.body.len() < BODY_MAX);
+        // Reading it is a separate, explicit act.
+        let body = research_read_file("p1".into(), s.id.clone(), src.file).unwrap();
+        assert_eq!(body.len(), BODY_MAX + 1);
+    }
+
+    #[test]
+    fn superseding_marks_both_sides() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _home = TempHome::new("supersede");
+
+        let old = start("p1", "First attempt");
+        let new = start("p1", "Better attempt");
+        set_status_impl("p1".into(), old.id.clone(), "researched".into(), None, None).unwrap();
+
+        link_impl(
+            "p1".into(),
+            new.id.clone(),
+            None,
+            None,
+            None,
+            None,
+            Some(old.id.clone()),
+        )
+        .unwrap();
+
+        let old_detail = research_get("p1".into(), old.id.clone()).unwrap();
+        // The superseded entry warns its own readers rather than relying on
+        // them to go looking for a successor.
+        assert_eq!(old_detail.summary.status, "superseded");
+        assert_eq!(old_detail.summary.superseded_by, Some(new.id.clone()));
+        let new_detail = research_get("p1".into(), new.id).unwrap();
+        assert_eq!(new_detail.links.supersedes, vec![old.id]);
+    }
+
+    #[test]
+    fn reads_cannot_escape_the_entry() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _home = TempHome::new("escape");
+
+        let s = start("p1", "Scoped");
+        for bad in ["../../../etc/passwd", "sources/../../../etc/passwd", ""] {
+            assert!(
+                research_read_file("p1".into(), s.id.clone(), bad.into()).is_err(),
+                "{bad} should not be readable"
+            );
+        }
+        // A project that never existed is an error, not an empty read.
+        assert!(research_read_file("..".into(), s.id, "research.md".into()).is_err());
+    }
+
+    #[test]
+    fn the_index_sees_entries_with_the_cwd_that_scopes_them() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _home = TempHome::new("index");
+
+        let s = start("p1", "Indexed thing");
+        update_impl(
+            "p1".into(),
+            s.id.clone(),
+            None,
+            Some("findable digest".into()),
+            None,
+            None,
+            None,
+            Some("body text".into()),
+            None,
+        )
+        .unwrap();
+
+        let docs = index_docs();
+        let doc = docs.iter().find(|d| d.id == s.id).expect("entry indexed");
+        assert_eq!(doc.cwd, "/repo", "cwd is what scopes a hit to a project");
+        assert!(doc.body.contains("findable digest"));
+        assert!(doc.body.contains("body text"));
+        assert!(doc.title.contains("researching"));
+    }
+
+    #[test]
+    fn the_directory_the_harness_gates_on_is_the_entrys_own() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _home = TempHome::new("harness");
+
+        let s = start("p1", "Real one");
+        let dir = research_dir("p1".into(), s.id.clone()).unwrap();
+        assert!(dir.ends_with(&format!("p1/{}", s.id)));
+        // The same value `get` reports, because the launcher exports one and
+        // the detail view shows the other and they must not drift.
+        assert_eq!(research_get("p1".into(), s.id).unwrap().dir, dir);
+        // An id that isn't one never becomes a path.
+        assert!(research_dir("p1".into(), "garbage".into()).is_err());
+    }
+}

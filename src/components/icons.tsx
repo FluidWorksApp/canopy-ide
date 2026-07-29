@@ -320,6 +320,20 @@ export function IssueIcon({ size = 18, className }: IconProps) {
   );
 }
 
+/** Research: a magnifier over a page. The page is what distinguishes it from a
+ *  plain search glass — this is a *written* finding, not a query — and at rail
+ *  size the two strokes of the document edge are enough to read as one. */
+export function ResearchIcon({ size = 18, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M13.5 20.5H6.5a1.5 1.5 0 0 1-1.5-1.5V5a1.5 1.5 0 0 1 1.5-1.5h7L19 9v3" />
+      <path d="M13 3.6V9.5h5.6" />
+      <circle cx="15.2" cy="16.2" r="3.1" />
+      <path d="M17.5 18.5L20 21" />
+    </svg>
+  );
+}
+
 /** Agents: a bot head. Distinct from every CLI brand mark on purpose. */
 export function AgentsIcon({ size = 18, className }: IconProps) {
   return (
