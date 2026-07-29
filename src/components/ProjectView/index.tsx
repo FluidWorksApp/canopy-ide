@@ -111,6 +111,7 @@ import { ChangesPanel, type ChangeGroup } from "../ChangesPanel";
 import { useEscape } from "../../useEscape";
 import { useTabDrag, applyOrder } from "../../tabDrag";
 import { agentIdForCommand, identifyAgent } from "../../agentIdentity";
+import { tabNamesByPty } from "../../agentDisplayName";
 import { modelCommandLine, modelSwitchFor } from "../../agentModels";
 import { AgentsPanel, digestBySurface } from "../AgentsPanel";
 import { StatusBar } from "../StatusBar";
@@ -2723,6 +2724,10 @@ export const ProjectView = memo(function ProjectView({
   // The pty of the terminal tab in front, so the Agents panel can highlight its
   // row — relating the tab you're looking at back to its entry in the list.
   const activePty = activeTab?.type === "terminal" ? activeTab.ptyId : null;
+  // Every running pty's tab name, so the Agents panel can name its rows the
+  // way the tab strip does: the CLI's own title for the tab, or the user's
+  // rename over it.
+  const tabNames = useMemo(() => tabNamesByPty(tabs), [tabs]);
   const runTabs = useMemo(
     () =>
       tabs.filter(
@@ -5981,6 +5986,7 @@ export const ProjectView = memo(function ProjectView({
           onPreviewUrl={openPreview}
           onOpenAgent={(p) => void openAgent(p)}
           activePty={activePty}
+          tabNames={tabNames}
           roots={roots}
           shareContext={Boolean(project.shareContext)}
           onShareContext={onShareContext}

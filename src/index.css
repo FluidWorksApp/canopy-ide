@@ -3917,8 +3917,19 @@ body.dragging-tab * {
   min-width: 0;
 }
 
+/* A row is named after its tab now, so the name is a sentence ("Fix the login
+   redirect") rather than a word ("claude"). Capped and ellipsized: left to
+   grow it would push the timer, directory and branch chips onto a second
+   line, and those chips are what tell two rows apart when the names are
+   similar. */
 .agent-name {
   font-weight: 600;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Lifecycle dot: one glance tells working from waiting-on-you from finished. */
