@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SpotSearch } from "./SpotSearch";
 import { mockCommands } from "../test/setup";
@@ -44,6 +44,7 @@ beforeEach(() => {
     spot_ingest: () => ({ more: false, messages: 0, terminals: 0 }),
     spot_search: () => [],
     fs_search: () => [],
+    spot_save_context_image: () => "/repo/.canopy/spot/ctx-1785293237.png",
   });
 });
 
@@ -164,5 +165,97 @@ describe("SpotSearch", () => {
         digest: expect.objectContaining({ session_id: "s1" }),
       }),
     );
+  });
+});
+
+// The palette is one field over two jobs. "prview" is a search; a paragraph, or
+// a pasted screenshot, is a prompt — and ranking prose against filenames
+// answers a sentence with a list of things that share letters with it.
+describe("SpotSearch as a composer", () => {
+  const png = () => new File(["pixels"], "shot.png", { type: "image/png" });
+
+  const paste = (files: File[]) =>
+    fireEvent.paste(screen.getByRole("combobox"), {
+      clipboardData: {
+        items: files.map((file) => ({ kind: "file", type: file.type, getAsFile: () => file })),
+      },
+    });
+
+  it("keeps every section for a search", async () => {
+    open();
+    await userEvent.keyboard("dev ser");
+    expect(screen.getByText("Open Tabs")).toBeInTheDocument();
+  });
+
+  it("shows only what you can do with a sentence", async () => {
+    open();
+    await userEvent.keyboard("the dev server tab flickers whenever the diff gets wide, please fix it");
+    expect(screen.getByText("Actions")).toBeInTheDocument();
+    // The tab still matches on "dev server" — and is no longer an answer to
+    // what was written.
+    expect(screen.queryByText("Open Tabs")).toBeNull();
+  });
+
+  it("attaches a pasted image as a chip", async () => {
+    open();
+    paste([png()]);
+    expect(await screen.findByText("ctx-1785293237.png")).toBeInTheDocument();
+  });
+
+  it("hands the image path to the agent, not the pixels", async () => {
+    const { onAction } = open();
+    paste([png()]);
+    await screen.findByText("ctx-1785293237.png");
+    await userEvent.keyboard("why does this look wrong?");
+    await userEvent.keyboard("{Enter}");
+    expect(onAction).toHaveBeenCalledWith({
+      type: "run-task",
+      brief: expect.stringContaining("why does this look wrong?"),
+    });
+    expect(onAction).toHaveBeenCalledWith({
+      type: "run-task",
+      brief: expect.stringContaining("/repo/.canopy/spot/ctx-1785293237.png"),
+    });
+    expect(onAction).toHaveBeenCalledWith({
+      type: "run-task",
+      brief: expect.stringContaining("open them with your file tools"),
+    });
+  });
+
+  it("an image alone is enough to send", async () => {
+    // No text at all: the brief still has to be an instruction.
+    const { onAction } = open();
+    paste([png()]);
+    await screen.findByText("ctx-1785293237.png");
+    await userEvent.keyboard("{Enter}");
+    expect(onAction).toHaveBeenCalledWith({
+      type: "run-task",
+      brief: expect.stringContaining("ctx-1785293237.png"),
+    });
+  });
+
+  it("takes the last attachment back on Backspace", async () => {
+    open();
+    paste([png()]);
+    await screen.findByText("ctx-1785293237.png");
+    await userEvent.keyboard("{Backspace}");
+    expect(screen.queryByText("ctx-1785293237.png")).toBeNull();
+  });
+
+  it("Shift+Enter writes a newline instead of sending", async () => {
+    const { onAction } = open();
+    await userEvent.keyboard("first line{Shift>}{Enter}{/Shift}second line");
+    expect(onAction).not.toHaveBeenCalled();
+    expect((screen.getByRole("combobox") as HTMLTextAreaElement).value).toBe(
+      "first line\nsecond line",
+    );
+  });
+
+  it("grows with what is typed", async () => {
+    open();
+    const field = () => screen.getByRole("combobox") as HTMLTextAreaElement;
+    expect(field().rows).toBe(1);
+    await userEvent.keyboard("one{Shift>}{Enter}{/Shift}two{Shift>}{Enter}{/Shift}three");
+    expect(field().rows).toBe(3);
   });
 });

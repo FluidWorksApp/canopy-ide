@@ -19,6 +19,15 @@ import { fuzzyRanges } from "../fuzzy";
 import { SearchIcon } from "./icons";
 import { SpotRowIcon } from "./spotIcons";
 import { runIngest } from "../spotIndex";
+import { thumbnail } from "../pageCapture";
+import {
+  attachmentLabel,
+  briefWithAttachments,
+  composerRows,
+  isPrompt,
+  pastedImages,
+  type SpotAttachment,
+} from "../spotCompose";
 import {
   deferredRows,
   instantRows,
@@ -100,7 +109,12 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
   const [busy, setBusy] = useState(false);
   const [sel, setSel] = useState(0);
   const [corpus, setCorpus] = useState<string[]>([]);
-  const inputRef = useRef<HTMLInputElement>(null);
+  /** Images pasted into the field, already written under `.canopy/spot/` so an
+   *  agent can open them by path. Held here rather than encoded into the query:
+   *  the text is what gets searched, and a base64 blob is not a search term. */
+  const [shots, setShots] = useState<SpotAttachment[]>([]);
+  const [attaching, setAttaching] = useState(false);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   // Hover only takes the selection after the pointer has actually moved:
   // scrolling the keyboard selection into view slides rows under a resting
@@ -134,8 +148,8 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
 
   // The synchronous sources — recomputed every keystroke, no round trips.
   const syncRows = useMemo(
-    () => instantRows({ query, ctx, corpus, roots }),
-    [query, ctx, corpus, roots],
+    () => instantRows({ query, ctx, corpus, roots, attachments: shots.length }),
+    [query, ctx, corpus, roots, shots.length],
   );
   const syncRowsRef = useRef(syncRows);
   syncRowsRef.current = syncRows;
@@ -167,10 +181,16 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
     };
   }, [query, corpus, roots.join("\n")]);
 
-  const items = useMemo(
-    () => sectioned([...syncRows, ...asyncRows]),
-    [syncRows, asyncRows],
-  );
+  /** Typing has become writing: a sentence, a line break, or a pasted image.
+   *  Ranking a paragraph against filenames produces a list of things that share
+   *  letters with it and answer nothing, so the palette stops offering matches
+   *  and offers the two things you can do with what you wrote. */
+  const composing = isPrompt(query, shots.length);
+
+  const items = useMemo(() => {
+    const all = [...syncRows, ...asyncRows];
+    return sectioned(composing ? all.filter((r) => r.group === "Actions") : all);
+  }, [syncRows, asyncRows, composing]);
   const selectable = useMemo(
     () => items.flatMap((i) => ("row" in i ? [i.row] : [])),
     [items],
@@ -189,7 +209,56 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
   const commit = (row: SpotRow | undefined) => {
     if (!row) return;
     onClose();
+    // The pasted images belong to whatever this row sends off. Only the two
+    // rows that carry prose can carry them — everything else opens a thing that
+    // already exists and has nothing to do with a screenshot.
+    if (shots.length > 0 && row.action.type === "run-task") {
+      onAction({ type: "run-task", brief: briefWithAttachments(row.action.brief, shots) });
+      return;
+    }
+    if (shots.length > 0 && row.action.type === "start-research") {
+      onAction({
+        type: "start-research",
+        question: briefWithAttachments(row.action.question, shots),
+      });
+      return;
+    }
     onAction(row.action);
+  };
+
+  /** Paste an image: write it where an agent can read it, keep a thumbnail.
+   *  Same path the preview's Screenshot button uses, so the two produce
+   *  interchangeable briefs. */
+  const attach = async (files: File[]) => {
+    const dir = ctx.components[0]?.path;
+    if (!dir || files.length === 0) return;
+    setAttaching(true);
+    for (const file of files) {
+      try {
+        const base64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onerror = () => reject(reader.error);
+          reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");
+          reader.readAsDataURL(file);
+        });
+        if (!base64) continue;
+        const path = await ipc.spotSaveContextImage(dir, base64);
+        // The chip appears on the write, not on the picture. Decoding happens
+        // in an <img> whose onload and onerror both stay silent for something
+        // that isn't really an image — waiting on it would mean a paste that
+        // vanished, with the field stuck saying it was working on it.
+        setShots((prev) => [...prev, { path, thumb: "" }]);
+        void thumbnail(base64, 96)
+          .then((thumb) =>
+            setShots((prev) => prev.map((s) => (s.path === path ? { ...s, thumb } : s))),
+          )
+          .catch(() => {});
+      } catch (err) {
+        void ipc.jsLog("warn", `spot: could not attach a pasted image: ${String(err)}`);
+      }
+    }
+    setAttaching(false);
+    inputRef.current?.focus();
   };
 
   /** Move the cursor by `d`, wrapping at both ends — a list this long is
@@ -225,9 +294,13 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
     } else if (e.key === "End" && !query) {
       e.preventDefault();
       setSel(Math.max(0, selectable.length - 1));
-    } else if (e.key === "Enter") {
+    } else if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       commit(selectable[sel]);
+    } else if (e.key === "Backspace" && !query && shots.length > 0) {
+      // Nothing left to delete in the text, so delete the thing before it.
+      e.preventDefault();
+      setShots((prev) => prev.slice(0, -1));
     }
   };
 
@@ -239,27 +312,68 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
         className="palette spot-palette"
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <div className="spot-field">
+        <div className={`spot-field${composing ? " spot-field-composing" : ""}`}>
           <SearchIcon size={15} className="spot-field-icon" />
-          <input
-            ref={inputRef}
-            className="palette-input spot-input"
-            value={query}
-            placeholder="Search everything, or type a task…"
-            role="combobox"
-            aria-expanded
-            aria-controls="spot-list"
-            aria-activedescendant={active ? `spot-row-${active.id}` : undefined}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={onKeyDown}
-          />
-          {query && (
+          <div className="spot-field-body">
+            {shots.length > 0 && (
+              <div className="spot-shots">
+                {shots.map((shot) => (
+                  <span className="spot-shot" key={shot.path} title={shot.path}>
+                    {shot.thumb ? (
+                      <img className="spot-shot-thumb" src={shot.thumb} alt="" />
+                    ) : (
+                      <span className="spot-shot-thumb spot-shot-blank" />
+                    )}
+                    <span className="spot-shot-name">{attachmentLabel(shot.path)}</span>
+                    <button
+                      type="button"
+                      className="spot-shot-drop"
+                      aria-label={`Remove ${attachmentLabel(shot.path)}`}
+                      onClick={() => {
+                        setShots((prev) => prev.filter((s) => s.path !== shot.path));
+                        inputRef.current?.focus();
+                      }}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+            <textarea
+              ref={inputRef}
+              className="palette-input spot-input"
+              value={query}
+              rows={composerRows(query)}
+              placeholder={
+                shots.length > 0
+                  ? "What should an agent do with this?"
+                  : "Search everything, or type a task…"
+              }
+              role="combobox"
+              aria-expanded
+              aria-controls="spot-list"
+              aria-activedescendant={active ? `spot-row-${active.id}` : undefined}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={onKeyDown}
+              onPaste={(e) => {
+                const images = pastedImages(e.clipboardData);
+                if (images.length === 0) return;
+                // Only swallow the paste when there is an image in it — a paste
+                // that is also text should still put the text in the field.
+                e.preventDefault();
+                void attach(images);
+              }}
+            />
+          </div>
+          {(query || shots.length > 0) && (
             <button
               type="button"
               className="spot-clear"
               aria-label="Clear search"
               onClick={() => {
                 setQuery("");
+                setShots([]);
                 inputRef.current?.focus();
               }}
             >
@@ -269,7 +383,7 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
         </div>
         {/* A hairline that sweeps while the slow sources are out — the footer
             saying "searching…" is easy to miss under a full list. */}
-        <div className={`spot-progress${busy ? " spot-progress-on" : ""}`} />
+        <div className={`spot-progress${busy || attaching ? " spot-progress-on" : ""}`} />
         <div
           className="palette-list"
           ref={listRef}
