@@ -495,6 +495,7 @@ pub fn run() {
             agents::agent_health_report,
             agents::claude_session_stats,
             agents::agent_usage,
+            agents::plan_usage,
             agents::hook_bridge_path,
             agents::set_context_scopes,
             agents::session_digests,

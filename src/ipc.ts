@@ -568,6 +568,25 @@ export interface AgentSessionUsage {
  *  Statistics panel and the status-tray grand total. */
 export const agentUsage = () => invoke<AgentSessionUsage[]>("agent_usage");
 
+/** One rolling subscription window ("5h", "7d") and how much of it is gone. */
+export interface PlanWindow {
+  label: string;
+  used_percent: number;
+  resets_at: number | null;
+}
+/** A CLI's subscription headroom — the cap side of usage, as opposed to the
+ *  spend side in AgentSessionUsage. Only CLIs that actually report appear. */
+export interface PlanUsage {
+  agent: string;
+  plan: string | null;
+  windows: PlanWindow[];
+  credits: number | null;
+  /** Unix seconds these numbers were last true; they persist across the gap
+   *  where a rate-limited request returns no limit headers. */
+  observed: number;
+}
+export const planUsage = () => invoke<PlanUsage[]>("plan_usage");
+
 export interface FsChange {
   root: string;
   paths: string[];
