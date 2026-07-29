@@ -73,6 +73,8 @@ pub async fn dictation_start(
     _app: tauri::AppHandle,
     _state: tauri::State<'_, DictationManager>,
     _model_id: String,
+    _streaming: Option<bool>,
+    _language: Option<String>,
 ) -> Result<String, String> {
     Err(UNAVAILABLE.into())
 }
