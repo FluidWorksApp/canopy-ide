@@ -464,7 +464,7 @@ export function AgentsPanel({
     if (!visible) return;
     const load = () =>
       void ipc
-        .sessionDigests()
+        .sessionDigests(roots)
         .then((d) =>
           setDigests(
             d.filter((x) =>

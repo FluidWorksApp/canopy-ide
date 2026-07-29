@@ -490,10 +490,14 @@ export interface SpotIndexHit {
   kind: string;
   /** Session id for a transcript, "pty:<id>" for a terminal. */
   key: string;
-  /** Cwd (transcript) or tab title (terminal). */
+  /** Registry id of the CLI that wrote it, or "terminal". */
+  agent: string;
+  /** Where the conversation was running. */
+  cwd: string;
+  /** Tab title for a terminal; empty for a transcript. */
   title: string;
   snippet: string;
-  /** Transcript path (transcript) or cwd (terminal). */
+  /** The file the hit came from — a transcript path, or the terminal's cwd. */
   meta: string;
   ts: number;
 }
@@ -502,13 +506,54 @@ export interface SpotIngestReport {
   more: boolean;
   messages: number;
   terminals: number;
+  /** Documents dropped: vanished files, disabled agents, retention. */
+  pruned: number;
+}
+
+export interface SpotIndexStats {
+  messages: number;
+  sessions: number;
+  terminals: number;
+  bytes: number;
+  /** [registry id, messages], busiest first. */
+  by_agent: [string, number][];
+}
+
+export interface SpotIngestOptions {
+  /** Registry ids to index. An agent left out is purged, not just skipped. */
+  agents: string[];
+  terminals: boolean;
+  /** The open project's directories — how the per-project stores (gemini,
+   *  aider) are found at all. */
+  roots: string[];
+  /** Drop transcript messages older than this. 0 keeps everything. */
+  retentionDays: number;
 }
 
 /** Bring the index up to date; call again while `more`. */
-export const spotIngest = () => invoke<SpotIngestReport>("spot_ingest");
+export const spotIngest = (opts: SpotIngestOptions) =>
+  invoke<SpotIngestReport>("spot_ingest", {
+    agents: opts.agents,
+    terminals: opts.terminals,
+    roots: opts.roots,
+    retentionDays: opts.retentionDays,
+  });
 
-export const spotSearch = (query: string, limit?: number) =>
-  invoke<SpotIndexHit[]>("spot_search", { query, limit });
+/** Search the index. `roots` scopes to the open project; `allProjects` asks
+ *  across every project on the machine instead. */
+export const spotSearch = (
+  query: string,
+  limit?: number,
+  roots?: string[],
+  allProjects?: boolean,
+) => invoke<SpotIndexHit[]>("spot_search", { query, limit, roots, allProjects });
+
+/** What the index holds right now (Settings → SpotSearch). */
+export const spotIndexStats = () => invoke<SpotIndexStats>("spot_index_stats");
+
+/** Empty the index. Everything in it is derived, so this costs recall until
+ *  the next ingest and nothing else. */
+export const spotIndexClear = () => invoke<void>("spot_index_clear");
 
 /** Persist a captured page screenshot under `<dir>/.canopy/spot/` so a task
  *  brief can point an agent at it. Returns the absolute path. */
@@ -1461,7 +1506,12 @@ export const setContextScopes = (
   scopes: { name: string; roots: string[]; enabled: boolean }[],
 ) => invoke<void>("set_context_scopes", { scopes });
 
-export const sessionDigests = () => invoke<SessionDigest[]>("session_digests");
+/** Every agent conversation this machine has a record of: Canopy's own hook
+ *  records, plus each CLI's own on-disk store. `roots` are the open project's
+ *  directories — the stores that file themselves by project (gemini, aider)
+ *  can only be found through them. */
+export const sessionDigests = (roots?: string[]) =>
+  invoke<SessionDigest[]>("session_digests", { roots });
 
 /** Drop a session the user no longer wants offered for restore. */
 export const sessionForget = (sessionId: string) =>

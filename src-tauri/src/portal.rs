@@ -622,7 +622,11 @@ async fn snapshot_msg(app: &AppHandle, theme: Option<Value>) -> String {
         .await
         .unwrap_or_else(|_| "null".into());
     let projects: Value = serde_json::from_str(&projects).unwrap_or(Value::Null);
-    let sessions = crate::agents::session_digests().await.unwrap_or_default();
+    // No roots: the portal snapshot describes every project this instance has
+    // open, and filtering is the client's job.
+    let sessions = crate::agents::session_digests(None)
+        .await
+        .unwrap_or_default();
     let usage = crate::agents::agent_usage().await.unwrap_or_default();
     let ptys = app.state::<PtyManager>().summaries();
     json!({

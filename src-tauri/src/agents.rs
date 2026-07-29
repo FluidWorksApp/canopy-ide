@@ -1203,126 +1203,58 @@ fn resume_dir(launch: &str, now: &str, bucket: &str) -> Option<String> {
     None
 }
 
-/// Sessions read straight from a CLI's own on-disk store, no hook required.
-///
-/// oh-my-pi writes complete, readable session files
-/// (`~/.omp/agent/sessions/<dir>/<ts>_<id>.jsonl`, opening with a `title` and
-/// a `session` record carrying the id and cwd), so its resumable sessions can
-/// be listed without it cooperating at all. That is strictly better than
-/// depending on a hook: the hook we install for omp is real but its plugin API
-/// is documented as in flux, and on this machine it has never emitted an
-/// event — meanwhile every session it ran is sitting on disk, resumable.
-///
-/// Bounded to the most recent files: a long-lived install accumulates
-/// hundreds, and this runs on a panel refresh.
-fn omp_digests(home: &str) -> Vec<serde_json::Value> {
-    const MAX: usize = 60;
-    let root = std::path::PathBuf::from(home)
-        .join(".omp")
-        .join("agent")
-        .join("sessions");
-    let Ok(dirs) = std::fs::read_dir(&root) else {
-        return Vec::new();
-    };
-    let mut files: Vec<(u64, std::path::PathBuf)> = Vec::new();
-    for dir in dirs.flatten() {
-        let Ok(entries) = std::fs::read_dir(dir.path()) else {
-            continue;
-        };
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
-                continue;
-            }
-            let mtime = e
-                .metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            files.push((mtime, p));
-        }
-    }
-    files.sort_by(|a, b| b.0.cmp(&a.0));
-    files.truncate(MAX);
-
-    files
-        .into_iter()
-        .filter_map(|(mtime, path)| {
-            use std::io::{BufRead, BufReader};
-            let f = std::fs::File::open(&path).ok()?;
-            let mut id = String::new();
-            let mut cwd = String::new();
-            let mut title = String::new();
-            // The header records are at the top; never read the whole
-            // transcript just to label a row.
-            for line in BufReader::new(f).lines().take(8).map_while(Result::ok) {
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
-                    continue;
-                };
-                match v["type"].as_str() {
-                    Some("session") => {
-                        id = v["id"].as_str().unwrap_or("").to_string();
-                        cwd = v["cwd"].as_str().unwrap_or("").to_string();
-                    }
-                    Some("title") => title = v["title"].as_str().unwrap_or("").to_string(),
-                    _ => {}
-                }
-                if !id.is_empty() && !title.is_empty() {
-                    break;
-                }
-            }
-            if id.is_empty() || cwd.is_empty() {
-                return None;
-            }
-            Some(serde_json::json!({
-                "session_id": id,
-                "agent": "omp",
-                "cwd": cwd,
-                "launch_cwd": cwd,
-                "updated": mtime,
-                // The title is what the row is recognised by — omp generates
-                // it from the conversation, which is the same job the last
-                // human prompt does for claude.
-                "prompts": if title.is_empty() { vec![] } else { vec![title] },
-                "resume_cwd": cwd,
-                "resumable": true,
-            }))
-        })
-        .collect()
-}
-
 /// Live digests of agent sessions, for showing the user exactly what would be
 /// shared, and for restoring sessions after a crash.
+///
+/// Two sources, in this order of authority:
+///
+///  1. Canopy's own hook records (~/.canopy/sessions). These know things the
+///     file on disk cannot — which terminal the session ran in, which app
+///     instance owned it — so they win on any id both describe.
+///  2. Every CLI's own session store (stores.rs). No hook required, which is
+///     the only way a session started outside Canopy — or by a CLI whose plugin
+///     API never fired — is ever seen at all.
+///
+/// `roots` are the open project's directories. Two stores can only be found
+/// through them (gemini files chats under a hash of the project path, aider
+/// writes into the repo), and passing them also keeps the walk to what the
+/// caller is going to show.
 #[tauri::command]
-pub async fn session_digests() -> Result<Vec<serde_json::Value>, String> {
+pub async fn session_digests(
+    roots: Option<Vec<String>>,
+) -> Result<Vec<serde_json::Value>, String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
     let dir = std::path::PathBuf::from(&home)
         .join(".canopy")
         .join("sessions");
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Ok(vec![]);
-    };
     let mut out = Vec::new();
-    for entry in entries.flatten() {
-        if entry.path().extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        if let Ok(raw) = std::fs::read_to_string(entry.path()) {
-            if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&raw) {
-                let (root, resumable) = resume_location(&v);
-                if let Some(map) = v.as_object_mut() {
-                    map.insert("resume_cwd".into(), serde_json::json!(root));
-                    map.insert("resumable".into(), serde_json::json!(resumable));
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if entry.path().extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            if let Ok(raw) = std::fs::read_to_string(entry.path()) {
+                if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    let (root, resumable) = resume_location(&v);
+                    if let Some(id) = v["session_id"].as_str() {
+                        seen.insert(id.to_string());
+                    }
+                    if let Some(map) = v.as_object_mut() {
+                        map.insert("resume_cwd".into(), serde_json::json!(root));
+                        map.insert("resumable".into(), serde_json::json!(resumable));
+                    }
+                    out.push(v);
                 }
-                out.push(v);
             }
         }
     }
-    // Plus any CLI that keeps its own readable session store — those need no
-    // hook to be restorable.
-    out.extend(omp_digests(&home));
+    let roots = roots.unwrap_or_default();
+    out.extend(crate::stores::digests(
+        &roots,
+        &|_| true,
+        &|id| seen.contains(id),
+    ));
     Ok(out)
 }
 

@@ -12553,6 +12553,79 @@ a.btn-mini {
   white-space: nowrap;
 }
 
+/* ---- Settings → SpotSearch ----------------------------------------------
+   The agent-tools list two columns of short names; these rows carry a name and
+   a sentence about where its data comes from, which in that grid wrapped every
+   name down its own column ("Termi nal Outpu t"). One row per line, the name in
+   a fixed column that never wraps, the explanation taking the rest. */
+.spot-set-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 6px;
+}
+
+.spot-set-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.spot-set-row:hover {
+  background: var(--bg-alt);
+}
+
+.spot-set-row input {
+  flex: 0 0 auto;
+}
+
+.spot-set-name {
+  flex: 0 0 var(--spot-set-name-w, 140px);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.spot-set-note {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spot-set-note code {
+  font-size: 10.5px;
+  opacity: 0.9;
+}
+
+/* The index's own line: a fact, then the two buttons that act on it. */
+.spot-set-index {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.spot-set-days {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.spot-set-days input {
+  width: 90px;
+}
+
 /* ---- A file Canopy refused to load (binary / too large) ------------------ */
 .blocked-file {
   max-width: 460px;

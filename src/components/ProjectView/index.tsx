@@ -1145,7 +1145,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   useEffect(() => {
     const load = () =>
       void ipc
-        .sessionDigests()
+        .sessionDigests(rootsRef.current)
         .then((d) => {
           const mine = d.filter((x) =>
             rootsRef.current.some(
@@ -1178,7 +1178,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     let live = true;
     const load = () =>
       void ipc
-        .sessionDigests()
+        .sessionDigests(rootsRef.current)
         .then((d) => {
           if (!live) return;
           const mine = d.filter((x) =>
