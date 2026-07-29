@@ -688,6 +688,12 @@ fn human_bytes(n: u64) -> String {
     }
 }
 
+/// How long to wait between typing a message into another agent's terminal and
+/// sending the return that submits it. Matches the delay the desktop uses for
+/// every seeded prompt: long enough that the TUI has settled the text as input
+/// rather than folding the CR into a paste, short enough not to feel deferred.
+const SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// A write the frontend has to perform (start a run command, open a preview
 /// tab, restart a server): validated here against the published snapshots, then
 /// handed to the UI over the app event bus. Kept an event (not a direct call)
@@ -923,8 +929,7 @@ async fn action(
                 );
             };
             // Straight into the other agent's stdin, exactly as if the user had
-            // typed it — that IS the interface every agent CLI exposes. Newline
-            // separate from the text so a multi-line message submits once.
+            // typed it — that IS the interface every agent CLI exposes.
             let manager = app.state::<crate::pty::PtyManager>();
             if manager.get(id).is_none() {
                 return (
@@ -933,13 +938,24 @@ async fn action(
                 );
             }
             let body = text.replace(['\r', '\n'], " ");
-            match manager.write(id, &format!("{body}\r")) {
-                Ok(()) => format!(
-                    "Sent to terminal {id}. It answers in its own session — read its reply with \
-                     canopy_server_output({id})."
-                ),
-                Err(e) => return (StatusCode::BAD_REQUEST, e),
+            if let Err(e) = manager.write(id, &body) {
+                return (StatusCode::BAD_REQUEST, e);
             }
+            // The return has to arrive as its own write, a beat later. An agent
+            // TUI reads a burst that ends in CR as a paste and keeps the whole
+            // thing in its composer — which is exactly what this did: the
+            // message appeared in the other agent's prompt box and sat there
+            // unsent until the user pressed enter. Every send from the desktop
+            // has always split the two; only this one didn't.
+            let send = app.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(SUBMIT_DELAY).await;
+                let _ = send.state::<crate::pty::PtyManager>().write(id, "\r");
+            });
+            format!(
+                "Sent to terminal {id}. It answers in its own session — read its reply with \
+                 canopy_server_output({id})."
+            )
         }
         other => return (StatusCode::BAD_REQUEST, format!("unknown action: {other}")),
     };
