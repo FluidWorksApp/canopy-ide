@@ -350,6 +350,10 @@ export const ProjectView = memo(function ProjectView({
   // that the debounce below retracts. Either one shows it.
   const [pinned, setPinned] = useState(false);
   const [peeking, setPeeking] = useState(false);
+  /** Close the side panel, whatever is holding it open. Kept in a ref because
+   *  the thing that needs it most — opening a preview — is defined long before
+   *  the peek timers it has to cancel. */
+  const dismissPeekRef = useRef<() => void>(() => {});
   /** How the user wants the panel to behave (Settings → Appearance). Held in
    *  state rather than read inline: these decide what effects are registered,
    *  and a change has to take hold without reopening the project. */
@@ -690,6 +694,11 @@ export const ProjectView = memo(function ProjectView({
     const id = tabId();
     setTabs((prev) => [...prev, { id, type: "preview", url, annotations: [] }]);
     setActiveTabId(id);
+    // The panel that opened this is almost always still over the pane, and a
+    // browser view cannot be drawn under it — so the page you just asked for
+    // would be hidden by the thing you asked with. Closing it is what the user
+    // was about to do anyway.
+    dismissPeekRef.current();
     return id;
   }, []);
 
@@ -3158,6 +3167,15 @@ export const ProjectView = memo(function ProjectView({
       openTimer.current = null;
     }
   }, []);
+  // One way to close the panel, shared by everything that closes it: a press
+  // in the page, a press outside it, and opening a preview it would cover.
+  // Assigned on every render so it always closes over current state.
+  dismissPeekRef.current = () => {
+    cancelPeekOpen();
+    cancelPeekClose();
+    setPeeking(false);
+    setPinned(false);
+  };
   useEffect(
     () => () => {
       if (openTimer.current !== null) window.clearTimeout(openTimer.current);
@@ -3213,12 +3231,7 @@ export const ProjectView = memo(function ProjectView({
     // choice once the panel is docked: a pane that isn't covering anything has
     // no reason to close because you clicked in the editor.
     if (!sideOpen || !sidePrefs.clickOutsideCloses) return;
-    const dismiss = () => {
-      cancelPeekOpen();
-      cancelPeekClose();
-      setPeeking(false);
-      setPinned(false);
-    };
+    const dismiss = dismissPeekRef.current;
     const onDown = (e: PointerEvent) => {
       const target = e.target;
       if (
