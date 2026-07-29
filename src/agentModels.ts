@@ -8,6 +8,8 @@
 // checked. A CLI we could not verify is simply absent, and its tab shows no
 // model control at all.
 
+import { SEEDS } from "./modelCatalog";
+
 /** One entry in the tray's model menu: what to type, and how to name it. */
 export interface ModelChoice {
   id: string;
@@ -28,16 +30,14 @@ export type ModelSwitch =
   | { kind: "inline"; command: string; choices: ModelChoice[] }
   | { kind: "picker"; command: string };
 
-/** What `/model` in Claude Code accepts — aliases resolve to the CLI's own
- *  latest models, so this list doesn't go stale with each release. */
-const CLAUDE_MODELS: ModelChoice[] = [
-  { id: "default", label: "Default", hint: "recommended" },
-  { id: "opus", label: "Opus", hint: "most capable" },
-  { id: "sonnet", label: "Sonnet", hint: "balanced" },
-  { id: "sonnet[1m]", label: "Sonnet · 1M context", hint: "long sessions" },
-  { id: "haiku", label: "Haiku", hint: "fast, cheapest" },
-  { id: "opusplan", label: "Opus Plan", hint: "Opus plans, Sonnet codes" },
-];
+/** What `/model` in Claude Code accepts. Aliases resolve to the CLI's own
+ *  latest models — but the *set* of aliases is not itself stable, which is how
+ *  the list this replaced went wrong: it was written when `opusplan` and
+ *  `sonnet[1m]` were in the picker and `fable` did not exist, and stayed that
+ *  way through the releases that changed all three. So the entries live in
+ *  modelCatalog.ts, where a donor CLI's catalogue can refresh them and the
+ *  checked-in seed is only the starting point. */
+const claudeModels = (): ModelChoice[] => SEEDS.anthropic;
 
 /** Aider's own aliases (MODEL_ALIASES in aider/models.py), not model ids: the
  *  alias is what survives a release, since aider repoints it at each vendor's
@@ -61,13 +61,15 @@ const AIDER_MODELS: ModelChoice[] = [
 export const MODEL_SWITCH: Record<string, ModelSwitch> = {
   // Verified: `/model <alias>` is documented by `claude --help`'s slash command
   // list and applies to the running session.
-  claude: { kind: "inline", command: "/model", choices: CLAUDE_MODELS },
+  claude: { kind: "inline", command: "/model", choices: claudeModels() },
   // Verified against aider/models.py on disk: cmd_model() takes the name as its
   // argument and swaps the main model in place.
   aider: { kind: "inline", command: "/model", choices: AIDER_MODELS },
   // Verified against codex-rs/tui/src/slash_command.rs: Model is absent from
   // supports_inline_args(), so `/model gpt-5` is not a thing — the command
-  // opens the "Select Model and Effort" picker and nothing else.
+  // opens the "Select Model and Effort" picker and nothing else. Codex's
+  // catalogue *is* borrowable (see SEEDS.openai), but a borrowed id would have
+  // nowhere to be typed: `-m/--model` is launch-time only. CATALOGUE_ONLY.
   codex: { kind: "picker", command: "/model" },
   // Verified in the shipped TUI bundle: the command is plural, and its hint
   // reads "Use /models to switch between available AI models".
@@ -76,6 +78,8 @@ export const MODEL_SWITCH: Record<string, ModelSwitch> = {
   // installed tag: `/model manage` opens the model dialog. There is also
   // `/model set <name>`, deliberately unused — Gemini's available model ids
   // vary by account tier, so the dialog is the only list that can be right.
+  // That `set` form could not be re-verified in the installed 0.37.1 bundle,
+  // which keeps it unused for a second reason now. CATALOGUE_ONLY.
   gemini: { kind: "picker", command: "/model manage" },
   // Verified in the shipped binary: it prompts "Please use the /model command
   // to select a valid model", and the TUI logs "Exited /model command".

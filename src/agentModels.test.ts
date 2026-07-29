@@ -35,7 +35,7 @@ describe("modelCommandLine", () => {
   it("appends the chosen model for an inline switch", () => {
     const claude = modelSwitchFor("claude")!;
     expect(claude.kind).toBe("inline");
-    expect(modelCommandLine(claude, "sonnet[1m]")).toBe("/model sonnet[1m]");
+    expect(modelCommandLine(claude, "fable")).toBe("/model fable");
   });
 
   it("passes a picker's command through untouched", () => {

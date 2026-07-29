@@ -2039,6 +2039,12 @@ export const onTunnelState = (
 /** Which of these commands are installed (login-shell PATH). */
 export const whichCheck = (commands: string[]) =>
   invoke<Record<string, boolean>>("which_check", { commands });
+/** Stdout of one allowlisted donor-CLI model-list command (see MODEL_DONORS in
+ *  agents.rs), or null when that donor can't answer — not installed, needs a
+ *  tty, timed out. `query` indexes the donor's own argv table; nothing about
+ *  the command line crosses this boundary. */
+export const modelCatalog = (donor: string, query: number) =>
+  invoke<string | null>("model_catalog", { donor, query });
 /** Resolves with the stamped message — the sender's UI appends it; the relay
  *  never echoes a frame back to its author. */
 export const relaySendChat = (to: string | null, text: string) =>

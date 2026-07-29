@@ -132,7 +132,12 @@ import { askDialog } from "../../branchSwitch";
 import { useTabDrag, applyOrder } from "../../tabDrag";
 import { agentIdForCommand, identifyAgent } from "../../agentIdentity";
 import { tabNamesByPty } from "../../agentDisplayName";
-import { modelCommandLine, modelSwitchFor } from "../../agentModels";
+import {
+  modelCommandLine,
+  modelSwitchFor,
+  type ModelChoice,
+} from "../../agentModels";
+import { refreshChoices } from "../../modelCatalog";
 import { AgentsPanel, digestBySurface } from "../AgentsPanel";
 import { StatusBar } from "../StatusBar";
 import { Palette, type PaletteMode } from "../Palette";
@@ -4147,12 +4152,37 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // never describe one session while the keystrokes go to another — which is
   // what happened while the two were worked out separately, and every `/model`
   // landed in the leftmost Claude tab.
+  //
+  // Claude ships no way to list its own models, so its menu starts as the
+  // checked-in seed and is refined once per session from a donor CLI's
+  // catalogue if the user has one (see modelCatalog.ts). Probed lazily — the
+  // first time a Claude session is actually in front — so a project with no
+  // Claude tab never shells out at all, and never more than once either way.
+  const [claudeModels, setClaudeModels] = useState<ModelChoice[] | null>(null);
+  const claudeProbed = useRef(false);
+  useEffect(() => {
+    if (claudeProbed.current) return;
+    const hasClaude = tabs.some((t) => {
+      if (t.type !== "terminal" || t.ptyId == null) return false;
+      const s = projectStats.find((x) => x.id === t.ptyId);
+      return (s ? identifyAgent(s.agent_hint)?.id : null) === "claude";
+    });
+    if (!hasClaude) return;
+    claudeProbed.current = true;
+    void refreshChoices("anthropic", ipc.modelCatalog).then(setClaudeModels);
+  }, [tabs, projectStats]);
+
   const modelTarget = useMemo(() => {
     const agentOf = (t: TermSubTab) => {
       if (t.ptyId == null) return null;
       const s = projectStats.find((x) => x.id === t.ptyId);
       const agent = s ? (identifyAgent(s.agent_hint)?.id ?? null) : null;
-      const sw = modelSwitchFor(agent);
+      let sw = modelSwitchFor(agent);
+      // The donor's answer replaces the seed only when one arrived; a failed
+      // probe leaves the menu exactly as it was rather than emptying it.
+      if (agent === "claude" && claudeModels && sw?.kind === "inline") {
+        sw = { ...sw, choices: claudeModels };
+      }
       if (!agent || !sw) return null;
       // A bare binary Canopy ships no entry for (gemini) has no registry name
       // to borrow, so it is named by the id — which is its command anyway.
@@ -4167,7 +4197,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (hit) return hit;
     }
     return null;
-  }, [tabs, activeTabId, projectStats]);
+  }, [tabs, activeTabId, projectStats, claudeModels]);
   const modelTargetRef = useRef(modelTarget);
   modelTargetRef.current = modelTarget;
 
