@@ -1,16 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { StatusBar } from "./StatusBar";
+import { BranchSwitchProvider } from "../useBranchSwitch";
 import * as ipc from "../ipc";
 import { modelSwitchFor } from "../agentModels";
 import type { AgentEventEntry } from "../types";
 
 vi.mock("../ipc", () => ({
   gitStatus: vi.fn(),
+  gitBranches: vi.fn(),
+  gitCheckout: vi.fn(),
   claudeSessionStats: vi.fn(),
   onAppStats: vi.fn(),
   onPtyStats: vi.fn(),
   agentUsage: vi.fn(),
+  planUsage: vi.fn(),
 }));
 
 const noSub = async () => () => {};
@@ -22,9 +26,19 @@ beforeEach(() => {
     branch: "main",
     entries: [],
   } as never);
+  vi.mocked(ipc.gitBranches).mockResolvedValue([
+    { name: "main", current: true, remote_only: false } as never,
+    { name: "feat/x", current: false, remote_only: false } as never,
+  ]);
+  vi.mocked(ipc.gitCheckout).mockResolvedValue({
+    kind: "switched",
+    message: "Switched to feat/x",
+    path: null,
+  } as never);
   vi.mocked(ipc.onAppStats).mockImplementation(noSub as never);
   vi.mocked(ipc.onPtyStats).mockImplementation(noSub as never);
   vi.mocked(ipc.agentUsage).mockResolvedValue([]);
+  vi.mocked(ipc.planUsage).mockResolvedValue([]);
   vi.mocked(ipc.claudeSessionStats).mockResolvedValue({
     model: "claude-opus-5",
     input_tokens: 10,
@@ -53,6 +67,43 @@ const base = {
   visible: true,
   projects: [{ name: "canopy", roots: ["/repo"] }],
 };
+
+describe("the tray's plan chip", () => {
+  const claudePlan = {
+    agent: "claude",
+    plan: "default_claude_max_20x",
+    windows: [
+      { label: "5h", used_percent: 18, resets_at: null },
+      { label: "7d", used_percent: 52, resets_at: null },
+    ],
+    credits: null,
+    observed: Math.floor(Date.now() / 1000),
+  };
+
+  it("shows the headroom of the CLI in front", async () => {
+    vi.mocked(ipc.planUsage).mockResolvedValue([claudePlan] as never);
+    render(<StatusBar {...base} events={[]} agentId="claude" />);
+    expect(await screen.findByText("7d 52% · 5h 18%")).toBeTruthy();
+  });
+
+  // The important negative: a chip belonging to another CLI is worse than no
+  // chip, because it looks authoritative.
+  it("shows nothing for a CLI that reports no plan", async () => {
+    vi.mocked(ipc.planUsage).mockResolvedValue([claudePlan] as never);
+    render(<StatusBar {...base} events={[]} agentId="amp" />);
+    await screen.findByText(/main/);
+    expect(screen.queryByText(/52%/)).toBeNull();
+  });
+
+  it("escalates once a window is nearly spent", async () => {
+    vi.mocked(ipc.planUsage).mockResolvedValue([
+      { ...claudePlan, windows: [{ label: "7d", used_percent: 96, resets_at: null }] },
+    ] as never);
+    render(<StatusBar {...base} events={[]} agentId="claude" />);
+    const chip = await screen.findByText("7d 96%");
+    expect(chip.className).toContain("is-critical");
+  });
+});
 
 describe("the tray's model control", () => {
   it("lists the models of an inline CLI and switches to the one clicked", async () => {
@@ -137,5 +188,56 @@ describe("the tray's model control", () => {
       <StatusBar {...base} events={[unstamped]} activePtyId={9} modelSwitch={null} />,
     );
     expect(await screen.findByText(/opus-5/)).toBeTruthy();
+  });
+});
+
+// The most persistently visible branch affordance in the app. It used to be an
+// inert span reading "git branch (N changed files)" — a git noun in primary
+// chrome, and a detached HEAD rendered as a branch literally called "HEAD".
+describe("the tray's branch chip", () => {
+  const inProvider = (ui: React.ReactElement) =>
+    render(
+      <BranchSwitchProvider onNotice={vi.fn()} onUseWorktree={vi.fn()}>
+        {ui}
+      </BranchSwitchProvider>,
+    );
+
+  it("switches through the one funnel when a branch is picked", async () => {
+    inProvider(<StatusBar {...base} events={[]} modelSwitch={null} />);
+    fireEvent.click(await screen.findByText(/⎇ main/));
+    // Only somewhere else to go is offered — the branch you're on is the chip.
+    expect(screen.queryByText("main")).toBeNull();
+    fireEvent.click(screen.getByText("feat/x"));
+    expect(ipc.gitCheckout).toHaveBeenCalledWith("/repo", "feat/x", false);
+  });
+
+  it("says what it means without a git noun", async () => {
+    render(<StatusBar {...base} events={[]} modelSwitch={null} />);
+    const chip = await screen.findByText(/⎇ main/);
+    const tip = chip.getAttribute("title") ?? "";
+    expect(tip).toBe("On main · 0 changed files. Click to switch.");
+    for (const noun of ["git", "worktree", "detached", "stash", "HEAD"])
+      expect(tip.toLowerCase()).not.toContain(noun.toLowerCase());
+  });
+
+  it("reads a detached HEAD as a snapshot, with the way back in the menu", async () => {
+    // `rev-parse --abbrev-ref HEAD` answers a literal "HEAD" off a branch. The
+    // tray printed that as if it were a branch you could be on.
+    vi.mocked(ipc.gitStatus).mockResolvedValue({
+      is_repo: true,
+      branch: "HEAD",
+      entries: [{ status: " M", path: "/repo/a.ts" }],
+    } as never);
+    inProvider(<StatusBar {...base} events={[]} modelSwitch={null} />);
+    const chip = await screen.findByText(/snapshot/);
+    expect(chip.textContent).toContain("⚠ snapshot");
+    expect(chip.getAttribute("title")).toBe(
+      "You're looking at a snapshot of the code · 1 changed file. Click to go back.",
+    );
+    fireEvent.click(chip);
+    // The same sentence the Git panel leads with, where the exit actually is.
+    expect(
+      screen.getByText(/Pick a branch to go back — nothing you had is lost/),
+    ).toBeTruthy();
   });
 });

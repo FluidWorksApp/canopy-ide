@@ -16,6 +16,7 @@ mod fsx;
 mod git;
 mod instructions;
 mod lsp;
+mod mcp;
 mod portal;
 mod preview;
 mod prwatch;
@@ -25,6 +26,7 @@ mod relay;
 mod selftest;
 mod snapshot;
 mod spot;
+mod stores;
 mod tunnel;
 mod winproc;
 mod wsbridge;
@@ -417,6 +419,8 @@ pub fn run() {
             android::android_run,
             spot::spot_ingest,
             spot::spot_search,
+            spot::spot_index_stats,
+            spot::spot_index_clear,
             spot::spot_save_context_image,
             fsx::workspace_add,
             fsx::workspace_remove,
@@ -445,6 +449,8 @@ pub fn run() {
             git::git_checkout_detached,
             git::git_checkout_carry,
             git::git_branch_release,
+            git::git_operation_quit,
+            git::git_branch_at,
             git::git_stage,
             git::git_unstage,
             git::git_discard,
@@ -510,8 +516,10 @@ pub fn run() {
             agents::agent_hooks_installed,
             agents::agent_integration_health,
             agents::agent_health_report,
+            mcp::mcp_servers,
             agents::claude_session_stats,
             agents::agent_usage,
+            agents::plan_usage,
             agents::hook_bridge_path,
             agents::set_context_scopes,
             agents::session_digests,

@@ -4,8 +4,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
-import { AGENT_CLIS, restoreCommand } from "../projects";
+import { AGENT_CLIS } from "../projects";
 import { identifyAgent, observeForLearning } from "../agentIdentity";
+import { agentDisplayName, type TabName } from "../agentDisplayName";
 import { effectiveState, silenceLabel } from "../agentState";
 import { forgetSessions, restorableFrom } from "../restorable";
 import { AgentRuntime } from "./AgentRuntime";
@@ -130,6 +131,10 @@ interface AgentsPanelProps {
    *  highlighted — the reverse of onJumpToPty: relate the tab you're on back to
    *  its row in the list. Null when the active tab isn't a terminal. */
   activePty?: number | null;
+  /** What each running pty's tab is called — the CLI's own title for it, and
+   *  the user's rename when there is one. Rows are named from this, so the
+   *  panel and the tab strip say the same thing about the same session. */
+  tabNames?: Map<number, TabName>;
   /** Cross-session context sharing for this project. */
   roots: string[];
   shareContext: boolean;
@@ -309,6 +314,7 @@ export function AgentsPanel({
   onPreviewUrl,
   onOpenAgent,
   activePty,
+  tabNames,
   roots,
   shareContext,
   onShareContext,
@@ -458,7 +464,7 @@ export function AgentsPanel({
     if (!visible) return;
     const load = () =>
       void ipc
-        .sessionDigests()
+        .sessionDigests(roots)
         .then((d) =>
           setDigests(
             d.filter((x) =>
@@ -536,7 +542,7 @@ export function AgentsPanel({
   // Shared with the project's empty state — one definition of "restorable",
   // so the two surfaces can never disagree about what is offered.
   const restorable = useMemo(
-    () => restorableFrom(digests, stats, liveSessionIds).map((r) => r.digest),
+    () => restorableFrom(digests, stats, liveSessionIds),
     [digests, stats, liveSessionIds.join(",")],
   );
 
@@ -680,6 +686,15 @@ export function AgentsPanel({
     // "fix the login redirect" identifies it in a way that cpu, memory and a
     // directory never will.
     const task = lastHumanPrompt(digest?.prompts);
+    // What to call this row. Its tab's name first — the CLI titles that tab
+    // with what it is working on, and the user can rename it — so the panel
+    // never shows a column of identical "claude"s while the tab strip above it
+    // is naming the same sessions apart.
+    const name = agentDisplayName({
+      tab: tabNames?.get(s.id),
+      agentLabel: agent?.label,
+      sessionTitle: s.title,
+    });
     return (
       <div
         key={s.id}
@@ -693,7 +708,14 @@ export function AgentsPanel({
         onClick={() => onJumpToPty?.(s.id)}
         // Rows truncate to one line each now; the full detail lives here.
         title={[
-          agent ? `${agent.label} (identified by ${agent.via})` : s.title,
+          // The row's name, then which CLI it is — now that the name is the
+          // tab's, the row no longer says that on its face.
+          name,
+          agent && name !== agent.label
+            ? `${agent.label} (identified by ${agent.via})`
+            : agent
+              ? `identified by ${agent.via}`
+              : undefined,
           s.cwd,
           digest?.branch,
           task,
@@ -716,7 +738,7 @@ export function AgentsPanel({
           ) : (
             <TerminalIcon size={13} className="ap-mark" />
           )}
-          <span className="agent-name">{agent?.label ?? s.title}</span>
+          <span className="agent-name">{name}</span>
           {/* How long it has actually been working: this stretch while it is
               working, the session's total once it stops. Ahead of the directory
               and branch chips because this row truncates rather than wraps, and
@@ -1269,13 +1291,10 @@ export function AgentsPanel({
             Not open right now — reopening runs the agent's own resume, so it
             comes back with its history.
           </div>
-          {restorable.map((d) => {
-            const agentId = d.agent ?? "agent";
-            // resume_cwd, not cwd: claude looks the conversation up under its
-            // project root, so resuming from the subdirectory the agent ran in
-            // reports "No conversation found".
-            const runIn = d.resume_cwd || d.cwd || "";
-            const cmd = d.resumable === false ? null : restoreCommand(agentId, d.session_id);
+          {restorable.map(({ digest: d, agentId, cwd: runIn, command: cmd }) => {
+            // runIn is resume_cwd, not cwd: claude looks the conversation up
+            // under its project root, so resuming from the subdirectory the
+            // agent ran in reports "No conversation found".
             const dir = runIn.split("/").filter(Boolean).pop() ?? "";
             const last = lastHumanPrompt(d.prompts);
             return (
@@ -1305,31 +1324,17 @@ export function AgentsPanel({
                     full-width buttons per row made four sessions look like a
                     form. Labels come back on hover. */}
                 <div className="restore-actions">
-                  {cmd ? (
-                    <button
-                      className="row-act row-act-go"
-                      title={`Restore this session — ${cmd}`}
-                      onClick={() => onRestore?.(runIn, cmd, agentId, agentId)}
-                    >
-                      <RestartIcon size={13} />
-                      <span className="row-act-label">Restore</span>
-                    </button>
-                  ) : (
-                    // The agent wrote no transcript (or its CLI can't reopen
-                    // by id), so every --resume against this fails. Say so
-                    // rather than offer a button whose only outcome is a red
-                    // error in a terminal.
-                    <span
-                      className="restore-unsupported"
-                      title={
-                        d.resumable === false
-                          ? "No saved history for this session"
-                          : `${agentId} cannot reopen a specific past session by id`
-                      }
-                    >
-                      can't resume
-                    </span>
-                  )}
+                  {/* Always a real offer: a session the CLI can't reopen by id,
+                      or that wrote no transcript to reopen, never reaches this
+                      list — see restorableFrom. */}
+                  <button
+                    className="row-act row-act-go"
+                    title={`Restore this session — ${cmd}`}
+                    onClick={() => onRestore?.(runIn, cmd, agentId, agentId)}
+                  >
+                    <RestartIcon size={13} />
+                    <span className="row-act-label">Restore</span>
+                  </button>
                   <button
                     className="row-act row-act-del"
                     title="Forget this session — removes it from this list"

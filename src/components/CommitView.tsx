@@ -6,6 +6,7 @@ import { DiffView, DiffModeEnum } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import * as ipc from "../ipc";
 import type { Notify } from "../types";
+import { useBranchSwitch } from "../useBranchSwitch";
 import { splitPatch } from "./PrView";
 
 interface CommitViewProps {
@@ -37,6 +38,7 @@ export function CommitView({ repo, hash, onNotice }: CommitViewProps) {
   const [patch, setPatch] = useState<ipc.CommitPatch | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [split, setSplit] = useState(true);
+  const { switchTo } = useBranchSwitch();
 
   // Two phases on purpose: metadata is a `git show -s` (milliseconds) so the
   // header paints at once, while the patch — the part that actually costs
@@ -97,6 +99,24 @@ export function CommitView({ repo, hash, onNotice }: CommitViewProps) {
               Open on remote
             </a>
           )}
+          {/* Reading a commit and being unable to run it was the gap: the
+              snapshot is what "check this out without moving anything" means
+              everywhere else in the app, and a commit is its most natural
+              subject. Through the one funnel, so a checkout with unsaved work
+              gets asked about rather than refused at. */}
+          <button
+            className="btn-mini"
+            title="Put the whole project at this commit for a look. Nothing moves — your next branch switch puts everything back."
+            onClick={() =>
+              void switchTo(repo, {
+                kind: "ref",
+                ref: detail.hash,
+                label: detail.short,
+              })
+            }
+          >
+            Test a snapshot of this commit
+          </button>
           <button
             className="btn-mini"
             title="Copy the full hash"

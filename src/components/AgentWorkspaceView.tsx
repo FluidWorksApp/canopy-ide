@@ -10,6 +10,7 @@ import { createTwoFilesPatch } from "diff";
 import { fmtTokens } from "../format";
 import * as ipc from "../ipc";
 import type { Notify } from "../types";
+import { useBranchSwitch } from "../useBranchSwitch";
 import { splitPatch } from "./PrView";
 import { STATE_META, lastHumanPrompt } from "./AgentsPanel";
 import { AgentRuntime } from "./AgentRuntime";
@@ -397,6 +398,7 @@ export function AgentWorkspaceView({
   savedTasks = [],
   onRunOneOff,
 }: AgentWorkspaceViewProps) {
+  const { switchTo, openThere } = useBranchSwitch();
   const [taskMenu, setTaskMenu] = useState(false);
   /** The one-off brief being typed in the Run task menu, or null when that row
    *  is still just a row. */
@@ -1013,10 +1015,14 @@ export function AgentWorkspaceView({
           {ws?.branch && (
             <span
               className="agent-branch"
-              title={ws.detached ? "detached HEAD" : `On branch ${ws.branch}`}
+              title={
+                ws.detached
+                  ? `${ws.branch} — the agent is looking at a snapshot of the code, not working on the branch itself.`
+                  : `The agent works on ${ws.branch}.`
+              }
             >
               <GitBranchIcon size={12} /> {ws.branch}
-              {ws.detached ? " (detached)" : ""}
+              {ws.detached ? " · snapshot" : ""}
             </span>
           )}
           {ws?.merged && <span className="loose-chip">merged</span>}
@@ -1034,6 +1040,39 @@ export function AgentWorkspaceView({
             </span>
           )}
           <span className="status-spacer" />
+          {/* Go where this agent worked. The pair the switch dialog talks about
+              is right there in the banner — the branch and the directory — and
+              until now neither could be acted on: you could read what an agent
+              did and still have to go to the Git panel to stand where it did.
+              Both routes are the one funnel, so a branch another workspace is
+              holding asks its question here too. */}
+          {repo && ws?.isolated && ws.workdir && (
+            <button
+              className="btn"
+              title={`Point this project's files, search and new terminals at ${ws.workdir}. Nothing moves, nothing is lost.`}
+              onClick={() =>
+                void openThere(repo, ws.workdir as string, ws.branch)
+              }
+            >
+              Open it there
+            </button>
+          )}
+          {/* On a shared checkout there is no other folder to point at — the
+              agent worked here — so the way back to its work is the branch. */}
+          {repo && ws?.branch && !ws.isolated && !ws.detached && !ws.on_base && (
+            <button
+              className="btn"
+              title={`Open ${ws.branch} in this project's own checkout`}
+              onClick={() =>
+                void switchTo(repo, {
+                  kind: "branch",
+                  branch: ws.branch as string,
+                })
+              }
+            >
+              Switch to this branch
+            </button>
+          )}
           {/* Only for an isolated worktree: that directory isn't a tab anywhere
               else, so a scratch shell pointed at it is the one thing closing
               this overlay can't give you. On a shared checkout it's the repo

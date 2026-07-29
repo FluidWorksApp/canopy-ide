@@ -490,10 +490,14 @@ export interface SpotIndexHit {
   kind: string;
   /** Session id for a transcript, "pty:<id>" for a terminal. */
   key: string;
-  /** Cwd (transcript) or tab title (terminal). */
+  /** Registry id of the CLI that wrote it, or "terminal". */
+  agent: string;
+  /** Where the conversation was running. */
+  cwd: string;
+  /** Tab title for a terminal; empty for a transcript. */
   title: string;
   snippet: string;
-  /** Transcript path (transcript) or cwd (terminal). */
+  /** The file the hit came from — a transcript path, or the terminal's cwd. */
   meta: string;
   ts: number;
 }
@@ -502,13 +506,54 @@ export interface SpotIngestReport {
   more: boolean;
   messages: number;
   terminals: number;
+  /** Documents dropped: vanished files, disabled agents, retention. */
+  pruned: number;
+}
+
+export interface SpotIndexStats {
+  messages: number;
+  sessions: number;
+  terminals: number;
+  bytes: number;
+  /** [registry id, messages], busiest first. */
+  by_agent: [string, number][];
+}
+
+export interface SpotIngestOptions {
+  /** Registry ids to index. An agent left out is purged, not just skipped. */
+  agents: string[];
+  terminals: boolean;
+  /** The open project's directories — how the per-project stores (gemini,
+   *  aider) are found at all. */
+  roots: string[];
+  /** Drop transcript messages older than this. 0 keeps everything. */
+  retentionDays: number;
 }
 
 /** Bring the index up to date; call again while `more`. */
-export const spotIngest = () => invoke<SpotIngestReport>("spot_ingest");
+export const spotIngest = (opts: SpotIngestOptions) =>
+  invoke<SpotIngestReport>("spot_ingest", {
+    agents: opts.agents,
+    terminals: opts.terminals,
+    roots: opts.roots,
+    retentionDays: opts.retentionDays,
+  });
 
-export const spotSearch = (query: string, limit?: number) =>
-  invoke<SpotIndexHit[]>("spot_search", { query, limit });
+/** Search the index. `roots` scopes to the open project; `allProjects` asks
+ *  across every project on the machine instead. */
+export const spotSearch = (
+  query: string,
+  limit?: number,
+  roots?: string[],
+  allProjects?: boolean,
+) => invoke<SpotIndexHit[]>("spot_search", { query, limit, roots, allProjects });
+
+/** What the index holds right now (Settings → SpotSearch). */
+export const spotIndexStats = () => invoke<SpotIndexStats>("spot_index_stats");
+
+/** Empty the index. Everything in it is derived, so this costs recall until
+ *  the next ingest and nothing else. */
+export const spotIndexClear = () => invoke<void>("spot_index_clear");
 
 /** Persist a captured page screenshot under `<dir>/.canopy/spot/` so a task
  *  brief can point an agent at it. Returns the absolute path. */
@@ -567,6 +612,25 @@ export interface AgentSessionUsage {
 /** Usage for every session Canopy knows, across all supported CLIs. Drives the
  *  Statistics panel and the status-tray grand total. */
 export const agentUsage = () => invoke<AgentSessionUsage[]>("agent_usage");
+
+/** One rolling subscription window ("5h", "7d") and how much of it is gone. */
+export interface PlanWindow {
+  label: string;
+  used_percent: number;
+  resets_at: number | null;
+}
+/** A CLI's subscription headroom — the cap side of usage, as opposed to the
+ *  spend side in AgentSessionUsage. Only CLIs that actually report appear. */
+export interface PlanUsage {
+  agent: string;
+  plan: string | null;
+  windows: PlanWindow[];
+  credits: number | null;
+  /** Unix seconds these numbers were last true; they persist across the gap
+   *  where a rate-limited request returns no limit headers. */
+  observed: number;
+}
+export const planUsage = () => invoke<PlanUsage[]>("plan_usage");
 
 export interface FsChange {
   root: string;
@@ -714,6 +778,40 @@ export interface HealthReport {
 }
 export const agentIntegrationHealth = () =>
   invoke<IntegrationHealth[]>("agent_integration_health");
+
+/** One config file's claim on an MCP server. A server configured in four CLIs
+ *  arrives as one McpServer carrying four of these. */
+export interface McpSource {
+  agent: string;
+  /** CLI plus scope, as the panel shows it: "Claude Code (project)". */
+  label: string;
+  /** The name it has in *this* config — CLIs rarely agree. */
+  name: string;
+  config_path: string;
+  scope: "global" | "project";
+  /** "pending" is a `.mcp.json` server nobody has approved or rejected yet. */
+  status: "enabled" | "disabled" | "pending";
+}
+/** One MCP server, folded across every CLI that configures it. Credentials are
+ *  stripped in Rust: `args` is redacted and `env_keys` holds names only, so
+ *  there is no value here to leak. */
+export interface McpServer {
+  key: string;
+  name: string;
+  transport: "stdio" | "http" | "sse";
+  command: string | null;
+  args: string[];
+  url: string | null;
+  env_keys: string[];
+  sources: McpSource[];
+  enabled: boolean;
+}
+/** Every MCP server configured on this machine. Reads config files only — no
+ *  server is started or connected to, so this is cheap to call on panel open.
+ *  Pass the project's component roots to include their `.mcp.json` and the CLIs'
+ *  per-project registries; pass none for the user-scope answer alone. */
+export const mcpServers = (projectDirs: string[] = []) =>
+  invoke<McpServer[]>("mcp_servers", { projectDirs });
 /** The launch's integration report if the pass has already finished. It runs
  *  before the webview does, so the event below can fire with nobody listening —
  *  ask for this on mount and take whichever arrives first. */
@@ -775,6 +873,9 @@ export interface BranchInfo {
   /** A local branch that also exists on the remote (already pushed). */
   synced: boolean;
   subject: string;
+  /** An integration branch, or this repo's actual base. Decided in the backend
+   *  because only it knows what the base is. */
+  protected: boolean;
 }
 
 export interface CommitInfo {
@@ -811,7 +912,13 @@ export interface BranchHolder {
  *  resolve comes back as an outcome, not a thrown error — the UI turns these
  *  into choices instead of showing git's stderr. */
 export type CheckoutOutcome =
-  | { kind: "switched"; message: string }
+  | {
+      kind: "switched";
+      message: string;
+      /** The checkout to work in when it isn't the repo root — a workspace we
+       *  landed in or created. Null means "here". */
+      path?: string | null;
+    }
   | { kind: "branch_in_worktree"; holder: BranchHolder }
   | {
       kind: "local_changes";
@@ -820,6 +927,43 @@ export type CheckoutOutcome =
       detail: string;
     }
   | { kind: "changes_stashed"; stash: string; detail: string }
+  /** A half-finished merge/rebase/cherry-pick/revert/am, or another git process
+   *  holding the index. */
+  | {
+      kind: "repo_busy";
+      operation:
+        | "merge"
+        | "rebase"
+        | "cherry-pick"
+        | "revert"
+        | "am"
+        | "another-command";
+      detail: string;
+    }
+  /** No branch, tag or commit of that name is here. `can_create` means the name
+   *  is legal and free, so starting it here is a real way out. */
+  | {
+      kind: "nothing_called";
+      name: string;
+      can_create: boolean;
+      detail: string;
+    }
+  /** A create-shaped request refused because the name is taken. */
+  | { kind: "name_taken"; branch: string; detail: string }
+  /** A workspace couldn't go there. `usable` means the path is a worktree of
+   *  this repo, so opening it as it stands is safe. */
+  | { kind: "path_in_use"; path: string; usable: boolean; detail: string }
+  /** GitHub couldn't be reached, or doesn't have what we asked it for. */
+  | { kind: "remote_unreachable"; summary: string; detail: string }
+  /** The switch worked, but left a detached HEAD's commits on no branch. Git
+   *  says this and exits 0, so nothing else would mention it. `commits` is
+   *  "<short> <subject>", newest first. */
+  | {
+      kind: "switched_with_leftovers";
+      message: string;
+      commits: string[];
+      detail: string;
+    }
   | { kind: "failed"; summary: string; detail: string };
 
 export const gitCheckout = (repo: string, branch: string, create = false) =>
@@ -831,9 +975,19 @@ export const gitCheckoutDetached = (repo: string, refname: string) =>
 export const gitCheckoutCarry = (repo: string, branch: string) =>
   invoke<CheckoutOutcome>("git_checkout_carry", { repo, branch });
 /** Free a branch name from the worktree holding it. That worktree keeps every
- *  file it has — it just stops claiming the name. */
+ *  file it has — it just stops claiming the name. A locked workspace comes back
+ *  as `branch_in_worktree` so the caller can re-ask, not as an error. */
 export const gitBranchRelease = (repo: string, branch: string) =>
-  invoke<string>("git_branch_release", { repo, branch });
+  invoke<CheckoutOutcome>("git_branch_release", { repo, branch });
+/** Call off a half-finished merge/rebase/cherry-pick/revert/am. Only the
+ *  operation's bookkeeping is dropped; every file stays exactly as it is. */
+export const gitOperationQuit = (repo: string) =>
+  invoke<string>("git_operation_quit", { repo });
+/** Give a commit a branch name without checking it out — how a commit a switch
+ *  left reachable from nothing gets kept, without moving you off where you just
+ *  landed. */
+export const gitBranchAt = (repo: string, name: string, commit: string) =>
+  invoke<string>("git_branch_at", { repo, name, commit });
 /** Delete a local branch. `force` (git -D) is needed for a squash-merged branch
  *  whose remote is gone; otherwise the safe -d refuses unmerged work. Protected
  *  and current branches are refused by the backend. */
@@ -1058,14 +1212,23 @@ export const gitWorktreeAdd = (
   path: string,
   branch: string,
   create: boolean,
-) => invoke<string>("git_worktree_add", { repo, path, branch, create });
+) =>
+  invoke<CheckoutOutcome>("git_worktree_add", { repo, path, branch, create });
 export const gitWorktreeAddPr = (
   repo: string,
   path: string,
   number: number,
   branch: string,
-) => invoke<string>("git_worktree_add_pr", { repo, path, number, branch });
-export const gitWorktreeRemove = (repo: string, path: string, force: boolean) =>
+) =>
+  invoke<CheckoutOutcome>("git_worktree_add_pr", {
+    repo,
+    path,
+    number,
+    branch,
+  });
+/** `force` counts rather than toggles: 1 drops uncommitted work, 2 also clears
+ *  a locked workspace — git needs `remove -f -f` for that and says so. */
+export const gitWorktreeRemove = (repo: string, path: string, force: 0 | 1 | 2) =>
   invoke<string>("git_worktree_remove", { repo, path, force });
 export const gitWorktreePrune = (repo: string) =>
   invoke<string>("git_worktree_prune", { repo });
@@ -1083,8 +1246,11 @@ export const ghPrReview = (
   action: "approve" | "comment" | "request-changes",
   body?: string,
 ) => invoke<string>("gh_pr_review", { repo, number, action, body });
-export const ghPrCheckout = (repo: string, number: number) =>
-  invoke<string>("gh_pr_checkout", { repo, number });
+/** Check out a PR's head here — ordinary branch switching wearing gh's coat, so
+ *  it refuses in the same ways and returns the same outcomes. `carry` sets the
+ *  working tree aside and puts it back, as the local-changes answer does. */
+export const ghPrCheckout = (repo: string, number: number, carry = false) =>
+  invoke<CheckoutOutcome>("gh_pr_checkout", { repo, number, carry });
 export const ghPrMerge = (
   repo: string,
   number: number,
@@ -1340,7 +1506,12 @@ export const setContextScopes = (
   scopes: { name: string; roots: string[]; enabled: boolean }[],
 ) => invoke<void>("set_context_scopes", { scopes });
 
-export const sessionDigests = () => invoke<SessionDigest[]>("session_digests");
+/** Every agent conversation this machine has a record of: Canopy's own hook
+ *  records, plus each CLI's own on-disk store. `roots` are the open project's
+ *  directories — the stores that file themselves by project (gemini, aider)
+ *  can only be found through them. */
+export const sessionDigests = (roots?: string[]) =>
+  invoke<SessionDigest[]>("session_digests", { roots });
 
 /** Drop a session the user no longer wants offered for restore. */
 export const sessionForget = (sessionId: string) =>

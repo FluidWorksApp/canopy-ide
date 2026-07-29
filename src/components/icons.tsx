@@ -105,24 +105,27 @@ export function FailIcon({ size = 14, className }: IconProps) {
   );
 }
 
-/** Wrench + play: the rail's execution tab. A wrench on its own reads as
- *  settings, and a play triangle on its own reads as "run the thing in front" —
- *  together they say run *and* manage, which is what the panel does.
+/** Server rack + play: the rail's execution tab. Two stacked rack units with a
+ *  status LED each say "the things this project runs"; the play mark says they
+ *  are yours to start. A wrench used to stand in for the rack and kept reading
+ *  as settings.
  *
- *  The wrench is scaled toward the lower-left (its stroke widened to compensate,
- *  or it would read thinner than its neighbours) and the play mark sits bottom
- *  right, in the one corner both the wrench's head and its handle leave empty.
- *  Not the top right: the rail's running-count badge lands there and would eat
- *  the play mark exactly when servers are up. */
+ *  The rack is kept left of x=15 so the play mark has the bottom-right corner
+ *  to itself. Not the top right: the rail's running-count badge lands there and
+ *  would eat the play mark exactly when servers are up. The play is --ok green
+ *  rather than currentColor — it is the one part of the glyph that means "run",
+ *  and it stays legible while the rest of the icon dims with the rail. */
 export function ServersIcon({ size = 18, className }: IconProps) {
   return (
-    <svg {...svgProps(size, className)}>
-      <g transform="translate(-1.3 4.86) scale(0.78)" strokeWidth={2.5}>
-        <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
-      </g>
+    <svg {...svgProps(size, className)} strokeWidth={1.8}>
+      <rect x="2.3" y="3.6" width="11.9" height="6.5" rx="1.7" />
+      <rect x="2.3" y="13.1" width="11.9" height="6.5" rx="1.7" />
+      <path d="M10.2 6.85h1.4M10.2 16.35h1.4" />
+      <circle cx="5.5" cy="6.85" r="0.95" fill="currentColor" stroke="none" />
+      <circle cx="5.5" cy="16.35" r="0.95" fill="currentColor" stroke="none" />
       <path
-        d="M17.4 15.4v5.6a.55.55 0 0 0 .84.47l4.6-2.8a.55.55 0 0 0 0-.94l-4.6-2.8a.55.55 0 0 0-.84.47Z"
-        fill="currentColor"
+        d="M15.9 13.5v7.6a.6.6 0 0 0 .92.5l6.1-3.8a.6.6 0 0 0 0-1l-6.1-3.8a.6.6 0 0 0-.92.5Z"
+        fill="var(--ok, #9ece6a)"
         stroke="none"
       />
     </svg>
@@ -340,6 +343,21 @@ export function TasksIcon({ size = 18, className }: IconProps) {
       <path d="M12 6.5h8" />
       <path d="M4 12.5h16" />
       <path d="M4 18.5h16" />
+    </svg>
+  );
+}
+
+/** MCP tools: a plug going into a socket. The rail already has a wrench
+ *  (Servers) and a bot (Agents), so the shape has to say "something external
+ *  connected to the agents" rather than "a tool" in the generic sense — which
+ *  at 22px is the difference between this and a second wrench. */
+export function PlugIcon({ size = 18, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M9 3v5" />
+      <path d="M15 3v5" />
+      <path d="M6 8h12v3a6 6 0 0 1-6 6 6 6 0 0 1-6-6z" />
+      <path d="M12 17v4" />
     </svg>
   );
 }

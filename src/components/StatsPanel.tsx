@@ -7,6 +7,7 @@ import { useEffect, useMemo, useState } from "react";
 import { fmtTokens } from "../format";
 import * as ipc from "../ipc";
 import { sessionCost } from "../pricing";
+import { planLabel, resetText, stalenessText } from "../planUsage";
 import { AGENT_CLIS } from "../projects";
 import { AgentIcon } from "./icons";
 
@@ -69,9 +70,49 @@ function CostCell({ g }: { g: Pick<Group, "cost" | "estimated" | "priced"> }) {
   );
 }
 
+/** One subscription window as a labelled bar. The percentage is always spelled
+ *  out beside the fill — the bar is the glance, the number is the answer. */
+function PlanBar({ w }: { w: ipc.PlanWindow }) {
+  const pct = Math.min(100, Math.max(0, w.used_percent));
+  const reset = resetText(w);
+  return (
+    <div className="plan-row">
+      <span className="plan-window">{w.label}</span>
+      <span className="plan-track">
+        <span
+          className="plan-fill"
+          style={{ width: `${pct}%` }}
+          data-tone={pct >= 90 ? "critical" : pct >= 75 ? "warn" : "normal"}
+        />
+      </span>
+      <span className="plan-pct">{Math.round(w.used_percent)}%</span>
+      <span className="plan-reset">{reset ?? ""}</span>
+    </div>
+  );
+}
+
 export function StatsPanel({ visible }: { visible: boolean }) {
   const [usage, setUsage] = useState<ipc.AgentSessionUsage[]>([]);
+  const [plans, setPlans] = useState<ipc.PlanUsage[]>([]);
   const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    if (!visible) return;
+    let cancelled = false;
+    const refresh = () =>
+      void ipc
+        .planUsage()
+        .then((p) => {
+          if (!cancelled) setPlans(p);
+        })
+        .catch(() => {});
+    refresh();
+    const timer = setInterval(refresh, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [visible]);
 
   useEffect(() => {
     if (!visible) return;
@@ -140,6 +181,56 @@ export function StatsPanel({ visible }: { visible: boolean }) {
         <span className="ap-title">Usage &amp; cost · all sessions</span>
         <span className="ap-head-spacer" />
       </div>
+
+      {/* Plan limits lead: "can I keep working" outranks "what did this cost",
+          and unlike the totals below these are capped quantities the user can
+          actually run out of. Only CLIs that report appear — the absence of a
+          row means unknown, which the footnote says out loud rather than
+          leaving the list to imply full coverage. */}
+      {plans.length > 0 && (
+        <>
+          <div className="ap-head stats-section-head">
+            <span className="ap-title">Plan limits</span>
+          </div>
+          <div className="plan-list">
+            {plans.map((p) => {
+              const stale = stalenessText(p);
+              return (
+                <div className="plan-group" key={p.agent}>
+                  <div className="plan-group-head">
+                    <AgentIcon id={p.agent} size={13} />
+                    <span className="plan-agent">{agentName(p.agent)}</span>
+                    {planLabel(p) && (
+                      <span className="plan-tier">{planLabel(p)}</span>
+                    )}
+                    {stale && <span className="plan-stale">{stale}</span>}
+                  </div>
+                  {p.windows.map((w) => (
+                    <PlanBar key={w.label} w={w} />
+                  ))}
+                  {p.credits != null && (
+                    <div className="plan-row plan-credits">
+                      <span className="plan-window">credits</span>
+                      <span className="plan-pct">{fmtCost(p.credits)}</span>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {/* Said plainly because Claude's own /usage shows a third bar we
+              cannot read: it reports the session and all-models windows to a
+              status line, but not the per-model weekly one. Better to name the
+              gap than to let two bars imply the whole picture. */}
+          {plans.some((p) => p.agent === "claude") && (
+            <div className="stats-note">
+              Claude also caps some models individually each week; that limit
+              isn't exposed locally — run <code>/usage</code> in Claude Code to
+              see it.
+            </div>
+          )}
+        </>
+      )}
 
       {loaded && supported.length === 0 ? (
         <div className="stats-empty">

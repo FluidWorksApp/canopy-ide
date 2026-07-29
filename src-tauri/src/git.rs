@@ -74,6 +74,10 @@ pub struct BranchInfo {
     /// A local branch that also exists on the remote (already pushed).
     pub synced: bool,
     pub subject: String,
+    /// An integration branch, or this repo's actual base. Decided here because
+    /// only the backend knows what the base is — a hardcoded list in the UI
+    /// cannot see a repo whose base is neither main nor master.
+    pub protected: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -110,16 +114,44 @@ fn git(repo: &Path) -> Command {
     cmd
 }
 
-fn run(cmd: &mut Command) -> Result<String, String> {
+/// Both of git's streams, because one refusal routinely spans them and one
+/// success routinely carries a warning.
+///
+/// On failure git splits a single message: the mid-merge refusal puts the file
+/// list on stdout (`f.txt: needs merge`) and the sentence about it on stderr
+/// (`error: you need to resolve your current index first`). Returning only one
+/// destroys half the evidence before any classifier sees it, so both come back,
+/// stdout first — the order git wrote them in.
+///
+/// On success stderr is where git puts the things it will never say again: the
+/// orphaned-commits warning after leaving a detached HEAD, `warning: refname
+/// 'x' is ambiguous.`, the sparse-checkout note. All exit 0, so a caller that
+/// only reads stdout tells the user "done" and drops the warning on the floor.
+fn run_verbose(cmd: &mut Command) -> Result<(String, String), String> {
     let out = cmd.output().map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
     if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+        Ok((stdout, stderr))
     } else {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        // git puts useful detail on either stream depending on the subcommand.
-        Err(if err.is_empty() { stdout } else { err })
+        Err(join_streams(&stdout, &stderr))
     }
+}
+
+/// stdout then stderr, each trimmed, empties skipped — one text to classify.
+fn join_streams(stdout: &str, stderr: &str) -> String {
+    [stdout.trim(), stderr.trim()]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The ~100 call sites that only want git's answer. Failures still carry both
+/// streams; successes drop the warning, which is exactly why the switch paths
+/// use `run_verbose` instead.
+fn run(cmd: &mut Command) -> Result<String, String> {
+    run_verbose(cmd).map(|(stdout, _)| stdout)
 }
 
 /// Resolve + scope-check a repo path handed to us by the frontend.
@@ -354,6 +386,7 @@ pub async fn git_branches(
 
     // Build in committerdate order, emitting each logical branch once: a local
     // ref always wins; a remote ref is emitted only when it has no local twin.
+    let base = default_base(&top);
     let mut branches = Vec::new();
     let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
     for r in &refs {
@@ -371,6 +404,7 @@ pub async fn git_branches(
             remote_only: !is_local,
             synced: is_local && remote_logicals.contains(&name),
             subject: r.subject.to_string(),
+            protected: is_protected_branch(&name, &base),
             name,
         });
     }
@@ -406,11 +440,12 @@ pub struct BranchHolder {
 pub enum CheckoutOutcome {
     Switched {
         message: String,
+        /// The checkout the caller should now work in, when it isn't the repo
+        /// root — a workspace we landed in or created. `None` means "here".
+        path: Option<String>,
     },
     /// Another worktree holds the branch.
-    BranchInWorktree {
-        holder: BranchHolder,
-    },
+    BranchInWorktree { holder: BranchHolder },
     /// Uncommitted work here would be overwritten; `files` is git's own list.
     LocalChanges {
         files: Vec<String>,
@@ -419,16 +454,42 @@ pub enum CheckoutOutcome {
     },
     /// The switch happened, but the set-aside changes wouldn't reapply. They
     /// are still saved — this outcome exists so the UI can say where.
-    ChangesStashed {
-        stash: String,
+    ChangesStashed { stash: String, detail: String },
+    /// A half-finished merge/rebase/cherry-pick/revert/am, or another git
+    /// process holding the index. `operation` is one of "merge", "rebase",
+    /// "cherry-pick", "revert", "am", "another-command".
+    RepoBusy { operation: String, detail: String },
+    /// No branch, tag or commit of that name is here. `can_create` says the
+    /// name is a legal one and nothing already holds it, so starting it here is
+    /// a real way out.
+    NothingCalled {
+        name: String,
+        can_create: bool,
+        detail: String,
+    },
+    /// A create-shaped request refused because the name is taken. Distinct from
+    /// `Failed` so nothing offers to look at a branch that doesn't exist.
+    NameTaken { branch: String, detail: String },
+    /// A workspace couldn't go there — something is already at that path.
+    /// `usable` means it is a worktree of *this* repo, so opening it is safe.
+    PathInUse {
+        path: String,
+        usable: bool,
+        detail: String,
+    },
+    /// GitHub couldn't be reached, or doesn't have what we asked it for.
+    RemoteUnreachable { summary: String, detail: String },
+    /// The switch worked, but it left a detached HEAD's commits on no branch.
+    /// Git says this on stderr and exits 0, so nothing else would ever mention
+    /// it. `commits` is "<short> <subject>", newest first.
+    SwitchedWithLeftovers {
+        message: String,
+        commits: Vec<String>,
         detail: String,
     },
     /// Nothing we recognise. Still carries a human first line so the raw text
     /// is never the whole message.
-    Failed {
-        summary: String,
-        detail: String,
-    },
+    Failed { summary: String, detail: String },
 }
 
 fn is_agent_worktree(path: &str) -> bool {
@@ -509,33 +570,435 @@ fn classify_checkout(err: &str) -> CheckoutRefusal {
     CheckoutRefusal::Unknown
 }
 
+/// Which half-finished operation a checkout is sitting in the middle of. The
+/// string is both git's subcommand (`git <op> --quit`) and the token the UI
+/// turns into plain words.
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum RepoOp {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+    Am,
+}
+
+impl RepoOp {
+    fn as_str(self) -> &'static str {
+        match self {
+            RepoOp::Merge => "merge",
+            RepoOp::Rebase => "rebase",
+            RepoOp::CherryPick => "cherry-pick",
+            RepoOp::Revert => "revert",
+            RepoOp::Am => "am",
+        }
+    }
+}
+
+/// The refusals worth acting on that git's older wording never covered, plus
+/// the ones gh only produces at its fetch stage. Consulted *only* when
+/// `classify_checkout` has nothing, so the two shapes it knows keep their exact
+/// meaning and its tests keep their exact truth.
+#[derive(Debug, PartialEq)]
+enum ExtraRefusal {
+    BranchInWorktree { path: String },
+    MidOperation { op: RepoOp },
+    NameTaken { branch: String },
+    NothingCalled { name: String },
+    PathInUse { path: String },
+    LockedWorkspace { path: String, reason: String },
+    AnotherCommandRunning,
+    RemoteUnreachable { summary: String },
+}
+
+/// The text between the first pair of single quotes on a line.
+fn quoted(line: &str) -> Option<String> {
+    let (_, rest) = line.split_once('\'')?;
+    let (inner, _) = rest.split_once('\'')?;
+    Some(inner.to_string())
+}
+
+fn classify_extra(err: &str) -> Option<ExtraRefusal> {
+    for line in err.lines() {
+        let l = line.trim();
+
+        // gh reaches the branch-is-taken case one stage earlier than checkout
+        // does, and git words it differently there. Same human situation.
+        // (fetch.c, stable since git 2.20.)
+        if l.contains("refusing to fetch into branch ") {
+            if let Some((_, at)) = l.split_once(" checked out at ") {
+                return Some(ExtraRefusal::BranchInWorktree {
+                    path: at.trim().trim_matches('\'').to_string(),
+                });
+            }
+        }
+
+        // Git refuses a switch mid-operation with one sentence per operation.
+        let mid = if l.contains("cannot switch branch while merging") {
+            Some(RepoOp::Merge)
+        } else if l.contains("cannot switch branch while rebasing") {
+            Some(RepoOp::Rebase)
+        } else if l.contains("cannot switch branch while cherry-picking") {
+            Some(RepoOp::CherryPick)
+        } else if l.contains("cannot switch branch while reverting") {
+            Some(RepoOp::Revert)
+        } else if l.contains("in the middle of an am session") {
+            Some(RepoOp::Am)
+        } else if l.contains("you need to resolve your current index first") {
+            // An unresolved merge, said from the index's point of view.
+            Some(RepoOp::Merge)
+        } else {
+            None
+        };
+        if let Some(op) = mid {
+            return Some(ExtraRefusal::MidOperation { op });
+        }
+
+        // Order matters: a taken *branch* name also ends in "already exists",
+        // and it is a different question from a taken *path*.
+        if l.contains("a branch named ") && l.contains(" already exists") {
+            if let Some(branch) = quoted(l) {
+                return Some(ExtraRefusal::NameTaken { branch });
+            }
+        }
+        if l.contains("' already exists") && !l.contains("a branch named ") {
+            if let Some(path) = quoted(l) {
+                return Some(ExtraRefusal::PathInUse { path });
+            }
+        }
+
+        // git 2.31 dropped this line's trailing period, so never anchor its end.
+        if l.contains("pathspec ") && l.contains(" did not match") {
+            if let Some(name) = quoted(l) {
+                return Some(ExtraRefusal::NothingCalled { name });
+            }
+        }
+        if let Some((_, name)) = l.split_once("invalid reference: ") {
+            return Some(ExtraRefusal::NothingCalled {
+                name: name.trim().trim_matches('\'').to_string(),
+            });
+        }
+
+        if l.contains("cannot remove a locked working tree")
+            || l.contains("cannot move a locked working tree")
+        {
+            let reason = l
+                .split_once("lock reason: ")
+                .map(|(_, r)| r.trim().to_string())
+                .filter(|r| !r.is_empty())
+                .unwrap_or_else(|| "locked".into());
+            return Some(ExtraRefusal::LockedWorkspace {
+                // git names the reason here, never the path; the caller knows it.
+                path: String::new(),
+                reason,
+            });
+        }
+
+        if l.contains("Unable to create '") && l.contains("index.lock': File exists") {
+            return Some(ExtraRefusal::AnotherCommandRunning);
+        }
+
+        if l.contains("couldn't find remote ref pull/")
+            || l.contains("no git remotes found")
+            || l.contains("Could not resolve to a PullRequest")
+            // run_net's own ceiling, and gh's not-signed-in advice.
+            || l.contains("remote unreachable, or it wants credentials")
+            || l.contains("gh auth login")
+        {
+            return Some(ExtraRefusal::RemoteUnreachable {
+                summary: l.trim_start_matches("fatal: ").to_string(),
+            });
+        }
+    }
+    None
+}
+
+/// gh streams git's lines through verbatim and appends its own wrapper line
+/// last. That line means nothing to a person, so it comes off the *detail* —
+/// never off the text we classify, because git's untouched sentences are
+/// exactly what makes the existing patterns match straight through gh.
+fn strip_gh_noise(err: &str) -> String {
+    let mut lines: Vec<&str> = err.lines().collect();
+    while lines.last().is_some_and(|l| {
+        let t = l.trim();
+        t.is_empty()
+            || t.strip_prefix("failed to run git: exit status ")
+                .is_some_and(|n| n.trim().parse::<i32>().is_ok())
+    }) {
+        lines.pop();
+    }
+    lines.join("\n").trim().to_string()
+}
+
+/// Everything we know about the worktree git just named. `branch_holder` is
+/// tried first because it carries the dirty count, the lock and the prunable
+/// flag; failing that we still look the path up in the worktree list, and only
+/// then fall back to what the one error line said.
+fn holder_at(top: &Path, branch: &str, path: &str) -> BranchHolder {
+    if let Some(h) = branch_holder(top, branch) {
+        return h;
+    }
+    if let Some(w) = scan_worktrees(top).ok().and_then(|ws| {
+        ws.into_iter()
+            .find(|w| same_dir(Path::new(&w.path), Path::new(path)))
+    }) {
+        return BranchHolder {
+            branch: branch.to_string(),
+            agent: is_agent_worktree(&w.path),
+            name: w.name,
+            path: w.path,
+            is_main: w.is_main,
+            dirty: 0,
+            locked: w.locked,
+            prunable: w.prunable,
+            head: w.head,
+        };
+    }
+    // Last resort: one line of git's. Split the leaf on both separators — a
+    // Windows path has no forward slashes to split on — and settle is_main by
+    // comparing paths rather than assuming false, so nothing ever leads with
+    // "move the branch here" against the repo's own main checkout.
+    BranchHolder {
+        branch: branch.to_string(),
+        name: path
+            .trim_end_matches(['/', '\\'])
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(path)
+            .to_string(),
+        agent: is_agent_worktree(path),
+        is_main: same_dir(Path::new(path), top),
+        path: path.to_string(),
+        dirty: 0,
+        locked: None,
+        prunable: None,
+        head: String::new(),
+    }
+}
+
+/// Would `name` be a legal new branch here, and is it still free? "Start it
+/// here" means starting it from HEAD, so an unborn checkout has nothing to
+/// start it from and the offer must not be made.
+fn can_create_branch(top: &Path, name: &str) -> bool {
+    !repo_state(top).unborn
+        && run(git(top).args(["check-ref-format", "--branch", name])).is_ok()
+        && run(git(top).args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{name}"),
+        ]))
+        .is_err()
+}
+
+/// Is `path` a worktree of *this* repo? Only then is "use the folder that's
+/// there" an offer we can keep.
+fn is_known_worktree(top: &Path, path: &str) -> bool {
+    scan_worktrees(top)
+        .map(|ws| {
+            ws.iter()
+                .any(|w| same_dir(Path::new(&w.path), Path::new(path)))
+        })
+        .unwrap_or(false)
+}
+
+fn repo_busy(op: RepoOp) -> CheckoutOutcome {
+    let name = op.as_str();
+    CheckoutOutcome::RepoBusy {
+        operation: name.into(),
+        detail: format!(
+            "git {name} --quit — the {name} state is cleared; the working tree is untouched."
+        ),
+    }
+}
+
+/// The body of the "couldn't get that from GitHub" question, chosen by cause.
+///
+/// Quoting git's or gh's first line here — which is what this did — puts raw
+/// stderr in the one sentence the user reads, and says the same thing whichever
+/// of three quite different situations they are actually in. The raw text keeps
+/// its place in `detail`, where it teaches rather than blocks. `pr` lets the
+/// missing-head case name the pull request it is about.
+fn remote_unreachable_for(err: &str, pr: Option<u32>) -> CheckoutOutcome {
+    let detail = strip_gh_noise(err);
+    let l = detail.to_lowercase();
+    let summary = if l.contains("gh auth login")
+        || l.contains("not logged in")
+        || l.contains("requires authentication")
+        || l.contains("wants credentials")
+        || l.contains("authentication failed")
+    {
+        "Canopy couldn't reach GitHub with the sign-in it has.".to_string()
+    } else if l.contains("no git remotes found") || l.contains("does not appear to be a git repo") {
+        "This project has no remote to fetch from.".to_string()
+    } else if l.contains("couldn't find remote ref")
+        || l.contains("could not resolve to a pullrequest")
+    {
+        match pr {
+            Some(n) => format!(
+                "GitHub doesn't have a copy of #{n}'s changes to fetch. A private fork you can't read is the usual reason."
+            ),
+            None => "GitHub doesn't have a copy of those changes to fetch. A private fork you can't read is the usual reason.".into(),
+        }
+    } else {
+        "Canopy couldn't reach GitHub just now.".to_string()
+    };
+    CheckoutOutcome::RemoteUnreachable { summary, detail }
+}
+
+/// The same question, asked about no pull request in particular.
+fn remote_unreachable(err: &str) -> CheckoutOutcome {
+    remote_unreachable_for(err, None)
+}
+
 fn switch_failed(top: &Path, target: &str, err: String) -> CheckoutOutcome {
+    // Classification always sees the untouched text; only the detail is tidied.
+    let detail = strip_gh_noise(&err);
     match classify_checkout(&err) {
-        // Preflight missed it, or the worktree appeared in between. Look the
-        // holder up properly; if that fails too, git's path is enough to talk
-        // about it.
+        // Preflight missed it, or the worktree appeared in between.
         CheckoutRefusal::BranchInWorktree { path } => CheckoutOutcome::BranchInWorktree {
-            holder: branch_holder(top, target).unwrap_or_else(|| BranchHolder {
-                branch: target.to_string(),
-                name: path.rsplit('/').next().unwrap_or(&path).to_string(),
-                agent: is_agent_worktree(&path),
-                path,
-                is_main: false,
-                dirty: 0,
-                locked: None,
-                prunable: None,
-                head: String::new(),
-            }),
+            holder: holder_at(top, target, &path),
         },
         CheckoutRefusal::LocalChanges { files, untracked } => CheckoutOutcome::LocalChanges {
             files,
             untracked,
-            detail: err,
+            detail,
         },
-        CheckoutRefusal::Unknown => CheckoutOutcome::Failed {
-            summary: format!("Git couldn't switch to {target}."),
-            detail: err,
+        CheckoutRefusal::Unknown => match classify_extra(&err) {
+            Some(ExtraRefusal::BranchInWorktree { path }) => CheckoutOutcome::BranchInWorktree {
+                holder: holder_at(top, target, &path),
+            },
+            Some(ExtraRefusal::MidOperation { op }) => repo_busy(op),
+            Some(ExtraRefusal::AnotherCommandRunning) => CheckoutOutcome::RepoBusy {
+                operation: "another-command".into(),
+                detail,
+            },
+            Some(ExtraRefusal::NameTaken { branch }) => {
+                CheckoutOutcome::NameTaken { branch, detail }
+            }
+            Some(ExtraRefusal::NothingCalled { name }) => CheckoutOutcome::NothingCalled {
+                can_create: can_create_branch(top, &name),
+                name,
+                detail,
+            },
+            Some(ExtraRefusal::PathInUse { path }) => CheckoutOutcome::PathInUse {
+                usable: is_known_worktree(top, &path),
+                path,
+                detail,
+            },
+            // A locked workspace is still a workspace holding the branch: the
+            // frontend already knows to re-ask with "move it here" disabled.
+            Some(ExtraRefusal::LockedWorkspace { path, reason }) => {
+                let mut holder = holder_at(top, target, &path);
+                holder.locked.get_or_insert(reason);
+                CheckoutOutcome::BranchInWorktree { holder }
+            }
+            Some(ExtraRefusal::RemoteUnreachable { .. }) => remote_unreachable(&err),
+            None => CheckoutOutcome::Failed {
+                summary: format!("Git couldn't switch to {target}."),
+                detail,
+            },
         },
+    }
+}
+
+/// The states of this checkout that make a switch mean something other than
+/// what the user asked for. Read *before* the switch, because git will not tell
+/// us after: it succeeds, exits 0, and quietly does the wrong thing.
+#[derive(Debug, Default, Clone)]
+struct RepoState {
+    /// A half-finished operation. `git checkout other` mid-rebase succeeds and
+    /// abandons the rebase in place — a success that discards user work.
+    mid: Option<RepoOp>,
+    unborn: bool,
+    /// Commits on a detached HEAD that no branch or remote holds — "<short>
+    /// <subject>", newest first.
+    orphan_commits: Vec<String>,
+}
+
+fn repo_state(top: &Path) -> RepoState {
+    // One `--git-dir` and then plain joins, rather than a `--git-path` process
+    // per marker: every marker below is per-worktree, so it lives in this
+    // checkout's own git dir — which is what --git-dir returns, linked worktree
+    // or not. This runs before every switch, so it stays to three processes.
+    let dir = run(git(top).args(["rev-parse", "--git-dir"]))
+        .map(|s| {
+            let p = PathBuf::from(s.trim());
+            if p.is_absolute() {
+                p
+            } else {
+                top.join(p)
+            }
+        })
+        .unwrap_or_else(|_| top.join(".git"));
+    let exists = |p: &str| dir.join(p).exists();
+
+    let mid = if exists("rebase-merge") {
+        Some(RepoOp::Rebase)
+    } else if exists("rebase-apply") {
+        // `git am` and `git rebase --apply` share the directory; only am leaves
+        // an `applying` marker inside it.
+        Some(if exists("rebase-apply/applying") {
+            RepoOp::Am
+        } else {
+            RepoOp::Rebase
+        })
+    } else if exists("MERGE_HEAD") {
+        Some(RepoOp::Merge)
+    } else if exists("CHERRY_PICK_HEAD") {
+        Some(RepoOp::CherryPick)
+    } else if exists("REVERT_HEAD") {
+        Some(RepoOp::Revert)
+    } else {
+        None
+    };
+
+    let unborn = run(git(top).args(["rev-parse", "--verify", "--quiet", "HEAD"])).is_err();
+    // Only a detached HEAD can be carrying commits nothing else points at.
+    let detached = run(git(top).args(["symbolic-ref", "--quiet", "HEAD"])).is_err();
+    let orphan_commits = if detached && !unborn {
+        run(git(top).args([
+            "log",
+            "--max-count=20",
+            "--format=%h %s",
+            "HEAD",
+            "--not",
+            "--branches",
+            "--remotes",
+        ]))
+        .map(|s| {
+            s.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    RepoState {
+        mid,
+        unborn,
+        orphan_commits,
+    }
+}
+
+/// A switch that worked. If HEAD was sitting on commits no branch holds, that
+/// is a success which loses work unless we say so here.
+fn settled(message: String, path: Option<String>, before: &RepoState) -> CheckoutOutcome {
+    if before.orphan_commits.is_empty() {
+        return CheckoutOutcome::Switched { message, path };
+    }
+    let first = before.orphan_commits[0]
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string();
+    CheckoutOutcome::SwitchedWithLeftovers {
+        message,
+        commits: before.orphan_commits.clone(),
+        detail: format!("git branch saved-{first} {first} — the commit gets a name, and stops being reachable only by luck."),
     }
 }
 
@@ -554,6 +1017,18 @@ pub async fn git_checkout(
     create: bool,
 ) -> Result<CheckoutOutcome, String> {
     let top = repo_path(&state, &repo)?;
+    // Mid-operation first: git does not refuse this one, it succeeds and
+    // abandons the half-finished work in place.
+    let mut before = repo_state(&top);
+    if let Some(op) = before.mid {
+        return Ok(repo_busy(op));
+    }
+    // `checkout -b` off a snapshot is how a loose commit stops being loose —
+    // the new branch is exactly the name it was missing. Warning that it was
+    // "left behind" would be the opposite of what just happened.
+    if create {
+        before.orphan_commits.clear();
+    }
     if !create {
         if let Some(holder) = branch_holder(&top, &branch) {
             return Ok(CheckoutOutcome::BranchInWorktree { holder });
@@ -566,9 +1041,7 @@ pub async fn git_checkout(
         cmd.args(["checkout", &branch]);
     }
     match run(&mut cmd) {
-        Ok(_) => Ok(CheckoutOutcome::Switched {
-            message: format!("Switched to {branch}"),
-        }),
+        Ok(_) => Ok(settled(format!("Switched to {branch}"), None, &before)),
         Err(err) => Ok(switch_failed(&top, &branch, err)),
     }
 }
@@ -577,10 +1050,20 @@ pub async fn git_checkout(
 /// `checkout` does, so a branch you have only ever seen on GitHub has to be
 /// resolved to its remote-tracking twin here — otherwise the one option that
 /// touches nothing would be the one that refuses.
+///
+/// Every configured remote is tried, not just origin: a branch that only exists
+/// on `upstream` is a branch, and reporting it as nonexistent was a lie.
 fn resolve_ref(top: &Path, name: &str) -> Option<String> {
-    for candidate in [name.to_string(), format!("refs/remotes/origin/{name}")] {
+    let mut candidates = vec![name.to_string()];
+    let remotes = run(git(top).args(["remote"])).unwrap_or_default();
+    for r in remotes.lines().map(str::trim).filter(|r| !r.is_empty()) {
+        candidates.push(format!("refs/remotes/{r}/{name}"));
+    }
+    for candidate in candidates {
         let spec = format!("{candidate}^{{commit}}");
-        if run(git(top).args(["rev-parse", "--verify", "--quiet", &spec])).is_ok() {
+        // No --quiet: it also swallows "refname 'x' is ambiguous", which is
+        // something the user needs to hear.
+        if run(git(top).args(["rev-parse", "--verify", &spec])).is_ok() {
             return Some(candidate);
         }
     }
@@ -600,16 +1083,27 @@ pub async fn git_checkout_detached(
     if name.is_empty() {
         return Err("need a branch or commit to look at".into());
     }
+    let before = repo_state(&top);
+    if let Some(op) = before.mid {
+        return Ok(repo_busy(op));
+    }
     let Some(target) = resolve_ref(&top, name) else {
-        return Ok(CheckoutOutcome::Failed {
-            summary: format!("There's nothing here called {name}."),
-            detail: format!("No branch, tag or commit matches {name}. Fetching from GitHub first may bring it in."),
+        // Not a dead end: the name may only exist on the remote, and starting
+        // it here may be what was meant. Both are answerable questions.
+        return Ok(CheckoutOutcome::NothingCalled {
+            can_create: can_create_branch(&top, name),
+            name: name.to_string(),
+            detail: format!(
+                "git rev-parse --verify {name} finds nothing — not locally, and not on any remote this checkout knows."
+            ),
         });
     };
     match run(git(&top).args(["checkout", "--detach", &target])) {
-        Ok(_) => Ok(CheckoutOutcome::Switched {
-            message: format!("Looking at {name} — nothing moved"),
-        }),
+        Ok(_) => Ok(settled(
+            format!("Looking at {name} — nothing moved"),
+            None,
+            &before,
+        )),
         Err(err) => Ok(switch_failed(&top, name, err)),
     }
 }
@@ -617,31 +1111,113 @@ pub async fn git_checkout_detached(
 /// Free a branch name from the worktree holding it. That worktree goes to a
 /// detached HEAD at the same commit, so its files — including uncommitted work
 /// — are left exactly as they are; only the name is released.
+///
+/// Every refusal here is a question, not an error: a locked workspace comes
+/// back as the holder it is, so the caller can re-ask with the ways out that
+/// still work instead of landing in a dialog whose only button is Close.
 #[tauri::command]
 pub async fn git_branch_release(
     state: State<'_, WorkspaceManager>,
     repo: String,
     branch: String,
-) -> Result<String, String> {
+) -> Result<CheckoutOutcome, String> {
     let top = repo_path(&state, &repo)?;
-    let Some(holder) = branch_holder(&top, &branch) else {
-        return Ok(format!("{branch} is free"));
+    let free = || CheckoutOutcome::Switched {
+        message: format!("{branch} is free"),
+        path: None,
     };
-    if let Some(reason) = &holder.locked {
-        return Err(format!(
-            "The workspace at {} is locked ({reason}), so {branch} can't be moved out of it.",
-            holder.path
-        ));
-    }
+    let Some(holder) = branch_holder(&top, &branch) else {
+        return Ok(free());
+    };
     if holder.prunable.is_some() {
         // Its directory is gone; only git's bookkeeping still claims the name.
+        // `prune` skips locked entries silently, so a locked-and-missing one
+        // needs the record removed by force first — nothing on disk to lose.
+        if holder.locked.is_some() {
+            let _ = run(git(&top).args(["worktree", "remove", "--force", "--force", &holder.path]));
+        }
         run(git(&top).args(["worktree", "prune"]))?;
-        return Ok(format!("{branch} is free"));
+        return Ok(if branch_holder(&top, &branch).is_some() {
+            CheckoutOutcome::BranchInWorktree {
+                holder: branch_holder(&top, &branch).unwrap_or(holder),
+            }
+        } else {
+            free()
+        });
+    }
+    if holder.locked.is_some() {
+        return Ok(CheckoutOutcome::BranchInWorktree { holder });
     }
     // Not user input: this path came from `git worktree list` for a repo that
     // was already scope-checked, so it is part of that repo by construction.
-    run(git(Path::new(&holder.path)).args(["switch", "--detach"]))?;
-    Ok(format!("{branch} is free"))
+    match run(git(Path::new(&holder.path)).args(["switch", "--detach"])) {
+        Ok(_) => Ok(free()),
+        // The directory went away between the listing and now — same situation
+        // as prunable, so take the same way out.
+        Err(err)
+            if err.contains("cannot change to '") || err.contains("No such file or directory") =>
+        {
+            run(git(&top).args(["worktree", "prune"]))?;
+            Ok(free())
+        }
+        Err(err) => Ok(switch_failed(&top, &branch, err)),
+    }
+}
+
+/// What the carry dance did around the caller's operation.
+enum Carried {
+    /// The operation ran. `changes` says whether set-aside work came back with
+    /// it, so the caller can word its own success.
+    Done { changes: bool },
+    /// It didn't — this outcome is the whole answer.
+    Stopped(CheckoutOutcome),
+}
+
+/// Set the working tree aside, do the thing, put it back. A push that fails is
+/// an outcome, not an `Err`: this is the path with the most to lose, and it
+/// fails exactly when it is offered — unmerged files after a local-changes
+/// refusal are the case where `stash push` itself declines.
+fn carrying<F>(top: &Path, branch: &str, f: F) -> Result<Carried, String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    let before = stash_top(top);
+    if let Err(detail) = run(git(top).args([
+        "stash",
+        "push",
+        "--include-untracked",
+        "-m",
+        &format!("canopy: switching to {branch}"),
+    ])) {
+        return Ok(Carried::Stopped(CheckoutOutcome::Failed {
+            summary: "Your changes couldn't be set aside, so nothing was moved.".into(),
+            detail: strip_gh_noise(&detail),
+        }));
+    }
+    // Comparing the stash ref beats parsing "No local changes to save": it is
+    // the same answer without depending on git's wording.
+    let after = stash_top(top);
+    let stashed = after.is_some() && after != before;
+
+    if let Err(err) = f() {
+        if stashed {
+            let _ = run(git(top).args(["stash", "pop"]));
+        }
+        return Ok(Carried::Stopped(switch_failed(top, branch, err)));
+    }
+    if !stashed {
+        return Ok(Carried::Done { changes: false });
+    }
+    match run(git(top).args(["stash", "pop"])) {
+        Ok(_) => Ok(Carried::Done { changes: true }),
+        // A conflicting pop leaves the stash in place — that is git's own
+        // safety net, and the reason this outcome can promise nothing is lost.
+        // Name the entry we actually made, not a position that may have moved.
+        Err(detail) => Ok(Carried::Stopped(CheckoutOutcome::ChangesStashed {
+            stash: after.unwrap_or_else(|| "refs/stash".into()),
+            detail,
+        })),
+    }
 }
 
 /// Switch with the working tree's changes carried across: set them aside, move
@@ -655,43 +1231,26 @@ pub async fn git_checkout_carry(
     branch: String,
 ) -> Result<CheckoutOutcome, String> {
     let top = repo_path(&state, &repo)?;
+    let before = repo_state(&top);
+    if let Some(op) = before.mid {
+        return Ok(repo_busy(op));
+    }
     if let Some(holder) = branch_holder(&top, &branch) {
         return Ok(CheckoutOutcome::BranchInWorktree { holder });
     }
-    let before = stash_top(&top);
-    run(git(&top).args([
-        "stash",
-        "push",
-        "--include-untracked",
-        "-m",
-        &format!("canopy: switching to {branch}"),
-    ]))?;
-    // Comparing the stash ref beats parsing "No local changes to save": it is
-    // the same answer without depending on git's wording.
-    let after = stash_top(&top);
-    let stashed = after.is_some() && after != before;
-
-    if let Err(err) = run(git(&top).args(["checkout", &branch])) {
-        if stashed {
-            let _ = run(git(&top).args(["stash", "pop"]));
-        }
-        return Ok(switch_failed(&top, &branch, err));
-    }
-    if !stashed {
-        return Ok(CheckoutOutcome::Switched {
-            message: format!("Switched to {branch}"),
-        });
-    }
-    match run(git(&top).args(["stash", "pop"])) {
-        Ok(_) => Ok(CheckoutOutcome::Switched {
-            message: format!("Switched to {branch} with your changes"),
-        }),
-        // A conflicting pop leaves the stash in place — that is git's own
-        // safety net, and the reason this outcome can promise nothing is lost.
-        Err(detail) => Ok(CheckoutOutcome::ChangesStashed {
-            stash: "stash@{0}".into(),
-            detail,
-        }),
+    match carrying(&top, &branch, || {
+        run(git(&top).args(["checkout", &branch])).map(|_| ())
+    })? {
+        Carried::Stopped(outcome) => Ok(outcome),
+        Carried::Done { changes } => Ok(settled(
+            if changes {
+                format!("Switched to {branch} with your changes")
+            } else {
+                format!("Switched to {branch}")
+            },
+            None,
+            &before,
+        )),
     }
 }
 
@@ -1424,17 +1983,91 @@ pub async fn gh_pr_review(
     })
 }
 
+/// Check out a PR's head here. Ordinary branch switching wearing gh's coat, so
+/// it refuses in exactly the same ways and comes back as the same outcomes.
+///
+/// gh does not mangle git's stderr — it streams git's lines through verbatim
+/// and appends its own `failed to run git: exit status N` last — so the shapes
+/// `classify_checkout` already knows match straight through the wrapper. What
+/// gh cannot do is preflight, which is why the branch and the repo's own state
+/// are checked here before it runs at all.
 #[tauri::command]
 pub async fn gh_pr_checkout(
     state: State<'_, WorkspaceManager>,
     repo: String,
     number: u32,
-) -> Result<String, String> {
+    carry: bool,
+) -> Result<CheckoutOutcome, String> {
     let top = repo_path(&state, &repo)?;
-    let mut cmd = gh_in(&top);
-    cmd.args(["pr", "checkout", &number.to_string()]);
-    run_net(&mut cmd)?;
-    Ok(format!("Checked out #{number}"))
+
+    // Learn the head branch without touching the checkout, so the preflights
+    // below have something to preflight against.
+    let mut view = gh_in(&top);
+    view.args([
+        "pr",
+        "view",
+        &number.to_string(),
+        "--json",
+        "headRefName,isCrossRepository",
+    ]);
+    let head = match run_net(&mut view) {
+        // Nothing has moved, so nothing needs undoing.
+        Err(err) => return Ok(remote_unreachable_for(&err, Some(number))),
+        Ok(json) => serde_json::from_str::<Value>(&json)
+            .ok()
+            .and_then(|v| {
+                v.get("headRefName")
+                    .and_then(|h| h.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_default(),
+    };
+    if head.trim().is_empty() {
+        // Built rather than classified: there is no stderr here to read a cause
+        // out of, only an answer with nothing in it.
+        return Ok(CheckoutOutcome::RemoteUnreachable {
+            summary: format!("GitHub didn't say which branch #{number} comes from."),
+            detail: "gh pr view --json headRefName returned no head branch.".into(),
+        });
+    }
+
+    // A same-repo PR whose branch is held elsewhere is the ordinary case, and
+    // it is the same question as any other switch — asked before gh can turn it
+    // into a fetch-stage error nobody reads.
+    if let Some(holder) = branch_holder(&top, &head) {
+        return Ok(CheckoutOutcome::BranchInWorktree { holder });
+    }
+    let before = repo_state(&top);
+    if let Some(op) = before.mid {
+        return Ok(repo_busy(op));
+    }
+
+    // Fork PRs still need gh: only it knows the refspec to fetch.
+    let checkout = || {
+        let mut cmd = gh_in(&top);
+        cmd.args(["pr", "checkout", &number.to_string()]);
+        run_net(&mut cmd).map(|_| ())
+    };
+    let message = format!("Checked out #{number} — you're on {head}");
+    if carry {
+        match carrying(&top, &head, checkout)? {
+            Carried::Stopped(outcome) => Ok(outcome),
+            Carried::Done { changes } => Ok(settled(
+                if changes {
+                    format!("{message}, with your changes")
+                } else {
+                    message
+                },
+                None,
+                &before,
+            )),
+        }
+    } else {
+        match checkout() {
+            Ok(()) => Ok(settled(message, None, &before)),
+            Err(err) => Ok(switch_failed(&top, &head, err)),
+        }
+    }
 }
 
 /// Merge a PR through `gh pr merge`. This is outward-facing and lands commits on
@@ -2208,7 +2841,25 @@ fn list_worktrees(top: &Path) -> Result<Vec<WorktreeInfo>, String> {
 /// The worktree records alone — one git process, no per-worktree status.
 fn scan_worktrees(top: &Path) -> Result<Vec<WorktreeInfo>, String> {
     let out = run(git(top).args(["worktree", "list", "--porcelain"]))?;
+    let mut list = parse_worktrees(&out);
+    mark_missing(&mut list);
+    Ok(list)
+}
 
+/// Git omits the `prunable` line for a *locked* worktree even when its
+/// directory is gone, so a caller branching on `prunable` first would offer to
+/// open a folder that isn't there. Say it is prunable and keep the lock, so the
+/// caller knows both: it needs clearing, and clearing it takes force.
+fn mark_missing(list: &mut [WorktreeInfo]) {
+    for w in list.iter_mut() {
+        if w.prunable.is_none() && w.locked.is_some() && !w.is_main && !Path::new(&w.path).exists()
+        {
+            w.prunable = Some("its folder is gone".into());
+        }
+    }
+}
+
+fn parse_worktrees(out: &str) -> Vec<WorktreeInfo> {
     let mut list: Vec<WorktreeInfo> = Vec::new();
     let mut cur: Option<WorktreeInfo> = None;
     for line in out.lines() {
@@ -2282,12 +2933,21 @@ fn scan_worktrees(top: &Path) -> Result<Vec<WorktreeInfo>, String> {
     for (i, w) in list.iter_mut().enumerate() {
         w.is_main = i == 0;
     }
-    Ok(list)
+    list
 }
 
 /// Create a worktree. `branch` is checked out there; with `create` it's a new
-/// branch off the current HEAD. A branch can only be checked out in one
-/// worktree at a time — git enforces that, and we surface its error verbatim.
+/// branch off the current HEAD.
+///
+/// A branch lives in one worktree at a time, and git says so with the very same
+/// sentence a plain checkout uses (`branch.c die_if_checked_out()`), so the
+/// branch is preflighted here and every refusal goes through `switch_failed` —
+/// the caller gets the same question it would get from any other switch, not
+/// git's stderr in a toast.
+///
+/// Deliberately *not* preflighted for a half-finished merge or rebase: a
+/// worktree of its own is the recommended way out of that state, and refusing
+/// here would close the only door.
 #[tauri::command]
 pub async fn git_worktree_add(
     state: State<'_, WorkspaceManager>,
@@ -2295,22 +2955,33 @@ pub async fn git_worktree_add(
     path: String,
     branch: String,
     create: bool,
-) -> Result<String, String> {
+) -> Result<CheckoutOutcome, String> {
     let top = repo_path(&state, &repo)?;
-    if branch.trim().is_empty() {
+    let branch = branch.trim().to_string();
+    if branch.is_empty() {
         return Err("branch name is required".into());
+    }
+    if !create {
+        if let Some(holder) = branch_holder(&top, &branch) {
+            return Ok(CheckoutOutcome::BranchInWorktree { holder });
+        }
     }
     let mut cmd = git(&top);
     cmd.arg("worktree").arg("add");
     if create {
-        cmd.arg("-b").arg(branch.trim());
+        cmd.arg("-b").arg(&branch);
         cmd.arg(&path);
     } else {
         cmd.arg(&path);
-        cmd.arg(branch.trim());
+        cmd.arg(&branch);
     }
-    run(&mut cmd)?;
-    Ok(format!("Worktree created at {path}"))
+    match run(&mut cmd) {
+        Ok(_) => Ok(CheckoutOutcome::Switched {
+            message: format!("Workspace created at {path}"),
+            path: Some(path),
+        }),
+        Err(err) => Ok(switch_failed(&top, &branch, err)),
+    }
 }
 
 /// Fetch a PR's head and check it out in a fresh worktree, without touching the
@@ -2327,14 +2998,18 @@ pub async fn git_worktree_add_pr(
     path: String,
     number: u32,
     branch: String,
-) -> Result<String, String> {
+) -> Result<CheckoutOutcome, String> {
     let top = repo_path(&state, &repo)?;
     if branch.trim().is_empty() {
         return Err("branch name is required".into());
     }
     let mut fetch = git(&top);
     fetch.args(["fetch", "origin", &format!("pull/{number}/head")]);
-    run_net(&mut fetch)?;
+    // A private fork we can't read, a remote that isn't there, a stall — all
+    // one question ("try again?"), not three shapes of raw stderr.
+    if let Err(err) = run_net(&mut fetch) {
+        return Ok(remote_unreachable_for(&err, Some(number)));
+    }
     // Detached, not `-B <branch>`, for two reasons the old form got wrong.
     //
     // Git lets a branch be checked out in exactly one worktree, so `-B` failed
@@ -2351,30 +3026,41 @@ pub async fn git_worktree_add_pr(
         .arg("--detach")
         .arg(&path)
         .arg("FETCH_HEAD");
-    run(&mut add)?;
-    Ok(format!(
-        "Worktree created at {path} (detached at #{number}'s head)"
-    ))
+    match run(&mut add) {
+        Ok(_) => Ok(CheckoutOutcome::Switched {
+            message: format!("Workspace created at {path}, at #{number}'s head"),
+            path: Some(path),
+        }),
+        // A leftover directory from a previous review is the routine failure
+        // here — the path is derived, not chosen — and `path_in_use` is the
+        // question that has "use the one that's there" in it.
+        Err(err) => Ok(switch_failed(&top, branch.trim(), err)),
+    }
 }
 
 /// Remove a worktree. Destructive when it holds uncommitted work, so `force` is
-/// only ever passed after the UI has confirmed with the dirty count in hand.
+/// only ever raised after the UI has confirmed with the dirty count in hand.
+///
+/// `force` counts, it isn't a flag: one `--force` drops uncommitted work, and a
+/// *locked* worktree needs two — git says so itself ("use 'remove -f -f' to
+/// override or unlock first"), and relaying that sentence as a red toast left
+/// the user with no way to act on it.
 #[tauri::command]
 pub async fn git_worktree_remove(
     state: State<'_, WorkspaceManager>,
     repo: String,
     path: String,
-    force: bool,
+    force: u8,
 ) -> Result<String, String> {
     let top = repo_path(&state, &repo)?;
     let mut cmd = git(&top);
     cmd.arg("worktree").arg("remove");
-    if force {
+    for _ in 0..force.min(2) {
         cmd.arg("--force");
     }
     cmd.arg(&path);
     run(&mut cmd)?;
-    Ok("Worktree removed".into())
+    Ok("Workspace removed".into())
 }
 
 /// Drop administrative records for worktrees whose directories are gone.
@@ -2385,11 +3071,69 @@ pub async fn git_worktree_prune(
 ) -> Result<String, String> {
     let top = repo_path(&state, &repo)?;
     let out = run(git(&top).args(["worktree", "prune", "-v"]))?;
-    Ok(if out.trim().is_empty() {
-        "Nothing to prune".into()
-    } else {
-        out.trim().to_string()
+    // Prune skips locked records silently and still exits 0 with nothing to
+    // say, so "Nothing to prune" was a lie in the one case that matters: a
+    // locked workspace whose folder is gone keeps claiming its branch forever.
+    let stuck: Vec<String> = scan_worktrees(&top)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|w| !w.is_main && !Path::new(&w.path).exists())
+        .map(|w| w.name)
+        .collect();
+    let pruned = out.trim().to_string();
+    Ok(match (pruned.is_empty(), stuck.is_empty()) {
+        (true, true) => "Nothing to clear".into(),
+        (false, true) => pruned,
+        (true, false) => format!(
+            "{} is still recorded even though its folder is gone — it's locked, so clearing it takes force.",
+            stuck.join(", ")
+        ),
+        (false, false) => format!(
+            "{pruned}\n{} is still recorded even though its folder is gone — it's locked, so clearing it takes force.",
+            stuck.join(", ")
+        ),
     })
+}
+
+/// Call off a half-finished merge/rebase/cherry-pick/revert/am. Only the
+/// operation's own bookkeeping is dropped; every file in the working tree stays
+/// exactly as it is. This is the "keep your files" way out of `repo_busy`.
+#[tauri::command]
+pub async fn git_operation_quit(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+) -> Result<String, String> {
+    let top = repo_path(&state, &repo)?;
+    let Some(op) = repo_state(&top).mid else {
+        return Ok("Nothing was half-finished".into());
+    };
+    run(git(&top).args([op.as_str(), "--quit"]))?;
+    Ok(format!(
+        "Called it off — your files are exactly as you left them ({})",
+        op.as_str()
+    ))
+}
+
+/// Give a commit a branch name without checking anything out. This is the "save
+/// it to a branch" way out of a switch that left commits reachable from nothing
+/// — and the reason it is `git branch` rather than `git checkout -b` is that the
+/// user has just landed where they asked to be, and moving them again to rescue
+/// a commit would undo the very switch they made.
+#[tauri::command]
+pub async fn git_branch_at(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    name: String,
+    commit: String,
+) -> Result<String, String> {
+    let top = repo_path(&state, &repo)?;
+    let name = name.trim();
+    let commit = commit.trim();
+    if name.is_empty() || commit.is_empty() {
+        return Err("need a name and a commit to save it at".into());
+    }
+    run(git(&top).args(["branch", name, commit]))?;
+    Ok(format!("Saved as {name}"))
 }
 
 /// A commit's metadata — everything the header needs, and nothing that costs
@@ -4185,6 +4929,256 @@ index 333..444 100644
             CheckoutRefusal::Unknown
         );
         assert_eq!(classify_checkout(""), CheckoutRefusal::Unknown);
+    }
+
+    // The second stage. Every string below is real git 2.50.1 / gh 2.96.0
+    // stderr; `classify_checkout` is consulted first and returns Unknown for
+    // all of them, which is exactly why they live here.
+
+    #[test]
+    fn a_failure_keeps_what_git_said_on_both_streams() {
+        // The mid-merge refusal splits: the file list on stdout, the sentence
+        // about it on stderr. Losing either loses the point.
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            "echo 'f.txt: needs merge'; echo 'error: you need to resolve your current index first' >&2; exit 1",
+        ]);
+        let err = run(&mut cmd).expect_err("a non-zero exit is an error");
+        assert_eq!(
+            err,
+            "f.txt: needs merge\nerror: you need to resolve your current index first"
+        );
+        // And that combined text still classifies.
+        assert_eq!(
+            classify_extra(&err),
+            Some(ExtraRefusal::MidOperation { op: RepoOp::Merge })
+        );
+    }
+
+    #[test]
+    fn a_success_keeps_the_warning_git_only_says_on_stderr() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo out; echo 'warning: refname is ambiguous' >&2"]);
+        let (stdout, stderr) = run_verbose(&mut cmd).expect("exit 0 is a success");
+        assert_eq!(stdout.trim(), "out");
+        assert_eq!(stderr, "warning: refname is ambiguous");
+    }
+
+    #[test]
+    fn extra_reads_ghs_fetch_stage_wording_for_a_held_branch() {
+        let err = "fatal: refusing to fetch into branch 'refs/heads/new-branch' checked out at '/Users/dev/repo-wt-new-branch'\nfailed to run git: exit status 128";
+        assert_eq!(
+            classify_extra(err),
+            Some(ExtraRefusal::BranchInWorktree {
+                path: "/Users/dev/repo-wt-new-branch".into()
+            })
+        );
+    }
+
+    #[test]
+    fn extra_names_the_operation_the_repo_is_in_the_middle_of() {
+        for (err, op) in [
+            ("fatal: cannot switch branch while merging", RepoOp::Merge),
+            (
+                "fatal: cannot switch branch while rebasing\nConsider \"git rebase --quit\" or \"git worktree add\".",
+                RepoOp::Rebase,
+            ),
+            (
+                "fatal: cannot switch branch while cherry-picking",
+                RepoOp::CherryPick,
+            ),
+            ("fatal: cannot switch branch while reverting", RepoOp::Revert),
+            (
+                "fatal: cannot switch branch in the middle of an am session",
+                RepoOp::Am,
+            ),
+        ] {
+            assert_eq!(
+                classify_extra(err),
+                Some(ExtraRefusal::MidOperation { op }),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn extra_reads_an_unresolved_index_as_an_unfinished_merge() {
+        let err = "error: you need to resolve your current index first";
+        assert_eq!(
+            classify_extra(err),
+            Some(ExtraRefusal::MidOperation { op: RepoOp::Merge })
+        );
+    }
+
+    #[test]
+    fn extra_tells_a_taken_branch_name_from_a_taken_path() {
+        assert_eq!(
+            classify_extra("fatal: a branch named 'feat/x' already exists"),
+            Some(ExtraRefusal::NameTaken {
+                branch: "feat/x".into()
+            })
+        );
+        assert_eq!(
+            classify_extra("fatal: '/Users/dev/canopy-wt-feat-x' already exists"),
+            Some(ExtraRefusal::PathInUse {
+                path: "/Users/dev/canopy-wt-feat-x".into()
+            })
+        );
+    }
+
+    #[test]
+    fn extra_recognises_a_name_that_is_not_here() {
+        // git 2.31 dropped this line's trailing period; both forms must match.
+        assert_eq!(
+            classify_extra("error: pathspec 'feat/x' did not match any file(s) known to git"),
+            Some(ExtraRefusal::NothingCalled {
+                name: "feat/x".into()
+            })
+        );
+        assert_eq!(
+            classify_extra("error: pathspec 'feat/x' did not match any file(s) known to git."),
+            Some(ExtraRefusal::NothingCalled {
+                name: "feat/x".into()
+            })
+        );
+        assert_eq!(
+            classify_extra("fatal: invalid reference: nope"),
+            Some(ExtraRefusal::NothingCalled {
+                name: "nope".into()
+            })
+        );
+    }
+
+    #[test]
+    fn extra_reads_a_locked_workspace_with_and_without_a_reason() {
+        assert_eq!(
+            classify_extra(
+                "fatal: cannot remove a locked working tree, lock reason: review in progress\nuse 'remove -f -f' to override or unlock first"
+            ),
+            Some(ExtraRefusal::LockedWorkspace {
+                path: String::new(),
+                reason: "review in progress".into()
+            })
+        );
+        assert_eq!(
+            classify_extra("fatal: cannot move a locked working tree"),
+            Some(ExtraRefusal::LockedWorkspace {
+                path: String::new(),
+                reason: "locked".into()
+            })
+        );
+    }
+
+    #[test]
+    fn extra_recognises_another_git_holding_the_index() {
+        let err = "fatal: Unable to create '/Users/dev/repo/.git/index.lock': File exists.\n\nAnother git process seems to be running in this repository, e.g.\nan editor opened by 'git commit'. Please make sure all processes\nare terminated then try again.";
+        assert_eq!(
+            classify_extra(err),
+            Some(ExtraRefusal::AnotherCommandRunning)
+        );
+    }
+
+    #[test]
+    fn extra_recognises_the_ways_github_is_out_of_reach() {
+        for err in [
+            "fatal: couldn't find remote ref pull/142/head",
+            "no git remotes found",
+            "GraphQL: Could not resolve to a PullRequest with the number of 999. (repository.pullRequest)",
+            "timed out after 120s — remote unreachable, or it wants credentials this app can't prompt for",
+        ] {
+            assert!(
+                matches!(
+                    classify_extra(err),
+                    Some(ExtraRefusal::RemoteUnreachable { .. })
+                ),
+                "{err}"
+            );
+        }
+    }
+
+    /// The one sentence a person reads is ours, never git's or gh's. Quoting
+    /// their first line said the same unhelpful thing in three quite different
+    /// situations; the raw text belongs in the folded detail instead.
+    #[test]
+    fn out_of_reach_says_which_of_the_three_it_is_in_our_own_words() {
+        let body = |err: &str, pr: Option<u32>| match remote_unreachable_for(err, pr) {
+            CheckoutOutcome::RemoteUnreachable { summary, detail } => {
+                // git's own words are kept, just not as the headline.
+                assert!(!detail.is_empty(), "{err}");
+                assert!(!summary.contains("fatal:"), "{summary}");
+                summary
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            body(
+                "To get started with GitHub CLI, please run: gh auth login",
+                None
+            ),
+            "Canopy couldn't reach GitHub with the sign-in it has."
+        );
+        assert_eq!(
+            body("no git remotes found", None),
+            "This project has no remote to fetch from."
+        );
+        assert!(
+            body("fatal: couldn't find remote ref pull/142/head", Some(142))
+                .starts_with("GitHub doesn't have a copy of #142's changes")
+        );
+    }
+
+    #[test]
+    fn ghs_wrapper_line_never_changes_what_a_refusal_means() {
+        // gh streams git's lines through verbatim and appends its own last, so
+        // the shapes classify_checkout already knows match straight through it.
+        let err = "error: Your local changes to the following files would be overwritten by checkout:\n\tsrc/app.ts\nPlease commit your changes or stash them before you switch branches.\nAborting\nfailed to run git: exit status 1";
+        assert_eq!(
+            classify_checkout(err),
+            CheckoutRefusal::LocalChanges {
+                files: vec!["src/app.ts".into()],
+                untracked: false,
+            }
+        );
+        // …and the wrapper line comes off the detail, which is all it costs.
+        assert_eq!(
+            strip_gh_noise(err),
+            "error: Your local changes to the following files would be overwritten by checkout:\n\tsrc/app.ts\nPlease commit your changes or stash them before you switch branches.\nAborting"
+        );
+    }
+
+    #[test]
+    fn strip_gh_noise_leaves_git_alone() {
+        let err = "fatal: invalid reference: nope";
+        assert_eq!(strip_gh_noise(err), err);
+    }
+
+    #[test]
+    fn a_locked_workspace_whose_folder_is_gone_reads_as_prunable() {
+        // Git omits the `prunable` line for a locked worktree, which made the
+        // busy dialog offer to open a directory that isn't there.
+        let out = "worktree /Users/dev/repo\nHEAD abc1234567\nbranch refs/heads/main\n\nworktree /Users/dev/repo-wt-gone\nHEAD def4567890\nbranch refs/heads/feat/x\nlocked review in progress\n";
+        let mut list = parse_worktrees(out);
+        assert_eq!(list.len(), 2);
+        assert!(list[0].is_main);
+        assert_eq!(list[1].locked.as_deref(), Some("review in progress"));
+        assert_eq!(list[1].prunable, None);
+        mark_missing(&mut list);
+        assert_eq!(list[1].prunable.as_deref(), Some("its folder is gone"));
+        // The lock stays: clearing this record still takes force.
+        assert_eq!(list[1].locked.as_deref(), Some("review in progress"));
+    }
+
+    #[test]
+    fn a_synthesised_holder_survives_a_windows_path() {
+        let h = holder_at(
+            Path::new("/nonexistent-repo"),
+            "feat/x",
+            r"C:\Users\dev\repo\.claude\worktrees\agent-a1",
+        );
+        assert_eq!(h.name, "agent-a1");
+        assert!(h.agent);
+        assert!(!h.is_main);
     }
 
     #[test]
