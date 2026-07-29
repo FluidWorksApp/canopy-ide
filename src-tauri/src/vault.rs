@@ -575,58 +575,20 @@ pub async fn vault_reveal(state: State<'_, Vault>, id: String) -> Result<String,
 
 // ---------- filling ----------
 
-/// The script that puts a credential into a page's own form.
-///
-/// Values are passed as JSON literals rather than spliced into source, so a
-/// password containing a quote, a backslash or a newline stays one string.
-/// Fields are set through the native value setter and followed by input and
-/// change events: React (and everything like it) tracks its own value and
-/// ignores a plain assignment, which is how "the field looks filled but the
-/// form submits empty" happens.
-///
-/// Two-step logins are the common case that a naive filler gets wrong: the
-/// first page has a username field and no password field at all. Filling
-/// whatever is there and saying which fields it managed is more useful than
-/// failing, so that is what it reports.
+/// The field-finding and filling logic, as shipped. Kept in its own file
+/// because it is the one part of the vault that faces the open web: it is
+/// tested against a corpus of real login-form shapes (src/vaultAutofill.test.ts
+/// loads this exact file), and a rule written as a Rust string literal cannot
+/// be tested against a DOM at all.
+const FILL_JS: &str = include_str!("vault_fill.js");
+
+/// The call, with the credential passed as JSON literals rather than spliced
+/// into source: a password containing a quote, a backslash or a newline has to
+/// arrive as one string and not as a statement.
 fn fill_script(username: &str, password: &str) -> String {
     let user_json = serde_json::to_string(username).unwrap_or_else(|_| "\"\"".into());
     let pass_json = serde_json::to_string(password).unwrap_or_else(|_| "\"\"".into());
-    format!(
-        r#"(() => {{
-  const visible = (el) => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
-  const set = (el, value) => {{
-    const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-    const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
-    setter.call(el, value);
-    el.dispatchEvent(new Event("input", {{ bubbles: true }}));
-    el.dispatchEvent(new Event("change", {{ bubbles: true }}));
-  }};
-  const pw = [...document.querySelectorAll('input[type="password"]')].find(visible);
-  const scope = pw ? (pw.form || document) : document;
-  const userSelectors = [
-    'input[autocomplete="username"]',
-    'input[autocomplete="email"]',
-    'input[type="email"]',
-    'input[name*="user" i]',
-    'input[name*="email" i]',
-    'input[name*="login" i]',
-    'input[id*="user" i]',
-    'input[id*="email" i]',
-    'input[type="text"]',
-    'input:not([type])',
-  ];
-  let user = null;
-  for (const sel of userSelectors) {{
-    user = [...scope.querySelectorAll(sel)].find(visible);
-    if (user) break;
-  }}
-  const filled = [];
-  if (user && {user_json}) {{ set(user, {user_json}); filled.push("username"); }}
-  if (pw) {{ set(pw, {pass_json}); filled.push("password"); }}
-  if (pw && !user) {{ pw.focus(); }} else if (user && !pw) {{ user.focus(); }}
-  return JSON.stringify({{ filled, form: !!(pw && pw.form) }});
-}})()"#
-    )
+    format!("{FILL_JS}\nwindow.__canopyVaultFill({user_json}, {pass_json})")
 }
 
 /// What a fill did. Never the value — only which fields took one.
@@ -951,6 +913,17 @@ mod tests {
         assert!(script.contains(r#""\";alert(1);//\n\\""#), "{script}");
         // And the raw sequence never appears unescaped.
         assert!(!script.contains("\";alert(1);//\n"));
+    }
+
+    #[test]
+    fn the_embedded_script_is_the_one_the_dom_tests_exercise() {
+        // src/vaultAutofill.test.ts loads this same file and runs it against a
+        // corpus of login-form shapes. If the entry point is renamed on one
+        // side and not the other, the fill silently does nothing — so the name
+        // is asserted on both sides.
+        assert!(FILL_JS.contains("window.__canopyVaultFill = function"));
+        let script = fill_script("sam", "pw");
+        assert!(script.ends_with("window.__canopyVaultFill(\"sam\", \"pw\")"));
     }
 
     #[test]
