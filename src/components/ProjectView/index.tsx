@@ -3788,7 +3788,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const target = e.target;
       if (
         target instanceof Element &&
-        target.closest(".side-peek, .side-dock, .rail")
+        // The docked grip is a sibling of the panel, not a child of it, so it
+        // has to be named here too — pressing it is the start of a resize, not
+        // a click past the panel.
+        target.closest(".side-peek, .side-dock, .side-dock-grip, .rail")
       )
         return;
       dismiss();
@@ -3834,29 +3837,77 @@ const ProjectViewBody = memo(function ProjectViewBody({
     setPeeking(false);
   }, [cancelPeekClose, cancelPeekOpen]);
 
-  /** Drag the panel's right edge. The overlay is out of flow, so the old
-   *  PanelGroup percentage no longer applies — the width is plain pixels. */
-  const startSideResize = useCallback((e: React.PointerEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = sideWidthRef.current;
-    resizing.current = true;
-    const move = (ev: PointerEvent) => {
-      const w = Math.max(
-        SIDE_MIN_W,
-        Math.min(SIDE_MAX_W, startW + ev.clientX - startX),
-      );
-      sideWidthRef.current = w;
-      setSideWidth(w);
-    };
-    const up = () => {
-      resizing.current = false;
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+  /** The one place the panel's width is written. Neither mode is in the
+   *  PanelGroup any more — the overlay is out of flow and the dock is a
+   *  fixed-width column — so the width is plain pixels in both. */
+  const applySideWidth = useCallback((w: number) => {
+    const next = Math.max(SIDE_MIN_W, Math.min(SIDE_MAX_W, Math.round(w)));
+    sideWidthRef.current = next;
+    setSideWidth(next);
   }, []);
+
+  /** Drag the panel's right edge, in either mode. */
+  const startSideResize = useCallback(
+    (e: React.PointerEvent) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startW = sideWidthRef.current;
+      const grip = e.currentTarget;
+      // Docked, the drag is over the editor from its first pixel — without the
+      // capture the gesture is lost to whatever the pointer lands on.
+      grip.setPointerCapture?.(e.pointerId);
+      resizing.current = true;
+      document.body.classList.add("resizing-side");
+      let frame = 0;
+      let pending = startW;
+      const move = (ev: PointerEvent) => {
+        pending = startW + ev.clientX - startX;
+        // Coalesced to one write per frame: docked, every width change reflows
+        // the main area, and that re-wraps every terminal in it. A pointermove
+        // stream is faster than the frames it would be drawn on.
+        if (frame) return;
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          applySideWidth(pending);
+        });
+      };
+      const up = () => {
+        resizing.current = false;
+        document.body.classList.remove("resizing-side");
+        if (frame) {
+          cancelAnimationFrame(frame);
+          frame = 0;
+        }
+        applySideWidth(pending);
+        if (grip.hasPointerCapture?.(e.pointerId))
+          grip.releasePointerCapture(e.pointerId);
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        window.removeEventListener("pointercancel", up);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      window.addEventListener("pointercancel", up);
+    },
+    [applySideWidth],
+  );
+
+  /** The separator is focusable, so it answers the arrow keys too — a width
+   *  that can only be set by dragging an 8px strip is one a keyboard can't
+   *  reach at all. */
+  const onSideResizeKey = useCallback(
+    (e: React.KeyboardEvent) => {
+      const step = e.shiftKey ? 48 : 16;
+      if (e.key === "ArrowLeft") applySideWidth(sideWidthRef.current - step);
+      else if (e.key === "ArrowRight")
+        applySideWidth(sideWidthRef.current + step);
+      else if (e.key === "Home") applySideWidth(SIDE_MIN_W);
+      else if (e.key === "End") applySideWidth(SIDE_MAX_W);
+      else return;
+      e.preventDefault();
+    },
+    [applySideWidth],
+  );
 
   // Jump to the terminal running the agent that raised the item: prefer a
   // terminal whose PTY tree contains an agent process, then match by cwd.
@@ -6726,8 +6777,33 @@ const ProjectViewBody = memo(function ProjectViewBody({
             onMouseLeave={() => schedulePeekClose()}
           >
             {sidePanel}
-            <div className="side-peek-grip" onPointerDown={startSideResize} />
           </div>
+        )}
+        {/* The docked panel's grip is a sibling, not a child. .side-dock clips
+            its contents — that is how it collapses to nothing without
+            unmounting — so a handle inside it was clipped to a 3px strip lying
+            on the border, invisible and all but unhittable, which is why the
+            docked panel read as fixed-width. Out here it straddles the seam at
+            its full width and nothing clips it. */}
+        {!zen && !sidePrefs.overlay && sideOpen && (
+          <div
+            className="side-dock-grip"
+            style={{ left: RAIL_W + sideWidth - 4 }}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize side panel"
+            aria-valuenow={sideWidth}
+            aria-valuemin={SIDE_MIN_W}
+            aria-valuemax={SIDE_MAX_W}
+            tabIndex={0}
+            onPointerDown={startSideResize}
+            onKeyDown={onSideResizeKey}
+            // The grip sits outside the panel, so reaching for it is a mouseleave
+            // as far as the dock is concerned — without this a hover-opened panel
+            // starts retracting the moment you go to resize it.
+            onMouseEnter={cancelPeekClose}
+            onMouseLeave={() => schedulePeekClose()}
+          />
         )}
         {/* The PanelGroup renders in every mode on purpose. Swapping mainArea
             between a bare child and a <Panel> changes its element type, which
