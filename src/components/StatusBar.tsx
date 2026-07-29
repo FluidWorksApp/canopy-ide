@@ -58,6 +58,15 @@ interface StatusBarProps {
   activePtyId?: number | null;
 }
 
+/** How many agent names the tray spells out before it starts counting.
+ *
+ *  One name per running agent is fine at three and absurd at twenty-five: with
+ *  a project full of them the list ran the width of the window and pushed the
+ *  branch, the model and the cost off the bar entirely. Three is enough to
+ *  recognise what is running, the count says how much more there is, and the
+ *  tooltip still carries every name. */
+const AGENTS_LISTED = 3;
+
 export const StatusBar = memo(function StatusBar({
   roots,
   agents,
@@ -348,9 +357,20 @@ export const StatusBar = memo(function StatusBar({
         </span>
       )}
       {agents.length > 0 && (
-        <span className="status-item status-agent" title="running agents">
+        <span
+          className="status-item status-agent"
+          // The whole roster on hover: the bar shows the first few, and the
+          // count is the only part of the rest anybody reads at a glance.
+          title={`running agents: ${agents.map((a) => a.name).join(", ")}`}
+        >
           <span className="status-agent-dot" aria-hidden />
-          {agents.map((a) => a.name).join(", ")}
+          {agents
+            .slice(0, AGENTS_LISTED)
+            .map((a) => a.name)
+            .join(", ")}
+          {agents.length > AGENTS_LISTED && (
+            <span className="status-agent-more">+{agents.length - AGENTS_LISTED}</span>
+          )}
         </span>
       )}
       <span className="status-spacer" />

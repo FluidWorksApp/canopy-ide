@@ -241,3 +241,35 @@ describe("the tray's branch chip", () => {
     ).toBeTruthy();
   });
 });
+
+// The tray is one line, and this is the only chip whose length is set by how
+// much work is running. Twenty-five agents spelled out ran the width of the
+// window and pushed the branch, the model and the cost off the bar.
+describe("the running-agents chip", () => {
+  const agents = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ name: i % 4 === 0 ? "codex" : "claude", cpu: 0 }));
+
+  it("spells out a handful", async () => {
+    render(<StatusBar {...base} agents={agents(3)} events={[]} />);
+    const chip = await screen.findByTitle(/running agents/);
+    expect(chip.textContent).toBe("codex, claude, claude");
+    expect(chip.textContent).not.toContain("+");
+  });
+
+  it("counts the rest instead of listing them", async () => {
+    render(<StatusBar {...base} agents={agents(25)} events={[]} />);
+    const chip = await screen.findByTitle(/running agents/);
+    expect(chip.textContent).toBe("codex, claude, claude+22");
+  });
+
+  it("keeps every name in the tooltip", async () => {
+    render(<StatusBar {...base} agents={agents(25)} events={[]} />);
+    const chip = await screen.findByTitle(/running agents/);
+    expect(chip.getAttribute("title")?.split(", ")).toHaveLength(25);
+  });
+
+  it("says nothing when nothing is running", () => {
+    render(<StatusBar {...base} agents={[]} events={[]} />);
+    expect(screen.queryByTitle(/running agents/)).toBeNull();
+  });
+});
