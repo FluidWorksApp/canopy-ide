@@ -2212,11 +2212,13 @@ export const dictationStart = (
   modelId: string,
   streaming?: boolean,
   language?: string,
+  muteOutput?: boolean,
 ) =>
   invoke<string>("dictation_start", {
     modelId,
     streaming: streaming ?? false,
     language: language || null,
+    muteOutput: muteOutput ?? false,
   });
 /** Stops the mic and resolves to the transcribed text. `language` is an
  *  optional BCP-47 hint (empty/undefined = auto-detect). */
