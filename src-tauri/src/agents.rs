@@ -3195,9 +3195,11 @@ fn run_donor(target: &str, argv: &[String]) -> Option<String> {
             .no_console_window()
             .args(&a)
             .output();
-        let _ = tx.send(out.ok().filter(|o| o.status.success()).map(|o| {
-            String::from_utf8_lossy(&o.stdout).into_owned()
-        }));
+        let _ = tx.send(
+            out.ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned()),
+        );
     });
     rx.recv_timeout(BUDGET).ok().flatten()
 }
