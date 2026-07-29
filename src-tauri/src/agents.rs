@@ -1220,9 +1220,7 @@ fn resume_dir(launch: &str, now: &str, bucket: &str) -> Option<String> {
 /// writes into the repo), and passing them also keeps the walk to what the
 /// caller is going to show.
 #[tauri::command]
-pub async fn session_digests(
-    roots: Option<Vec<String>>,
-) -> Result<Vec<serde_json::Value>, String> {
+pub async fn session_digests(roots: Option<Vec<String>>) -> Result<Vec<serde_json::Value>, String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
     let dir = std::path::PathBuf::from(&home)
         .join(".canopy")
@@ -1250,11 +1248,9 @@ pub async fn session_digests(
         }
     }
     let roots = roots.unwrap_or_default();
-    out.extend(crate::stores::digests(
-        &roots,
-        &|_| true,
-        &|id| seen.contains(id),
-    ));
+    out.extend(crate::stores::digests(&roots, &|_| true, &|id| {
+        seen.contains(id)
+    }));
     Ok(out)
 }
 
