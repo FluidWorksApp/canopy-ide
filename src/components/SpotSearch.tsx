@@ -115,6 +115,9 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
   // On open: fetch the quick-open corpus once, and bring the persistent index
   // up to date (incremental — a warm index is a handful of stats). Looping
   // while `more` is bounded so a cold index can't hold the palette hostage.
+  // The index does not depend on this: spotIndexJob.ts keeps it current while
+  // the app runs. This is the last-second top-up, and it joins that job's run
+  // if one is already going.
   useEffect(() => {
     void ipc.fsListFiles(roots).then(setCorpus).catch(() => setCorpus([]));
     // What the index holds is opt-out (Settings → SpotSearch); the call is made

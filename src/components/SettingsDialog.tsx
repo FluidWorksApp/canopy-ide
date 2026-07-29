@@ -1791,6 +1791,11 @@ function SpotSearchSettings({
 }) {
   const [stats, setStats] = useState<ipc.SpotIndexStats | null>(null);
   const [busy, setBusy] = useState<"" | "reindex" | "clear">("");
+  // Unread transcript bytes as of the last update, null before one has run.
+  // Without it the message count is the only feedback the screen gives, and a
+  // count that rises on every press reads as double-counting rather than as a
+  // machine with more history than one press can read.
+  const [pending, setPending] = useState<number | null>(null);
   const sources = spotSources();
 
   const refresh = useCallback(() => {
@@ -1938,6 +1943,13 @@ function SpotSearchSettings({
                 } · ${fmtBytes(stats.bytes)}`
               : "Not built yet — it fills the first time you open ⌘K."}
           </p>
+          {pending !== null && (
+            <p className="set-item-desc">
+              {pending > 0
+                ? `${fmtBytes(pending)} of transcript still unread — the count grows until this reaches zero. Canopy keeps reading in the background; this button only hurries it along.`
+                : "Everything on disk has been read; the count only moves when your agents write more."}
+            </p>
+          )}
           <div className="tool-bulk">
             <button
               className="btn btn-small"
@@ -1945,6 +1957,7 @@ function SpotSearchSettings({
               onClick={() => {
                 setBusy("reindex");
                 void runIngest(roots)
+                  .then((r) => setPending(r ? r.pending : null))
                   .catch(() => {})
                   .finally(() => {
                     setBusy("");
@@ -1952,13 +1965,18 @@ function SpotSearchSettings({
                   });
               }}
             >
-              {busy === "reindex" ? "Reading…" : "Update now"}
+              {busy === "reindex"
+                ? "Reading…"
+                : pending
+                  ? "Keep reading"
+                  : "Update now"}
             </button>
             <button
               className="btn btn-small"
               disabled={busy !== ""}
               onClick={() => {
                 setBusy("clear");
+                setPending(null);
                 void ipc
                   .spotIndexClear()
                   .catch(() => {})
