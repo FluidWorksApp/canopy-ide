@@ -24,7 +24,7 @@ import { GuestSession, OwnerSession } from "../../collab";
 import { CollabView } from "../CollabView";
 import { SharedProjectView } from "../SharedProjectView";
 import type { AgentCli } from "../../projects";
-import { briefPointer, fitsOnOneLine } from "../../agentSeed";
+import { startCommandParked } from "../../agentSeed";
 import {
   AGENT_CLIS,
   announceCliInstallsChanged,
@@ -35,7 +35,6 @@ import {
   restoreCommand,
   resumeSessionId,
   shellBin,
-  startCommand,
   updateCommand,
 } from "../../projects";
 import {
@@ -1386,7 +1385,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
           AGENT_CLIS[0]
         )?.id;
       const cli = AGENT_CLIS.find((c) => c.id === agent);
-      const start = startCommand(agent, ticketContext(ticket));
+      // Parked in `repo` rather than the workspace, which does not exist yet:
+      // the pointer is an absolute path, so it reads the same from either.
+      const start = await startCommandParked(agent, ticketContext(ticket), repo);
       if (!cli || !start) {
         onNotice(`Unknown agent "${agent}".`);
         return;
@@ -1485,7 +1486,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         mode === "resolve"
           ? prConflictContext(pr, cleanup)
           : prReviewContext(pr, cleanup);
-      const start = startCommand(agent, context);
+      const start = await startCommandParked(agent, context, r.path);
       if (!start) {
         onNotice(`Unknown agent "${agent}".`);
         return;
@@ -1764,23 +1765,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
           AGENT_CLIS[0]
         )?.id;
       const cli = AGENT_CLIS.find((c) => c.id === agent);
-      let start = agent ? startCommand(agent, seed) : null;
+      const start = agent ? await startCommandParked(agent, seed, dir) : null;
       if (!cli || !start) {
         onNotice(`Unknown agent "${agent}".`);
         return;
-      }
-      // A command line longer than the tty will hold is not shortened, it is
-      // TRUNCATED — mid-word, closing quote and all, with no error anywhere
-      // (agentSeed.ts). Past that length the brief goes to a file and the agent
-      // is started pointed at it. A failed write leaves the original command:
-      // the old behaviour, not a lost launch.
-      if (!start.typePrompt && !fitsOnOneLine(start.command)) {
-        try {
-          const path = await ipc.spotSaveContextText(dir, seed);
-          start = startCommand(agent!, briefPointer(path)) ?? start;
-        } catch (err) {
-          void ipc.jsLog("warn", `preview: could not park a long brief: ${String(err)}`);
-        }
       }
       const id = addTerminal(
         dir,
@@ -1916,7 +1904,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const seed = oneLine(
         `${def.buildContext(payload, userQuery, env)} ${progressBrief(def, payload)} ${microTaskProtocol()}`,
       );
-      const start = startCommand(agent, seed);
+      const start = await startCommandParked(agent, seed, dir);
       if (!start) {
         onNotice(`No agent CLI installed to run "${def.label}".`);
         return false;

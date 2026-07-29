@@ -23,6 +23,9 @@
 // command line at all: write it to a file and start the agent pointed at the
 // file, which is what the screenshots themselves already do.
 
+import * as ipc from "./ipc";
+import { startCommand } from "./projects";
+
 /** Darwin's MAX_CANON: the most a canonical-mode tty will hold for one line
  *  before it starts dropping. Linux allows 4096; the smaller number is the one
  *  that has to hold. */
@@ -53,4 +56,39 @@ export function briefPointer(path: string): string {
     `Read ${path} — a brief written for you, in full — and do everything it asks. ` +
     `It names the files to look at and the change to make.`
   );
+}
+
+/** How to start `agentId` on `seed`, with a brief too long to type parked in a
+ *  file first.
+ *
+ *  Every caller that starts an agent goes through here rather than through
+ *  `startCommand` directly. There are four of them — a ticket, a PR, a diff
+ *  surface, a micro-task — and each builds its brief from something with no
+ *  length limit: a ticket body, a review, four screenshots and their notes. A
+ *  guard at one of them is a guard at the one that happened to be reported.
+ *
+ *  `dir` is where the brief is parked. It only has to be somewhere the agent
+ *  can read — the pointer is an absolute path — so a launch that ends up in a
+ *  worktree can still park in the repo it came from.
+ *
+ *  Never fails: a brief that cannot be written falls back to the command that
+ *  would have been typed anyway. That is the old behaviour, which is wrong in
+ *  a way we now understand, rather than no agent at all. */
+export async function startCommandParked(
+  agentId: string,
+  seed: string,
+  dir: string,
+): Promise<{ command: string; typePrompt: boolean } | null> {
+  const start = startCommand(agentId, seed);
+  // typePrompt means the CLI takes no prompt argument: it launches bare and the
+  // text is typed into its TUI once it is up, which is raw mode and has no such
+  // limit. Only a prompt that has to survive the SHELL is at risk here.
+  if (!start || start.typePrompt || fitsOnOneLine(start.command)) return start;
+  try {
+    const path = await ipc.spotSaveContextText(dir, seed);
+    return startCommand(agentId, briefPointer(path)) ?? start;
+  } catch (err) {
+    void ipc.jsLog("warn", `agent: could not park a ${byteLength(seed)}-byte brief: ${String(err)}`);
+    return start;
+  }
 }
