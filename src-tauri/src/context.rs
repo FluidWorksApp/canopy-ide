@@ -906,6 +906,9 @@ async fn action(
                 serde_json::json!({
                     "kind": "notify",
                     "route": act.cwd.clone().unwrap_or_default(),
+                    // Absent for an agent running outside a Canopy terminal;
+                    // the frontend then falls back to routing by cwd.
+                    "ptyId": act.pty_id,
                     "text": text,
                     "level": act.level.as_deref().unwrap_or("info"),
                 }),

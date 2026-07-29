@@ -18,6 +18,7 @@ mod instructions;
 mod lsp;
 mod mcp;
 mod mcp_client;
+mod notify;
 mod portal;
 mod preview;
 mod prwatch;
@@ -391,6 +392,7 @@ pub fn run() {
             crash::file_crash_issue,
             cli::cli_take_pending_open,
             cli::cli_install_shim,
+            notify::notify_native,
             selftest::selftest_config,
             selftest::selftest_finish,
             pty::pty_spawn,

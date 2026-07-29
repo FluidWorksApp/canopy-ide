@@ -66,6 +66,7 @@ import {
   type MicroRun,
 } from "../../microRuns";
 import { renderPtyText } from "../../ptyText";
+import { followLink, type DeepLink } from "../../deepLinks";
 import {
   addressPrCommentsTask,
   adhocLabel,
@@ -2724,6 +2725,60 @@ const ProjectViewBody = memo(function ProjectViewBody({
     finishMicroTask,
     updateMicroRuns,
   ]);
+
+  // The tail of a deep link (deepLinks.ts): App resolved the project and
+  // opened it, and this lands on the actual thing — the terminal an agent was
+  // running in, the panel that holds the answer, the conversation, the file.
+  //
+  // Every step degrades on purpose, because a target is a description of the
+  // world as it was when a notification went out. A terminal that has since
+  // exited falls back to the panel that still knows about the run; a peer who
+  // has left falls back to the Team panel. The user is already in the right
+  // project by the time this runs, so the worst case is a short walk rather
+  // than a dead end — but it says which fallback it took, so a click that
+  // didn't do what the banner promised never looks like the app ignoring it.
+  useEffect(() => {
+    const onLink = (e: Event) => {
+      const d = (e as CustomEvent).detail as {
+        projectId: string;
+        link: DeepLink;
+      };
+      if (d?.projectId !== project.id) return;
+      const act = followLink(d.link, {
+        terminals: tabsRef.current
+          .filter((t): t is TermSubTab => t.type === "terminal")
+          .map((t) => ({ id: t.id, ptyId: t.ptyId, attachId: t.attachId })),
+        detachedPtys: microRunsRef.current.map((r) => r.ptyId),
+        members: relay.status.members.map((m) => ({
+          key: m.key,
+          name: m.name,
+        })),
+      });
+      if (act.do === "tab") {
+        setActiveTabId(act.tabId);
+      } else if (act.do === "panel") {
+        setSideTab(act.panel);
+        setPinned(true);
+        if (act.note) onNotice(act.note);
+      } else if (act.do === "chat") {
+        openChat(act.peer, act.name);
+      } else if (act.do === "file") {
+        const { path, line } = act;
+        void openFileRef.current(path).then(() => {
+          if (line)
+            requestAnimationFrame(() =>
+              window.dispatchEvent(
+                new CustomEvent("canopy:reveal-line", {
+                  detail: { path, line },
+                }),
+              ),
+            );
+        });
+      }
+    };
+    window.addEventListener("canopy:deep-link", onLink);
+    return () => window.removeEventListener("canopy:deep-link", onLink);
+  }, [project.id, openChat, onNotice, relay.status.members]);
 
   // A browser-control op (canopy_browser_*): pick the preview tab it targets —
   // by origin when it names a URL, else the active/first preview tab, creating

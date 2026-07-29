@@ -152,6 +152,25 @@ export const onAgentAction = (
 ): Promise<UnlistenFn> =>
   listen<AgentAction>("agent:action", (event) => cb(event.payload));
 
+// ---------- Native notifications ----------
+
+/** Post an OS notification carrying a deep-link target (see deepLinks.ts).
+ *
+ *  Not `@tauri-apps/plugin-notification`: that path posts and forgets, so a
+ *  click could only ever raise the window. The backend keeps the click and
+ *  hands the target back through `onDeepLink`. */
+export const notifyNative = (
+  title: string,
+  body: string,
+  target?: string,
+): Promise<void> => invoke("notify_native", { title, body, target });
+
+/** A notification the user clicked, or a `canopy://…` forwarded from a second
+ *  CLI invocation. The payload is the raw target — parse it with
+ *  `parseDeepLink`. */
+export const onDeepLink = (cb: (target: string) => void): Promise<UnlistenFn> =>
+  listen<string>("deep-link", (event) => cb(event.payload));
+
 /** A browser-control op an agent sent through the MCP bridge (canopy_browser_*).
  *  Request/response: the bridge holds the agent's HTTP request open under `id`
  *  until the answer comes back via `browserResult`. Routed like AgentAction. */
