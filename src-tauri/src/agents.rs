@@ -3115,6 +3115,93 @@ fn which_installed(commands: &[String]) -> HashMap<String, bool> {
     result
 }
 
+/// The donor CLIs whose model catalogue Canopy is allowed to read, and the
+/// exact argv it may run for each. The frontend names a donor; it never names a
+/// command. That is the whole point of the table: `model_catalog` is a shell-out
+/// reachable from the webview, so the argv has to be fixed here rather than
+/// travelling in from the caller, or the command becomes arbitrary execution
+/// wearing a model-list costume.
+///
+/// `pty` marks a donor that aborts on a non-tty stdin. Nothing runs those yet —
+/// see the guard in `model_catalog` — so the entry is a declaration of what the
+/// donor needs, not a claim that it works.
+const MODEL_DONORS: &[(&str, &[&[&str]], bool)] = &[
+    // `omp models --json` — omp's own refreshed catalogue, with one entry per
+    // model and a `provider` field to filter on. ~0.8s, no tty needed.
+    ("omp", &[&["models", "--json"]], false),
+    // `aider --list-models <substr>` — LiteLLM's static registry, so it answers
+    // for every vendor rather than only the ones the user holds a key for. It
+    // exits with an uncaught OSError when stdin is not a terminal, and takes
+    // several seconds even when it works.
+    (
+        "aider",
+        &[
+            &["--list-models", "claude"],
+            &["--list-models", "gpt-5"],
+            &["--list-models", "gemini-3"],
+        ],
+        true,
+    ),
+];
+
+/// Read a donor CLI's model catalogue: stdout of one allowlisted command, or
+/// None when the donor isn't installed, isn't allowlisted, needs a tty, or took
+/// too long. Every one of those is "no catalogue today", and the caller draws
+/// its checked-in seed instead — a donor must never be able to blank the menu.
+#[tauri::command]
+pub async fn model_catalog(donor: String, query: usize) -> Option<String> {
+    let (_, argvs, needs_pty) = MODEL_DONORS.iter().find(|(a, _, _)| *a == donor)?;
+    // Declared but not driven: collecting output from a pty donor means running
+    // it through the pty subsystem, which is a different piece of work. Until
+    // then, saying no is correct — a donor that reliably fails is not one to run
+    // on every tray open.
+    if *needs_pty {
+        return None;
+    }
+    let argv: Vec<String> = argvs.get(query)?.iter().map(|s| s.to_string()).collect();
+    let target = probe_target(&donor)?;
+    tokio::task::spawn_blocking(move || run_donor(&target, &argv))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Run one donor command and return its stdout, bounded in time. A donor that
+/// hangs must not hold the tray open, so the wait is capped and a timeout is
+/// reported the same way as "not installed".
+fn run_donor(target: &str, argv: &[String]) -> Option<String> {
+    /// Generous next to omp's measured 0.8s, tight enough that a wedged donor
+    /// is noticed rather than waited on.
+    const BUDGET: Duration = Duration::from_secs(10);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (t, a) = (target.to_string(), argv.to_vec());
+    thread::spawn(move || {
+        #[cfg(unix)]
+        let out = {
+            // A login shell, for the same reason which_installed uses one: a
+            // GUI app does not inherit the user's PATH, so a donor installed by
+            // homebrew or pipx is invisible without it.
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+            let line = std::iter::once(sh_quote(&t))
+                .chain(a.iter().map(|s| sh_quote(s)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            std::process::Command::new(shell)
+                .args(["-lc", &line])
+                .output()
+        };
+        #[cfg(windows)]
+        let out = std::process::Command::new(&t)
+            .no_console_window()
+            .args(&a)
+            .output();
+        let _ = tx.send(out.ok().filter(|o| o.status.success()).map(|o| {
+            String::from_utf8_lossy(&o.stdout).into_owned()
+        }));
+    });
+    rx.recv_timeout(BUDGET).ok().flatten()
+}
+
 /// One CLI's version pair: what's on disk vs what its registry publishes.
 /// Either side is None when unknown — not installed, unparseable output, no
 /// registry to ask, or the probe timed out.

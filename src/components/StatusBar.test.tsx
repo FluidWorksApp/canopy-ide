@@ -119,12 +119,12 @@ describe("the tray's model control", () => {
       />,
     );
     fireEvent.click(await screen.findByText(/opus-5 ▾/));
-    fireEvent.click(screen.getByText("Sonnet · 1M context"));
+    fireEvent.click(screen.getByText("Fable"));
     // The confirmation names the exact line that will be typed — a picker's
     // command with a model appended would be the bug this spells out.
-    expect(screen.getByText("/model sonnet[1m]")).toBeTruthy();
+    expect(screen.getByText("/model fable")).toBeTruthy();
     fireEvent.click(screen.getByText("Switch model"));
-    expect(onSetModel).toHaveBeenCalledWith("sonnet[1m]");
+    expect(onSetModel).toHaveBeenCalledWith("fable");
   });
 
   it("opens a picker CLI's own chooser instead of naming models for it", () => {
