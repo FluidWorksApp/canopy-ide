@@ -1246,6 +1246,17 @@ body,
 
 .status-agent {
   color: var(--text-dim);
+  /* The tray is one line and this chip is the only one whose length is set by
+     how much work is running. Never let it push the branch, model and cost off
+     the bar again — the count carries what the names cannot. */
+  flex: none;
+  white-space: nowrap;
+}
+
+/* "+22": the part that has to stay legible when the names are a blur. */
+.status-agent-more {
+  margin-left: 4px;
+  opacity: 0.75;
 }
 
 /* Cost: the one accent pill on the bar — the number you actually watch. */
