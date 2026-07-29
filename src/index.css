@@ -15439,3 +15439,58 @@ a.btn-mini {
 .vault-skipped-why {
   color: var(--text-dim);
 }
+
+/* Floating over an open markdown file. It sits on a document the user opened
+   to read, so it has to be reachable and ignorable at once: no banner pushing
+   the text down, and quiet until the pointer is near it. */
+.file-tab-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.file-tab-wrap > :not(.research-import) {
+  flex: 1;
+  min-height: 0;
+}
+
+.research-import {
+  position: absolute;
+  top: 10px;
+  right: 18px;
+  z-index: 5;
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  padding: 5px 10px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  /* Held back until wanted: at full strength it competes with the first
+     heading of the document it is sitting on. */
+  opacity: 0.55;
+  transition: opacity 120ms ease, color 120ms ease;
+}
+
+.research-import:hover {
+  color: var(--text);
+  opacity: 1;
+  border-color: var(--accent);
+}
+
+.research-import:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+/* Already adopted: the same spot becomes the way back to the entry. */
+.research-import.is-open {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}

@@ -86,6 +86,7 @@ import {
 } from "../../microTasks";
 import { TasksPanel, type RunningMicroTask } from "../TasksPanel";
 import { ResearchPanel } from "../ResearchPanel";
+import { ResearchImportCta } from "../ResearchImportCta";
 import { ResearchView } from "../ResearchView";
 import {
   cached as researchCached,
@@ -5713,7 +5714,24 @@ const ProjectViewBody = memo(function ProjectViewBody({
         );
       case "file":
         return (
-          <FileView
+          // Wrapped so the import CTA can float over whichever view FileView
+          // picks — rendered markdown, Monaco, a diff — rather than each of
+          // them having to carry it.
+          <div className="file-tab-wrap">
+            {/* Only markdown, and only a file that is not already an entry:
+                loose notes in the repo are research that predates the store,
+                and this is how one gets adopted without anybody retyping it. */}
+            {/\.(md|markdown)$/i.test(tab.file.path) && (
+              <ResearchImportCta
+                projectId={project.id}
+                projectName={project.name}
+                roots={roots}
+                path={tab.file.path}
+                onOpen={(id) => openResearch(id, tab.file.name)}
+                onNotice={onNotice}
+              />
+            )}
+            <FileView
             file={tab.file}
             onCursor={
               // Only a shared file broadcasts a caret; every other tab passes
@@ -5756,7 +5774,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 }
               />
             }
-          />
+            />
+          </div>
         );
     }
   }

@@ -1097,6 +1097,219 @@ pub fn research_read_file(project_id: String, id: String, path: String) -> Resul
     std::fs::read_to_string(&file).map_err(|e| e.to_string())
 }
 
+// ---- importing a markdown file --------------------------------------------
+//
+// Research existed before this module did, and it is sitting in the repo as
+// loose markdown — a NOTES.md, a docs/spike.md, the file an agent wrote before
+// the harness stopped it. Those are findings; they are simply not findable,
+// which is the whole complaint the store answers. Importing one is therefore
+// not a conversion so much as an adoption: the document keeps its text, gains
+// the fields that make it show up in a list, and points back at the file it
+// came from.
+//
+// Deliberately mechanical, with no agent involved. An import is instant and
+// free, and the derived digest is honest about being derived — the user can
+// put an agent on it afterwards with Continue research, which is the tool that
+// already exists for making an entry better.
+
+/// Cut to a length rather than refuse it. `cap` is right for text an agent
+/// authored, where the limit is the message; a digest lifted out of someone
+/// else's file is derived, and refusing the import over it would help nobody.
+fn clip(s: &str, max: usize) -> String {
+    let s = s.trim();
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(max.saturating_sub(1)).collect();
+    // Prefer a word boundary, so the ellipsis lands after a word and not
+    // mid-syllable.
+    match cut.rfind(char::is_whitespace) {
+        Some(i) if i > max / 2 => format!("{}…", cut[..i].trim_end()),
+        _ => format!("{}…", cut.trim_end()),
+    }
+}
+
+/// The document's own title, or its filename made readable. A markdown file
+/// that opens with a heading has already named itself, and using anything else
+/// would rename someone's document on import.
+fn imported_title(body: &str, path: &Path) -> String {
+    for line in body.lines().take(40) {
+        if let Some(rest) = line.trim().strip_prefix("# ") {
+            if !rest.trim().is_empty() {
+                return clip(rest, TITLE_MAX);
+            }
+        }
+    }
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Imported note".into());
+    clip(&stem.replace(['-', '_'], " "), TITLE_MAX)
+}
+
+/// The first real paragraph — what the document leads with, which is the
+/// closest thing a hand-written note has to a digest. Headings, list bullets
+/// and code fences are skipped: none of them read as a summary on their own.
+fn imported_digest(body: &str) -> String {
+    let mut para = String::new();
+    let mut in_fence = false;
+    for line in body.lines() {
+        let t = line.trim();
+        if t.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        if t.is_empty() {
+            if !para.is_empty() {
+                break;
+            }
+            continue;
+        }
+        if t.starts_with('#') || t.starts_with('>') || t.starts_with("---") {
+            continue;
+        }
+        if para.is_empty() && (t.starts_with("- ") || t.starts_with("* ")) {
+            continue;
+        }
+        if !para.is_empty() {
+            para.push(' ');
+        }
+        para.push_str(t);
+    }
+    clip(&para, DIGEST_MAX)
+}
+
+/// Is this file already an entry? Import is a button the user can press twice,
+/// and the second press should take them to what the first one made rather
+/// than making a duplicate of it.
+#[tauri::command]
+pub fn research_for_file(project_id: String, path: String) -> Result<Option<String>, String> {
+    Ok(load_project(&project_id)?
+        .into_iter()
+        .find(|m| m.links.files.iter().any(|f| f == &path))
+        .map(|m| m.id))
+}
+
+/// Adopt a markdown file as a research entry.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub fn research_import(
+    store: State<'_, ResearchStore>,
+    project_id: String,
+    project_name: Option<String>,
+    roots: Option<Vec<String>>,
+    path: String,
+    instance: Option<String>,
+) -> Result<Summary, String> {
+    let _guard = store.0.lock().unwrap();
+    import_impl(project_id, project_name, roots, path, instance)
+}
+
+fn import_impl(
+    project_id: String,
+    project_name: Option<String>,
+    roots: Option<Vec<String>>,
+    path: String,
+    instance: Option<String>,
+) -> Result<Summary, String> {
+    let file = PathBuf::from(&path);
+    let roots = roots.unwrap_or_default();
+    // Only files belonging to this project. The store is otherwise reachable
+    // with any path at all, and "import" is not a licence to read the disk.
+    if !roots.iter().any(|r| {
+        let r = r.trim_end_matches('/');
+        !r.is_empty() && path.starts_with(&format!("{r}/"))
+    }) {
+        return Err(format!("{path} is not inside this project"));
+    }
+    let bytes = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+    if bytes as usize > SOURCE_MAX {
+        return Err(format!(
+            "{path} is {bytes} bytes — too large to import. Split it, or point a \
+             research run at it instead."
+        ));
+    }
+    let text = std::fs::read_to_string(&file).map_err(|e| format!("cannot read {path}: {e}"))?;
+    if text.trim().is_empty() {
+        return Err(format!("{path} is empty — there is nothing to import yet."));
+    }
+
+    let existing = load_project(&project_id)?
+        .into_iter()
+        .find(|m| m.links.files.iter().any(|f| f == &path));
+    if let Some(m) = existing {
+        return Err(format!(
+            "{path} is already research entry {} (\"{}\") — open that instead of \
+             importing it twice.",
+            m.id, m.title
+        ));
+    }
+
+    let title = imported_title(&text, &file);
+    let summary = start_impl(
+        project_id.clone(),
+        project_name,
+        Some(roots),
+        title,
+        Some(clip(&format!("Imported from {path}"), QUESTION_MAX)),
+        None,
+        file.parent().map(|p| p.to_string_lossy().to_string()),
+        None,
+        None,
+        instance,
+    )?;
+    let dir = entry_dir(&project_id, &summary.id)?;
+    let mut meta = read_meta(&dir)?;
+
+    // The text goes in the body when it fits and in a source when it does not,
+    // never both — a duplicated document is two things to keep in step.
+    if text.len() <= BODY_MAX {
+        write_atomic(&body_path(&dir), &text)?;
+    } else {
+        let name = file
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "imported.md".into());
+        let rel = format!("sources/01-{}", slugify(&name));
+        write_atomic(&dir.join(&rel), &text)?;
+        meta.sources.push(SourceRef {
+            file: rel,
+            title: name,
+            origin: format!("imported from {path}"),
+            bytes: text.len() as u64,
+        });
+        write_atomic(
+            &body_path(&dir),
+            &format!(
+                "# {}\n\nImported from `{path}`. The document was too long for the \
+                 write-up, so it is kept whole as a source.\n",
+                meta.title
+            ),
+        )?;
+    }
+
+    meta.digest = imported_digest(&text);
+    meta.tags.push("imported".into());
+    meta.links.files.push(path.clone());
+    // Researched, not researching: someone already did this work, and the entry
+    // is a record of it rather than a run waiting to finish. Nothing is going
+    // to arrive later to move it.
+    meta.history.push(HistoryEntry {
+        at: now_secs(),
+        from: Status::Researching.as_str().into(),
+        to: Status::Researched.as_str().into(),
+        by: "you".into(),
+        note: format!("imported from {path}"),
+    });
+    meta.status = Status::Researched;
+    meta.updated_at = now_secs();
+    write_meta(&dir, &meta)?;
+    Ok(summarize(&meta))
+}
+
 /// Where an entry lives on disk. The launcher exports this to a research
 /// session as `CANOPY_RESEARCH_DIR`, which is what the PreToolUse gate compares
 /// against — so the gate is string work on every tool call rather than a bridge
@@ -1669,6 +1882,155 @@ mod tests {
         assert!(binding_file("../evil", "12").is_none());
         assert!(binding_file("inst", "12/../..").is_none());
         assert!(binding_file("", "12").is_none());
+    }
+
+    #[test]
+    fn an_imported_file_keeps_its_own_title_and_leads_with_its_own_words() {
+        // A markdown file that opens with a heading has already named itself,
+        // and using anything else would rename someone's document on import.
+        let body = "# Donation tiers\n\nGitHub Sponsors has no transaction API, so\nStripe must stay the ledger.\n\nMore detail here.";
+        assert_eq!(
+            imported_title(body, Path::new("/repo/notes/spike.md")),
+            "Donation tiers"
+        );
+        // The first real paragraph is the closest thing a hand-written note has
+        // to a digest — and it is one paragraph, not the whole file.
+        let d = imported_digest(body);
+        assert!(d.starts_with("GitHub Sponsors has no transaction API"));
+        assert!(!d.contains("More detail here"));
+    }
+
+    #[test]
+    fn a_file_with_no_heading_is_named_after_itself() {
+        assert_eq!(
+            imported_title(
+                "just some prose",
+                Path::new("/repo/api-capability_notes.md")
+            ),
+            "api capability notes"
+        );
+    }
+
+    #[test]
+    fn the_derived_digest_skips_what_never_reads_as_a_summary() {
+        // Headings, quotes, rules, bullets and fenced code are all things a
+        // note can open with that say nothing on their own.
+        let body =
+            "# T\n\n---\n\n> a quote\n\n- a bullet\n\n```\ncode here\n```\n\nThe actual point.";
+        assert_eq!(imported_digest(body), "The actual point.");
+        // Nothing quotable at all is an empty digest, not a wrong one.
+        assert_eq!(imported_digest("# Only a heading\n"), "");
+    }
+
+    #[test]
+    fn derived_text_is_cut_rather_than_refused() {
+        // `cap` is right for text an agent authored, where the limit is the
+        // message. A digest lifted out of someone else's file is derived, and
+        // refusing the import over its length would help nobody.
+        let long = "word ".repeat(400);
+        let d = imported_digest(&long);
+        assert!(d.chars().count() <= DIGEST_MAX);
+        assert!(d.ends_with('…'));
+        // Cut at a word boundary, not mid-syllable.
+        assert!(!d.contains("wor…"));
+    }
+
+    #[test]
+    fn importing_adopts_the_file_without_moving_it() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempHome::new("import");
+        let repo = home.0.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let md = repo.join("NOTES.md");
+        std::fs::write(&md, "# Tiered donations\n\nStripe stays the ledger.\n").unwrap();
+        let path = md.to_string_lossy().to_string();
+        let roots = vec![repo.to_string_lossy().to_string()];
+
+        let s = import_impl(
+            "p1".into(),
+            Some("Canopy".into()),
+            Some(roots.clone()),
+            path.clone(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(s.title, "Tiered donations");
+        assert_eq!(s.digest, "Stripe stays the ledger.");
+        // Researched, not researching: someone already did this work, and
+        // nothing is going to arrive later to move it along.
+        assert_eq!(s.status, "researched");
+
+        let d = research_get("p1".into(), s.id.clone()).unwrap();
+        // It points back at the file, and the file is still there.
+        assert_eq!(d.links.files, vec![path.clone()]);
+        assert!(md.exists(), "import must not move or delete the original");
+        assert!(d.body.contains("Stripe stays the ledger"));
+
+        // Twice is not two entries — the button is one the user can press
+        // again, and the second press should find the first one's work.
+        let err = import_impl("p1".into(), None, Some(roots), path.clone(), None).unwrap_err();
+        assert!(err.contains(&s.id), "{err}");
+        assert_eq!(research_for_file("p1".into(), path).unwrap(), Some(s.id));
+    }
+
+    #[test]
+    fn a_long_import_is_kept_whole_as_a_source_and_not_duplicated() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempHome::new("import-big");
+        let repo = home.0.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let md = repo.join("big.md");
+        let text = format!("# Big\n\nThe point.\n\n{}", "x".repeat(BODY_MAX));
+        std::fs::write(&md, &text).unwrap();
+
+        let s = import_impl(
+            "p1".into(),
+            None,
+            Some(vec![repo.to_string_lossy().to_string()]),
+            md.to_string_lossy().to_string(),
+            None,
+        )
+        .unwrap();
+        let d = research_get("p1".into(), s.id).unwrap();
+        assert_eq!(d.sources.len(), 1);
+        // Kept whole in the source, and the body says where it went rather
+        // than holding a second copy of it.
+        assert!(d.body.len() < BODY_MAX);
+        assert!(d.body.contains("kept whole as a source"));
+        assert!(!d.body.contains(&"x".repeat(1000)));
+    }
+
+    #[test]
+    fn import_refuses_what_it_should_not_read_or_cannot_use() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempHome::new("import-refuse");
+        let repo = home.0.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let roots = vec![repo.to_string_lossy().to_string()];
+
+        // Outside the project: "import" is not a licence to read the disk.
+        assert!(import_impl(
+            "p1".into(),
+            None,
+            Some(roots.clone()),
+            "/etc/hosts".into(),
+            None
+        )
+        .is_err());
+
+        // Empty: there is nothing to adopt yet, and an entry with no content
+        // is a row that says nothing.
+        let empty = repo.join("empty.md");
+        std::fs::write(&empty, "   \n\n").unwrap();
+        let err = import_impl(
+            "p1".into(),
+            None,
+            Some(roots),
+            empty.to_string_lossy().to_string(),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("empty"), "{err}");
     }
 
     #[test]

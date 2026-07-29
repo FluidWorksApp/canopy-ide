@@ -460,6 +460,8 @@ pub fn run() {
             research::research_link,
             research::research_read_file,
             research::research_dir,
+            research::research_import,
+            research::research_for_file,
             research::research_delete,
             spot::spot_save_context_text,
             fsx::workspace_add,
