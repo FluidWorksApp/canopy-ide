@@ -2,6 +2,7 @@ import type * as ipc from "../../ipc";
 import type { AgentEventEntry, OpenFile, Notify, RelayHandle } from "../../types";
 import type { ReviewPayload } from "../ReviewView";
 import type { PreviewAnnotation } from "../../preview";
+import type { DeviceAnnotation } from "../../android";
 import type { Project } from "../../projects";
 import { getSettings } from "../../settings";
 
@@ -173,10 +174,28 @@ export interface PreviewSubTab {
   annotations: PreviewAnnotation[];
 }
 
+/** A live Android device or emulator, shown as refreshing still frames.
+ *
+ *  Deliberately not a video stream: an agent drives the device and the user
+ *  watches, so there is nothing to decode and the tab works identically on
+ *  every platform Canopy runs on. Like PreviewSubTab, the selected device and
+ *  collected annotations live on the tab so they survive switching away. */
+export interface DeviceSubTab {
+  id: string;
+  type: "device";
+  /** adb serial ("" until a device is picked). */
+  serial: string;
+  /** The Android project this device is showing, for SDK resolution and so
+   *  feedback names the codebase to change. */
+  projectDir: string;
+  annotations: DeviceAnnotation[];
+}
+
 export type SubTab =
   | CollabSubTab
   | SharedProjectSubTab
   | PreviewSubTab
+  | DeviceSubTab
   | TermSubTab
   | FileSubTab
   | PrSubTab
@@ -265,6 +284,8 @@ export function describeTab(tab: SubTab | undefined) {
       };
     case "preview":
       return { kind: "preview", url: tab.url || null };
+    case "device":
+      return { kind: "device", label: tab.serial || "Android device" };
     case "ticket":
       return { kind: "ticket", label: tab.ticket.title };
     case "pr":
@@ -334,7 +355,16 @@ export function tabDisplayLabel(t: SubTab): string {
       return t.name;
     case "preview":
       return previewLabel(t.url);
+    case "device":
+      return deviceLabel(t.serial);
   }
+}
+
+/** The serial without adb's `emulator-` prefix, which is the same on every
+ *  emulator and so tells the user nothing at tab-strip width. */
+export function deviceLabel(serial: string): string {
+  if (!serial) return "Device";
+  return serial.startsWith("emulator-") ? `Emulator ${serial.slice(9)}` : serial;
 }
 
 /** host[/path] for the tab strip; the scheme is noise at that width. */

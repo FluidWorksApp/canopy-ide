@@ -120,6 +120,7 @@ pub fn start(app: tauri::AppHandle) {
             .route("/ctx/resources", get(resources))
             .route("/ctx/action", post(action))
             .route("/ctx/browser", post(browser))
+            .route("/ctx/device", post(device))
             .route("/ctx/network", get(network))
             .route("/ctx/editor", get(editor))
             .route("/ctx/ui", post(ui_op))
@@ -734,6 +735,171 @@ struct BrowserOp {
 /// How long the app + page get to answer a browser op. Covers a preview tab
 /// mounting and its page loading; the sidecar's own read timeout is longer.
 const BROWSER_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// An Android device op (canopy_device_* tools).
+///
+/// Unlike the browser ops, these never round-trip through the frontend: a
+/// device is reachable from the backend directly, so an agent can drive one
+/// with no device tab open and without depending on a window being on screen.
+/// The tab, when there is one, is just another viewer of the same device.
+#[derive(serde::Deserialize)]
+struct DeviceOp {
+    op: String,
+    serial: Option<String>,
+    #[serde(rename = "projectDir")]
+    project_dir: Option<String>,
+    x: Option<i32>,
+    y: Option<i32>,
+    x2: Option<i32>,
+    y2: Option<i32>,
+    ms: Option<u32>,
+    text: Option<String>,
+    key: Option<String>,
+    package: Option<String>,
+    lines: Option<u32>,
+    name: Option<String>,
+    apk: Option<String>,
+}
+
+async fn device(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+    Json(op): Json<DeviceOp>,
+) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let dir = op.project_dir.clone();
+    let bad = |e: String| (StatusCode::BAD_REQUEST, e);
+
+    // Ops that address the SDK rather than one device resolve no serial.
+    if op.op == "list" {
+        let status = crate::android::resolve(dir.as_deref());
+        let sdk = match &status.sdk {
+            Some(s) => s.clone(),
+            None => return bad(status.missing.join("; ")),
+        };
+        let devices = match crate::android::devices(&sdk) {
+            Ok(d) => d,
+            Err(e) => return bad(e),
+        };
+        // Absent cmdline-tools this simply has no emulators to report, which is
+        // already said in `missing` — no reason to fail the whole listing.
+        let avds = crate::android::android_avds(dir.clone()).unwrap_or_default();
+        return (
+            StatusCode::OK,
+            serde_json::json!({
+                "devices": devices,
+                "emulators": avds,
+                "missing": status.missing,
+            })
+            .to_string(),
+        );
+    }
+    if op.op == "emulator_start" {
+        let Some(name) = op.name.clone() else {
+            return bad("emulator_start needs a name (from canopy_device_list)".into());
+        };
+        return match crate::android::android_emulator_start(dir, name).await {
+            Ok(serial) => (
+                StatusCode::OK,
+                serde_json::json!({ "serial": serial }).to_string(),
+            ),
+            Err(e) => bad(e),
+        };
+    }
+    if op.op == "describe" {
+        let Some(project) = dir else {
+            return bad("describe needs a projectDir".into());
+        };
+        return match crate::android::android_describe(project).await {
+            Ok(out) => (
+                StatusCode::OK,
+                serde_json::json!({ "describe": out }).to_string(),
+            ),
+            Err(e) => bad(e),
+        };
+    }
+
+    // Everything below acts on one device. Naming it is optional while exactly
+    // one is attached, which is the common case and saves a round trip.
+    let serial = match op.serial.clone() {
+        Some(s) if !s.is_empty() => s,
+        _ => match crate::android::only_device(dir.as_deref()) {
+            Ok(s) => s,
+            Err(e) => return bad(e),
+        },
+    };
+
+    let result: Result<serde_json::Value, String> = match op.op.as_str() {
+        "screenshot" => crate::android::screencap_bytes(dir, serial.clone())
+            .await
+            .map(|bytes| {
+                use base64::Engine;
+                serde_json::json!({
+                    "image": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                    "mimeType": "image/png",
+                    "serial": serial,
+                })
+            }),
+        "snapshot" => crate::android::android_layout(dir, serial)
+            .await
+            .map(|json| serde_json::json!({ "layout": json })),
+        "foreground" => crate::android::android_foreground(dir, serial)
+            .await
+            .map(|c| serde_json::json!({ "component": c })),
+        "tap" => match (op.x, op.y) {
+            (Some(x), Some(y)) => crate::android::android_tap(dir, serial, x, y)
+                .await
+                .map(|_| serde_json::json!({ "tapped": [x, y] })),
+            _ => Err(
+                "tap needs x and y in device pixels (canopy_device_snapshot reports the \
+                      centre of every node)"
+                    .into(),
+            ),
+        },
+        "type" => match op.text.clone() {
+            Some(t) => crate::android::android_text(dir, serial, t)
+                .await
+                .map(|_| serde_json::json!({ "typed": true })),
+            None => Err("type needs text".into()),
+        },
+        "key" => match op.key.clone() {
+            Some(k) => crate::android::android_key(dir, serial, k)
+                .await
+                .map(|_| serde_json::json!({ "pressed": true })),
+            None => Err("key needs a keyevent name, e.g. BACK or ENTER".into()),
+        },
+        "swipe" => match (op.x, op.y, op.x2, op.y2) {
+            (Some(x), Some(y), Some(x2), Some(y2)) => {
+                crate::android::android_swipe(dir, serial, x, y, x2, y2, op.ms)
+                    .await
+                    .map(|_| serde_json::json!({ "swiped": true }))
+            }
+            _ => Err("swipe needs x, y, x2 and y2".into()),
+        },
+        "logcat" => crate::android::android_logcat(dir, serial, op.package.clone(), op.lines)
+            .await
+            .map(|log| serde_json::json!({ "logcat": log })),
+        "emulator_stop" => crate::android::android_emulator_stop(dir, serial)
+            .await
+            .map(|_| serde_json::json!({ "stopped": true })),
+        "run" => match (op.project_dir.clone(), op.apk.clone()) {
+            (Some(project), Some(apk)) => crate::android::android_run(project, apk, serial)
+                .await
+                .map(|out| serde_json::json!({ "run": out })),
+            _ => Err(
+                "run needs projectDir and apk (canopy_device_describe reports APK paths)".into(),
+            ),
+        },
+        other => Err(format!("unknown device op: {other}")),
+    };
+
+    match result {
+        Ok(v) => (StatusCode::OK, v.to_string()),
+        Err(e) => bad(e),
+    }
+}
 
 async fn browser(
     State(app): State<tauri::AppHandle>,

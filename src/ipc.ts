@@ -1637,3 +1637,93 @@ export const onDictationProgress = (
   cb: (p: DictationProgress) => void,
 ): Promise<UnlistenFn> =>
   listen<DictationProgress>("dictation:progress", (e) => cb(e.payload));
+
+// ---------- Android ----------
+
+export interface AndroidSdk {
+  root: string;
+  adb: string;
+  /** The `android` CLI; null when cmdline-tools was never installed. */
+  cli: string | null;
+}
+
+export interface AndroidSdkStatus {
+  sdk: AndroidSdk | null;
+  /** What to install, phrased for the user. Empty means everything is there. */
+  missing: string[];
+}
+
+export interface AndroidDevice {
+  serial: string;
+  state: string;
+  model: string;
+  emulator: boolean;
+}
+
+/** `projectDir` locates the SDK: a project's local.properties pins one, and it
+ *  outranks the environment the same way it does for Gradle. */
+export const androidSdkStatus = (projectDir?: string) =>
+  invoke<AndroidSdkStatus>("android_sdk_status", { projectDir });
+
+export const androidDevices = (projectDir?: string) =>
+  invoke<AndroidDevice[]>("android_devices", { projectDir });
+
+export const androidAvds = (projectDir?: string) =>
+  invoke<string[]>("android_avds", { projectDir });
+
+/** Resolves once the emulator is genuinely usable, with its serial. */
+export const androidEmulatorStart = (name: string, projectDir?: string) =>
+  invoke<string>("android_emulator_start", { name, projectDir });
+
+export const androidEmulatorStop = (serial: string, projectDir?: string) =>
+  invoke<void>("android_emulator_stop", { serial, projectDir });
+
+/** PNG bytes of the device screen, as an ArrayBuffer — no base64 round trip. */
+export const androidScreencap = (serial: string, projectDir?: string) =>
+  invoke<ArrayBuffer>("android_screencap", { serial, projectDir });
+
+/** uiautomator's XML: the only source with a rectangle on every node, which is
+ *  what hit-testing a click needs. */
+export const androidUiDump = (serial: string, projectDir?: string) =>
+  invoke<string>("android_ui_dump", { serial, projectDir });
+
+/** The same tree as the `android` CLI's JSON — what an agent reads. */
+export const androidLayout = (serial: string, projectDir?: string) =>
+  invoke<string>("android_layout", { serial, projectDir });
+
+/** `package/activity` in front, or "" when nothing is focused. */
+export const androidForeground = (serial: string, projectDir?: string) =>
+  invoke<string>("android_foreground", { serial, projectDir });
+
+export const androidTap = (serial: string, x: number, y: number, projectDir?: string) =>
+  invoke<void>("android_tap", { serial, x, y, projectDir });
+
+export const androidText = (serial: string, text: string, projectDir?: string) =>
+  invoke<void>("android_text", { serial, text, projectDir });
+
+export const androidSwipe = (
+  serial: string,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  ms?: number,
+  projectDir?: string,
+) => invoke<void>("android_swipe", { serial, x1, y1, x2, y2, ms, projectDir });
+
+export const androidKey = (serial: string, key: string, projectDir?: string) =>
+  invoke<void>("android_key", { serial, key, projectDir });
+
+export const androidLogcat = (
+  serial: string,
+  packageName?: string,
+  lines?: number,
+  projectDir?: string,
+) => invoke<string>("android_logcat", { serial, package: packageName, lines, projectDir });
+
+/** Build targets and where their APKs land, straight from Gradle. */
+export const androidDescribe = (projectDir: string) =>
+  invoke<string>("android_describe", { projectDir });
+
+export const androidRun = (projectDir: string, apk: string, serial: string) =>
+  invoke<string>("android_run", { projectDir, apk, serial });
