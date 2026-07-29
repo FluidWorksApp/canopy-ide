@@ -161,7 +161,7 @@ import { BROWSER_INPUT_EVENT, PreviewView } from "../PreviewView";
 import DeviceView from "../DeviceView";
 import type { PreviewServer } from "../../preview";
 import { dispatchBrowserOp } from "../../previewAgent";
-import { useBrowserEngine } from "../../browserHost";
+import { suppressBrowserViewsOver, useBrowserEngine } from "../../browserHost";
 import { serverForUrl } from "../../preview";
 import { ticketBranch, ticketContext, ticketWorktree } from "../../trackers";
 import { prConflictContext, prReviewContext } from "../../prs";
@@ -295,6 +295,14 @@ function hostStyle(front: boolean, keepLaidOut: boolean): CSSProperties {
  *  overlay rather than a bar above the grid on purpose: the terminal's size is
  *  what the pty is told, and anything that changes its height risks the
  *  wrap-at-the-wrong-column class of bug. An absolute chip changes nothing. */
+/** The activity rail's width, and so where the overlay peek starts —
+ *  `.side-peek-layer { left: 54px }` in index.css. */
+const RAIL_W = 54;
+
+/** How long the peek takes to leave (`--peek-out`, 150ms) plus a frame or two,
+ *  so the page does not come back through a panel still on its way out. */
+const PEEK_EXIT_MS = 220;
+
 function TermPorts({
   ptyId,
   stats,
@@ -407,6 +415,30 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const [sideWidth, setSideWidth] = useState(SIDE_DEFAULT_W);
   const sideWidthRef = useRef(SIDE_DEFAULT_W);
   const sideOpen = !zen && (pinned || peeking);
+
+  // The overlay peek slides over the pane, and a child webview cannot be drawn
+  // under it — so the panel has to be announced, not discovered. The occlusion
+  // walk re-measures every 60ms and the hide is a round trip to the compositor,
+  // while the panel is in motion for 340ms firing nothing the observer can
+  // sample: measured, the page painted over the panel for 157ms every time it
+  // opened. Claiming the rect the panel will occupy, at the moment the state
+  // changes, takes the race off the table.
+  useEffect(() => {
+    if (!sidePrefs.overlay || !sideOpen) return;
+    const release = suppressBrowserViewsOver({
+      x: RAIL_W,
+      y: 0,
+      width: sideWidthRef.current,
+      height: window.innerHeight,
+    });
+    return () => {
+      // Held through the exit transition: releasing on the state change alone
+      // brings the page back over a panel that is still sliding out — the same
+      // bug pointing the other way. The release is idempotent, so a peek that
+      // reopens before this lands is still balanced.
+      window.setTimeout(release, PEEK_EXIT_MS);
+    };
+  }, [sidePrefs.overlay, sideOpen]);
   const [tabs, setTabs] = useState<SubTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   /** Briefly ringed after a jump — with several similar terminal tabs open,

@@ -89,6 +89,10 @@ interface Entry {
   /** The page moved on and the held frame is known to be wrong. */
   dirty: boolean;
   told: PaneView | null;
+  /** Held off screen by a caller that knows something is about to cover this
+   *  view, rather than by the walk having seen it (suppressBrowserViewsOver).
+   *  A count, because two surfaces may claim the same view. */
+  forced: number;
   /** Observation only, for the watchdog and the selftest — never read by any
    *  decision here. When a frame last arrived, when the page last moved, and
    *  whether it is still arriving.
@@ -281,7 +285,7 @@ function apply() {
     // Only pay for the walk when this view would otherwise be on screen.
     const over = host && rect && bounds && showable(bounds) ? occludersOver(host, rect) : null;
     const clear = !!over && over.length === 0;
-    const visible = e.wanted && suppressed === 0 && clear;
+    const visible = e.wanted && suppressed === 0 && e.forced === 0 && clear;
     if (visible !== e.shown) {
       e.shown = visible;
       const seq = ++visibilitySeq;
@@ -546,6 +550,7 @@ export function registerBrowserView(tabId: string, host: () => Element | null) {
     capturing: false,
     dirty: true,
     told: null,
+    forced: 0,
     lastCaptureOkAt: 0,
     lastNavAt: Date.now(),
     loading: false,
@@ -613,6 +618,42 @@ export function suppressBrowserViews(): () => void {
     if (released) return;
     released = true;
     suppressed--;
+    schedule();
+  };
+}
+
+/** Hold every view under `rect` off screen until the returned release is called.
+ *
+ *  For a surface that ANIMATES over the page. The walk re-measures every 60ms
+ *  and the hide is a round trip to the compositor, so a panel that slides in
+ *  over 340ms — moving every frame, mutating nothing, firing no event the
+ *  observer can sample — is already on top of the page by the time its overlap
+ *  is discovered. Measured on the side panel: the page painted over it for
+ *  157ms, which is a screenshot's worth of the panel being behind the page.
+ *
+ *  The race is not winnable after the animation starts, and it does not have to
+ *  be run at all: the app knows the panel is opening before it moves. This is
+ *  how it says so. Views the rect misses are left alone — a preview in a pane
+ *  the panel never reaches has no reason to freeze.
+ *
+ *  `rect` is where the surface will END UP, in CSS pixels, not where it starts.
+ */
+export function suppressBrowserViewsOver(rect: RectLike): () => void {
+  const claimed: Entry[] = [];
+  for (const e of views.values()) {
+    const host = e.host();
+    const r = host?.getBoundingClientRect();
+    if (!r || r.width < 1 || r.height < 1) continue;
+    if (!overlaps(rect, r)) continue;
+    e.forced++;
+    claimed.push(e);
+  }
+  schedule();
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    for (const e of claimed) e.forced = Math.max(0, e.forced - 1);
     schedule();
   };
 }
