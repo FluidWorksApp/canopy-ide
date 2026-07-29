@@ -26,6 +26,8 @@ import {
   setStatus,
 } from "../research";
 import { ago } from "./ProjectView/helpers";
+import { AgentLaunchButton } from "./AgentLaunchButton";
+import type { AgentTarget } from "./TicketsPanel";
 import {
   ArchiveIcon,
   BlockedIcon,
@@ -40,9 +42,14 @@ import { RESEARCH_STEPS, stepsDone } from "../microTasks";
 interface ResearchViewProps {
   projectId: string;
   researchId: string;
-  /** Hand this entry to an agent to build. Absent while no CLI is installed. */
-  onImplement?: (entry: ipc.ResearchDetail) => void;
-  /** Reopen the question with a fresh agent, carrying the entry. */
+  /** Hand this entry to a fresh agent to build, on the CLI the user picked. */
+  onImplement?: (entry: ipc.ResearchDetail, agentId: string) => void;
+  /** Hand it to an agent already running instead of starting one. */
+  onSendImplement?: (target: AgentTarget, entry: ipc.ResearchDetail) => void;
+  /** Agent terminals open in this project — the "send it there" targets. */
+  agentTargets?: AgentTarget[];
+  /** Which agent CLIs are on PATH. */
+  installed?: Record<string, boolean>;
   /** Put an agent back on it. `steer` is what the user typed into the popover
    *  — continuing with nothing extra is allowed, and is the empty string. */
   onContinue?: (entry: ipc.ResearchDetail, steer: string) => void;
@@ -59,6 +66,9 @@ export function ResearchView({
   projectId,
   researchId,
   onImplement,
+  onSendImplement,
+  agentTargets,
+  installed,
   onContinue,
   onOpenPr,
   onOpenFile,
@@ -546,19 +556,30 @@ export function ResearchView({
         )}
       </div>
 
-      {/* One button, and only when there is one thing to do. The bar used to
-          be six equal-weight buttons with the action that matters buried among
-          five state moves; those are marks in the header now, and this is the
-          accented CTA the PR surfaces use for the same job. */}
+      {/* The note leads, the control is rightmost — the same shape every other
+          footer in the app has, and the reason the eye finds the action without
+          reading the sentence first. A split button rather than a plain one:
+          starting an agent is always a choice of *which* agent, and every other
+          surface that starts one (the ticket tab, the PR header) already asks
+          it that way. */}
       {moves.includes("implementing") && onImplement && (
         <div className="research-actions">
-          <button className="btn btn-accent" onClick={() => onImplement(entry)}>
-            Implement this
-          </button>
           <span className="research-actions-note">
-            Starts an agent on a branch of its own. The pull request it raises
-            is what marks this implemented.
+            Starts an agent on a branch of its own. The pull request it raises is
+            what marks this implemented.
           </span>
+          <span className="status-spacer" />
+          <AgentLaunchButton
+            label="Implement this"
+            agentTargets={agentTargets ?? []}
+            installed={installed ?? {}}
+            newAgentLabel={`New agent on research/${entry.id}`}
+            primaryTitle={(cli) =>
+              `Start ${cli} on this research, in a worktree of its own`
+            }
+            onStart={(agentId) => onImplement(entry, agentId)}
+            onSend={(target) => onSendImplement?.(target, entry)}
+          />
         </div>
       )}
     </div>

@@ -1848,7 +1848,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  a caller left guessing shows "Resolving…" over an error toast until a
    *  timeout rescues it. */
   const startMicroTask = useCallback(
-    async <P,>(def: MicroTaskDef<P>, payload: P, userQuery: string): Promise<boolean> => {
+    async <P,>(
+      def: MicroTaskDef<P>,
+      payload: P,
+      userQuery: string,
+      // Which CLI to run it on. Absent means "decide for me", which is every
+      // caller that has no agent picker; the split-button surfaces pass the
+      // one the user chose from its menu.
+      preferAgent?: string,
+    ): Promise<boolean> => {
       const installedClis = AGENT_CLIS.filter((c) => getInstalled()[c.bin]);
       if (installedClis.length === 0) {
         onNotice(
@@ -1858,6 +1866,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       }
       const preferred = getSettings().defaultAgent;
       const agent = (
+        installedClis.find((c) => c.id === preferAgent) ??
         installedClis.find((c) => c.id === "claude") ??
         installedClis.find((c) => c.id === preferred) ??
         installedClis[0]
@@ -2127,7 +2136,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  own. Flips the entry to `implementing` — the PR the agent links is what
    *  later carries it the rest of the way. */
   const implementResearch = useCallback(
-    async (entry: ipc.ResearchDetail, userQuery = "") => {
+    async (entry: ipc.ResearchDetail, userQuery = "", agentId?: string) => {
       const repo = roots[0];
       if (!repo) return;
       const branch = `research/${entry.id}`;
@@ -2143,6 +2152,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             brief: implementContext(entry),
           },
           userQuery,
+          agentId,
         );
         if (!ok) return;
         await researchSetStatus(project.id, entry.id, "implementing", "you");
@@ -5249,7 +5259,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
           <ResearchView
             projectId={project.id}
             researchId={tab.researchId}
-            onImplement={(entry) => void implementResearch(entry)}
+            agentTargets={agentTargets}
+            installed={installed}
+            onImplement={(entry, agentId) =>
+              void implementResearch(entry, "", agentId)
+            }
+            onSendImplement={(target, entry) =>
+              sendTicketToAgent(target, implementContext(entry))
+            }
             // Continuing works on the same entry rather than opening a new
             // one — the point is to go further on this question, not to ask it
             // again — so the steer is passed through as the run's user context.
