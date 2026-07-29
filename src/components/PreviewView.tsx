@@ -51,10 +51,9 @@ import {
 import { getSettings, updateSettings } from "../settings";
 import { IS_MAC } from "../platform";
 import { registerBrowserTarget } from "../previewAgent";
-import { agentMenuItems } from "../agentMenu";
 import { AgentLaunchButton } from "./AgentLaunchButton";
-import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
-import { AgentsIcon, LiveDot } from "./icons";
+import { ContextMenu, useContextMenu } from "./ContextMenu";
+import { LiveDot } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
 
 /** A trusted press landed inside a previewed page, forwarded out of it by the
@@ -841,37 +840,6 @@ export function PreviewView({
   const shotBrief = () =>
     previewShotContext(urlRef.current, shotsRef.current, serverForUrl(urlRef.current, servers));
 
-  /** One control, two destinations. It was two buttons — "Send screenshot ▾"
-   *  beside "Send to task ▾" — which read as two unrelated features rather than
-   *  one question with two answers: who should look at this?
-   *
-   *  Agent opens the menu every other surface opens (running agents, or a fresh
-   *  CLI). One-off task runs immediately: the tab knows the page, the brief and
-   *  the component serving it, so a composer would only be asking the user to
-   *  confirm what we already filled in. */
-  const sendMenu = useContextMenu();
-  const sendItems = (brief: () => string, newAgentLabel: string): MenuItem[] => {
-    const where = linked?.componentPath ?? dir;
-    return [
-      {
-        label: "Agent",
-        icon: <AgentsIcon size={14} />,
-        submenu: agentMenuItems({
-          targets: agentTargets,
-          installed,
-          newLabel: newAgentLabel,
-          onSend: (target) => onSendToAgent(target, brief()),
-          onStart: (agentId) => onStartNew(agentId, brief(), linked?.componentPath ?? null),
-        }),
-      },
-      {
-        label: "⚡ One-off task",
-        hint: linked?.componentLabel ?? undefined,
-        onClick: () => onRunOneOff(brief(), where),
-      },
-    ];
-  };
-
   const go = (delta: -1 | 0 | 1) => {
     if (native) {
       void ipc
@@ -982,14 +950,6 @@ export function PreviewView({
           y={captureMenu.menu.y}
           items={captureMenu.menu.items}
           onClose={captureMenu.close}
-        />
-      )}
-      {sendMenu.menu && (
-        <ContextMenu
-          x={sendMenu.menu.x}
-          y={sendMenu.menu.y}
-          items={sendMenu.menu.items}
-          onClose={sendMenu.close}
         />
       )}
       <div className="preview-toolbar">
@@ -1103,23 +1063,32 @@ export function PreviewView({
                   ))}
                 </div>
                 <div className="preview-panel-foot">
-                  <button
-                    className="btn-mini"
-                    title="Hand these screenshots to an agent, or run them as a one-off task"
-                    onClick={(e) =>
-                      sendMenu.open(
-                        e,
-                        sendItems(
-                          shotBrief,
-                          linked?.componentLabel
-                            ? `New agent in ${linked.componentLabel}`
-                            : "New agent on this screenshot",
-                        ),
-                      )
+                  <AgentLaunchButton
+                    label="Send screenshot"
+                    agentTargets={agentTargets}
+                    installed={installed}
+                    newAgentLabel={
+                      linked?.componentLabel
+                        ? `New agent in ${linked.componentLabel}`
+                        : "New agent on this screenshot"
                     }
-                  >
-                    ▲ Send screenshot ▾
-                  </button>
+                    primaryTitle={(cli) =>
+                      `Start ${cli} on these screenshots${
+                        linked?.componentLabel ? ` in the ${linked.componentLabel} component` : ""
+                      }`
+                    }
+                    onStart={(agentId) =>
+                      onStartNew(agentId, shotBrief(), linked?.componentPath ?? null)
+                    }
+                    onSend={(target) => onSendToAgent(target, shotBrief())}
+                    extras={[
+                      {
+                        label: "⚡ One-off task",
+                        hint: linked?.componentLabel ?? undefined,
+                        onClick: () => onRunOneOff(shotBrief(), linked?.componentPath ?? dir),
+                      },
+                    ]}
+                  />
                 </div>
               </>
             )}
