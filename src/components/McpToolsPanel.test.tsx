@@ -33,11 +33,18 @@ const server = (over: Partial<McpServer> = {}): McpServer => ({
   ...over,
 });
 
+const onOpen = vi.fn();
+
 const panel = (servers: McpServer[]) => {
   mcpServers.mockReset();
+  onOpen.mockReset();
   mcpServers.mockResolvedValue(servers);
-  render(<McpToolsPanel rootsKey={"/repo"} visible />);
+  render(<McpToolsPanel rootsKey={"/repo"} visible onOpen={onOpen} />);
 };
+
+/** Unfold a row's configs — the chevron, not the row, which now opens the
+ *  server instead. */
+const expand = () => fireEvent.click(screen.getByTitle("Where it's configured"));
 
 it("asks for the project's roots, not a joined string", async () => {
   panel([]);
@@ -125,7 +132,8 @@ it("shows a server no CLI can reach rather than hiding it", async () => {
 
 it("names the variables a server needs without holding a single value", async () => {
   panel([server({ env_keys: ["BROWSERBASE_API_KEY", "GEMINI_API_KEY"] })]);
-  fireEvent.click(await screen.findByText("playwright"));
+  await screen.findByText("playwright");
+  expand();
   expect(screen.getByText("BROWSERBASE_API_KEY")).toBeTruthy();
   // The Rust side never sends values; this asserts the panel invents no way to
   // show one — the whole `McpServer` shape has nowhere to put it.
@@ -148,7 +156,8 @@ it("names each config's own name for the server, which is rarely the row's", asy
       ],
     }),
   ]);
-  fireEvent.click(await screen.findByText("browserbase"));
+  await screen.findByText("browserbase");
+  expand();
   expect(screen.getByText("bb")).toBeTruthy();
   expect(screen.getByTitle("/home/u/.codeium/windsurf/mcp_config.json")).toBeTruthy();
 });
@@ -156,8 +165,25 @@ it("names each config's own name for the server, which is rarely the row's", asy
 it("does not read the configs while it is out of sight", () => {
   mcpServers.mockReset();
   mcpServers.mockResolvedValue([]);
-  render(<McpToolsPanel rootsKey="/repo" visible={false} />);
+  render(<McpToolsPanel rootsKey="/repo" visible={false} onOpen={onOpen} />);
   expect(mcpServers).not.toHaveBeenCalled();
+});
+
+// The point of the rewrite: a row is a way into the server, not a disclosure
+// triangle. Clicking one must open it; unfolding its configs must not.
+it("opens the server when its row is clicked", async () => {
+  const one = server();
+  panel([one]);
+  fireEvent.click(await screen.findByText("playwright"));
+  expect(onOpen).toHaveBeenCalledWith(one);
+});
+
+it("does not open the server when the configs are unfolded", async () => {
+  panel([server({ env_keys: ["A_KEY"] })]);
+  await screen.findByText("playwright");
+  expand();
+  expect(onOpen).not.toHaveBeenCalled();
+  expect(screen.getByText("A_KEY")).toBeTruthy();
 });
 
 describe("a remote server", () => {
@@ -173,7 +199,7 @@ describe("a remote server", () => {
   it("is marked as remote and shows its endpoint rather than a command", async () => {
     panel([remote]);
     expect(await screen.findByText("http")).toBeTruthy();
-    fireEvent.click(screen.getByText("linear"));
+    expand();
     expect(screen.getByText("https://mcp.linear.app/mcp")).toBeTruthy();
   });
 });

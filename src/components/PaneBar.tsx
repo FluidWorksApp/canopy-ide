@@ -7,6 +7,7 @@ import {
   GitBranchIcon,
   GlobeIcon,
   LiveShareIcon,
+  PlugIcon,
   PullRequestIcon,
   TeamIcon,
   TerminalIcon,
@@ -37,6 +38,7 @@ function tabTitle(tab: SubTab): string {
     case "review": return `Review from ${tab.review.from}: ${tab.review.title}`;
     case "task-history": return "Every one-shot task that has finished, and what it reported";
     case "instructions": return "CLAUDE.md, AGENTS.md, skills and subagents — what every agent reads first";
+    case "mcp": return `${tab.server.name} — the tools this MCP server exposes, and who can reach it`;
     case "shared-project": return `${tab.name} — shared live by ${tab.ownerName}`;
     case "preview": return tab.url || "Preview";
     case "device": return tab.serial ? `Android device ${tab.serial}` : "Android device";
@@ -57,6 +59,7 @@ function tabText(tab: SubTab): string {
     case "review": return tab.review.title;
     case "task-history": return "Completed tasks";
     case "instructions": return "Agent instructions";
+    case "mcp": return tab.server.name;
     case "shared-project": return tab.name;
     case "preview": return previewLabel(tab.url);
     case "device": return deviceLabel(tab.serial);
@@ -321,6 +324,8 @@ function PaneBarImpl({
                     <LiveShareIcon size={12} className="tab-collab-icon" />
                   ) : tab.type === "preview" ? (
                     <GlobeIcon size={12} className="tab-preview-icon" />
+                  ) : tab.type === "mcp" ? (
+                    <PlugIcon size={12} className="tab-mcp-icon" />
                   ) : (
                     <>
                       {tab.type === "file" && collabPaths.has(tab.file.path) && (

@@ -812,6 +812,100 @@ export interface McpServer {
  *  per-project registries; pass none for the user-scope answer alone. */
 export const mcpServers = (projectDirs: string[] = []) =>
   invoke<McpServer[]>("mcp_servers", { projectDirs });
+
+/** One tool a server exposes. `input_schema` is the server's own JSON Schema,
+ *  passed through untouched — the argument form is generated from it. */
+export interface McpTool {
+  name: string;
+  title: string | null;
+  description: string | null;
+  input_schema: JsonSchema;
+  output_schema: JsonSchema | null;
+  /** `readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint`,
+   *  verbatim. What the run button uses to decide whether to warn first. */
+  annotations: Record<string, unknown> | null;
+}
+
+/** As much JSON Schema as an argument form can act on. Anything richer is still
+ *  shown — the raw-JSON editor takes whatever the server asks for. */
+export interface JsonSchema {
+  type?: string | string[];
+  title?: string;
+  description?: string;
+  properties?: Record<string, JsonSchema>;
+  required?: string[];
+  items?: JsonSchema;
+  enum?: unknown[];
+  default?: unknown;
+  format?: string;
+  [key: string]: unknown;
+}
+
+/** A prompt or a resource: listed so a server's whole surface is visible, not
+ *  driven the way tools are. */
+export interface McpNamed {
+  name: string;
+  description: string | null;
+  uri: string | null;
+  mime_type: string | null;
+}
+
+/** A live connection's answer to "what do you expose?". */
+export interface McpSession {
+  key: string;
+  /** The name the *server* gives itself, which is often not the config's. */
+  server_name: string | null;
+  server_version: string | null;
+  protocol_version: string | null;
+  instructions: string | null;
+  tools: McpTool[];
+  prompts: McpNamed[];
+  resources: McpNamed[];
+  capabilities: string[];
+  /** What the user actually waited, cold start included. */
+  elapsed_ms: number;
+}
+
+/** One tool call. `is_error` is the tool saying no; a rejected call rejects the
+ *  promise instead — the difference is "it ran and refused" vs "it never ran". */
+export interface McpCallResult {
+  content: McpContent[];
+  is_error: boolean;
+  structured: unknown | null;
+  elapsed_ms: number;
+}
+
+/** A block of a tool's answer. Only `text` is rendered as itself; the rest are
+ *  described, since the panel is not the place to open a PDF. */
+export interface McpContent {
+  type: string;
+  text?: string;
+  data?: string;
+  mimeType?: string;
+  uri?: string;
+  [key: string]: unknown;
+}
+
+/** Start the server if it isn't running and list what it exposes. Costs a cold
+ *  start the first time — `npx` may fetch the package — and is cheap after,
+ *  because the connection is pooled until it goes idle. `refresh` throws the
+ *  pooled connection away first, for when the user has just edited the config. */
+export const mcpConnect = (key: string, refresh = false) =>
+  invoke<McpSession>("mcp_connect", { key, refresh });
+
+/** Run one tool against a connected server. */
+export const mcpCallTool = (
+  key: string,
+  tool: string,
+  args: Record<string, unknown>,
+) => invoke<McpCallResult>("mcp_call_tool", { key, tool, arguments: args });
+
+/** Stop the server — for stdio, kill the process. */
+export const mcpDisconnect = (key: string) =>
+  invoke<void>("mcp_disconnect", { key });
+
+/** Keys of the servers currently connected, so the list can mark them live. */
+export const mcpConnected = () => invoke<string[]>("mcp_connected");
 /** The launch's integration report if the pass has already finished. It runs
  *  before the webview does, so the event below can fire with nobody listening —
  *  ask for this on mount and take whichever arrives first. */

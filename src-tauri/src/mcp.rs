@@ -10,13 +10,17 @@
 //! Discovery is file-only and deliberately so: no process is spawned, nothing is
 //! connected to, so this is cheap enough to run every time the panel opens. What
 //! the servers *expose* — the tools themselves — is not in any of these files
-//! and can only be had by speaking MCP to each server; that is a later phase
-//! built on top of this one.
+//! and can only be had by speaking MCP to each server. That is `mcp_client`,
+//! which starts here: discovery hands it a `LaunchSpec` per row and it does the
+//! connecting.
 //!
 //! Secrets never leave this module. These configs hold live API keys in `env`
 //! and sometimes in argv (`--api-key=…`), and the panel has no use for a single
-//! one of them. Values are dropped at parse time and argv is redacted, so a key
-//! cannot reach the webview, a log line, or a cache file by any later mistake.
+//! one of them. The webview is handed `McpServer` — variable *names*, redacted
+//! argv — while the values go into `LaunchSpec`, which has no `Serialize` and is
+//! reachable only by the code that spawns the process. A key therefore cannot
+//! reach a webview, a log line or a cache file by any later mistake: there is no
+//! function that would write one out.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -58,7 +62,7 @@ pub struct McpServer {
     pub args: Vec<String>,
     pub url: Option<String>,
     /// Names of the environment variables the server is given. Names only —
-    /// the values are dropped at parse time and never stored.
+    /// the values live in `LaunchSpec`, which cannot be serialized.
     pub env_keys: Vec<String>,
     /// Every config that configures this server, in discovery order.
     pub sources: Vec<McpSource>,
@@ -68,14 +72,49 @@ pub struct McpServer {
 }
 
 /// The shape of one registry entry, once the dialect is parsed away.
+///
+/// This is the only type that holds a config's environment *values*. It has no
+/// `Serialize`, and neither does `LaunchSpec`, which is where the values go
+/// afterwards — the webview is handed `McpServer`, which carries names only. The
+/// values exist because a server cannot be started without them: an API key is
+/// junk to the panel and load-bearing to the process.
 #[derive(Clone, Debug, PartialEq)]
 struct Endpoint {
     transport: String,
     command: Option<String>,
     args: Vec<String>,
     url: Option<String>,
-    env_keys: Vec<String>,
+    /// `env` for stdio, request headers for http/sse — same secret, same rule.
+    env: BTreeMap<String, String>,
     enabled: bool,
+}
+
+impl Endpoint {
+    /// Variable names, sorted. What the panel is allowed to know.
+    fn env_keys(&self) -> Vec<String> {
+        self.env.keys().cloned().collect()
+    }
+}
+
+/// Everything needed to actually start this server and speak to it, kept on the
+/// Rust side of the bridge for as long as the app runs.
+///
+/// Deliberately not `Serialize`: it holds live credentials, and the way to be
+/// sure they never reach a webview, a log line or a cache file is for there to
+/// be no code that can write one out. Connecting takes a key, not a spec, so
+/// nothing downstream ever needs to hold one.
+#[derive(Clone, Debug)]
+pub struct LaunchSpec {
+    pub key: String,
+    pub name: String,
+    pub transport: String,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub url: Option<String>,
+    pub env: BTreeMap<String, String>,
+    /// Where to run it. A project-scope entry runs in the checkout that
+    /// configured it — servers routinely resolve paths relative to it.
+    pub cwd: Option<PathBuf>,
 }
 
 /// How a config spells its server entries. The three shapes are genuinely
@@ -354,15 +393,26 @@ fn string_list(value: Option<&serde_json::Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Variable *names*, sorted. The values are read and dropped here, and this is
-/// the only place in the app that ever holds them.
-fn env_key_names(value: Option<&serde_json::Value>) -> Vec<String> {
-    let mut keys: Vec<String> = value
+/// A config's `env` (or `headers`) map, values and all. Everything downstream of
+/// here treats it as secret: only `Endpoint::env_keys` crosses into `McpServer`.
+///
+/// Non-string values are stringified rather than dropped — a port written as a
+/// number is still a variable the server needs.
+fn env_map(value: Option<&serde_json::Value>) -> BTreeMap<String, String> {
+    value
         .and_then(|v| v.as_object())
-        .map(|obj| obj.keys().cloned().collect())
-        .unwrap_or_default();
-    keys.sort();
-    keys
+        .map(|obj| {
+            obj.iter()
+                .map(|(k, v)| {
+                    let value = match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    (k.clone(), value)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn parse_claude_entry(entry: &serde_json::Value) -> Option<Endpoint> {
@@ -383,7 +433,7 @@ fn parse_claude_entry(entry: &serde_json::Value) -> Option<Endpoint> {
             command: None,
             args: Vec::new(),
             url: Some(url.to_string()),
-            env_keys: env_key_names(obj.get("headers")),
+            env: env_map(obj.get("headers")),
             enabled: obj.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true),
         });
     }
@@ -393,7 +443,7 @@ fn parse_claude_entry(entry: &serde_json::Value) -> Option<Endpoint> {
         command: Some(command.to_string()),
         args: string_list(obj.get("args")),
         url: None,
-        env_keys: env_key_names(obj.get("env")),
+        env: env_map(obj.get("env")),
         enabled: obj.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true),
     })
 }
@@ -407,7 +457,7 @@ fn parse_opencode_entry(entry: &serde_json::Value) -> Option<Endpoint> {
             command: None,
             args: Vec::new(),
             url: Some(url.to_string()),
-            env_keys: env_key_names(obj.get("headers")),
+            env: env_map(obj.get("headers")),
             enabled,
         });
     }
@@ -419,7 +469,7 @@ fn parse_opencode_entry(entry: &serde_json::Value) -> Option<Endpoint> {
         command: Some(command.clone()),
         args: args.to_vec(),
         url: None,
-        env_keys: env_key_names(obj.get("environment")),
+        env: env_map(obj.get("environment")),
         enabled,
     })
 }
@@ -506,11 +556,13 @@ fn parse_codex_toml(raw: &str) -> Vec<(String, Endpoint)> {
             command: None,
             args: Vec::new(),
             url: None,
-            env_keys: Vec::new(),
+            env: BTreeMap::new(),
             enabled: true,
         });
         if path.len() == 3 && path[2] == "env" {
-            entry.env_keys.push(key.to_string());
+            entry
+                .env
+                .insert(key.to_string(), toml_value(value).join(" "));
             continue;
         }
         if path.len() != 2 {
@@ -526,9 +578,6 @@ fn parse_codex_toml(raw: &str) -> Vec<(String, Endpoint)> {
             "enabled" => entry.enabled = value.trim() != "false",
             _ => {}
         }
-    }
-    for endpoint in servers.values_mut() {
-        endpoint.env_keys.sort();
     }
     // A table with neither a command nor a url is a fragment, not a server.
     servers
@@ -548,10 +597,14 @@ struct Collector {
     /// key would sort by launch command, which means nothing to anyone.
     order: Vec<String>,
     by_key: BTreeMap<String, McpServer>,
+    /// The startable half of each row, values included. Same keys, separate map,
+    /// so the thing that gets serialized and the thing that holds credentials
+    /// are two different objects and can't be confused for one another.
+    specs: BTreeMap<String, LaunchSpec>,
 }
 
 impl Collector {
-    fn add(&mut self, name: &str, endpoint: Endpoint, source: McpSource) {
+    fn add(&mut self, name: &str, endpoint: Endpoint, source: McpSource, cwd: Option<PathBuf>) {
         let key = dedupe_key(&endpoint);
         let enabled = source.status == "enabled";
         if !self.by_key.contains_key(&key) {
@@ -570,12 +623,25 @@ impl Collector {
                     enabled: false,
                 },
             );
+            self.specs.insert(
+                key.clone(),
+                LaunchSpec {
+                    key: key.clone(),
+                    name: name.to_string(),
+                    transport: endpoint.transport.clone(),
+                    command: endpoint.command.clone(),
+                    args: endpoint.args.clone(),
+                    url: endpoint.url.clone(),
+                    env: BTreeMap::new(),
+                    cwd,
+                },
+            );
         }
         let existing = self.by_key.get_mut(&key).expect("just inserted");
         // Union rather than first-wins: one CLI's entry may name variables the
         // other's leaves to the ambient environment, and the row should show
         // everything this server has been given anywhere.
-        for env_key in endpoint.env_keys {
+        for env_key in endpoint.env_keys() {
             if !existing.env_keys.contains(&env_key) {
                 existing.env_keys.push(env_key);
             }
@@ -583,14 +649,32 @@ impl Collector {
         existing.env_keys.sort();
         existing.enabled |= enabled;
         existing.sources.push(source);
+
+        // Same union on the values, and for the same reason: whichever config
+        // bothered to write the API key down is the one that can start it.
+        // First value wins so a later config's empty placeholder can't blank a
+        // working one.
+        if let Some(spec) = self.specs.get_mut(&key) {
+            for (env_key, value) in endpoint.env {
+                if value.is_empty() {
+                    continue;
+                }
+                spec.env.entry(env_key).or_insert(value);
+            }
+        }
     }
 
-    fn finish(self) -> Vec<McpServer> {
-        let Collector { order, mut by_key } = self;
-        order
+    fn split(self) -> (Vec<McpServer>, BTreeMap<String, LaunchSpec>) {
+        let Collector {
+            order,
+            mut by_key,
+            specs,
+        } = self;
+        let servers = order
             .into_iter()
             .filter_map(|k| by_key.remove(&k))
-            .collect()
+            .collect();
+        (servers, specs)
     }
 }
 
@@ -630,6 +714,7 @@ fn read_registry(
     registry: &Registry,
     scope: &str,
     status_for: &dyn Fn(&str, bool) -> &'static str,
+    cwd: &Path,
 ) {
     if !path.exists() {
         return;
@@ -658,6 +743,7 @@ fn read_registry(
                 scope: scope.into(),
                 status: status.into(),
             },
+            Some(cwd.to_path_buf()),
         );
     }
 }
@@ -678,7 +764,13 @@ fn plain_status(_name: &str, enabled: bool) -> &'static str {
 /// user-scope answer and with them it is what this project's agents can
 /// actually reach. It takes several because a Canopy project is a set of
 /// components, each its own checkout with its own configs.
-pub fn discover(home: &Path, projects: &[PathBuf]) -> Vec<McpServer> {
+///
+/// Returns the rows and, alongside them, how to start each one — see
+/// `LaunchSpec` for why those are two values and not one struct.
+pub fn discover(
+    home: &Path,
+    projects: &[PathBuf],
+) -> (Vec<McpServer>, BTreeMap<String, LaunchSpec>) {
     let mut collector = Collector::default();
 
     for registry in GLOBAL_REGISTRIES {
@@ -688,6 +780,7 @@ pub fn discover(home: &Path, projects: &[PathBuf]) -> Vec<McpServer> {
             registry,
             "global",
             &plain_status,
+            home,
         );
     }
 
@@ -707,12 +800,13 @@ pub fn discover(home: &Path, projects: &[PathBuf]) -> Vec<McpServer> {
                     scope: "global".into(),
                     status: status.into(),
                 },
+                Some(home.to_path_buf()),
             );
         }
     }
 
     if projects.is_empty() {
-        return collector.finish();
+        return collector.split();
     }
     // Read once for every root: `~/.claude.json` is a 200KB file holding
     // Claude Code's whole account and project state, and a Canopy project can
@@ -723,7 +817,7 @@ pub fn discover(home: &Path, projects: &[PathBuf]) -> Vec<McpServer> {
         read_project(&mut collector, project, &claude_path, &claude);
     }
 
-    collector.finish()
+    collector.split()
 }
 
 /// One project root's share of the walk.
@@ -762,6 +856,7 @@ fn read_project(
                     scope: "project".into(),
                     status: status.into(),
                 },
+                Some(project.to_path_buf()),
             );
         }
     }
@@ -781,7 +876,36 @@ fn read_project(
             registry,
             "project",
             &status_for,
+            project,
         );
+    }
+}
+
+/// The launch specs from the most recent discovery, by key.
+///
+/// A process-global rather than Tauri state because the client needs it from
+/// contexts that have no `AppHandle` (the reaper task), and because it is a
+/// cache of the filesystem, not app state: whatever the last walk saw. The panel
+/// re-reads on open and on project change, so a server the user has just
+/// configured is connectable as soon as they can see it.
+static SPECS: std::sync::OnceLock<std::sync::Mutex<BTreeMap<String, LaunchSpec>>> =
+    std::sync::OnceLock::new();
+
+fn specs() -> &'static std::sync::Mutex<BTreeMap<String, LaunchSpec>> {
+    SPECS.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
+}
+
+/// How to start the server with this key, if the last discovery walk saw it.
+pub fn launch_spec(key: &str) -> Option<LaunchSpec> {
+    specs().lock().ok()?.get(key).cloned()
+}
+
+/// Replace what we know how to start. Merge rather than overwrite: the panel is
+/// per-project and a walk scoped to one project must not forget the servers of
+/// another project whose tab is still open behind it.
+fn remember_specs(found: BTreeMap<String, LaunchSpec>) {
+    if let Ok(mut held) = specs().lock() {
+        held.extend(found);
     }
 }
 
@@ -793,7 +917,9 @@ pub async fn mcp_servers(project_dirs: Option<Vec<String>>) -> Result<Vec<McpSer
         .into_iter()
         .map(PathBuf::from)
         .collect();
-    Ok(discover(Path::new(&home), &projects))
+    let (servers, found) = discover(Path::new(&home), &projects);
+    remember_specs(found);
+    Ok(servers)
 }
 
 #[cfg(test)]
@@ -806,7 +932,7 @@ mod tests {
             command: Some(command.into()),
             args: args.iter().map(|a| (*a).to_string()).collect(),
             url: None,
-            env_keys: Vec::new(),
+            env: BTreeMap::new(),
             enabled: true,
         }
     }
@@ -850,7 +976,7 @@ mod tests {
             command: None,
             args: Vec::new(),
             url: Some(format!("https://Example.com/mcp/?token={q}")),
-            env_keys: Vec::new(),
+            env: BTreeMap::new(),
             enabled: true,
         };
         assert_eq!(dedupe_key(&with("aaa")), dedupe_key(&with("bbb")));
@@ -872,17 +998,48 @@ mod tests {
         );
     }
 
+    /// The values are kept — a server cannot be started without them — but they
+    /// live only on the side of the bridge that starts processes. What the
+    /// webview is handed must not contain one however the row is serialized.
     #[test]
-    fn env_values_are_dropped_and_only_names_kept() {
+    fn env_values_reach_the_launch_spec_and_never_the_serialized_row() {
         let entry = serde_json::json!({
             "command": "npx",
             "args": ["@browserbasehq/mcp-server-browserbase"],
             "env": { "BROWSERBASE_API_KEY": "bb_live_xxx", "GEMINI_API_KEY": "AIzaSy" },
         });
         let endpoint = parse_claude_entry(&entry).expect("parses");
-        assert_eq!(endpoint.env_keys, ["BROWSERBASE_API_KEY", "GEMINI_API_KEY"]);
-        let rendered = serde_json::to_string(&endpoint.env_keys).unwrap();
-        assert!(!rendered.contains("bb_live_xxx"));
+        assert_eq!(
+            endpoint.env_keys(),
+            ["BROWSERBASE_API_KEY", "GEMINI_API_KEY"]
+        );
+        assert_eq!(endpoint.env["BROWSERBASE_API_KEY"], "bb_live_xxx");
+
+        let mut collector = Collector::default();
+        collector.add(
+            "browserbase",
+            endpoint,
+            McpSource {
+                agent: "cursor".into(),
+                label: "Cursor".into(),
+                name: "browserbase".into(),
+                config_path: "/tmp/x".into(),
+                scope: "global".into(),
+                status: "enabled".into(),
+            },
+            None,
+        );
+        let (servers, specs) = collector.split();
+        // The whole row, serialized exactly as the IPC layer would send it.
+        let rendered = serde_json::to_string(&servers[0]).unwrap();
+        assert!(!rendered.contains("bb_live_xxx"), "{rendered}");
+        assert!(!rendered.contains("AIzaSy"), "{rendered}");
+        assert!(rendered.contains("BROWSERBASE_API_KEY"));
+        // And the launchable copy still has what a spawn needs.
+        assert_eq!(
+            specs.values().next().unwrap().env["BROWSERBASE_API_KEY"],
+            "bb_live_xxx"
+        );
     }
 
     #[test]
@@ -942,7 +1099,8 @@ CANOPY_CTX_PORT = "1234"
         assert_eq!(names, ["MCP_DOCKER", "canopy"]);
         let canopy = &servers[1].1;
         assert_eq!(canopy.args, ["--mcp"]);
-        assert_eq!(canopy.env_keys, ["CANOPY_CTX_PORT"]);
+        assert_eq!(canopy.env_keys(), ["CANOPY_CTX_PORT"]);
+        assert_eq!(canopy.env["CANOPY_CTX_PORT"], "1234");
         assert_eq!(servers[0].1.args, ["mcp", "gateway", "run"]);
     }
 
@@ -977,6 +1135,7 @@ CANOPY_CTX_PORT = "1234"
             "browserbase",
             stdio("npx", &["@browserbasehq/mcp-server-browserbase"]),
             source("cursor", "browserbase", "disabled"),
+            None,
         );
         collector.add(
             "bb",
@@ -985,8 +1144,9 @@ CANOPY_CTX_PORT = "1234"
                 &["-y", "@browserbasehq/mcp-server-browserbase"],
             ),
             source("windsurf", "bb", "enabled"),
+            None,
         );
-        let servers = collector.finish();
+        let servers = collector.split().0;
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].sources.len(), 2);
         // Named by the first config that had it, not by the last.
@@ -999,7 +1159,10 @@ CANOPY_CTX_PORT = "1234"
     fn env_var_names_are_unioned_across_configs() {
         let mut collector = Collector::default();
         let with_env = |keys: &[&str]| Endpoint {
-            env_keys: keys.iter().map(|k| (*k).to_string()).collect(),
+            env: keys
+                .iter()
+                .map(|k| ((*k).to_string(), format!("value-of-{k}")))
+                .collect(),
             ..stdio("npx", &["srv"])
         };
         let source = McpSource {
@@ -1010,9 +1173,15 @@ CANOPY_CTX_PORT = "1234"
             scope: "global".into(),
             status: "enabled".into(),
         };
-        collector.add("srv", with_env(&["A_KEY"]), source.clone());
-        collector.add("srv", with_env(&["B_KEY", "A_KEY"]), source);
-        assert_eq!(collector.finish()[0].env_keys, ["A_KEY", "B_KEY"]);
+        collector.add("srv", with_env(&["A_KEY"]), source.clone(), None);
+        collector.add("srv", with_env(&["B_KEY", "A_KEY"]), source, None);
+        let (servers, specs) = collector.split();
+        assert_eq!(servers[0].env_keys, ["A_KEY", "B_KEY"]);
+        // The values follow the same union, because starting the server needs
+        // every variable any config was willing to name.
+        let spec = specs.values().next().unwrap();
+        assert_eq!(spec.env.keys().collect::<Vec<_>>(), ["A_KEY", "B_KEY"]);
+        assert_eq!(spec.env["A_KEY"], "value-of-A_KEY");
     }
 
     #[test]
@@ -1047,7 +1216,7 @@ CANOPY_CTX_PORT = "1234"
         )
         .unwrap();
 
-        let servers = discover(&home, std::slice::from_ref(&project));
+        let servers = discover(&home, std::slice::from_ref(&project)).0;
         let names: Vec<&str> = servers.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["browserbase", "mastra", "linear"]);
         // Two CLIs, one server.

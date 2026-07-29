@@ -21,6 +21,9 @@ interface McpToolsPanelProps {
   /** In front. Discovery is file-only and cheap, but a panel nobody is looking
    *  at should still not re-read eight configs when the project changes. */
   visible: boolean;
+  /** Open this server's own tab — where its tools live. The row is the summary;
+   *  the tab is the server. */
+  onOpen: (server: McpServer) => void;
 }
 
 /** Which CLIs can actually reach this server, so the panel can say "Claude has
@@ -78,7 +81,7 @@ function SourceRow({ source }: { source: McpSource }) {
   );
 }
 
-export function McpToolsPanel({ rootsKey, visible }: McpToolsPanelProps) {
+export function McpToolsPanel({ rootsKey, visible, onOpen }: McpToolsPanelProps) {
   const [servers, setServers] = useState<McpServer[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -145,10 +148,21 @@ export function McpToolsPanel({ rootsKey, visible }: McpToolsPanelProps) {
           <div key={server.key} className="mcp-server">
             <div
               className={`mcp-row ${server.enabled ? "" : "mcp-row-off"}`}
-              onClick={() => toggle(server.key)}
-              title={launchLine(server)}
+              /* The row opens the server, because a server is a thing you look
+                 at rather than a thing you unfold. The chevron keeps the
+                 configs, which is the one question answerable without starting
+                 anything — and the reason it stays a separate hit target. */
+              onClick={() => onOpen(server)}
+              title={`${launchLine(server)}\n\nOpen this server`}
             >
-              <span className={`tree-chevron ${open ? "tree-chevron-open" : ""}`}>
+              <span
+                className={`tree-chevron ${open ? "tree-chevron-open" : ""}`}
+                title={open ? "Hide where it's configured" : "Where it's configured"}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggle(server.key);
+                }}
+              >
                 <ChevronIcon />
               </span>
               <PlugIcon size={13} className="mcp-row-icon" />
@@ -191,12 +205,12 @@ export function McpToolsPanel({ rootsKey, visible }: McpToolsPanelProps) {
         );
       })}
 
-      {/* Said once, at the end, rather than under every expanded server: it is a
-          fact about the panel, not about any one row. */}
+      {/* Said once, at the end, rather than under every row: it is a fact about
+          the panel, not about any one server. */}
       {servers && servers.length > 0 && (
         <div className="mcp-pending-note">
-          Tools themselves are not listed yet — what a server exposes lives in the
-          server, not in any of these configs.
+          Open a server to see the tools it exposes. That means starting it —
+          nothing here runs until you do.
         </div>
       )}
     </div>

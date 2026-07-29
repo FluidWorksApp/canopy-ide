@@ -63,6 +63,7 @@ export type SnapshotTab =
     }
   | { kind: "task-history" }
   | { kind: "instructions"; focus?: string }
+  | { kind: "mcp"; server: ipc.McpServer }
   | { kind: "chat"; peer: string | null; name: string };
 
 export interface ProjectSnapshot {
@@ -174,6 +175,11 @@ export function snapshotTabs(
       case "instructions":
         out.push({ kind: "instructions", focus: t.focus });
         break;
+      // The row is config, not a live connection: safe to store, and it lets
+      // the tab draw its header on wake before the server has restarted.
+      case "mcp":
+        out.push({ kind: "mcp", server: t.server });
+        break;
       case "chat":
         out.push({ kind: "chat", peer: t.peer, name: t.name });
         break;
@@ -276,6 +282,8 @@ export function stepLabel(t: SnapshotTab): string {
       return "Reopening completed tasks";
     case "instructions":
       return "Reopening agent instructions";
+    case "mcp":
+      return `Reopening ${t.server.name}`;
     case "chat":
       return `Reopening chat with ${t.name}`;
   }
