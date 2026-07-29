@@ -429,6 +429,8 @@ pub fn run() {
             git::git_checkout_detached,
             git::git_checkout_carry,
             git::git_branch_release,
+            git::git_operation_quit,
+            git::git_branch_at,
             git::git_stage,
             git::git_unstage,
             git::git_discard,

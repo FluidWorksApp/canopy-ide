@@ -7,6 +7,8 @@ import { useMemo } from "react";
 import { renderMarkdown } from "../markdown";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type * as ipc from "../ipc";
+import { heldBadge } from "../branchSwitch";
+import { useBranchSwitch } from "../useBranchSwitch";
 import { TRACKERS } from "../trackers";
 import { AgentLaunchButton } from "./AgentLaunchButton";
 import { TrackerIcon } from "./icons";
@@ -16,6 +18,10 @@ interface TicketViewProps {
   ticket: ipc.TicketInfo;
   /** Which tracker it came from (registry id). */
   source: string;
+  /** The repository the ticket's work lives in — what "open it there" needs to
+   *  know which project's files to point. Absent until the owner resolves it,
+   *  in which case the workspace chip stays a label. */
+  repo?: string | null;
   /** The worktree already holding this ticket's work, if any. */
   worktree: ipc.WorktreeInfo | undefined;
   /** Agent terminals open in this project — the "send it there" targets. */
@@ -30,6 +36,7 @@ interface TicketViewProps {
 export function TicketView({
   ticket,
   source,
+  repo,
   worktree,
   agentTargets,
   installed,
@@ -37,6 +44,7 @@ export function TicketView({
   onSendToAgent,
 }: TicketViewProps) {
   const trackerName = TRACKERS.find((t) => t.id === source)?.name ?? source;
+  const { openThere } = useBranchSwitch();
 
   const html = useMemo(
     () =>
@@ -63,12 +71,28 @@ export function TicketView({
           <span className={ticket.mine ? "ticket-mine" : ""}>
             {ticket.mine ? "you" : (ticket.assignee ?? "Unassigned")}
           </span>
-          {worktree && (
-            <span className="ticket-wt" title={worktree.path}>
-              ⑂ {worktree.branch}
-              {worktree.dirty > 0 ? ` ±${worktree.dirty}` : ""}
-            </span>
-          )}
+          {/* The workspace holding this ticket's work. Seeing which one has it
+              and having no way to get there was the gap; the words are the
+              shared badge's, so this reads the same as every other surface. */}
+          {worktree &&
+            (repo && !worktree.is_main ? (
+              <button
+                className="ticket-wt"
+                title={`${heldBadge(worktree).label}\n${worktree.path}\n\nClick to open it there.`}
+                onClick={() => void openThere(repo, worktree.path, worktree.branch)}
+              >
+                ⑂ {worktree.branch}
+                {worktree.dirty > 0 ? ` ±${worktree.dirty}` : ""}
+              </button>
+            ) : (
+              <span
+                className="ticket-wt"
+                title={`${heldBadge(worktree).label}\n${worktree.path}`}
+              >
+                ⑂ {worktree.branch}
+                {worktree.dirty > 0 ? ` ±${worktree.dirty}` : ""}
+              </span>
+            ))}
           <span className="status-spacer" />
           <button className="btn" onClick={() => void openUrl(ticket.url)}>
             Open in {trackerName}

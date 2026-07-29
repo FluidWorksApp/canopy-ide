@@ -7,6 +7,8 @@ import { DiffView, DiffModeEnum } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import * as ipc from "../ipc";
 import type { Notify, RelayHandle } from "../types";
+import { askDialog, heldBadge } from "../branchSwitch";
+import { useBranchSwitch } from "../useBranchSwitch";
 import { splitPatch } from "./PrView";
 import { GitBranchIcon } from "./icons";
 import { raisePrTask, type MicroTaskDef, type RaisePrPayload } from "../microTasks";
@@ -49,6 +51,10 @@ export function BranchView({
   const [split, setSplit] = useState(true);
   const [remote, setRemote] = useState("");
   const [askReview, setAskReview] = useState(false);
+  // Bumped by the "Try again" any failed read offers. A dialog that only says
+  // what went wrong is a dead end; this is what makes its way out real.
+  const [retry, setRetry] = useState(0);
+  const { switchTo, openThere, ask } = useBranchSwitch();
 
   const teammates =
     relay && relay.status.role !== "off"
@@ -58,7 +64,10 @@ export function BranchView({
   /** Send this branch's cumulative diff to a teammate as a review request. The
    *  full branch patch (vs base) goes over the encrypted channel, so they can
    *  review a branch they don't have — and a truncated one says so. */
-  const sendForReview = async (memberId: string, memberName: string) => {
+  const sendForReview = async (
+    memberId: string,
+    memberName: string,
+  ): Promise<void> => {
     setAskReview(false);
     try {
       const p = await ipc.gitBranchPatch(repo, branch.branch, branch.worktree, false);
@@ -72,7 +81,18 @@ export function BranchView({
       });
       onNotice(`Sent ${branch.branch} to ${memberName} for review.`, "success");
     } catch (err) {
-      onNotice(String(err), "error");
+      const again = await ask(
+        askDialog({
+          title: `Couldn't send ${branch.branch} to ${memberName}`,
+          body: "The diff didn't make it over. Nothing on your side changed — the branch is exactly as it was.",
+          detail: String(err),
+          choices: [
+            { action: "retry", label: "Try again", recommended: true },
+            { action: "cancel", label: "Leave it for now" },
+          ],
+        }),
+      );
+      if (again === "retry") await sendForReview(memberId, memberName);
     }
   };
 
@@ -95,11 +115,25 @@ export function BranchView({
     void ipc
       .gitBranchCommits(repo, branch.branch)
       .then((c) => live && setCommits(c))
-      .catch((e) => live && onNotice(String(e), "error"));
+      .catch(async (e) => {
+        if (!live) return;
+        const again = await ask(
+          askDialog({
+            title: `Couldn't read what's on ${branch.branch}`,
+            body: "Git wouldn't list this branch's commits. Nothing has changed — this is only what we can show you.",
+            detail: String(e),
+            choices: [
+              { action: "retry", label: "Try again", recommended: true },
+              { action: "cancel", label: "Leave it for now" },
+            ],
+          }),
+        );
+        if (again === "retry") setRetry((n) => n + 1);
+      });
     return () => {
       live = false;
     };
-  }, [repo, branch.branch, onNotice]);
+  }, [repo, branch.branch, retry, ask]);
 
   const loadPatch = useCallback(() => {
     let live = true;
@@ -107,11 +141,28 @@ export function BranchView({
     void ipc
       .gitBranchPatch(repo, branch.branch, branch.worktree, pane === "uncommitted")
       .then((p) => live && setPatch(p))
-      .catch((e) => live && onNotice(String(e), "error"));
+      .catch(async (e) => {
+        if (!live) return;
+        const again = await ask(
+          askDialog({
+            title: "Couldn't read this diff",
+            body:
+              pane === "uncommitted"
+                ? "Git wouldn't show the uncommitted changes here. Nothing has been touched."
+                : `Git wouldn't compare ${branch.branch} against the base branch. Nothing has been touched.`,
+            detail: String(e),
+            choices: [
+              { action: "retry", label: "Try again", recommended: true },
+              { action: "cancel", label: "Leave it for now" },
+            ],
+          }),
+        );
+        if (again === "retry") setRetry((n) => n + 1);
+      });
     return () => {
       live = false;
     };
-  }, [repo, branch.branch, branch.worktree, pane, onNotice]);
+  }, [repo, branch.branch, branch.worktree, pane, retry, ask]);
 
   useEffect(() => loadPatch(), [loadPatch]);
 
@@ -134,12 +185,62 @@ export function BranchView({
           {!branch.upstream && !branch.upstream_gone && (
             <span className="loose-chip">local only</span>
           )}
-          <span className="ticket-view-chip" title={branch.worktree ?? "no worktree"}>
-            {branch.worktree
-              ? branch.worktree.split("/").pop()
-              : "no worktree"}
+          {/* Where this branch lives, in the words the switch dialog uses —
+              the same badge the branch rows carry, so the tab and the list
+              can't describe the same state two different ways. */}
+          <span
+            className="ticket-view-chip"
+            title={branch.worktree ?? "Nothing has this branch open right now."}
+          >
+            {branch.worktree ? heldBadge(branch).label : "not open anywhere"}
           </span>
           <span className="status-spacer" />
+          {/* Acting on the branch you are reading about. This whole tab could
+              show you a branch and then make you go back to the Git panel to
+              do anything with it. Every route below is the one funnel, so a
+              branch another workspace is holding asks its question here too. */}
+          {branch.current ? (
+            <span className="loose-chip">you're on it</span>
+          ) : (
+            <button
+              className="btn"
+              title={`Open ${branch.branch} in this project's own checkout`}
+              onClick={() =>
+                void switchTo(repo, { kind: "branch", branch: branch.branch })
+              }
+            >
+              Switch to this branch
+            </button>
+          )}
+          {/* Only for a workspace that is somewhere else and still there:
+              pointing the project at its own checkout is a no-op, and at a
+              folder that has gone is a lie. */}
+          {branch.worktree && !branch.is_main && !branch.prunable && (
+            <button
+              className="btn"
+              title={`Point this project's files at ${branch.worktree}. Nothing moves, nothing is lost.`}
+              onClick={() =>
+                void openThere(repo, branch.worktree as string, branch.branch)
+              }
+            >
+              Open it there
+            </button>
+          )}
+          {!branch.current && (
+            <button
+              className="btn"
+              title="Look around this branch without moving anything. Your next switch puts everything back."
+              onClick={() =>
+                void switchTo(repo, {
+                  kind: "ref",
+                  ref: branch.branch,
+                  label: branch.branch,
+                })
+              }
+            >
+              Test a snapshot
+            </button>
+          )}
           {teammates.length > 0 && (
             <div className="review-send">
               <button
