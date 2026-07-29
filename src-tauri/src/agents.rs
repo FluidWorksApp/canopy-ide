@@ -1128,7 +1128,10 @@ fn transcript_bucket(session_id: &str) -> Option<String> {
 /// reports drifts when the agent cds mid-session — starting at a repo root and
 /// moving into a worktree is routine — so resuming from the reported cwd fails
 /// with "No conversation found". Walk *up* from it instead, re-encoding each
-/// ancestor until one matches the bucket that really holds the transcript.
+/// ancestor until one matches the bucket that really holds the transcript, and
+/// try the same from the cwd the session ended up in: claude re-files the
+/// transcript when it moves, so the bucket can be below the launch dir as
+/// easily as above the reported one.
 ///
 /// That bucket is found on disk rather than taken from the `transcript_path`
 /// the hook reported: the hook fires at SessionStart, so its path is only a
@@ -1161,19 +1164,43 @@ fn resume_location(digest: &serde_json::Value) -> (String, bool) {
         return (cwd, false);
     };
 
-    let mut probe = std::path::PathBuf::from(&cwd);
-    loop {
-        if claude_bucket(&probe.to_string_lossy()) == bucket {
-            return (probe.to_string_lossy().to_string(), true);
+    let now = digest["cwd"].as_str().unwrap_or("");
+    match resume_dir(&cwd, now, &bucket) {
+        Some(dir) => (dir, true),
+        // The transcript exists, but neither directory the session reported has
+        // an ancestor mapping to its bucket — it was launched outside this path
+        // entirely. Resume from here would fail, so say so rather than offer a
+        // button that reports "No conversation found".
+        None => (cwd, false),
+    }
+}
+
+/// The directory `--resume` has to run in: the first ancestor of `launch` — or,
+/// failing that, of `now` — whose encoded path is the bucket holding the
+/// transcript.
+///
+/// Both chains, because a session moves in either direction. Walking up from
+/// the launch dir alone misses the one that moves *down*: a session that starts
+/// at a repo root and is then moved into a worktree (which is what Canopy's own
+/// EnterWorktree does) is re-filed under the worktree's bucket, a descendant
+/// the upward walk never visits — so every such session was labeled "can't
+/// resume".
+fn resume_dir(launch: &str, now: &str, bucket: &str) -> Option<String> {
+    for start in [launch, now] {
+        if start.is_empty() {
+            continue;
         }
-        if !probe.pop() {
-            // The transcript exists, but no ancestor of the recorded cwd maps
-            // to its bucket — it was launched outside this path entirely.
-            // Resume from here would fail, so say so rather than offer a button
-            // that reports "No conversation found".
-            return (cwd, false);
+        let mut probe = std::path::PathBuf::from(start);
+        loop {
+            if claude_bucket(&probe.to_string_lossy()) == bucket {
+                return Some(probe.to_string_lossy().to_string());
+            }
+            if !probe.pop() {
+                break;
+            }
         }
     }
+    None
 }
 
 /// Sessions read straight from a CLI's own on-disk store, no hook required.
@@ -3723,6 +3750,42 @@ mod tests {
             "-Users-dev-Projects-my-demo",
             "an existing hyphen survives unchanged"
         );
+    }
+
+    /// Where a resume has to run, given the two directories a session reports.
+    /// The worktree case is the one that was broken: Canopy moves an agent from
+    /// the repo root down into `.claude/worktrees/<name>`, claude re-files the
+    /// transcript there, and walking up from the launch dir can never reach it.
+    #[test]
+    fn resume_dir_finds_the_bucket_below_the_launch_dir() {
+        use super::resume_dir;
+        let root = "/Users/dev/Projects/app";
+        let tree = "/Users/dev/Projects/app/.claude/worktrees/fix+thing";
+
+        // Moved down into a worktree: resume from the worktree.
+        assert_eq!(
+            resume_dir(root, tree, &claude_bucket(tree)).as_deref(),
+            Some(tree)
+        );
+        // The ordinary case still resolves to the launch dir, even though the
+        // agent has since cd'd into a subdirectory.
+        assert_eq!(
+            resume_dir(
+                root,
+                "/Users/dev/Projects/app/src/api",
+                &claude_bucket(root)
+            )
+            .as_deref(),
+            Some(root)
+        );
+        // An agent that cd'd somewhere unrelated: the launch dir's own bucket
+        // is what a resume needs, and it is still reachable by walking up.
+        assert_eq!(
+            resume_dir("/Users/dev/Projects/app/src", "/tmp", &claude_bucket(root)).as_deref(),
+            Some(root)
+        );
+        // A transcript filed under neither chain — nothing to offer.
+        assert_eq!(resume_dir(root, tree, &claude_bucket("/other/repo")), None);
     }
 
     /// The encoding is many-to-one, which is why a bucket name is never decoded

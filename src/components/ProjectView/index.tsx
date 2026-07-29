@@ -5242,7 +5242,7 @@ export const ProjectView = memo(function ProjectView({
                 {restorable.map((r) => (
                   <div
                     key={r.digest.session_id}
-                    className={`resume-row ${r.command ? "resume-row-click" : ""}`}
+                    className="resume-row resume-row-click"
                     title={`${r.agentId} · ${r.cwd}`}
                     onClick={() => resumeSession(r)}
                   >
@@ -5257,20 +5257,16 @@ export const ProjectView = memo(function ProjectView({
                       <span className="resume-branch">⑂ {r.digest.branch}</span>
                     )}
                     <span className="resume-age">{ago(r.digest.updated)}</span>
-                    {r.command ? (
-                      <button
-                        className="btn-mini btn-accent"
-                        title={r.command}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          resumeSession(r);
-                        }}
-                      >
-                        Resume
-                      </button>
-                    ) : (
-                      <span className="resume-unsupported">can't resume</span>
-                    )}
+                    <button
+                      className="btn-mini btn-accent"
+                      title={r.command}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        resumeSession(r);
+                      }}
+                    >
+                      Resume
+                    </button>
                     <button
                       className="btn-icon resume-forget"
                       title="Forget this session — stops it resurfacing unless it's used again"

@@ -4,7 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
-import { AGENT_CLIS, restoreCommand } from "../projects";
+import { AGENT_CLIS } from "../projects";
 import { identifyAgent, observeForLearning } from "../agentIdentity";
 import { agentDisplayName, type TabName } from "../agentDisplayName";
 import { effectiveState, silenceLabel } from "../agentState";
@@ -542,7 +542,7 @@ export function AgentsPanel({
   // Shared with the project's empty state — one definition of "restorable",
   // so the two surfaces can never disagree about what is offered.
   const restorable = useMemo(
-    () => restorableFrom(digests, stats, liveSessionIds).map((r) => r.digest),
+    () => restorableFrom(digests, stats, liveSessionIds),
     [digests, stats, liveSessionIds.join(",")],
   );
 
@@ -1291,13 +1291,10 @@ export function AgentsPanel({
             Not open right now — reopening runs the agent's own resume, so it
             comes back with its history.
           </div>
-          {restorable.map((d) => {
-            const agentId = d.agent ?? "agent";
-            // resume_cwd, not cwd: claude looks the conversation up under its
-            // project root, so resuming from the subdirectory the agent ran in
-            // reports "No conversation found".
-            const runIn = d.resume_cwd || d.cwd || "";
-            const cmd = d.resumable === false ? null : restoreCommand(agentId, d.session_id);
+          {restorable.map(({ digest: d, agentId, cwd: runIn, command: cmd }) => {
+            // runIn is resume_cwd, not cwd: claude looks the conversation up
+            // under its project root, so resuming from the subdirectory the
+            // agent ran in reports "No conversation found".
             const dir = runIn.split("/").filter(Boolean).pop() ?? "";
             const last = lastHumanPrompt(d.prompts);
             return (
@@ -1327,31 +1324,17 @@ export function AgentsPanel({
                     full-width buttons per row made four sessions look like a
                     form. Labels come back on hover. */}
                 <div className="restore-actions">
-                  {cmd ? (
-                    <button
-                      className="row-act row-act-go"
-                      title={`Restore this session — ${cmd}`}
-                      onClick={() => onRestore?.(runIn, cmd, agentId, agentId)}
-                    >
-                      <RestartIcon size={13} />
-                      <span className="row-act-label">Restore</span>
-                    </button>
-                  ) : (
-                    // The agent wrote no transcript (or its CLI can't reopen
-                    // by id), so every --resume against this fails. Say so
-                    // rather than offer a button whose only outcome is a red
-                    // error in a terminal.
-                    <span
-                      className="restore-unsupported"
-                      title={
-                        d.resumable === false
-                          ? "No saved history for this session"
-                          : `${agentId} cannot reopen a specific past session by id`
-                      }
-                    >
-                      can't resume
-                    </span>
-                  )}
+                  {/* Always a real offer: a session the CLI can't reopen by id,
+                      or that wrote no transcript to reopen, never reaches this
+                      list — see restorableFrom. */}
+                  <button
+                    className="row-act row-act-go"
+                    title={`Restore this session — ${cmd}`}
+                    onClick={() => onRestore?.(runIn, cmd, agentId, agentId)}
+                  >
+                    <RestartIcon size={13} />
+                    <span className="row-act-label">Restore</span>
+                  </button>
                   <button
                     className="row-act row-act-del"
                     title="Forget this session — removes it from this list"
