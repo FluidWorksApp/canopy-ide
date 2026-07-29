@@ -728,6 +728,10 @@ pub async fn spot_index_clear(state: State<'_, SpotIndex>) -> Result<(), String>
 /// Write a captured page screenshot where a micro-task brief can point at it:
 /// `<dir>/.canopy/spot/ctx-<stamp>.png`, inside a registered workspace root so
 /// the agent's own file tools can read it back. Returns the absolute path.
+///
+/// Never overwrites: the preview's Screenshot button can take several in a row,
+/// and a second-resolution stamp alone would hand the second shot the first
+/// one's name — the brief would then point two entries at the same picture.
 #[tauri::command]
 pub async fn spot_save_context_image(
     ws: State<'_, WorkspaceManager>,
@@ -741,14 +745,45 @@ pub async fn spot_save_context_image(
         .decode(base64_png.trim())
         .map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
-    let path = target.join(format!("ctx-{}.png", now_secs()));
+    let path = free_path(&target, now_secs());
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().to_string())
+}
+
+/// `ctx-<stamp>.png`, then `ctx-<stamp>-2.png`, … until one is free. Bounded so
+/// a directory that cannot be written to fails at the write rather than here.
+fn free_path(dir: &std::path::Path, stamp: i64) -> PathBuf {
+    let first = dir.join(format!("ctx-{stamp}.png"));
+    if !first.exists() {
+        return first;
+    }
+    for n in 2..1000 {
+        let candidate = dir.join(format!("ctx-{stamp}-{n}.png"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    first
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn free_path_never_reuses_a_name_within_the_same_second() {
+        let dir = std::env::temp_dir().join(format!("canopy-freepath-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = free_path(&dir, 1700);
+        std::fs::write(&a, b"a").unwrap();
+        let b = free_path(&dir, 1700);
+        assert_ne!(a, b);
+        std::fs::write(&b, b"b").unwrap();
+        assert_ne!(free_path(&dir, 1700), b);
+        // A different second starts clean again.
+        assert_eq!(free_path(&dir, 1701), dir.join("ctx-1701.png"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn strip_ansi_drops_csi_and_osc() {

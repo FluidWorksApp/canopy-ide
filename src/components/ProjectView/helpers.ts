@@ -1,7 +1,7 @@
 import type * as ipc from "../../ipc";
 import type { AgentEventEntry, OpenFile, Notify, RelayHandle } from "../../types";
 import type { ReviewPayload } from "../ReviewView";
-import type { PreviewAnnotation } from "../../preview";
+import type { PreviewAnnotation, PreviewShot } from "../../preview";
 import type { DeviceAnnotation } from "../../android";
 import type { Project } from "../../projects";
 import { getSettings } from "../../settings";
@@ -183,6 +183,9 @@ export interface PreviewSubTab {
   /** The previewed page's real URL ("" until the user picks a server). */
   url: string;
   annotations: PreviewAnnotation[];
+  /** Screenshots taken of this page, with the notes written on them. Absent on
+   *  tabs restored from a session saved before the button existed. */
+  shots?: PreviewShot[];
 }
 
 /** A live Android device or emulator, shown as refreshing still frames.

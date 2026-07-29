@@ -4,6 +4,7 @@ import type { CustomMicroTask } from "./microTasks";
 // and never a runtime one.
 import type { CustomAgentCli } from "./projects";
 import type { BrowserEngine } from "./browserBounds";
+import type { CaptureMode } from "./pageCapture";
 import { IS_MAC } from "./platform";
 
 export type Theme = "auto" | "default" | "gotham" | "daylight" | "custom";
@@ -283,6 +284,12 @@ export interface Settings {
    *  would cover it, which is the case that actually bit. */
   browserEngine: BrowserEngine;
 
+  /** What the preview's Screenshot button grabs when clicked without opening
+   *  its menu. Remembered rather than fixed: whichever mode you picked last is
+   *  almost always the one you want next, and a mode chooser you have to
+   *  re-answer every time is a mode chooser nobody uses. */
+  previewCaptureMode: CaptureMode;
+
   // ---- Crash reporting ----
   /** Opt-in, default off: when a panel crashes (or a native panic is found on
    *  the next launch), offer to send an anonymous report — message + stack,
@@ -335,6 +342,7 @@ const DEFAULTS: Settings = {
   remoteReach: "local",
   remoteTunnelProvider: "cloudflare",
   browserEngine: "webview",
+  previewCaptureMode: "visible",
   crashReporting: false,
 };
 

@@ -34,12 +34,25 @@ import {
 import * as ipc from "../ipc";
 import {
   previewFeedbackContext,
+  previewShotContext,
   serverForUrl,
   type PreviewAnnotation,
   type PreviewServer,
+  type PreviewShot,
 } from "../preview";
+import {
+  CAPTURE_MODES,
+  captureModeLabel,
+  cropCapture,
+  thumbnail,
+  type CaptureMode,
+  type CaptureRect,
+} from "../pageCapture";
+import { getSettings, updateSettings } from "../settings";
+import { IS_MAC } from "../platform";
 import { registerBrowserTarget } from "../previewAgent";
 import { AgentLaunchButton } from "./AgentLaunchButton";
+import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { LiveDot } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
 
@@ -48,18 +61,32 @@ import type { AgentTarget } from "./TicketsPanel";
  *  engine, so this is the only way the rest of the app hears about them. */
 export const BROWSER_INPUT_EVENT = "canopy:browser-input";
 
+/** What we ask the platform for, before cropping and storing. Bigger than
+ *  MAX_STORED_WIDTH on purpose — see shootPane. */
+const SHOOT_WIDTH = 2400;
+
 interface PreviewViewProps {
   /** The owning SubTab's id — how agent browser ops address this view. */
   tabId: string;
   url: string;
   annotations: PreviewAnnotation[];
+  /** Screenshots taken of this page, awaiting a note and a destination. */
+  shots: PreviewShot[];
+  /** Where captured PNGs are written — the serving component's directory when
+   *  the page is linked to one, else the project root. An agent reads them back
+   *  by path, so they have to land somewhere it can reach. */
+  dir: string;
   /** Whether this tab is the one in front of an open project. Under the proxy
    *  this only tunes the agent-cursor choreography; under the webview engine it
    *  is what puts the native view on screen at all. */
   visible: boolean;
   /** Persist navigation / annotation changes onto the tab, so they survive a
    *  switch away and back (the view itself unmounts like every doc tab). */
-  onPatch: (patch: { url?: string; annotations?: PreviewAnnotation[] }) => void;
+  onPatch: (patch: {
+    url?: string;
+    annotations?: PreviewAnnotation[];
+    shots?: PreviewShot[];
+  }) => void;
   /** Servers detected listening in this project's terminals, each tied to its
    *  component — what the empty tab offers, and what links a URL to a codebase. */
   servers: PreviewServer[];
@@ -68,6 +95,10 @@ interface PreviewViewProps {
   onSendToAgent: (target: AgentTarget, text: string) => void;
   /** `cwd` is the serving component's directory when the URL is linked to one. */
   onStartNew: (agentId: string, text: string, cwd: string | null) => void;
+  /** The shared task rows — "New Task… / One-off task… / Custom / Built-in",
+   *  built by ProjectView because it owns the task registry and the launcher.
+   *  Same rows the "Tasks ▸" submenu shows everywhere else. */
+  taskRows: (seed: string, dir: string) => MenuItem[];
   onNotice: (msg: string) => void;
 }
 
@@ -100,6 +131,8 @@ export function PreviewView({
   tabId,
   url,
   annotations,
+  shots,
+  dir,
   visible,
   onPatch,
   servers,
@@ -107,6 +140,7 @@ export function PreviewView({
   installed,
   onSendToAgent,
   onStartNew,
+  taskRows,
   onNotice,
 }: PreviewViewProps) {
   const engine = useBrowserEngine();
@@ -120,6 +154,12 @@ export function PreviewView({
   const [draft, setDraft] = useState(url);
   const [picking, setPicking] = useState(false);
   const [proxyError, setProxyError] = useState<string | null>(null);
+  const [capturing, setCapturing] = useState(false);
+  // The mode the plain click uses, remembered across sessions. Held in state as
+  // well as settings so the menu's "default" hint updates without a reload.
+  const [captureMode, setCaptureMode] = useState<CaptureMode>(
+    () => getSettings().previewCaptureMode,
+  );
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
   const draftFocused = useRef(false);
@@ -132,6 +172,8 @@ export function PreviewView({
   urlRef.current = url;
   const pickingRef = useRef(picking);
   pickingRef.current = picking;
+  const shotsRef = useRef(shots);
+  shotsRef.current = shots;
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
   // ProjectView hands down a fresh arrow every render, so an effect that
@@ -240,6 +282,11 @@ export function PreviewView({
   // the (new) document announces ready.
   const pendingOps = useRef(new Map<number, { op: ipc.AgentBrowserOp; timer: number }>());
   const navWaiters = useRef<{ id: number; timer: number }[]>([]);
+  /** The in-flight "drag a region" ask, settled by the page's answer. */
+  const regionWaiter = useRef<{
+    resolve: (r: CaptureRect | null) => void;
+    timer: number;
+  } | null>(null);
 
   /** Whether this preview is actually painted right now. Under the proxy a
    *  background tab stays laid out — that's what keeps snapshot and click
@@ -459,6 +506,14 @@ export function PreviewView({
           restoreFocus();
           answer(id, !!d.ok, d.data);
         }
+      } else if (d.canopy === "region-done" || d.canopy === "region-cancel") {
+        // The drag finished (or Escape did). Either way the overlay is already
+        // gone in the page; here we only settle the promise capture() is on.
+        const w = regionWaiter.current;
+        if (!w) return;
+        regionWaiter.current = null;
+        clearTimeout(w.timer);
+        w.resolve(d.canopy === "region-done" ? (d.rect as CaptureRect) : null);
       } else if (d.canopy === "annotation" && d.payload) {
         const payload = d.payload as Omit<PreviewAnnotation, "comment" | "n">;
         const next: PreviewAnnotation = {
@@ -648,6 +703,128 @@ export function PreviewView({
     post({ canopy: "sync", marks: [] });
   };
 
+  // ---------- screenshots ----------
+
+  /** The pane's pixels as the platform gives them, plus the CSS width they
+   *  correspond to — the pair pageCapture needs to turn a page-space rect into
+   *  an image-space one. Under the webview engine the page is its own view and
+   *  is captured whole; under the proxy it is one rectangle of this window. */
+  const shootPane = useCallback(async (): Promise<{ png: string; cssWidth: number }> => {
+    const el = nativeRef.current ? hostRef.current : iframeRef.current;
+    const rect = el?.getBoundingClientRect();
+    if (!rect || !painted() || rect.width < 1 || rect.height < 1) {
+      throw new Error("the page isn't on screen right now");
+    }
+    // Asked for at more than we keep: the snapshot is capped before we see it,
+    // and a region crop out of a 1200px-wide still of a retina page is mush.
+    const png = nativeRef.current
+      ? await ipc.browserSnapshot(tabId, SHOOT_WIDTH)
+      : await ipc.webviewSnapshot(rect.x, rect.y, rect.width, rect.height, SHOOT_WIDTH);
+    return { png, cssWidth: rect.width };
+  }, [painted, tabId]);
+
+  /** Put the page into region-drag mode and wait for what the user drew.
+   *  Resolves null if they pressed Escape, clicked without dragging, or walked
+   *  away — the timeout exists so an abandoned drag can't wedge the button. */
+  const askRegion = useCallback((): Promise<CaptureRect | null> => {
+    const pending = regionWaiter.current;
+    if (pending) {
+      regionWaiter.current = null;
+      clearTimeout(pending.timer);
+      pending.resolve(null);
+    }
+    return new Promise((resolve) => {
+      const timer = window.setTimeout(() => {
+        regionWaiter.current = null;
+        post({ canopy: "region", on: false });
+        resolve(null);
+      }, 60_000);
+      regionWaiter.current = { resolve, timer };
+      post({ canopy: "region", on: true });
+    });
+  }, [post]);
+
+  const capturingRef = useRef(false);
+
+  const capture = useCallback(
+    async (mode: CaptureMode) => {
+      if (capturingRef.current) return;
+      capturingRef.current = true;
+      setCapturing(true);
+      try {
+        let region: CaptureRect | null = null;
+        if (mode === "region") {
+          // The page drops annotate mode to take the crosshair; the toggle up
+          // here has to agree, or it reads "on" while clicks do nothing.
+          if (pickingRef.current) setPicking(false);
+          region = await askRegion();
+          if (!region) return;
+          // The page tears its overlay down before answering, but the frame
+          // that removes it still has to reach the screen — snapshot too soon
+          // and the picture is of the dimming, not the page.
+          await new Promise((r) => setTimeout(r, 90));
+        }
+        const { png, cssWidth } = await shootPane();
+        const image = await cropCapture(png, region, cssWidth);
+        const [path, thumb] = await Promise.all([
+          ipc.spotSaveContextImage(dir, image.png),
+          thumbnail(image.png),
+        ]);
+        onPatchRef.current({
+          shots: [
+            ...shotsRef.current,
+            {
+              n: shotsRef.current.length + 1,
+              path,
+              thumb,
+              width: image.width,
+              height: image.height,
+              region: !!region,
+              pageUrl: urlRef.current,
+              note: "",
+            },
+          ],
+        });
+      } catch (err) {
+        onNotice(`Couldn't take the screenshot — ${String(err)}`);
+      } finally {
+        capturingRef.current = false;
+        setCapturing(false);
+      }
+    },
+    [askRegion, dir, onNotice, shootPane],
+  );
+
+  /** Take one, and remember the mode as the button's one-click default. */
+  const runCapture = (mode: CaptureMode) => {
+    if (mode !== captureMode) {
+      setCaptureMode(mode);
+      updateSettings({ previewCaptureMode: mode });
+    }
+    void capture(mode);
+  };
+
+  const captureMenu = useContextMenu();
+  const openCaptureMenu = (e: React.MouseEvent) =>
+    captureMenu.open(
+      e,
+      CAPTURE_MODES.map((m) => ({
+        label: m.label,
+        hint: m.id === captureMode ? "default" : m.hint,
+        onClick: () => runCapture(m.id),
+      })),
+    );
+
+  const setShotNote = (n: number, note: string) => {
+    onPatch({ shots: shotsRef.current.map((s) => (s.n === n ? { ...s, note } : s)) });
+  };
+
+  const removeShot = (n: number) => {
+    onPatch({
+      shots: shotsRef.current.filter((s) => s.n !== n).map((s, i) => ({ ...s, n: i + 1 })),
+    });
+  };
+
   /** The codebase behind whatever page is currently shown — re-derived on
    *  every navigation, so crossing to another server's port relinks. */
   const linked = serverForUrl(url, servers);
@@ -658,6 +835,16 @@ export function PreviewView({
       annotationsRef.current,
       serverForUrl(urlRef.current, servers),
     );
+
+  const shotBrief = () =>
+    previewShotContext(urlRef.current, shotsRef.current, serverForUrl(urlRef.current, servers));
+
+  /** The same "Tasks ▸" rows the rest of the app shows, seeded with the
+   *  screenshot brief so a composer opens pre-filled and a saved task runs with
+   *  it as its user query. */
+  const taskMenu = useContextMenu();
+  const openTaskMenu = (e: React.MouseEvent) =>
+    taskMenu.open(e, taskRows(shotBrief(), linked?.componentPath ?? dir));
 
   const go = (delta: -1 | 0 | 1) => {
     if (native) {
@@ -763,6 +950,22 @@ export function PreviewView({
 
   return (
     <div className="preview-view">
+      {captureMenu.menu && (
+        <ContextMenu
+          x={captureMenu.menu.x}
+          y={captureMenu.menu.y}
+          items={captureMenu.menu.items}
+          onClose={captureMenu.close}
+        />
+      )}
+      {taskMenu.menu && (
+        <ContextMenu
+          x={taskMenu.menu.x}
+          y={taskMenu.menu.y}
+          items={taskMenu.menu.items}
+          onClose={taskMenu.close}
+        />
+      )}
       <div className="preview-toolbar">
         <button className="btn-icon" title="Back" onClick={() => go(-1)}>
           ‹
@@ -810,73 +1013,161 @@ export function PreviewView({
         >
           ◎ Annotate{annotations.length > 0 ? ` (${annotations.length})` : ""}
         </button>
+        {/* One click takes the shot the way you took the last one; the caret is
+            for changing your mind. Same split shape as the agent launcher.
+            Absent off macOS rather than present and always failing: webview
+            capture has no implementation there (see snapshot.rs). */}
+        {IS_MAC && (
+          <span className="split-btn split-btn-mini">
+            <button
+              className="btn-mini split-btn-main"
+              title={`Screenshot — ${captureModeLabel(captureMode).toLowerCase()}`}
+              disabled={capturing}
+              onClick={() => runCapture(captureMode)}
+            >
+              ▣ Screenshot{shots.length > 0 ? ` (${shots.length})` : ""}
+            </button>
+            <button
+              className="btn-mini split-btn-caret"
+              title="Choose what to capture"
+              disabled={capturing}
+              onClick={openCaptureMenu}
+            >
+              ▾
+            </button>
+          </span>
+        )}
       </div>
       <div className="preview-body">
         <div className="preview-frame-wrap">{body}</div>
-        {(annotations.length > 0 || picking) && (
+        {(annotations.length > 0 || picking || shots.length > 0) && (
           <div className="preview-panel">
-            <div className="preview-panel-head">
-              <span>Feedback</span>
-              {annotations.length > 0 && (
-                <button className="btn-mini" onClick={clearAnnotations}>
-                  Clear all
-                </button>
-              )}
-            </div>
-            {annotations.length === 0 && (
-              <p className="preview-panel-hint">
-                Click an element on the page to tag it, then write what should change.
-              </p>
+            {shots.length > 0 && (
+              <>
+                <div className="preview-panel-head">
+                  <span>Screenshots</span>
+                  <button className="btn-mini" onClick={() => onPatch({ shots: [] })}>
+                    Clear all
+                  </button>
+                </div>
+                <div className="preview-panel-list">
+                  {shots.map((s) => (
+                    <div className="preview-note preview-shot" key={s.n}>
+                      <div className="preview-note-head">
+                        <span className="preview-note-badge">{s.n}</span>
+                        <span className="preview-note-what" title={s.path}>
+                          {s.region ? "region" : "page"} · {s.width}×{s.height}
+                        </span>
+                        <button
+                          className="btn-icon preview-note-remove"
+                          title="Remove"
+                          onClick={() => removeShot(s.n)}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      <img className="preview-shot-thumb" src={s.thumb} alt={`Screenshot ${s.n}`} />
+                      <textarea
+                        className="preview-note-comment"
+                        placeholder="What should the agent do with this?"
+                        value={s.note}
+                        onChange={(e) => setShotNote(s.n, e.target.value)}
+                      />
+                    </div>
+                  ))}
+                </div>
+                <div className="preview-panel-foot">
+                  <AgentLaunchButton
+                    variant="mini"
+                    label="Send screenshot"
+                    agentTargets={agentTargets}
+                    installed={installed}
+                    newAgentLabel={
+                      linked?.componentLabel
+                        ? `New agent in ${linked.componentLabel}`
+                        : "New agent on this screenshot"
+                    }
+                    onStart={(agentId) =>
+                      onStartNew(agentId, shotBrief(), linked?.componentPath ?? null)
+                    }
+                    onSend={(target) => onSendToAgent(target, shotBrief())}
+                  />
+                  <button
+                    className="btn-mini"
+                    title="Run a task on this screenshot — a new one, a one-off, or one you saved"
+                    onClick={openTaskMenu}
+                  >
+                    ◆ Send to task ▾
+                  </button>
+                </div>
+              </>
             )}
-            <div className="preview-panel-list">
-              {annotations.map((a) => (
-                <div className="preview-note" key={a.n}>
-                  <div className="preview-note-head">
-                    <span className="preview-note-badge">{a.n}</span>
-                    <span className="preview-note-what" title={a.selector}>
-                      {a.components[0] ? `⟨${a.components[0]}⟩ ` : ""}
-                      {`<${a.tag}${a.id ? `#${a.id}` : ""}>`}
-                    </span>
-                    <button
-                      className="btn-icon preview-note-remove"
-                      title="Remove"
-                      onClick={() => removeAnnotation(a.n)}
-                    >
-                      ✕
-                    </button>
+            {(annotations.length > 0 || picking) && (
+              <>
+              <div className="preview-panel-head">
+                <span>Feedback</span>
+                {annotations.length > 0 && (
+                  <button className="btn-mini" onClick={clearAnnotations}>
+                    Clear all
+                  </button>
+                )}
+              </div>
+              {annotations.length === 0 && (
+                <p className="preview-panel-hint">
+                  Click an element on the page to tag it, then write what should change.
+                </p>
+              )}
+              <div className="preview-panel-list">
+                {annotations.map((a) => (
+                  <div className="preview-note" key={a.n}>
+                    <div className="preview-note-head">
+                      <span className="preview-note-badge">{a.n}</span>
+                      <span className="preview-note-what" title={a.selector}>
+                        {a.components[0] ? `⟨${a.components[0]}⟩ ` : ""}
+                        {`<${a.tag}${a.id ? `#${a.id}` : ""}>`}
+                      </span>
+                      <button
+                        className="btn-icon preview-note-remove"
+                        title="Remove"
+                        onClick={() => removeAnnotation(a.n)}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                    {a.text && <div className="preview-note-text">“{a.text.slice(0, 120)}”</div>}
+                    <textarea
+                      className="preview-note-comment"
+                      placeholder="What should change here?"
+                      value={a.comment}
+                      onChange={(e) => setComment(a.n, e.target.value)}
+                    />
                   </div>
-                  {a.text && <div className="preview-note-text">“{a.text.slice(0, 120)}”</div>}
-                  <textarea
-                    className="preview-note-comment"
-                    placeholder="What should change here?"
-                    value={a.comment}
-                    onChange={(e) => setComment(a.n, e.target.value)}
+                ))}
+              </div>
+              {annotations.length > 0 && (
+                <div className="preview-panel-foot">
+                  <AgentLaunchButton
+                    label="Send feedback"
+                    agentTargets={agentTargets}
+                    installed={installed}
+                    newAgentLabel={
+                      linked?.componentLabel
+                        ? `New agent in ${linked.componentLabel}`
+                        : "New agent on this feedback"
+                    }
+                    primaryTitle={(cli) =>
+                      `Start ${cli} on this feedback${
+                        linked?.componentLabel ? ` in the ${linked.componentLabel} component` : ""
+                      }`
+                    }
+                    onStart={(agentId) =>
+                      onStartNew(agentId, feedback(), linked?.componentPath ?? null)
+                    }
+                    onSend={(target) => onSendToAgent(target, feedback())}
                   />
                 </div>
-              ))}
-            </div>
-            {annotations.length > 0 && (
-              <div className="preview-panel-foot">
-                <AgentLaunchButton
-                  label="Send feedback"
-                  agentTargets={agentTargets}
-                  installed={installed}
-                  newAgentLabel={
-                    linked?.componentLabel
-                      ? `New agent in ${linked.componentLabel}`
-                      : "New agent on this feedback"
-                  }
-                  primaryTitle={(cli) =>
-                    `Start ${cli} on this feedback${
-                      linked?.componentLabel ? ` in the ${linked.componentLabel} component` : ""
-                    }`
-                  }
-                  onStart={(agentId) =>
-                    onStartNew(agentId, feedback(), linked?.componentPath ?? null)
-                  }
-                  onSend={(target) => onSendToAgent(target, feedback())}
-                />
-              </div>
+              )}
+              </>
             )}
           </div>
         )}
