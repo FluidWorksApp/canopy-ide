@@ -2184,9 +2184,19 @@ export const dictationDownload = (modelId: string) =>
   invoke<void>("dictation_download", { modelId });
 export const dictationDeleteModel = (modelId: string) =>
   invoke<void>("dictation_delete_model", { modelId });
-/** Resolves to "recording" (mic live) or "downloading" (model fetch started). */
-export const dictationStart = (modelId: string) =>
-  invoke<string>("dictation_start", { modelId });
+/** Resolves to "recording" (mic live) or "downloading" (model fetch started).
+ *  `streaming` turns on the live preview loop (dictation:partial events); it
+ *  costs a core while recording and does not change the final text. */
+export const dictationStart = (
+  modelId: string,
+  streaming?: boolean,
+  language?: string,
+) =>
+  invoke<string>("dictation_start", {
+    modelId,
+    streaming: streaming ?? false,
+    language: language || null,
+  });
 /** Stops the mic and resolves to the transcribed text. `language` is an
  *  optional BCP-47 hint (empty/undefined = auto-detect). */
 export const dictationStop = (language?: string) =>
@@ -2199,6 +2209,26 @@ export const onDictationProgress = (
   cb: (p: DictationProgress) => void,
 ): Promise<UnlistenFn> =>
   listen<DictationProgress>("dictation:progress", (e) => cb(e.payload));
+
+/** Live transcription while the mic is open, split into the part successive
+ *  decodes agree on and the tail they don't (see dictation.rs). Only fires
+ *  when dictation_start was passed streaming: true. */
+export interface DictationPartial {
+  confirmed: string;
+  unconfirmed: string;
+}
+export const onDictationPartial = (
+  cb: (p: DictationPartial) => void,
+): Promise<UnlistenFn> =>
+  listen<DictationPartial>("dictation:partial", (e) => cb(e.payload));
+
+/** Input loudness as RMS in 0..1, ~30 times a second while recording. Drives
+ *  the pill's visualiser. Raw, not normalised — speech sits around 0.02–0.2,
+ *  so callers scale it themselves. */
+export const onDictationLevel = (
+  cb: (rms: number) => void,
+): Promise<UnlistenFn> =>
+  listen<number>("dictation:level", (e) => cb(e.payload));
 
 // ---------- Android ----------
 

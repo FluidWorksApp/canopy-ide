@@ -3,7 +3,7 @@
 // long labels into slivers and pushed wide control groups out of the modal).
 // Skins render as preview cards — a palette is a thing you look at, not a
 // word you read.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   applyTheme,
   THEME_CHANGE_EVENT,
@@ -11,13 +11,19 @@ import {
   updateSettings,
   THEMES,
   formatHotkey,
+  modKeyLabel,
   DEFAULT_DICTATION_HOTKEY,
+  DICTATION_WAVE_STYLES,
   type CursorStyle,
+  type DictationModKey,
+  type DictationTriggerMode,
+  type DictationWaveStyle,
   type Hotkey,
   type LinkClickMode,
   type Settings,
   type Theme,
 } from "../settings";
+import { drawWave } from "../waveStyles";
 import { LINK_CHORD } from "../terminalLinks";
 import { useEscape } from "../useEscape";
 import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
@@ -1260,6 +1266,60 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
 /** Voice dictation setup: the model is a one-time ~700 MB download; after
  *  that everything runs locally. Lives here so setup is discoverable before
  *  the first shortcut press (which would otherwise trigger the download). */
+
+/** Modifiers offered as a bare trigger, ordered by how safe each is to bind.
+ *  The right-hand keys come first because a touch typist reaches for them
+ *  least, so the pollution rule has the least work to do; the "either side"
+ *  entries are last because they are the most likely to be pressed by
+ *  accident. */
+const MOD_KEY_CHOICES: DictationModKey[] = [
+  "MetaRight",
+  "AltRight",
+  "ControlRight",
+  "ShiftRight",
+  "CapsLock",
+  "MetaLeft",
+  "AltLeft",
+  "ControlLeft",
+  "ShiftLeft",
+  "Meta",
+  "Alt",
+  "Control",
+  "Shift",
+];
+
+/** A looping sample of a visualiser, so the picker shows what each one does
+ *  rather than naming it and hoping. Driven by a synthetic level — there is no
+ *  microphone open on the Settings screen. */
+function WavePreview({ style }: { style: DictationWaveStyle }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = ref.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) return;
+    let raf = 0;
+    let phase = 0;
+    const draw = () => {
+      const dpr = window.devicePixelRatio || 1;
+      const w = canvas.clientWidth;
+      const h = canvas.clientHeight;
+      if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+        canvas.width = Math.round(w * dpr);
+        canvas.height = Math.round(h * dpr);
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      phase += 0.07;
+      // Two beating sines stand in for speech: loud, quiet, loud again.
+      const level = 0.45 + 0.35 * Math.sin(phase * 0.9) * Math.sin(phase * 0.31);
+      drawWave(style, { ctx, w, h, level, phase });
+      raf = requestAnimationFrame(draw);
+    };
+    raf = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(raf);
+  }, [style]);
+  return <canvas ref={ref} className="dictation-wave-preview" />;
+}
 /** BCP-47 → display name for the languages our models cover. */
 const LANG_NAMES: Record<string, string> = {
   en: "English", es: "Spanish", fr: "French", de: "German", it: "Italian",
@@ -2051,10 +2111,93 @@ function DictationSettings() {
   return (
     <>
       <Item
-        name="Shortcut"
-        desc="Press to start dictating, again to insert; Esc cancels. Runs fully locally."
+        name="Trigger"
+        desc="How to open the mic. Esc always cancels. Runs fully locally, and only while Canopy has focus."
       >
-        <HotkeyCapture value={s.dictationHotkey} onChange={(h) => patch({ dictationHotkey: h })} />
+        <select
+          className="set-wide"
+          value={s.dictationTriggerMode}
+          onChange={(e) =>
+            patch({ dictationTriggerMode: e.target.value as DictationTriggerMode })
+          }
+        >
+          <option value="combo">Key combo</option>
+          <option value="hold">Hold a modifier — push to talk</option>
+          <option value="doubleTap">Double-tap a modifier</option>
+        </select>
+      </Item>
+
+      {s.dictationTriggerMode === "combo" ? (
+        <Item
+          name="Shortcut"
+          desc="Press to start dictating, again to insert."
+        >
+          <HotkeyCapture value={s.dictationHotkey} onChange={(h) => patch({ dictationHotkey: h })} />
+        </Item>
+      ) : (
+        <Item
+          name="Key"
+          desc={
+            s.dictationTriggerMode === "hold"
+              ? "Hold it to talk, let go to insert. Double-tap instead to keep recording hands-free; a single tap then ends it."
+              : "Two quick taps start recording, one tap ends it."
+          }
+        >
+          <select
+            className="set-wide"
+            value={s.dictationModKey}
+            onChange={(e) => patch({ dictationModKey: e.target.value as DictationModKey })}
+          >
+            {MOD_KEY_CHOICES.map((k) => (
+              <option key={k} value={k}>
+                {modKeyLabel(k)}
+              </option>
+            ))}
+          </select>
+        </Item>
+      )}
+
+      {s.dictationTriggerMode !== "combo" && (
+        <p className="set-note">
+          Using the key normally still works — {modKeyLabel(s.dictationModKey)} only
+          triggers dictation when nothing else is pressed with it, so ⇧A and ⌘S are
+          never mistaken for it.
+          {s.dictationModKey === "CapsLock" &&
+            " Caps Lock latches, so holding it means caps stay on while you speak."}
+        </p>
+      )}
+
+      <Item
+        name="Live preview"
+        desc="Show words in the pill as you speak. Costs a CPU core while recording; the inserted text is unaffected — it always comes from one clean pass over the whole recording."
+      >
+        <label className="set-inline-check">
+          <input
+            type="checkbox"
+            checked={s.dictationStreaming}
+            onChange={(e) => patch({ dictationStreaming: e.target.checked })}
+          />
+          <span>Stream as I talk</span>
+        </label>
+      </Item>
+
+      <Item name="Indicator" desc="The visualiser drawn in the recording pill.">
+        <div className="dictation-waves">
+          {DICTATION_WAVE_STYLES.map((w) => (
+            <button
+              key={w.id}
+              type="button"
+              title={w.hint}
+              className={`btn dictation-wave-opt${
+                s.dictationWaveStyle === w.id ? " dictation-wave-on" : ""
+              }`}
+              onClick={() => patch({ dictationWaveStyle: w.id })}
+            >
+              <WavePreview style={w.id} />
+              <span>{w.label}</span>
+            </button>
+          ))}
+        </div>
       </Item>
 
       <Item

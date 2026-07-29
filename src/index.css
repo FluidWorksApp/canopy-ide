@@ -12051,23 +12051,91 @@ a.btn-mini {
   pointer-events: none;
   white-space: nowrap;
 }
+/* The visualiser is drawn from --accent, so the ring around it follows the
+   accent too — a red border framing a green waveform read as two unrelated
+   pieces of UI. The animation is what says "recording"; it does not need a
+   colour to repeat the message. */
 .dictation-recording {
-  border-color: color-mix(in srgb, var(--danger) 60%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
 }
-.dictation-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--danger);
-  animation: dictation-pulse 1.2s ease-in-out infinite;
+
+/* While recording the pill stacks: the visualiser row, and — with the live
+   preview on — a second line of transcription under it. It grows from a
+   capsule to a rounded panel, which is the shape change that signals "there
+   is text here now" without needing a label to say so. */
+.dictation-recording,
+.dictation-expanded {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
 }
-@keyframes dictation-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.4; transform: scale(0.8); }
+.dictation-expanded {
+  width: 340px;
+  border-radius: 14px;
+  white-space: normal;
+}
+.dictation-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.dictation-wave {
+  width: 56px;
+  height: 18px;
+  flex: none;
+}
+.dictation-hint {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+/* Newest words stay in view as the text outgrows the line: the inner span is
+   pushed to the right edge and clipped on the left, so the preview reads like
+   a teleprompter rather than freezing on the first few words. */
+.dictation-live {
+  display: flex;
+  justify-content: flex-end;
+  overflow: hidden;
+  max-width: 100%;
+  height: 16px;
+}
+.dictation-live-text {
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text);
+}
+.dictation-live-tentative {
+  color: var(--text-dim);
+  opacity: 0.65;
 }
 
 .set-error {
   color: var(--danger);
+}
+
+/* dictation settings: visualiser picker. Each option animates continuously so
+   the choice is made by looking, not by reading a name. */
+.dictation-waves {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.dictation-wave-opt {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 10px;
+  height: auto;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.dictation-wave-on {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.dictation-wave-preview {
+  width: 62px;
+  height: 20px;
 }
 
 /* dictation settings: hotkey capture + model registry list */
