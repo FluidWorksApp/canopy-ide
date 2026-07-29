@@ -411,6 +411,29 @@ export function StatsIcon({ size = 18, className }: IconProps) {
   );
 }
 
+/** Reclaiming disk: a broom. Distinct from the trash can on purpose — this one
+ *  sweeps up what a build can make again, it doesn't delete your work. */
+export function BroomIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M19.5 4.5 12 12" />
+      <path d="M13.2 9.4 6 16.6l3.2 3.2 7.2-7.2z" />
+      <path d="M6.6 17.2 4 19.8M9 19.6l-2.6 2.6" strokeWidth={1.4} />
+    </svg>
+  );
+}
+
+/** Storage: a stack of platters. */
+export function DiskIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <ellipse cx="12" cy="6.5" rx="7.5" ry="3" />
+      <path d="M4.5 6.5v11c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-11" />
+      <path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3" />
+    </svg>
+  );
+}
+
 /** Delete/forget: a trash can. */
 export function TrashIcon({ size = 14, className }: IconProps) {
   return (

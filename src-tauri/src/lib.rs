@@ -2,6 +2,7 @@ mod agentid;
 mod agents;
 mod android;
 mod browser;
+mod cleanup;
 mod cli;
 mod context;
 mod crash;
@@ -590,6 +591,9 @@ pub fn run() {
             browser::browser_command,
             browser::browser_here,
             browser::browser_clear_data,
+            cleanup::cleanup_scan,
+            cleanup::cleanup_run,
+            cleanup::cleanup_disk,
             context::context_publish,
             context::context_remove,
             context::context_tools,

@@ -1666,6 +1666,197 @@ body.resizing-side * {
   border-top: 1px solid var(--border);
 }
 
+/* The one action on this panel: everything else here is a reading. Quiet until
+   hovered, because it is a button next to numbers, not a call to action. */
+.stats-cleanup-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  font: inherit;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  corner-shape: squircle;
+  cursor: pointer;
+}
+
+.stats-cleanup-btn:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+/* The same action from the cpu/mem popup, where it is a full-width row. */
+.bd-cleanup {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  text-align: left;
+}
+
+.bd-cleanup:hover {
+  background: var(--bg-alt);
+}
+
+.bd-cleanup-hint {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+/* ---- Cleanup dialog ---- */
+.cln-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 46vh;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  font-size: 12px;
+}
+
+.cln-mode {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.cln-group {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  overflow: hidden;
+}
+
+.cln-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+}
+
+.cln-check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.cln-ws {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
+
+.cln-chip {
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+/* A chip that explains why a row is not ticked reads as a warning, because that
+   is what it is: the reason Canopy is not offering to delete this. */
+.cln-chip-hold {
+  color: var(--warn);
+  border-color: color-mix(in oklab, var(--warn) 45%, transparent);
+}
+
+/* And the opposite: the work here has landed, which is why its install is
+   ticked. */
+.cln-chip-done {
+  color: var(--accent);
+  border-color: color-mix(in oklab, var(--accent) 45%, transparent);
+}
+
+.cln-spacer {
+  flex: 1;
+}
+
+.cln-nums {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.cln-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 8px;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.cln-row:hover {
+  background: var(--bg-alt);
+}
+
+.cln-rel {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 280px;
+}
+
+.cln-cat {
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.cln-why {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cln-empty {
+  padding: 8px 2px;
+  color: var(--text-dim);
+}
+
+.cln-notes {
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+}
+
+.cln-note {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.cln-error {
+  color: var(--danger);
+}
+
 /* Headline metrics: cost first, then the token flow and session count. */
 .stats-overview {
   display: grid;

@@ -1810,8 +1810,12 @@ export default function App() {
       openProjects.map((x) => ({
         name: x.name,
         roots: x.components.map((c) => c.path),
+        // Carried because the cleanup task must not offer to delete what a wake
+        // expects to find (installs, build output) — hibernating is "put away",
+        // not "finished with".
+        asleep: Boolean(hibernated[x.id]),
       })),
-    [openProjects],
+    [openProjects, hibernated],
   );
   const allPending = useMemo(
     () =>

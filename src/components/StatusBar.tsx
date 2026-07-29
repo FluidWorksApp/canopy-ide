@@ -7,9 +7,10 @@ import * as ipc from "../ipc";
 import { estimateCost, sessionCost } from "../pricing";
 import { chipText, planFor, planTone, tooltip } from "../planUsage";
 import { StatsPanel } from "./StatsPanel";
+import { CleanupDialog } from "./CleanupDialog";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { Dialog } from "./Dialog";
-import { HeartIcon, StatsIcon } from "./icons";
+import { BroomIcon, HeartIcon, StatsIcon } from "./icons";
 import type { AgentEventEntry } from "../types";
 import { modelCommandLine, type ModelSwitch } from "../agentModels";
 import { useBranchSwitch } from "../useBranchSwitch";
@@ -37,8 +38,10 @@ interface StatusBarProps {
   /** This project is the one on screen. Hidden projects freeze their polling
    *  (git status, transcript stats) instead of burning it in the background. */
   visible: boolean;
-  /** All open projects — the resource popup groups every session by project. */
-  projects: { name: string; roots: string[] }[];
+  /** All open projects — the resource popup groups every session by project,
+   *  and the cleanup task scans their folders. `asleep` marks a hibernating
+   *  project, whose installs a wake expects to still be there. */
+  projects: { name: string; roots: string[]; asleep?: boolean }[];
   /** Switches the model of the session the tray is showing. `model` is the id
    *  of one of `modelSwitch`'s choices, and is omitted for a picker — that
    *  command carries no argument. */
@@ -99,6 +102,10 @@ export const StatusBar = memo(function StatusBar({
   const [allSessions, setAllSessions] = useState<ipc.SessionStats[]>([]);
   // All-CLI usage & cost popup, anchored to the stats chip in the corner.
   const [statsOpen, setStatsOpen] = useState(false);
+  // The cleanup task. Held here rather than inside either popup so the dialog
+  // outlives the popup that opened it — both of them dismiss on an outside
+  // click, and a scan must not be cancelled by the user clicking its own list.
+  const [cleanupOpen, setCleanupOpen] = useState(false);
   const statsAnchorRef = useRef<HTMLSpanElement>(null);
   // Native dismissal: click anywhere outside, or Escape. Mouse-leave felt
   // flimsy on a panel this size — the cursor grazes the edge and it vanishes.
@@ -141,6 +148,23 @@ export const StatusBar = memo(function StatusBar({
       } as const)
     : undefined;
   const [openSessions, setOpenSessions] = useState<Record<number, boolean>>({});
+  // What the cleanup task is pointed at: every open project's folders, the cwds
+  // of anything live, and the projects that are asleep. Rust unions the busy
+  // list with the process monitor's own reading, so an empty one here (the
+  // popup was never opened, so no stats have streamed) can't make a running
+  // workspace look idle.
+  const allRoots = useMemo(
+    () => [...new Set(projects.flatMap((p) => p.roots))],
+    [projects],
+  );
+  const asleepRoots = useMemo(
+    () => projects.filter((p) => p.asleep).flatMap((p) => p.roots),
+    [projects],
+  );
+  const busyCwds = useMemo(
+    () => [...new Set(allSessions.map((s) => s.cwd))],
+    [allSessions],
+  );
   // All-CLI token/cost usage, for the grand-total row atop the popup. Fetched
   // (not streamed) only while the popup is open — it costs nothing otherwise.
   const [usage, setUsage] = useState<ipc.AgentSessionUsage[]>([]);
@@ -448,6 +472,21 @@ export const StatusBar = memo(function StatusBar({
                 }
                 return (
                   <>
+                    {/* Memory and CPU are what this popup has always shown, and
+                        disk is the resource next door: the same projects, the
+                        same "what is this costing me", one click away. */}
+                    <button
+                      className="bd-cleanup"
+                      title="Find build output, installs and caches your projects no longer need"
+                      onClick={() => {
+                        setBreakdown(false);
+                        setCleanupOpen(true);
+                      }}
+                    >
+                      <BroomIcon size={13} />
+                      <span>Cleanup resources</span>
+                      <span className="bd-cleanup-hint">disk</span>
+                    </button>
                     {/* The cpu/mem chip this popped from already shows the
                         resource total, but not tokens/cost — so lead with an
                         all-CLI usage total, then the per-project resource tree. */}
@@ -711,10 +750,24 @@ export const StatusBar = memo(function StatusBar({
         </button>
         {statsOpen && (
           <div className="status-menu status-stats-menu" style={menuStyle}>
-            <StatsPanel visible={statsOpen} />
+            <StatsPanel
+              visible={statsOpen}
+              roots={allRoots}
+              onCleanup={() => {
+                setStatsOpen(false);
+                setCleanupOpen(true);
+              }}
+            />
           </div>
         )}
       </span>
+      <CleanupDialog
+        open={cleanupOpen}
+        roots={allRoots}
+        busy={busyCwds}
+        asleep={asleepRoots}
+        onClose={() => setCleanupOpen(false)}
+      />
       {branchMenu.menu && (
         <ContextMenu {...branchMenu.menu} onClose={branchMenu.close} />
       )}

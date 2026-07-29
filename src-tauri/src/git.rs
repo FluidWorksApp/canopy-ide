@@ -92,7 +92,7 @@ pub struct CommitInfo {
 
 // ---------- plumbing ----------
 
-fn git(repo: &Path) -> Command {
+pub(crate) fn git(repo: &Path) -> Command {
     let mut cmd = Command::new("git");
     // No TTY in a GUI app: prompting would hang forever, so make git fail with
     // a real message instead. The user's credential helper still works.
@@ -2872,7 +2872,7 @@ fn list_worktrees(top: &Path) -> Result<Vec<WorktreeInfo>, String> {
 }
 
 /// The worktree records alone — one git process, no per-worktree status.
-fn scan_worktrees(top: &Path) -> Result<Vec<WorktreeInfo>, String> {
+pub(crate) fn scan_worktrees(top: &Path) -> Result<Vec<WorktreeInfo>, String> {
     let out = run(git(top).args(["worktree", "list", "--porcelain"]))?;
     let mut list = parse_worktrees(&out);
     mark_missing(&mut list);
@@ -3702,7 +3702,7 @@ pub struct WorkAudit {
 /// The branch merges are measured against: origin's default branch when it is
 /// knowable, else a local main/master, else the current branch (which makes
 /// every other branch read as unmerged — correct, if unhelpful).
-fn default_base(top: &Path) -> String {
+pub(crate) fn default_base(top: &Path) -> String {
     if let Ok(sym) = run(git(top).args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])) {
         let s = sym.trim();
         if !s.is_empty() {
@@ -3722,7 +3722,7 @@ fn default_base(top: &Path) -> String {
 /// Branches that must never be offered for cleanup or deletion: the integration
 /// branches every repo keeps forever, plus whatever this repo's base actually
 /// is. `base` may carry a remote prefix (origin/main) — compare on the leaf.
-fn is_protected_branch(name: &str, base: &str) -> bool {
+pub(crate) fn is_protected_branch(name: &str, base: &str) -> bool {
     let base_leaf = base.rsplit('/').next().unwrap_or(base);
     name == base_leaf
         || matches!(
