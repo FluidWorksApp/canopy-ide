@@ -9,7 +9,7 @@ import { useState } from "react";
 import { AGENT_CLIS } from "../projects";
 import { getSettings } from "../settings";
 import { agentMenuItems } from "../agentMenu";
-import { ContextMenu, useContextMenu } from "./ContextMenu";
+import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { AgentsIcon } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
 
@@ -32,6 +32,11 @@ interface AgentLaunchButtonProps {
    *  "mini" — a single btn-mini dropdown that sits in a header row of small
    *  buttons (PR header), next to Merge ▾ / Request review ▾. */
   variant?: "split" | "mini";
+  /** Destinations that are not an agent, appended below the agent rows behind
+   *  a divider — the preview's "run it as a one-off task". Kept as extra rows
+   *  on this control rather than a second button beside it: the question is
+   *  who should look at this, and one question wants one control. */
+  extras?: MenuItem[];
 }
 
 export function AgentLaunchButton({
@@ -43,6 +48,7 @@ export function AgentLaunchButton({
   onStart,
   onSend,
   variant = "split",
+  extras,
 }: AgentLaunchButtonProps) {
   const menu = useContextMenu();
   const [, force] = useState(0);
@@ -60,10 +66,14 @@ export function AgentLaunchButton({
     // ContextMenu items are built once at open; bump a counter so a change in
     // targets/installed since last open is reflected.
     force((n) => n + 1);
-    menu.open(
-      e,
-      agentMenuItems({ targets: agentTargets, installed, newLabel: newAgentLabel, onSend, onStart }),
-    );
+    const agents = agentMenuItems({
+      targets: agentTargets,
+      installed,
+      newLabel: newAgentLabel,
+      onSend,
+      onStart,
+    });
+    menu.open(e, extras?.length ? [...agents, { separator: true }, ...extras] : agents);
   };
 
   return (
