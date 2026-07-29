@@ -653,6 +653,24 @@ export const vaultRead = (id: string) =>
 /** Put an entry into the page in `tabId`. Returns which fields took a value. */
 export const vaultFill = (tabId: string, id: string) =>
   invoke<VaultFillReport>("vault_fill", { tabId, id });
+/** One row a .kdbx import could not take, and why. */
+export interface VaultSkipped {
+  title: string;
+  why: string;
+}
+
+export interface VaultImportReport {
+  imported: number;
+  /** Already in the vault under the same site and username. */
+  duplicates: number;
+  skipped: VaultSkipped[];
+}
+
+/** Merge a KeePass export into the vault. Existing entries are never
+ *  overwritten, and imported ones are always fill-only. */
+export const vaultImportKdbx = (path: string, password: string) =>
+  invoke<VaultImportReport>("vault_import_kdbx", { path, password });
+
 export const vaultApprovals = () => invoke<VaultApproval[]>("vault_approvals");
 export const vaultApprove = (domain: string, op: "fill" | "read") =>
   invoke<void>("vault_approve", { domain, op });

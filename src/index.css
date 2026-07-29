@@ -15071,3 +15071,32 @@ a.btn-mini {
   font-size: 12px;
   color: var(--danger, #e5534b);
 }
+
+/* The rows an import could not take. A list, not a count: "12 skipped" tells
+   nobody which twelve, and the whole point is that those twelve are still
+   sitting in the export the user came from. */
+.vault-skipped {
+  margin: 0;
+  padding: 0 0 0 2px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.vault-skipped li {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+}
+
+.vault-skipped-title {
+  font-weight: 600;
+}
+
+.vault-skipped-why {
+  color: var(--text-dim);
+}

@@ -308,6 +308,129 @@ function EntryRow({ item, onChanged }: { item: ipc.VaultItem; onChanged: () => v
   );
 }
 
+
+/** Bringing an existing password set in from a KeePass export.
+ *
+ *  Two steps on purpose: pick the file, then type its password. A single form
+ *  with a path box invites pasting a path, and the password box has to say
+ *  which file it belongs to — people have several exports and one of them is
+ *  usually old. */
+function ImportPanel({ onDone }: { onDone: () => void }) {
+  const [path, setPath] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [report, setReport] = useState<ipc.VaultImportReport | null>(null);
+
+  const pick = async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const picked = await open({
+      multiple: false,
+      filters: [{ name: "KeePass database", extensions: ["kdbx"] }],
+    });
+    if (typeof picked === "string") {
+      setPath(picked);
+      setErr("");
+      setReport(null);
+    }
+  };
+
+  const run = async () => {
+    setBusy(true);
+    setErr("");
+    try {
+      setReport(await ipc.vaultImportKdbx(path, password));
+      // The password to their export is not ours to keep a moment longer.
+      setPassword("");
+      onDone();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (report) {
+    return (
+      <div className="vault-card">
+        <div className="vault-card-head">
+          <h4>Imported {report.imported} {report.imported === 1 ? "login" : "logins"}</h4>
+        </div>
+        {report.duplicates > 0 && (
+          <p className="vault-empty">
+            {report.duplicates} already here under the same site and username, left as they were.
+          </p>
+        )}
+        {report.skipped.length > 0 && (
+          <>
+            <p className="vault-empty">
+              {report.skipped.length} not taken — these are still in your export:
+            </p>
+            <ul className="vault-skipped">
+              {report.skipped.map((s) => (
+                <li key={`${s.title}:${s.why}`}>
+                  <span className="vault-skipped-title">{s.title}</span>
+                  <span className="vault-skipped-why">{s.why}</span>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+        <div className="vault-card-actions">
+          <button className="btn" onClick={() => setReport(null)}>
+            Import another
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="vault-card">
+      <div className="vault-card-head">
+        <h4>Import from KeePass</h4>
+      </div>
+      <p className="vault-empty">
+        A .kdbx file, which is what KeePassXC saves and what Bitwarden, 1Password
+        and Strongbox export. Nothing already here is overwritten, and imported
+        logins are fill-only until you say otherwise.
+      </p>
+      <div className="vault-add">
+        <button className="btn" onClick={() => void pick()}>
+          {path ? "Choose a different file" : "Choose a file…"}
+        </button>
+        {path && <span className="vault-row-sub">{path.split("/").pop()}</span>}
+      </div>
+      {path && (
+        <Field label="Password for that file">
+          <input
+            autoFocus
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && password) void run();
+            }}
+          />
+        </Field>
+      )}
+      {err && <p className="vault-err">{err}</p>}
+      <div className="vault-card-actions">
+        <button
+          className="btn btn-accent"
+          disabled={!path || !password || busy}
+          onClick={() => void run()}
+        >
+          {busy ? "Reading…" : "Import"}
+        </button>
+        <button className="btn" onClick={onDone}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function VaultSettings() {
   const [status, setStatus] = useState<ipc.VaultStatus | null>(null);
   const [items, setItems] = useState<ipc.VaultItem[]>([]);
@@ -319,6 +442,7 @@ export function VaultSettings() {
   const [adding, setAdding] = useState<string | null>(null);
   /** The site in the preview, if one is open. */
   const [pageSite, setPageSite] = useState("");
+  const [importing, setImporting] = useState(false);
 
   const refresh = useCallback(() => {
     void ipc
@@ -484,6 +608,24 @@ export function VaultSettings() {
             </div>
           )}
         </div>
+      </Item>
+
+      <Item
+        name="Bring in an existing set"
+        desc="If you already keep passwords somewhere else, export them as .kdbx and import that — rather than typing them all in again."
+      >
+        {importing ? (
+          <ImportPanel
+            onDone={() => {
+              setImporting(false);
+              refresh();
+            }}
+          />
+        ) : (
+          <button className="btn btn-small" onClick={() => setImporting(true)}>
+            Import from KeePass…
+          </button>
+        )}
       </Item>
 
       <Item

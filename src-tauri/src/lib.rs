@@ -32,6 +32,7 @@ mod spot;
 mod stores;
 mod tunnel;
 mod vault;
+mod vault_kdbx;
 mod winproc;
 mod wsbridge;
 
@@ -442,6 +443,7 @@ pub fn run() {
             vault::vault_fill,
             vault::vault_read,
             vault::vault_approve,
+            vault::vault_import_kdbx,
             vault::vault_approvals,
             vault::vault_revoke,
             research::research_list,

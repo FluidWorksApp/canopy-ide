@@ -730,6 +730,48 @@ pub async fn vault_approve(
     approve(&state, &domain, &op)
 }
 
+/// Take an existing password set in from a .kdbx export.
+///
+/// Merged rather than replacing: the vault may already hold entries, and an
+/// import is an addition. A row whose site and username are already here is
+/// counted as a duplicate and left alone — re-importing the same file twice
+/// must not produce two of everything, and must never overwrite a password the
+/// user has since changed here.
+#[tauri::command]
+pub async fn vault_import_kdbx(
+    state: State<'_, Vault>,
+    path: String,
+    password: String,
+) -> Result<crate::vault_kdbx::ImportReport, String> {
+    let now = now_secs();
+    let (candidates, skipped) =
+        crate::vault_kdbx::read_kdbx(std::path::Path::new(&path), &password, now)?;
+
+    let mut guard = state.0.lock().unwrap();
+    guard.key()?;
+    let mut report = crate::vault_kdbx::ImportReport {
+        imported: 0,
+        duplicates: 0,
+        skipped,
+    };
+    for entry in candidates {
+        let same = guard.data.entries.iter().any(|e| {
+            e.domain.eq_ignore_ascii_case(&entry.domain)
+                && e.username.eq_ignore_ascii_case(&entry.username)
+        });
+        if same {
+            report.duplicates += 1;
+            continue;
+        }
+        guard.data.entries.push(entry);
+        report.imported += 1;
+    }
+    if report.imported > 0 {
+        persist(&mut guard)?;
+    }
+    Ok(report)
+}
+
 #[tauri::command]
 pub async fn vault_approvals(state: State<'_, Vault>) -> Result<Vec<VaultApproval>, String> {
     let mut guard = state.0.lock().unwrap();
