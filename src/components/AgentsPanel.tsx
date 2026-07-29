@@ -6,6 +6,7 @@ import * as ipc from "../ipc";
 import { getSettings } from "../settings";
 import { AGENT_CLIS, restoreCommand } from "../projects";
 import { identifyAgent, observeForLearning } from "../agentIdentity";
+import { agentDisplayName, type TabName } from "../agentDisplayName";
 import { effectiveState, silenceLabel } from "../agentState";
 import { forgetSessions, restorableFrom } from "../restorable";
 import { AgentRuntime } from "./AgentRuntime";
@@ -130,6 +131,10 @@ interface AgentsPanelProps {
    *  highlighted — the reverse of onJumpToPty: relate the tab you're on back to
    *  its row in the list. Null when the active tab isn't a terminal. */
   activePty?: number | null;
+  /** What each running pty's tab is called — the CLI's own title for it, and
+   *  the user's rename when there is one. Rows are named from this, so the
+   *  panel and the tab strip say the same thing about the same session. */
+  tabNames?: Map<number, TabName>;
   /** Cross-session context sharing for this project. */
   roots: string[];
   shareContext: boolean;
@@ -309,6 +314,7 @@ export function AgentsPanel({
   onPreviewUrl,
   onOpenAgent,
   activePty,
+  tabNames,
   roots,
   shareContext,
   onShareContext,
@@ -680,6 +686,15 @@ export function AgentsPanel({
     // "fix the login redirect" identifies it in a way that cpu, memory and a
     // directory never will.
     const task = lastHumanPrompt(digest?.prompts);
+    // What to call this row. Its tab's name first — the CLI titles that tab
+    // with what it is working on, and the user can rename it — so the panel
+    // never shows a column of identical "claude"s while the tab strip above it
+    // is naming the same sessions apart.
+    const name = agentDisplayName({
+      tab: tabNames?.get(s.id),
+      agentLabel: agent?.label,
+      sessionTitle: s.title,
+    });
     return (
       <div
         key={s.id}
@@ -693,7 +708,14 @@ export function AgentsPanel({
         onClick={() => onJumpToPty?.(s.id)}
         // Rows truncate to one line each now; the full detail lives here.
         title={[
-          agent ? `${agent.label} (identified by ${agent.via})` : s.title,
+          // The row's name, then which CLI it is — now that the name is the
+          // tab's, the row no longer says that on its face.
+          name,
+          agent && name !== agent.label
+            ? `${agent.label} (identified by ${agent.via})`
+            : agent
+              ? `identified by ${agent.via}`
+              : undefined,
           s.cwd,
           digest?.branch,
           task,
@@ -716,7 +738,7 @@ export function AgentsPanel({
           ) : (
             <TerminalIcon size={13} className="ap-mark" />
           )}
-          <span className="agent-name">{agent?.label ?? s.title}</span>
+          <span className="agent-name">{name}</span>
           {/* How long it has actually been working: this stretch while it is
               working, the session's total once it stops. Ahead of the directory
               and branch chips because this row truncates rather than wraps, and
