@@ -726,6 +726,11 @@ export const spotIndexClear = () => invoke<void>("spot_index_clear");
 export const spotSaveContextImage = (dir: string, base64Png: string) =>
   invoke<string>("spot_save_context_image", { dir, base64Png });
 
+/** Persist a brief too long to type at a shell prompt (see agentSeed.ts) under
+ *  `<dir>/.canopy/spot/`, and return its path for the agent to read. */
+export const spotSaveContextText = (dir: string, text: string) =>
+  invoke<string>("spot_save_context_text", { dir, text });
+
 // ---------- file management ----------
 
 export const fsCreateFile = (path: string) =>

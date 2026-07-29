@@ -24,6 +24,7 @@ import { GuestSession, OwnerSession } from "../../collab";
 import { CollabView } from "../CollabView";
 import { SharedProjectView } from "../SharedProjectView";
 import type { AgentCli } from "../../projects";
+import { briefPointer, fitsOnOneLine } from "../../agentSeed";
 import {
   AGENT_CLIS,
   announceCliInstallsChanged,
@@ -1752,7 +1753,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  the agent just opens in the existing checkout. Same resolve-CLI-then-seed
    *  shape as startTicketWork/startPrAgent. */
   const startAgentInDir = useCallback(
-    (dir: string, agentId: string | undefined, seed: string, title: string) => {
+    async (dir: string, agentId: string | undefined, seed: string, title: string) => {
       const installedClis = AGENT_CLIS.filter((c) => getInstalled()[c.bin]);
       const preferred = getSettings().defaultAgent;
       const agent =
@@ -1763,10 +1764,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
           AGENT_CLIS[0]
         )?.id;
       const cli = AGENT_CLIS.find((c) => c.id === agent);
-      const start = agent ? startCommand(agent, seed) : null;
+      let start = agent ? startCommand(agent, seed) : null;
       if (!cli || !start) {
         onNotice(`Unknown agent "${agent}".`);
         return;
+      }
+      // A command line longer than the tty will hold is not shortened, it is
+      // TRUNCATED — mid-word, closing quote and all, with no error anywhere
+      // (agentSeed.ts). Past that length the brief goes to a file and the agent
+      // is started pointed at it. A failed write leaves the original command:
+      // the old behaviour, not a lost launch.
+      if (!start.typePrompt && !fitsOnOneLine(start.command)) {
+        try {
+          const path = await ipc.spotSaveContextText(dir, seed);
+          start = startCommand(agent!, briefPointer(path)) ?? start;
+        } catch (err) {
+          void ipc.jsLog("warn", `preview: could not park a long brief: ${String(err)}`);
+        }
       }
       const id = addTerminal(
         dir,
@@ -5210,7 +5224,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
               }
               startAgentInDir(dir, agentId, text, "Preview feedback");
             }}
-            taskRows={(brief, dir) => taskRows(brief, dir, undefined, brief)}
+            onRunOneOff={(brief, dir) =>
+              // Named, so the Tasks list says what it is rather than opening
+              // with the first line of a brief about four screenshots.
+              runAdhocTask(brief, dir, "Preview screenshots")
+            }
             onNotice={onNotice}
           />
         );

@@ -784,20 +784,44 @@ pub async fn spot_save_context_image(
         .decode(base64_png.trim())
         .map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
-    let path = free_path(&target, now_secs());
+    let path = free_path(&target, now_secs(), "ctx", "png");
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().to_string())
 }
 
-/// `ctx-<stamp>.png`, then `ctx-<stamp>-2.png`, … until one is free. Bounded so
-/// a directory that cannot be written to fails at the write rather than here.
-fn free_path(dir: &std::path::Path, stamp: i64) -> PathBuf {
-    let first = dir.join(format!("ctx-{stamp}.png"));
+/// Write a brief too long to type at a shell prompt, and return its path.
+///
+/// A new agent is started by typing its command into a freshly spawned shell,
+/// and a canonical-mode tty drops everything past MAX_CANON (1024 on Darwin) on
+/// one line — silently, so a long brief arrived cut mid-word with its closing
+/// quote gone and the shell stuck at a continuation prompt. Past that size the
+/// brief goes to a file and the agent is started pointed at it. Beside the
+/// screenshots it refers to, for the same reason: the agent's file tools can
+/// read it, and it survives the terminal it was meant for.
+#[tauri::command]
+pub async fn spot_save_context_text(
+    ws: State<'_, WorkspaceManager>,
+    dir: String,
+    text: String,
+) -> Result<String, String> {
+    let target = PathBuf::from(&dir).join(".canopy/spot");
+    check_scope(&ws, &target)?;
+    std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+    let path = free_path(&target, now_secs(), "brief", "md");
+    std::fs::write(&path, text.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// `<prefix>-<stamp>.<ext>`, then `<prefix>-<stamp>-2.<ext>`, … until one is
+/// free. Bounded so a directory that cannot be written to fails at the write
+/// rather than here.
+fn free_path(dir: &std::path::Path, stamp: i64, prefix: &str, ext: &str) -> PathBuf {
+    let first = dir.join(format!("{prefix}-{stamp}.{ext}"));
     if !first.exists() {
         return first;
     }
     for n in 2..1000 {
-        let candidate = dir.join(format!("ctx-{stamp}-{n}.png"));
+        let candidate = dir.join(format!("{prefix}-{stamp}-{n}.{ext}"));
         if !candidate.exists() {
             return candidate;
         }
@@ -813,14 +837,35 @@ mod tests {
     fn free_path_never_reuses_a_name_within_the_same_second() {
         let dir = std::env::temp_dir().join(format!("canopy-freepath-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let a = free_path(&dir, 1700);
+        let a = free_path(&dir, 1700, "ctx", "png");
         std::fs::write(&a, b"a").unwrap();
-        let b = free_path(&dir, 1700);
+        let b = free_path(&dir, 1700, "ctx", "png");
         assert_ne!(a, b);
         std::fs::write(&b, b"b").unwrap();
-        assert_ne!(free_path(&dir, 1700), b);
+        assert_ne!(free_path(&dir, 1700, "ctx", "png"), b);
         // A different second starts clean again.
-        assert_eq!(free_path(&dir, 1701), dir.join("ctx-1701.png"));
+        assert_eq!(
+            free_path(&dir, 1701, "ctx", "png"),
+            dir.join("ctx-1701.png")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn briefs_and_shots_taken_in_the_same_second_do_not_collide() {
+        // A brief is written beside the screenshots it refers to, in the same
+        // second, so the two kinds have to be able to share a directory.
+        let dir = std::env::temp_dir().join(format!("canopy-brief-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shot = free_path(&dir, 1700, "ctx", "png");
+        let brief = free_path(&dir, 1700, "brief", "md");
+        assert_eq!(shot, dir.join("ctx-1700.png"));
+        assert_eq!(brief, dir.join("brief-1700.md"));
+        std::fs::write(&brief, b"one").unwrap();
+        assert_eq!(
+            free_path(&dir, 1700, "brief", "md"),
+            dir.join("brief-1700-2.md")
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

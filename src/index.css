@@ -12839,6 +12839,16 @@ a.btn-mini {
   justify-content: flex-end;
   gap: 6px;
 }
+/* btn-mini carries a 6px top margin from the stacked contexts it was born in.
+   In a row that centres its items that margin is part of the box being centred,
+   so every small button landed 3px below the badge beside it — measured, in the
+   preview toolbar: badge centre -0.5px off the bar's, each button +2.5px. The
+   split wrapper had it worse: 25px tall around a 19px button, because both its
+   children carried the margin inside it. */
+.preview-toolbar .btn-mini,
+.preview-panel-foot .btn-mini {
+  margin-top: 0;
+}
 /* The captured pixels, at panel width. Dark backing so a screenshot with
    transparency reads as an image rather than a hole in the panel. */
 .preview-shot-thumb {

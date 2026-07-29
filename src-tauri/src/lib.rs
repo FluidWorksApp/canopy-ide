@@ -436,6 +436,7 @@ pub fn run() {
             research::research_read_file,
             research::research_dir,
             research::research_delete,
+            spot::spot_save_context_text,
             fsx::workspace_add,
             fsx::workspace_remove,
             fsx::workspace_list,
