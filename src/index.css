@@ -14809,3 +14809,93 @@ a.btn-mini {
   font-size: 11px;
   color: var(--text-dim);
 }
+
+/* Settings → Vault. The list is rows of metadata; a password is only ever on
+   screen one at a time, behind a click, which is why the revealed value gets a
+   monospace line of its own rather than sitting inline where it could be
+   screenshotted alongside the rest of the list. */
+.vault-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.vault-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-alt);
+}
+
+.vault-row-main {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.vault-label {
+  font-weight: 600;
+}
+
+.vault-domain,
+.vault-user {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+/* An entry an agent can read in plain text is the exception, and it says so. */
+.vault-flag {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warn, #d9a441) 22%, transparent);
+  color: var(--warn, #d9a441);
+}
+
+.vault-secret {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--bg);
+  user-select: all;
+  overflow-wrap: anywhere;
+}
+
+.vault-row-actions,
+.vault-form {
+  display: flex;
+  gap: 8px;
+}
+
+.vault-form {
+  flex-direction: column;
+  width: 100%;
+  max-width: 420px;
+}
+
+.vault-readable {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 12px;
+}
+
+/* The explanation under the checkbox label is a span inside a span, so it needs
+   telling to be a line of its own — inline, it read as one run-on sentence
+   ("…in plain textOff is right for…"). */
+.vault-readable .set-item-desc {
+  display: block;
+  margin-top: 2px;
+}
+
+.vault-err {
+  color: var(--danger, #e5534b);
+  font-size: 12px;
+  margin: 0;
+}

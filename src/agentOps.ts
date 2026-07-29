@@ -10,6 +10,7 @@
 // Pure functions over ipc/monaco: App owns the routing and the answering, this
 // owns the work.
 import * as ipc from "./ipc";
+import { runVaultOp, type PreviewTarget } from "./vaultFill";
 import { modelFor, monaco } from "./monaco-setup";
 import {
   describeMissingServer,
@@ -365,6 +366,9 @@ export interface UiOpContext {
   inbox: ipc.RelayCommandMsg[];
   /** Put the question in front of the user and resolve with their answer. */
   ask: (question: string, options: string[]) => Promise<string>;
+  /** The preview tab an agent's browser ops are driving, for the vault ops:
+   *  filling a credential needs to know which page is being logged in to. */
+  preview: () => Promise<PreviewTarget | null>;
 }
 
 /** Run one UI op and produce the tool's result. Throwing is how an op reports
@@ -387,6 +391,8 @@ export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unkn
       return reviews(ctx.repos, ctx.inbox);
     case "ask":
       return { answer: await ctx.ask(op.question ?? "", op.options ?? []) };
+    case "vault":
+      return runVaultOp(op, { preview: ctx.preview, ask: ctx.ask });
     default:
       throw new Error(`unknown op: ${op.op}`);
   }

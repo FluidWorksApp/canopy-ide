@@ -228,7 +228,8 @@ export interface AgentUiOp {
     | "symbols"
     | "tickets"
     | "reviews"
-    | "ask";
+    | "ask"
+    | "vault";
   route: string;
   path?: string | null;
   line?: number | null;
@@ -238,6 +239,10 @@ export interface AgentUiOp {
   query?: string | null;
   question?: string | null;
   options?: string[];
+  /** vault: list | fill | read. */
+  vaultOp?: string | null;
+  /** vault: a specific entry, when the agent already listed them. */
+  entryId?: string | null;
   /** diagnostics: how long the caller will hold. A hook firing after every
    *  edit can't sit through a cold server's first index. */
   waitMs?: number | null;
@@ -574,6 +579,85 @@ export const spotSearch = (
 
 /** What the index holds right now (Settings → SpotSearch). */
 export const spotIndexStats = () => invoke<SpotIndexStats>("spot_index_stats");
+
+// ---------- Credential vault ----------
+//
+// The password never crosses this boundary in the fill direction: `vaultFill`
+// sends two ids and the backend puts the value into the page itself. Only
+// `vaultReveal` (the user's own click in Settings) and `vaultRead` (an entry
+// the user marked readable, after an approval prompt) ever return plaintext.
+
+export interface VaultStatus {
+  /** A vault file exists on disk — "unlock" rather than "create one". */
+  exists: boolean;
+  unlocked: boolean;
+  entries: number;
+  auto_lock_minutes: number;
+}
+
+/** An entry without its password — what the UI lists and what agents are told. */
+export interface VaultItem {
+  id: string;
+  label: string;
+  domain: string;
+  username: string;
+  readable: boolean;
+  notes: string;
+  updated: number;
+}
+
+export interface VaultApproval {
+  domain: string;
+  fill: boolean;
+  read: boolean;
+  granted: number;
+}
+
+/** What a fill did — which fields took a value, never the value. */
+export interface VaultFillReport {
+  filled: string[];
+  label: string;
+  domain: string;
+  form: boolean;
+}
+
+export const vaultStatus = () => invoke<VaultStatus>("vault_status");
+export const vaultCreate = (passphrase: string) =>
+  invoke<void>("vault_create", { passphrase });
+export const vaultUnlock = (passphrase: string) =>
+  invoke<void>("vault_unlock", { passphrase });
+export const vaultLock = () => invoke<void>("vault_lock");
+export const vaultChangePassphrase = (old: string, next: string) =>
+  invoke<void>("vault_change_passphrase", { old, new: next });
+export const vaultList = () => invoke<VaultItem[]>("vault_list");
+/** Entries whose domain covers this URL's host, most specific first. */
+export const vaultMatches = (url: string) =>
+  invoke<VaultItem[]>("vault_matches", { url });
+export const vaultSave = (entry: {
+  id?: string;
+  label: string;
+  domain: string;
+  username: string;
+  /** Omitted means "keep the stored password" — editing a label never has to
+   *  hold the secret. */
+  password?: string;
+  readable?: boolean;
+  notes?: string;
+}) => invoke<string>("vault_save", entry);
+export const vaultDelete = (id: string) => invoke<void>("vault_delete", { id });
+/** Plaintext for the user's own eyes, from Settings. */
+export const vaultReveal = (id: string) => invoke<string>("vault_reveal", { id });
+/** Plaintext for an agent — only for an entry marked readable. */
+export const vaultRead = (id: string) =>
+  invoke<{ username: string; password: string }>("vault_read", { id });
+/** Put an entry into the page in `tabId`. Returns which fields took a value. */
+export const vaultFill = (tabId: string, id: string) =>
+  invoke<VaultFillReport>("vault_fill", { tabId, id });
+export const vaultApprovals = () => invoke<VaultApproval[]>("vault_approvals");
+export const vaultApprove = (domain: string, op: "fill" | "read") =>
+  invoke<void>("vault_approve", { domain, op });
+export const vaultRevoke = (domain: string) =>
+  invoke<void>("vault_revoke", { domain });
 
 // ---------- Research ----------
 //

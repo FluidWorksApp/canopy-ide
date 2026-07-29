@@ -22,6 +22,7 @@ import { LINK_CHORD } from "../terminalLinks";
 import { useEscape } from "../useEscape";
 import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
 import * as ipc from "../ipc";
+import { VaultSettings } from "./VaultSettings";
 import { availableMonoFonts, fontLabel, fontStack } from "../fonts";
 import { AgentIcon, TrackerIcon } from "./icons";
 import {
@@ -58,6 +59,7 @@ export type SettingsTab =
   | "integrations"
   | "browser"
   | "remote"
+  | "vault"
   | "privacy";
 
 interface SettingsDialogProps {
@@ -74,6 +76,7 @@ const TABS: { id: SettingsTab; label: string }[] = [
   { id: "dictation", label: "Dictation" },
   { id: "integrations", label: "Integrations" },
   { id: "browser", label: "Browser" },
+  { id: "vault", label: "Vault" },
   { id: "remote", label: "Remote access" },
   { id: "privacy", label: "Privacy" },
 ];
@@ -1010,6 +1013,8 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
             )}
 
             {tab === "spotsearch" && <SpotSearchSettings s={s} patch={patch} />}
+
+            {tab === "vault" && <VaultSettings />}
 
             {tab === "dictation" && dictationOk && <DictationSettings />}
 

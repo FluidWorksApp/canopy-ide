@@ -2269,6 +2269,25 @@ fn tool_defs() -> serde_json::Value {
             }, "required": ["text"], "additionalProperties": false }
         },
         {
+            "name": "canopy_vault_list",
+            "description": "The logins Canopy holds for the page you are on (or all of them, with no preview open): label, domain, username, and whether each may be read in plain text. Never returns passwords. Read this before a login to find out whether you can sign in at all.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
+        {
+            "name": "canopy_vault_fill",
+            "description": "Sign in to the page in the preview: Canopy types the stored username and password into the page's own fields. You never see the password. Use this instead of canopy_browser_type for any login. Picks the entry matching the loaded page unless entryId says otherwise, and asks the user the first time on each site. Submit the form afterwards the way a person would — click its button.",
+            "inputSchema": { "type": "object", "properties": {
+                "entryId": { "type": "string", "description": "A specific entry from canopy_vault_list; omit to use the one matching the page" }
+            }, "additionalProperties": false }
+        },
+        {
+            "name": "canopy_vault_read",
+            "description": "The plain-text password for one entry — only for entries the user has marked readable, and only for logins no browser form can take (a database URL, an SSH passphrase). For a web login use canopy_vault_fill instead: it does not put the secret in your context, where anything you later read from a page could try to talk you into repeating it. Asks the user the first time on each site.",
+            "inputSchema": { "type": "object", "properties": {
+                "entryId": { "type": "string", "description": "The entry, from canopy_vault_list" }
+            }, "required": ["entryId"], "additionalProperties": false }
+        },
+        {
             "name": "canopy_ask_user",
             "description": "Ask the user a question in Canopy and block until they answer. For a decision you genuinely can't make — a fork in the design, a destructive step — not for confirmation you could infer. `options` render as buttons; they can also type freely or skip.",
             "inputSchema": { "type": "object", "properties": {
@@ -2594,6 +2613,30 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 return Err("start needs a title — the question in a few words".into());
             }
             text(research_op(action, args))
+        }
+        "canopy_vault_list" => {
+            let mut body = args.clone();
+            body["vaultOp"] = serde_json::json!("list");
+            text(ui_op("vault", &body, 30))
+        }
+        "canopy_vault_fill" => {
+            let mut body = args.clone();
+            body["vaultOp"] = serde_json::json!("fill");
+            // The first fill on a site puts an approval prompt in front of the
+            // user, so this waits on a person, not on a page.
+            text(ui_op("vault", &body, 605))
+        }
+        "canopy_vault_read" => {
+            if args
+                .get("entryId")
+                .and_then(|v| v.as_str())
+                .map_or(true, str::is_empty)
+            {
+                return Err("missing required argument: entryId (from canopy_vault_list)".into());
+            }
+            let mut body = args.clone();
+            body["vaultOp"] = serde_json::json!("read");
+            text(ui_op("vault", &body, 605))
         }
         "canopy_ask_user" => {
             if args
