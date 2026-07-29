@@ -1963,35 +1963,23 @@ export default function App() {
       })()}
 
       {confirmDelete && (
-        <div
-          className="confirm-backdrop"
-          onMouseDown={() => setConfirmDelete(null)}
-        >
-          <div className="confirm" onMouseDown={(e) => e.stopPropagation()}>
-            <p>
-              Delete project <strong>{confirmDelete.name}</strong>?
-            </p>
-            <p className="confirm-sub">
-              Removes it from Canopy only — the folders on disk are untouched.
-              If it is open, its terminals (and anything running in them) will
-              be closed.
-            </p>
-            <div className="confirm-actions">
-              <button className="btn" onClick={() => setConfirmDelete(null)}>
-                Cancel
-              </button>
-              <button
-                className="btn btn-danger-solid"
-                onClick={() => {
-                  deleteProject(confirmDelete.id);
-                  setConfirmDelete(null);
-                }}
-              >
-                Delete
-              </button>
-            </div>
-          </div>
-        </div>
+        <Dialog
+          variant="danger"
+          title={`Delete project ${confirmDelete.name}?`}
+          body="Removes it from Canopy only — the folders on disk are untouched. If it is open, its terminals (and anything running in them) will be closed."
+          dismissLabel="Cancel"
+          onDismiss={() => setConfirmDelete(null)}
+          actions={[
+            {
+              label: "Delete",
+              primary: true,
+              onClick: () => {
+                deleteProject(confirmDelete.id);
+                setConfirmDelete(null);
+              },
+            },
+          ]}
+        />
       )}
 
       {ask && (

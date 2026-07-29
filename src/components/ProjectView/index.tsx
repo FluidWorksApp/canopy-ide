@@ -108,7 +108,7 @@ import { ContextMenu, useContextMenu, type MenuItem } from "../ContextMenu";
 import { FileTree } from "../FileTree";
 import { FileView } from "../FileView";
 import { ChangesPanel, type ChangeGroup } from "../ChangesPanel";
-import { useEscape } from "../../useEscape";
+import { Dialog } from "../Dialog";
 import { BranchSwitchProvider, useBranchSwitch } from "../../useBranchSwitch";
 import { askDialog } from "../../branchSwitch";
 import { useTabDrag, applyOrder } from "../../tabDrag";
@@ -405,7 +405,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
     kind: "file" | "dir";
     value: string;
   } | null>(null);
-  useEscape(() => setRootCreate(null), rootCreate != null);
   const [cliMenuOpen, setCliMenuOpen] = useState(false);
   const [shareMenuOpen, setShareMenuOpen] = useState(false);
   const [shareProjectMenuOpen, setShareProjectMenuOpen] = useState(false);
@@ -5745,45 +5744,33 @@ const ProjectViewBody = memo(function ProjectViewBody({
         />
       )}
       {rootCreate && (
-        <div
-          className="confirm-backdrop"
-          onMouseDown={() => setRootCreate(null)}
+        <Dialog
+          variant="accent"
+          title={`New ${rootCreate.kind === "dir" ? "folder" : "file"} in ${rootCreate.dir.split("/").pop()}`}
+          meta={rootCreate.dir}
+          dismissLabel="Cancel"
+          onDismiss={() => setRootCreate(null)}
+          actions={[
+            {
+              label: "Create",
+              primary: true,
+              disabled: !rootCreate.value.trim(),
+              onClick: () => void submitRootCreate(),
+            },
+          ]}
         >
-          <div className="confirm" onMouseDown={(e) => e.stopPropagation()}>
-            <p>
-              New {rootCreate.kind === "dir" ? "folder" : "file"} in{" "}
-              <strong>{rootCreate.dir.split("/").pop()}</strong>
-            </p>
-            <input
-              autoFocus
-              className="git-branch-input"
-              placeholder={
-                rootCreate.kind === "dir" ? "folder name" : "name.ext"
-              }
-              value={rootCreate.value}
-              onChange={(e) =>
-                setRootCreate((p) => (p ? { ...p, value: e.target.value } : p))
-              }
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  void submitRootCreate();
-                }
-              }}
-            />
-            <div className="confirm-actions">
-              <button className="btn" onClick={() => setRootCreate(null)}>
-                Cancel
-              </button>
-              <button
-                className="btn btn-accent"
-                onClick={() => void submitRootCreate()}
-              >
-                Create
-              </button>
-            </div>
-          </div>
-        </div>
+          <input
+            // Beats the primary button to focus: the name is what you came to
+            // type, and Enter still commits from inside the field.
+            data-autofocus
+            className="git-branch-input"
+            placeholder={rootCreate.kind === "dir" ? "folder name" : "name.ext"}
+            value={rootCreate.value}
+            onChange={(e) =>
+              setRootCreate((p) => (p ? { ...p, value: e.target.value } : p))
+            }
+          />
+        </Dialog>
       )}
       {sidePane("files", () => (
         <div

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
 import type { Notify } from "../types";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
-import { useEscape } from "../useEscape";
+import { Dialog } from "./Dialog";
 import { fileIconUrl } from "./fileIcons";
 import { ChevronIcon } from "./icons";
 import { WindowedList } from "./WindowedList";
@@ -122,13 +122,6 @@ export function FileTree({
     name: string;
     isDir: boolean;
   } | null>(null);
-  useEscape(
-    () => {
-      setConfirmDelete(null);
-      setPrompt(null);
-    },
-    confirmDelete != null || prompt != null,
-  );
   // autoFocus loses the race when this dialog mounts while the context menu is
   // still unmounting, which left Enter going nowhere and no way to submit.
   const promptInput = useRef<HTMLInputElement>(null);
@@ -646,90 +639,68 @@ export function FileTree({
       )}
 
       {prompt && (
-        <div className="confirm-backdrop" onMouseDown={() => setPrompt(null)}>
-          <form
-            className="confirm"
-            onMouseDown={(e) => e.stopPropagation()}
-            onSubmit={(e) => {
-              e.preventDefault();
-              submitPrompt();
-            }}
-          >
-            <p>
-              {prompt.kind === "rename"
-                ? "Rename"
-                : prompt.kind === "new-dir"
-                  ? "New folder in"
-                  : "New file in"}{" "}
-              <code>{prompt.kind === "rename" ? prompt.path : prompt.dir}</code>
-            </p>
-            <input
-              className="git-branch-input"
-              ref={promptInput}
-              value={prompt.value}
-              placeholder={
-                prompt.kind === "new-dir" ? "folder name" : "name.ext"
-              }
-              onChange={(e) => setPrompt({ ...prompt, value: e.target.value })}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") setPrompt(null);
-              }}
-            />
-            <div className="confirm-actions">
-              <button
-                type="button"
-                className="btn"
-                onClick={() => setPrompt(null)}
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="btn btn-accent"
-                disabled={!promptReady}
-              >
-                {prompt.kind === "rename" ? "Rename" : "Create"}
-              </button>
-            </div>
-          </form>
-        </div>
+        <Dialog
+          variant="accent"
+          title={
+            prompt.kind === "rename"
+              ? "Rename"
+              : prompt.kind === "new-dir"
+                ? "New folder"
+                : "New file"
+          }
+          meta={prompt.kind === "rename" ? prompt.path : prompt.dir}
+          dismissLabel="Cancel"
+          onDismiss={() => setPrompt(null)}
+          actions={[
+            {
+              label: prompt.kind === "rename" ? "Rename" : "Create",
+              primary: true,
+              disabled: !promptReady,
+              onClick: submitPrompt,
+            },
+          ]}
+        >
+          <input
+            className="git-branch-input"
+            // Beats the primary button to focus: the name is what you came to
+            // type, and Enter still commits from inside the field.
+            data-autofocus
+            ref={promptInput}
+            value={prompt.value}
+            placeholder={prompt.kind === "new-dir" ? "folder name" : "name.ext"}
+            onChange={(e) => setPrompt({ ...prompt, value: e.target.value })}
+          />
+        </Dialog>
       )}
 
       {confirmDelete && (
-        <div
-          className="confirm-backdrop"
-          onMouseDown={() => setConfirmDelete(null)}
-        >
-          <div className="confirm" onMouseDown={(e) => e.stopPropagation()}>
-            <p>
-              Move <strong>{confirmDelete.name}</strong> to the Trash?
-            </p>
-            <p className="confirm-sub">
-              {confirmDelete.isDir
-                ? "The folder and everything in it goes to the Trash. You can restore it from there."
-                : "It goes to the Trash — you can restore it from there."}
-            </p>
-            <div className="confirm-actions">
-              <button className="btn" onClick={() => setConfirmDelete(null)}>
-                Cancel
-              </button>
-              <button
-                className="btn btn-danger-solid"
-                onClick={() => {
-                  const { path } = confirmDelete;
-                  setConfirmDelete(null);
-                  void run(
-                    "Delete",
-                    () => ipc.fsTrash(path),
-                    path.slice(0, path.lastIndexOf("/")),
-                  );
-                }}
-              >
-                Move to Trash
-              </button>
-            </div>
-          </div>
-        </div>
+        <Dialog
+          variant="danger"
+          title={`Move ${confirmDelete.name} to the Trash?`}
+          body={
+            confirmDelete.isDir
+              ? "The folder and everything in it goes to the Trash. You can restore it from there."
+              : "It goes to the Trash — you can restore it from there."
+          }
+          meta={confirmDelete.path}
+          dismissLabel="Cancel"
+          onDismiss={() => setConfirmDelete(null)}
+          actions={[
+            {
+              label: "Move to Trash",
+              primary: true,
+              onClick: () => {
+                const { path } = confirmDelete;
+                setConfirmDelete(null);
+                void run(
+                  "Delete",
+                  () => ipc.fsTrash(path),
+                  path.slice(0, path.lastIndexOf("/")),
+                );
+              },
+            },
+          ]}
+        />
       )}
 
       <WindowedList
