@@ -1255,6 +1255,26 @@ body,
   font-weight: 600;
 }
 
+/* Plan headroom. Quiet by default — it is ambient information most of the
+   time — and only takes colour as a window fills, so the tray does not cry
+   wolf at 20%. Colour is never the only signal: the percentage is right there
+   in the text, which is what makes this readable to a colour-blind user. */
+.status-plan {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+
+.status-plan.is-warn {
+  color: var(--warn, #d89614);
+  font-weight: 600;
+}
+
+.status-plan.is-critical {
+  background: var(--danger-soft, rgba(220, 76, 70, 0.16));
+  color: var(--danger, #dc4c46);
+  font-weight: 600;
+}
+
 .status-spacer {
   flex: 1;
 }
@@ -1499,6 +1519,96 @@ body,
   margin-top: 4px;
   border-top: 1px solid var(--border);
   padding-top: 8px;
+}
+
+/* Plan limits: one group per CLI, one bar per rolling window. */
+.plan-list {
+  padding: 6px 12px 2px;
+}
+
+.plan-group + .plan-group {
+  margin-top: 10px;
+}
+
+.plan-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 5px;
+}
+
+.plan-agent {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.plan-tier {
+  font-size: 10px;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+/* Pushed right: the age of a reading is a caveat on the row, not a headline. */
+.plan-stale {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.plan-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 1.9;
+}
+
+.plan-window {
+  width: 26px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.plan-track {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.plan-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+.plan-fill[data-tone="warn"] {
+  background: var(--warn);
+}
+
+.plan-fill[data-tone="critical"] {
+  background: var(--danger);
+}
+
+.plan-pct {
+  width: 34px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.plan-reset {
+  width: 108px;
+  color: var(--text-dim);
+  font-size: 10px;
+  text-align: right;
+  white-space: nowrap;
 }
 
 .stats-empty,

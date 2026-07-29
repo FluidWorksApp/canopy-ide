@@ -14,6 +14,7 @@ vi.mock("../ipc", () => ({
   onAppStats: vi.fn(),
   onPtyStats: vi.fn(),
   agentUsage: vi.fn(),
+  planUsage: vi.fn(),
 }));
 
 const noSub = async () => () => {};
@@ -37,6 +38,7 @@ beforeEach(() => {
   vi.mocked(ipc.onAppStats).mockImplementation(noSub as never);
   vi.mocked(ipc.onPtyStats).mockImplementation(noSub as never);
   vi.mocked(ipc.agentUsage).mockResolvedValue([]);
+  vi.mocked(ipc.planUsage).mockResolvedValue([]);
   vi.mocked(ipc.claudeSessionStats).mockResolvedValue({
     model: "claude-opus-5",
     input_tokens: 10,
@@ -65,6 +67,43 @@ const base = {
   visible: true,
   projects: [{ name: "canopy", roots: ["/repo"] }],
 };
+
+describe("the tray's plan chip", () => {
+  const claudePlan = {
+    agent: "claude",
+    plan: "default_claude_max_20x",
+    windows: [
+      { label: "5h", used_percent: 18, resets_at: null },
+      { label: "7d", used_percent: 52, resets_at: null },
+    ],
+    credits: null,
+    observed: Math.floor(Date.now() / 1000),
+  };
+
+  it("shows the headroom of the CLI in front", async () => {
+    vi.mocked(ipc.planUsage).mockResolvedValue([claudePlan] as never);
+    render(<StatusBar {...base} events={[]} agentId="claude" />);
+    expect(await screen.findByText("7d 52% · 5h 18%")).toBeTruthy();
+  });
+
+  // The important negative: a chip belonging to another CLI is worse than no
+  // chip, because it looks authoritative.
+  it("shows nothing for a CLI that reports no plan", async () => {
+    vi.mocked(ipc.planUsage).mockResolvedValue([claudePlan] as never);
+    render(<StatusBar {...base} events={[]} agentId="amp" />);
+    await screen.findByText(/main/);
+    expect(screen.queryByText(/52%/)).toBeNull();
+  });
+
+  it("escalates once a window is nearly spent", async () => {
+    vi.mocked(ipc.planUsage).mockResolvedValue([
+      { ...claudePlan, windows: [{ label: "7d", used_percent: 96, resets_at: null }] },
+    ] as never);
+    render(<StatusBar {...base} events={[]} agentId="claude" />);
+    const chip = await screen.findByText("7d 96%");
+    expect(chip.className).toContain("is-critical");
+  });
+});
 
 describe("the tray's model control", () => {
   it("lists the models of an inline CLI and switches to the one clicked", async () => {

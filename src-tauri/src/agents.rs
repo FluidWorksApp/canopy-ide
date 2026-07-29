@@ -1410,6 +1410,8 @@ fn setup_claude_hooks(home: &str, bridge: &str) -> Result<String, String> {
         arr.push(want);
         changed += 1;
     }
+    changed += install_claude_statusline(&mut settings, &command);
+
     if changed == 0 {
         return Ok("Claude Code hooks already set up".into());
     }
@@ -1422,6 +1424,57 @@ fn setup_claude_hooks(home: &str, bridge: &str) -> Result<String, String> {
     Ok(format!(
         "Claude Code hooks installed ({changed} events) — restart claude sessions to pick them up"
     ))
+}
+
+/// Claim Claude's `statusLine` slot for the plan chip, preserving whatever was
+/// there.
+///
+/// This is the one part of setup that takes something the user may already be
+/// using: Claude has exactly one status line, and it is the only surface that
+/// reports subscription rate limits. So we wrap rather than replace — the
+/// previous command is handed to canopy-hook as `--passthrough` and still runs,
+/// against the same payload, with its output forwarded untouched. Re-running
+/// setup is idempotent and, crucially, never nests our own wrapper inside
+/// itself: an existing Canopy statusLine is re-derived from the command IT was
+/// wrapping, not from itself.
+///
+/// Returns 1 if the settings object changed.
+fn install_claude_statusline(settings: &mut serde_json::Value, helper: &str) -> u32 {
+    let existing = settings.get("statusLine").cloned();
+    // What was the user's own status line, before any Canopy wrapper?
+    let inner = match &existing {
+        Some(v) if v["command"].as_str().is_some_and(is_canopy_statusline) => {
+            v["command"].as_str().and_then(unwrap_passthrough)
+        }
+        Some(v) => v["command"].as_str().map(|s| s.to_string()),
+        None => None,
+    };
+    let mut command = format!("{} --statusline", sh_quote(helper));
+    if let Some(prev) = inner.as_deref().filter(|s| !s.trim().is_empty()) {
+        command.push_str(&format!(" --passthrough {}", sh_quote(prev)));
+    }
+    let want = serde_json::json!({ "type": "command", "command": command, "padding": 0 });
+    if existing.as_ref() == Some(&want) {
+        return 0;
+    }
+    settings["statusLine"] = want;
+    1
+}
+
+/// Whether a statusLine command is one of ours (and so safe to rewrite).
+fn is_canopy_statusline(command: &str) -> bool {
+    command.contains("canopy-hook") && command.contains("--statusline")
+}
+
+/// The command a Canopy statusLine wrapper is passing through to, if any.
+/// Mirrors the `--passthrough 'cmd'` form written above; anything else means
+/// there was no inner command to preserve.
+fn unwrap_passthrough(command: &str) -> Option<String> {
+    let rest = command.split("--passthrough ").nth(1)?.trim();
+    let inner = rest.strip_prefix('\'')?.strip_suffix('\'')?;
+    // Undo sh_quote's escaping so a re-install re-quotes the original, rather
+    // than accumulating a layer of backslashes each time.
+    Some(inner.replace(r"'\''", "'"))
 }
 
 /// Register `canopy-hook --mcp` as a user-scope MCP server in ~/.claude.json,
@@ -2412,6 +2465,10 @@ struct Candidate {
     title: Option<String>,
     path: Option<std::path::PathBuf>,
     updated: u64,
+    /// The CLI's own billed cost, when it told us one. Claude reports this to
+    /// its statusLine, which canopy-hook records on the digest; transcripts
+    /// carry no such figure. None falls back to the price-table estimate.
+    cost: Option<f64>,
 }
 
 fn secs_mtime(meta: &std::fs::Metadata) -> u64 {
@@ -2482,6 +2539,7 @@ fn canopy_digest_candidates(home: &str) -> Vec<Candidate> {
             title,
             path,
             updated,
+            cost: v["cost_usd"].as_f64(),
         });
     }
     out
@@ -2546,6 +2604,9 @@ fn omp_sessions(home: &str) -> Vec<Candidate> {
                 title: (!title.is_empty()).then_some(title),
                 path: Some(path),
                 updated: mtime,
+                // omp reports cost per turn inside its transcript; fold_omp
+                // picks it up, so nothing to carry on the candidate.
+                cost: None,
             })
         })
         .collect()
@@ -2606,6 +2667,7 @@ fn codex_sessions(home: &str) -> Vec<Candidate> {
                 title: None,
                 path: Some(path),
                 updated: mtime,
+                cost: None,
             })
         })
         .collect()
@@ -2668,7 +2730,10 @@ pub async fn agent_usage() -> Result<Vec<AgentSessionUsage>, String> {
             output_tokens: usage.output,
             cache_read_tokens: usage.cache_read,
             cache_creation_tokens: usage.cache_creation,
-            cost: usage.cost,
+            // A transcript-derived cost (omp) beats a statusLine-derived one
+            // only because omp has no statusLine; in practice at most one of
+            // the two is ever set.
+            cost: usage.cost.or(c.cost),
             turns: usage.turns,
             updated: c.updated,
             supported,
@@ -2678,6 +2743,204 @@ pub async fn agent_usage() -> Result<Vec<AgentSessionUsage>, String> {
     // Unsupported rows are kept so the panel can name what it can't measure.
     out.retain(|u| !u.supported || u.turns > 0);
     out.sort_by(|a, b| b.updated.cmp(&a.updated));
+    Ok(out)
+}
+
+// ---------- subscription plan limits ----------
+//
+// Spend (above) and headroom (here) are different questions with different
+// answers. No amount of token counting yields "you have used 18% of your
+// 5-hour window" — only the provider knows the denominator, and it tells the
+// CLI, not us. So each CLI needs its own route:
+//
+//   codex  — writes `rate_limits` into the rollout JSONL, right beside the
+//            token counts we already fold. Free; nothing to install.
+//   claude — exposes it only to a statusLine command, which is why canopy-hook
+//            has a `--statusline` mode. It drops a snapshot in
+//            ~/.canopy/plan-usage/claude.json and we read that here.
+//
+// Both share one caveat worth designing around: the numbers exist only after a
+// *successful* API response. A request rejected for hitting the limit carries
+// no limit headers, so the moment the user most wants the chip is the moment
+// the live value goes missing. Snapshots are therefore persistent and stamped
+// with `observed` — the frontend shows the last known value with its age
+// rather than blanking.
+
+/// One rolling limit window. `label` is pre-formatted ("5h", "7d") because the
+/// providers disagree on how to express the period and the chip should not
+/// carry that translation.
+#[derive(Serialize, Clone)]
+pub struct PlanWindow {
+    pub label: String,
+    pub used_percent: f64,
+    pub resets_at: Option<u64>,
+}
+
+/// A CLI's subscription headroom. Absent entirely for CLIs that have no plan
+/// concept or expose nothing — never synthesized as zeros, which would read as
+/// "plenty left" when the truth is "unknown".
+#[derive(Serialize, Clone)]
+pub struct PlanUsage {
+    pub agent: String,
+    /// The subscription's name when we can name it ("default_claude_max_20x",
+    /// "free"), for labelling only.
+    pub plan: Option<String>,
+    pub windows: Vec<PlanWindow>,
+    /// Prepaid balance, where the provider bills that way rather than by window.
+    pub credits: Option<f64>,
+    /// When these numbers were true. Drives the staleness note in the UI.
+    pub observed: u64,
+}
+
+/// Human label for a rolling window given its length in minutes.
+fn window_label(minutes: u64) -> String {
+    match minutes {
+        60 => "1h".into(),
+        300 => "5h".into(),
+        1440 => "24h".into(),
+        10080 => "7d".into(),
+        43200 => "30d".into(),
+        m if m % 1440 == 0 => format!("{}d", m / 1440),
+        m if m % 60 == 0 => format!("{}h", m / 60),
+        m => format!("{m}m"),
+    }
+}
+
+/// Snapshots dropped by canopy-hook --statusline (currently Claude's only
+/// route). One file per agent; unknown agents are passed through unread so a
+/// future CLI needs no change here.
+fn stored_plan_usage(home: &str) -> Vec<PlanUsage> {
+    let dir = std::path::PathBuf::from(home).join(".canopy/plan-usage");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let windows: Vec<PlanWindow> = v["windows"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|w| {
+                        Some(PlanWindow {
+                            label: w["label"].as_str()?.to_string(),
+                            used_percent: w["used_percent"].as_f64()?,
+                            resets_at: w["resets_at"].as_u64(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if windows.is_empty() {
+            continue;
+        }
+        out.push(PlanUsage {
+            agent: v["agent"].as_str().unwrap_or("").to_string(),
+            plan: v["plan"].as_str().map(|s| s.to_string()),
+            windows,
+            credits: v["credits"].as_f64(),
+            observed: v["observed"].as_u64().unwrap_or(0),
+        });
+    }
+    out
+}
+
+/// Codex's limits, read straight from the newest rollout that carries them.
+///
+/// Scans newest-first and stops at the first populated snapshot: a session that
+/// only ever got rate-limited writes `primary: null`, so "newest file" and
+/// "newest usable number" are not the same file. The schema has already
+/// changed once in the field (`limit_id`/`plan_type` appeared, `primary` became
+/// nullable), so every field is treated as optional.
+fn codex_plan_usage(home: &str) -> Option<PlanUsage> {
+    use std::io::{BufRead, BufReader};
+    const MAX_FILES: usize = 40;
+    let root = std::path::PathBuf::from(home).join(".codex/sessions");
+    let mut files: Vec<(u64, std::path::PathBuf)> = Vec::new();
+    collect_jsonl(&root, 4, &mut files);
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.truncate(MAX_FILES);
+
+    for (mtime, path) in files {
+        let Ok(f) = std::fs::File::open(&path) else {
+            continue;
+        };
+        // Last populated snapshot in this file wins: within a session the
+        // counters only move forward.
+        let mut best: Option<PlanUsage> = None;
+        for line in BufReader::new(f).lines().map_while(Result::ok) {
+            if !line.contains("\"rate_limits\"") {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let rl = &v["payload"]["rate_limits"];
+            if rl.is_null() {
+                continue;
+            }
+            let mut windows = Vec::new();
+            for slot in ["primary", "secondary"] {
+                let w = &rl[slot];
+                let (Some(used), Some(minutes)) =
+                    (w["used_percent"].as_f64(), w["window_minutes"].as_u64())
+                else {
+                    continue;
+                };
+                windows.push(PlanWindow {
+                    label: window_label(minutes),
+                    used_percent: used,
+                    resets_at: w["resets_at"].as_u64(),
+                });
+            }
+            if windows.is_empty() {
+                continue;
+            }
+            let credits = &rl["credits"];
+            best = Some(PlanUsage {
+                agent: "codex".into(),
+                plan: rl["plan_type"]
+                    .as_str()
+                    .or_else(|| rl["limit_id"].as_str())
+                    .map(|s| s.to_string()),
+                windows,
+                credits: credits["has_credits"]
+                    .as_bool()
+                    .unwrap_or(false)
+                    .then(|| credits["balance"].as_f64())
+                    .flatten(),
+                observed: mtime,
+            });
+        }
+        if best.is_some() {
+            return best;
+        }
+    }
+    None
+}
+
+/// Subscription headroom per CLI, for the status-tray plan chip and the
+/// Statistics panel. Only CLIs that actually report appear in the result.
+#[tauri::command]
+pub async fn plan_usage() -> Result<Vec<PlanUsage>, String> {
+    let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
+    let mut out = stored_plan_usage(&home);
+    // Codex is read live rather than from a stored snapshot, so drop any stale
+    // stored copy of it in favour of what the rollouts say now.
+    if let Some(codex) = codex_plan_usage(&home) {
+        out.retain(|p| p.agent != "codex");
+        out.push(codex);
+    }
+    out.sort_by(|a, b| a.agent.cmp(&b.agent));
     Ok(out)
 }
 
@@ -3617,6 +3880,200 @@ mod tests {
     use super::first_version_token;
     use super::probe_target;
     use super::sh_quote;
+
+    // ---------- statusLine wrapping ----------
+    //
+    // Claude has exactly one statusLine slot. Canopy needs it (the only source
+    // of subscription rate limits) but does not get to cost the user theirs,
+    // and setup runs again on every upgrade — so these cover the two ways that
+    // goes wrong: losing what was there, and nesting inside ourselves.
+
+    const HELPER: &str = "/opt/canopy/canopy-hook";
+
+    fn statusline_command(settings: &serde_json::Value) -> String {
+        settings["statusLine"]["command"].as_str().unwrap().into()
+    }
+
+    #[test]
+    fn claiming_an_empty_slot_installs_a_bare_wrapper() {
+        let mut s = serde_json::json!({});
+        assert_eq!(super::install_claude_statusline(&mut s, HELPER), 1);
+        let cmd = statusline_command(&s);
+        assert!(cmd.contains("--statusline"), "{cmd}");
+        assert!(
+            !cmd.contains("--passthrough"),
+            "nothing to pass through: {cmd}"
+        );
+    }
+
+    #[test]
+    fn an_existing_status_line_is_preserved_not_replaced() {
+        let mut s = serde_json::json!({
+            "statusLine": { "type": "command", "command": "~/.claude/mine.sh" }
+        });
+        super::install_claude_statusline(&mut s, HELPER);
+        assert!(statusline_command(&s).contains("--passthrough '~/.claude/mine.sh'"));
+    }
+
+    #[test]
+    fn reinstalling_is_idempotent_and_never_nests() {
+        let mut s = serde_json::json!({
+            "statusLine": { "type": "command", "command": "~/.claude/mine.sh" }
+        });
+        super::install_claude_statusline(&mut s, HELPER);
+        let once = statusline_command(&s);
+
+        // The upgrade path: setup runs again over settings we already wrote.
+        assert_eq!(
+            super::install_claude_statusline(&mut s, HELPER),
+            0,
+            "no change means no needless settings.json write"
+        );
+        assert_eq!(statusline_command(&s), once);
+        assert_eq!(
+            once.matches("--statusline").count(),
+            1,
+            "wrapper must not wrap itself: {once}"
+        );
+    }
+
+    #[test]
+    fn a_quote_in_the_users_command_survives_a_round_trip() {
+        // sh_quote escapes it on the way in; unwrap_passthrough must undo that
+        // exactly, or each upgrade adds a layer of backslashes.
+        let original = r#"sh -c 'echo it'\''s fine'"#;
+        let mut s = serde_json::json!({
+            "statusLine": { "type": "command", "command": original }
+        });
+        super::install_claude_statusline(&mut s, HELPER);
+        let wrapped = statusline_command(&s);
+        assert_eq!(
+            super::unwrap_passthrough(&wrapped).as_deref(),
+            Some(original)
+        );
+
+        super::install_claude_statusline(&mut s, HELPER);
+        assert_eq!(
+            statusline_command(&s),
+            wrapped,
+            "escaping must not accumulate"
+        );
+    }
+
+    // ---------- codex plan limits ----------
+
+    /// Write a rollout under `home`, dated by `day` so filename order matches
+    /// the order the test means.
+    fn write_rollout(home: &std::path::Path, day: &str, rate_limits: &str) -> std::path::PathBuf {
+        let dir = home.join(".codex/sessions/2026/07").join(day);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("rollout-{day}.jsonl"));
+        // JSONL is one record per line; the fixtures above are wrapped for
+        // readability, so collapse them back. Safe here because none of these
+        // JSON values contain a literal space.
+        let rate_limits: String = rate_limits.split_whitespace().collect();
+        let line = format!(
+            r#"{{"type":"event_msg","payload":{{"type":"token_count","info":null,"rate_limits":{rate_limits}}}}}"#
+        );
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+        path
+    }
+
+    fn tmp_home(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("canopy-plan-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn codex_limits_are_read_from_the_rollout() {
+        let home = tmp_home("read");
+        write_rollout(
+            &home,
+            "20",
+            r#"{"primary":{"used_percent":58.0,"window_minutes":10080,"resets_at":1785291145},
+                "secondary":null,"credits":{"has_credits":false},"plan_type":"free"}"#,
+        );
+        let plan = super::codex_plan_usage(home.to_str().unwrap()).expect("limits");
+        assert_eq!(plan.agent, "codex");
+        assert_eq!(plan.plan.as_deref(), Some("free"));
+        assert_eq!(plan.windows.len(), 1, "a null secondary is not a window");
+        assert_eq!(plan.windows[0].label, "7d");
+        assert_eq!(plan.windows[0].used_percent, 58.0);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The trap this feature actually hits in the wild: a request rejected for
+    /// hitting the limit carries no limit headers, so Codex writes
+    /// `primary: null` — and that is the NEWEST file. Reading only the newest
+    /// rollout reports "no data" exactly when the user is blocked; the last
+    /// real reading is still on disk one file back.
+    #[test]
+    fn a_rate_limited_session_falls_back_to_the_last_real_reading() {
+        let home = tmp_home("fallback");
+        write_rollout(
+            &home,
+            "20",
+            r#"{"primary":{"used_percent":58.0,"window_minutes":10080,"resets_at":1},
+                "secondary":null,"credits":{"has_credits":false},"plan_type":"free"}"#,
+        );
+        // Newer, and useless: this is what a 429 leaves behind.
+        let newer = write_rollout(
+            &home,
+            "29",
+            r#"{"limit_id":"premium","primary":null,"secondary":null,
+                "credits":{"has_credits":false,"unlimited":false,"balance":null},"plan_type":null}"#,
+        );
+        filetime_bump(&newer);
+
+        let plan = super::codex_plan_usage(home.to_str().unwrap()).expect("last good reading");
+        assert_eq!(plan.windows[0].used_percent, 58.0);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_codex_install_that_never_reported_limits_yields_nothing() {
+        let home = tmp_home("empty");
+        write_rollout(&home, "29", r#"{"primary":null,"secondary":null}"#);
+        // Not zeros: a 0% chip would read as "plenty left" when the truth is
+        // that we do not know.
+        assert!(super::codex_plan_usage(home.to_str().unwrap()).is_none());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn both_codex_windows_become_chips_when_both_are_present() {
+        let home = tmp_home("two");
+        write_rollout(
+            &home,
+            "20",
+            r#"{"primary":{"used_percent":0.0,"window_minutes":300,"resets_at":1},
+                "secondary":{"used_percent":10.0,"window_minutes":10080,"resets_at":2},
+                "credits":{"has_credits":false},"plan_type":null}"#,
+        );
+        let plan = super::codex_plan_usage(home.to_str().unwrap()).expect("limits");
+        let labels: Vec<&str> = plan.windows.iter().map(|w| w.label.as_str()).collect();
+        assert_eq!(labels, vec!["5h", "7d"]);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Make a file unambiguously the newest, without sleeping.
+    fn filetime_bump(path: &std::path::Path) {
+        let now = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(now).unwrap();
+    }
+
+    #[test]
+    fn window_labels_read_as_humans_write_them() {
+        assert_eq!(super::window_label(300), "5h");
+        assert_eq!(super::window_label(10080), "7d");
+        // Unknown periods still have to render as something sane.
+        assert_eq!(super::window_label(2880), "2d");
+        assert_eq!(super::window_label(180), "3h");
+        assert_eq!(super::window_label(90), "90m");
+    }
 
     /// The whole point of the rewrite, against a real pty: the terminal's
     /// foreground program is the candidate — not the shell that is idling, and

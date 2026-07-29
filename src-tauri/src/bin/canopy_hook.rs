@@ -82,11 +82,181 @@ fn main() {
         mcp_main();
         return;
     }
+    // Fourth job: `canopy-hook --statusline` sits in Claude's statusLine slot.
+    // That slot is the ONLY place Claude exposes subscription rate limits
+    // (rate_limits.five_hour / .seven_day) and its own billed cost, so the plan
+    // chip has no other source. It is not a hook: it must reproduce whatever
+    // status line the user already had, so it always ends by running the
+    // command it replaced.
+    if std::env::args().any(|a| a == "--statusline") {
+        statusline_main();
+        return;
+    }
     // Any failure exits 0 with no stdout: a hook must never break the session
     // it's attached to.
     if let Err(_e) = real_main() {
         std::process::exit(0);
     }
+}
+
+// ---------- statusLine: subscription rate limits ----------
+//
+// Claude renders the status line on every repaint, so this path runs orders of
+// magnitude more often than any hook. Two rules follow: it must never write
+// unless a number actually moved, and it must never fail in a way that costs
+// the user their status line.
+//
+// Deliberately NOT gated on $CANOPY, unlike the hook path. Rate limits are a
+// property of the account, not of a session, so a `claude` in any terminal
+// reports exactly the same window percentages a Canopy-spawned one would —
+// and refusing to read them there would leave the chip stale for anyone whose
+// habit is to run the CLI outside the IDE. Nothing session-scoped is recorded
+// for foreign sessions: the per-session cost below only updates a digest that
+// already exists, and only Canopy ever creates one.
+
+/// Where the plan chip reads from. One file per agent, overwritten in place.
+fn plan_usage_path(agent: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(home())
+        .join(".canopy/plan-usage")
+        .join(format!("{agent}.json"))
+}
+
+/// Normalize Claude's `rate_limits` into the shape the frontend consumes:
+/// an ordered list of windows, each a label + percent + reset. Returns None
+/// when the payload carries no limits at all (API-key auth, or before the
+/// session's first API response).
+fn claude_windows(rate_limits: &serde_json::Value) -> Option<Vec<serde_json::Value>> {
+    let mut windows = Vec::new();
+    // Claude exposes exactly these two. Its /usage panel also shows a
+    // model-scoped weekly bar, but that one is not in the payload — the chip
+    // must not imply it is covered.
+    for (key, label) in [("five_hour", "5h"), ("seven_day", "7d")] {
+        let w = &rate_limits[key];
+        let Some(used) = w["used_percentage"].as_f64() else {
+            continue;
+        };
+        windows.push(serde_json::json!({
+            "label": label,
+            "used_percent": used,
+            "resets_at": w["resets_at"].as_u64(),
+        }));
+    }
+    (!windows.is_empty()).then_some(windows)
+}
+
+/// Persist the plan snapshot, but only when something changed. Comparing the
+/// windows (not the whole record, which carries a timestamp) is what keeps a
+/// per-repaint hook from becoming a per-repaint disk write.
+fn store_plan_usage(agent: &str, windows: &[serde_json::Value], plan: Option<String>) {
+    let path = plan_usage_path(agent);
+    if let Ok(raw) = std::fs::read_to_string(&path) {
+        if let Ok(prev) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if prev["windows"] == serde_json::Value::Array(windows.to_vec()) {
+                return;
+            }
+        }
+    }
+    let record = serde_json::json!({
+        "agent": agent,
+        "plan": plan,
+        "windows": windows,
+        "observed": now_secs(),
+    });
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(body) = serde_json::to_string(&record) {
+        let _ = std::fs::write(&path, body);
+    }
+}
+
+/// The subscription's name, for labelling the chip. `claudeMaxTier` looks like
+/// the right field and is not — it reads "not_max" on a Max 20x account. The
+/// organization tier is the one that tracks reality.
+fn claude_plan_label() -> Option<String> {
+    let raw =
+        std::fs::read_to_string(std::path::PathBuf::from(home()).join(".claude.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let acct = &v["oauthAccount"];
+    acct["organizationRateLimitTier"]
+        .as_str()
+        .or_else(|| acct["userRateLimitTier"].as_str())
+        .map(|s| s.to_string())
+}
+
+/// Record the CLI's own cost figure onto an existing session digest, so the
+/// tray can show a real number instead of a price-table estimate. Only touches
+/// digests Canopy already created.
+fn store_session_cost(session_id: &str, cost: f64) {
+    if session_id.is_empty() {
+        return;
+    }
+    let path = std::path::PathBuf::from(home())
+        .join(".canopy/sessions")
+        .join(format!("{session_id}.json"));
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
+    // Cost only ever grows within a session; an equal value means no repaint
+    // worth a write.
+    if v["cost_usd"].as_f64().is_some_and(|prev| prev >= cost) {
+        return;
+    }
+    v["cost_usd"] = serde_json::json!(cost);
+    if let Ok(body) = serde_json::to_string(&v) {
+        let _ = std::fs::write(&path, body);
+    }
+}
+
+/// Run the status line this one displaced, feeding it the identical payload and
+/// forwarding its output verbatim. Canopy owns a slot Claude only has one of,
+/// so the user's own status line has to survive us intact.
+fn run_passthrough(raw: &str) {
+    let mut args = std::env::args().skip(1);
+    let mut cmd = None;
+    while let Some(a) = args.next() {
+        if a == "--passthrough" {
+            cmd = args.next();
+        }
+    }
+    let Some(cmd) = cmd.filter(|c| !c.trim().is_empty()) else {
+        return;
+    };
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let Ok(mut child) = Command::new("sh")
+        .arg("-c")
+        .arg(&cmd)
+        .stdin(Stdio::piped())
+        .spawn()
+    else {
+        return;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(raw.as_bytes());
+    }
+    let _ = child.wait();
+}
+
+fn statusline_main() {
+    use std::io::Read;
+    let mut raw = String::new();
+    if std::io::stdin().read_to_string(&mut raw).is_err() {
+        return;
+    }
+    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&raw) {
+        if let Some(windows) = claude_windows(&payload["rate_limits"]) {
+            store_plan_usage("claude", &windows, claude_plan_label());
+        }
+        if let Some(cost) = payload["cost"]["total_cost_usd"].as_f64() {
+            store_session_cost(payload["session_id"].as_str().unwrap_or(""), cost);
+        }
+    }
+    // Always last, and always reached: capture failing must not blank the line.
+    run_passthrough(&raw);
 }
 
 fn real_main() -> Result<(), Box<dyn std::error::Error>> {

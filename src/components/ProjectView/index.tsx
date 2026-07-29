@@ -3627,6 +3627,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const modelTargetRef = useRef(modelTarget);
   modelTargetRef.current = modelTarget;
 
+  // Which CLI the front terminal is running, resolved independently of
+  // modelTarget: that one is null for any CLI Canopy can't switch models on
+  // (Codex among them), and the plan chip has to work there too.
+  const activeAgentId = useMemo(() => {
+    const termTabs = tabs.filter((t): t is TermSubTab => t.type === "terminal");
+    const active = termTabs.find((t) => t.id === activeTabId) ?? termTabs[0];
+    if (!active || active.ptyId == null) return null;
+    const s = projectStats.find((x) => x.id === active.ptyId);
+    return s ? (identifyAgent(s.agent_hint)?.id ?? null) : null;
+  }, [tabs, activeTabId, projectStats]);
+
   // Change that session's model by typing the CLI's own command into its
   // terminal — the same thing the user would type, so the CLI's confirmations,
   // pickers and context-size warnings appear right there. The terminal is
@@ -6207,6 +6218,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         onSetModel={modelTarget ? setAgentModel : undefined}
         modelSwitch={modelTarget?.sw ?? null}
         agentLabel={modelTarget?.label}
+        agentId={activeAgentId}
         activePtyId={activeTab?.type === "terminal" ? activeTab.ptyId : null}
       />
       {launcherOpen && visible && (

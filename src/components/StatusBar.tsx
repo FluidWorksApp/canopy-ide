@@ -5,6 +5,7 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { fmtTokens } from "../format";
 import * as ipc from "../ipc";
 import { estimateCost, sessionCost } from "../pricing";
+import { chipText, planFor, planTone, tooltip } from "../planUsage";
 import { StatsPanel } from "./StatsPanel";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { HeartIcon, StatsIcon } from "./icons";
@@ -47,6 +48,10 @@ interface StatusBarProps {
   modelSwitch?: ModelSwitch | null;
   /** What to call the CLI in front in the switch dialog ("Codex CLI"). */
   agentLabel?: string;
+  /** Registry id of the CLI in front ("claude", "codex"), used to pick which
+   *  plan's headroom the chip shows. Separate from agentLabel because that one
+   *  is absent for CLIs Canopy can't switch models on. */
+  agentId?: string | null;
   /** The pty of the active terminal tab — the model/token tray follows THIS
    *  tab's session, not whichever session in the project spoke last. */
   activePtyId?: number | null;
@@ -61,6 +66,7 @@ export const StatusBar = memo(function StatusBar({
   onSetModel,
   modelSwitch,
   agentLabel,
+  agentId,
   activePtyId,
 }: StatusBarProps) {
   const [branch, setBranch] = useState<string | null>(null);
@@ -158,6 +164,30 @@ export const StatusBar = memo(function StatusBar({
     const sub = ipc.onAppStats(setApp);
     return () => void sub.then((fn) => fn());
   }, [visible]);
+
+  // Subscription headroom. Visible-gated like everything else here, and slow:
+  // these are rolling windows measured in hours, so a minute of lag is
+  // invisible while a tighter poll would re-scan Codex's rollout files for
+  // nothing.
+  const [plans, setPlans] = useState<ipc.PlanUsage[]>([]);
+  useEffect(() => {
+    if (!visible) return;
+    let cancelled = false;
+    const pull = () =>
+      void ipc
+        .planUsage()
+        .then((p) => {
+          if (!cancelled) setPlans(p);
+        })
+        .catch(() => {});
+    pull();
+    const timer = setInterval(pull, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [visible]);
+  const plan = useMemo(() => planFor(plans, agentId), [plans, agentId]);
 
   // The transcript whose model/tokens the tray shows. Per-TAB first: prefer
   // the latest event stamped with the active terminal's pty, so switching
@@ -623,6 +653,19 @@ export const StatusBar = memo(function StatusBar({
           title="estimated session cost"
         >
           ~${cost.toFixed(2)}
+        </span>
+      )}
+      {/* Plan headroom, right of spend: the two answer different questions —
+          what this session cost vs how much of the subscription is left — and
+          only the CLIs that genuinely report limits get a chip. A CLI with no
+          plan concept, or one that has not seen an API response yet, shows
+          nothing rather than a 0% that would read as "plenty left". */}
+      {plan && plan.windows.length > 0 && (
+        <span
+          className={`status-item status-plan is-${planTone(plan)}`}
+          title={tooltip(plan)}
+        >
+          {chipText(plan)}
         </span>
       )}
       {/* Between the spend and the stats: the two things either side of it are
