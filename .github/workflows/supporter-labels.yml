@@ -1,0 +1,53 @@
+# Puts a supporter:* label on issues and PRs opened by people who fund Canopy.
+#
+# The tiers and the supporter list are data in .github/supporters/, not a query
+# against GitHub. That is the whole point of the design: GitHub Sponsors has no
+# transaction API and can never say who has given how much, so Stripe stays the
+# ledger and GitHub is only the identity. It also keeps this workflow on the
+# default GITHUB_TOKEN — reading sponsorships from the API is refused for
+# GITHUB_TOKEN and impossible for GitHub Apps, and would mean a classic PAT with
+# account-wide scope living in a repo secret.
+#
+# pull_request_target rather than pull_request: a fork PR's GITHUB_TOKEN is
+# read-only and could not apply a label at all. The usual danger of that trigger
+# is running fork code with a write token — this job runs only the script and
+# store committed on the base ref, never checks out or executes the PR head, and
+# takes nothing from the PR but the author's login.
+#
+# See docs/supporter-tiers.md for the tier policy and what has to happen outside
+# this repo (the Stripe custom field, the webhook receiver in canopy-website).
+name: supporter labels
+
+on:
+  issues:
+    types: [opened]
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: supporter-labels-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  label:
+    name: Apply supporter tier label
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/supporter-labels.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional: once canopy-website serves the store built by the Stripe
+          # webhook receiver, point these at it and the committed file becomes a
+          # fallback rather than the source of truth.
+          SUPPORTERS_URL: ${{ vars.SUPPORTERS_URL }}
+          SUPPORTERS_TOKEN: ${{ secrets.SUPPORTERS_TOKEN }}

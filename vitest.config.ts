@@ -11,7 +11,15 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: ["src/test/setup.ts"],
-    include: ["src/**/*.test.{ts,tsx}", "shared/**/*.test.{ts,tsx}", "packages/**/src/**/*.test.{ts,tsx}"],
+    // scripts/ is plain .mjs and outside the TS project, but the supporter
+    // tier rules run in CI against real issues — they belong under test with
+    // everything else rather than in a corner nothing checks.
+    include: [
+      "src/**/*.test.{ts,tsx}",
+      "shared/**/*.test.{ts,tsx}",
+      "packages/**/src/**/*.test.{ts,tsx}",
+      "scripts/**/*.test.mjs",
+    ],
     coverage: {
       provider: "v8",
       // Only the modules we actually target — reporting 0% for the whole tree
