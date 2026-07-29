@@ -25,6 +25,7 @@ mod prwatch;
 mod pty;
 mod punch;
 mod relay;
+mod remote;
 mod research;
 mod selftest;
 mod snapshot;
