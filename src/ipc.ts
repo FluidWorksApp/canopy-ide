@@ -2101,8 +2101,18 @@ export const androidSdkStatus = (projectDir?: string) =>
 export const androidDevices = (projectDir?: string) =>
   invoke<AndroidDevice[]>("android_devices", { projectDir });
 
+/** Emulators, each with whether it can actually boot. `android emulator start`
+ *  exits 0 on an AVD whose system image is gone, so this is checked up front
+ *  rather than discovered as an unexplainable failure afterwards. */
 export const androidAvds = (projectDir?: string) =>
-  invoke<string[]>("android_avds", { projectDir });
+  invoke<AndroidAvd[]>("android_avds", { projectDir });
+
+export interface AndroidAvd {
+  name: string;
+  ready: boolean;
+  /** Why it can't boot, in the user's terms; null when it can. */
+  problem: string | null;
+}
 
 /** Resolves once the emulator is genuinely usable, with its serial. */
 export const androidEmulatorStart = (name: string, projectDir?: string) =>

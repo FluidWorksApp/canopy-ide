@@ -62,7 +62,7 @@ export default function DeviceView({
 }: DeviceViewProps) {
   const [status, setStatus] = useState<ipc.AndroidSdkStatus | null>(null);
   const [devices, setDevices] = useState<ipc.AndroidDevice[]>([]);
-  const [avds, setAvds] = useState<string[]>([]);
+  const [avds, setAvds] = useState<ipc.AndroidAvd[]>([]);
   const [frame, setFrame] = useState<string | null>(null);
   const [size, setSize] = useState<{ w: number; h: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -215,89 +215,130 @@ export default function DeviceView({
   const missing = status?.missing ?? [];
 
   if (!serial) {
+    const running = devices.filter((d) => d.state === "device");
+    const notReady = devices.filter((d) => d.state !== "device");
     return (
       <div className="preview-view">
-        <div className="preview-empty">
-          <h3>Android device</h3>
-          {missing.length > 0 && (
-            <ul className="device-missing">
-              {missing.map((m) => (
-                <li key={m}>{m}</li>
-              ))}
-            </ul>
-          )}
-          {projects.length > 1 && (
-            <label className="device-project-pick">
-              Project
-              <select
-                value={projectDir}
-                onChange={(e) => onPatch({ projectDir: e.target.value })}
-              >
-                {projects.map((p) => (
-                  <option key={p.path} value={p.path}>
-                    {p.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          {devices.length > 0 && (
-            <>
-              <p>Attached:</p>
-              <ul className="device-list">
-                {devices.map((d) => (
-                  <li key={d.serial}>
-                    <button
-                      className="btn-mini"
-                      disabled={d.state !== "device"}
-                      title={d.state !== "device" ? `adb reports it as ${d.state}` : ""}
-                      onClick={() => onPatch({ serial: d.serial })}
-                    >
-                      {d.model || d.serial}
-                      <span className="device-serial">{d.serial}</span>
-                      {d.state !== "device" && (
-                        <span className="device-state">{d.state}</span>
-                      )}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
-          {avds.length > 0 && (
-            <>
-              <p>Emulators:</p>
-              <ul className="device-list">
-                {avds.map((name) => (
-                  <li key={name}>
-                    <button
-                      className="btn-mini"
-                      disabled={booting !== null}
-                      onClick={() => void startEmulator(name)}
-                    >
-                      {booting === name ? `Starting ${name}…` : `▶ ${name}`}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
-          {devices.length === 0 && avds.length === 0 && missing.length === 0 && (
-            <p>
-              Nothing attached. Plug in a device with USB debugging on, or create an emulator
-              in Android Studio.
+        <div className="device-picker">
+          <div className="device-picker-card">
+            <h3>Pick a device to watch</h3>
+            <p className="device-picker-lead">
+              Canopy shows its screen here and refreshes it while this tab is in front. Your
+              agent can install the app, drive it and read its log on the same device.
             </p>
-          )}
-          <button className="btn-mini" onClick={() => void refreshDevices()}>
-            Refresh
-          </button>
-          {error && <p className="preview-error">{error}</p>}
+
+            {missing.length > 0 && (
+              <div className="device-block device-block-warn">
+                <h4>Install these first</h4>
+                <ul>
+                  {missing.map((m) => (
+                    <li key={m}>{m}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {projects.length > 1 && (
+              <label className="device-project-pick">
+                <span>Android project</span>
+                <select
+                  value={projectDir}
+                  onChange={(e) => onPatch({ projectDir: e.target.value })}
+                >
+                  {projects.map((p) => (
+                    <option key={p.path} value={p.path}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+
+            {running.length > 0 && (
+              <div className="device-block">
+                <h4>Running now</h4>
+                <ul className="device-list">
+                  {running.map((d) => (
+                    <li key={d.serial}>
+                      <button className="device-row" onClick={() => onPatch({ serial: d.serial })}>
+                        <span className="device-row-name">{d.model || d.serial}</span>
+                        <span className="device-row-sub">
+                          {d.emulator ? "emulator" : "connected device"} · {d.serial}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {avds.length > 0 && (
+              <div className="device-block">
+                <h4>{running.length ? "Or start another emulator" : "Start an emulator"}</h4>
+                <ul className="device-list">
+                  {avds.map((avd) => (
+                    <li key={avd.name}>
+                      <button
+                        className="device-row"
+                        // A broken AVD stays visible but unclickable: hiding it
+                        // would leave the user hunting for a device they know
+                        // they created, and the reason is the useful part.
+                        disabled={!avd.ready || booting !== null}
+                        onClick={() => void startEmulator(avd.name)}
+                      >
+                        <span className="device-row-name">
+                          {booting === avd.name ? `Starting ${avd.name}…` : avd.name}
+                        </span>
+                        <span className="device-row-sub">
+                          {avd.problem ??
+                            (booting === avd.name
+                              ? "this takes about half a minute"
+                              : "not running — click to boot it")}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {notReady.length > 0 && (
+              <div className="device-block">
+                <h4>Not usable yet</h4>
+                <ul className="device-list">
+                  {notReady.map((d) => (
+                    <li key={d.serial} className="device-row device-row-dead">
+                      <span className="device-row-name">{d.model || d.serial}</span>
+                      <span className="device-row-sub">
+                        {d.state === "unauthorized"
+                          ? "accept the USB debugging prompt on the device"
+                          : `adb reports it as ${d.state}`}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {devices.length === 0 && avds.length === 0 && missing.length === 0 && (
+              <div className="device-block">
+                <p>
+                  No devices and no emulators. Create one in Android Studio, or plug in a phone
+                  with USB debugging turned on.
+                </p>
+              </div>
+            )}
+
+            {error && <p className="preview-error device-picker-error">{error}</p>}
+
+            <button className="btn-mini" onClick={() => void refreshDevices()}>
+              Refresh
+            </button>
+          </div>
         </div>
       </div>
     );
   }
-
-  const scale = size && imgRef.current ? imgRef.current.clientWidth / size.w : 1;
 
   return (
     <div className="preview-view">
@@ -320,7 +361,15 @@ export default function DeviceView({
       <div className="preview-body">
         <div className="preview-frame-wrap device-frame-wrap">
           {frame ? (
-            <div className="device-screen">
+            // The box is given the device's aspect ratio and told to fit the
+            // pane; the image then fills it exactly. Sizing the image by
+            // `max-height: 100%` instead does nothing, because its parent has
+            // no definite height to resolve the percentage against — which is
+            // how the frame ended up overflowing the pane.
+            <div
+              className="device-screen"
+              style={size ? { aspectRatio: `${size.w} / ${size.h}` } : undefined}
+            >
               <img
                 ref={imgRef}
                 src={frame}
@@ -339,11 +388,13 @@ export default function DeviceView({
                   <span
                     key={a.n}
                     className="device-mark"
+                    // Percentages of the frame, not scaled pixels: correct at
+                    // any pane size, and no layout read during render.
                     style={{
-                      left: a.bounds.x1 * scale,
-                      top: a.bounds.y1 * scale,
-                      width: (a.bounds.x2 - a.bounds.x1) * scale,
-                      height: (a.bounds.y2 - a.bounds.y1) * scale,
+                      left: `${(a.bounds.x1 / size.w) * 100}%`,
+                      top: `${(a.bounds.y1 / size.h) * 100}%`,
+                      width: `${((a.bounds.x2 - a.bounds.x1) / size.w) * 100}%`,
+                      height: `${((a.bounds.y2 - a.bounds.y1) / size.h) * 100}%`,
                     }}
                   >
                     <b>{a.n}</b>

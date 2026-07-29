@@ -264,15 +264,74 @@ pub fn android_devices(project_dir: Option<String>) -> Result<Vec<Device>, Strin
 // ---------- emulators ----------
 
 #[tauri::command]
-pub fn android_avds(project_dir: Option<String>) -> Result<Vec<String>, String> {
+pub fn android_avds(project_dir: Option<String>) -> Result<Vec<Avd>, String> {
     let sdk = sdk_or_err(project_dir.as_deref())?;
     let out = run(Command::new(cli_or_err(&sdk)?).args(["emulator", "list"]))?;
     Ok(out
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
-        .map(str::to_string)
+        .map(|name| {
+            let problem = avd_problem(&sdk, name);
+            Avd {
+                name: name.to_string(),
+                ready: problem.is_none(),
+                problem,
+            }
+        })
         .collect())
+}
+
+/// An emulator, and whether it can actually boot.
+///
+/// Checked up front because the alternative is worse than useless: `android
+/// emulator start` on an AVD whose system image is gone **exits 0**, prints
+/// "Emulator process has exited early", and reports no serial — so the only
+/// honest thing a caller could say afterwards is that something went wrong
+/// somewhere. Offering a button that cannot work, and then explaining the
+/// failure badly, is two bugs; this removes both.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Avd {
+    pub name: String,
+    pub ready: bool,
+    /// Why it can't boot, in the user's terms. `None` when it can.
+    pub problem: Option<String>,
+}
+
+/// The AVD's `image.sysdir.1`, resolved against the SDK. Missing means the
+/// system image was never installed or has since been removed.
+fn avd_problem(sdk: &Sdk, name: &str) -> Option<String> {
+    let config = avd_home().join(format!("{name}.avd")).join("config.ini");
+    let text = std::fs::read_to_string(config).ok()?;
+    let sysdir = text.lines().find_map(|l| {
+        l.trim()
+            .strip_prefix("image.sysdir.1")?
+            .trim_start()
+            .strip_prefix('=')
+            .map(|v| v.trim().to_string())
+    })?;
+    // Relative to the SDK root, which is how the emulator resolves it.
+    if Path::new(&sdk.root).join(&sysdir).is_dir() {
+        return None;
+    }
+    Some(format!(
+        "its system image is missing ({sysdir}) — install it in Android Studio's SDK Manager, \
+         or delete this device and create a new one"
+    ))
+}
+
+/// Where AVDs live. `ANDROID_AVD_HOME` wins, then `ANDROID_SDK_HOME`, then the
+/// default — the same order the emulator itself resolves in.
+fn avd_home() -> PathBuf {
+    if let Ok(dir) = std::env::var("ANDROID_AVD_HOME") {
+        return PathBuf::from(dir);
+    }
+    let base = std::env::var("ANDROID_SDK_HOME")
+        .map(PathBuf::from)
+        .ok()
+        .or_else(dirs_home)
+        .unwrap_or_default();
+    base.join(".android").join("avd")
 }
 
 /// Boot an AVD and return its serial.
@@ -287,16 +346,70 @@ pub async fn android_emulator_start(
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let sdk = sdk_or_err(project_dir.as_deref())?;
+        // Refuse before spawning when we already know why it can't work; the
+        // CLI's own failure for this case is a success exit code and a shrug.
+        if let Some(problem) = avd_problem(&sdk, &name) {
+            return Err(format!("{name} can't start: {problem}"));
+        }
         let out = run(Command::new(cli_or_err(&sdk)?).args(["emulator", "start", &name]))?;
-        parse_started_serial(&out).ok_or_else(|| {
-            format!(
-                "the emulator started but didn't report a serial:\n{}",
-                out.trim()
-            )
-        })
+        if let Some(serial) = parse_started_serial(&out) {
+            return Ok(serial);
+        }
+        Err(format!(
+            "{name} didn't start: {}",
+            start_failure(&name, &out)
+        ))
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Why a start produced no serial. The CLI exits 0 either way and keeps the
+/// reason in the AVD's own log, so that is where to look before falling back to
+/// whatever it did print.
+fn start_failure(name: &str, out: &str) -> String {
+    let log = avd_home().join(format!("{name}.avd"));
+    let log = log
+        .parent()
+        .map(|p| p.join(name).join("emulator.log"))
+        .unwrap_or_default();
+    // The emulator writes its log beside the AVD under ~/.android/<name>/.
+    let log = if log.is_file() {
+        log
+    } else {
+        dirs_home()
+            .unwrap_or_default()
+            .join(".android")
+            .join(name)
+            .join("emulator.log")
+    };
+    if let Ok(text) = std::fs::read_to_string(&log) {
+        let fatal: Vec<&str> = text
+            .lines()
+            .filter(|l| l.contains("FATAL") || l.contains("ERROR"))
+            .rev()
+            .take(2)
+            .collect();
+        if !fatal.is_empty() {
+            return fatal
+                .into_iter()
+                .rev()
+                .map(|l| l.split('|').next_back().unwrap_or(l).trim())
+                .collect::<Vec<_>>()
+                .join("; ");
+        }
+    }
+    let said = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("Waiting for"))
+        .next_back()
+        .unwrap_or("");
+    if said.is_empty() {
+        format!("no reason given (see {})", log.display())
+    } else {
+        said.to_string()
+    }
 }
 
 /// The serial out of "Virtual device successfully started as 'emulator-5554'".
@@ -718,6 +831,24 @@ mod tests {
     #[test]
     fn reports_no_serial_when_the_emulator_never_said_one() {
         assert_eq!(parse_started_serial("Waiting for virtual device\n"), None);
+    }
+
+    #[test]
+    fn quotes_what_the_cli_said_when_there_is_no_log_to_read() {
+        // The real shape of a failed start: exit 0, no serial, one line of
+        // explanation buried after the countdown spam.
+        let out = "Emulator process 87132 started, log file location: '/x/emulator.log'\n\
+                   Waiting for virtual device 'Broken' to fully start (299 seconds left)\n\
+                   Emulator process has exited early, see log for details.\n";
+        let said = start_failure("definitely-not-a-real-avd-name", out);
+        assert!(said.contains("exited early"), "got: {said}");
+        assert!(!said.contains("Waiting for"), "countdown leaked: {said}");
+    }
+
+    #[test]
+    fn admits_it_has_no_reason_rather_than_inventing_one() {
+        let said = start_failure("definitely-not-a-real-avd-name", "Waiting for it\n");
+        assert!(said.starts_with("no reason given"), "got: {said}");
     }
 
     #[test]
