@@ -6901,6 +6901,14 @@ body.dragging-tab * {
 .spot-field-composing .spot-field-icon {
   margin-top: 13px;
 }
+/* The clear button is the other thing flex-start moves, and it was left behind:
+   in a composing field it flew to the top of the row and sat on the panel's
+   rim, level with nothing. Both ends of the row line up with the first line of
+   text instead — the icon's 13px on a 15px box and this on an 18px one put the
+   two centres within half a pixel of each other. */
+.spot-field-composing .spot-clear {
+  margin-top: 12px;
+}
 
 .spot-shots {
   display: flex;
