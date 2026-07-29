@@ -14634,3 +14634,82 @@ a.btn-mini {
   font-style: italic;
   color: var(--text-dim);
 }
+
+/* Sized and weighted like the title it replaces, so committing a rename does
+   not make the header jump. */
+.research-title-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0 4px;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+}
+
+.research-title-input:focus {
+  outline: none;
+}
+
+.research-title-text {
+  cursor: text;
+}
+
+/* The entry's CRUD, as marks. They sit at the end of the meta row rather than
+   in a bar of their own: they are small, frequent, and were previously six
+   equal-weight buttons drowning the one action that matters. */
+.research-crud {
+  display: inline-flex;
+  gap: 2px;
+  align-items: center;
+}
+
+.research-crud .btn-icon {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.research-crud .btn-icon:hover {
+  color: var(--text);
+  background: var(--bg-raised);
+}
+
+.btn-icon-danger:hover {
+  color: var(--danger) !important;
+}
+
+.research-steer {
+  position: relative;
+}
+
+/* Wider than the CLI menu it borrows from: this one holds a sentence of
+   explanation as well as the box, because "continue" without saying what
+   changed is how you get the same answer twice. */
+.research-steer-menu {
+  right: 0;
+  left: auto;
+  width: 320px;
+  padding: 10px;
+}
+
+.research-steer-menu .agent-query-input {
+  width: 100%;
+}
+
+.research-steer-note {
+  margin: 8px 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.research-actions-note {
+  font-size: 11px;
+  color: var(--text-dim);
+}

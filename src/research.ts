@@ -168,6 +168,25 @@ export async function settleIfRunning(
   await setStatus(projectId, id, status, "Canopy", note).catch(() => {});
 }
 
+/** Give an entry a better name than the one it was born with.
+ *
+ *  An entry titles itself from the question, shortened — which is the only
+ *  thing available at the moment it is created, and reliably terrible once
+ *  anyone knows what the research actually turned out to be about. The title is
+ *  what the panel, the tab strip, ⌘K and every citation of this entry show, so
+ *  it is worth being able to fix. Empty is refused rather than stored: a row
+ *  with no name is worse than a clumsy one. */
+export async function rename(
+  projectId: string,
+  id: string,
+  title: string,
+): Promise<void> {
+  const next = title.trim();
+  if (!next) return;
+  await ipc.researchUpdate({ projectId, id, title: next });
+  await refresh(projectId);
+}
+
 export async function remove(projectId: string, id: string): Promise<void> {
   await ipc.researchDelete(projectId, id);
   await refresh(projectId);
