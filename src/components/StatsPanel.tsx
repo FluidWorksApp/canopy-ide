@@ -198,7 +198,7 @@ export function StatsPanel({ visible }: { visible: boolean }) {
               return (
                 <div className="plan-group" key={p.agent}>
                   <div className="plan-group-head">
-                    <AgentIcon agent={p.agent} size={13} />
+                    <AgentIcon id={p.agent} size={13} />
                     <span className="plan-agent">{agentName(p.agent)}</span>
                     {planLabel(p) && (
                       <span className="plan-tier">{planLabel(p)}</span>
