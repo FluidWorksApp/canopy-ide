@@ -9,10 +9,14 @@ import {
 
 export interface DialogAction {
   label: string;
-  /** Filled with accent (or danger when variant="danger"). */
+  /** Filled with accent (or danger when variant="danger"). Enter fires the
+   *  first primary action, so exactly one action should carry it. */
   primary?: boolean;
-  /** Mono shortcut shown inside the button, e.g. "⌘⌫". */
+  /** Mono shortcut shown inside the button, e.g. "⌘⌫". The primary action and
+   *  the dismiss button get "⏎" / "esc" for free — pass this only to override. */
   hint?: string;
+  /** Greys the button out and takes Enter away from it. */
+  disabled?: boolean;
   onClick?: () => void;
 }
 
@@ -58,6 +62,10 @@ function DialogImpl({
   const [closing, setClosing] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
   const prevFocusRef = useRef<Element | null>(null);
+  // Read by the key listener, which must not re-subscribe on every render just
+  // because the caller rebuilt its actions array inline.
+  const actionsRef = useRef(actions);
+  actionsRef.current = actions;
 
   // Enter / exit lifecycle
   useEffect(() => {
@@ -105,6 +113,25 @@ function DialogImpl({
         onDismiss?.();
         return;
       }
+      // Enter commits the dialog wherever focus happens to be — that is the
+      // whole point of one shared dialog: the answer is never "click it".
+      if (e.key === "Enter") {
+        const el = document.activeElement as HTMLElement | null;
+        // A focused button already gets Enter natively (firing here too would
+        // run two actions), and a textarea owns the key for newlines.
+        if (
+          el?.tagName === "BUTTON" ||
+          el?.tagName === "TEXTAREA" ||
+          el?.isContentEditable
+        )
+          return;
+        const primary = actionsRef.current.find((a) => a.primary);
+        if (!primary || primary.disabled) return;
+        e.preventDefault();
+        e.stopPropagation();
+        primary.onClick?.();
+        return;
+      }
       if (e.key !== "Tab" || !node) return;
       const focusables = Array.from(
         node.querySelectorAll<HTMLElement>(
@@ -137,6 +164,7 @@ function DialogImpl({
   if (!alive) return null;
 
   const showDot = icon !== undefined || variant !== "default";
+  const enterAction = actions.find((a) => a.primary);
 
   return (
     <div
@@ -178,16 +206,28 @@ function DialogImpl({
           <div className="dlg-actions">
             <span className="dlg-actions-spacer" />
             {dismissLabel && (
-              <DialogButton label={dismissLabel} kind="quiet" onClick={onDismiss} />
+              <DialogButton
+                label={dismissLabel}
+                hint="esc"
+                kind="quiet"
+                onClick={onDismiss}
+              />
             )}
             {actions.map((a, i) => (
               <DialogButton
                 key={i}
                 label={a.label}
-                hint={a.hint}
+                // The button Enter fires says so; the rest keep their own hint.
+                hint={a.hint ?? (a === enterAction ? "⏎" : undefined)}
                 onClick={a.onClick}
+                disabled={a.disabled}
                 kind={a.primary ? (variant === "danger" ? "danger" : "accent") : "quiet"}
-                autoFocus={Boolean(a.primary) && variant !== "danger"}
+                // The action Enter fires is also the one holding focus, danger
+                // included — a confirmation you can't answer from the keyboard
+                // is the thing this dialog exists to stop. A field in the
+                // children slot can still claim focus with its own
+                // data-autofocus, since it comes first in the DOM.
+                autoFocus={a === enterAction}
               />
             ))}
           </div>
@@ -203,22 +243,31 @@ function DialogButton({
   onClick,
   kind = "quiet",
   autoFocus,
+  disabled,
 }: {
   label: string;
   hint?: string;
   onClick?: () => void;
   kind?: "quiet" | "accent" | "danger";
   autoFocus?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       className={`dlg-btn dlg-btn-${kind}`}
       onClick={onClick}
-      data-autofocus={autoFocus ? "" : undefined}
+      disabled={disabled}
+      data-autofocus={autoFocus && !disabled ? "" : undefined}
     >
       {label}
-      {hint && <span className="dlg-btn-hint">{hint}</span>}
+      {/* Hidden from the accessible name: the button is "Discard", not
+          "Discard ⏎" — the key is already announced by the shortcut itself. */}
+      {hint && (
+        <span className="dlg-btn-hint" aria-hidden="true">
+          {hint}
+        </span>
+      )}
     </button>
   );
 }

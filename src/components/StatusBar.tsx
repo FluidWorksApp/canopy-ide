@@ -8,6 +8,7 @@ import { estimateCost, sessionCost } from "../pricing";
 import { chipText, planFor, planTone, tooltip } from "../planUsage";
 import { StatsPanel } from "./StatsPanel";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
+import { Dialog } from "./Dialog";
 import { HeartIcon, StatsIcon } from "./icons";
 import type { AgentEventEntry } from "../types";
 import { modelCommandLine, type ModelSwitch } from "../agentModels";
@@ -597,46 +598,39 @@ export const StatusBar = memo(function StatusBar({
         </span>
       )}
       {confirmModel && modelSwitch && (
-        <div
-          className="confirm-backdrop"
-          onMouseDown={() => setConfirmModel(null)}
-        >
-          <div className="confirm" onMouseDown={(e) => e.stopPropagation()}>
-            <p>
-              {modelSwitch.kind === "inline" ? (
-                <>
-                  Switch this session to <strong>{confirmModel.label}</strong>?
-                </>
-              ) : (
-                <>Choose a model for this session?</>
-              )}
-            </p>
-            <p className="confirm-sub">
-              This types{" "}
-              <code>{modelCommandLine(modelSwitch, confirmModel.id)}</code> into
-              the {agentLabel ?? "agent"} terminal and submits it.{" "}
+        <Dialog
+          variant="accent"
+          title={
+            modelSwitch.kind === "inline"
+              ? `Switch this session to ${confirmModel.label}?`
+              : "Choose a model for this session?"
+          }
+          body={
+            <>
+              This types the command below into the {agentLabel ?? "agent"}{" "}
+              terminal and submits it.{" "}
               {modelSwitch.kind === "inline"
                 ? `${agentLabel ?? "The CLI"} applies it to the running session — if the new model has a smaller context window it will warn or compact in the terminal, so check its response there.`
                 : `${agentLabel ?? "The CLI"} then opens its own model list in the terminal, where you pick — nothing changes until you do.`}{" "}
               If you have unsent text typed in that session's input box, it will
               be submitted along with the command.
-            </p>
-            <div className="confirm-actions">
-              <button className="btn" onClick={() => setConfirmModel(null)}>
-                Cancel
-              </button>
-              <button
-                className="btn btn-accent"
-                onClick={() => {
-                  onSetModel?.(confirmModel.id);
-                  setConfirmModel(null);
-                }}
-              >
-                {modelSwitch.kind === "inline" ? "Switch model" : "Open picker"}
-              </button>
-            </div>
-          </div>
-        </div>
+            </>
+          }
+          meta={<code>{modelCommandLine(modelSwitch, confirmModel.id)}</code>}
+          dismissLabel="Cancel"
+          onDismiss={() => setConfirmModel(null)}
+          actions={[
+            {
+              label:
+                modelSwitch.kind === "inline" ? "Switch model" : "Open picker",
+              primary: true,
+              onClick: () => {
+                onSetModel?.(confirmModel.id);
+                setConfirmModel(null);
+              },
+            },
+          ]}
+        />
       )}
       {stats && (stats.input_tokens > 0 || stats.output_tokens > 0) && (
         <span

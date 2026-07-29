@@ -17,6 +17,7 @@ export function BranchSwitchDialog({
   busy: boolean;
   onChoose: (action: SwitchAction) => void;
 }) {
+  const leadIndex = dialog.choices.findIndex((c) => c.recommended && !c.disabled);
   return (
     <div className="confirm-backdrop" onClick={() => !busy && onChoose("cancel")}>
       <div className="confirm branch-switch" onClick={(e) => e.stopPropagation()}>
@@ -25,6 +26,11 @@ export function BranchSwitchDialog({
         <div className="branch-switch-choices">
           {dialog.choices.map((c, i) => (
             <button
+              // Same contract as the shared Dialog: the recommended choice holds
+              // focus, so Enter takes it and Escape (owned by the caller) backs
+              // out. Every choice here is safe — the destructive ones are what
+              // this dialog exists to talk you out of.
+              autoFocus={i === leadIndex}
               // Keyed by position, not by action: a question built with
               // askDialog can legitimately offer the same action twice.
               key={`${c.action}-${i}`}

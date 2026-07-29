@@ -298,6 +298,14 @@ export const OVERLAY_SURFACES: OverlaySurface[] = [
     why: "Opening it tears the project down, which ends the run it is part of.",
   },
   {
+    id: "confirm-dialog",
+    label: "Confirm dialog",
+    selector: ".dlg-scrim",
+    kind: "persistent",
+    covers: "center",
+    why: "Only a destructive or outward-facing action opens it, and the test takes none.",
+  },
+  {
     id: "modal-dialog",
     label: "Project / share dialogs",
     selector: ".modal-backdrop",

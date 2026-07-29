@@ -7683,6 +7683,11 @@ body.dragging-tab * {
 .dlg-children {
   padding: 12px 20px 0;
 }
+/* A name field in a dialog is the dialog — it gets the full width. */
+.dlg-children > input:not([type="checkbox"]):not([type="radio"]) {
+  width: 100%;
+  box-sizing: border-box;
+}
 
 /* Mono consequence line */
 .dlg-meta {
@@ -7729,6 +7734,11 @@ body.dragging-tab * {
 }
 .dlg-btn:hover {
   transform: translateY(-1px);
+}
+.dlg-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
 }
 
 .dlg-btn-quiet {

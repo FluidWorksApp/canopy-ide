@@ -188,7 +188,7 @@ function painting(selector: string): boolean {
 async function clearTheStage() {
   markOnboarded();
   for (let i = 0; i < 6; i++) {
-    const backdrop = document.querySelector(".confirm-backdrop, .modal-backdrop, .palette-backdrop");
+    const backdrop = document.querySelector(".confirm-backdrop, .dlg-scrim, .modal-backdrop, .palette-backdrop");
     if (!backdrop) return;
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     backdrop.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));

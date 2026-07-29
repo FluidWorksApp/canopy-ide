@@ -5,6 +5,7 @@
 import { useState, type ReactNode } from "react";
 import type { FileChange } from "../ipc";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
+import { Dialog } from "./Dialog";
 import { WindowedList } from "./WindowedList";
 
 /** Must match .change-row's CSS height — the windowing spacers are the scrollbar. */
@@ -156,36 +157,28 @@ export function ChangesPanel({
         />
       )}
       {discarding && (
-        <div
-          className="confirm-backdrop"
-          onMouseDown={() => setDiscarding(null)}
-        >
-          <div className="confirm" onMouseDown={(e) => e.stopPropagation()}>
-            <p>
-              {discarding.file.untracked ? "Delete" : "Discard changes to"}{" "}
-              <strong>{discarding.file.path.split("/").pop()}</strong>?
-            </p>
-            <p className="confirm-sub">
-              {discarding.file.untracked
-                ? "This file isn't in git yet, so deleting it is the only way to discard it — and nothing can bring it back."
-                : "The file goes back to what HEAD has, staged or not. This can't be undone."}
-            </p>
-            <div className="confirm-actions">
-              <button className="btn" onClick={() => setDiscarding(null)}>
-                Cancel
-              </button>
-              <button
-                className="btn btn-danger-solid"
-                onClick={() => {
-                  onDiscard?.(discarding.repo, discarding.file);
-                  setDiscarding(null);
-                }}
-              >
-                {discarding.file.untracked ? "Delete" : "Discard"}
-              </button>
-            </div>
-          </div>
-        </div>
+        <Dialog
+          variant="danger"
+          title={`${discarding.file.untracked ? "Delete" : "Discard changes to"} ${discarding.file.path.split("/").pop()}?`}
+          body={
+            discarding.file.untracked
+              ? "This file isn't in git yet, so deleting it is the only way to discard it — and nothing can bring it back."
+              : "The file goes back to what HEAD has, staged or not. This can't be undone."
+          }
+          meta={discarding.file.path}
+          dismissLabel="Cancel"
+          onDismiss={() => setDiscarding(null)}
+          actions={[
+            {
+              label: discarding.file.untracked ? "Delete" : "Discard",
+              primary: true,
+              onClick: () => {
+                onDiscard?.(discarding.repo, discarding.file);
+                setDiscarding(null);
+              },
+            },
+          ]}
+        />
       )}
       <div className="side-panel-head">
         <span>

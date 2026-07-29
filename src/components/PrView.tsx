@@ -21,7 +21,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useEscape } from "../useEscape";
+import { Dialog } from "./Dialog";
 import { useBranchSwitch } from "../useBranchSwitch";
 import { DiffView, DiffModeEnum, SplitSide } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
@@ -346,14 +346,6 @@ export function PrView({
    *  land there, and it survives the tab being closed and reopened. */
   const [running, setRunning] = useState<TaskRun[]>([]);
 
-  useEscape(
-    () => {
-      setConfirm(null);
-      setMergeConfirm(null);
-      setCloseConfirm(false);
-    },
-    confirm != null || mergeConfirm != null || closeConfirm,
-  );
   const [done, setDone] = useState<string | null>(null);
   // Two dropdowns, both ContextMenu-driven: the agent menu and the overflow.
   // Using the shared menu (rather than another hand-rolled popover) is what
@@ -2483,147 +2475,127 @@ export function PrView({
       </div>
 
       {confirm && (
-        <div className="confirm-backdrop" onClick={() => setConfirm(null)}>
-          <div className="confirm" onClick={(e) => e.stopPropagation()}>
-            <p>
-              {REVIEW_LABEL[confirm]}{" "}
-              <strong>
-                #{pr.number} {pr.title}
-              </strong>{" "}
-              as {pr.mine ? "yourself" : "yourself"} on GitHub?
-            </p>
-            <p className="confirm-sub">
+        <Dialog
+          variant="accent"
+          title={`${REVIEW_LABEL[confirm]} this pull request as yourself on GitHub?`}
+          body={
+            <>
               This posts a public review to the repository and notifies its
               authors.
               {drafts.length > 0 &&
                 ` ${drafts.length} inline comment${drafts.length === 1 ? "" : "s"} go with it.`}
-            </p>
-            <div className="confirm-actions">
-              <button className="btn" onClick={() => setConfirm(null)}>
-                Cancel
-              </button>
-              <button
-                className="btn btn-accent"
-                onClick={() => {
-                  const a = confirm;
-                  setConfirm(null);
-                  void submit(a);
-                }}
-              >
-                {REVIEW_LABEL[confirm]}
-              </button>
-            </div>
-          </div>
-        </div>
+            </>
+          }
+          meta={`#${pr.number} ${pr.title}`}
+          dismissLabel="Cancel"
+          onDismiss={() => setConfirm(null)}
+          actions={[
+            {
+              label: REVIEW_LABEL[confirm],
+              primary: true,
+              onClick: () => {
+                const a = confirm;
+                setConfirm(null);
+                void submit(a);
+              },
+            },
+          ]}
+        />
       )}
 
       {mergeConfirm && (
-        <div className="confirm-backdrop" onClick={() => setMergeConfirm(null)}>
-          <div className="confirm" onClick={(e) => e.stopPropagation()}>
-            <p>
-              {MERGE_LABEL[mergeConfirm]}{" "}
-              <strong>
-                #{pr.number} {pr.title}
-              </strong>{" "}
-              into <code>{pr.base}</code> on GitHub?
-            </p>
-            <p className="confirm-sub">
+        <Dialog
+          variant="accent"
+          title={`${MERGE_LABEL[mergeConfirm]} this pull request into ${pr.base} on GitHub?`}
+          body={
+            <>
               This lands <code>{pr.branch}</code> on <code>{pr.base}</code> in
-              the real repository and closes the pull request. It can't be
-              undone here.
+              the real repository and closes the pull request. It can't be undone
+              here.
+            </>
+          }
+          meta={`#${pr.number} ${pr.title}`}
+          dismissLabel="Cancel"
+          onDismiss={() => setMergeConfirm(null)}
+          actions={[
+            {
+              label: MERGE_LABEL[mergeConfirm],
+              primary: true,
+              disabled: busy,
+              onClick: () => {
+                const m = mergeConfirm;
+                setMergeConfirm(null);
+                void merge(m);
+              },
+            },
+          ]}
+        >
+          {conflicting && (
+            <p className="confirm-warn">
+              GitHub reports merge conflicts — this will likely be rejected.
             </p>
-            {conflicting && (
-              <p className="confirm-warn">
-                GitHub reports merge conflicts — this will likely be rejected.
-              </p>
-            )}
-            {liveChecks === "FAIL" && (
-              <p className="confirm-warn">
-                Some checks are failing ({pr.checks_summary}).
-              </p>
-            )}
-            {liveChecks === "PENDING" && (
-              <p className="confirm-warn">
-                Checks are still running ({pr.checks_summary}).
-              </p>
-            )}
-            {decision === "CHANGES_REQUESTED" && (
-              <p className="confirm-warn">Changes were requested on this PR.</p>
-            )}
-            {!!act?.count && (
-              <p className="confirm-warn">
-                {act.count} comment{act.count === 1 ? "" : "s"} still
-                unaddressed.
-              </p>
-            )}
-            <div className="confirm-actions">
-              <button className="btn" onClick={() => setMergeConfirm(null)}>
-                Cancel
-              </button>
-              <button
-                className="btn btn-accent"
-                disabled={busy}
-                onClick={() => {
-                  const m = mergeConfirm;
-                  setMergeConfirm(null);
-                  void merge(m);
-                }}
-              >
-                {MERGE_LABEL[mergeConfirm]}
-              </button>
-            </div>
-          </div>
-        </div>
+          )}
+          {liveChecks === "FAIL" && (
+            <p className="confirm-warn">
+              Some checks are failing ({pr.checks_summary}).
+            </p>
+          )}
+          {liveChecks === "PENDING" && (
+            <p className="confirm-warn">
+              Checks are still running ({pr.checks_summary}).
+            </p>
+          )}
+          {decision === "CHANGES_REQUESTED" && (
+            <p className="confirm-warn">Changes were requested on this PR.</p>
+          )}
+          {!!act?.count && (
+            <p className="confirm-warn">
+              {act.count} comment{act.count === 1 ? "" : "s"} still unaddressed.
+            </p>
+          )}
+        </Dialog>
       )}
 
       {closeConfirm && (
-        <div
-          className="confirm-backdrop"
-          onClick={() => setCloseConfirm(false)}
-        >
-          <div className="confirm" onClick={(e) => e.stopPropagation()}>
-            <p>
-              Close{" "}
-              <strong>
-                #{pr.number} {pr.title}
-              </strong>{" "}
-              without merging?
-            </p>
-            <p className="confirm-sub">
+        <Dialog
+          variant="danger"
+          title="Close this pull request without merging?"
+          body={
+            <>
               The pull request closes on GitHub and its author is notified. You
               can reopen it there later
               {closeDelBranch ? " — but only if the branch still exists" : ""}.
-            </p>
-            {/* Opt-in to the destructive half: gh pr close --delete-branch drops
-                the branch locally and on the remote, so reopening is no longer
-                possible. Off by default; a plain close keeps the work. */}
-            <label className="confirm-check">
-              <input
-                type="checkbox"
-                checked={closeDelBranch}
-                onChange={(e) => setCloseDelBranch(e.target.checked)}
-              />
-              Also delete the branch <code>{pr.branch}</code> (local + GitHub)
-            </label>
-            <div className="confirm-actions">
-              <button className="btn" onClick={() => setCloseConfirm(false)}>
-                Cancel
-              </button>
-              <button
-                className="btn btn-danger-solid"
-                disabled={busy}
-                onClick={() => {
-                  const del = closeDelBranch;
-                  setCloseConfirm(false);
-                  setCloseDelBranch(false);
-                  void close(del);
-                }}
-              >
-                {closeDelBranch ? "Close & delete" : "Close PR"}
-              </button>
-            </div>
-          </div>
-        </div>
+            </>
+          }
+          meta={`#${pr.number} ${pr.title}`}
+          dismissLabel="Cancel"
+          onDismiss={() => setCloseConfirm(false)}
+          actions={[
+            {
+              label: closeDelBranch ? "Close & delete" : "Close PR",
+              primary: true,
+              disabled: busy,
+              onClick: () => {
+                const del = closeDelBranch;
+                setCloseConfirm(false);
+                setCloseDelBranch(false);
+                void close(del);
+              },
+            },
+          ]}
+        >
+          {/* Opt-in to the destructive half: gh pr close --delete-branch drops
+              the branch locally and on the remote, so reopening is no longer
+              possible. Off by default; a plain close keeps the work. */}
+          <label className="confirm-check">
+            <input
+              type="checkbox"
+              checked={closeDelBranch}
+              onChange={(e) => setCloseDelBranch(e.target.checked)}
+            />
+            Also delete the branch <code>{pr.branch}</code> (local + GitHub)
+          </label>
+        </Dialog>
       )}
     </div>
   );
