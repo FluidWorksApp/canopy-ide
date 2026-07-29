@@ -775,6 +775,9 @@ export interface BranchInfo {
   /** A local branch that also exists on the remote (already pushed). */
   synced: boolean;
   subject: string;
+  /** An integration branch, or this repo's actual base. Decided in the backend
+   *  because only it knows what the base is. */
+  protected: boolean;
 }
 
 export interface CommitInfo {
@@ -811,7 +814,13 @@ export interface BranchHolder {
  *  resolve comes back as an outcome, not a thrown error — the UI turns these
  *  into choices instead of showing git's stderr. */
 export type CheckoutOutcome =
-  | { kind: "switched"; message: string }
+  | {
+      kind: "switched";
+      message: string;
+      /** The checkout to work in when it isn't the repo root — a workspace we
+       *  landed in or created. Null means "here". */
+      path?: string | null;
+    }
   | { kind: "branch_in_worktree"; holder: BranchHolder }
   | {
       kind: "local_changes";
@@ -820,6 +829,43 @@ export type CheckoutOutcome =
       detail: string;
     }
   | { kind: "changes_stashed"; stash: string; detail: string }
+  /** A half-finished merge/rebase/cherry-pick/revert/am, or another git process
+   *  holding the index. */
+  | {
+      kind: "repo_busy";
+      operation:
+        | "merge"
+        | "rebase"
+        | "cherry-pick"
+        | "revert"
+        | "am"
+        | "another-command";
+      detail: string;
+    }
+  /** No branch, tag or commit of that name is here. `can_create` means the name
+   *  is legal and free, so starting it here is a real way out. */
+  | {
+      kind: "nothing_called";
+      name: string;
+      can_create: boolean;
+      detail: string;
+    }
+  /** A create-shaped request refused because the name is taken. */
+  | { kind: "name_taken"; branch: string; detail: string }
+  /** A workspace couldn't go there. `usable` means the path is a worktree of
+   *  this repo, so opening it as it stands is safe. */
+  | { kind: "path_in_use"; path: string; usable: boolean; detail: string }
+  /** GitHub couldn't be reached, or doesn't have what we asked it for. */
+  | { kind: "remote_unreachable"; summary: string; detail: string }
+  /** The switch worked, but left a detached HEAD's commits on no branch. Git
+   *  says this and exits 0, so nothing else would mention it. `commits` is
+   *  "<short> <subject>", newest first. */
+  | {
+      kind: "switched_with_leftovers";
+      message: string;
+      commits: string[];
+      detail: string;
+    }
   | { kind: "failed"; summary: string; detail: string };
 
 export const gitCheckout = (repo: string, branch: string, create = false) =>
@@ -831,9 +877,19 @@ export const gitCheckoutDetached = (repo: string, refname: string) =>
 export const gitCheckoutCarry = (repo: string, branch: string) =>
   invoke<CheckoutOutcome>("git_checkout_carry", { repo, branch });
 /** Free a branch name from the worktree holding it. That worktree keeps every
- *  file it has — it just stops claiming the name. */
+ *  file it has — it just stops claiming the name. A locked workspace comes back
+ *  as `branch_in_worktree` so the caller can re-ask, not as an error. */
 export const gitBranchRelease = (repo: string, branch: string) =>
-  invoke<string>("git_branch_release", { repo, branch });
+  invoke<CheckoutOutcome>("git_branch_release", { repo, branch });
+/** Call off a half-finished merge/rebase/cherry-pick/revert/am. Only the
+ *  operation's bookkeeping is dropped; every file stays exactly as it is. */
+export const gitOperationQuit = (repo: string) =>
+  invoke<string>("git_operation_quit", { repo });
+/** Give a commit a branch name without checking it out — how a commit a switch
+ *  left reachable from nothing gets kept, without moving you off where you just
+ *  landed. */
+export const gitBranchAt = (repo: string, name: string, commit: string) =>
+  invoke<string>("git_branch_at", { repo, name, commit });
 /** Delete a local branch. `force` (git -D) is needed for a squash-merged branch
  *  whose remote is gone; otherwise the safe -d refuses unmerged work. Protected
  *  and current branches are refused by the backend. */
@@ -1058,14 +1114,23 @@ export const gitWorktreeAdd = (
   path: string,
   branch: string,
   create: boolean,
-) => invoke<string>("git_worktree_add", { repo, path, branch, create });
+) =>
+  invoke<CheckoutOutcome>("git_worktree_add", { repo, path, branch, create });
 export const gitWorktreeAddPr = (
   repo: string,
   path: string,
   number: number,
   branch: string,
-) => invoke<string>("git_worktree_add_pr", { repo, path, number, branch });
-export const gitWorktreeRemove = (repo: string, path: string, force: boolean) =>
+) =>
+  invoke<CheckoutOutcome>("git_worktree_add_pr", {
+    repo,
+    path,
+    number,
+    branch,
+  });
+/** `force` counts rather than toggles: 1 drops uncommitted work, 2 also clears
+ *  a locked workspace — git needs `remove -f -f` for that and says so. */
+export const gitWorktreeRemove = (repo: string, path: string, force: 0 | 1 | 2) =>
   invoke<string>("git_worktree_remove", { repo, path, force });
 export const gitWorktreePrune = (repo: string) =>
   invoke<string>("git_worktree_prune", { repo });
@@ -1083,8 +1148,11 @@ export const ghPrReview = (
   action: "approve" | "comment" | "request-changes",
   body?: string,
 ) => invoke<string>("gh_pr_review", { repo, number, action, body });
-export const ghPrCheckout = (repo: string, number: number) =>
-  invoke<string>("gh_pr_checkout", { repo, number });
+/** Check out a PR's head here — ordinary branch switching wearing gh's coat, so
+ *  it refuses in the same ways and returns the same outcomes. `carry` sets the
+ *  working tree aside and puts it back, as the local-changes answer does. */
+export const ghPrCheckout = (repo: string, number: number, carry = false) =>
+  invoke<CheckoutOutcome>("gh_pr_checkout", { repo, number, carry });
 export const ghPrMerge = (
   repo: string,
   number: number,

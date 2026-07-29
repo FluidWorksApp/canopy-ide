@@ -1,6 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
+
+const gitBranches = vi.fn();
+const gitWorktrees = vi.fn();
+
+// Only the two git calls the branch source makes are faked; every other source
+// keeps the real module, so the registry tests below still exercise what ships.
+vi.mock("./ipc", async (orig) => ({
+  ...(await orig<typeof import("./ipc")>()),
+  gitBranches: (repo: string) => gitBranches(repo),
+  gitWorktrees: (repo: string) => gitWorktrees(repo),
+}));
+
 import {
   actionRows,
+  branchRows,
   deferredRows,
   instantRows,
   registerSpotSource,
@@ -91,6 +104,72 @@ describe("sessionRows", () => {
       type: "open-session",
       digest: { session_id: "s1" },
     });
+  });
+});
+
+describe("branchRows", () => {
+  const branch = (name: string, over: Record<string, unknown> = {}) => ({
+    name,
+    current: false,
+    remote_only: false,
+    synced: true,
+    subject: "",
+    protected: false,
+    ...over,
+  });
+  const worktree = (path: string, name: string, over: Record<string, unknown> = {}) => ({
+    path,
+    name,
+    head: "6ccd544",
+    branch: name,
+    detached: false,
+    bare: false,
+    locked: null,
+    prunable: null,
+    is_main: false,
+    dirty: 0,
+    ...over,
+  });
+  // The source caches on the repo list (two git processes per repo), so each
+  // case brings its own repo path rather than reaching into the cache.
+  const wire = (repo: string, branches: unknown[], worktrees: unknown[] = []) => {
+    gitBranches.mockImplementation(async (r: string) => (r === repo ? branches : []));
+    gitWorktrees.mockImplementation(async (r: string) => (r === repo ? worktrees : []));
+  };
+
+  it("finds a branch and hands the switch to the shared flow", async () => {
+    wire("/repo-a", [
+      branch("main", { current: true, subject: "init", protected: true }),
+      branch("feat/relay", { subject: "rework the relay handshake" }),
+    ]);
+    const rows = await branchRows("relay", ["/repo-a"]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].action).toEqual({
+      type: "switch-branch",
+      repo: "/repo-a",
+      branch: "feat/relay",
+    });
+    expect(rows[0].kind).toBe("branch");
+    expect(rows[0].detail).toContain("rework the relay handshake");
+  });
+
+  it("never offers the branch you are already on", async () => {
+    wire("/repo-b", [branch("main", { current: true, subject: "init" })]);
+    expect(await branchRows("main", ["/repo-b"])).toEqual([]);
+  });
+
+  it("says another workspace has it before you click, not after", async () => {
+    wire(
+      "/repo-c",
+      [branch("feat/x", { subject: "wip" })],
+      [
+        worktree("/repo-c", "main", { is_main: true }),
+        worktree("/repo-c-wt-feat-x", "feat/x"),
+      ],
+    );
+    const rows = await branchRows("feat/x", ["/repo-c"]);
+    expect(rows[0].detail).toContain("in another workspace");
+    expect(rows[0].detail).toContain("wip");
   });
 });
 
@@ -197,5 +276,14 @@ describe("the source registry", () => {
     // registry and the palette stopped being extensible in that spot.
     expect(spotSources().map((s) => s.id)).toContain("actions");
     expect(spotSources().every((s) => typeof s.rows === "function")).toBe(true);
+  });
+
+  it("carries the branch source, debounced like the other git-shaped ones", () => {
+    // ⌘K is the "from wherever we are" surface; without this row it is the one
+    // place you cannot switch a branch from.
+    const branches = spotSources().find((s) => s.id === "branches");
+    expect(branches?.group).toBe("Branches");
+    expect(branches?.timing).toBe("deferred");
+    expect(spotGroupOrder()).toContain("Branches");
   });
 });

@@ -22,6 +22,7 @@ import {
   type ReactNode,
 } from "react";
 import { useEscape } from "../useEscape";
+import { useBranchSwitch } from "../useBranchSwitch";
 import { DiffView, DiffModeEnum, SplitSide } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import * as ipc from "../ipc";
@@ -354,6 +355,9 @@ export function PrView({
   // lets them carry submenus, hints and a danger row without new markup.
   const agentMenu = useContextMenu();
   const moreMenu = useContextMenu();
+  // Anything here that moves a ref goes through the one funnel: it owns the
+  // question a refusal really is, and it outlives this tab closing itself.
+  const { switchTo } = useBranchSwitch();
   const fileRefs = useRef(new Map<string, HTMLDivElement>());
   // Latest-value refs so the callbacks handed to memoized children can stay
   // identity-stable while still seeing the current props/conversation.
@@ -1614,10 +1618,24 @@ export function PrView({
         label: "Check out locally",
         hint: "switches branch",
         onClick: () =>
-          void ipc
-            .ghPrCheckout(repo, pr.number)
-            .then(onNotice)
-            .catch((err) => onNotice(String(err), "error")),
+          void switchTo(repo, {
+            kind: "pr",
+            number: pr.number,
+            branch: pr.branch,
+          }),
+      },
+      // The other half of the same wish: look at it without this checkout
+      // moving at all. It is also the answer to a PR whose head can't be
+      // fetched here — the funnel names that case itself now.
+      {
+        label: "Open this PR's workspace",
+        hint: "a folder of its own — nothing here moves",
+        onClick: () =>
+          void switchTo(repo, {
+            kind: "pr-workspace",
+            number: pr.number,
+            branch: pr.branch,
+          }),
       },
       {
         label: "Refresh conversation",
