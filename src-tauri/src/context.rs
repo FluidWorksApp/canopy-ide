@@ -1299,6 +1299,12 @@ struct UiOp {
     options: Vec<String>,
     #[serde(rename = "timeoutMs")]
     timeout_ms: Option<u64>,
+    /// vault: list | fill | read.
+    #[serde(rename = "vaultOp")]
+    vault_op: Option<String>,
+    /// vault: a specific entry, when the agent has already listed them.
+    #[serde(rename = "entryId")]
+    entry_id: Option<String>,
 }
 
 const UI_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
@@ -1346,6 +1352,20 @@ async fn ui_op(
                 .unwrap_or(std::time::Duration::from_secs(120))
                 .min(MAX_ASK_TIMEOUT)
         }
+        "vault" => {
+            match op.vault_op.as_deref().unwrap_or("list") {
+                "list" | "fill" | "read" => {}
+                other => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!("unknown vault op: {other} (list, fill or read)"),
+                    )
+                }
+            }
+            // A fill the user has not approved yet puts a prompt on screen, so
+            // this waits on a person exactly like `ask` does.
+            MAX_ASK_TIMEOUT
+        }
         other => return (StatusCode::BAD_REQUEST, format!("unknown ui op: {other}")),
     };
 
@@ -1368,6 +1388,8 @@ async fn ui_op(
             "waitMs": op.wait_ms,
             "question": op.question,
             "options": op.options,
+            "vaultOp": op.vault_op,
+            "entryId": op.entry_id,
         }),
     );
 
@@ -1384,7 +1406,7 @@ async fn ui_op(
                 .lock()
                 .unwrap()
                 .remove(&id);
-            let why = if op.op == "ask" {
+            let why = if op.op == "ask" || op.op == "vault" {
                 "The user didn't answer in time — carry on without them, or ask again."
             } else {
                 "Canopy didn't answer in time. The window may be busy, or the language server \
