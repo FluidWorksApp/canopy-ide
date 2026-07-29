@@ -21,6 +21,12 @@ import {
   parseAgentEvent,
   pendingForRoots,
 } from "./notifications";
+import {
+  formatDeepLink,
+  parseDeepLink,
+  projectForLink,
+  type DeepLink,
+} from "./deepLinks";
 import { runUiOp } from "./agentOps";
 import { getSettings, THEME_CHANGE_EVENT } from "./settings";
 import { useTabDrag } from "./tabDrag";
@@ -151,21 +157,29 @@ export default function App() {
     (text: string, kind: NoticeKind = "info") => setNotice({ text, kind }),
     [],
   );
-  // Native (macOS) notification for team activity landing while Canopy isn't
-  // the focused app — the in-app toast can't be seen from another Space.
-  // First call asks the OS for permission; a denial just means silence.
-  const nativeNotify = useCallback(async (title: string, body: string) => {
-    if (document.hasFocus()) return;
-    try {
-      const { isPermissionGranted, requestPermission, sendNotification } =
-        await import("@tauri-apps/plugin-notification");
-      let granted = await isPermissionGranted();
-      if (!granted) granted = (await requestPermission()) === "granted";
-      if (granted) sendNotification({ title, body });
-    } catch {
-      // Notifications are a garnish — never fail anything over them.
-    }
-  }, []);
+  // Native (macOS) notification for activity landing while Canopy isn't the
+  // focused app — the in-app toast can't be seen from another Space.
+  //
+  // `where` is where a click should land the user (deepLinks.ts). It is not
+  // optional in spirit: a notification about a thing, that doesn't take you to
+  // the thing, makes the user go find it themselves — which is what this whole
+  // path exists to stop. Pass the most specific target the caller honestly
+  // knows; the router degrades from there.
+  const nativeNotify = useCallback(
+    async (title: string, body: string, where?: DeepLink) => {
+      if (document.hasFocus()) return;
+      try {
+        await ipc.notifyNative(
+          title,
+          body,
+          formatDeepLink(where ?? { kind: "app" }),
+        );
+      } catch {
+        // Notifications are a garnish — never fail anything over them.
+      }
+    },
+    [],
+  );
   // A micro-task in flight when Canopy last quit has no terminal to come back
   // to — its tab is ephemeral and never restored — so it can never report.
   // Settle those before anything new is recorded, or they stay "running"
@@ -223,7 +237,10 @@ export default function App() {
         relayIntentional.current = false;
       } else {
         notify("Disconnected from the team relay.", "error");
-        void nativeNotify("Canopy — Team", "Disconnected from the team relay.");
+        void nativeNotify("Canopy — Team", "Disconnected from the team relay.", {
+          kind: "panel",
+          panel: "team",
+        });
       }
     }
   }, [relayStatus.role, notify, nativeNotify]);
@@ -290,7 +307,7 @@ export default function App() {
       if (!o) return;
       const what = `${o.fromName} wants to share their project "${o.name}" with you`;
       notify(`${what} — see the Team panel`);
-      void nativeNotify("Canopy — Team", what);
+      void nativeNotify("Canopy — Team", what, { kind: "panel", panel: "team" });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -484,6 +501,9 @@ export default function App() {
         void nativeNotify(
           m.to === null ? `${m.from_name} (team chat)` : m.from_name,
           text,
+          // Straight into the conversation it came from — the one target where
+          // "take me there" is unambiguous.
+          { kind: "chat", peer: convo },
         );
       }),
       ipc.onRelayCommand((m) => {
@@ -503,7 +523,10 @@ export default function App() {
                 ? `${m.from_name} wants to send you ${file}`
                 : `${m.from_name} sent a ${m.kind} command`;
         notify(`${text} — see the Team panel`);
-        void nativeNotify("Canopy — Team", text);
+        void nativeNotify("Canopy — Team", text, {
+          kind: "panel",
+          panel: "team",
+        });
       }),
       ipc.onRelayCollab((m) => {
         const mgr = collab.current!;
@@ -515,7 +538,10 @@ export default function App() {
         if (!known && m.body.kind === "offer") {
           const what = `${m.from_name} wants to edit ${safeName(m.body.name)} with you`;
           notify(`${what} — see the Team panel`);
-          void nativeNotify("Canopy — Team", what);
+          void nativeNotify("Canopy — Team", what, {
+            kind: "panel",
+            panel: "team",
+          });
         }
       }),
       ipc.onRelayTransferProgress((p) => {
@@ -544,7 +570,10 @@ export default function App() {
               ? `Sent ${t.name} to ${t.detail}`
               : `Sending ${t.name} failed: ${t.detail}`;
         notify(msg, t.ok ? "success" : "error");
-        void nativeNotify("Canopy — File transfer", msg);
+        void nativeNotify("Canopy — File transfer", msg, {
+          kind: "panel",
+          panel: "team",
+        });
         // A completed transfer is part of the conversation, not just a toast
         // that scrolls away: record it in the transcript with the peer it was
         // with (a DM, since files are always one-to-one), so history shows what
@@ -1270,6 +1299,71 @@ export default function App() {
     return () => un?.();
   }, [notify]);
 
+  // A clicked notification, or a `canopy 'canopy://…'` from a terminal.
+  //
+  // The whole point is that the target was composed minutes ago, against a
+  // workspace that has since moved on — the terminal exited, the project was
+  // closed, the teammate left. So this never insists: it resolves the project,
+  // opens it (waking it if it was hibernating — there is no ProjectView behind
+  // the frost to receive anything), and hands the link down. The ProjectView
+  // takes it as far as it can and says so if the exact surface is gone. With
+  // no project to resolve at all, the window is already up, which is where
+  // this used to stop for every notification.
+  useEffect(() => {
+    if (!loaded) return;
+    let un: (() => void) | undefined;
+    void ipc
+      .onDeepLink(async (raw) => {
+        const link = parseDeepLink(raw);
+        if (!link || link.kind === "app") return;
+        const state = wsRef.current;
+        // Team surfaces (chat, transfers, the inbox) are global but rendered
+        // inside a project, so they carry no project hint and are perfectly
+        // happy in whichever one is in front. A link that *does* name a
+        // project and doesn't resolve is a different story — dropping the user
+        // into an unrelated project would be worse than saying so.
+        const hinted = Boolean(link.projectId || link.path);
+        const projectId =
+          projectForLink(link, state.projects) ??
+          // An agent running in a worktree has a cwd (`<repo>-wt-…`) under no
+          // component root, so a hinted link can still fail to resolve. With
+          // exactly one project open there is only one place it could mean —
+          // the same fallback agent actions already take.
+          (hinted
+            ? state.openIds.length === 1
+              ? state.openIds[0]
+              : undefined
+            : (state.activeId ?? state.openIds[0]));
+        if (!projectId) {
+          notify(
+            hinted
+              ? "That notification's project isn't in this workspace any more."
+              : "Nothing to open — no project is open.",
+            "info",
+          );
+          return;
+        }
+        await openForActionRef.current(projectId);
+        if (link.kind === "project") return;
+        // Timer, not rAF — a project that was hibernating has only just
+        // mounted its ProjectView, and a listener registered during that
+        // mount would miss an event dispatched in the same frame.
+        window.setTimeout(
+          () =>
+            window.dispatchEvent(
+              new CustomEvent("canopy:deep-link", {
+                detail: { projectId, link },
+              }),
+            ),
+          80,
+        );
+      })
+      .then((u) => {
+        un = u;
+      });
+    return () => un?.();
+  }, [loaded, notify]);
+
   // An action an agent requested via the MCP context bridge (canopy_start_server
   // / canopy_open_preview). Routed exactly like a phone-spawned PTY: find the
   // project whose component most-specifically contains the action's `route`
@@ -1316,7 +1410,17 @@ export default function App() {
             `${ok ? "Task done" : "Task blocked"}: ${summary}${a.url ? ` — ${a.url}` : ""}`,
             ok ? "success" : "warn",
           );
-          void nativeNotify("Canopy — Task", summary);
+          // Blocked means the agent is still there, waiting on an answer —
+          // send the click to its terminal. Done means the opposite: the
+          // ProjectView below is about to kill the pty and close the tab, so
+          // the only thing left to look at is the run's row in Tasks.
+          void nativeNotify(
+            "Canopy — Task",
+            summary,
+            !ok && a.ptyId != null
+              ? { kind: "terminal", ptyId: a.ptyId, path: a.route }
+              : { kind: "panel", panel: "tasks", path: a.route },
+          );
           window.dispatchEvent(
             new CustomEvent("canopy:agent-action", {
               detail: { projectId: null, action: a },
@@ -1325,12 +1429,23 @@ export default function App() {
           return;
         }
         // An agent reaching for the user (canopy_notify) — often one running in
-        // a terminal nobody is watching. It belongs to no project in
-        // particular, so it lands as a notice here rather than being routed.
+        // a terminal nobody is watching. It doesn't move the app on its own:
+        // an agent saying something is not grounds for yanking the user out of
+        // what they're doing, so it lands as a notice here. The native banner
+        // is the one that carries a target, because by the time it's read the
+        // user has already left, and "which terminal said that?" is the entire
+        // question. The sidecar stamps the terminal it ran in; without one
+        // (an agent outside a Canopy tab) the cwd still names the project.
         if (a.kind === "notify") {
           notify(a.text ?? "", (a.level ?? "info") as NoticeKind);
           if (a.level === "error" || a.level === "warn")
-            void nativeNotify("Canopy — Agent", a.text ?? "");
+            void nativeNotify(
+              "Canopy — Agent",
+              a.text ?? "",
+              a.ptyId != null
+                ? { kind: "terminal", ptyId: a.ptyId, path: a.route }
+                : { kind: "project", path: a.route },
+            );
           return;
         }
         const projectId =

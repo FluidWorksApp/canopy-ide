@@ -2523,9 +2523,14 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 .get("text")
                 .and_then(|v| v.as_str())
                 .ok_or("missing required argument: text")?;
+            // The terminal, when we're running in one. A notification about an
+            // agent is worth nothing if clicking it doesn't reach the agent,
+            // and cwd alone only narrows it to the project — two sessions in
+            // the same checkout are the normal case, not the exception.
             text(ctx_post(serde_json::json!({
                 "kind": "notify",
                 "cwd": cwd(),
+                "ptyId": std::env::var("CANOPY_PTY").ok().and_then(|v| v.parse::<u64>().ok()),
                 "text": body,
                 "level": args.get("level").and_then(|v| v.as_str()).unwrap_or("info"),
             })))
