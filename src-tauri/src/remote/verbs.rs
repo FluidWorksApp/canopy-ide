@@ -99,7 +99,6 @@ impl VerbRouter {
             }
         }
     }
-
 }
 
 #[cfg(test)]
@@ -122,7 +121,10 @@ mod tests {
         let r = VerbRouter::default();
         assert_eq!(r.begin(PING.name, PING.guard, "a1"), Begin::Run);
         r.finish("a1", Answer::Ok);
-        assert_eq!(r.begin(PING.name, PING.guard, "a1"), Begin::Replay(Answer::Ok));
+        assert_eq!(
+            r.begin(PING.name, PING.guard, "a1"),
+            Begin::Replay(Answer::Ok)
+        );
     }
 
     #[test]
@@ -152,7 +154,11 @@ mod tests {
             r.begin(PING.name, PING.guard, &id);
             r.finish(&id, Answer::Ok);
         }
-        assert_eq!(r.begin(PING.name, PING.guard, "a0"), Begin::Run, "oldest answer evicted");
+        assert_eq!(
+            r.begin(PING.name, PING.guard, "a0"),
+            Begin::Run,
+            "oldest answer evicted"
+        );
         assert!(matches!(
             r.begin(PING.name, PING.guard, &format!("a{}", REPLAY_MEMORY + 9)),
             Begin::Replay(_)

@@ -96,9 +96,7 @@ pub async fn dispatch(
             let roots = args
                 .get("roots")
                 .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok());
-            crate::agents::session_digests(roots)
-                .await
-                .map(Value::from)
+            crate::agents::session_digests(roots).await.map(Value::from)
         }
 
         "agent_usage" => crate::agents::agent_usage()
@@ -124,10 +122,7 @@ pub async fn dispatch(
         }
 
         "pty_spawn_detached" => {
-            let cwd = args
-                .get("cwd")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
+            let cwd = args.get("cwd").and_then(|v| v.as_str()).map(str::to_string);
             let command = str_arg(args, "command")?;
             crate::pty::pty_spawn_detached(
                 app.clone(),
@@ -186,7 +181,10 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(names, sorted, "GRANTS must be sorted and free of duplicates");
+        assert_eq!(
+            names, sorted,
+            "GRANTS must be sorted and free of duplicates"
+        );
     }
 
     #[test]

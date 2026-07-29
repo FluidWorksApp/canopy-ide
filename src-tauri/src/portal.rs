@@ -602,7 +602,9 @@ fn act(v: &Value, p: &Portal, out: &mpsc::Sender<String>) {
             match crate::remote::verbs::lookup(&action) {
                 Some(verb) => verb.guard,
                 None => {
-                    let _ = out.send(ack_err(&id, format!("no such action: {action}"))).await;
+                    let _ = out
+                        .send(ack_err(&id, format!("no such action: {action}")))
+                        .await;
                     return;
                 }
             }
