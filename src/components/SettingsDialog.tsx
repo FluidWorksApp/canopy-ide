@@ -30,6 +30,7 @@ import { LINK_CHORD } from "../terminalLinks";
 import { useEscape } from "../useEscape";
 import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
 import * as ipc from "../ipc";
+import { refreshEngineSupport } from "../browserHost";
 import { VaultSettings } from "./VaultSettings";
 import { availableMonoFonts, fontLabel, fontStack } from "../fonts";
 import { AgentIcon, TrackerIcon } from "./icons";
@@ -601,8 +602,16 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
   // does so far; everywhere else the engine choice is decoration and the
   // section says so instead of offering a switch that does nothing.
   const [browserOk, setBrowserOk] = useState(false);
+  // Chromium-family browsers found on this machine. Unlike browserOk this is an
+  // installation fact, not a platform one — it can change while the dialog is
+  // open, which is why the section offers a re-scan.
+  const [browsers, setBrowsers] = useState<ipc.DetectedBrowser[]>([]);
   const [clearing, setClearing] = useState<null | "busy" | "done" | string>(null);
   const fonts = availableMonoFonts();
+
+  useEffect(() => {
+    void ipc.chromiumDetect().then(setBrowsers).catch(() => {});
+  }, []);
 
   useEffect(() => {
     void ipc
@@ -1208,6 +1217,23 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                           a panel or menu covers it.</em>
                         </span>
                       </label>
+                      <label className="set-inline-check">
+                        <input
+                          type="radio"
+                          name="browser-engine"
+                          disabled={browsers.length === 0 && !s.chromiumPath.trim()}
+                          checked={s.browserEngine === "chromium"}
+                          onChange={() => patch({ browserEngine: "chromium" })}
+                        />
+                        <span>
+                          Chrome or Chromium
+                          <em>
+                            {browsers.length || s.chromiumPath.trim()
+                              ? "Drives a browser you already have, over its debugging protocol. Its own profile — logins here are separate from the embedded browser's."
+                              : "No Chrome, Chromium, Edge or Brave found. Install one, or point Canopy at a binary below."}
+                          </em>
+                        </span>
+                      </label>
                       <p className="set-item-desc">
                         Open tabs keep the engine they started on.
                       </p>
@@ -1217,6 +1243,41 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                       Loopback proxy only — the embedded browser is macOS-only so far.
                     </p>
                   )}
+                </Item>
+                <Item
+                  name="Chrome binary"
+                  desc="Which browser the Chrome engine drives. Canopy never downloads one — it uses what you have."
+                >
+                  <div className="set-inline">
+                    <select
+                      value={s.chromiumPath}
+                      onChange={(e) => patch({ chromiumPath: e.target.value })}
+                    >
+                      <option value="">
+                        {browsers.length
+                          ? `Detected — ${browsers[0].name}`
+                          : "Detected — nothing found"}
+                      </option>
+                      {browsers.map((b) => (
+                        <option key={b.path} value={b.path}>
+                          {b.name}
+                        </option>
+                      ))}
+                    </select>
+                    <Button
+                      onClick={() => {
+                        void ipc.chromiumDetect().then(setBrowsers);
+                        void refreshEngineSupport();
+                      }}
+                    >
+                      Re-scan
+                    </Button>
+                  </div>
+                  <p className="set-item-desc">
+                    Canopy launches it on a profile of its own, with an ephemeral
+                    debugging port bound to this machine — never your everyday Chrome
+                    profile, whose cookies that port would otherwise expose.
+                  </p>
                 </Item>
                 <Item
                   name="Browsing data"

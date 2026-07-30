@@ -384,6 +384,48 @@ export const browserHere = (tabId: string) =>
 /** Wipe the shared browser profile — cookies, storage, caches, every site. */
 export const browserClearData = () => invoke<void>("browser_clear_data");
 
+// ---------- Embedded browser (chromium engine) ----------
+//
+// A browser the user already installed, driven over CDP. Same op vocabulary as
+// the webview engine — the page-side picker is identical, so only the transport
+// differs — which is why these mirror the shapes above rather than inventing
+// new ones.
+
+export interface DetectedBrowser {
+  name: string;
+  path: string;
+}
+
+/** Chromium-family browsers found on this machine, most preferred first.
+ *  Empty is the normal answer on a machine with only Safari. */
+export const chromiumDetect = () =>
+  invoke<DetectedBrowser[]>("chromium_detect").catch(() => [] as DetectedBrowser[]);
+
+/** Launch (or reuse) the browser and open a tab in it. `exe` is the binary the
+ *  user picked or that detection found. */
+export const chromiumOpen = (exe: string, tabId: string, url: string) =>
+  invoke<void>("chromium_open", { exe, tabId, url });
+
+export const chromiumNavigate = (tabId: string, url: string) =>
+  invoke<void>("chromium_navigate", { tabId, url });
+
+export const chromiumRunOp = (tabId: string, op: Record<string, unknown>) =>
+  invoke<BrowserOpAck | null>("chromium_run_op", { tabId, op });
+
+export const chromiumCommand = (tabId: string, message: Record<string, unknown>) =>
+  invoke<void>("chromium_command", { tabId, message });
+
+/** Queued page events. The webview engine gets these pushed by a doorbell it
+ *  can hook; a browser we do not host has no such hook, so this is pulled. */
+export const chromiumDrain = (tabId: string) =>
+  invoke<unknown[] | null>("chromium_drain", { tabId });
+
+export const chromiumHere = (tabId: string) =>
+  invoke<{ url: string; title: string } | null>("chromium_here", { tabId });
+
+export const chromiumClose = (tabId: string) =>
+  invoke<void>("chromium_close", { tabId }).catch(() => {});
+
 /** Messages a page pushed up: agent-op results, annotations, in-page
  *  navigations, the ready announcement after every load. */
 export interface BrowserEvents {
