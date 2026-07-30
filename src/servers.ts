@@ -232,3 +232,31 @@ export const runningCount = (groups: ServerGroup[]) =>
   groups.reduce((n, g) => n + g.running, 0);
 
 export const serverUrl = (port: number) => `http://localhost:${port}`;
+
+/** Start of the OS's dynamic/ephemeral range. A listener up here was assigned,
+ *  not chosen: Tauri's dev IPC socket, a bundler's inspector, an HMR helper. */
+const EPHEMERAL_PORT = 49152;
+
+/** Room for a dev server and its API, and no more — the panel goes down to
+ *  200px wide. */
+const PORTS_ON_ROW = 2;
+
+/**
+ * Split a run's ports into the ones worth putting on its row and the rest.
+ *
+ * `pnpm tauri dev` listens on three: the Vite port you asked for and two the OS
+ * handed out. All three on a row of a narrow panel left no space for the run's
+ * own name, and two of them are not pages anyone would open — so the assigned
+ * ones are demoted behind a `+N`, not dropped. "Which port is my dev server on"
+ * and "what else did this process open" are different questions, and only the
+ * first belongs on the row.
+ *
+ * A run whose *only* ports are ephemeral still shows them: demoting every port
+ * would hide the answer rather than rank it.
+ */
+export function splitPorts(ports: number[]): { shown: number[]; rest: number[] } {
+  const all = [...new Set(ports)].sort((a, b) => a - b);
+  const chosen = all.filter((p) => p < EPHEMERAL_PORT);
+  const shown = (chosen.length ? chosen : all).slice(0, PORTS_ON_ROW);
+  return { shown, rest: all.filter((p) => !shown.includes(p)) };
+}

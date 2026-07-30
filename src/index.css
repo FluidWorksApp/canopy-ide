@@ -2377,8 +2377,16 @@ body.resizing-side * {
   visibility: visible;
 }
 
+/* One line, and the line that gives way first. Without `nowrap` a two-word name
+   ("Local Instance") wrapped inside a 24px row and came out as two clipped
+   stubs; without `min-width: 0` a flex item refuses to shrink past its content,
+   so the port chips beside it won the width instead. The name is the only thing
+   in the row that may lose space, hence `flex: 1`. */
 .command-run-name {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
+  white-space: nowrap;
   text-overflow: ellipsis;
 }
 
@@ -2391,6 +2399,24 @@ body.resizing-side * {
 .servers-panel {
   overflow-y: auto;
   flex: 1;
+  /* The panel drags from 560px down to 200px, and what fits at one end does not
+     at the other — so the rows answer to the panel's width, not the window's. */
+  container: servers / inline-size;
+}
+
+/* Dragged narrow, a row sheds chips before it sheds the run's name: at 200px
+   three port chips left nothing but "L…", which is the answer to no question.
+   Everything dropped here is still in the row's tooltip. */
+@container servers (max-width: 230px) {
+  .command-run-row .servers-port-more {
+    display: none;
+  }
+}
+
+@container servers (max-width: 215px) {
+  .command-run-row .servers-port {
+    display: none;
+  }
 }
 
 .servers-head-actions {
@@ -2443,6 +2469,36 @@ body.resizing-side * {
   flex: 0 0 auto;
   padding: 1px 5px;
   font-size: 9.5px;
+}
+
+/* The ports the OS assigned, folded into one chip. Quieter than a real port
+   because it is a count, not an address — clicking it shows them. */
+.servers-port-more {
+  min-width: 20px;
+  text-align: center;
+  color: var(--text-dim);
+}
+
+/* Where they land once revealed: their own line, indented under the row's name,
+   so the row itself keeps its shape at any panel width. */
+.servers-port-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0 8px 3px 38px;
+}
+
+/* Hover-gated like the files panel's, and for the same reason: two icons per
+   group, on every group, all the time, read as a toolbar you have to parse
+   before you can find the one server you came for. The run rows keep theirs
+   while running — stopping a server must never need a hunt. */
+.servers-group > .component-header .component-actions .btn-icon {
+  visibility: hidden;
+}
+
+.servers-group > .component-header:hover .component-actions .btn-icon,
+.servers-group > .component-header .component-actions .btn-icon:focus-visible {
+  visibility: visible;
 }
 
 .servers-empty {
