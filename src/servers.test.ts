@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { TermSubTab } from "./components/ProjectView/helpers";
-import { groupServers, runningCount, type ServerComponent } from "./servers";
+import {
+  groupServers,
+  runningCount,
+  splitPorts,
+  type ServerComponent,
+} from "./servers";
 
 const term = (t: Partial<TermSubTab> & { id: string; cwd: string }): TermSubTab => ({
   type: "terminal",
@@ -202,5 +207,36 @@ describe("workspaces nest under their component", () => {
   it("leaves a project with no workspaces exactly as it was", () => {
     const [g] = groupServers([web], [], noPorts);
     expect(g.workspaces).toEqual([]);
+  });
+});
+
+describe("splitPorts", () => {
+  it("keeps the port you chose and demotes the ones the OS handed out", () => {
+    // The row this was written for: `pnpm tauri dev` listens on Vite's port and
+    // two the kernel picked, and all three left no room for "Local Instance".
+    const { shown, rest } = splitPorts([5173, 51845, 51729]);
+    expect(shown).toEqual([5173]);
+    expect(rest).toEqual([51729, 51845]);
+  });
+
+  it("shows ephemeral ports when they are the only ones there are", () => {
+    // Demoting every port would hide the answer instead of ranking it.
+    const { shown, rest } = splitPorts([51729]);
+    expect(shown).toEqual([51729]);
+    expect(rest).toEqual([]);
+  });
+
+  it("makes room for a dev server and its API, and no more", () => {
+    const { shown, rest } = splitPorts([3000, 8080, 9229]);
+    expect(shown).toEqual([3000, 8080]);
+    expect(rest).toEqual([9229]);
+  });
+
+  it("dedupes and orders, so the row never reshuffles between polls", () => {
+    expect(splitPorts([8080, 3000, 8080]).shown).toEqual([3000, 8080]);
+  });
+
+  it("has nothing to say about a run with no ports", () => {
+    expect(splitPorts([])).toEqual({ shown: [], rest: [] });
   });
 });

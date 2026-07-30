@@ -29,6 +29,7 @@ beforeEach(() => {
       position: own.position || "static",
       zIndex: own.zIndex || "auto",
       pointerEvents: pe || "auto",
+      display: own.display || "block",
     } as CSSStyleDeclaration;
   }) as typeof window.getComputedStyle;
   // Both bindings: readStyle() resolves the global, which is not guaranteed to
@@ -162,6 +163,32 @@ describe("the occlusion walk", () => {
     rect(toast, { x: 700, y: 700, w: 400, h: 60 });
     toast.setAttribute("style", "position:fixed;pointer-events:none");
     expect(occludersOver(host, VIEW).map((c) => (c.el as HTMLElement).id)).toContain("toast");
+  });
+
+  it("descends through a display:contents wrapper the engine calls invisible", () => {
+    // The bug this whole file exists for. ProjectView wraps an entire project in
+    // `display: contents` so that hiding the project takes its dialogs with it.
+    // Such an element generates no box, so getClientRects() is empty and
+    // checkVisibility() answers false on every engine — while everything inside
+    // it is on screen. Pruning there cut the whole app out of the walk: it found
+    // nothing over any browser view, and the only surface that ever hid one was
+    // a toast mounted outside the wrapper.
+    document.body.innerHTML = `
+      <div id="host"></div>
+      <div id="project"><div class="status-bar"><div class="ctx-menu" id="menu"></div></div></div>`;
+    const host = document.getElementById("host")!;
+    rect(host, { x: 600, y: 40, w: 600, h: 720 });
+    const project = document.getElementById("project")!;
+    // A box-less element: no rects, and the engine says invisible.
+    project.setAttribute("style", "display:contents");
+    rect(project, { x: 0, y: 0, w: 0, h: 0 });
+    (project as Element & { checkVisibility: () => boolean }).checkVisibility = () => false;
+    rect(document.querySelector(".status-bar")!, { x: 0, y: 760, w: 1200, h: 40 });
+    const menu = document.getElementById("menu")!;
+    rect(menu, { x: 900, y: 300, w: 260, h: 400 });
+    menu.setAttribute("style", "position:fixed;z-index:500");
+
+    expect(occludersOver(host, VIEW).map((c) => (c.el as HTMLElement).id)).toContain("menu");
   });
 
   it("skips a subtree the engine reports as not visible", () => {
