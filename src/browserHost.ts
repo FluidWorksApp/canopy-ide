@@ -115,12 +115,15 @@ let scheduled = 0;
  *  be told apart from one that landed slowly. */
 let visibilitySeq = 0;
 
-/** Enough of an occluder to recognise it in a log line or a violation. */
-function describe(c: Candidate): string {
-  const el = c.el;
-  if (!el) return "?";
+/** Enough of an element to recognise it in a log line or a violation. */
+function nameOf(el: Element): string {
   const cls = typeof el.className === "string" ? el.className.trim().split(/\s+/)[0] : "";
   return `${el.tagName.toLowerCase()}${cls ? `.${cls}` : ""}`;
+}
+
+/** Enough of an occluder to recognise it in a log line or a violation. */
+function describe(c: Candidate): string {
+  return c.el ? nameOf(c.el) : "?";
 }
 
 /** Every hop the host takes goes into the app log, always — the embedded
@@ -165,13 +168,32 @@ function currentZoom(): number {
 }
 
 /** display / visibility / opacity in one question. This is what prunes every
- *  backgrounded doc tab — one call at the subtree's root, not once per node. */
+ *  backgrounded doc tab — one call at the subtree's root, not once per node.
+ *
+ *  With one exception, and it is not a detail: a BOX-LESS element is not a
+ *  hidden one. `display: contents` renders an element's children directly in
+ *  its parent's flow and generates no box of its own, so `getClientRects()` is
+ *  empty and `checkVisibility()` answers false — while everything inside it is
+ *  on screen. ProjectView wraps an entire project in one of those (so hiding a
+ *  project takes its dialogs with it, see its own comment), which put the whole
+ *  app underneath an element the walk called invisible: it pruned at the first
+ *  hop and found nothing, ever. Every menu, dialog, palette and panel inside a
+ *  project was invisible to the detector, and the only surface that ever hid a
+ *  browser view was a toast mounted outside the wrapper.
+ *
+ *  So the question asked here is "is this subtree rendered", not "does this
+ *  element paint". A contents wrapper is descended into, exactly like the
+ *  click-through layers in browserOcclusion.ts — it has no rectangle to count,
+ *  and its children have their own. */
 function isVisible(el: Element): boolean {
   const check = (el as Element & { checkVisibility?: (o?: object) => boolean }).checkVisibility;
-  if (typeof check === "function") {
-    return check.call(el, { visibilityProperty: true, opacityProperty: true });
-  }
-  return el.getClientRects().length > 0;
+  const rendered =
+    typeof check === "function"
+      ? check.call(el, { visibilityProperty: true, opacityProperty: true })
+      : el.getClientRects().length > 0;
+  // Only asked of what the engine already called invisible, so this costs one
+  // style resolution per pruned subtree root — not one per node.
+  return rendered || getComputedStyle(el).display === "contents";
 }
 
 function readStyle(el: Element): OccluderStyle {
@@ -662,6 +684,56 @@ export function suppressBrowserViewsOver(rect: RectLike): () => void {
   };
 }
 
+/** An element the walk refused to descend into, named well enough to find in the
+ *  source, with everything that could have made the engine call it invisible. A
+ *  class-less wrapper says nothing on its own, and this pruning cuts off whole
+ *  subtrees — so the report has to identify the node, not its shape. */
+function whyInvisible(el: Element): string {
+  const s = getComputedStyle(el);
+  const check = (el as Element & { checkVisibility?: (o?: object) => boolean }).checkVisibility;
+  return (
+    `${nameOf(el)}${el.id ? `#${el.id}` : ""}` +
+    ` display=${s.display} visibility=${s.visibility} opacity=${s.opacity}` +
+    ` contentVisibility=${s.contentVisibility || "?"} rects=${el.getClientRects().length}` +
+    ` bare=${typeof check === "function" ? check.call(el) : "?"}`
+  );
+}
+
+/** Why the walk did not count `el`, asked of the tree rather than guessed.
+ *
+ *  `walkFound=false` on an element that passes every predicate says the walk
+ *  never REACHED it, and there are only a few ways that happens. Each is named
+ *  here, because the difference between them is the difference between the bug
+ *  being in the geometry, in the pruning, or in where the surface is mounted. */
+function walkMiss(host: Element, view: RectLike, el: Element): string {
+  if (!document.body.contains(el)) return "outside-body";
+  if (host === el || host.contains(el)) return "inside-host";
+  const r = el.getBoundingClientRect();
+  if (r.width <= 0 || r.height <= 0) return `collapsed=${r.width}x${r.height}`;
+  if (!overlaps(view, r)) {
+    const box = (b: RectLike) =>
+      `${Math.round(b.width)}x${Math.round(b.height)}@${Math.round(b.x)},${Math.round(b.y)}`;
+    return `no-overlap el=${box(r)} view=${box(view)}`;
+  }
+  // The walk descends from body and stops at anything it treats as invisible or
+  // as an occluder in its own right. Whichever comes first is the reason.
+  for (let a = el.parentElement; a && a !== document.body; a = a.parentElement) {
+    if (!isVisible(a)) return `pruned-invisible-at=${whyInvisible(a)}`;
+    const ar = a.getBoundingClientRect();
+    if (
+      occludes(view, {
+        rect: ar,
+        style: readStyle(a),
+        painted: a.matches(PAINTED_OVERLAY_SELECTOR),
+        el: a,
+      })
+    ) {
+      return `pruned-covered-at=${nameOf(a)}`;
+    }
+  }
+  return "reachable-but-uncounted";
+}
+
 /** What the host thinks about one element, for the watchdog to print when it
  *  disagrees.
  *
@@ -679,9 +751,12 @@ export function hostVerdictFor(el: Element): string {
   const rect = host?.getBoundingClientRect();
   if (!host || !rect) return "view has no host element";
   const style = readStyle(el);
-  const found = occludersOver(host, rect).some((c) => c.el === el);
+  const over = occludersOver(host, rect);
+  const found = over.some((c) => c.el === el);
   return [
     `walkFound=${found}`,
+    ...(found ? [] : [`miss=${walkMiss(host, rect, el)}`]),
+    `walkSaw=[${over.map(describe).join(" ")}]`,
     `visible=${isVisible(el)}`,
     `position=${style.position}`,
     `zIndex=${style.zIndex}`,

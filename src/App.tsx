@@ -856,24 +856,18 @@ export default function App() {
   // has explicitly turned it on, so nothing about a shipped launch changes.
   useEffect(() => startBrowserWatchdog(), []);
 
-  // A broken invariant, made impossible to miss while developing: an error
-  // notice is the one kind that waits to be dismissed rather than fading.
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    const onBreach = (e: Event) => {
-      const d = (e as CustomEvent).detail as {
-        kind: string;
-        violation: { code: string; what: string; detail: string };
-      };
-      if (d?.kind !== "opened") return;
-      notify(
-        `Browser invariant ${d.violation.code}: ${d.violation.what} — ${d.violation.detail}`,
-        "error",
-      );
-    };
-    window.addEventListener("canopy:browser-invariant", onBreach);
-    return () => window.removeEventListener("canopy:browser-invariant", onBreach);
-  }, [notify]);
+  // A breach is reported to the console, to the app log under a stable
+  // `browser:INVARIANT` prefix, and to the selftest through watchdogViolations()
+  // — deliberately nowhere on screen.
+  //
+  // It used to raise a dev error notice here, to be impossible to miss. That
+  // notice is itself a surface over the pane, so reporting the breach hid the
+  // very view it was reporting on: the page froze into its last frame (nothing
+  // on the site responded to a click), and the invariant CLEARED some 50ms
+  // later because the view was no longer visible — the report destroying the
+  // state it existed to make visible. A measurement that changes what it
+  // measures is worse than a quiet one, and it made the app look broken in a
+  // way the bug never did.
 
   // `canopy --selftest=browser`: the app drives a scripted browser scenario
   // against a page it serves itself, then exits with a machine-readable report.
