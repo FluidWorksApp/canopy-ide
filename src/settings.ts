@@ -7,7 +7,13 @@ import type { BrowserEngine } from "./browserBounds";
 import type { CaptureMode } from "./pageCapture";
 import { IS_MAC } from "./platform";
 
-export type Theme = "auto" | "default" | "gotham" | "daylight" | "custom";
+export type Theme =
+  | "auto"
+  | "default"
+  | "gotham"
+  | "daylight"
+  | "vitrine"
+  | "custom";
 
 /** What "auto" means right now: Default when macOS is in dark mode, Daylight
  *  in light mode. Every consumer of the skin (CSS data-theme, terminal
@@ -37,6 +43,7 @@ export const THEMES: { id: Theme; label: string }[] = [
   { id: "default", label: "Default" },
   { id: "gotham", label: "Gotham" },
   { id: "daylight", label: "Daylight" },
+  { id: "vitrine", label: "Vitrine" },
   { id: "custom", label: "Custom" },
 ];
 

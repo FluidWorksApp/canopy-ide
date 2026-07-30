@@ -17,6 +17,7 @@ import {
   PdfView,
   SheetView,
 } from "./viewers";
+import { Button } from "./ui";
 
 const decoder = new TextDecoder();
 
@@ -49,16 +50,16 @@ export function FileView(props: FileViewProps) {
           <div className="blocked-file-path">{file.name}</div>
           <div className="blocked-file-detail">{detail}</div>
           <div className="blocked-file-actions">
-            <button className="btn" onClick={() => void ipc.fsReveal(file.path)}>
+            <Button onClick={() => void ipc.fsReveal(file.path)}>
               Reveal in file manager
-            </button>
+            </Button>
             {/* Only for size: a binary blob has nothing to show however hard
                 you insist, but "too large" is a judgement call the user is
                 entitled to overrule on their own machine. */}
             {file.blocked.reason === "too-large" && props.onOpenAnyway && (
-              <button className="btn" onClick={props.onOpenAnyway}>
+              <Button onClick={props.onOpenAnyway}>
                 Open anyway
-              </button>
+              </Button>
             )}
           </div>
         </div>

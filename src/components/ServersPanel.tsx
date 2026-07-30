@@ -20,6 +20,7 @@ import {
   StopIcon,
   TerminalIcon,
 } from "./icons";
+import { Button } from "./ui";
 
 interface ServersPanelProps {
   groups: ServerGroup[];
@@ -75,9 +76,9 @@ export function ServersPanel({
         <span>Servers</span>
         <span className="servers-head-actions">
           {live > 0 && <span className="servers-live">{live} running</span>}
-          <button className="btn-icon" title="Edit run commands" onClick={onEdit}>
+          <Button icon title="Edit run commands" onClick={onEdit}>
             ⚙
-          </button>
+          </Button>
         </span>
       </div>
 
@@ -88,9 +89,9 @@ export function ServersPanel({
             Run commands live on a component — a dev server, a build, a worker. Add one and
             it shows up here.
           </p>
-          <button className="btn-mini" onClick={onEdit}>
+          <Button size="sm" onClick={onEdit}>
             Add a run command
-          </button>
+          </Button>
         </div>
       )}
 
@@ -116,40 +117,34 @@ export function ServersPanel({
               )}
               <span className="component-actions">
                 {stoppable.length > 0 ? (
-                  <button
-                    className="icon-btn icon-btn-danger"
+                  <Button icon variant="danger"
                     title={`Stop all in ${g.label}`}
                     onClick={(e) => {
                       e.stopPropagation();
                       for (const s of stoppable) if (s.ptyId != null) onStop(s.ptyId);
-                    }}
-                  >
+                    }}>
                     <StopIcon size={13} />
-                  </button>
+                  </Button>
                 ) : (
                   startable.length > 0 && (
-                    <button
-                      className="icon-btn"
+                    <Button icon
                       title={`Start all in ${g.label}`}
                       onClick={(e) => {
                         e.stopPropagation();
                         for (const s of startable) onStart(g.path, s);
-                      }}
-                    >
+                      }}>
                       <PlayIcon size={12} />
-                    </button>
+                    </Button>
                   )
                 )}
-                <button
-                  className="icon-btn"
+                <Button icon
                   title={`New terminal in ${g.label}`}
                   onClick={(e) => {
                     e.stopPropagation();
                     onNewTerminal(g.path);
-                  }}
-                >
+                  }}>
                   <TerminalIcon size={13} />
-                </button>
+                </Button>
               </span>
             </div>
 
@@ -212,29 +207,23 @@ export function ServersPanel({
                       >
                         {running ? (
                           <>
-                            <button
-                              className="icon-btn"
+                            <Button icon
                               title="Restart"
-                              onClick={() => e.tabId && onRestart(e.tabId)}
-                            >
+                              onClick={() => e.tabId && onRestart(e.tabId)}>
                               <RestartIcon size={14} />
-                            </button>
-                            <button
-                              className="icon-btn icon-btn-danger"
+                            </Button>
+                            <Button icon variant="danger"
                               title="Stop"
-                              onClick={() => e.ptyId != null && onStop(e.ptyId)}
-                            >
+                              onClick={() => e.ptyId != null && onStop(e.ptyId)}>
                               <StopIcon size={13} />
-                            </button>
+                            </Button>
                           </>
                         ) : (
-                          <button
-                            className="icon-btn"
+                          <Button icon
                             title={e.tabId ? "Run again" : "Run"}
-                            onClick={start}
-                          >
+                            onClick={start}>
                             {e.tabId ? <RestartIcon size={14} /> : <PlayIcon size={12} />}
-                          </button>
+                          </Button>
                         )}
                       </span>
                     </div>

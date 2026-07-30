@@ -55,6 +55,7 @@ import { AgentLaunchButton } from "./AgentLaunchButton";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
 import { LiveDot } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
+import { Button } from "./ui";
 
 /** A trusted press landed inside a previewed page, forwarded out of it by the
  *  injected picker. The page's own events never reach this window under either
@@ -870,9 +871,9 @@ export function PreviewView({
         <div className="preview-error">
           <p>Couldn't reach {origin}.</p>
           <pre>{proxyError}</pre>
-          <button className="btn" onClick={() => navigate(urlRef.current)}>
+          <Button onClick={() => navigate(urlRef.current)}>
             Retry
-          </button>
+          </Button>
         </div>
       );
     }
@@ -953,15 +954,15 @@ export function PreviewView({
         />
       )}
       <div className="preview-toolbar">
-        <button className="btn-icon" title="Back" onClick={() => go(-1)}>
+        <Button icon title="Back" onClick={() => go(-1)}>
           ‹
-        </button>
-        <button className="btn-icon" title="Forward" onClick={() => go(1)}>
+        </Button>
+        <Button icon title="Forward" onClick={() => go(1)}>
           ›
-        </button>
-        <button className="btn-icon" title="Reload" onClick={() => go(0)}>
+        </Button>
+        <Button icon title="Reload" onClick={() => go(0)}>
           ↻
-        </button>
+        </Button>
         <form
           className="preview-url-form"
           onSubmit={(e) => {
@@ -992,35 +993,32 @@ export function PreviewView({
             {linked.componentLabel ?? linked.title}
           </span>
         )}
-        <button
-          className={`btn-mini preview-annotate-toggle ${picking ? "preview-annotate-on" : ""}`}
+        <Button
+          size="sm"
+          className={`preview-annotate-toggle ${picking ? "preview-annotate-on" : ""}`}
           title="Annotate: click any element on the page to attach feedback to it"
           onClick={togglePicking}
         >
           ◎ Annotate{annotations.length > 0 ? ` (${annotations.length})` : ""}
-        </button>
+        </Button>
         {/* One click takes the shot the way you took the last one; the caret is
             for changing your mind. Same split shape as the agent launcher.
             Absent off macOS rather than present and always failing: webview
             capture has no implementation there (see snapshot.rs). */}
         {IS_MAC && (
           <span className="split-btn split-btn-mini">
-            <button
-              className="btn-mini split-btn-main"
+            <Button size="sm" className="split-btn-main"
               title={`Screenshot — ${captureModeLabel(captureMode).toLowerCase()}`}
               disabled={capturing}
-              onClick={() => runCapture(captureMode)}
-            >
+              onClick={() => runCapture(captureMode)}>
               ▣ Screenshot{shots.length > 0 ? ` (${shots.length})` : ""}
-            </button>
-            <button
-              className="btn-mini split-btn-caret"
+            </Button>
+            <Button size="sm" className="split-btn-caret"
               title="Choose what to capture"
               disabled={capturing}
-              onClick={openCaptureMenu}
-            >
+              onClick={openCaptureMenu}>
               ▾
-            </button>
+            </Button>
           </span>
         )}
       </div>
@@ -1032,9 +1030,9 @@ export function PreviewView({
               <>
                 <div className="preview-panel-head">
                   <span>Screenshots</span>
-                  <button className="btn-mini" onClick={() => onPatch({ shots: [] })}>
+                  <Button size="sm" onClick={() => onPatch({ shots: [] })}>
                     Clear all
-                  </button>
+                  </Button>
                 </div>
                 <div className="preview-panel-list">
                   {shots.map((s) => (
@@ -1044,13 +1042,11 @@ export function PreviewView({
                         <span className="preview-note-what" title={s.path}>
                           {s.region ? "region" : "page"} · {s.width}×{s.height}
                         </span>
-                        <button
-                          className="btn-icon preview-note-remove"
+                        <Button icon className="preview-note-remove"
                           title="Remove"
-                          onClick={() => removeShot(s.n)}
-                        >
+                          onClick={() => removeShot(s.n)}>
                           ✕
-                        </button>
+                        </Button>
                       </div>
                       <img className="preview-shot-thumb" src={s.thumb} alt={`Screenshot ${s.n}`} />
                       <textarea
@@ -1097,9 +1093,9 @@ export function PreviewView({
               <div className="preview-panel-head">
                 <span>Feedback</span>
                 {annotations.length > 0 && (
-                  <button className="btn-mini" onClick={clearAnnotations}>
+                  <Button size="sm" onClick={clearAnnotations}>
                     Clear all
-                  </button>
+                  </Button>
                 )}
               </div>
               {annotations.length === 0 && (
@@ -1116,13 +1112,11 @@ export function PreviewView({
                         {a.components[0] ? `⟨${a.components[0]}⟩ ` : ""}
                         {`<${a.tag}${a.id ? `#${a.id}` : ""}>`}
                       </span>
-                      <button
-                        className="btn-icon preview-note-remove"
+                      <Button icon className="preview-note-remove"
                         title="Remove"
-                        onClick={() => removeAnnotation(a.n)}
-                      >
+                        onClick={() => removeAnnotation(a.n)}>
                         ✕
-                      </button>
+                      </Button>
                     </div>
                     {a.text && <div className="preview-note-text">“{a.text.slice(0, 120)}”</div>}
                     <textarea

@@ -5,6 +5,7 @@
 // here is an answer. Closing without one would strand it until the bridge's
 // timeout — "skip" says so explicitly instead.
 import { useState } from "react";
+import { Button } from "./ui";
 
 export function AskDialog({
   question,
@@ -24,9 +25,9 @@ export function AskDialog({
         {options.length > 0 && (
           <div className="ask-options">
             {options.map((option) => (
-              <button key={option} className="btn ask-option" onClick={() => onAnswer(option)}>
+              <Button className="ask-option" key={option}  onClick={() => onAnswer(option)}>
                 {option}
-              </button>
+              </Button>
             ))}
           </div>
         )}
@@ -43,17 +44,15 @@ export function AskDialog({
             placeholder={options.length ? "…or answer in your own words" : "Your answer"}
             onChange={(e) => setText(e.target.value)}
           />
-          <button className="btn btn-accent" type="submit" disabled={!text.trim()}>
+          <Button variant="accent" type="submit" disabled={!text.trim()}>
             Send
-          </button>
+          </Button>
         </form>
         <div className="confirm-actions">
-          <button
-            className="btn"
-            onClick={() => onAnswer("(the user skipped this question — decide for yourself)")}
-          >
+          <Button
+            onClick={() => onAnswer("(the user skipped this question — decide for yourself)")}>
             Skip
-          </button>
+          </Button>
         </div>
       </div>
     </div>

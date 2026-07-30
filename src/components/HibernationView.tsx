@@ -9,6 +9,7 @@
 import { useEffect, useRef } from "react";
 import type { Project } from "../projects";
 import { snapshotSummary, wakeSteps, type ProjectSnapshot } from "../hibernation";
+import { Button } from "./ui";
 
 /** Drift positions for the ambient crystals. Fixed, not random: a random
  *  layout would reshuffle on every render (and every progress tick). */
@@ -203,9 +204,9 @@ export function HibernationView({
             ) : (
               <p className="hib-sub hib-empty">This project was asleep with nothing open.</p>
             )}
-            <button className="btn btn-accent hib-wake" onClick={onWake} autoFocus>
+            <Button variant="accent" className="hib-wake" onClick={onWake} autoFocus>
               Wake the project from hibernation
-            </button>
+            </Button>
             <button className="hib-discard" onClick={onDiscard}>
               Discard the snapshot and open it empty
             </button>

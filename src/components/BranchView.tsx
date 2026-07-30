@@ -13,6 +13,7 @@ import { splitPatch } from "./PrView";
 import { GitBranchIcon } from "./icons";
 import { raisePrTask, type MicroTaskDef, type RaisePrPayload } from "../microTasks";
 import { MicroTaskButton } from "./MicroTaskButton";
+import { Button } from "./ui";
 
 interface BranchViewProps {
   repo: string;
@@ -202,33 +203,28 @@ export function BranchView({
           {branch.current ? (
             <span className="loose-chip">you're on it</span>
           ) : (
-            <button
-              className="btn"
+            <Button
               title={`Open ${branch.branch} in this project's own checkout`}
               onClick={() =>
                 void switchTo(repo, { kind: "branch", branch: branch.branch })
-              }
-            >
+              }>
               Switch to this branch
-            </button>
+            </Button>
           )}
           {/* Only for a workspace that is somewhere else and still there:
               pointing the project at its own checkout is a no-op, and at a
               folder that has gone is a lie. */}
           {branch.worktree && !branch.is_main && !branch.prunable && (
-            <button
-              className="btn"
+            <Button
               title={`Point this project's files at ${branch.worktree}. Nothing moves, nothing is lost.`}
               onClick={() =>
                 void openThere(repo, branch.worktree as string, branch.branch)
-              }
-            >
+              }>
               Open it there
-            </button>
+            </Button>
           )}
           {!branch.current && (
-            <button
-              className="btn"
+            <Button
               title="Look around this branch without moving anything. Your next switch puts everything back."
               onClick={() =>
                 void switchTo(repo, {
@@ -236,20 +232,17 @@ export function BranchView({
                   ref: branch.branch,
                   label: branch.branch,
                 })
-              }
-            >
+              }>
               Test a snapshot
-            </button>
+            </Button>
           )}
           {teammates.length > 0 && (
             <div className="review-send">
-              <button
-                className="btn"
+              <Button
                 title="Send this branch's diff to a teammate for review"
-                onClick={() => setAskReview((v) => !v)}
-              >
+                onClick={() => setAskReview((v) => !v)}>
                 Request review ▾
-              </button>
+              </Button>
               {askReview && (
                 <div className="cli-menu review-menu" onMouseLeave={() => setAskReview(false)}>
                   {teammates.map((m) => (
@@ -295,37 +288,37 @@ export function BranchView({
             />
           )}
           {branch.worktree && !branch.prunable && (
-            <button
-              className="btn"
-              onClick={() => onOpenTerminal(branch.worktree as string, branch.branch)}
-            >
+            <Button
+              onClick={() => onOpenTerminal(branch.worktree as string, branch.branch)}>
               Open terminal here
-            </button>
+            </Button>
           )}
         </div>
       </div>
 
       <div className="branch-panes">
-        <button
-          className={`btn-mini ${pane === "uncommitted" ? "btn-accent" : ""}`}
+        <Button
+          size="sm"
+          variant={pane === "uncommitted" ? "accent" : "default"}
           onClick={() => setPane("uncommitted")}
         >
           Uncommitted{branch.dirty > 0 ? ` (${branch.dirty})` : ""}
-        </button>
-        <button
-          className={`btn-mini ${pane === "diff" ? "btn-accent" : ""}`}
+        </Button>
+        <Button
+          size="sm"
+          variant={pane === "diff" ? "accent" : "default"}
           onClick={() => setPane("diff")}
         >
           All changes vs base
-        </button>
+        </Button>
         {patch && files.length > 0 && (
           <>
             <span className="loose-ahead">+{patch.insertions}</span>
             <span className="loose-dirty">−{patch.deletions}</span>
             <span className="git-spacer" />
-            <button className="btn-mini" onClick={() => setSplit((v) => !v)}>
+            <Button size="sm" onClick={() => setSplit((v) => !v)}>
               {split ? "Unified" : "Split"}
-            </button>
+            </Button>
           </>
         )}
       </div>

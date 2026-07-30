@@ -8,6 +8,7 @@
 // prefers-reduced-motion stops the motion and shows the resting state.
 import { useState } from "react";
 import { useEscape } from "../useEscape";
+import { Button } from "./ui";
 
 interface OnboardingProps {
   /** Called when the walkthrough is dismissed any way (Skip, Esc, Done). */
@@ -398,25 +399,21 @@ export function Onboarding({ onClose, onCreateProject }: OnboardingProps) {
         </div>
 
         <div className="onboarding-actions">
-          <button
-            className="btn"
+          <Button
             disabled={step === 0}
-            onClick={() => setStep((s) => Math.max(0, s - 1))}
-          >
+            onClick={() => setStep((s) => Math.max(0, s - 1))}>
             Back
-          </button>
+          </Button>
           {last ? (
-            <button
-              className="btn btn-accent"
+            <Button variant="accent"
               onClick={onCreateProject}
-              title="Close the intro and create your first project"
-            >
+              title="Close the intro and create your first project">
               Create a project
-            </button>
+            </Button>
           ) : (
-            <button className="btn btn-accent" onClick={() => setStep((s) => s + 1)}>
+            <Button variant="accent" onClick={() => setStep((s) => s + 1)}>
               Next
-            </button>
+            </Button>
           )}
         </div>
       </div>

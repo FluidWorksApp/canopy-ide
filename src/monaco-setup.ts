@@ -43,15 +43,32 @@ export const monacoReady: Promise<void> = (async () => {
       "editor.background": "#f2f3f7",
     },
   });
-  // Monaco doesn't read CSS variables, so it follows the skin by hand: the
-  // Daylight skin maps to canopy-light, everything else to canopy-dark —
-  // once at service startup (editors mount with whatever is then active) and
-  // again on every live skin switch (settings.ts dispatches canopy:theme).
+  // Vitrine is glass all the way down: the editor paints no surface of its
+  // own and the app's ambient field shows through, tinted by
+  // `.project-content` in index.css. A slab here would be the one opaque
+  // rectangle in the skin, and it covers most of the window.
+  monaco.editor.defineTheme("canopy-vitrine", {
+    base: "vs-dark",
+    inherit: true,
+    rules: [],
+    colors: {
+      "editor.background": "#00000000",
+      "editorGutter.background": "#00000000",
+      "minimap.background": "#00000000",
+      "editorOverviewRuler.background": "#00000000",
+    },
+  });
+  // Monaco doesn't read CSS variables, so it follows the skin by hand:
+  // Daylight maps to canopy-light, Vitrine to canopy-vitrine, everything else
+  // to canopy-dark — once at service startup (editors mount with whatever is
+  // then active) and again on every live skin switch (settings.ts dispatches
+  // canopy:theme).
   const monacoThemeForSkin = () => {
     try {
       const stored = JSON.parse(localStorage.getItem("canopy.settings") ?? "{}") as {
         theme?: string;
       };
+      if (stored.theme === "vitrine") return "canopy-vitrine";
       const light =
         stored.theme === "daylight" ||
         (stored.theme === "auto" &&

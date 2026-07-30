@@ -22,6 +22,7 @@ import {
 } from "../instructionDoc";
 import type { Notify } from "../types";
 import { AgentIcon, BRAND_ICONS, InstructionKindIcon, TrashIcon } from "./icons";
+import { Button } from "./ui";
 
 /** Display names for agents Canopy doesn't ship a launcher for. Their files
  *  still turn up on disk — a `.cursor/rules` or a `.windsurfrules` is worth
@@ -665,9 +666,9 @@ export function InstructionsView({
                 >
                   Raw
                 </button>
-                <button className="btn btn-accent" disabled={!dirty} onClick={save}>
+                <Button variant="accent" disabled={!dirty} onClick={save}>
                   {current.exists ? "Save" : "Create"}
-                </button>
+                </Button>
               </div>
             </div>
 
@@ -748,29 +749,23 @@ export function InstructionsView({
                           value={s.heading}
                           onChange={(e) => patchSection(s.id, { heading: e.target.value })}
                         />
-                        <button
-                          className="btn-icon"
+                        <Button icon
                           title="Move up"
                           disabled={i === 0}
-                          onClick={() => moveSection(s.id, -1)}
-                        >
+                          onClick={() => moveSection(s.id, -1)}>
                           ↑
-                        </button>
-                        <button
-                          className="btn-icon"
+                        </Button>
+                        <Button icon
                           title="Move down"
                           disabled={i === doc.sections.length - 1}
-                          onClick={() => moveSection(s.id, 1)}
-                        >
+                          onClick={() => moveSection(s.id, 1)}>
                           ↓
-                        </button>
-                        <button
-                          className="btn-icon btn-danger"
+                        </Button>
+                        <Button icon variant="danger"
                           title="Delete this section"
-                          onClick={() => removeSection(s.id)}
-                        >
+                          onClick={() => removeSection(s.id)}>
                           <TrashIcon size={12} />
-                        </button>
+                        </Button>
                       </div>
 
                       {s.items ? (
@@ -787,17 +782,15 @@ export function InstructionsView({
                                   })
                                 }
                               />
-                              <button
-                                className="btn-icon btn-danger"
+                              <Button icon variant="danger"
                                 title="Remove this item"
                                 onClick={() =>
                                   patchSection(s.id, {
                                     items: s.items?.filter((_, n) => n !== k),
                                   })
-                                }
-                              >
+                                }>
                                 ✕
-                              </button>
+                              </Button>
                             </div>
                           ))}
                           <button

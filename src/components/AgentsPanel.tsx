@@ -22,6 +22,7 @@ import {
 } from "./icons";
 import { useEscape } from "../useEscape";
 import type { PendingItem } from "../notifications";
+import { Button } from "./ui";
 
 /** Colour + label for the lifecycle dot on a running-agent row. `working` is
  *  the only state that pulses — a moving dot in a column of still ones is
@@ -240,9 +241,9 @@ function SharedDialog({
           ))
         )}
         <div className="modal-actions">
-          <button className="btn" onClick={onClose}>
+          <Button onClick={onClose}>
             Close
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -836,27 +837,23 @@ export function AgentsPanel({
           <span>{fmtMem(s.total_mem_bytes)}</span>
           <span>{s.procs.length} procs</span>
           {canHibernate && (
-            <button
-              className="btn-icon"
+            <Button icon
               title="Hibernate — frees memory now; resume later from Restorable with its history"
               onClick={(e) => {
                 e.stopPropagation();
                 hibernate(s.id);
-              }}
-            >
+              }}>
               <MoonIcon size={12} />
-            </button>
+            </Button>
           )}
-          <button
-            className="btn-icon btn-danger"
+          <Button icon variant="danger"
             title={`Kill terminal #${s.id}${agent ? ` and the ${agent.label} running in it` : ""}`}
             onClick={(e) => {
               e.stopPropagation();
               void ipc.ptyKill(s.id);
-            }}
-          >
+            }}>
             ✕
-          </button>
+          </Button>
         </div>
       </div>
     );
@@ -868,16 +865,14 @@ export function AgentsPanel({
 
   const dismissBtn = (key: string) =>
     onDismissPending && (
-      <button
-        className="icon-btn pending-dismiss"
+      <Button icon className="pending-dismiss"
         title="Dismiss"
         onClick={(e) => {
           e.stopPropagation();
           onDismissPending(key);
-        }}
-      >
+        }}>
         ✕
-      </button>
+      </Button>
     );
 
   return (
@@ -955,8 +950,7 @@ export function AgentsPanel({
                       single-select answered on click above, so it shows no
                       button. */}
                   {canAnswerInPanel(item) && !instantAnswer(item) && (
-                    <button
-                      className="btn btn-accent pending-submit"
+                    <Button variant="accent" className="pending-submit"
                       disabled={!answerable(item)}
                       title={
                         answerable(item)
@@ -966,25 +960,22 @@ export function AgentsPanel({
                       onClick={(e) => {
                         e.stopPropagation();
                         submitAnswers(item);
-                      }}
-                    >
+                      }}>
                       Submit answer
-                    </button>
+                    </Button>
                   )}
                   {/* A multi-question form can't be answered reliably by
                       synthesised keystrokes (the pages desync into a decline),
                       so the panel sends you to the terminal to answer it there. */}
                   {onAnswer && multiPage(item) && (
-                    <button
-                      className="btn pending-submit"
+                    <Button className="pending-submit"
                       title="Multi-question forms are answered in the terminal"
                       onClick={(e) => {
                         e.stopPropagation();
                         onJumpToTerminal?.(item);
-                      }}
-                    >
+                      }}>
                       Answer in the terminal ↗
-                    </button>
+                    </Button>
                   )}
                 </>
               ) : (
@@ -1064,13 +1055,11 @@ export function AgentsPanel({
         // two things the panel exists for.
         collapseKey="instructions"
         action={
-          <button
-            className="btn-icon"
+          <Button icon
             title="Open all agent instructions — CLAUDE.md, AGENTS.md, skills, subagents"
-            onClick={() => onOpenInstructions?.()}
-          >
+            onClick={() => onOpenInstructions?.()}>
             ⤢
-          </button>
+          </Button>
         }
       >
         {instructionsFailed ? (
@@ -1149,13 +1138,11 @@ export function AgentsPanel({
         title="Running agents"
         count={agentSessions.length}
         action={
-          <button
-            className="btn-icon"
+          <Button icon
             title="How to hook up agent CLIs"
-            onClick={() => setShowHookHelp((v) => !v)}
-          >
+            onClick={() => setShowHookHelp((v) => !v)}>
             ?
-          </button>
+          </Button>
         }
       >
 
@@ -1167,9 +1154,9 @@ export function AgentsPanel({
             {unhooked.map((id) => AGENT_LABELS.find((a) => a.id === id)?.label ?? id).join(", ")} —
             questions, tasks and tokens won't show until hooks are set up.
           </span>
-          <button className="btn btn-accent" onClick={() => void autoSetup(unhooked)}>
+          <Button variant="accent" onClick={() => void autoSetup(unhooked)}>
             Set up agent integrations
-          </button>
+          </Button>
           {setupResult && <p className="hook-result">{setupResult}</p>}
         </div>
       )}
@@ -1183,9 +1170,9 @@ export function AgentsPanel({
             Hooks are set up, but these agents started before that — restart one
             to stream its questions, tasks and tokens here.
           </span>
-          <button className="btn" onClick={dismissHint}>
+          <Button onClick={dismissHint}>
             Got it
-          </button>
+          </Button>
         </div>
       )}
 
@@ -1225,9 +1212,9 @@ export function AgentsPanel({
                       </span>
                     </>
                   )}
-                  <button className="btn btn-accent" onClick={() => void autoSetup(a.id)}>
+                  <Button variant="accent" onClick={() => void autoSetup(a.id)}>
                     Set up
-                  </button>
+                  </Button>
                 </div>
               );
             })}
@@ -1270,15 +1257,13 @@ export function AgentsPanel({
                   {claim.note ? `${claim.note} — ` : ""}
                   {claim.paths.map((p) => p.split("/").pop()).join(", ")}
                 </span>
-                <button
-                  className="btn btn-small"
+                <Button
                   title="Drop this claim — for an agent that died holding it"
                   onClick={() => {
                     void ipc.contextReleaseClaim(claim.owner).catch(() => {});
-                  }}
-                >
+                  }}>
                   Release
-                </button>
+                </Button>
               </div>
             ))}
           </div>

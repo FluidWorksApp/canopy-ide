@@ -6,6 +6,7 @@
 import { useState } from "react";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { ChevronIcon } from "./icons";
+import { Button } from "./ui";
 
 interface AgentQueryBarProps {
   /** Placeholder for the query input. */
@@ -57,21 +58,17 @@ export function AgentQueryBar({
           work they were written for. The box still runs what you type; the
           caret lists what exists. */}
       <div className="agent-query-run">
-        <button
-          className="btn btn-accent"
+        <Button variant="accent"
           title="Run this as a one-shot task: an agent does it, reports back, and closes itself"
-          onClick={() => onRunTask(take())}
-        >
+          onClick={() => onRunTask(take())}>
           ◆ Run task
-        </button>
+        </Button>
         {tasks && (
-          <button
-            className="btn btn-accent agent-query-more"
+          <Button variant="accent" className="agent-query-more"
             title="Run a task you've already written, or one Canopy ships"
-            onClick={(e) => menu.openUnder(e, tasks())}
-          >
+            onClick={(e) => menu.openUnder(e, tasks())}>
             <ChevronIcon size={13} className="chevron-down" />
-          </button>
+          </Button>
         )}
       </div>
     </div>

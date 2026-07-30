@@ -19,6 +19,7 @@ import {
 } from "../taskHistory";
 import { AGENT_CLIS } from "../projects";
 import { AgentsIcon, PlayIcon, TrashIcon } from "./icons";
+import { Button } from "./ui";
 
 const PER_PAGE = 25;
 
@@ -138,28 +139,24 @@ export function TaskHistoryView({
         {confirmClear ? (
           <>
             <span className="task-history-note">Delete all {runs.length}?</span>
-            <button className="btn" onClick={() => setConfirmClear(false)}>
+            <Button onClick={() => setConfirmClear(false)}>
               Cancel
-            </button>
-            <button
-              className="btn btn-danger"
+            </Button>
+            <Button variant="danger"
               onClick={() => {
                 clearTaskHistory();
                 setRuns([]);
                 setConfirmClear(false);
-              }}
-            >
+              }}>
               Clear history
-            </button>
+            </Button>
           </>
         ) : (
-          <button
-            className="btn"
+          <Button
             disabled={runs.length === 0}
-            onClick={() => setConfirmClear(true)}
-          >
+            onClick={() => setConfirmClear(true)}>
             Clear history
-          </button>
+          </Button>
         )}
       </div>
 
@@ -263,24 +260,20 @@ export function TaskHistoryView({
                           land in another project's tree while being recorded
                           against this one. */}
                       {onRunAgain && run.projectId === projectId && (
-                        <button
-                          className="btn"
+                        <Button
                           title="Run this task again, in the same directory"
-                          onClick={() => onRunAgain(run)}
-                        >
+                          onClick={() => onRunAgain(run)}>
                           <PlayIcon size={12} /> Run again
-                        </button>
+                        </Button>
                       )}
-                      <button
-                        className="btn-icon"
+                      <Button icon
                         title="Forget this run"
                         onClick={() => {
                           removeTaskRun(run.id);
                           setRuns(completedTaskRuns());
-                        }}
-                      >
+                        }}>
                         <TrashIcon size={12} />
-                      </button>
+                      </Button>
                     </div>
 
                     {/* Three different things, and until now they arrived as
@@ -361,19 +354,17 @@ export function TaskHistoryView({
 
       {pages > 1 && (
         <div className="task-history-pager">
-          <button className="btn" disabled={current === 0} onClick={() => setPage(current - 1)}>
+          <Button disabled={current === 0} onClick={() => setPage(current - 1)}>
             ‹ Newer
-          </button>
+          </Button>
           <span className="task-history-note">
             {current * PER_PAGE + 1}–{current * PER_PAGE + shown.length} of {matches.length}
           </span>
-          <button
-            className="btn"
+          <Button
             disabled={current >= pages - 1}
-            onClick={() => setPage(current + 1)}
-          >
+            onClick={() => setPage(current + 1)}>
             Older ›
-          </button>
+          </Button>
         </div>
       )}
     </div>

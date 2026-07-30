@@ -5,6 +5,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useState } from "react";
 import { useEscape } from "../useEscape";
+import { Button } from "./ui";
 
 interface AboutDialogProps {
   onClose: () => void;
@@ -45,9 +46,9 @@ export function AboutDialog({ onClose }: AboutDialogProps) {
           </p>
         </div>
         <div className="confirm-actions">
-          <button className="btn btn-accent" onClick={onClose}>
+          <Button variant="accent" onClick={onClose}>
             Done
-          </button>
+          </Button>
         </div>
       </div>
     </div>

@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { mcpServers, type McpServer, type McpSource } from "../ipc";
 import { ChevronIcon, PlugIcon, RestartIcon } from "./icons";
+import { Button } from "./ui";
 
 interface McpToolsPanelProps {
   /** The project's component roots, for their `.mcp.json` and the CLIs'
@@ -122,9 +123,9 @@ export function McpToolsPanel({ rootsKey, visible, onOpen }: McpToolsPanelProps)
               {reachable} of {servers.length} live
             </span>
           )}
-          <button className="btn-icon" title="Re-read the configs" onClick={load}>
+          <Button icon title="Re-read the configs" onClick={load}>
             <RestartIcon size={13} />
-          </button>
+          </Button>
         </span>
       </div>
 

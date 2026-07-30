@@ -5,6 +5,7 @@ import * as ipc from "../ipc";
 import type { Component, Project } from "../projects";
 import { newProjectId } from "../projects";
 import { useEscape } from "../useEscape";
+import { Button } from "./ui";
 
 interface ProjectDialogProps {
   existing?: Project;
@@ -150,15 +151,13 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
                     {c.path}
                   </span>
                 </div>
-                <button
-                  className="btn-icon"
+                <Button icon
                   title="Remove from project — the folder on disk is untouched"
                   onClick={() =>
                     setComponents((prev) => prev.filter((_, j) => j !== i))
-                  }
-                >
+                  }>
                   ✕
-                </button>
+                </Button>
               </div>
               <div className="pd-cmds">
                 <div className="pd-cmds-head">
@@ -183,29 +182,27 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
                       value={cmd.command}
                       onChange={(e) => patchCommand(i, k, "command", e.target.value)}
                     />
-                    <button className="btn-icon" onClick={() => removeCommand(i, k)}>
+                    <Button icon onClick={() => removeCommand(i, k)}>
                       ✕
-                    </button>
+                    </Button>
                   </div>
                 ))}
-                <button className="btn btn-mini" onClick={() => addCommand(i)}>
+                <Button size="sm" onClick={() => addCommand(i)}>
                   ＋ Add command
-                </button>
+                </Button>
               </div>
             </div>
           ))}
           <div className="pd-add-row">
-            <button className="btn pd-add-choice" onClick={() => void addComponent()}>
+            <Button className="pd-add-choice" onClick={() => void addComponent()}>
               ＋ Add directory…
-            </button>
+            </Button>
             {!cloneOpen && (
-              <button
-                className="btn pd-add-choice"
+              <Button className="pd-add-choice"
                 onClick={() => setCloneOpen(true)}
-                title="Clone a git repository and add it as a directory"
-              >
+                title="Clone a git repository and add it as a directory">
                 ↧ Clone from git…
-              </button>
+              </Button>
             )}
           </div>
           {cloneOpen && (
@@ -229,25 +226,21 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
                     }
                   }}
                 />
-                <button
-                  className="btn btn-accent pd-clone-go"
+                <Button variant="accent" className="pd-clone-go"
                   disabled={!cloneUrl.trim() || cloning}
-                  onClick={() => void cloneFromUrl()}
-                >
+                  onClick={() => void cloneFromUrl()}>
                   {cloning ? "Cloning…" : "Clone"}
-                </button>
+                </Button>
               </div>
               {!cloning && (
-                <button
-                  className="btn-icon pd-clone-cancel"
+                <Button icon className="pd-clone-cancel"
                   title="Cancel"
                   onClick={() => {
                     setCloneOpen(false);
                     setCloneError(null);
-                  }}
-                >
+                  }}>
                   ✕
-                </button>
+                </Button>
               )}
             </div>
           )}
@@ -257,11 +250,10 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
           )}
         </div>
         <div className="modal-actions">
-          <button className="btn" onClick={onCancel}>
+          <Button onClick={onCancel}>
             Cancel
-          </button>
-          <button
-            className="btn btn-accent"
+          </Button>
+          <Button variant="accent"
             disabled={!valid}
             onClick={() =>
               onSave({
@@ -274,10 +266,9 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
                 name: name.trim(),
                 components,
               })
-            }
-          >
+            }>
             {existing ? "Save" : "Create & open"}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

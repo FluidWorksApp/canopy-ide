@@ -29,6 +29,7 @@ import {
   ONE_OFF_HEADING,
   type TaskChoice,
 } from "../taskMenu";
+import { Button } from "./ui";
 
 const fmtCost = (n: number) =>
   n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`;
@@ -333,12 +334,12 @@ export function CommentComposer({
         }}
       />
       <div className="aw-cc-actions">
-        <button className="btn-mini btn-accent" onClick={commit}>
+        <Button size="sm" variant="accent" onClick={commit}>
           Add comment
-        </button>
-        <button className="btn-mini" onClick={onCancel}>
+        </Button>
+        <Button size="sm" onClick={onCancel}>
           Cancel
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -365,13 +366,11 @@ function CommentCard({
         title="Include when sending to the agent"
       />
       <div className="aw-comment-body">{c.body}</div>
-      <button
-        className="btn-icon aw-comment-x"
+      <Button icon className="aw-comment-x"
         title="Remove comment"
-        onClick={onRemove}
-      >
+        onClick={onRemove}>
         ✕
-      </button>
+      </Button>
     </div>
   );
 }
@@ -1047,46 +1046,40 @@ export function AgentWorkspaceView({
               Both routes are the one funnel, so a branch another workspace is
               holding asks its question here too. */}
           {repo && ws?.isolated && ws.workdir && (
-            <button
-              className="btn"
+            <Button
               title={`Point this project's files, search and new terminals at ${ws.workdir}. Nothing moves, nothing is lost.`}
               onClick={() =>
                 void openThere(repo, ws.workdir as string, ws.branch)
-              }
-            >
+              }>
               Open it there
-            </button>
+            </Button>
           )}
           {/* On a shared checkout there is no other folder to point at — the
               agent worked here — so the way back to its work is the branch. */}
           {repo && ws?.branch && !ws.isolated && !ws.detached && !ws.on_base && (
-            <button
-              className="btn"
+            <Button
               title={`Open ${ws.branch} in this project's own checkout`}
               onClick={() =>
                 void switchTo(repo, {
                   kind: "branch",
                   branch: ws.branch as string,
                 })
-              }
-            >
+              }>
               Switch to this branch
-            </button>
+            </Button>
           )}
           {/* Only for an isolated worktree: that directory isn't a tab anywhere
               else, so a scratch shell pointed at it is the one thing closing
               this overlay can't give you. On a shared checkout it's the repo
               dir you already have shells in — no value, so it's omitted. */}
           {ws?.isolated && ws.workdir && (
-            <button
-              className="btn"
+            <Button
               title={`Open a shell in the worktree: ${ws.workdir}`}
               onClick={() =>
                 onOpenTerminal(ws.workdir as string, ws.branch ?? agent)
-              }
-            >
+              }>
               New shell in worktree
-            </button>
+            </Button>
           )}
           {/* Hand this agent's output to a fresh one-shot agent: a one-off you
               type here, any task you've saved, or a built-in — raise the PR for
@@ -1100,13 +1093,11 @@ export function AgentWorkspaceView({
             onRunSavedTask ||
             onRunOneOff) && (
             <div className="review-send">
-              <button
-                className="btn"
+              <Button
                 title="Run a one-shot task on this work"
-                onClick={() => setTaskMenu((v) => !v)}
-              >
+                onClick={() => setTaskMenu((v) => !v)}>
                 Run task ▾
-              </button>
+              </Button>
               {taskMenu && (
                 <div
                   className="cli-menu review-menu"
@@ -1159,13 +1150,11 @@ export function AgentWorkspaceView({
                             <kbd>↵</kbd> run · <kbd>⇧↵</kbd> new line ·{" "}
                             <kbd>esc</kbd> cancel
                           </span>
-                          <button
-                            className="btn btn-accent"
+                          <Button variant="accent"
                             disabled={!oneOff.trim()}
-                            onClick={runOneOff}
-                          >
+                            onClick={runOneOff}>
                             Run
-                          </button>
+                          </Button>
                         </div>
                       </div>
                     ))}
@@ -1216,23 +1205,19 @@ export function AgentWorkspaceView({
               )}
             </div>
           )}
-          <button
-            className="btn-icon aw-refresh"
+          <Button icon className="aw-refresh"
             title="Refresh — re-read this agent's changes"
             aria-label="Refresh"
-            onClick={() => setTick((t) => t + 1)}
-          >
+            onClick={() => setTick((t) => t + 1)}>
             <RestartIcon size={14} />
-          </button>
+          </Button>
           {onClose && (
-            <button
-              className="btn-icon workspace-overlay-close"
+            <Button icon className="workspace-overlay-close"
               title="Close (Esc)"
               aria-label="Close agent workspace"
-              onClick={onClose}
-            >
+              onClick={onClose}>
               ✕
-            </button>
+            </Button>
           )}
         </div>
         {task && <div className="agent-task">{task}</div>}
@@ -1416,38 +1401,41 @@ export function AgentWorkspaceView({
       {(ws || edits.length > 0) && (
         <div className="branch-panes">
           {edits.length > 0 && (
-            <button
-              className={`btn-mini ${pane === "edits" ? "btn-accent" : ""}`}
+            <Button
+              size="sm"
+              variant={pane === "edits" ? "accent" : "default"}
               title="Only the changes this agent made, attributed per hunk — accurate even on a shared checkout"
               onClick={() => setPane("edits")}
             >
               This agent ({edits.length})
-            </button>
+            </Button>
           )}
           {ws && (
-            <button
-              className={`btn-mini ${pane === "uncommitted" ? "btn-accent" : ""}`}
+            <Button
+              size="sm"
+              variant={pane === "uncommitted" ? "accent" : "default"}
               onClick={() => setPane("uncommitted")}
             >
               Uncommitted{ws.dirty > 0 ? ` (${ws.dirty})` : ""}
-            </button>
+            </Button>
           )}
           {ws && branchable && (
-            <button
-              className={`btn-mini ${pane === "diff" ? "btn-accent" : ""}`}
+            <Button
+              size="sm"
+              variant={pane === "diff" ? "accent" : "default"}
               onClick={() => setPane("diff")}
             >
               All changes vs base
-            </button>
+            </Button>
           )}
           {pane !== "edits" && patch && files.length > 0 && (
             <>
               <span className="loose-ahead">+{patch.insertions}</span>
               <span className="loose-dirty">−{patch.deletions}</span>
               <span className="git-spacer" />
-              <button className="btn-mini" onClick={() => setSplit((v) => !v)}>
+              <Button size="sm" onClick={() => setSplit((v) => !v)}>
                 {split ? "Unified" : "Split"}
-              </button>
+              </Button>
             </>
           )}
         </div>
@@ -1478,29 +1466,23 @@ export function AgentWorkspaceView({
             All
           </label>
           <span className="git-spacer" />
-          <button
-            className="btn-mini btn-accent"
+          <Button size="sm" variant="accent"
             disabled={sending || selectedCount === 0}
-            onClick={() => sendComments("selected")}
-          >
+            onClick={() => sendComments("selected")}>
             {sending ? "Sending…" : `Send selected (${selectedCount})`}
-          </button>
-          <button
-            className="btn-mini"
+          </Button>
+          <Button size="sm"
             disabled={sending}
             onClick={() => sendComments("all")}
-            title="Send every comment, regardless of selection"
-          >
+            title="Send every comment, regardless of selection">
             Send all
-          </button>
-          <button
-            className="btn-mini"
+          </Button>
+          <Button size="sm"
             disabled={sending}
             onClick={() => setComments([])}
-            title="Discard all draft comments"
-          >
+            title="Discard all draft comments">
             Clear
-          </button>
+          </Button>
         </div>
       )}
 

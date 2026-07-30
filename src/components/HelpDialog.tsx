@@ -3,6 +3,7 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEscape } from "../useEscape";
 import { IS_MAC } from "../platform";
+import { Button } from "./ui";
 
 interface HelpDialogProps {
   onClose: () => void;
@@ -129,12 +130,10 @@ export function HelpDialog({ onClose, onReplayIntro }: HelpDialogProps) {
 
           <div className="set-head">Support &amp; about</div>
           <p>
-            <button
-              className="btn btn-accent"
-              onClick={() => void openUrl("mailto:Sam@CauseConnect.ai")}
-            >
+            <Button variant="accent"
+              onClick={() => void openUrl("mailto:Sam@CauseConnect.ai")}>
               Contact support
-            </button>
+            </Button>
           </p>
           <p>
             {link("https://canopyide.dev", "canopyide.dev")} ·{" "}
@@ -149,9 +148,9 @@ export function HelpDialog({ onClose, onReplayIntro }: HelpDialogProps) {
           </p>
         </div>
         <div className="confirm-actions">
-          <button className="btn btn-accent" onClick={onClose}>
+          <Button variant="accent" onClick={onClose}>
             Done
-          </button>
+          </Button>
         </div>
       </div>
     </div>

@@ -1,5 +1,13 @@
 import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
+// Bundled, not fetched: this is a desktop app that has to look the same on a
+// machine with no network and no fonts installed. Variable weight axis only —
+// one file per subset covers 100–900, so the four weights the Vitrine skin
+// uses cost no more than one would. Each @font-face carries a unicode-range,
+// so a session that never types Cyrillic never loads the Cyrillic file.
+// Referenced by --font-ui/--font-mono; see the Vitrine block in index.css.
+import "@fontsource-variable/archivo/wght.css";
+import "@fontsource-variable/jetbrains-mono/index.css";
 import "./index.css";
 import { monacoReady } from "./monaco-setup";
 import { applyTheme, getSettings, watchSystemTheme } from "./settings";

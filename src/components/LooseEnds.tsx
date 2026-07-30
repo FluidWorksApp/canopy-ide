@@ -14,6 +14,7 @@ import { askDialog, heldBadge } from "../branchSwitch";
 import { useBranchSwitch } from "../useBranchSwitch";
 import type { Notify } from "../types";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
+import { Button } from "./ui";
 
 interface LooseEndsProps {
   repo: string | null;
@@ -170,9 +171,9 @@ export function LooseEnds({
         ) : (
           <>
             Nothing read yet.{" "}
-            <button className="btn-mini" onClick={() => void load()}>
+            <Button size="sm" onClick={() => void load()}>
               Check again
-            </button>
+            </Button>
           </>
         )}
       </div>
@@ -478,9 +479,9 @@ export function LooseEnds({
           <strong>{cleanable}</strong> safe to remove
         </span>
         <span className="git-spacer" />
-        <button className="btn-mini" onClick={() => void load()} disabled={busy}>
+        <Button size="sm" onClick={() => void load()} disabled={busy}>
           {busy ? "…" : "Recheck"}
-        </button>
+        </Button>
       </div>
       <div className="loose-base">
         Merge status measured against <code>{audit.base}</code>. Squash-merged
@@ -492,9 +493,9 @@ export function LooseEnds({
         <div className="loose-base">
           Showing only the {leftAlone.length} branch
           {leftAlone.length === 1 ? "" : "es"} the cleanup left alone.{" "}
-          <button className="btn-mini" onClick={() => setLeftAlone(null)}>
+          <Button size="sm" onClick={() => setLeftAlone(null)}>
             Show everything again
-          </button>
+          </Button>
         </div>
       )}
 
@@ -506,13 +507,11 @@ export function LooseEnds({
             {g.id === "cleanable" && cleanableBranches.length > 0 && (
               <>
                 <span className="git-spacer" />
-                <button
-                  className="btn-mini btn-danger"
+                <Button size="sm" variant="danger"
                   title={`Delete ${cleanableBranches.length} merged local branch${cleanableBranches.length === 1 ? "" : "es"}`}
-                  onClick={() => void cleanupAll()}
-                >
+                  onClick={() => void cleanupAll()}>
                   Clean up {cleanableBranches.length}
-                </button>
+                </Button>
               </>
             )}
           </div>
@@ -572,43 +571,35 @@ export function LooseEnds({
                 <span className="loose-actions" onClick={(e) => e.stopPropagation()}>
                   {b.worktree && !b.prunable && (
                     <>
-                      <button
-                        className="btn-mini"
+                      <Button size="sm"
                         title="Open a terminal in this workspace"
-                        onClick={() => onOpenTerminal(b.worktree as string, b.branch)}
-                      >
+                        onClick={() => onOpenTerminal(b.worktree as string, b.branch)}>
                         Terminal
-                      </button>
+                      </Button>
                       {!b.is_main && (
-                        <button
-                          className="btn-mini"
+                        <Button size="sm"
                           title="Point this project's files at this workspace. Nothing moves, nothing is lost."
                           onClick={() =>
                             void openThere(repo, b.worktree as string, b.branch)
-                          }
-                        >
+                          }>
                           Open it there
-                        </button>
+                        </Button>
                       )}
                     </>
                   )}
                   {b.worktree && !b.is_main && (
-                    <button
-                      className="btn-mini btn-danger"
+                    <Button size="sm" variant="danger"
                       title="Take this workspace away"
-                      onClick={() => void removeWorktree(b)}
-                    >
+                      onClick={() => void removeWorktree(b)}>
                       Remove
-                    </button>
+                    </Button>
                   )}
                   {g.id === "cleanable" && !b.worktree && !b.protected && (
-                    <button
-                      className="btn-mini btn-danger"
+                    <Button size="sm" variant="danger"
                       title="Delete this local branch — its work is already on the base"
-                      onClick={() => void deleteBranch(b)}
-                    >
+                      onClick={() => void deleteBranch(b)}>
                       Delete
-                    </button>
+                    </Button>
                   )}
                 </span>
               </div>
@@ -618,9 +609,9 @@ export function LooseEnds({
       ))}
 
       {cleanable > 0 && (
-        <button className="btn loose-toggle" onClick={() => setShowAll((v) => !v)}>
+        <Button className="loose-toggle" onClick={() => setShowAll((v) => !v)}>
           {showAll ? "Hide" : `Show ${cleanable} safe to clean up`}
-        </button>
+        </Button>
       )}
       {visible.length === 0 && !showAll && (
         <div className="tree-empty">Nothing left hanging — every branch is merged and clean.</div>

@@ -13,6 +13,7 @@ import { getSettings, updateSettings } from "../settings";
 import { trackerKey } from "../trackers";
 import type { Notify, RelayHandle } from "../types";
 import { LiveDot, PullRequestIcon, TeamIcon } from "./icons";
+import { Button } from "./ui";
 
 interface TeamPanelProps {
   relay: RelayHandle;
@@ -213,8 +214,7 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
                 ? "Teammates on the same network (office, VPN) join via your LAN address. The channel is end-to-end encrypted either way."
                 : "Teammates anywhere join via one public link — the same shared tunnel Canopy Remote uses (Cloudflare / ngrok / Tailscale), no router setup. The code bootstraps an end-to-end-encrypted channel (SPAKE2), so the tunnel only relays ciphertext."}
             </div>
-            <button
-              className="btn btn-accent team-cta"
+            <Button variant="accent" className="team-cta"
               disabled={busy || !name.trim()}
               onClick={() =>
                 run(async () => {
@@ -224,10 +224,9 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
                   if (visibility === "public") await ensureInternetEndpoint();
                   await relay.hostStart(name.trim(), visibility);
                 })
-              }
-            >
+              }>
               {busy ? "Starting…" : "Host a relay"}
-            </button>
+            </Button>
             <div className="team-sep">or join one</div>
             <label className="team-label">Host address or link</label>
             <input
@@ -245,8 +244,7 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
               value={code}
               onChange={(e) => setCode(e.target.value)}
             />
-            <button
-              className="btn team-cta"
+            <Button className="team-cta"
               disabled={
                 busy || !name.trim() || !addr.trim() || code.replace(/\D/g, "").length !== 7
               }
@@ -255,10 +253,9 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
                   updateSettings({ relayName: name.trim(), relayAddr: addr.trim() });
                   await relay.connect(addr.trim(), code.replace(/\D/g, ""), name.trim());
                 }, () => setCode(""))
-              }
-            >
+              }>
               {busy ? "Joining…" : "Join"}
-            </button>
+            </Button>
           </div>
         </>
       )}
@@ -298,17 +295,15 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
             )}
           </div>
           <div className="team-host-actions">
-            <button
-              className="btn"
+            <Button
               disabled={busy}
               title="New code — members already connected stay; the old code stops admitting anyone new"
-              onClick={() => run(() => relay.regenerateCode())}
-            >
+              onClick={() => run(() => relay.regenerateCode())}>
               New code
-            </button>
-            <button className="btn btn-danger" disabled={busy} onClick={() => run(() => relay.hostStop())}>
+            </Button>
+            <Button variant="danger" disabled={busy} onClick={() => run(() => relay.hostStop())}>
               Stop hosting
-            </button>
+            </Button>
           </div>
           <div className="team-note">
             End-to-end encrypted — the code performs a SPAKE2 key exchange, and
@@ -327,9 +322,9 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
             </span>
           </div>
           <div className="team-host-actions">
-            <button className="btn btn-danger" disabled={busy} onClick={() => run(() => relay.disconnect())}>
+            <Button variant="danger" disabled={busy} onClick={() => run(() => relay.disconnect())}>
               Disconnect
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -420,18 +415,16 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
                 the files and open any of them to edit together, live.
               </div>
               <div className="team-inbox-actions">
-                <button
-                  className="btn-mini btn-accent"
+                <Button size="sm" variant="accent"
                   onClick={() => {
                     relay.collab.acceptProject(doc);
                     onNotice(`Opening ${offer.name}…`);
-                  }}
-                >
+                  }}>
                   Open
-                </button>
-                <button className="btn-mini" onClick={() => relay.collab.dismissProject(doc)}>
+                </Button>
+                <Button size="sm" onClick={() => relay.collab.dismissProject(doc)}>
                   Dismiss
-                </button>
+                </Button>
               </div>
             </div>
           ))}
@@ -457,18 +450,16 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
                 stays in memory — only they can save it.
               </div>
               <div className="team-inbox-actions">
-                <button
-                  className="btn-mini btn-accent"
+                <Button size="sm" variant="accent"
                   onClick={() => {
                     relay.collab.accept(doc);
                     onNotice(`Opening ${offer.name}…`);
-                  }}
-                >
+                  }}>
                   Join
-                </button>
-                <button className="btn-mini" onClick={() => relay.collab.dismiss(doc)}>
+                </Button>
+                <Button size="sm" onClick={() => relay.collab.dismiss(doc)}>
                   Dismiss
-                </button>
+                </Button>
               </div>
             </div>
           ))}
@@ -513,17 +504,17 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
                 </div>
                 <div className="team-inbox-actions">
                   {file ? (
-                    <button className="btn-mini btn-accent" onClick={() => void acceptFile(item)}>
+                    <Button size="sm" variant="accent" onClick={() => void acceptFile(item)}>
                       Save…
-                    </button>
+                    </Button>
                   ) : (
-                    <button className="btn-mini btn-accent" onClick={() => onOpenInboxItem(item)}>
+                    <Button size="sm" variant="accent" onClick={() => onOpenInboxItem(item)}>
                       {item.kind === "open-pr" ? "Open PR" : "Open"}
-                    </button>
+                    </Button>
                   )}
-                  <button className="btn-mini" onClick={() => relay.dismissInbox(item.id)}>
+                  <Button size="sm" onClick={() => relay.dismissInbox(item.id)}>
                     Dismiss
-                  </button>
+                  </Button>
                 </div>
               </div>
             );

@@ -22,6 +22,7 @@ import {
   type Field,
 } from "../mcpForm";
 import { ChevronIcon, PlugIcon, RestartIcon } from "./icons";
+import { Button } from "./ui";
 
 interface McpViewProps {
   server: ipc.McpServer;
@@ -278,18 +279,16 @@ function ToolRunner({
       )}
 
       <div className="mcp-run-row">
-        <button
-          className="btn btn-primary"
+        <Button
           disabled={running || (!raw && missing.length > 0)}
           title={
             missing.length > 0 && !raw
               ? `Fill in ${missing.join(", ")} first`
               : `Call ${tool.name} on this server`
           }
-          onClick={run}
-        >
+          onClick={run}>
           {running ? "Running…" : "Run"}
-        </button>
+        </Button>
         {result && (
           <span className="mcp-dim">{result.elapsed_ms} ms</span>
         )}
@@ -402,14 +401,12 @@ export function McpView({ server, onNotice }: McpViewProps) {
             <span className="mcp-view-version">v{session.server_version}</span>
           )}
           <span className="status-spacer" />
-          <button
-            className="btn-icon"
+          <Button icon
             title="Restart this server and re-read its tools"
             disabled={connecting}
-            onClick={() => connect(true)}
-          >
+            onClick={() => connect(true)}>
             <RestartIcon size={13} />
-          </button>
+          </Button>
         </div>
 
         <div className="mcp-view-meta">
@@ -451,9 +448,9 @@ export function McpView({ server, onNotice }: McpViewProps) {
       {error && (
         <div className="mcp-view-status">
           <div className="mcp-error">{error}</div>
-          <button className="btn" onClick={() => connect(true)}>
+          <Button onClick={() => connect(true)}>
             Try again
-          </button>
+          </Button>
         </div>
       )}
 

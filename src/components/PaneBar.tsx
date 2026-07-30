@@ -22,6 +22,7 @@ import type {
   RailChip,
 } from "./ProjectView";
 import { tabDisplayLabel, previewLabel, deviceLabel } from "./ProjectView";
+import { Button } from "./ui";
 
 export type { SubTab, RailChip };
 
@@ -410,7 +411,7 @@ function PaneBarImpl({
 
       <div className="pane-actions">
         {stripTabs.length > 4 && (
-          <button className="btn-icon" title="All open tabs" onClick={onOpenAllTabs}>⌄</button>
+          <Button icon title="All open tabs" onClick={onOpenAllTabs}>⌄</Button>
         )}
 
         {/* Live-share a file */}
@@ -469,31 +470,29 @@ function PaneBarImpl({
 
         {/* Preview/Source toggle for document tabs */}
         {activeFileKind && ["markdown", "html", "notebook", "sheet", "json"].includes(activeFileKind) && (
-          <button className="btn" onClick={onToggleView}>
+          <Button onClick={onToggleView}>
             {activeFileView === "preview" ? "Source" : "Preview"}
-          </button>
+          </Button>
         )}
 
         {/* Terminal actions — only when a terminal tab is active */}
         {isTerminalTab && (
           <>
-            <button className="btn-icon" title="Clear scrollback" onClick={onClearScrollback}>⌫</button>
-            <button className="btn-icon" title="Hard reset" onClick={onHardReset}>↺</button>
+            <Button icon title="Clear scrollback" onClick={onClearScrollback}>⌫</Button>
+            <Button icon title="Hard reset" onClick={onHardReset}>↺</Button>
           </>
         )}
 
         {/* New terminal / agent launcher */}
         <div className="cli-menu-anchor">
-          <button
-            className="btn"
+          <Button
             title="New terminal / agent"
             onClick={() => {
               if (!cliMenuOpen) { onRefreshInstalled(); onRefreshUpdates(); }
               setCliMenuOpen(!cliMenuOpen);
-            }}
-          >
+            }}>
             ＋ ▾
-          </button>
+          </Button>
           {cliMenuOpen && (
             <div className="cli-menu" onMouseLeave={() => setCliMenuOpen(false)}>
               <div className="cli-item" onClick={() => { setCliMenuOpen(false); onNewShell(); }}>

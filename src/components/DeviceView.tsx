@@ -24,6 +24,7 @@ import {
 import * as ipc from "../ipc";
 import { AgentLaunchButton } from "./AgentLaunchButton";
 import type { AgentTarget } from "./TicketsPanel";
+import { Button } from "./ui";
 
 /** How long to wait after a frame before asking for the next one. The request
  *  itself costs ~500ms, so this is a pause between frames, not a frame budget. */
@@ -331,9 +332,9 @@ export default function DeviceView({
 
             {error && <p className="preview-error device-picker-error">{error}</p>}
 
-            <button className="btn-mini" onClick={() => void refreshDevices()}>
+            <Button size="sm" onClick={() => void refreshDevices()}>
               Refresh
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -346,16 +347,17 @@ export default function DeviceView({
         <span className="preview-component-badge" title={`adb serial ${serial}`}>
           {devices.find((d) => d.serial === serial)?.model || serial}
         </span>
-        <button className="btn-mini" onClick={() => onPatch({ serial: "" })}>
+        <Button size="sm" onClick={() => onPatch({ serial: "" })}>
           Change device
-        </button>
-        <button
-          className={`btn-mini preview-annotate-toggle ${picking ? "preview-annotate-on" : ""}`}
+        </Button>
+        <Button
+          size="sm"
+          className={`preview-annotate-toggle ${picking ? "preview-annotate-on" : ""}`}
           title="Annotate: click anything on the device to attach feedback to it"
           onClick={() => setPicking((p) => !p)}
         >
           ◎ Annotate{annotations.length > 0 ? ` (${annotations.length})` : ""}
-        </button>
+        </Button>
         {resolving && <span className="device-busy">Reading the screen…</span>}
       </div>
       <div className="preview-body">
@@ -411,9 +413,9 @@ export default function DeviceView({
             <div className="preview-panel-head">
               <span>Feedback</span>
               {annotations.length > 0 && (
-                <button className="btn-mini" onClick={() => onPatch({ annotations: [] })}>
+                <Button size="sm" onClick={() => onPatch({ annotations: [] })}>
                   Clear all
-                </button>
+                </Button>
               )}
             </div>
             {annotations.length === 0 && (
@@ -436,26 +438,22 @@ export default function DeviceView({
                         ? a.resourceId.replace(/^.*:id\//, "#")
                         : shortClass(a.className)}
                     </span>
-                    <button
-                      className="btn-icon preview-note-remove"
+                    <Button icon className="preview-note-remove"
                       title="Remove"
-                      onClick={() => removeAnnotation(a.n)}
-                    >
+                      onClick={() => removeAnnotation(a.n)}>
                       ✕
-                    </button>
+                    </Button>
                   </div>
                   {a.text && <div className="preview-note-text">“{a.text.slice(0, 120)}”</div>}
                   {a.clickable && (
-                    <button
-                      className="btn-mini device-tap"
+                    <Button size="sm" className="device-tap"
                       title="Tap this element on the device"
                       onClick={() => {
                         const c = centerOf(a.bounds);
                         void ipc.androidTap(serial, c.x, c.y, dir).catch((e) => setError(String(e)));
-                      }}
-                    >
+                      }}>
                       Tap it
-                    </button>
+                    </Button>
                   )}
                   <textarea
                     className="preview-note-comment"

@@ -9,6 +9,7 @@ import type { TabDrag } from "../tabDrag";
 // Windows/Linux the native bar stays, `titleBarStyle` is ignored, and the
 // class is simply absent — nothing changes there.
 import { IS_MAC } from "../platform";
+import { Button } from "./ui";
 
 /** True while the window is in macOS fullscreen, where the traffic lights are
  *  hidden and the space reserved for them would read as a dead gap. There's no
@@ -181,9 +182,9 @@ function TitleBarImpl({
           </div>
           );
         })}
-        <button className="btn-icon" title="New project" onClick={onNewProject}>
+        <Button icon title="New project" onClick={onNewProject}>
           ＋
-        </button>
+        </Button>
       </div>
       <div className="titlebar-spacer" data-tauri-drag-region />
       {collabActive && (
@@ -202,13 +203,11 @@ function TitleBarImpl({
           </button>
         </div>
       )}
-      <button
-        className="btn project-manage-btn"
+      <Button className="project-manage-btn"
         title="Manage projects — open, create, edit, delete"
-        onClick={onManageProjects}
-      >
+        onClick={onManageProjects}>
         Projects ▾
-      </button>
+      </Button>
       {menu.menu && (
         <ContextMenu
           x={menu.menu.x}

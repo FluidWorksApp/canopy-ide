@@ -24,6 +24,7 @@ import {
   suggestedLabel,
   tint,
 } from "../vaultUi";
+import { Button } from "./ui";
 
 function Item({
   name,
@@ -156,24 +157,23 @@ function EntryForm({
               value={password}
               onChange={(e) => setPassword(e.target.value)}
             />
-            <button
-              type="button"
-              className="vault-pw-btn"
+            <Button
+              size="sm"
+              variant={reveal ? "accent" : "default"}
               aria-pressed={reveal}
               onClick={() => setReveal((r) => !r)}
             >
               {reveal ? "Hide" : "Show"}
-            </button>
-            <button
-              type="button"
-              className="vault-pw-btn"
+            </Button>
+            <Button
+              size="sm"
               onClick={() => {
                 setPassword(generatePassword());
                 setReveal(true);
               }}
             >
               Generate
-            </button>
+            </Button>
           </div>
         </Field>
       </div>
@@ -196,16 +196,14 @@ function EntryForm({
 
       {err && <p className="vault-err">{err}</p>}
       <div className="vault-card-actions">
-        <button
-          className="btn btn-accent"
+        <Button variant="accent"
           onClick={() => void save()}
-          disabled={!domain.trim()}
-        >
+          disabled={!domain.trim()}>
           {entry ? "Save changes" : "Save login"}
-        </button>
-        <button className="btn" onClick={onDone}>
+        </Button>
+        <Button onClick={onDone}>
           Cancel
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -257,50 +255,44 @@ function EntryRow({ item, onChanged }: { item: ipc.VaultItem; onChanged: () => v
         {confirming ? (
           <>
             <span className="vault-confirm">Delete {item.label}?</span>
-            <button
-              className="btn btn-small btn-danger"
-              onClick={() => void ipc.vaultDelete(item.id).then(onChanged)}
-            >
+            <Button variant="danger"
+              onClick={() => void ipc.vaultDelete(item.id).then(onChanged)}>
               Delete
-            </button>
-            <button className="btn btn-small" onClick={() => setConfirming(false)}>
+            </Button>
+            <Button onClick={() => setConfirming(false)}>
               Keep
-            </button>
+            </Button>
           </>
         ) : (
           <>
             {/* Copying is the reason people reveal a password, so it is offered
                 without revealing anything. */}
-            <button
-              className="btn btn-small"
+            <Button
               onClick={() => {
                 void ipc.vaultReveal(item.id).then((pw) => {
                   void navigator.clipboard.writeText(pw);
                   setCopied(true);
                   setTimeout(() => setCopied(false), 1500);
                 });
-              }}
-            >
+              }}>
               {copied ? "Copied" : "Copy"}
-            </button>
-            <button
-              className="btn btn-small"
+            </Button>
+            <Button
               onClick={() => {
                 if (shown !== null) return setShown(null);
                 void ipc
                   .vaultReveal(item.id)
                   .then(setShown)
                   .catch(() => setShown("(could not read it)"));
-              }}
-            >
+              }}>
               {shown === null ? "Reveal" : "Hide"}
-            </button>
-            <button className="btn btn-small" onClick={() => setEditing(true)}>
+            </Button>
+            <Button onClick={() => setEditing(true)}>
               Edit
-            </button>
-            <button className="btn btn-small" onClick={() => setConfirming(true)}>
+            </Button>
+            <Button onClick={() => setConfirming(true)}>
               Delete
-            </button>
+            </Button>
           </>
         )}
       </div>
@@ -377,9 +369,9 @@ function ImportPanel({ onDone }: { onDone: () => void }) {
           </>
         )}
         <div className="vault-card-actions">
-          <button className="btn" onClick={() => setReport(null)}>
+          <Button onClick={() => setReport(null)}>
             Import another
-          </button>
+          </Button>
         </div>
       </div>
     );
@@ -396,9 +388,9 @@ function ImportPanel({ onDone }: { onDone: () => void }) {
         logins are fill-only until you say otherwise.
       </p>
       <div className="vault-add">
-        <button className="btn" onClick={() => void pick()}>
+        <Button onClick={() => void pick()}>
           {path ? "Choose a different file" : "Choose a file…"}
-        </button>
+        </Button>
         {path && <span className="vault-row-sub">{path.split("/").pop()}</span>}
       </div>
       {path && (
@@ -416,16 +408,14 @@ function ImportPanel({ onDone }: { onDone: () => void }) {
       )}
       {err && <p className="vault-err">{err}</p>}
       <div className="vault-card-actions">
-        <button
-          className="btn btn-accent"
+        <Button variant="accent"
           disabled={!path || !password || busy}
-          onClick={() => void run()}
-        >
+          onClick={() => void run()}>
           {busy ? "Reading…" : "Import"}
-        </button>
-        <button className="btn" onClick={onDone}>
+        </Button>
+        <Button onClick={onDone}>
           Cancel
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -518,13 +508,11 @@ export function VaultSettings() {
           </div>
           {err && <p className="vault-err">{err}</p>}
           <div className="vault-card-actions">
-            <button
-              className="btn btn-accent"
+            <Button variant="accent"
               type="submit"
-              disabled={passphrase.length < 8 || passphrase !== confirm}
-            >
+              disabled={passphrase.length < 8 || passphrase !== confirm}>
               Create vault
-            </button>
+            </Button>
           </div>
         </form>
       </Item>
@@ -558,9 +546,9 @@ export function VaultSettings() {
           </Field>
           {err && <p className="vault-err">{err}</p>}
           <div className="vault-card-actions">
-            <button className="btn btn-accent" type="submit" disabled={!passphrase}>
+            <Button variant="accent" type="submit" disabled={!passphrase}>
               Unlock
-            </button>
+            </Button>
           </div>
         </form>
       </Item>
@@ -599,16 +587,18 @@ export function VaultSettings() {
           ) : (
             <div className="vault-add">
               {offerPage && (
-                <button className="btn btn-accent" onClick={() => setAdding(pageSite)}>
+                <Button variant="accent" onClick={() => setAdding(pageSite)}>
                   Add {pageSite}
-                </button>
+                </Button>
               )}
-              <button
-                className={offerPage ? "btn" : "btn btn-accent"}
+              {/* Demoted when "Add <this site>" is showing: only one button
+                  in a row gets to be the accent one. */}
+              <Button
+                variant={offerPage ? "default" : "accent"}
                 onClick={() => setAdding("")}
               >
                 Add a login
-              </button>
+              </Button>
             </div>
           )}
         </div>
@@ -626,9 +616,9 @@ export function VaultSettings() {
             }}
           />
         ) : (
-          <button className="btn btn-small" onClick={() => setImporting(true)}>
+          <Button onClick={() => setImporting(true)}>
             Import from KeePass…
-          </button>
+          </Button>
         )}
       </Item>
 
@@ -658,12 +648,10 @@ export function VaultSettings() {
                 </span>
               </div>
               <div className="vault-row-actions">
-                <button
-                  className="btn btn-small"
-                  onClick={() => void ipc.vaultRevoke(a.domain).then(refresh)}
-                >
+                <Button
+                  onClick={() => void ipc.vaultRevoke(a.domain).then(refresh)}>
                   Revoke
-                </button>
+                </Button>
               </div>
             </div>
           ))}
@@ -675,9 +663,9 @@ export function VaultSettings() {
         desc={`${status.entries} saved · locks after ${status.auto_lock_minutes} minutes unused`}
       >
         <div className="tool-bulk">
-          <button className="btn btn-small" onClick={() => void run(ipc.vaultLock())}>
+          <Button onClick={() => void run(ipc.vaultLock())}>
             Lock now
-          </button>
+          </Button>
         </div>
       </Item>
     </>

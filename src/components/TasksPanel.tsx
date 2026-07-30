@@ -21,6 +21,7 @@ import {
   type TaskRun,
 } from "../taskHistory";
 import { PlayIcon, StopIcon, TrashIcon } from "./icons";
+import { Button } from "./ui";
 
 /** A task in flight. Detached runs (the usual kind) carry a `ptyId` and no tab —
  *  this row is the only place they appear, so it has to say what a tab would
@@ -184,19 +185,16 @@ export function TasksPanel({
           <span className="task-label" title={task.brief}>
             {task.label}
           </span>
-          <button
-            className="btn-icon"
+          <Button icon
             title="Run this task"
             onClick={() => {
               setRunOpen(open ? null : task.id);
               setRunQuery("");
               setRunDir(components[0]?.path ?? "");
-            }}
-          >
+            }}>
             <PlayIcon size={12} />
-          </button>
-          <button
-            className="btn-icon"
+          </Button>
+          <Button icon
             title="Edit"
             onClick={() => {
               setDraft({
@@ -207,17 +205,14 @@ export function TasksPanel({
                 brief: task.brief,
               });
               setRunOpen(null);
-            }}
-          >
+            }}>
             ✎
-          </button>
-          <button
-            className="btn-icon"
+          </Button>
+          <Button icon
             title="Delete this task"
-            onClick={() => save(custom.filter((c) => c.id !== task.id))}
-          >
+            onClick={() => save(custom.filter((c) => c.id !== task.id))}>
             <TrashIcon size={12} />
-          </button>
+          </Button>
         </div>
         {open && (
           <div className="task-run-form">
@@ -253,8 +248,7 @@ export function TasksPanel({
                 if (e.key === "Escape") setRunOpen(null);
               }}
             />
-            <button
-              className="btn btn-accent"
+            <Button variant="accent"
               onClick={() => {
                 onRunCustom(
                   task,
@@ -262,10 +256,9 @@ export function TasksPanel({
                   runQuery.trim(),
                 );
                 setRunOpen(null);
-              }}
-            >
+              }}>
               Go
-            </button>
+            </Button>
           </div>
         )}
       </div>
@@ -314,13 +307,11 @@ export function TasksPanel({
                 {r.title}
                 {r.note && <span className="task-note-inline">{r.note}</span>}
               </span>
-              <button
-                className="btn-icon"
+              <Button icon
                 title="Stop this task"
-                onClick={() => onStop(r)}
-              >
+                onClick={() => onStop(r)}>
                 <StopIcon size={12} />
-              </button>
+              </Button>
             </div>
           ))}
         </section>
@@ -359,13 +350,11 @@ export function TasksPanel({
                 )}
               </span>
               {r.url && (
-                <button
-                  className="btn-icon"
+                <Button icon
                   title={`Open ${r.url}`}
-                  onClick={() => void openUrl(r.url as string)}
-                >
+                  onClick={() => void openUrl(r.url as string)}>
                   ↗
-                </button>
+                </Button>
               )}
             </div>
           ))}
@@ -385,13 +374,11 @@ export function TasksPanel({
           Your tasks
           <span className="badge">{custom.length}</span>
           <span className="status-spacer" />
-          <button
-            className="btn-icon"
+          <Button icon
             title="New task — saved to this project"
-            onClick={openNewTask}
-          >
+            onClick={openNewTask}>
             ＋
-          </button>
+          </Button>
         </div>
         {draft && (
           <div className="task-edit-form">
@@ -419,16 +406,14 @@ export function TasksPanel({
               }
             />
             <div className="confirm-actions">
-              <button className="btn" onClick={() => setDraft(null)}>
+              <Button onClick={() => setDraft(null)}>
                 Cancel
-              </button>
-              <button
-                className="btn btn-accent"
+              </Button>
+              <Button variant="accent"
                 disabled={!draft.label.trim() || !draft.brief.trim()}
-                onClick={submitDraft}
-              >
+                onClick={submitDraft}>
                 {draft.id ? "Save" : "Create"}
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -451,17 +436,15 @@ export function TasksPanel({
         <div className="ticket-state-head">
           One-off
           <span className="status-spacer" />
-          <button
-            className="btn-mini"
+          <Button size="sm"
             title="Type a job, run it once — nothing is saved to the list"
             onClick={() => {
               setOneOff((v) => (v == null ? "" : null));
               setOneOffDir(components[0]?.path ?? "");
               setDraft(null);
-            }}
-          >
+            }}>
             ⚡ Run once
-          </button>
+          </Button>
         </div>
         {oneOff != null && (
           <div className="task-edit-form">
@@ -494,16 +477,14 @@ export function TasksPanel({
               </select>
             )}
             <div className="confirm-actions">
-              <button className="btn" onClick={() => setOneOff(null)}>
+              <Button onClick={() => setOneOff(null)}>
                 Cancel
-              </button>
-              <button
-                className="btn btn-accent"
+              </Button>
+              <Button variant="accent"
                 disabled={!oneOff.trim()}
-                onClick={runOneOff}
-              >
+                onClick={runOneOff}>
                 Run once
-              </button>
+              </Button>
             </div>
           </div>
         )}

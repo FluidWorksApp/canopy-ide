@@ -7,6 +7,7 @@ import type { FileChange } from "../ipc";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { Dialog } from "./Dialog";
 import { WindowedList } from "./WindowedList";
+import { Button } from "./ui";
 
 /** Must match .change-row's CSS height — the windowing spacers are the scrollbar. */
 const ROW_H = 26;
@@ -184,9 +185,9 @@ export function ChangesPanel({
         <span>
           {shown} changed file{shown === 1 ? "" : "s"}
         </span>
-        <button className="icon-btn" title="Refresh" onClick={onRefresh}>
+        <Button icon title="Refresh" onClick={onRefresh}>
           ↻
-        </button>
+        </Button>
       </div>
       {total > 0 && agentBar}
       {collabEdited.length > 0 && (
@@ -206,16 +207,14 @@ export function ChangesPanel({
               <span className="change-dir">
                 {c.path.split("/").slice(0, -1).join("/")}
               </span>
-              <button
-                className="btn-mini change-collab-save"
+              <Button size="sm" className="change-collab-save"
                 title="Write these edits to disk (then git tracks them normally)"
                 onClick={(e) => {
                   e.stopPropagation();
                   onSaveCollab?.(c.path);
-                }}
-              >
+                }}>
                 Save
-              </button>
+              </Button>
             </div>
           ))}
         </div>
@@ -257,43 +256,37 @@ export function ChangesPanel({
                   }}
                 />
                 <div className="git-commit-actions">
-                  <button
-                    className="btn btn-accent"
+                  <Button variant="accent"
                     disabled={
                       stagedIn(g) === 0 ||
                       !(messages[g.repo] ?? "").trim() ||
                       committing === g.repo
                     }
                     title="Commit staged changes (Cmd+Enter)"
-                    onClick={() => commit(g.repo)}
-                  >
+                    onClick={() => commit(g.repo)}>
                     Commit {stagedIn(g) > 0 ? stagedIn(g) : ""}
-                  </button>
+                  </Button>
                   {unstagedIn(g).length > 0 && onStage && (
-                    <button
-                      className="btn-mini"
+                    <Button size="sm"
                       onClick={() =>
                         onStage(
                           g.repo,
                           unstagedIn(g).map((f) => f.path),
                         )
-                      }
-                    >
+                      }>
                       Stage all
-                    </button>
+                    </Button>
                   )}
                   {stagedIn(g) > 0 && onUnstage && (
-                    <button
-                      className="btn-mini"
+                    <Button size="sm"
                       onClick={() =>
                         onUnstage(
                           g.repo,
                           g.files.filter((f) => f.staged).map((f) => f.path),
                         )
-                      }
-                    >
+                      }>
                       Unstage all
-                    </button>
+                    </Button>
                   )}
                 </div>
               </div>
@@ -319,17 +312,15 @@ export function ChangesPanel({
                     {f.path.split("/").slice(0, -1).join("/")}
                   </span>
                   {(onStage || onUnstage) && !f.conflicted && (
-                    <button
-                      className="btn-mini change-stage"
+                    <Button size="sm" className="change-stage"
                       title={f.staged ? "Unstage this file" : "Stage this file"}
                       onClick={(e) => {
                         e.stopPropagation();
                         if (f.staged) onUnstage?.(g.repo, [f.path]);
                         else onStage?.(g.repo, [f.path]);
-                      }}
-                    >
+                      }}>
                       {f.staged ? "−" : "+"}
-                    </button>
+                    </Button>
                   )}
                 </div>
               )}
