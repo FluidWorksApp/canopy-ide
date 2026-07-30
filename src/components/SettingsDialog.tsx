@@ -1164,6 +1164,19 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
             {tab === "browser" && (
               <>
                 <Item
+                  name="Links"
+                  desc="Where a link goes when you click one — in a commit message, an issue body, rendered markdown, or a terminal. Opening it here keeps you in the app, in a preview tab you can close; the OS browser is a window you have to find your way back from. Either way, controls that say they leave (Support, Open on GitHub, filing an issue) still do, and a URL that no project can take falls back to the OS browser rather than doing nothing."
+                >
+                  <label className="set-inline-check">
+                    <input
+                      type="checkbox"
+                      checked={s.openLinksInApp}
+                      onChange={(e) => patch({ openLinksInApp: e.target.checked })}
+                    />
+                    <span>Open links in Canopy</span>
+                  </label>
+                </Item>
+                <Item
                   name="Engine"
                   desc="How preview tabs show a page. The trade is logins against layering."
                 >

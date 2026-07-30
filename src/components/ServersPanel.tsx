@@ -9,7 +9,7 @@
 // calls back into ProjectView, which already runs the terminals — so a start
 // here and a start from the files panel are the same start, on the same tab.
 import { useState } from "react";
-import { serverUrl, type ServerEntry, type ServerGroup } from "../servers";
+import { serverUrl, splitPorts, type ServerEntry, type ServerGroup } from "../servers";
 import { principalAgent, type AgentRef } from "../workspaces";
 import {
   CheckIcon,
@@ -82,72 +82,110 @@ function RunRow({
 >) {
   const running = e.state === "running";
   const start = () => (e.tabId ? onRestart(e.tabId) : onStart(dir, e));
-  return (
-    <div
-      className={`command-run-row ${running ? "command-running" : ""} ${
-        e.state === "done"
-          ? "command-done"
-          : e.state === "failed"
-            ? "command-failed"
-            : ""
-      }`}
-      title={`${STATE_TITLE[e.state]}${
-        e.state === "failed" ? ` ${e.exitCode ?? "?"}` : ""
-      } — ${e.command || e.name}`}
-      // Clicking the row opens the run's terminal, which is where its output
-      // is. A row that has never run has no terminal to open, so the click
-      // starts it instead.
-      onClick={() => (e.tabId ? onOpenRun(e.tabId) : start())}
+  const { shown, rest } = splitPorts(e.ports);
+  // Whether this row's demoted ports are open. Per row, not per panel: the
+  // question is about one process.
+  const [portsOpen, setPortsOpen] = useState(false);
+  const portChip = (p: number) => (
+    <span
+      key={p}
+      className="term-port servers-port"
+      title={`Open ${serverUrl(p)} in a preview tab`}
+      onClick={(ev) => {
+        ev.stopPropagation();
+        onOpenPreview(serverUrl(p));
+      }}
     >
-      <StateMark state={e.state} />
-      <span className="command-run-name">{e.name}</span>
-      {e.adhoc && (
-        <span
-          className="servers-adhoc"
-          title="Started outside this project's run commands — by an agent, or from a terminal"
-        >
-          ad-hoc
-        </span>
-      )}
-      {/* The port is the reason most of these are running, so it is on the row
-          rather than in a tooltip — and it opens the page rather than merely
-          naming it. */}
-      {e.ports.map((p) => (
-        <span
-          key={p}
-          className="term-port servers-port"
-          title={`Open ${serverUrl(p)} in a preview tab`}
-          onClick={(ev) => {
-            ev.stopPropagation();
-            onOpenPreview(serverUrl(p));
-          }}
-        >
-          :{p}
-        </span>
-      ))}
-      {e.state === "failed" && <span className="command-exit-code">{e.exitCode}</span>}
-      <span className="command-run-actions" onClick={(ev) => ev.stopPropagation()}>
-        {running ? (
-          <>
-            <Button icon
-              title="Restart"
-              onClick={() => e.tabId && onRestart(e.tabId)}>
-              <RestartIcon size={14} />
-            </Button>
-            <Button icon variant="danger"
-              title="Stop"
-              onClick={() => e.ptyId != null && onStop(e.ptyId)}>
-              <StopIcon size={13} />
-            </Button>
-          </>
-        ) : (
-          <Button icon
-            title={e.tabId ? "Run again" : "Run"}
-            onClick={start}>
-            {e.tabId ? <RestartIcon size={14} /> : <PlayIcon size={12} />}
-          </Button>
+      :{p}
+    </span>
+  );
+  return (
+    <div className="servers-run">
+      <div
+        className={`command-run-row ${running ? "command-running" : ""} ${
+          e.state === "done"
+            ? "command-done"
+            : e.state === "failed"
+              ? "command-failed"
+              : ""
+        }`}
+        // The name is the first thing to give way when the panel is dragged
+        // narrow and the chips are the next, so the tooltip carries both in
+        // full: nothing the row drops is knowable only by widening the panel.
+        title={`${e.name} — ${STATE_TITLE[e.state]}${
+          e.state === "failed" ? ` ${e.exitCode ?? "?"}` : ""
+        }${
+          e.ports.length
+            ? ` · listening on ${[...shown, ...rest].map((p) => `:${p}`).join(", ")}`
+            : ""
+        }\n${e.command || e.name}`}
+        // Clicking the row opens the run's terminal, which is where its output
+        // is. A row that has never run has no terminal to open, so the click
+        // starts it instead.
+        onClick={() => (e.tabId ? onOpenRun(e.tabId) : start())}
+      >
+        <StateMark state={e.state} />
+        <span className="command-run-name">{e.name}</span>
+        {e.adhoc && (
+          <span
+            className="servers-adhoc"
+            title="Started outside this project's run commands — by an agent, or from a terminal"
+          >
+            ad-hoc
+          </span>
         )}
-      </span>
+        {/* The port is the reason most of these are running, so it is on the row
+            rather than in a tooltip — and it opens the page rather than merely
+            naming it. The ones the OS assigned itself sit behind the `+N` rather
+            than pushing the run's own name off the row. */}
+        {shown.map(portChip)}
+        {rest.length > 0 && (
+          <span
+            className="term-port servers-port servers-port-more"
+            title={
+              portsOpen
+                ? "Hide the ports the OS assigned"
+                : `Also listening on ${rest.map((p) => `:${p}`).join(", ")}`
+            }
+            onClick={(ev) => {
+              ev.stopPropagation();
+              setPortsOpen((v) => !v);
+            }}
+          >
+            {portsOpen ? "−" : `+${rest.length}`}
+          </span>
+        )}
+        {e.state === "failed" && <span className="command-exit-code">{e.exitCode}</span>}
+        <span className="command-run-actions" onClick={(ev) => ev.stopPropagation()}>
+          {running ? (
+            <>
+              <Button icon
+                title="Restart"
+                onClick={() => e.tabId && onRestart(e.tabId)}>
+                <RestartIcon size={14} />
+              </Button>
+              <Button icon variant="danger"
+                title="Stop"
+                onClick={() => e.ptyId != null && onStop(e.ptyId)}>
+                <StopIcon size={13} />
+              </Button>
+            </>
+          ) : (
+            <Button icon
+              title={e.tabId ? "Run again" : "Run"}
+              onClick={start}>
+              {e.tabId ? <RestartIcon size={14} /> : <PlayIcon size={12} />}
+            </Button>
+          )}
+        </span>
+      </div>
+      {/* Revealed on their own line, never squeezed into the row: five chips in
+          a 24px row is how the name got crushed in the first place. Growing the
+          group is fine here — the user asked for it by clicking, so it is not a
+          layout that shifts under the pointer. */}
+      {portsOpen && rest.length > 0 && (
+        <div className="servers-port-line">{rest.map(portChip)}</div>
+      )}
     </div>
   );
 }
@@ -219,7 +257,10 @@ export function ServersPanel({
                 <ChevronIcon />
               </span>
               <span className="component-title">{g.label}</span>
-              {g.running > 0 && (
+              {/* Only while collapsed, which is the whole reason it exists: an
+                  expanded group says the same thing with a live dot per row, and
+                  saying it twice is what made the header read as busy. */}
+              {isCollapsed && g.running > 0 && (
                 <span className="servers-group-live" title={`${g.running} running`}>
                   {g.running}
                 </span>
@@ -287,15 +328,24 @@ export function ServersPanel({
                   const wsStartable = w.entries.filter(
                     (e) => !e.adhoc && e.state !== "running",
                   );
-                  const wsPorts = [
-                    ...new Set(w.entries.flatMap((e) => e.ports)),
-                  ];
+                  // A branch line is a summary, so it takes only the ports
+                  // somebody would open — the assigned ones are on the run's own
+                  // row inside, and in this line's tooltip either way.
+                  const wsAllPorts = [...new Set(w.entries.flatMap((e) => e.ports))];
+                  const wsPorts = splitPorts(wsAllPorts).shown;
                   const lead = principalAgent(w.agents);
                   return (
                     <div key={w.path} className="ws-runs">
                       <div
                         className={`ws-run-head ${w.running > 0 ? "ws-run-live" : ""}`}
-                        title={`${w.label}\n${w.path}`}
+                        title={`${w.label}${
+                          wsAllPorts.length
+                            ? ` · listening on ${wsAllPorts
+                                .sort((a, b) => a - b)
+                                .map((p) => `:${p}`)
+                                .join(", ")}`
+                            : ""
+                        }\n${w.path}`}
                         onClick={() => toggleWs(w.path, busy)}
                       >
                         <span

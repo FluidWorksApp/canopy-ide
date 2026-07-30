@@ -68,6 +68,31 @@ describe("SpotSearch", () => {
     });
   });
 
+  it("stops searching once the text is a prompt rather than a query", async () => {
+    // A paragraph or a line break means the palette will only offer the two
+    // actions — so asking the slow sources to rank it against filenames buys a
+    // list that is filtered away, and shows a sweeping progress hairline and
+    // "searching…" for a search whose every result was already discarded.
+    const search = vi.fn(() => []);
+    mockCommands({ spot_search: search, fs_search: search });
+    const { container } = render(
+      <SpotSearch ctx={ctx()} onAction={vi.fn()} onClose={vi.fn()} />,
+    );
+    const bar = () => container.querySelector(".spot-progress");
+
+    await userEvent.keyboard("relay");
+    expect(bar()?.className).toContain("spot-progress-on");
+
+    // Enough words to be writing, not searching (see isPrompt).
+    await userEvent.keyboard(" do you really know what needs to happen here");
+    expect(bar()?.className).not.toContain("spot-progress-on");
+    expect(screen.queryByText("searching…")).not.toBeInTheDocument();
+    // ...and only the actions are left to choose from.
+    expect(
+      screen.getAllByRole("option").every((o) => /Run task|Research/.test(o.textContent ?? "")),
+    ).toBe(true);
+  });
+
   it("navigates with arrows and opens a tab row", async () => {
     const { onAction } = open();
     await userEvent.keyboard("dev ser");
@@ -103,11 +128,13 @@ describe("SpotSearch", () => {
 
   it("counts each section, and the results, without lying about either", () => {
     open();
-    // Shell, Preview, Device and the one installed CLI, then the one open tab.
+    // Shell, Preview and the one installed CLI, then the one open tab. (New
+    // Android Device is withheld while the device tab is unfinished — see
+    // spotSources.ts; restoring it moves both counts up by one.)
     const actions = screen.getByText("Actions").parentElement;
-    expect(actions?.querySelector(".spot-group-count")?.textContent).toBe("4");
-    expect(screen.getAllByRole("option")).toHaveLength(5);
-    expect(screen.getByText(/results?$/)).toHaveTextContent("5 results");
+    expect(actions?.querySelector(".spot-group-count")?.textContent).toBe("3");
+    expect(screen.getAllByRole("option")).toHaveLength(4);
+    expect(screen.getByText(/results?$/)).toHaveTextContent("4 results");
   });
 
   it("shows rows from a registered source and lets it open them itself", async () => {
