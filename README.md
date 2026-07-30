@@ -55,7 +55,7 @@ result.
   the last thing you asked it, CPU/memory, and the port it's listening on.
 - **A real editor.** Monaco with TypeScript diagnostics, plus native viewers for
   Markdown (incl. Mermaid), HTML, PDF, spreadsheets, Jupyter notebooks and images.
-- **Dictate anywhere.** A configurable hotkey (`⌘D`) transcribes speech straight
+- **Dictate anywhere.** A configurable hotkey (`⌘D`, `Alt+D` off macOS) transcribes speech straight
   to the cursor — a terminal, the editor, or an agent prompt. Fully on-device
   (Parakeet / SenseVoice / Moonshine): no cloud, no upload, no formatting pass.
 
@@ -103,7 +103,7 @@ no auto-PR; that stays yours.
 
 <img src="docs/screenshots/issue.png" alt="A GitHub issue opened in Canopy — the full markdown body rendered inline with a worktree branch chip and a Start-work · Claude Code button" width="820">
 
-**Dictate anywhere.** Press `⌘D` and talk — the transcript lands wherever your
+**Dictate anywhere.** Press `⌘D` (`Alt+D` off macOS) and talk — the transcript lands wherever your
 cursor is: a terminal, the editor, a commit message, an agent prompt. Speech
 recognition runs entirely on your machine; nothing is uploaded.
 
@@ -210,7 +210,7 @@ runs are fast and the frontend hot-reloads.
   rail** — kept apart from shells because they're services, not sessions. Each
   reports real state: a pulsing dot while live, a green check when a one-shot
   finishes, or a red exit code when it fails.
-- **Quick Open (`Cmd+P`) and Find in Files (`Cmd+Shift+F`)** search every
+- **Quick Open (`⌘P` / `Ctrl+P`) and Find in Files (`⇧⌘F` / `Ctrl+Shift+F`)** search every
   component of the project by default; chips scope to a single component.
 - **Diff-first.** A file changed on disk gives you a side-by-side diff — Accept
   disk version / Keep mine — never a silent reload. The Changes tab lists
@@ -224,21 +224,40 @@ runs are fast and the frontend hot-reloads.
 ### Keyboard shortcuts
 
 VS Code-standard where an equivalent exists. All scoped to the active window and
-visible project — `Cmd+W` closes a tab, never the app.
+visible project — Close Tab closes a tab, never the app.
 
-| Shortcut | Action |
-| --- | --- |
-| `Cmd+P` | Quick Open file (fuzzy) |
-| `Cmd+Shift+F` | Find in Files |
-| `Cmd+N` / `Cmd+O` | New project / Open project folder |
-| `Cmd+Shift+O` / `Cmd+Shift+S` | Open / Save workspace file |
-| `Cmd+T` | New terminal |
-| `Cmd+W` | Close tab |
-| `Ctrl+Cmd+←` / `Ctrl+Cmd+→` | Previous / next tab |
-| `Cmd+Shift+W` | Close project |
-| `Cmd+B` | Toggle sidebar |
-| `Cmd+Shift+Enter` | Focus mode (`Esc` exits) |
-| `Cmd+Q` | Quit |
+Every chord is defined once in [`shared/shortcuts.json`](shared/shortcuts.json),
+read by both the webview and the native menu, and resolved per platform: `Mod`
+is Command on macOS and Control on Windows/Linux, and a chord that cannot mean
+the same thing on both carries an explicit override. The Help dialog renders
+this table for the platform you are actually on.
+
+| Action | macOS | Windows / Linux |
+| --- | --- | --- |
+| New tab (shell, preview or agent) | `⌘N` | `Ctrl+N` |
+| SpotSearch — search everything | `⌘K` | `Ctrl+K` |
+| Quick Open file (fuzzy) | `⌘P` | `Ctrl+P` |
+| Find in Files | `⇧⌘F` | `Ctrl+Shift+F` |
+| New project / Open project folder | `⇧⌘N` / `⌘O` | `Ctrl+Shift+N` / `Ctrl+O` |
+| Open / Save workspace file | `⇧⌘O` / `⇧⌘S` | `Ctrl+Shift+O` / `Ctrl+Shift+S` |
+| New terminal | `⌘T` | `Ctrl+T` |
+| Close tab | `⌘W` | `Ctrl+W` |
+| Jump to a tab (hold to see the numbers) | `⌘1…9` | `Ctrl+1…9` |
+| Jump to a project | `⌥1…9` | `Alt+1…9` |
+| Previous / next tab | `⌃⌘←` / `⌃⌘→` | `Ctrl+PgUp` / `Ctrl+PgDn` |
+| Previous / next project | `⌥⌘←` / `⌥⌘→` | `Ctrl+Alt+PgUp` / `Ctrl+Alt+PgDn` |
+| Close project | `⇧⌘W` | `Ctrl+Shift+W` |
+| Toggle sidebar | `⌘B` | `Ctrl+B` |
+| Focus mode (`Esc` exits) | `⇧⌘Enter` | `Ctrl+Shift+Enter` |
+| Voice dictation | `⌘D` | `Alt+D` |
+| Quit | `⌘Q` | `Alt+F4` |
+
+Off macOS the tab and project chords move to PageUp/PageDown: `Ctrl+←` is
+word-jump in every text field there, and `Ctrl+Alt+←` is workspace switching on
+Linux and screen rotation on some Windows graphics drivers. Dictation avoids
+`Ctrl+D` because that is shell EOF — it would close the terminal you were
+dictating into. The three Cmd-based terminal chords (start/end of line, delete
+line) are unbound off macOS, where Home/End already do the job.
 
 ## Contributing
 

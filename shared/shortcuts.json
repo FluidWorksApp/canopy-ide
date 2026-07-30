@@ -1,0 +1,530 @@
+{
+  "readme": [
+    "The one place every Canopy keyboard shortcut is defined. Both the Rust",
+    "native menu (src-tauri/src/shortcuts.rs) and the webview key handlers",
+    "(src/shortcuts.ts) read this file, so a chord is written once and both",
+    "sides agree on every platform.",
+    "",
+    "chord.mods uses abstract tokens, resolved per platform:",
+    "  Mod   -> Command on macOS, Control on Windows/Linux (the primary key)",
+    "  Ctrl  -> literal Control everywhere (the physical ^ key on a Mac)",
+    "  Alt   -> Option on macOS, Alt elsewhere",
+    "  Shift -> Shift",
+    "  Meta  -> literal Command/Windows/Super. Never use in a default; it is",
+    "           the OS's key on Windows and Linux.",
+    "chord.key is a KeyboardEvent.code (KeyN, Comma, ArrowLeft, PageDown), or",
+    "null for a modifier-only chord used with a mouse click.",
+    "",
+    "platform holds per-OS overrides. A platform mapped to null is unbound",
+    "there. A platform not listed inherits chord.",
+    "",
+    "keyLabel overrides how the key renders in the help table (a range like",
+    "\"1…9\"). A label may contain {mod} or {alt}, substituted with this",
+    "platform's spelling of that modifier. scoped:true means the chord is live",
+    "only while one surface has focus, so it may reuse a global chord."
+  ],
+  "version": 1,
+  "shortcuts": [
+    {
+      "id": "new-launcher",
+      "label": "New tab — shell, preview or an agent (type to filter, ↵ to open)",
+      "surface": "menu",
+      "chord": {
+        "mods": [
+          "Mod"
+        ],
+        "key": "KeyN"
+      }
+    },
+    {
+      "id": "new-project",
+      "label": "New project",
+      "surface": "menu",
+      "chord": {
+        "mods": [
+          "Mod",
+          "Shift"
+        ],
+        "key": "KeyN"
+      }
+    },
+    {
+      "id": "open-project",
+      "label": "Open project folder",
+      "surface": "menu",
+      "chord": {
+        "mods": [
+          "Mod"
+        ],
+        "key": "KeyO"
+      }
+    },
+    {
+      "id": "manage-projects",
+      "label": "Manage projects (create, edit, delete)",
+      "surface": "menu",
+      "chord": {
+        "mods": [
+          "Mod",
+          "Shift"
+        ],
+        "key": "KeyM"
+      }
+    },
+    {
+      "id": "prev-project",
+      "label": "Previous project",
+      "surface": "menu",
+      "chord": {
+        "mods": [
+          "Mod",
+          "Alt"
+        ],
+        "key": "ArrowLeft"
+      },
+      "platform": {
+        "windows": {
+          "mods": [
+            "Mod",
+            "Alt"
+          ],
+          "key": "PageUp"
+        },
+        "linux": {
+          "mods": [
+            "Mod",
+            "Alt"
+          ],
+          "key": "PageUp"
+        }
+      },
+      "note": "Ctrl+Alt+Arrow is screen rotation on Intel drivers (Windows) and workspace switching (GNOME/KDE), so the non-Mac binding moves to PageUp/PageDown — the same pair the tab chords use one level down."
+    },
+    {
+      "id": "next-project",
+      "label": "Next project",
+      "surface": "menu",
+      "chord": {
+        "mods": [
+          "Mod",
+          "Alt"
+        ],
+        "key": "ArrowRight"
+      },
+      "platform": {
+        "windows": {
+          "mods": [
+            "Mod",
+            "Alt"
+          ],
+          "key": "PageDown"
+        },
+        "linux": {
+          "mods": [
+            "Mod",
+            "Alt"
+          ],
+          "key": "PageDown"
+        }
+      }
+    },
+    {
+      "id": "close-project",
+      "label": "Close project",
+      "surface": "menu",
+      "chord": {
+        "mods": [
+          "Mod",
+          "Shift"
+        ],
+        "key": "KeyW"
+      }
+    },
+    {
+      "id": "open-workspace",
+      "label": "Open workspace",
+      "surface": "menu",
+      "chord": {
+        "mods": [
+          "Mod",
+          "Shift"
+        ],
+        "key": "KeyO"
+      },
+      "help": false
+    },
+    {
+      "id": "save-workspace",
+      "label": "Save workspace as",
+      "surface": "menu",
+      "chord": {
+        "mods": [
+          "Mod",
+          "Shift"
+        ],
+        "key": "KeyS"
+      },
+      "help": false
+    },
+    {
+      "id": "tab-jump",
+      "label": "Jump to a tab — hold {mod} and the tabs show their numbers",
+      "surface": "app",
+      "chord": {
+        "mods": [
+          "Mod"
+        ],
+        "key": "Digit1"
+      },
+      "keyLabel": "1…9",
+      "note": "A range, not one chord: useHeldModifier reads any Digit1..9 with this modifier. keyLabel is what the help table shows."
+    },
+    {
+      "id": "project-jump",
+      "label": "Jump to a project — hold {alt} and the pills show their numbers",
+      "surface": "app",
+      "chord": {
+        "mods": [
+          "Alt"
+        ],
+        "key": "Digit1"
+      },
+      "keyLabel": "1…9"
+    },
+    {
+      "id": "new-terminal",
+      "label": "New terminal in the active project",
+      "surface": "menu",
+      "chord": {
+        "mods": [
+          "Mod"
+        ],
+        "key": "KeyT"
+      }
+    },
+    {
+      "id": "prev-tab",
+      "label": "Previous tab",
+      "surface": "menu",
+      "chord": {
+        "mods": [
+          "Ctrl",
+          "Mod"
+        ],
+        "key": "ArrowLeft"
+      },
+      "platform": {
+        "windows": {
+          "mods": [
+            "Mod"
+          ],
+          "key": "PageUp"
+        },
+        "linux": {
+          "mods": [
+            "Mod"
+          ],
+          "key": "PageUp"
+        }
+      },
+      "note": "Mac keeps Ctrl+Cmd+Arrow. Off Mac that chord collapses to Ctrl+Arrow, which is word-jump in every text field, so tabs use the Ctrl+PageUp/PageDown pair browsers and VS Code already train."
+    },
+    {
+      "id": "next-tab",
+      "label": "Next tab",
+      "surface": "menu",
+      "chord": {
+        "mods": [
+          "Ctrl",
+          "Mod"
+        ],
+        "key": "ArrowRight"
+      },
+      "platform": {
+        "windows": {
+          "mods": [
+            "Mod"
+          ],
+          "key": "PageDown"
+        },
+        "linux": {
+          "mods": [
+            "Mod"
+          ],
+          "key": "PageDown"
+        }
+      }
+    },
+    {
+      "id": "close-tab",
+      "label": "Close tab",
+      "surface": "menu",
+      "chord": {
+        "mods": [
+          "Mod"
+        ],
+        "key": "KeyW"
+      }
+    },
+    {
+      "id": "quick-open",
+      "label": "Quick-open a file",
+      "surface": "menu",
+      "chord": {
+        "mods": [
+          "Mod"
+        ],
+        "key": "KeyP"
+      }
+    },
+    {
+      "id": "find-in-files",
+      "label": "Find in files",
+      "surface": "menu",
+      "chord": {
+        "mods": [
+          "Mod",
+          "Shift"
+        ],
+        "key": "KeyF"
+      }
+    },
+    {
+      "id": "spot-search",
+      "label": "SpotSearch — search everything, or run what you type as a task",
+      "surface": "menu",
+      "chord": {
+        "mods": [
+          "Mod"
+        ],
+        "key": "KeyK"
+      }
+    },
+    {
+      "id": "toggle-sidebar",
+      "label": "Toggle sidebar",
+      "surface": "menu",
+      "chord": {
+        "mods": [
+          "Mod"
+        ],
+        "key": "KeyB"
+      }
+    },
+    {
+      "id": "toggle-zen",
+      "label": "Focus mode (Esc leaves)",
+      "surface": "menu",
+      "chord": {
+        "mods": [
+          "Mod",
+          "Shift"
+        ],
+        "key": "Enter"
+      }
+    },
+    {
+      "id": "settings",
+      "label": "Settings",
+      "surface": "menu",
+      "chord": {
+        "mods": [
+          "Mod"
+        ],
+        "key": "Comma"
+      }
+    },
+    {
+      "id": "help",
+      "label": "Canopy Help",
+      "surface": "menu",
+      "chord": {
+        "mods": [
+          "Mod",
+          "Shift"
+        ],
+        "key": "KeyH"
+      },
+      "help": false
+    },
+    {
+      "id": "dictation",
+      "label": "Voice dictation — speak, press again to insert (Esc cancels)",
+      "surface": "app",
+      "chord": {
+        "mods": [
+          "Mod"
+        ],
+        "key": "KeyD"
+      },
+      "platform": {
+        "windows": {
+          "mods": [
+            "Alt"
+          ],
+          "key": "KeyD"
+        },
+        "linux": {
+          "mods": [
+            "Alt"
+          ],
+          "key": "KeyD"
+        }
+      },
+      "note": "Off Mac, Mod is Ctrl and plain Ctrl+D is shell EOF — it would close the terminal you were dictating into. This is the default only; Settings can rebind it."
+    },
+    {
+      "id": "save-file",
+      "label": "Save the file you are editing",
+      "surface": "app",
+      "chord": {
+        "mods": [
+          "Mod"
+        ],
+        "key": "KeyS"
+      }
+    },
+    {
+      "id": "submit",
+      "label": "Submit the box you are typing in — commit message, agent comment, task brief",
+      "surface": "app",
+      "chord": {
+        "mods": [
+          "Mod"
+        ],
+        "key": "Enter"
+      }
+    },
+    {
+      "id": "newline",
+      "label": "Newline inside a box that submits on Enter",
+      "surface": "app",
+      "chord": {
+        "mods": [
+          "Shift"
+        ],
+        "key": "Enter"
+      },
+      "keyLabel": "↵",
+      "help": false
+    },
+    {
+      "id": "open-external",
+      "label": "Click a preview link to open it in your browser instead",
+      "surface": "app",
+      "chord": {
+        "mods": [
+          "Mod"
+        ],
+        "key": null
+      },
+      "note": "Modifier-click, not a key chord. Strictly Cmd on macOS and Ctrl elsewhere: accepting either meant Ctrl-click on a Mac — which is the OS's right-click — silently opened the system browser."
+    },
+    {
+      "id": "link-follow",
+      "label": "Follow a link in the terminal (when Settings asks for the modifier)",
+      "surface": "app",
+      "chord": {
+        "mods": [
+          "Mod"
+        ],
+        "key": null
+      }
+    },
+    {
+      "id": "settings-section",
+      "label": "Jump between Settings sections while Settings is open",
+      "surface": "app",
+      "chord": {
+        "mods": [
+          "Mod"
+        ],
+        "key": "Digit1"
+      },
+      "keyLabel": "1…9",
+      "scoped": true,
+      "help": false,
+      "note": "Scoped: bound only while the Settings dialog is open, so it deliberately reuses tab-jump's chord."
+    },
+    {
+      "id": "term-word-left",
+      "label": "Terminal: jump word left",
+      "surface": "terminal",
+      "chord": {
+        "mods": [
+          "Alt"
+        ],
+        "key": "ArrowLeft"
+      }
+    },
+    {
+      "id": "term-word-right",
+      "label": "Terminal: jump word right",
+      "surface": "terminal",
+      "chord": {
+        "mods": [
+          "Alt"
+        ],
+        "key": "ArrowRight"
+      }
+    },
+    {
+      "id": "term-delete-word",
+      "label": "Terminal: delete word",
+      "surface": "terminal",
+      "chord": {
+        "mods": [
+          "Alt"
+        ],
+        "key": "Backspace"
+      },
+      "note": "Documented, not implemented here — xterm.js itself sends ESC+DEL for this and readline binds it on every platform."
+    },
+    {
+      "id": "term-line-start",
+      "label": "Terminal: start of line",
+      "surface": "terminal",
+      "chord": {
+        "mods": [
+          "Mod"
+        ],
+        "key": "ArrowLeft"
+      },
+      "platform": {
+        "windows": null,
+        "linux": null
+      },
+      "note": "macOS natural text editing, the iTerm2 mapping. Off Mac there is no Cmd key: Mod would resolve to Ctrl (Ctrl+Left is word-jump, not line-start) and the Super key belongs to the window manager. Home/End already do this on those platforms."
+    },
+    {
+      "id": "term-line-end",
+      "label": "Terminal: end of line",
+      "surface": "terminal",
+      "chord": {
+        "mods": [
+          "Mod"
+        ],
+        "key": "ArrowRight"
+      },
+      "platform": {
+        "windows": null,
+        "linux": null
+      }
+    },
+    {
+      "id": "term-kill-line",
+      "label": "Terminal: delete line",
+      "surface": "terminal",
+      "chord": {
+        "mods": [
+          "Mod"
+        ],
+        "key": "Backspace"
+      },
+      "platform": {
+        "windows": null,
+        "linux": null
+      }
+    }
+  ]
+}

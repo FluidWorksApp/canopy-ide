@@ -27,6 +27,7 @@ mod prwatch;
 mod pty;
 mod punch;
 mod relay;
+mod shortcuts;
 mod remote;
 mod research;
 mod selftest;
@@ -40,8 +41,36 @@ mod vault_kdbx;
 mod winproc;
 mod wsbridge;
 
+use shortcuts::accel;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager};
+
+/// Every shortcut id this menu binds. The list is what the parity test walks —
+/// it is how a chord added to a menu row here is proven to resolve on Windows
+/// and Linux too, not just on the Mac it was written on.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const MENU_SHORTCUT_IDS: &[&str] = &[
+    "settings",
+    "new-launcher",
+    "new-terminal",
+    "close-tab",
+    "next-tab",
+    "prev-tab",
+    "close-project",
+    "next-project",
+    "prev-project",
+    "toggle-sidebar",
+    "toggle-zen",
+    "new-project",
+    "open-project",
+    "manage-projects",
+    "open-workspace",
+    "save-workspace",
+    "quick-open",
+    "find-in-files",
+    "spot-search",
+    "help",
+];
 
 /// Custom menu: keeps Edit (clipboard in WKWebView needs it) but replaces the
 /// default Cmd+W "Close Window" with tab-scoped shortcuts the frontend handles.
@@ -70,7 +99,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 None::<&str>,
             )?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?,
+            &MenuItem::with_id(app, "settings", "Settings…", true, accel("settings").as_deref())?,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::hide(app, None)?,
             &PredefinedMenuItem::separator(app)?,
@@ -99,15 +128,15 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             // The launcher (shell, preview, every agent CLI) as a typed list —
             // the ＋ menu's keyboard twin. Cmd/Ctrl+T stays the straight-to-a-
             // shell shortcut for when you already know what you want.
-            &MenuItem::with_id(app, "new-launcher", "New…", true, Some("CmdOrCtrl+N"))?,
+            &MenuItem::with_id(app, "new-launcher", "New…", true, accel("new-launcher").as_deref())?,
             &MenuItem::with_id(
                 app,
                 "new-terminal",
                 "New Terminal",
                 true,
-                Some("CmdOrCtrl+T"),
+                accel("new-terminal").as_deref(),
             )?,
-            &MenuItem::with_id(app, "close-tab", "Close Tab", true, Some("CmdOrCtrl+W"))?,
+            &MenuItem::with_id(app, "close-tab", "Close Tab", true, accel("close-tab").as_deref())?,
             &PredefinedMenuItem::separator(app)?,
             // Tabs and projects share one mental model: Ctrl+Cmd moves between
             // tabs, Cmd+Alt between projects. Cmd+1..9 used to jump to a tab by
@@ -117,14 +146,14 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 "next-tab",
                 "Next Tab",
                 true,
-                Some("Control+CmdOrCtrl+Right"),
+                accel("next-tab").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "prev-tab",
                 "Previous Tab",
                 true,
-                Some("Control+CmdOrCtrl+Left"),
+                accel("prev-tab").as_deref(),
             )?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(
@@ -132,21 +161,21 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 "close-project",
                 "Close Project",
                 true,
-                Some("CmdOrCtrl+Shift+W"),
+                accel("close-project").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "next-project",
                 "Next Project",
                 true,
-                Some("CmdOrCtrl+Alt+Right"),
+                accel("next-project").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "prev-project",
                 "Previous Project",
                 true,
-                Some("CmdOrCtrl+Alt+Left"),
+                accel("prev-project").as_deref(),
             )?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(
@@ -154,14 +183,14 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 "toggle-sidebar",
                 "Toggle Sidebar",
                 true,
-                Some("CmdOrCtrl+B"),
+                accel("toggle-sidebar").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "toggle-zen",
                 "Focus Mode",
                 true,
-                Some("CmdOrCtrl+Shift+Enter"),
+                accel("toggle-zen").as_deref(),
             )?,
         ],
     )?;
@@ -180,21 +209,21 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 true,
                 // Cmd/Ctrl+N is the new-tab launcher (Tabs menu); a whole new
                 // project is the rarer, bigger thing, so it takes the Shift.
-                Some("CmdOrCtrl+Shift+N"),
+                accel("new-project").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "open-project",
                 "Open Project…",
                 true,
-                Some("CmdOrCtrl+O"),
+                accel("open-project").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "manage-projects",
                 "Manage Projects…",
                 true,
-                Some("CmdOrCtrl+Shift+M"),
+                accel("manage-projects").as_deref(),
             )?,
             &MenuItem::with_id(app, "save-project", "Save Project As…", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
@@ -203,14 +232,14 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 "open-workspace",
                 "Open Workspace…",
                 true,
-                Some("CmdOrCtrl+Shift+O"),
+                accel("open-workspace").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "save-workspace",
                 "Save Workspace As…",
                 true,
-                Some("CmdOrCtrl+Shift+S"),
+                accel("save-workspace").as_deref(),
             )?,
         ],
     )?;
@@ -226,21 +255,21 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 "quick-open",
                 "Quick Open File…",
                 true,
-                Some("CmdOrCtrl+P"),
+                accel("quick-open").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "find-in-files",
                 "Find in Files…",
                 true,
-                Some("CmdOrCtrl+Shift+F"),
+                accel("find-in-files").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "spot-search",
                 "SpotSearch Everything…",
                 true,
-                Some("CmdOrCtrl+K"),
+                accel("spot-search").as_deref(),
             )?,
         ],
     )?;
@@ -259,7 +288,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         "Help",
         true,
         &[
-            &MenuItem::with_id(app, "help", "Canopy Help", true, Some("CmdOrCtrl+Shift+H"))?,
+            &MenuItem::with_id(app, "help", "Canopy Help", true, accel("help").as_deref())?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "support", "Support Us", true, None::<&str>)?,
         ],

@@ -23,7 +23,6 @@ import {
   type Settings,
   type Theme,
 } from "../settings";
-import { IS_MAC } from "../platform";
 import { Button, Checkbox, Field, Row, Segmented, Select, Stepper, Switch, TextInput } from "./ui";
 import { drawWave } from "../waveStyles";
 import { LINK_CHORD } from "../terminalLinks";
@@ -56,6 +55,7 @@ import {
   languageLabel,
   normalizePattern,
 } from "../fileAssociations";
+import { format, formatChord, modifierOnly, resolve } from "../shortcuts";
 
 export type SettingsTab =
   | "appearance"
@@ -583,6 +583,11 @@ function CustomClis({
   );
 }
 
+/** The modifier half of the Settings section jump, resolved once — the nav
+ *  badges render it and the key handler matches on it, so a badge can never
+ *  advertise a key the handler does not answer. */
+const SECTION_MOD = resolve("settings-section")!;
+
 export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsDialogProps) {
   // "vault" is still a valid deep-link target (agentOps and the status bar
   // both open it by name); it now lands on the tab the vault lives in.
@@ -628,13 +633,14 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
   // machines without it, and everything below it shifts up by one).
   const shortcutTabs = useMemo(() => visibleTabs.slice(0, 9), [visibleTabs]);
 
-  // ⌘1–⌘9 jump between sections. Bound while the dialog is open and nowhere
-  // else, so it can't collide with anything the app binds behind it — ⌘0 is
-  // the window's zoom reset (App.tsx) and stays untouched. e.code, not e.key,
-  // so a non-US layout that puts a symbol on the number row still works.
+  // The digit chord jumps between sections. Bound while the dialog is open and
+  // nowhere else, which is why the manifest marks it `scoped` and lets it reuse
+  // tab-jump's chord — ⌘0 is the window's zoom reset (App.tsx) and stays
+  // untouched. e.code, not e.key, so a non-US layout that puts a symbol on the
+  // number row still works.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+      if (!modifierOnly(e, "settings-section")) return;
       const n = /^Digit([1-9])$/.exec(e.code)?.[1];
       if (!n) return;
       const target = shortcutTabs[Number(n) - 1];
@@ -770,7 +776,9 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   <span>{t.label}</span>
                   {i < shortcutTabs.length && (
                     <span className="settings-nav-key">
-                      {IS_MAC ? "⌘" : "^"}
+                      {/* The section jump's own modifier, so this badge and
+                          the handler below can never name different keys. */}
+                      {formatChord({ ...SECTION_MOD, code: null })}
                       {i + 1}
                     </span>
                   )}
@@ -1982,7 +1990,7 @@ function SpotSearchSettings({
   return (
     <>
       <Item
-        name="What ⌘K searches"
+        name={`What ${format("spot-search")} searches`}
         desc="Every kind of result the omnibox can offer. Switching one off only stops it being asked — nothing is deleted, and it comes back the moment you switch it on."
       >
         <div className="spot-set-list">
@@ -2009,7 +2017,9 @@ function SpotSearchSettings({
 
       <Item
         name="Conversations to index"
-        desc="Canopy reads each agent CLI's own session files and keeps a full-text index of them, so ⌘K can find a conversation by something said in it. Switching an agent off deletes what it already indexed, on the next search."
+        desc={`Canopy reads each agent CLI's own session files and keeps a full-text index of them, so ${format(
+          "spot-search",
+        )} can find a conversation by something said in it. Switching an agent off deletes what it already indexed, on the next search.`}
       >
         <div className="spot-set-list" style={{ ["--spot-set-name-w" as string]: "150px" }}>
           {INDEXABLE_AGENTS.map((agent) => {
@@ -2075,7 +2085,9 @@ function SpotSearchSettings({
 
       <Item
         name="Keep history for"
-        desc="Indexed messages older than this are dropped. Zero keeps everything — the transcripts on disk are the real record, and this only decides how far back ⌘K can see."
+        desc={`Indexed messages older than this are dropped. Zero keeps everything — the transcripts on disk are the real record, and this only decides how far back ${format(
+          "spot-search",
+        )} can see.`}
       >
         <div className="spot-set-days">
           <input
@@ -2106,7 +2118,7 @@ function SpotSearchSettings({
               ? `${stats.messages.toLocaleString()} messages from ${stats.sessions.toLocaleString()} conversations, ${stats.terminals} terminal${
                   stats.terminals === 1 ? "" : "s"
                 } · ${fmtBytes(stats.bytes)}`
-              : "Not built yet — it fills the first time you open ⌘K."}
+              : `Not built yet — it fills the first time you open ${format("spot-search")}.`}
           </p>
           {pending !== null && (
             <p className="set-item-desc">

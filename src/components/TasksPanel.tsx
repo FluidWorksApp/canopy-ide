@@ -22,6 +22,7 @@ import {
 } from "../taskHistory";
 import { PlayIcon, StopIcon, TrashIcon } from "./icons";
 import { Button } from "./ui";
+import { matches } from "../shortcuts";
 
 /** A task in flight. Detached runs (the usual kind) carry a `ptyId` and no tab —
  *  this row is the only place they appear, so it has to say what a tab would
@@ -456,9 +457,9 @@ export function TasksPanel({
               value={oneOff}
               onChange={(e) => setOneOff(e.target.value)}
               onKeyDown={(e) => {
-                // ⌘/Ctrl+Enter submits; plain Enter is a newline, since a brief
-                // typed here is usually a paragraph rather than a line.
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) runOneOff();
+                // The submit chord sends; plain Enter is a newline, since a
+                // brief typed here is usually a paragraph rather than a line.
+                if (matches(e, "submit")) runOneOff();
                 if (e.key === "Escape") setOneOff(null);
               }}
             />

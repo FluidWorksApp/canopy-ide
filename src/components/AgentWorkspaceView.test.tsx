@@ -2,6 +2,19 @@ import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
 import { CommentComposer, sameJson, sameMap } from "./AgentWorkspaceView";
+import { resolve } from "../shortcuts";
+
+// The submit chord as this platform actually spells it: ⌘⏎ on a Mac, Ctrl+⏎
+// under the test runner. Spelling it by hand passed everywhere only because
+// the handler used to accept either modifier, which is the bug the registry
+// exists to prevent.
+const submit = resolve("submit")!;
+const submitKey = {
+  key: "Enter",
+  code: "Enter",
+  metaKey: submit.meta,
+  ctrlKey: submit.ctrl,
+};
 
 // The composer lives inside a DiffView that rebuilds whenever the agent under
 // review touches a file — which, while you are writing a comment about that
@@ -48,16 +61,16 @@ describe("comment composer drafts", () => {
     );
   });
 
-  it("adds on ⌘⏎ and treats an empty body as a cancel", () => {
+  it("adds on the submit chord and treats an empty body as a cancel", () => {
     const onAdd = vi.fn();
     render(<Harness mounted onAdd={onAdd} />);
     const box = screen.getByRole("textbox");
 
-    fireEvent.keyDown(box, { key: "Enter", metaKey: true });
+    fireEvent.keyDown(box, submitKey);
     expect(onAdd).not.toHaveBeenCalled();
 
     fireEvent.change(box, { target: { value: "  needs a test  " } });
-    fireEvent.keyDown(box, { key: "Enter", metaKey: true });
+    fireEvent.keyDown(box, submitKey);
     expect(onAdd).toHaveBeenCalledWith("needs a test");
   });
 });

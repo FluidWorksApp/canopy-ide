@@ -6,6 +6,13 @@ import type { CustomAgentCli } from "./projects";
 import type { BrowserEngine } from "./browserBounds";
 import type { CaptureMode } from "./pageCapture";
 import { IS_MAC } from "./platform";
+import {
+  formatChord,
+  keyLabel as chordKeyLabel,
+  matchesChord,
+  modifierLabel,
+  requireKeyChord,
+} from "./shortcuts";
 
 export type Theme =
   | "auto"
@@ -70,11 +77,9 @@ export interface Hotkey {
   code: string;
 }
 
-/** Default dictation hotkey: ⌘D on Mac, Alt+D elsewhere (plain Ctrl+D is shell
- *  EOF, so it's deliberately avoided). */
-export const DEFAULT_DICTATION_HOTKEY: Hotkey = IS_MAC
-  ? { meta: true, ctrl: false, alt: false, shift: false, code: "KeyD" }
-  : { meta: false, ctrl: false, alt: true, shift: false, code: "KeyD" };
+/** Default dictation hotkey — ⌘D on Mac, Alt+D elsewhere, per the manifest
+ *  (plain Ctrl+D is shell EOF, so it's deliberately avoided off Mac). */
+export const DEFAULT_DICTATION_HOTKEY: Hotkey = requireKeyChord("dictation");
 
 /** How dictation is triggered.
  *
@@ -128,10 +133,7 @@ export function modKeyLabel(k: DictationModKey): string {
   const side = k.endsWith("Left") ? "Left " : k.endsWith("Right") ? "Right " : "";
   const base = k.replace(/(Left|Right)$/, "");
   if (base === "CapsLock") return "Caps Lock";
-  const glyph: Record<string, string> = IS_MAC
-    ? { Shift: "⇧ Shift", Control: "⌃ Control", Alt: "⌥ Option", Meta: "⌘ Command" }
-    : { Shift: "Shift", Control: "Ctrl", Alt: "Alt", Meta: "Win" };
-  return side + (glyph[base] ?? base);
+  return side + modifierLabel(base as "Shift" | "Control" | "Alt" | "Meta");
 }
 
 /** The visualiser drawn in the recording pill while the mic is live. Ported
@@ -153,40 +155,22 @@ export const DICTATION_WAVE_STYLES: { id: DictationWaveStyle; label: string; hin
   { id: "neon", label: "Neon", hint: "Glowing double sine" },
 ];
 
-/** Render a hotkey for display, e.g. "⌘D" or "Alt+Shift+D". */
+/** Render a hotkey for display, e.g. "⌘D" or "Alt+Shift+D". A Hotkey is
+ *  structurally a resolved Chord, so display and comparison come from the
+ *  registry — this is the one shortcut the user can rebind, which is why it is
+ *  stored rather than looked up by id. */
 export function formatHotkey(h: Hotkey): string {
-  const parts: string[] = [];
-  if (IS_MAC) {
-    if (h.ctrl) parts.push("⌃");
-    if (h.alt) parts.push("⌥");
-    if (h.shift) parts.push("⇧");
-    if (h.meta) parts.push("⌘");
-  } else {
-    if (h.ctrl) parts.push("Ctrl");
-    if (h.alt) parts.push("Alt");
-    if (h.shift) parts.push("Shift");
-    if (h.meta) parts.push("Win");
-  }
-  parts.push(keyLabel(h.code));
-  return IS_MAC ? parts.join("") : parts.join("+");
+  return formatChord(h);
 }
 
 /** Human label for a KeyboardEvent.code (KeyD → "D", Digit1 → "1"). */
 export function keyLabel(code: string): string {
-  if (code.startsWith("Key")) return code.slice(3);
-  if (code.startsWith("Digit")) return code.slice(5);
-  return code;
+  return chordKeyLabel(code);
 }
 
 /** Does this keydown match the configured hotkey? */
 export function matchesHotkey(e: KeyboardEvent, h: Hotkey): boolean {
-  return (
-    e.code === h.code &&
-    e.metaKey === h.meta &&
-    e.ctrlKey === h.ctrl &&
-    e.altKey === h.alt &&
-    e.shiftKey === h.shift
-  );
+  return matchesChord(e, h);
 }
 
 export const TERMINAL_FONT_DEFAULT =
