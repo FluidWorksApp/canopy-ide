@@ -919,6 +919,27 @@ fn checkouts(roots: &[PathBuf], skipped: &mut Vec<String>) -> Vec<Checkout> {
     out
 }
 
+/// Split the roots the dialog asked about into the ones this window may look at
+/// and a note for each one it may not. `resolve` is the scope check, injected so
+/// the rule can be tested without a `WorkspaceManager`.
+fn in_scope_roots(
+    roots: &[String],
+    resolve: &dyn Fn(&str) -> Option<PathBuf>,
+) -> (Vec<PathBuf>, Vec<String>) {
+    let mut ok = Vec::new();
+    let mut skipped = Vec::new();
+    for r in roots {
+        match resolve(r) {
+            Some(p) => ok.push(p),
+            None => skipped.push(format!(
+                "{r} — not in this window's scope; a sleeping project releases \
+                 its folders, so wake it to include it"
+            )),
+        }
+    }
+    (ok, skipped)
+}
+
 /// Scan the open projects for disposable directories.
 ///
 /// `busy` is every cwd the frontend knows something live in (terminals, agents,
@@ -937,12 +958,27 @@ pub async fn cleanup_scan(
     // Scope-check while we still hold State, then hand owned paths to the
     // worker: this is minutes of `read_dir` on a big tree and must not sit on
     // the async runtime.
-    let mut resolved: Vec<PathBuf> = Vec::new();
-    for r in &roots {
-        resolved.push(check_scope(&state, Path::new(r))?);
-    }
+    //
+    // A root can be out of scope while still being a folder of an open project:
+    // a hibernating project releases its watchers and scopes — that is what
+    // hibernating *is* — and its folders come back only when it wakes. Failing
+    // the whole command on the first such root meant one sleeping project made
+    // "Cleanup resources" show nothing but a scope error for every other
+    // project. So an out-of-scope root is skipped and said out loud, the same
+    // way the walk reports anywhere else it wouldn't look, and only a scan with
+    // nothing left to look at is an error.
+    let (resolved, mut out_of_scope) =
+        in_scope_roots(&roots, &|r| check_scope(&state, Path::new(r)).ok());
     if resolved.is_empty() {
-        return Err("no project folders to scan".into());
+        return Err(if roots.is_empty() {
+            "no project folders to scan".into()
+        } else {
+            // Every project asked about is asleep. Saying that beats "no project
+            // folders", which reads as a bug when the tab strip is full.
+            "nothing to scan — the open projects are all hibernating, and a \
+             sleeping project keeps what it expects to wake up to"
+                .to_string()
+        });
     }
     // The frontend's `busy` is what it knows about; the monitor's last reading is
     // what is actually running. Union, because neither is a superset: a headless
@@ -955,13 +991,18 @@ pub async fn cleanup_scan(
             busy.extend(sessions.iter().map(|s| s.cwd.clone()));
         }
     }
-    tauri::async_runtime::spawn_blocking(move || {
+    let mut out = tauri::async_runtime::spawn_blocking(move || {
         scan(&resolved, &busy, &asleep, &mut |p| {
             let _ = app.emit("cleanup:progress", p);
         })
     })
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    // First, ahead of the walk's own notes: "my project isn't in this list" is
+    // the question these answer.
+    out_of_scope.extend(std::mem::take(&mut out.skipped));
+    out.skipped = out_of_scope;
+    Ok(out)
 }
 
 /// The scan itself, with the app reduced to a progress callback — so the test
@@ -1283,6 +1324,29 @@ mod tests {
         let (rec, hold) = verdict(&act, Category::Cache, 400);
         assert!(!rec);
         assert!(hold.unwrap().contains("hibernating"));
+    }
+
+    #[test]
+    fn a_root_this_window_cannot_see_is_a_note_not_a_dead_dialog() {
+        // A hibernating project is still an open project, and it holds no scope.
+        // The scan looks at the rest and says which folders it left out; only a
+        // scan with nothing at all to look at is an error (checked by the caller).
+        let roots = vec![
+            "/live/repo".to_string(),
+            "/asleep/repo".to_string(),
+            "/live/other".to_string(),
+        ];
+        let (ok, skipped) = in_scope_roots(&roots, &|r| {
+            r.starts_with("/live").then(|| PathBuf::from(r))
+        });
+        assert_eq!(
+            ok,
+            vec![PathBuf::from("/live/repo"), PathBuf::from("/live/other")]
+        );
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].starts_with("/asleep/repo — "));
+        // The note has to name the way back, or it reads as a bug.
+        assert!(skipped[0].contains("wake it"));
     }
 
     #[test]
