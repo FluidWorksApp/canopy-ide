@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type * as ipc from "./ipc";
 import {
+  agentsIn,
   basePort,
   ensureLeases,
   leasedPort,
   portEnv,
   portForCwd,
+  principalAgent,
   releaseLease,
   workspaceRows,
   type WorkspaceContext,
@@ -205,5 +207,60 @@ describe("port leases", () => {
       VITE_PORT: "5174",
     });
     expect(portEnv(null)).toEqual([]);
+  });
+});
+
+describe("who is working where", () => {
+  const d = (over: Record<string, unknown>) => ({
+    session_id: "s1",
+    cwd: "/w/repo-wt-a",
+    agent: "claude",
+    surface: "7",
+    instance: "inst-1",
+    state: "working",
+    ...over,
+  });
+
+  it("ties an agent to the workspace its cwd is in", () => {
+    const found = agentsIn("/w/repo-wt-a", [d({})], "inst-1");
+    expect(found).toEqual([
+      { sessionId: "s1", ptyId: 7, name: "claude", state: "working" },
+    ]);
+  });
+
+  it("keeps an agent that cd'd deeper inside the workspace", () => {
+    expect(agentsIn("/w/repo-wt-a", [d({ cwd: "/w/repo-wt-a/src" })], "inst-1")).toHaveLength(1);
+  });
+
+  it("does not take an agent from a sibling workspace", () => {
+    expect(agentsIn("/w/repo-wt-a", [d({ cwd: "/w/repo-wt-b" })], "inst-1")).toEqual([]);
+    // A path that merely shares a prefix is not inside.
+    expect(agentsIn("/w/repo-wt-a", [d({ cwd: "/w/repo-wt-abc" })], "inst-1")).toEqual([]);
+  });
+
+  it("drops a session from another app launch — its pty id names someone else", () => {
+    expect(agentsIn("/w/repo-wt-a", [d({ instance: "inst-0" })], "inst-1")).toEqual([]);
+  });
+
+  it("drops ended sessions — you cannot hand a server to one", () => {
+    expect(agentsIn("/w/repo-wt-a", [d({ state: "ended" })], "inst-1")).toEqual([]);
+  });
+
+  it("survives a session with no terminal behind it", () => {
+    const [a] = agentsIn("/w/repo-wt-a", [d({ surface: undefined })], "inst-1");
+    expect(a.ptyId).toBeNull();
+  });
+
+  it("picks the one mid-turn as the row's principal", () => {
+    const agents = agentsIn(
+      "/w/repo-wt-a",
+      [
+        d({ session_id: "idle", surface: "1", state: "idle" }),
+        d({ session_id: "busy", surface: "2", state: "working" }),
+      ],
+      "inst-1",
+    );
+    expect(principalAgent(agents)?.sessionId).toBe("busy");
+    expect(principalAgent([])).toBeNull();
   });
 });

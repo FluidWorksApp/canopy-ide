@@ -278,3 +278,87 @@ export function portForPath(cwd: string): number | null {
   }
   return best ? base + best.offset : null;
 }
+
+// ---------------------------------------------------------------------------
+// Who is working where.
+//
+// A run, a workspace and an agent were three facts Canopy held separately: the
+// Servers panel knew a dev server was up in a directory, the Git panel knew a
+// branch had a folder, and the Agents panel knew a session existed — and
+// nothing joined them. So "which agent is running this server, and on what
+// branch" had no answer, which is the question you have to be able to ask
+// before one agent can hand a server to another.
+//
+// The join is deterministic, not a guess: a digest carries `surface` (the PTY
+// id it was spawned under) and `instance` (the app launch), which is the same
+// pairing the Agents panel uses. Matching on titles or newest-file-by-mtime
+// would attach a run to someone else's conversation.
+
+/** An agent session, as the surfaces that aren't the Agents panel need it. */
+export interface AgentRef {
+  sessionId: string;
+  /** The terminal it runs in — how it is messaged, and how its liveness is
+   *  answered. Null for a session with no Canopy terminal behind it. */
+  ptyId: number | null;
+  /** The CLI, e.g. "claude". Not the branch and not the tab title. */
+  name: string;
+  state: "working" | "waiting" | "idle" | "ended" | "unknown";
+}
+
+/** Live agent sessions whose working directory is inside `dir`.
+ *
+ *  Ended sessions are dropped: they are still in the digest store (it doubles
+ *  as the crash-restore record) but they are not someone you can hand a server
+ *  to. Sessions from another app launch are dropped too — a PTY id is only
+ *  unique within one launch, and a stale one names a terminal that now belongs
+ *  to something else. */
+export function agentsIn(
+  dir: string,
+  digests: {
+    session_id: string;
+    cwd?: string;
+    launch_cwd?: string;
+    agent?: string;
+    surface?: string;
+    instance?: string;
+    state?: string;
+  }[],
+  thisInstance: string | null,
+): AgentRef[] {
+  const seen = new Set<string>();
+  const out: AgentRef[] = [];
+  for (const d of digests) {
+    if (d.state === "ended") continue;
+    if (thisInstance && d.instance && d.instance !== thisInstance) continue;
+    // `launch_cwd` as well as `cwd`: an agent that cd'd deeper is still working
+    // in the workspace it was started in, and an agent that cd'd *out* is not
+    // something we want to lose track of either.
+    const where = d.cwd ?? d.launch_cwd;
+    if (!where || !(under(where, dir) || (d.launch_cwd && under(d.launch_cwd, dir))))
+      continue;
+    if (seen.has(d.session_id)) continue;
+    seen.add(d.session_id);
+    const pty = d.surface ? Number(d.surface) : NaN;
+    out.push({
+      sessionId: d.session_id,
+      ptyId: Number.isFinite(pty) ? pty : null,
+      name: d.agent ?? "agent",
+      state:
+        d.state === "working" || d.state === "waiting" || d.state === "idle"
+          ? d.state
+          : "unknown",
+    });
+  }
+  return out;
+}
+
+/** The one that matters on a one-line row: whoever is actually mid-turn, else
+ *  the one blocked on you, else any of them. */
+export function principalAgent(agents: AgentRef[]): AgentRef | null {
+  return (
+    agents.find((a) => a.state === "working") ??
+    agents.find((a) => a.state === "waiting") ??
+    agents[0] ??
+    null
+  );
+}
