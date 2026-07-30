@@ -312,10 +312,14 @@
     return JSON.stringify({
       filled,
       refused: refused.length ? refused : undefined,
+      // Whether waiting could still change the answer. A form that has not
+      // rendered yet and a page that is still loading are both "come back in a
+      // moment"; the caller retries on this rather than on a guess.
+      ready: document.readyState === "complete",
       form: !!(found.password && found.password.form),
       frames: found.frames.blocked,
       why: refused.length
-        ? `the page took the ${refused.join(" and ")} field back to empty straight after it was filled — it is usually still starting up, so let it finish loading and fill again`
+        ? `the page took the ${refused.join(" and ")} field back to empty straight after it was filled — it kept re-rendering the form for longer than Canopy waited`
         : filled.length
           ? undefined
           : found.frames.blocked
