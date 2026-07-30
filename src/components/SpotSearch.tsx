@@ -154,10 +154,22 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
   const syncRowsRef = useRef(syncRows);
   syncRowsRef.current = syncRows;
 
+  /** Typing has become writing: a sentence, a line break, or a pasted image.
+   *  Ranking a paragraph against filenames produces a list of things that share
+   *  letters with it and answer nothing, so the palette stops offering matches
+   *  and offers the two things you can do with what you wrote. */
+  const composing = isPrompt(query, shots.length);
+
   // The debounced ones. Stale responses are dropped rather than merged late —
   // results for a query you're no longer typing are noise under the cursor.
   useEffect(() => {
-    if (!query.trim()) {
+    // Composing is not searching. Once the text is a prompt the only rows the
+    // palette will show are the actions, so the slow sources are being asked to
+    // rank a paragraph against filenames and transcripts for a list that is then
+    // filtered away — and they were paying for it in the one place it shows: a
+    // progress hairline sweeping under the box and "searching…" in the footer,
+    // for a search whose every result was already discarded.
+    if (composing || !query.trim()) {
       setAsyncRows([]);
       setBusy(false);
       return;
@@ -179,13 +191,7 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
       cancelled = true;
       clearTimeout(t);
     };
-  }, [query, corpus, roots.join("\n")]);
-
-  /** Typing has become writing: a sentence, a line break, or a pasted image.
-   *  Ranking a paragraph against filenames produces a list of things that share
-   *  letters with it and answer nothing, so the palette stops offering matches
-   *  and offers the two things you can do with what you wrote. */
-  const composing = isPrompt(query, shots.length);
+  }, [query, corpus, roots.join("\n"), composing]);
 
   const items = useMemo(() => {
     const all = [...syncRows, ...asyncRows];

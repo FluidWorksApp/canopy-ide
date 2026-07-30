@@ -129,17 +129,13 @@ export function actionRows(query: string, ctx: SpotContext, attachments = 0): Sp
         action: { type: "new-preview" },
       },
     },
-    {
-      hay: "new android device emulator preview",
-      row: {
-        id: "act:device",
-        group: "Actions",
-        kind: "device",
-        title: "New Android Device",
-        score: 0,
-        action: { type: "new-device" },
-      },
-    },
+    // "New Android Device" belongs here, and is withheld until the device tab is
+    // finished — it was the only way to open one, so leaving it out is what takes
+    // a half-built feature off the menu. Everything behind it is intact and
+    // untouched: the `new-device` action, ProjectView's openDevice, DeviceView
+    // itself. Putting this entry back is all that turns it on again.
+    //
+    // hay: "new android device emulator preview"
     ...ctx.clis.map((cli) => ({
       hay: `launch agent ${cli.name}`,
       row: {
