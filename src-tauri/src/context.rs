@@ -451,6 +451,9 @@ struct ResearchReq {
     files: Option<Vec<String>>,
     #[serde(default)]
     supersedes: Option<String>,
+    /// import: the markdown file to adopt.
+    #[serde(default)]
+    path: Option<String>,
 }
 
 async fn research_op(
@@ -542,6 +545,17 @@ async fn research_op(
             req.note.clone(),
         )
         .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        // The same adoption the file tab's button performs, reachable by an
+        // agent that finds loose research while doing something else.
+        "import" => crate::research::research_import(
+            store.clone(),
+            project_id.clone(),
+            Some(project_name.clone()),
+            Some(roots.clone()),
+            req.path.clone().unwrap_or_default(),
+            req.instance.clone(),
+        )
+        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
         "link" | "supersede" => crate::research::research_link(
             store.clone(),
             project_id.clone(),
@@ -555,7 +569,7 @@ async fn research_op(
         .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
         other => Err(format!(
             "unknown research action: {other} — one of list, search, get, start, digest, \
-             append, source, status, link"
+             append, source, status, link, import"
         )),
     })();
 
