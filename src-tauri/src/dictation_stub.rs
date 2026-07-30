@@ -82,6 +82,7 @@ pub async fn dictation_start(
 
 #[tauri::command]
 pub async fn dictation_stop(
+    _app: tauri::AppHandle,
     _state: tauri::State<'_, DictationManager>,
     _language: Option<String>,
 ) -> Result<String, String> {

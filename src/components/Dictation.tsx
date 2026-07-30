@@ -151,6 +151,7 @@ export function Dictation() {
       }
       if (phaseRef.current !== "recording") return;
       setPhase("transcribing");
+      setDetail("");
       try {
         // Read the language hint fresh, so a Settings change applies to the
         // very next transcription without a reload.
@@ -288,6 +289,11 @@ export function Dictation() {
         // First-use model load: reassure that a multi-second wait isn't a hang.
         setPhase("loading");
         setDetail("loading model — first use is slow…");
+      } else if (p.phase === "transcribe") {
+        // Only long recordings report here — they are split into chunks, and
+        // minutes of CPU inference behind a still pill reads as a hang. Ignore
+        // a late event that outlived the call that produced it.
+        if (phaseRef.current === "transcribing") setDetail(`${Math.floor(p.pct)}%`);
       } else if (p.phase === "ready") {
         const s = getSettings();
         notice(
@@ -351,7 +357,7 @@ export function Dictation() {
   const status: Record<Phase, string> = {
     downloading: `Downloading voice model… ${detail || ""}`,
     loading: detail || "Starting dictation…",
-    transcribing: "Transcribing…",
+    transcribing: detail ? `Transcribing… ${detail}` : "Transcribing…",
     notice: detail,
     recording: "",
     idle: "",
