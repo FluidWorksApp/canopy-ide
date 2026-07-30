@@ -274,6 +274,13 @@ shell EOF, and would close the terminal you were dictating into.
 `src/shortcuts.test.ts` enforces this: no chord may take a bare `Ctrl+<letter>`
 that readline binds, apart from four explicitly accepted exceptions.
 
+**Windows only:** release builds switch off WebView2's own browser accelerator
+keys, so the registry really is the whole answer to "what does this key do".
+Left on, Edge's shortcuts sit underneath the app — `Ctrl+R`/`F5` reload it and
+take unsaved editor buffers with them, `Ctrl+F` opens a find bar Canopy never
+drew, and `Ctrl+Plus/Minus` zooms the webview on top of Canopy's own zoom. Dev
+builds keep them, because reload and `F12` are how you work on the thing.
+
 The three Cmd-based terminal chords (start/end of line, delete line) are
 unbound off macOS, where Home/End already do the job.
 

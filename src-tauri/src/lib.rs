@@ -36,6 +36,7 @@ mod spot;
 mod stores;
 mod sysaudio;
 mod tunnel;
+mod webview_keys;
 mod vault;
 mod vault_kdbx;
 mod winproc;
@@ -395,6 +396,15 @@ pub fn run() {
                         .level(log::LevelFilter::Info)
                         .build(),
                 )?;
+            }
+            // Edge's built-in shortcuts are not Canopy's to hand out — see
+            // webview_keys.rs. Done here rather than at window creation
+            // because the setting lives on CoreWebView2, which only exists
+            // once the webview has been created.
+            // Every window rather than a label: tauri.conf.json does not name
+            // this one, so "main" is a default we would be relying on.
+            for w in app.webview_windows().values() {
+                webview_keys::disable_browser_accelerators(w);
             }
             // Install the hook helper before hooks are (re)written, so the
             // path they point at exists.
