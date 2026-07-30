@@ -135,12 +135,15 @@ export interface AgentAction {
     | "open_file"
     | "show_diff"
     | "notify"
-    | "job_done";
+    | "job_done"
+    | "close_session";
   route: string;
   dir?: string;
   name?: string;
   command?: string;
   url?: string;
+  /** The terminal the action is keyed to. For close_session it is the calling
+   *  agent's own — the tool takes no id, so it can name no other session. */
   ptyId?: number;
   path?: string;
   line?: number;

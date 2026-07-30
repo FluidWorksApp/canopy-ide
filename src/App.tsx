@@ -1386,7 +1386,10 @@ export default function App() {
         // Keyed by terminal id, not a path: the project owning that pty is
         // already open (its server is running), so just broadcast — the owning
         // ProjectView matches by pty and acts, the rest ignore it.
-        if (a.kind === "restart_server") {
+        // Same routing for an agent closing itself: the tab lives in whichever
+        // ProjectView owns that pty, and the terminal is the only address the
+        // action has — canopy_close_session takes no arguments at all.
+        if (a.kind === "restart_server" || a.kind === "close_session") {
           window.dispatchEvent(
             new CustomEvent("canopy:agent-action", {
               detail: { projectId: null, action: a },

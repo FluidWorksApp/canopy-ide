@@ -2371,6 +2371,49 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [reapMicroTask],
   );
 
+  /** Ordinary sessions that asked to close themselves (canopy_close_session),
+   *  keyed by pty. Same wait-for-Stop discipline as a micro-task's ending, for
+   *  the same reason: the tool result and the agent's last words have to land
+   *  before the terminal goes. What happens at the end differs, though — this
+   *  is a session the user started, so it is *closed*, not reaped: the tab's
+   *  unmount kills the PTY and the session stays in restorables, exactly as if
+   *  the user had clicked ×. */
+  const selfClose = useRef(
+    new Map<number, { tabId: string; since: number; timer: number }>(),
+  );
+
+  const runSelfClose = useCallback(
+    (ptyId: number) => {
+      const entry = selfClose.current.get(ptyId);
+      if (!entry) return;
+      selfClose.current.delete(ptyId);
+      window.clearTimeout(entry.timer);
+      // Kill before closing rather than leaving it to the unmount: a tab that
+      // only *attaches* to its pty (one spawned from the phone) detaches on
+      // close and would leave the agent running — which is not what it asked
+      // for. A grace kill either way, so the CLI still flushes the transcript
+      // that keeps the session restorable.
+      void ipc.ptyKill(ptyId).catch(() => {});
+      // The tab is gone from under the user without them touching anything —
+      // say who did it, since the only other record is scrollback that closing
+      // takes with it.
+      onNotice("The agent closed its own session, as you asked.");
+      closeTabRef.current(entry.tabId);
+    },
+    [onNotice],
+  );
+
+  /** Begin a self-close: wait out the turn, then close the tab. Idempotent per
+   *  pty, so an agent that calls the tool twice still closes one tab. */
+  const beginSelfClose = useCallback(
+    (ptyId: number, tabId: string) => {
+      if (selfClose.current.has(ptyId)) return;
+      const timer = window.setTimeout(() => runSelfClose(ptyId), 10_000);
+      selfClose.current.set(ptyId, { tabId, since: Date.now(), timer });
+    },
+    [runSelfClose],
+  );
+
   /** Call a detached run off: settle its history entry the way closing its tab
    *  would have, keep what it printed, then kill the PTY. */
   const stopMicroRun = useCallback(
@@ -2472,6 +2515,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
       }
     }
   }, [events, reapMicroTask]);
+
+  // The same wait, for a session that asked to close itself.
+  useEffect(() => {
+    if (selfClose.current.size === 0) return;
+    for (const [ptyId, entry] of selfClose.current) {
+      if (events.some((e) => e.ts >= entry.since && isStopFor(e, ptyId))) {
+        runSelfClose(ptyId);
+      }
+    }
+  }, [events, runSelfClose]);
 
   /** A relay review's diff isn't in any local checkout, so an agent can't
    *  `git diff` for it — write the patch into the project (an authorized
@@ -2712,6 +2765,31 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (tab) restartRun(tab.id);
         return;
       }
+      // An agent closing its own session, because the user told it to. Keyed by
+      // terminal like restart, and the id came from the caller's environment,
+      // so the only tab this can ever reach is the one it is running in — the
+      // ProjectView that doesn't own that pty finds nothing and does nothing.
+      if (a.kind === "close_session") {
+        // A detached task first, and by pty rather than by tab: a viewer the
+        // user opened onto it is a window, not the session, and closing that
+        // would leave the agent running. Its ending is the fuller one anyway —
+        // history settled, session forgotten — so hand it to the same path
+        // job_done uses.
+        const detached = findRun(microRunsRef.current, a.ptyId);
+        if (detached) {
+          finishMicroTask(detached.ptyId);
+          return;
+        }
+        const tab = tabsRef.current.find(
+          (t): t is TermSubTab =>
+            t.type === "terminal" && a.ptyId != null && t.ptyId === a.ptyId,
+        );
+        if (tab?.ptyId == null) return;
+        // A micro-task in a tab of its own: same teardown as job_done "done".
+        if (tab.micro) finishMicroTask(tab.ptyId, tab.id);
+        else beginSelfClose(tab.ptyId, tab.id);
+        return;
+      }
       // A micro-task reported in (App already surfaced the notice). Done →
       // wait out the turn, then kill + forget, closing the tab if it had one.
       // Blocked → the agent wants the user: bring its tab forward, or mark the
@@ -2827,6 +2905,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     addTerminal,
     restartRun,
     finishMicroTask,
+    beginSelfClose,
     updateMicroRuns,
   ]);
 
