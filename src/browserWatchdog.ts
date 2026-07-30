@@ -21,6 +21,7 @@
 // synthetic timelines. Everything below that is sampling and shouting.
 
 import { onBrowserSignal, browserViewSnapshots, type BrowserSignal } from "./browserSignals";
+import { hostVerdictFor } from "./browserHost";
 import { OVERLAY_SURFACES } from "./overlaySurfaces";
 import * as ipc from "./ipc";
 
@@ -309,7 +310,12 @@ function name(el: Element): string {
  *  test sees surfaces nobody registered. Between them, an overlay has to be
  *  both unlisted and click-through to escape — and browserHost's dev warning
  *  covers exactly that case. */
-function occluderOver(host: Element, rect: DOMRect): string | null {
+/** The element the last overlap was blamed on, per tab. Held weakly and only so
+ *  a breach can ask the host what IT thinks of the same node — the decision
+ *  above never consults the host, which is what keeps the two independent. */
+const blamed = new Map<string, WeakRef<Element>>();
+
+function occluderOver(host: Element, rect: DOMRect, tabId?: string): string | null {
   for (const surface of OVERLAY_SURFACES) {
     let nodes: NodeListOf<Element>;
     try {
@@ -321,6 +327,7 @@ function occluderOver(host: Element, rect: DOMRect): string | null {
       if (el === host || el.contains(host) || host.contains(el)) continue;
       if (!paints(el)) continue;
       if (intersectionArea(rect, el.getBoundingClientRect()) > 4) {
+        if (tabId) blamed.set(tabId, new WeakRef(el));
         return `${surface.id} (${name(el)})`;
       }
     }
@@ -331,6 +338,7 @@ function occluderOver(host: Element, rect: DOMRect): string | null {
   const y = Math.round(rect.top + rect.height / 2);
   const top = document.elementFromPoint(x, y);
   if (top && top !== host && !host.contains(top) && !top.contains(host)) {
+    if (tabId) blamed.set(tabId, new WeakRef(top));
     return `unregistered:${name(top)}`;
   }
   return null;
@@ -363,9 +371,25 @@ function driftOf(
  *  log for whoever doesn't (and for the selftest's report), and an error notice
  *  in dev — errors are the one notice kind that waits to be dismissed. */
 function report(v: Violation, kind: "opened" | "cleared") {
+  // For an overlap, add what the HOST thinks of the same element. The watchdog
+  // decides on its own measurements and always will — that independence is what
+  // makes it worth having — but a breach that says only "this is over the page"
+  // leaves the actual question (why did the host disagree?) to be reconstructed
+  // from timestamps afterwards. One line answers it at the moment it happens.
+  let verdict = "";
+  if (kind === "opened" && v.code === "I1") {
+    const el = blamed.get(v.tabId)?.deref();
+    if (el?.isConnected) {
+      try {
+        verdict = ` host:{${hostVerdictFor(el)}}`;
+      } catch {
+        verdict = " host:{unavailable}";
+      }
+    }
+  }
   const line =
     `browser:INVARIANT ${v.code} ${kind} tab=${v.tabId.slice(0, 8)} ` +
-    `${v.what} — ${v.detail} (${Math.max(0, v.at - v.since)}ms)`;
+    `${v.what} — ${v.detail} (${Math.max(0, v.at - v.since)}ms)${verdict}`;
   if (kind === "opened") console.error(`[watchdog] ${line}`);
   else console.warn(`[watchdog] ${line}`);
   void ipc.jsLog(kind === "opened" ? "error" : "info", line);
@@ -475,7 +499,7 @@ export function startBrowserWatchdog(force = false): () => void {
           tabId: v.tabId,
           wanted: v.wanted,
           visible,
-          occluder: host && rect && visible ? occluderOver(host, rect) : null,
+          occluder: host && rect && visible ? occluderOver(host, rect, v.tabId) : null,
           hasFrame: v.hasFrame,
           loading: v.loading,
           settled,
