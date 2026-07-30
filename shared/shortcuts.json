@@ -21,7 +21,12 @@
     "keyLabel overrides how the key renders in the help table (a range like",
     "\"1…9\"). A label may contain {mod} or {alt}, substituted with this",
     "platform's spelling of that modifier. scoped:true means the chord is live",
-    "only while one surface has focus, so it may reuse a global chord."
+    "only while one surface has focus, so it may reuse a global chord.",
+    "",
+    "Off macOS a chord may also move because plain Ctrl+<letter> is a readline",
+    "or termios binding the shell needs (Ctrl+K kill-line, Ctrl+W werase). Those",
+    "carry a note saying which. Canopy is terminal-first: a chord that silently",
+    "eats a shell key is worse than one the user has to learn."
   ],
   "version": 1,
   "shortcuts": [
@@ -138,7 +143,24 @@
           "Shift"
         ],
         "key": "KeyW"
-      }
+      },
+      "platform": {
+        "windows": {
+          "mods": [
+            "Mod",
+            "Alt"
+          ],
+          "key": "KeyW"
+        },
+        "linux": {
+          "mods": [
+            "Mod",
+            "Alt"
+          ],
+          "key": "KeyW"
+        }
+      },
+      "note": "Off macOS this vacates Ctrl+Shift+W for close-tab. Ctrl+Alt is already the project level there (prev/next-project are Ctrl+Alt+PgUp/PgDn), so tabs are Ctrl+Shift and projects are Ctrl+Alt — one rule, not two exceptions."
     },
     {
       "id": "open-workspace",
@@ -264,7 +286,24 @@
           "Mod"
         ],
         "key": "KeyW"
-      }
+      },
+      "platform": {
+        "windows": {
+          "mods": [
+            "Mod",
+            "Shift"
+          ],
+          "key": "KeyW"
+        },
+        "linux": {
+          "mods": [
+            "Mod",
+            "Shift"
+          ],
+          "key": "KeyW"
+        }
+      },
+      "note": "Off macOS Mod is Ctrl, and plain Ctrl+W is unix-word-rubout (and the terminal driver's own werase) in readline — a key the shell needs far more often than Canopy does. Ctrl+Shift is the namespace every terminal emulator already reserves for app commands (Windows Terminal and GNOME Terminal put copy/paste/new-tab there), and it keeps the letter, so the chord is the Mac one plus Shift."
     },
     {
       "id": "quick-open",
@@ -275,7 +314,24 @@
           "Mod"
         ],
         "key": "KeyP"
-      }
+      },
+      "platform": {
+        "windows": {
+          "mods": [
+            "Mod",
+            "Shift"
+          ],
+          "key": "KeyP"
+        },
+        "linux": {
+          "mods": [
+            "Mod",
+            "Shift"
+          ],
+          "key": "KeyP"
+        }
+      },
+      "note": "Off macOS Mod is Ctrl, and plain Ctrl+P is previous-history in readline — a key the shell needs far more often than Canopy does. Ctrl+Shift is the namespace every terminal emulator already reserves for app commands (Windows Terminal and GNOME Terminal put copy/paste/new-tab there), and it keeps the letter, so the chord is the Mac one plus Shift."
     },
     {
       "id": "find-in-files",
@@ -298,7 +354,24 @@
           "Mod"
         ],
         "key": "KeyK"
-      }
+      },
+      "platform": {
+        "windows": {
+          "mods": [
+            "Mod",
+            "Shift"
+          ],
+          "key": "KeyK"
+        },
+        "linux": {
+          "mods": [
+            "Mod",
+            "Shift"
+          ],
+          "key": "KeyK"
+        }
+      },
+      "note": "Off macOS Mod is Ctrl, and plain Ctrl+K is kill-line in readline — a key the shell needs far more often than Canopy does. Ctrl+Shift is the namespace every terminal emulator already reserves for app commands (Windows Terminal and GNOME Terminal put copy/paste/new-tab there), and it keeps the letter, so the chord is the Mac one plus Shift."
     },
     {
       "id": "toggle-sidebar",
@@ -309,7 +382,24 @@
           "Mod"
         ],
         "key": "KeyB"
-      }
+      },
+      "platform": {
+        "windows": {
+          "mods": [
+            "Mod",
+            "Shift"
+          ],
+          "key": "KeyB"
+        },
+        "linux": {
+          "mods": [
+            "Mod",
+            "Shift"
+          ],
+          "key": "KeyB"
+        }
+      },
+      "note": "Off macOS Mod is Ctrl, and plain Ctrl+B is backward-char — and the default tmux prefix in readline — a key the shell needs far more often than Canopy does. Ctrl+Shift is the namespace every terminal emulator already reserves for app commands (Windows Terminal and GNOME Terminal put copy/paste/new-tab there), and it keeps the letter, so the chord is the Mac one plus Shift."
     },
     {
       "id": "toggle-zen",

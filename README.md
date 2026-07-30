@@ -235,29 +235,47 @@ this table for the platform you are actually on.
 | Action | macOS | Windows / Linux |
 | --- | --- | --- |
 | New tab (shell, preview or agent) | `⌘N` | `Ctrl+N` |
-| SpotSearch — search everything | `⌘K` | `Ctrl+K` |
-| Quick Open file (fuzzy) | `⌘P` | `Ctrl+P` |
+| SpotSearch — search everything | `⌘K` | `Ctrl+Shift+K` |
+| Quick Open file (fuzzy) | `⌘P` | `Ctrl+Shift+P` |
 | Find in Files | `⇧⌘F` | `Ctrl+Shift+F` |
 | New project / Open project folder | `⇧⌘N` / `⌘O` | `Ctrl+Shift+N` / `Ctrl+O` |
 | Open / Save workspace file | `⇧⌘O` / `⇧⌘S` | `Ctrl+Shift+O` / `Ctrl+Shift+S` |
 | New terminal | `⌘T` | `Ctrl+T` |
-| Close tab | `⌘W` | `Ctrl+W` |
+| Close tab | `⌘W` | `Ctrl+Shift+W` |
 | Jump to a tab (hold to see the numbers) | `⌘1…9` | `Ctrl+1…9` |
 | Jump to a project | `⌥1…9` | `Alt+1…9` |
 | Previous / next tab | `⌃⌘←` / `⌃⌘→` | `Ctrl+PgUp` / `Ctrl+PgDn` |
 | Previous / next project | `⌥⌘←` / `⌥⌘→` | `Ctrl+Alt+PgUp` / `Ctrl+Alt+PgDn` |
-| Close project | `⇧⌘W` | `Ctrl+Shift+W` |
-| Toggle sidebar | `⌘B` | `Ctrl+B` |
+| Close project | `⇧⌘W` | `Ctrl+Alt+W` |
+| Toggle sidebar | `⌘B` | `Ctrl+Shift+B` |
 | Focus mode (`Esc` exits) | `⇧⌘Enter` | `Ctrl+Shift+Enter` |
 | Voice dictation | `⌘D` | `Alt+D` |
 | Quit | `⌘Q` | `Alt+F4` |
 
-Off macOS the tab and project chords move to PageUp/PageDown: `Ctrl+←` is
-word-jump in every text field there, and `Ctrl+Alt+←` is workspace switching on
-Linux and screen rotation on some Windows graphics drivers. Dictation avoids
-`Ctrl+D` because that is shell EOF — it would close the terminal you were
-dictating into. The three Cmd-based terminal chords (start/end of line, delete
-line) are unbound off macOS, where Home/End already do the job.
+Chords move off macOS for two reasons, both recorded as notes in the manifest.
+
+**The desktop already owns it.** `Ctrl+←` is word-jump in every text field, so
+the tab chords take PageUp/PageDown; `Ctrl+Alt+←` is workspace switching on
+Linux and screen rotation on some Windows graphics drivers, so the project
+chords do too.
+
+**The shell needs it.** Off macOS `Mod` is Ctrl — the same key readline and the
+terminal driver use for line editing — and a menu accelerator is consumed
+before the shell ever sees it. Canopy is terminal-first, so a chord that would
+eat a key people press constantly takes Shift instead: Quick Open, SpotSearch,
+Close Tab and Toggle Sidebar become `Ctrl+Shift+P/K/W/B`, leaving
+`Ctrl+P` (previous-history), `Ctrl+K` (kill-line), `Ctrl+W` (werase) and
+`Ctrl+B` (backward-char, and the tmux prefix) to the shell. Ctrl+Shift is the
+namespace terminal emulators already reserve for app commands. Close Project
+then moves to `Ctrl+Alt+W`, keeping the rule that tabs are Ctrl+Shift and
+projects are Ctrl+Alt. Dictation avoids `Ctrl+D` for the same reason — it is
+shell EOF, and would close the terminal you were dictating into.
+
+`src/shortcuts.test.ts` enforces this: no chord may take a bare `Ctrl+<letter>`
+that readline binds, apart from four explicitly accepted exceptions.
+
+The three Cmd-based terminal chords (start/end of line, delete line) are
+unbound off macOS, where Home/End already do the job.
 
 ## Contributing
 

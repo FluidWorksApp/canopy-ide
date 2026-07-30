@@ -76,10 +76,10 @@ describe("resolve", () => {
 
 describe("matches", () => {
   it("accepts the platform's own chord and rejects the other platform's", () => {
-    expect(matches(key("KeyP", { meta: true }), "quick-open", "macos")).toBe(true);
-    expect(matches(key("KeyP", { ctrl: true }), "quick-open", "macos")).toBe(false);
-    expect(matches(key("KeyP", { ctrl: true }), "quick-open", "windows")).toBe(true);
-    expect(matches(key("KeyP", { meta: true }), "quick-open", "windows")).toBe(false);
+    expect(matches(key("KeyO", { meta: true }), "open-project", "macos")).toBe(true);
+    expect(matches(key("KeyO", { ctrl: true }), "open-project", "macos")).toBe(false);
+    expect(matches(key("KeyO", { ctrl: true }), "open-project", "windows")).toBe(true);
+    expect(matches(key("KeyO", { meta: true }), "open-project", "windows")).toBe(false);
   });
 
   it("rejects a superset of the chord's modifiers", () => {
@@ -176,6 +176,68 @@ describe("helpRows", () => {
   });
 });
 
+describe("the shell keeps its own keys", () => {
+  /** Canopy is terminal-first, and off macOS `Mod` is Ctrl — the same key
+   *  readline and the terminal driver use for line editing. A bare
+   *  Ctrl+<letter> app chord is consumed before the shell ever sees it (on
+   *  Windows the menu's accelerator table is drained by TranslateAcceleratorW,
+   *  in the message pump, ahead of the webview), so binding one silently
+   *  breaks a key people use constantly.
+   *
+   *  This is the same reasoning that already kept dictation off Ctrl+D. */
+  const READLINE = {
+    KeyA: "beginning-of-line",
+    KeyB: "backward-char (and the tmux prefix)",
+    KeyD: "delete-char / EOF",
+    KeyE: "end-of-line",
+    KeyF: "forward-char",
+    KeyG: "abort",
+    KeyK: "kill-line",
+    KeyL: "clear-screen",
+    KeyN: "next-history",
+    KeyP: "previous-history",
+    KeyR: "reverse-search-history",
+    KeyS: "forward-search-history (and XOFF)",
+    KeyT: "transpose-chars",
+    KeyU: "unix-line-discard",
+    KeyW: "unix-word-rubout (and termios werase)",
+    KeyY: "yank",
+  } as const;
+
+  /** The four we accepted keeping, because their readline bindings are ones
+   *  almost nobody reaches for. Anything else has to justify itself here. */
+  const ACCEPTED = new Set(["new-launcher", "new-terminal", "open-project", "save-file"]);
+
+  it("binds no bare Ctrl+<letter> that readline needs", () => {
+    for (const p of ["windows", "linux"] as Platform[]) {
+      for (const id of globallyBoundIds()) {
+        if (ACCEPTED.has(id)) continue;
+        const c = resolve(id, p);
+        if (!c?.code || !c.ctrl || c.shift || c.alt || c.meta) continue;
+        const clash = READLINE[c.code as keyof typeof READLINE];
+        expect(clash, `${id} takes ${format(id, p)} from the shell (${clash})`).toBeUndefined();
+      }
+    }
+  });
+
+  it("keeps the Mac chords exactly as they were", () => {
+    // None of this applies on macOS: Mod is Command, which no shell uses. The
+    // moves are per-platform overrides, so muscle memory here is untouched.
+    expect(format("quick-open", "macos")).toBe("⌘P");
+    expect(format("spot-search", "macos")).toBe("⌘K");
+    expect(format("close-tab", "macos")).toBe("⌘W");
+    expect(format("toggle-sidebar", "macos")).toBe("⌘B");
+    expect(format("close-project", "macos")).toBe("⇧⌘W");
+  });
+
+  it("gives close-project its own key once close-tab takes Ctrl+Shift+W", () => {
+    expect(format("close-tab", "windows")).toBe("Ctrl+Shift+W");
+    // Ctrl+Alt is the project level off macOS, matching prev/next-project.
+    expect(format("close-project", "windows")).toBe("Ctrl+Alt+W");
+    expect(format("next-project", "windows")).toBe("Ctrl+Alt+PgDn");
+  });
+});
+
 describe("the manifest itself", () => {
   it("binds every menu shortcut on every platform", () => {
     for (const id of idsOnSurface("menu")) {
@@ -202,9 +264,12 @@ describe("the manifest itself", () => {
 describe("main's own chords", () => {
   it("puts SpotSearch on the platform's own key", () => {
     expect(format("spot-search", "macos")).toBe("⌘K");
-    expect(format("spot-search", "windows")).toBe("Ctrl+K");
+    // Ctrl+K is kill-line; off a Mac the chord takes Shift so the shell keeps it.
+    expect(format("spot-search", "windows")).toBe("Ctrl+Shift+K");
     expect(matches(key("KeyK", { meta: true }), "spot-search", "macos")).toBe(true);
     expect(matches(key("KeyK", { ctrl: true }), "spot-search", "macos")).toBe(false);
+    expect(matches(key("KeyK", { ctrl: true }), "spot-search", "windows")).toBe(false);
+    expect(matches(key("KeyK", { ctrl: true, shift: true }), "spot-search", "windows")).toBe(true);
   });
 
   it("renders a digit range with the platform's modifier", () => {
