@@ -213,8 +213,12 @@ function warnUnregistered(el: Element) {
   );
 }
 
-/** Everything painted over `view`, found by structure rather than by name. */
-function occludersOver(host: Element, view: RectLike): Candidate[] {
+/** Everything painted over `view`, found by structure rather than by name.
+ *
+ *  Exported for browserOcclusionWalk.test.ts. The predicates it applies were
+ *  tested; the walk that feeds them was not, which is how a surface the walk
+ *  never reaches passed every test in the suite. */
+export function occludersOver(host: Element, view: RectLike): Candidate[] {
   const found: Candidate[] = [];
   // An ancestor contains the view; it can never cover it.
   const ancestors = new Set<Node>();
@@ -656,6 +660,38 @@ export function suppressBrowserViewsOver(rect: RectLike): () => void {
     for (const e of claimed) e.forced = Math.max(0, e.forced - 1);
     schedule();
   };
+}
+
+/** What the host thinks about one element, for the watchdog to print when it
+ *  disagrees.
+ *
+ *  The watchdog measures the DOM itself and never runs this walk — that
+ *  independence is the whole point of it. The cost is that a breach says "the
+ *  menu is over the page" and nothing about WHY the host disagreed, which turns
+ *  every occurrence into an archaeology session over the log. This closes that
+ *  gap without giving up the independence: the watchdog still decides on its own
+ *  measurements, and only asks for this once it has already decided to complain.
+ */
+export function hostVerdictFor(el: Element): string {
+  const entry = [...views.values()].find((e) => e.wanted && e.host());
+  if (!entry) return "no view wanted";
+  const host = entry.host();
+  const rect = host?.getBoundingClientRect();
+  if (!host || !rect) return "view has no host element";
+  const style = readStyle(el);
+  const found = occludersOver(host, rect).some((c) => c.el === el);
+  return [
+    `walkFound=${found}`,
+    `visible=${isVisible(el)}`,
+    `position=${style.position}`,
+    `zIndex=${style.zIndex}`,
+    `pointerEvents=${style.pointerEvents}`,
+    `painted=${el.matches(PAINTED_OVERLAY_SELECTOR)}`,
+    `observing=${observer !== null}`,
+    `shown=${entry.shown}`,
+    `forced=${entry.forced}`,
+    `suppressed=${suppressed}`,
+  ].join(" ");
 }
 
 /** Nudge the host after something it can't observe — a tab switch, an engine
