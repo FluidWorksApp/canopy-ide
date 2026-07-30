@@ -659,8 +659,18 @@ pub async fn fill_into_tab(
         .get("form")
         .and_then(|f| f.as_bool())
         .unwrap_or(false);
-    if filled.is_empty() {
-        return Err("no login fields on this page — it may not have loaded the form yet".into());
+    // The script's own account of why, when it has one: it saw the page and
+    // this side did not. A fill that did not take has to fail here rather than
+    // report the fields it aimed at — a caller told "filled" submits the form.
+    let why = report.get("why").and_then(|w| w.as_str());
+    let refused = report
+        .get("refused")
+        .and_then(|r| r.as_array())
+        .is_some_and(|a| !a.is_empty());
+    if filled.is_empty() || refused {
+        return Err(why
+            .unwrap_or("no login fields on this page — it may not have loaded the form yet")
+            .to_string());
     }
     Ok(FillReport {
         filled,
