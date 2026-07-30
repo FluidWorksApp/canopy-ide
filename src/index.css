@@ -15929,6 +15929,480 @@ a.btn-sm {
   color: var(--text-dim);
 }
 
+/* ---------- scratchpad ----------
+ *
+ * Deliberately the same metrics as the research panel and detail view above:
+ * same row grid, same status pill, same footer shape. They are two lists of
+ * small things you open and act on, and making them look like two different
+ * apps would be inventing a distinction the user does not have.
+ */
+
+.notes-new {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.notes-input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+.notes-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.notes-error {
+  color: var(--warn);
+}
+
+.notes-state-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 10px 10px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+
+.notes-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.notes-row {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto;
+  gap: 2px 6px;
+  width: 100%;
+  padding: 6px 10px;
+  text-align: left;
+  font: inherit;
+  color: var(--text);
+  background: none;
+  border: 0;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.notes-row:hover {
+  background: var(--bg-raised);
+}
+
+.notes-row-mark {
+  align-self: center;
+  color: var(--text-dim);
+}
+
+.notes-row-num {
+  align-self: center;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--accent);
+}
+
+.notes-row-title {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notes-row-age {
+  align-self: center;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* Two lines and then it stops: a panel row is for choosing what to open. */
+.notes-row-preview {
+  grid-column: 2 / -1;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
+.notes-row-facts {
+  grid-column: 2 / -1;
+  display: flex;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.notes-more {
+  width: 100%;
+  padding: 10px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.notes-more:hover {
+  color: var(--text);
+}
+
+/* ---------- note detail ---------- */
+
+.note-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.note-head {
+  flex: 0 0 auto;
+  padding: 12px 18px 10px;
+  background: var(--bg-alt);
+  border-bottom: 1px solid var(--border);
+}
+
+.note-title {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.note-mark {
+  align-self: center;
+  color: var(--text-dim);
+}
+
+.note-num {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+
+/* Sized and weighted like the title it replaces, so committing a rename does
+   not make the header jump. */
+.note-title-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0 4px;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+}
+
+.note-title-input:focus {
+  outline: none;
+}
+
+.note-title-text {
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: text;
+}
+
+.note-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.note-status {
+  padding: 1px 7px;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+/* Only the states that mean something at a glance get a colour. `ideation` is
+   pointedly not one of them — it is where most notes live, and colouring the
+   default makes the whole list shout. */
+.note-status-ready { color: var(--accent); border-color: var(--accent); }
+.note-status-doing { color: var(--warn); border-color: var(--warn); }
+.note-status-done { color: var(--ok); border-color: var(--ok); }
+.note-status-parked,
+.note-status-archived { opacity: 0.6; }
+
+.note-steps {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.note-steps i {
+  width: 5px;
+  height: 5px;
+  background: var(--border);
+  border-radius: 50%;
+}
+
+.note-steps i.on {
+  background: var(--accent);
+}
+
+.note-chip,
+.note-tag {
+  padding: 1px 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+/* One scrolling region for the note and everything attached to it. */
+.note-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.note-body {
+  flex: 0 0 auto;
+  padding: 14px 18px 8px;
+  cursor: text;
+}
+
+.note-body-empty {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+/* Same box the rendered body occupies, so clicking into it doesn't reflow the
+   page under the cursor. */
+.note-body-input {
+  /* Tall enough to be worth typing into, and it grows with the region rather
+     than scrolling inside a fixed box. */
+  flex: 0 0 auto;
+  min-height: 180px;
+  padding: 14px 18px 8px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+  background: var(--bg);
+  border: 0;
+  border-left: 2px solid var(--accent);
+  resize: none;
+}
+
+.note-body-input:focus {
+  outline: none;
+}
+
+.note-section {
+  flex: 0 0 auto;
+  padding: 0 18px 14px;
+}
+
+.note-section h4 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+
+/* A row of thumbnails that scrolls sideways rather than wrapping into a wall:
+   the attachments are supporting evidence, and they must not push the note's
+   own actions off the bottom of the tab. */
+.note-attachments {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.note-attachment {
+  flex: 0 0 auto;
+  width: 180px;
+  margin: 0;
+}
+
+.note-attachment img,
+.note-attachment-blank,
+.note-attachment-text {
+  display: block;
+  width: 100%;
+  height: 110px;
+  object-fit: cover;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+.note-attachment-blank {
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.note-attachment-text {
+  overflow: hidden;
+  margin: 0;
+  padding: 6px 8px;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  color: var(--text-dim);
+}
+
+.note-attachment figcaption {
+  overflow: hidden;
+  margin-top: 4px;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+
+.note-files,
+.note-links {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+
+.note-files li,
+.note-links li {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 2px 0;
+}
+
+.note-file-lines {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.note-link {
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.note-link:hover {
+  text-decoration: underline;
+}
+
+.note-link-static {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.note-pr-state {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.note-pr-merged { color: var(--ok); }
+.note-pr-open { color: var(--accent); }
+
+.note-context {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.note-context summary {
+  cursor: pointer;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.note-context p {
+  margin: 6px 0 0;
+  line-height: 1.5;
+}
+
+.note-empty {
+  padding: 16px 18px;
+  color: var(--text-dim);
+}
+
+/* Note left, control hard right — the shape every other footer in the app
+   has, and why the eye finds the action without reading the sentence first. */
+.note-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 18px;
+  background: var(--bg-alt);
+  border-top: 1px solid var(--border);
+}
+
+.note-actions-note {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* Same marks-in-the-meta-row treatment the research tab uses. */
+.note-crud {
+  display: inline-flex;
+  gap: 2px;
+  align-items: center;
+}
+
+.note-crud .btn-icon {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.note-crud .btn-icon:hover {
+  color: var(--text);
+  background: var(--bg-raised);
+}
+
+/* The armed delete swaps its mark for a word: an icon cannot say "again". */
+.note-del-armed {
+  padding: 0 2px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
 /* Settings → Vault.
  *
  * A credential is a thing, not a row of fields: each gets a tile whose hue is

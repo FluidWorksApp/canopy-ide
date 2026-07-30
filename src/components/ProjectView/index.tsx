@@ -78,6 +78,7 @@ import {
   progressBrief,
   runLabelFor,
   raisePrTask,
+  noteTask,
   researchTask,
   reviewPrTask,
   type CustomMicroTask,
@@ -85,6 +86,8 @@ import {
   type MicroTaskEnv,
 } from "../../microTasks";
 import { TasksPanel, type RunningMicroTask } from "../TasksPanel";
+import { NotesPanel } from "../NotesPanel";
+import { NoteView } from "../NoteView";
 import { ResearchPanel } from "../ResearchPanel";
 import { ResearchImportCta } from "../ResearchImportCta";
 import { ResearchView } from "../ResearchView";
@@ -98,6 +101,14 @@ import {
   settleIfRunning as researchSettleIfRunning,
   start as researchStart,
 } from "../../research";
+import {
+  NEXT_STATUSES as NEXT_NOTE_STATUSES,
+  cached as notesCached,
+  create as createNote,
+  noteContext,
+  refresh as refreshNotes,
+  setStatus as setNoteStatus,
+} from "../../notes";
 import { TaskHistoryView } from "../TaskHistoryView";
 import { InstructionsView } from "../InstructionsView";
 import {
@@ -235,6 +246,7 @@ import {
   type TermSubTab,
   type FileSubTab,
   type TicketSubTab,
+  type NoteSubTab,
   type ResearchSubTab,
   type BranchSubTab,
   type CommitSubTab,
@@ -1846,6 +1858,27 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [patchTabRaw],
   );
 
+  /** Open a note as a tab. Same shape as openResearch: the tab holds the id
+   *  and the last known title, and the view re-reads the store itself. */
+  const openNote = useCallback(
+    (noteId: string, title: string) => {
+      const existing = tabsRef.current.find(
+        (t): t is NoteSubTab => t.type === "note" && t.noteId === noteId,
+      );
+      if (existing) {
+        if (title && title !== existing.title) {
+          patchTabRaw(existing.id, { title } as Partial<SubTab>);
+        }
+        setActiveTabId(existing.id);
+        return;
+      }
+      const id = tabId();
+      setTabs((prev) => [...prev, { id, type: "note", noteId, title }]);
+      setActiveTabId(id);
+    },
+    [patchTabRaw],
+  );
+
   /** Hand ticket context to an agent terminal that is already running. */
   const sendTicketToAgent = useCallback((target: AgentTarget, text: string) => {
     // Same two-write pattern as the model switcher: text, then Enter a beat
@@ -2136,6 +2169,97 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  binding is the harness), and a run that dies halfway still leaves the
    *  question and whatever it managed to record, which is the whole complaint
    *  this module answers. */
+  /** Park what the user typed, with whatever was on screen and whatever they
+   *  pasted. The third verb in ⌘K, and the only one that starts nothing.
+   *
+   *  Page context is captured as text only — no screenshot. The pixel capture
+   *  is a native call that is macOS-only (issue #211) and costs a frame, and a
+   *  picture of whatever page happened to be open is usually noise weeks later;
+   *  the text half (active tab, caret, selection, terminal tail) is free and is
+   *  the part that still means something when you come back. */
+  const saveNote = useCallback(
+    async (text: string, attachments: string[] = []) => {
+      const body = text.trim();
+      if (!body && attachments.length === 0) return;
+      const dir = componentsRef.current[0]?.path;
+      const active = tabsRef.current.find((t) => t.id === activeTabIdRef.current);
+      const termText =
+        active?.type === "terminal"
+          ? (termHandles.current.get(active.id)?.captureText(2000) ?? undefined)
+          : undefined;
+      try {
+        const context = dir
+          ? await capturePageContext({ activeTab: active, dir, termText, rect: null })
+          : "";
+        const note = await createNote({
+          projectId: project.id,
+          projectName: project.name,
+          roots,
+          // An image with nothing typed is still a thought worth keeping; it
+          // just has to name itself something.
+          title: body || "Pasted image",
+          context,
+          origin: "spot",
+          cwd: roots[0],
+        });
+        // Copied one at a time and failures reported per image: a note that
+        // saved but lost its screenshot should say so, not look like a success.
+        let lost = 0;
+        for (const path of attachments) {
+          await ipc
+            .notesAttachFile({ projectId: project.id, id: note.id, path, kind: "image" })
+            .catch(() => {
+              lost += 1;
+            });
+        }
+        await refreshNotes(project.id);
+        onNotice(
+          lost > 0
+            ? `Saved “${note.title}” — but ${lost} image${lost === 1 ? "" : "s"} could not be attached.`
+            : `Saved “${note.title}” to the scratchpad.`,
+          lost > 0 ? "error" : "success",
+        );
+      } catch (err) {
+        onNotice(String(err), "error");
+      }
+    },
+    [project.id, project.name, roots, onNotice],
+  );
+
+  /** Hand a note to an agent. Moves it to `doing` only when the launch
+   *  actually happened and only when the store would accept the move — a note
+   *  in the archive stays where it is rather than being quietly resurrected by
+   *  a button press. */
+  const workOnNote = useCallback(
+    async (note: ipc.NoteDetail, userQuery = "", agentId?: string) => {
+      const dir = await ipc
+        .notesDir(project.id, note.id)
+        .catch(() => note.dir);
+      const ok = await startMicroTask(
+        noteTask,
+        {
+          dir: roots[0] ?? "",
+          projectId: project.id,
+          noteId: note.id,
+          title: note.title,
+          brief: noteContext(note, dir),
+        },
+        userQuery,
+        agentId,
+      );
+      if (ok && (NEXT_NOTE_STATUSES[note.status] ?? []).includes("doing")) {
+        await setNoteStatus(
+          project.id,
+          note.id,
+          "doing",
+          "Canopy",
+          "handed to an agent",
+        ).catch(() => {});
+      }
+    },
+    [project.id, roots, startMicroTask],
+  );
+
   const startResearch = useCallback(
     async (question: string, userQuery = "") => {
       const q = question.trim();
@@ -5376,6 +5500,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
         case "start-research":
           void startResearch(action.question);
           return;
+        case "save-note":
+          void saveNote(action.text, action.attachments);
+          return;
+        case "open-note": {
+          const row = notesCached(project.id).find((n) => n.id === action.id);
+          openNote(action.id, row?.title ?? action.id);
+          return;
+        }
         case "open-research":
           openResearch(
             action.id,
@@ -5462,6 +5594,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       switchTo,
       startResearch,
       openResearch,
+      saveNote,
+      openNote,
       project.id,
     ],
   );
@@ -5616,6 +5750,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
             // before the first read; a rename has to reach it or the tab keeps
             // showing the name the entry no longer has.
             onRenamed={(title) => patchTabRaw(tab.id, { title } as Partial<SubTab>)}
+            onNotice={onNotice}
+          />
+        );
+      case "note":
+        return (
+          <NoteView
+            projectId={project.id}
+            id={tab.noteId}
+            agentTargets={agentTargets}
+            installed={installed}
+            onStartNew={(note, agentId) => void workOnNote(note, "", agentId)}
+            onSendToAgent={(note, target) =>
+              sendTicketToAgent(target, noteContext(note, note.dir))
+            }
+            onOpenResearch={(rid) => openResearch(rid, rid)}
+            onClosed={() => closeTab(tab.id)}
             onNotice={onNotice}
           />
         );
@@ -6878,6 +7028,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
           custom={project.customTasks ?? []}
           onSaveCustom={onSaveCustomTasks}
           projectId={project.id}
+        />
+      ))}
+      {sidePane("notes", () => (
+        <NotesPanel
+          projectId={project.id}
+          projectName={project.name}
+          roots={roots}
+          onOpen={(n) => openNote(n.id, n.title)}
         />
       ))}
       {sidePane("research", () => (
