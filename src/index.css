@@ -1635,6 +1635,104 @@ body.resizing-side * {
   text-align: right;
 }
 
+/* Base-branch drift chip: appears only when the branch this project is on has
+   fallen behind the one it was cut from. Warn-coloured when catching up would
+   conflict — the case worth looking at today rather than at PR time. */
+.status-sync-anchor {
+  position: relative;
+}
+
+.status-sync-btn {
+  background: none;
+  border: none;
+  padding: 0 2px;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.status-sync-btn.is-conflict {
+  color: var(--warn);
+}
+
+.status-sync-btn:hover,
+.status-sync-btn.is-open {
+  text-decoration: underline;
+}
+
+.status-sync-menu {
+  min-width: 320px;
+  max-width: 380px;
+  padding: 10px;
+  white-space: normal;
+  cursor: default;
+}
+
+.sync-head {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.sync-detail {
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+
+.sync-files {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  max-height: 132px;
+  overflow-y: auto;
+}
+
+.sync-files li {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--text);
+  padding: 1px 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sync-files .sync-more {
+  color: var(--text-dim);
+  font-family: inherit;
+}
+
+/* Incoming commit subjects share the list, but they're prose — monospace is
+   for the paths, where character alignment actually carries meaning. */
+.sync-subjects li {
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.sync-stale,
+.sync-result {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+
+.sync-result.is-ok {
+  color: var(--ok, var(--accent));
+}
+
+.sync-result.is-warn {
+  color: var(--warn);
+}
+
+.sync-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+
 /* Stats chip: an icon button in the corner that opens the all-CLI usage popup. */
 .status-stats-anchor {
   position: relative;

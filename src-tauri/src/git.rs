@@ -154,12 +154,12 @@ fn join_streams(stdout: &str, stderr: &str) -> String {
 /// The ~100 call sites that only want git's answer. Failures still carry both
 /// streams; successes drop the warning, which is exactly why the switch paths
 /// use `run_verbose` instead.
-fn run(cmd: &mut Command) -> Result<String, String> {
+pub(crate) fn run(cmd: &mut Command) -> Result<String, String> {
     run_verbose(cmd).map(|(stdout, _)| stdout)
 }
 
 /// Resolve + scope-check a repo path handed to us by the frontend.
-fn repo_path(state: &State<'_, WorkspaceManager>, path: &str) -> Result<PathBuf, String> {
+pub(crate) fn repo_path(state: &State<'_, WorkspaceManager>, path: &str) -> Result<PathBuf, String> {
     let dir = check_scope(state, Path::new(path))?;
     let top = run(git(&dir).args(["rev-parse", "--show-toplevel"]))?;
     let top = PathBuf::from(top.trim());
@@ -205,7 +205,7 @@ pub(crate) fn common_dir(dir: &Path) -> Option<PathBuf> {
     path.canonicalize().ok()
 }
 
-fn head_branch(repo: &Path) -> (Option<String>, bool) {
+pub(crate) fn head_branch(repo: &Path) -> (Option<String>, bool) {
     match run(git(repo).args(["symbolic-ref", "--quiet", "--short", "HEAD"])) {
         Ok(b) if !b.trim().is_empty() => (Some(b.trim().to_string()), false),
         // Detached HEAD: report the short hash rather than pretending there's a
