@@ -11682,6 +11682,23 @@ textarea,
   cursor: pointer;
 }
 
+/* Only appears once the list is long enough that reopening all of it is a
+   decision. The box itself is drawn app-wide (see input[type="checkbox"]);
+   all this does is shrink it to row scale and hold it back visually, so a
+   glance still reads as a list of sessions rather than a form. */
+.resume-pick {
+  width: 14px;
+  height: 14px;
+  opacity: 0.4;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+
+.resume-pick:checked,
+.resume-pick:hover,
+.resume-row:hover .resume-pick {
+  opacity: 1;
+}
+
 .resume-row-click:hover {
   background: var(--bg-raised);
 }
