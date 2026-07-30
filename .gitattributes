@@ -1,0 +1,13 @@
+# Source is text, even when a stray byte says otherwise.
+#
+# src/servers.ts spent some time committed with two NUL bytes inside it, which
+# put it over git's binary heuristic: `git diff` and every review surface said
+# "Binary file differs" and showed nothing. A file you cannot read the diff of
+# is a file that gets changed without review, which is the actual cost.
+#
+# `diff` forces a textual diff regardless of the heuristic; `text` normalises
+# line endings on the way in. Neither changes what is stored.
+*.ts  text diff
+*.tsx text diff
+*.rs  text diff
+*.css text diff
