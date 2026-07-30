@@ -55,13 +55,50 @@ const dest = join(destDir, `canopy-hook-${triple}${ext}`);
 mkdirSync(destDir, { recursive: true });
 if (!existsSync(dest)) writeFileSync(dest, "");
 
-const args = ["build", "--manifest-path", manifest, "--bin", "canopy-hook", "--target", triple];
+// Ask cargo where it put the binary rather than assuming
+// src-tauri/target/<triple>/<profile>/. A `[build] target-dir` in any
+// .cargo/config.toml — or CARGO_TARGET_DIR — relocates the whole output tree,
+// and this repo's worktrees share one build cache that way. Guessing the layout
+// makes the build fail right after a successful compile.
+const args = [
+  "build",
+  "--manifest-path",
+  manifest,
+  "--bin",
+  "canopy-hook",
+  "--target",
+  triple,
+  "--message-format",
+  "json-render-diagnostics",
+];
 if (release) args.push("--release");
 console.log(`prepare-sidecar: cargo ${args.join(" ")}`);
-execFileSync("cargo", args, { stdio: "inherit" });
+// json-render-diagnostics keeps warnings and progress human-readable on stderr;
+// only the artifact stream needs capturing.
+const out = execFileSync("cargo", args, {
+  encoding: "utf8",
+  stdio: ["inherit", "pipe", "inherit"],
+  maxBuffer: 256 * 1024 * 1024,
+});
 
-// Passing --target always nests output under target/<triple>/<profile>/.
-const src = join(root, "src-tauri", "target", triple, profile, `canopy-hook${ext}`);
+let src = null;
+for (const line of out.split("\n")) {
+  if (!line.startsWith("{")) continue;
+  let msg;
+  try {
+    msg = JSON.parse(line);
+  } catch {
+    continue;
+  }
+  if (msg.reason === "compiler-artifact" && msg.executable && msg.target?.name === "canopy-hook") {
+    src = msg.executable;
+  }
+}
+
+// Fall back to the default layout: a fully cached build still reports the
+// artifact, but don't let an unexpected message stream be fatal on its own.
+if (!src) src = join(root, "src-tauri", "target", triple, profile, `canopy-hook${ext}`);
+
 if (!existsSync(src)) {
   console.error(`prepare-sidecar: expected ${src} after build`);
   process.exit(1);
