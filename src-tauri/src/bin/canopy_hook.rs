@@ -2014,9 +2014,9 @@ fn research_tool_defs() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "canopy_research_write",
-            "description": "Record research in Canopy's research store — the ONLY place research output belongs. `start` opens an entry (do this before investigating, not after); `append` adds findings to its body; `source` stores long raw material (file dumps, logs, fetched pages) that must not sit in the body; `digest` sets the one paragraph every other agent reads instead of the whole entry; `status` moves it along; `link` ties it to the PR that implements it. Caps are enforced: an over-long digest or body is rejected, and the error says where the text belongs.",
+            "description": "Record research in Canopy's research store — the ONLY place research output belongs. `start` opens an entry (do this before investigating, not after); `append` adds findings to its body; `source` stores long raw material (file dumps, logs, fetched pages) that must not sit in the body; `digest` sets the one paragraph every other agent reads instead of the whole entry; `status` moves it along; `link` ties it to the PR that implements it; `import` adopts a markdown file that is already in the repo (an old NOTES.md, a docs/spike.md) as an entry, keeping its text and pointing back at the file. Caps are enforced: an over-long digest or body is rejected, and the error says where the text belongs.",
             "inputSchema": { "type": "object", "properties": {
-                "action": { "type": "string", "enum": ["start", "digest", "append", "source", "status", "link"], "description": "start | digest | append | source | status | link" },
+                "action": { "type": "string", "enum": ["start", "digest", "append", "source", "status", "link", "import"], "description": "start | digest | append | source | status | link | import" },
                 "id": { "type": "string", "description": "Entry id — required by everything except start" },
                 "title": { "type": "string", "description": "start: the question in a few words. source: what this capture is." },
                 "question": { "type": "string", "description": "start: what is being investigated and why" },
@@ -2032,7 +2032,8 @@ fn research_tool_defs() -> Vec<serde_json::Value> {
                 "ticket": { "type": "object", "description": "link: { id, title, url }" },
                 "branch": { "type": "string", "description": "link: branch carrying the work" },
                 "files": { "type": "array", "items": { "type": "string" }, "description": "link: files this research is about" },
-                "supersedes": { "type": "string", "description": "link: id of an earlier entry this replaces" }
+                "supersedes": { "type": "string", "description": "link: id of an earlier entry this replaces" },
+                "path": { "type": "string", "description": "import: absolute path of a markdown file in this project to adopt as an entry" }
             }, "required": ["action"], "additionalProperties": false }
         }),
     ]
@@ -2586,7 +2587,9 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
             // the tools is what lets the read side be annotated read-only (and
             // so auto-approved); that annotation has to stay true.
             let reads = ["list", "search", "get"];
-            let writes = ["start", "digest", "append", "source", "status", "link"];
+            let writes = [
+                "start", "digest", "append", "source", "status", "link", "import",
+            ];
             let allowed: &[&str] = if name == "canopy_research" {
                 &reads
             } else {
@@ -2611,6 +2614,14 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 .is_some_and(|t| !t.is_empty());
             if name == "canopy_research_write" && action == "start" && !titled {
                 return Err("start needs a title — the question in a few words".into());
+            }
+            if action == "import"
+                && args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(str::is_empty)
+            {
+                return Err("import needs a path — the markdown file to adopt".into());
             }
             text(research_op(action, args))
         }

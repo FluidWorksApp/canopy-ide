@@ -86,6 +86,7 @@ import {
 } from "../../microTasks";
 import { TasksPanel, type RunningMicroTask } from "../TasksPanel";
 import { ResearchPanel } from "../ResearchPanel";
+import { ResearchImportCta } from "../ResearchImportCta";
 import { ResearchView } from "../ResearchView";
 import {
   cached as researchCached,
@@ -154,8 +155,18 @@ import { GitPanel } from "../GitPanel";
 import { TicketsPanel, type AgentTarget } from "../TicketsPanel";
 import { PrsPanel } from "../PrsPanel";
 import { ServersPanel } from "../ServersPanel";
-import { groupServers, runningCount, type ServerEntry } from "../../servers";
-import { ensureLeases, portEnv, portForPath } from "../../workspaces";
+import {
+  groupServers,
+  runningCount,
+  type ComponentWorkspace,
+  type ServerEntry,
+} from "../../servers";
+import {
+  agentsIn,
+  ensureLeases,
+  portEnv,
+  portForPath,
+} from "../../workspaces";
 import { needsYouCount } from "../../prInbox";
 import { usePrWatch } from "../../usePrWatch";
 import { TicketView } from "../TicketView";
@@ -1266,6 +1277,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [prsRows, repoPaths],
   );
 
+  // Component roots plus every workspace's copy of them. The digest poll reads
+  // this rather than `roots`, so an agent working in a worktree is still seen.
+  // A ref because the poll is registered once and must not re-subscribe every
+  // time a worktree appears.
+  const digestRootsRef = useRef<string[]>([]);
+
   // Session digests + this launch's tag, so the "Agent Workspace" overlay can
   // resolve the agent behind the active terminal the same way AgentsPanel does
   // (by PTY surface id). Polled while an agent terminal is open; idle otherwise.
@@ -1295,10 +1312,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
   useEffect(() => {
     const load = () =>
       void ipc
-        .sessionDigests(rootsRef.current)
+        // Every workspace's directory too, not just the active one's. Filtered
+        // to the active roots, an agent working in another worktree was dropped
+        // here — which is exactly why a run could never be tied back to the
+        // agent behind it.
+        .sessionDigests(digestRootsRef.current)
         .then((d) => {
           const mine = d.filter((x) =>
-            rootsRef.current.some(
+            digestRootsRef.current.some(
               (r) => x.cwd === r || (x.cwd ?? "").startsWith(r + "/"),
             ),
           );
@@ -4769,48 +4790,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // to the run tabs and the ports they turned out to be listening on. Memoized
   // on its three inputs — the stats poller ticks every 2s and this must not
   // rebuild the panel's rows on ticks that changed no port.
-  // Each component, once per workspace that has a copy of it. A worktree
-  // mirrors its repo's tree, so a component inside the repo maps to the same
-  // relative path inside every workspace — the same remap the file surface does
-  // for the active one, done for all of them at once.
-  //
-  // This is deliberately not gated on which workspace is "active": you cannot
-  // test two branches side by side if starting the second one's server means
-  // first moving your whole file tree onto it.
-  const serverComponents = useMemo(() => {
-    const out = components.map((c) => ({ ...c }));
-    for (const { repo, trees } of allWorktrees) {
-      for (const w of trees) {
-        if (w.is_main || w.bare || w.prunable) continue;
-        for (const c of project.components) {
-          if (c.path !== repo && !c.path.startsWith(`${repo}/`)) continue;
-          const path = w.path + c.path.slice(repo.length);
-          // The active workspace's components are already in the list under
-          // their own paths — adding them twice would double every row.
-          if (out.some((x) => x.path === path)) continue;
-          out.push({
-            ...c,
-            label: `${c.label} · ${w.branch ?? w.name}`,
-            path,
-          });
-        }
-      }
-    }
-    return out;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [components, allWorktrees, project.components]);
-
-  const serverGroups = useMemo(
-    () =>
-      groupServers(serverComponents, runTabs, (ptyId) =>
-        ptyId == null
-          ? []
-          : (projectStats.find((s) => s.id === ptyId)?.ports ?? []),
-      ),
-    [serverComponents, runTabs, projectStats],
-  );
-  const serversRunning = runningCount(serverGroups);
-
   // What's alive and where, for the Git panel's one list: a workspace row can
   // say "a server is up in here, an agent is working in here" without the panel
   // having to know anything about tabs. Only live ones — a run tab that has
@@ -4829,6 +4808,69 @@ const ProjectViewBody = memo(function ProjectViewBody({
         .map((t) => t.cwd),
     [tabs],
   );
+
+  // Each component's copy in each workspace, hung under that component rather
+  // than beside it. Listing them as top-level components instead turned four
+  // components with four workspaces into sixteen headings — the panel became a
+  // wall you read past to find the one server that was actually up.
+  //
+  // Still not gated on which workspace is "active": you cannot test two
+  // branches side by side if starting the second one's server means first
+  // moving your whole file tree onto it.
+  const serverComponents = useMemo(() => {
+    return components.map((c) => {
+      const workspaces: ComponentWorkspace[] = [];
+      for (const { trees } of allWorktrees) {
+        for (const w of trees) {
+          if (w.is_main || w.bare || w.prunable) continue;
+          // A worktree mirrors its repo's tree, so this component sits at the
+          // same relative path inside it. `repoOf` is the worktree's own repo,
+          // which is the only one whose components it can hold.
+          const repo = repoPaths.find(
+            (r) => c.path === r || c.path.startsWith(`${r}/`),
+          );
+          if (!repo || !w.path.startsWith("/")) continue;
+          if (!trees.some((t) => t.is_main && t.path === repo)) continue;
+          const path = w.path + c.path.slice(repo.length);
+          if (path === c.path) continue;
+          workspaces.push({
+            label: w.branch ?? w.name,
+            path,
+            port: portForPath(path),
+            // Identities, not a count: a row that says "2 agents" cannot be
+            // the thing you send a request through.
+            agents: agentsIn(path, wsDigests, thisInstance),
+          });
+        }
+      }
+      return { ...c, workspaces };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [components, allWorktrees, repoPaths, wsDigests, thisInstance]);
+
+  // Keep the digest poll's filter in step with the workspaces we know about.
+  digestRootsRef.current = useMemo(
+    () => [
+      ...new Set([
+        ...roots,
+        ...serverComponents.flatMap((c) => (c.workspaces ?? []).map((w) => w.path)),
+      ]),
+    ],
+    [rootsKey, serverComponents],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  );
+
+  const serverGroups = useMemo(
+    () =>
+      groupServers(serverComponents, runTabs, (ptyId) =>
+        ptyId == null
+          ? []
+          : (projectStats.find((s) => s.id === ptyId)?.ports ?? []),
+      ),
+    [serverComponents, runTabs, projectStats],
+  );
+  const serversRunning = runningCount(serverGroups);
+
 
   /** Start a configured run command, from the Servers panel. Same call the
    *  files panel's run rows make, so both surfaces drive one tab. */
@@ -5712,7 +5754,24 @@ const ProjectViewBody = memo(function ProjectViewBody({
         );
       case "file":
         return (
-          <FileView
+          // Wrapped so the import CTA can float over whichever view FileView
+          // picks — rendered markdown, Monaco, a diff — rather than each of
+          // them having to carry it.
+          <div className="file-tab-wrap">
+            {/* Only markdown, and only a file that is not already an entry:
+                loose notes in the repo are research that predates the store,
+                and this is how one gets adopted without anybody retyping it. */}
+            {/\.(md|markdown)$/i.test(tab.file.path) && (
+              <ResearchImportCta
+                projectId={project.id}
+                projectName={project.name}
+                roots={roots}
+                path={tab.file.path}
+                onOpen={(id) => openResearch(id, tab.file.name)}
+                onNotice={onNotice}
+              />
+            )}
+            <FileView
             file={tab.file}
             onCursor={
               // Only a shared file broadcasts a caret; every other tab passes
@@ -5755,7 +5814,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 }
               />
             }
-          />
+            />
+          </div>
         );
     }
   }
@@ -6606,6 +6666,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
           onOpenRun={setActiveTabId}
           onOpenPreview={(url) => openPreview(url)}
           onNewTerminal={(path) => addTerminal(path)}
+          // The agent named on a workspace row is a terminal this project
+          // already owns, so this focuses it rather than attaching a new view.
+          onOpenAgent={(ptyId) => {
+            const tab = tabs.find(
+              (t): t is TermSubTab => t.type === "terminal" && t.ptyId === ptyId,
+            );
+            if (tab) setActiveTabId(tab.id);
+          }}
           onEdit={onEdit}
         />
       ))}

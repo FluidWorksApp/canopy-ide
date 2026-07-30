@@ -836,6 +836,21 @@ export const researchReadFile = (projectId: string, id: string, path: string) =>
 export const researchDir = (projectId: string, id: string) =>
   invoke<string>("research_dir", { projectId, id });
 
+/** Adopt a markdown file already in the repo as a research entry. Mechanical
+ *  and instant — no agent — so the digest it derives is the file's own opening
+ *  paragraph; Continue research is what improves on that. */
+export const researchImport = (args: {
+  projectId: string;
+  projectName?: string;
+  roots?: string[];
+  path: string;
+  instance?: string;
+}) => invoke<ResearchSummary>("research_import", { ...args });
+
+/** The entry that already adopted this file, if one has. */
+export const researchForFile = (projectId: string, path: string) =>
+  invoke<string | null>("research_for_file", { projectId, path });
+
 export const researchDelete = (projectId: string, id: string) =>
   invoke<void>("research_delete", { projectId, id });
 

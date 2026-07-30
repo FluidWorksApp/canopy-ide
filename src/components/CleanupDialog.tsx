@@ -9,10 +9,13 @@
 // cleanup tool that hides rows can never answer.
 //
 // Two things are deliberate. Nothing is ever cleaned automatically — not on
-// hibernation, not on a schedule; a hibernating project is even held *out* of
-// the default selection, since waking it expects its installs back. And the
-// default is the Trash, not `rm`: reversible, at the cost of the space only
-// coming back when the Trash is emptied, which the footer says out loud.
+// hibernation, not on a schedule; a hibernating project is held *out* of the
+// default selection wherever it does reach the scan, since waking it expects
+// its installs back. (Usually it does not reach the scan at all: sleeping is
+// what releasing the folders means, so Rust lists it among the places it did
+// not look rather than failing the whole scan over it.) And the default is the
+// Trash, not `rm`: reversible, at the cost of the space only coming back when
+// the Trash is emptied, which the footer says out loud.
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
 import {
