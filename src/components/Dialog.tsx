@@ -6,6 +6,7 @@ import {
   type AnimationEvent,
   type ReactNode,
 } from "react";
+import { Button } from "./ui";
 
 export interface DialogAction {
   label: string;
@@ -253,9 +254,8 @@ function DialogButton({
   disabled?: boolean;
 }) {
   return (
-    <button
-      type="button"
-      className={`dlg-btn dlg-btn-${kind}`}
+    <Button
+      variant={kind === "quiet" ? "default" : kind}
       onClick={onClick}
       disabled={disabled}
       data-autofocus={autoFocus && !disabled ? "" : undefined}
@@ -268,7 +268,7 @@ function DialogButton({
           {hint}
         </span>
       )}
-    </button>
+    </Button>
   );
 }
 

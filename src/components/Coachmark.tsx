@@ -4,6 +4,7 @@
 // layers by z-index. Dismiss via the button, Esc, or clicking the dimmed area.
 import { useCallback, useLayoutEffect, useState } from "react";
 import { useEscape } from "../useEscape";
+import { Button } from "./ui";
 
 interface CoachmarkProps {
   /** CSS selector for the element to spotlight. */
@@ -73,9 +74,9 @@ export function Coachmark({ targetSelector, title, body, onDismiss }: CoachmarkP
         <div className="coach-title">{title}</div>
         <p className="coach-body">{body}</p>
         <div className="coach-actions">
-          <button className="btn btn-accent" onClick={onDismiss} autoFocus>
+          <Button variant="accent" onClick={onDismiss} autoFocus>
             Got it
-          </button>
+          </Button>
         </div>
       </div>
     </div>

@@ -26,6 +26,7 @@ import {
   type CrashIssueOutcome,
 } from "../crash";
 import { updateSettings } from "../settings";
+import { Button } from "./ui";
 
 interface Props {
   /** Names the region in the fallback and the log — "the sidebar", "this tab". */
@@ -209,20 +210,16 @@ export class ErrorBoundary extends Component<Props, State> {
           </div>
         )}
         <div className="crash-report-row">
-          <button
-            className="btn btn-accent"
+          <Button variant="accent"
             disabled={busy}
-            onClick={canFile ? () => void this.file() : this.compose}
-          >
+            onClick={canFile ? () => void this.file() : this.compose}>
             {busy ? "Filing…" : canFile ? "File this issue" : "Open GitHub to file it"}
-          </button>
-          <button
-            className="btn"
+          </Button>
+          <Button
             disabled={busy}
-            onClick={() => this.setState({ phase: "idle", failure: null })}
-          >
+            onClick={() => this.setState({ phase: "idle", failure: null })}>
             Cancel
-          </button>
+          </Button>
         </div>
         {failure && <div className="crash-report-err">{failure}</div>}
       </div>
@@ -247,9 +244,9 @@ export class ErrorBoundary extends Component<Props, State> {
             ? "Someone had already reported this — your details are on the existing issue."
             : "Filed. Thank you."}
         </div>
-        <button className="btn" onClick={() => void openUrl(outcome.url)}>
+        <Button onClick={() => void openUrl(outcome.url)}>
           {outcome.existing ? "View that issue" : "View your issue"}
-        </button>
+        </Button>
       </div>
     );
   }
@@ -268,21 +265,19 @@ export class ErrorBoundary extends Component<Props, State> {
     return (
       <div className="crash-report">
         <div className="crash-report-row">
-          <button className="btn" disabled={busy} onClick={() => void this.startReport()}>
+          <Button disabled={busy} onClick={() => void this.startReport()}>
             {phase === "drafting" ? "Preparing…" : "Report this crash"}
-          </button>
-          <button
-            className="btn btn-mini"
+          </Button>
+          <Button size="sm"
             disabled={busy}
             title={
               optedIn
                 ? "Email the report to the maintainers with no name attached"
                 : "Turns on anonymous crash reports, then sends this one"
             }
-            onClick={() => void this.sendAnonymously(!optedIn)}
-          >
+            onClick={() => void this.sendAnonymously(!optedIn)}>
             {phase === "sending" ? "Sending…" : "Send anonymously"}
-          </button>
+          </Button>
         </div>
         <div className="crash-report-note">
           Reporting opens a public GitHub issue you can follow. Sending
@@ -304,9 +299,9 @@ export class ErrorBoundary extends Component<Props, State> {
         </div>
         <div className="crash-msg">{error.message || String(error)}</div>
         <div className="crash-actions">
-          <button className="btn btn-accent" onClick={this.reset}>
+          <Button variant="accent" onClick={this.reset}>
             Reload this panel
-          </button>
+          </Button>
           {this.renderReport()}
         </div>
       </div>

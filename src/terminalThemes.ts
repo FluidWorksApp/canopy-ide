@@ -107,6 +107,35 @@ const DAYLIGHT_TERM_THEME: TermTheme = {
   brightWhite: "#1c1f26",
 };
 
+// Vitrine's glass stops at the terminal: xterm renders its canvas opaque
+// unless allowTransparency is on, and turning that on costs a full
+// alpha-composited repaint on every frame of scrollback. A dark slab in a
+// glass shell is the honest version — and #08090c is the field's own base
+// gradient at its darkest, so the terminal reads as a well cut into it rather
+// than a foreign surface.
+const VITRINE_TERM_THEME: TermTheme = {
+  background: "#08090c",
+  foreground: "#edeff1",
+  cursor: "#b4f04a",
+  selectionBackground: "#2c3a1c",
+  black: "#1b1f26",
+  red: "#ff6b6b",
+  green: "#5be08a",
+  yellow: "#ffc24b",
+  blue: "#7ea6ff",
+  magenta: "#c29bff",
+  cyan: "#4be3e8",
+  white: "#9aa3ae",
+  brightBlack: "#4a515c",
+  brightRed: "#ffa3a3",
+  brightGreen: "#8df0ae",
+  brightYellow: "#ffd79a",
+  brightBlue: "#a8c4ff",
+  brightMagenta: "#d9c0ff",
+  brightCyan: "#8af0f3",
+  brightWhite: "#edeff1",
+};
+
 /** The current skin's terminal palette, with the accent (when the user set
  *  one) substituted into cursor/blue/brightBlue on ANY skin — the accent is
  *  orthogonal to the skin everywhere else, and a terminal whose cursor
@@ -131,6 +160,8 @@ function match_palette(theme: Theme): TermTheme {
       return GOTHAM_TERM_THEME;
     case "daylight":
       return DAYLIGHT_TERM_THEME;
+    case "vitrine":
+      return VITRINE_TERM_THEME;
     default:
       return DEFAULT_TERM_THEME;
   }

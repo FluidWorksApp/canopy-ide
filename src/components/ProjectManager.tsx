@@ -4,6 +4,7 @@
 import type { Project } from "../projects";
 import { FrostIcon } from "./icons";
 import { useEscape } from "../useEscape";
+import { Button } from "./ui";
 
 interface ProjectManagerProps {
   projects: Project[];
@@ -42,9 +43,9 @@ export function ProjectManager({
       >
         <div className="side-panel-head">
           <span>Projects</span>
-          <button className="btn btn-accent" onClick={onNew}>
+          <Button variant="accent" onClick={onNew}>
             ＋ New
-          </button>
+          </Button>
         </div>
         {projects.length === 0 && (
           <p className="confirm-sub">No projects yet — create one.</p>
@@ -79,45 +80,37 @@ export function ProjectManager({
                 </div>
                 <span className="pm-row-actions" onClick={(e) => e.stopPropagation()}>
                   {asleep ? (
-                    <button
-                      className="btn-icon"
+                    <Button icon
                       title="Wake it — everything it had open comes back"
                       onClick={() => {
                         onOpen(p.id);
                         onWake(p.id);
                         onClose();
-                      }}
-                    >
+                      }}>
                       ☀
-                    </button>
+                    </Button>
                   ) : (
                     open && (
-                      <button
-                        className="btn-icon"
+                      <Button icon
                         title="Hibernate — snapshot everything open and free its terminals"
                         onClick={() => {
                           onHibernate(p.id);
                           onClose();
-                        }}
-                      >
+                        }}>
                         <FrostIcon size={13} />
-                      </button>
+                      </Button>
                     )
                   )}
-                  <button
-                    className="btn-icon"
+                  <Button icon
                     title="Edit project (name, components, run commands)"
-                    onClick={() => onEdit(p)}
-                  >
+                    onClick={() => onEdit(p)}>
                     ⚙
-                  </button>
-                  <button
-                    className="btn-icon btn-danger"
+                  </Button>
+                  <Button icon variant="danger"
                     title="Delete project — folders on disk are untouched"
-                    onClick={() => onRequestDelete(p)}
-                  >
+                    onClick={() => onRequestDelete(p)}>
                     🗑
-                  </button>
+                  </Button>
                 </span>
               </div>
             );

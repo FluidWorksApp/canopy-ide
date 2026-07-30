@@ -8,6 +8,7 @@ import type { ReactNode } from "react";
 import { DiffView, DiffModeEnum } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import { splitPatch } from "./PrView";
+import { Button } from "./ui";
 
 /** What a "review" relay command carries — the diff plus enough context to
  *  read it. The patch is capped on the sender's side (see git_branch_patch). */
@@ -44,9 +45,9 @@ export function ReviewView({
           <span className="commit-stat commit-del">−{review.deletions}</span>
           <span className="git-spacer" />
           {files.length > 0 && (
-            <button className="btn-mini" onClick={() => setSplit((v) => !v)}>
+            <Button size="sm" onClick={() => setSplit((v) => !v)}>
               {split ? "Unified" : "Split"}
-            </button>
+            </Button>
           )}
         </div>
         {agentBar}

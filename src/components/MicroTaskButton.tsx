@@ -4,6 +4,7 @@
 // ephemeral session, which is what makes closing it safe.
 import { useRef, useState } from "react";
 import type { MicroTaskDef } from "../microTasks";
+import { Button } from "./ui";
 
 interface MicroTaskButtonProps<P> {
   task: MicroTaskDef<P>;
@@ -25,16 +26,14 @@ export function MicroTaskButton<P>({ task, payload, title, onLaunch }: MicroTask
 
   return (
     <div className="review-send">
-      <button
-        className="btn"
+      <Button
         title={title ?? task.label}
         onClick={() => {
           setOpen((v) => !v);
           setTimeout(() => inputRef.current?.focus(), 0);
-        }}
-      >
+        }}>
         {task.icon} {task.label}
-      </button>
+      </Button>
       {open && (
         <div className="cli-menu review-menu" onMouseLeave={() => setOpen(false)}>
           <input

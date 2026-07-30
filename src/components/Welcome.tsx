@@ -2,6 +2,7 @@
 // no editor until one is opened.
 import { FrostIcon } from "./icons";
 import type { Project } from "../projects";
+import { Button } from "./ui";
 
 interface WelcomeProps {
   projects: Project[];
@@ -21,9 +22,9 @@ export function Welcome({ projects, hibernated, onOpen, onNew, onDelete }: Welco
         Vibe-coding-first IDE — open a project, get a terminal in it, let your
         agents work, review the diffs.
       </p>
-      <button className="btn btn-accent welcome-new" onClick={onNew}>
+      <Button variant="accent" className="welcome-new" onClick={onNew}>
         ＋ New project
-      </button>
+      </Button>
       {projects.length > 0 && (
         <div className="welcome-list">
           <div className="side-panel-head">
@@ -44,16 +45,14 @@ export function Welcome({ projects, hibernated, onOpen, onNew, onDelete }: Welco
                   {p.components.map((c) => c.label).join(" · ")}
                 </span>
               </div>
-              <button
-                className="btn-icon btn-danger"
+              <Button icon variant="danger"
                 title="Delete project (folders are untouched)"
                 onClick={(e) => {
                   e.stopPropagation();
                   onDelete(p.id);
-                }}
-              >
+                }}>
                 ✕
-              </button>
+              </Button>
             </div>
           ))}
         </div>

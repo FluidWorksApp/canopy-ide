@@ -252,6 +252,7 @@ import {
   type ProjectViewProps,
   sidebarPrefs,
 } from "./helpers";
+import { Button } from "../ui";
 export { tabDisplayLabel, previewLabel, deviceLabel };
 export type {
   SideTab,
@@ -4619,16 +4620,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
             ? `${ok ? "finished" : `exited ${tab.exitCode ?? "?"}`} — ${tab.command ?? ""}`
             : `running — ${tab.command ?? ""}`,
           action: tab.exited ? (
-            <button
-              className="icon-btn run-chip-btn"
+            <Button icon className="run-chip-btn"
               title="Run again"
               onClick={(e) => {
                 e.stopPropagation();
                 restartRun(tab.id);
-              }}
-            >
+              }}>
               <RestartIcon size={11} />
-            </button>
+            </Button>
           ) : undefined,
           onSelect: () => setActiveTabId(tab.id),
           onClose: () => closeTab(tab.id),
@@ -6120,29 +6119,25 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     </span>
                   </span>
                   <span className="resume-head-actions">
-                    <button
-                      className="btn"
+                    <Button
                       title="Reopen everything below — agent sessions with their history, terminals with their command"
                       onClick={() => {
                         restorable.forEach(resumeSession);
                         freshAgents.forEach(reopenTerminal);
                         rememberedShells.forEach(reopenTerminal);
-                      }}
-                    >
+                      }}>
                       Restore all
-                    </button>
-                    <button
-                      className="btn-icon"
+                    </Button>
+                    <Button icon
                       title="Forget everything here — remembered terminals and restorable agent sessions — for this project"
                       onClick={() => {
                         forgetTerminals(project.id);
                         setRemembered([]);
                         forgetSessions(restorable.map((r) => r.digest));
                         setRestorable([]);
-                      }}
-                    >
+                      }}>
                       ✕
-                    </button>
+                    </Button>
                   </span>
                 </div>
                 {restorable.length > 0 &&
@@ -6169,18 +6164,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
                       <span className="resume-branch">⑂ {r.digest.branch}</span>
                     )}
                     <span className="resume-age">{ago(r.digest.updated)}</span>
-                    <button
-                      className="btn-mini btn-accent"
+                    <Button size="sm" variant="accent"
                       title={r.command}
                       onClick={(e) => {
                         e.stopPropagation();
                         resumeSession(r);
-                      }}
-                    >
+                      }}>
                       Resume
-                    </button>
-                    <button
-                      className="btn-icon resume-forget"
+                    </Button>
+                    <Button icon className="resume-forget"
                       title="Forget this session — stops it resurfacing unless it's used again"
                       onClick={(e) => {
                         e.stopPropagation();
@@ -6190,10 +6182,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
                             (x) => x.digest.session_id !== r.digest.session_id,
                           ),
                         );
-                      }}
-                    >
+                      }}>
                       ✕
-                    </button>
+                    </Button>
                   </div>
                 ))}
 
@@ -6220,15 +6211,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
                           <span className="resume-dir">
                             {t.cwd.split("/").filter(Boolean).pop()}
                           </span>
-                          <button
-                            className="btn-mini"
+                          <Button size="sm"
                             onClick={(e) => {
                               e.stopPropagation();
                               reopenTerminal(t);
-                            }}
-                          >
+                            }}>
                             Start
-                          </button>
+                          </Button>
                         </div>
                       );
                     })}
@@ -6261,15 +6250,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
                           {t.cwd.split("/").filter(Boolean).pop()}
                         </span>
                         {t.run && <span className="resume-branch">run</span>}
-                        <button
-                          className="btn-mini"
+                        <Button size="sm"
                           onClick={(e) => {
                             e.stopPropagation();
                             reopenTerminal(t);
-                          }}
-                        >
+                          }}>
                           Reopen
-                        </button>
+                        </Button>
                       </div>
                     ))}
                   </>
@@ -6492,9 +6479,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
         >
           <div className="side-panel-head">
             <span>Components</span>
-            <button className="btn-icon" title="Edit project" onClick={onEdit}>
+            <Button icon title="Edit project" onClick={onEdit}>
               ⚙
-            </button>
+            </Button>
           </div>
           {/* Which checkout these files come from. Always visible while a
               worktree is active, so you can never edit the wrong tree without
@@ -6506,13 +6493,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
             >
               <span className="wt-env-mark">⑂</span>
               <span className="wt-env-branch">{worktreeEnv.branch}</span>
-              <button
-                className="icon-btn"
+              <Button icon
                 title="Go back to your own checkout"
-                onClick={() => void leaveWorktreeEnv(worktreeEnv)}
-              >
+                onClick={() => void leaveWorktreeEnv(worktreeEnv)}>
                 ✕
-              </button>
+              </Button>
             </div>
           )}
           {components.map((c) => (
@@ -6534,16 +6519,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 </span>
                 <span className="component-title">{c.label}</span>
                 <span className="component-actions">
-                  <button
-                    className="icon-btn"
+                  <Button icon
                     title={`New terminal in ${c.label}`}
                     onClick={(e) => {
                       e.stopPropagation();
                       addTerminal(c.path);
-                    }}
-                  >
+                    }}>
                     <TerminalIcon size={13} />
-                  </button>
+                  </Button>
                 </span>
               </div>
               {sectionOpen(c.path) && (
@@ -6628,36 +6611,30 @@ const ProjectViewBody = memo(function ProjectViewBody({
                               >
                                 {running ? (
                                   <>
-                                    <button
-                                      className="icon-btn"
+                                    <Button icon
                                       title="Restart"
-                                      onClick={() => restartRun(running.id)}
-                                    >
+                                      onClick={() => restartRun(running.id)}>
                                       <RestartIcon size={14} />
-                                    </button>
-                                    <button
-                                      className="icon-btn icon-btn-danger"
+                                    </Button>
+                                    <Button icon variant="danger"
                                       title="Stop"
                                       onClick={() => {
                                         if (running.ptyId != null)
                                           void ipc.ptyKill(running.ptyId);
-                                      }}
-                                    >
+                                      }}>
                                       <StopIcon size={13} />
-                                    </button>
+                                    </Button>
                                   </>
                                 ) : (
-                                  <button
-                                    className="icon-btn"
+                                  <Button icon
                                     title={finished ? "Run again" : "Run"}
-                                    onClick={start}
-                                  >
+                                    onClick={start}>
                                     {finished ? (
                                       <RestartIcon size={14} />
                                     ) : (
                                       <PlayIcon size={12} />
                                     )}
-                                  </button>
+                                  </Button>
                                 )}
                               </span>
                             </div>

@@ -12,6 +12,7 @@ import type { ReactNode } from "react";
 import { DiffView as GitDiffView, DiffModeEnum } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import { createPatch } from "diff";
+import { Button } from "./ui";
 
 export interface DiffAction {
   label: string;
@@ -44,9 +45,9 @@ export function DiffView({ path, title, original, modified, actions, agentBar }:
     <div className="diff-view">
       <div className="diff-bar">
         <span className="diff-label">{title}</span>
-        <button className="btn-mini" onClick={() => setSplit((v) => !v)}>
+        <Button size="sm" onClick={() => setSplit((v) => !v)}>
           {split ? "Unified" : "Split"}
-        </button>
+        </Button>
         {actions.map((a) => (
           <button
             key={a.label}

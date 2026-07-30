@@ -8,6 +8,7 @@ import * as ipc from "../ipc";
 import type { Notify } from "../types";
 import { useBranchSwitch } from "../useBranchSwitch";
 import { splitPatch } from "./PrView";
+import { Button } from "./ui";
 
 interface CommitViewProps {
   repo: string;
@@ -91,8 +92,11 @@ export function CommitView({ repo, hash, onNotice }: CommitViewProps) {
           )}
           <span className="git-spacer" />
           {remote && (
+            /* A real link — it opens the remote in the OS browser — wearing
+               the button's clothes. Not <Button>, which renders a <button>;
+               it takes the same classes so it matches the row. */
             <a
-              className="btn-mini"
+              className="btn btn-sm"
               href={`${remote}/commit/${detail.hash}`}
               title="Open this commit on the remote"
             >
@@ -104,8 +108,7 @@ export function CommitView({ repo, hash, onNotice }: CommitViewProps) {
               everywhere else in the app, and a commit is its most natural
               subject. Through the one funnel, so a checkout with unsaved work
               gets asked about rather than refused at. */}
-          <button
-            className="btn-mini"
+          <Button size="sm"
             title="Put the whole project at this commit for a look. Nothing moves — your next branch switch puts everything back."
             onClick={() =>
               void switchTo(repo, {
@@ -113,26 +116,23 @@ export function CommitView({ repo, hash, onNotice }: CommitViewProps) {
                 ref: detail.hash,
                 label: detail.short,
               })
-            }
-          >
+            }>
             Test a snapshot of this commit
-          </button>
-          <button
-            className="btn-mini"
+          </Button>
+          <Button size="sm"
             title="Copy the full hash"
             onClick={() => {
               void navigator.clipboard
                 .writeText(detail.hash)
                 .then(() => onNotice(`Copied ${detail.short}`))
                 .catch(() => {});
-            }}
-          >
+            }}>
             Copy hash
-          </button>
+          </Button>
           {files.length > 0 && (
-            <button className="btn-mini" onClick={() => setSplit((v) => !v)}>
+            <Button size="sm" onClick={() => setSplit((v) => !v)}>
               {split ? "Unified" : "Split"}
-            </button>
+            </Button>
           )}
         </div>
         {detail.body && <pre className="commit-body">{linkify(detail.body)}</pre>}

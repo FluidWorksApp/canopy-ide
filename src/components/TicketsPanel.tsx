@@ -21,6 +21,7 @@ import { heldBadge } from "../branchSwitch";
 import { useBranchSwitch } from "../useBranchSwitch";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
 import { PlayIcon, TrackerIcon } from "./icons";
+import { Button } from "./ui";
 
 export interface AgentTarget {
   tabId: string;
@@ -350,17 +351,15 @@ export function TicketsPanel({
                         {t.mine ? "you" : t.assignee}
                       </span>
                     )}
-                    <button
-                      className="icon-btn ticket-start"
+                    <Button icon className="ticket-start"
                       title="Send to an agent — an open one, or a new one in a worktree"
                       disabled={starting != null}
                       onClick={(e) => {
                         e.stopPropagation();
                         openSendMenu(e, t);
-                      }}
-                    >
+                      }}>
                       <PlayIcon size={12} />
-                    </button>
+                    </Button>
                   </div>
                 </div>
               );

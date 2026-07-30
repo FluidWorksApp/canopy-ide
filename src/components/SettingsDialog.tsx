@@ -3,7 +3,7 @@
 // long labels into slivers and pushed wide control groups out of the modal).
 // Skins render as preview cards — a palette is a thing you look at, not a
 // word you read.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   applyTheme,
   THEME_CHANGE_EVENT,
@@ -23,6 +23,8 @@ import {
   type Settings,
   type Theme,
 } from "../settings";
+import { IS_MAC } from "../platform";
+import { Button, Checkbox, Field, Row, Segmented, Select, Stepper, Switch, TextInput } from "./ui";
 import { drawWave } from "../waveStyles";
 import { LINK_CHORD } from "../terminalLinks";
 import { useEscape } from "../useEscape";
@@ -73,18 +75,21 @@ interface SettingsDialogProps {
   initialTab?: SettingsTab;
 }
 
-const TABS: { id: SettingsTab; label: string }[] = [
-  { id: "appearance", label: "Appearance" },
-  { id: "agents", label: "Agents" },
-  { id: "editor", label: "Editor" },
-  { id: "terminal", label: "Terminal" },
-  { id: "spotsearch", label: "SpotSearch" },
-  { id: "dictation", label: "Dictation" },
-  { id: "integrations", label: "Integrations" },
-  { id: "browser", label: "Browser" },
-  { id: "vault", label: "Vault" },
-  { id: "remote", label: "Remote access" },
-  { id: "privacy", label: "Privacy" },
+/** Ordered, and grouped by what you came here to change: how it looks, what
+ *  the agents do, what reaches out of this machine. Eleven flat entries was a
+ *  list you had to read end to end; three headings turn it into three short
+ *  ones you can skip. */
+const TABS: { id: SettingsTab; label: string; group: string }[] = [
+  { id: "appearance", label: "Appearance", group: "Look" },
+  { id: "editor", label: "Editor", group: "Look" },
+  { id: "terminal", label: "Terminal", group: "Look" },
+  { id: "agents", label: "Agents", group: "Agents" },
+  { id: "dictation", label: "Dictation", group: "Agents" },
+  { id: "spotsearch", label: "SpotSearch", group: "Agents" },
+  { id: "integrations", label: "Integrations", group: "Access" },
+  { id: "browser", label: "Browser & Vault", group: "Access" },
+  { id: "remote", label: "Remote access", group: "Access" },
+  { id: "privacy", label: "Privacy", group: "Access" },
 ];
 
 const CURSOR_OPTIONS: { id: CursorStyle; label: string }[] = [
@@ -96,32 +101,69 @@ const CURSOR_OPTIONS: { id: CursorStyle; label: string }[] = [
 /** Mirror of each skin's defining colors in index.css — the preview must
  *  show the palette without applying it. Custom previews the user's own
  *  accent on the Default base. */
-const SKIN_PREVIEWS: Record<Theme, { bg: string; raised: string; text: string; accent?: string }> = {
+const SKIN_PREVIEWS: Record<
+  Theme,
+  { bg: string; raised: string; text: string; accent?: string; note: string }
+> = {
   // Auto previews as a split card: Default when the OS is dark, Daylight when light.
   auto: {
     bg: "linear-gradient(105deg, #1a1b26 50%, #f5f6f8 50%)",
     raised: "#1f2335",
     text: "#f5f6f8",
     accent: "#7aa2f7",
+    note: "follows the OS",
   },
-  default: { bg: "#1a1b26", raised: "#1f2335", text: "#c9d1d9", accent: "#7aa2f7" },
-  gotham: { bg: "#0d0f12", raised: "#171b20", text: "#e8e6df", accent: "#d4af37" },
-  daylight: { bg: "#f5f6f8", raised: "#ffffff", text: "#1c1f26", accent: "#3b6fd6" },
-  custom: { bg: "#1a1b26", raised: "#1f2335", text: "#c9d1d9" },
+  default: {
+    bg: "#1a1b26",
+    raised: "#1f2335",
+    text: "#c9d1d9",
+    accent: "#7aa2f7",
+    note: "midnight + blue",
+  },
+  gotham: {
+    bg: "#0d0f12",
+    raised: "#171b20",
+    text: "#e8e6df",
+    accent: "#d4af37",
+    note: "charcoal + gold",
+  },
+  daylight: {
+    bg: "#f5f6f8",
+    raised: "#ffffff",
+    text: "#1c1f26",
+    accent: "#3b6fd6",
+    note: "light",
+  },
+  // Previews the field, not a flat surface — the blooms are the skin.
+  vitrine: {
+    bg: "radial-gradient(70% 90% at 12% 0%, rgba(255,138,76,.3), transparent 68%), radial-gradient(70% 90% at 95% 100%, rgba(126,166,255,.28), transparent 68%), linear-gradient(155deg, #0b0d11, #07080a)",
+    raised: "rgba(255,255,255,.16)",
+    text: "#edeff1",
+    accent: "#b4f04a",
+    note: "glass · dark",
+  },
+  custom: { bg: "#1a1b26", raised: "#1f2335", text: "#c9d1d9", note: "your accent" },
 };
 
 function Item({
   name,
+  tag,
   desc,
   children,
 }: {
   name: string;
+  /** Small caps note beside the title, for the one thing worth knowing before
+   *  you touch the control — "applies immediately", "needs a restart". */
+  tag?: string;
   desc?: string;
   children: React.ReactNode;
 }) {
   return (
     <div className="set-item">
-      <div className="set-item-name">{name}</div>
+      <div className="set-item-head">
+        <span className="set-item-name">{name}</span>
+        {tag && <span className="set-item-tag">{tag}</span>}
+      </div>
       {desc && <div className="set-item-desc">{desc}</div>}
       <div className="set-item-control">{children}</div>
     </div>
@@ -176,14 +218,18 @@ function FileAssociations({
     .filter(([p]) => BUILTIN_MAP[p] == null)
     .filter(([p, lang]) => hit(p, lang));
 
-  const picker = (current: string, onPick: (id: string) => void) => (
-    <select value={current} onChange={(e) => onPick(e.target.value)}>
+  const picker = (
+    current: string,
+    onPick: (id: string) => void,
+    width: "sm" | "md" = "md",
+  ) => (
+    <Select width={width} value={current} onChange={(e) => onPick(e.target.value)}>
       {LANGUAGES.map((l) => (
         <option key={l.id} value={l.id}>
           {l.label}
         </option>
       ))}
-    </select>
+    </Select>
   );
 
   const row = (p: string, lang: string, shipped: string | null) => (
@@ -191,13 +237,13 @@ function FileAssociations({
       <code className="assoc-pattern">{describePattern(p)}</code>
       {picker(lang, (id) => (shipped === id ? clear(p) : set(p, id)))}
       {shipped == null ? (
-        <button className="btn-mini" onClick={() => clear(p)} title="Remove this mapping">
+        <Button size="sm" onClick={() => clear(p)} title="Remove this mapping">
           Remove
-        </button>
+        </Button>
       ) : value[p] != null ? (
-        <button className="btn-mini" onClick={() => clear(p)} title={`Back to ${languageLabel(shipped)}`}>
+        <Button size="sm" onClick={() => clear(p)} title={`Back to ${languageLabel(shipped)}`}>
           Reset
-        </button>
+        </Button>
       ) : (
         <span className="assoc-spacer" />
       )}
@@ -207,26 +253,31 @@ function FileAssociations({
   return (
     <div className="assoc">
       <div className="assoc-add">
-        <select value={kind} onChange={(e) => setKind(e.target.value as "ext" | "name")}>
+        <Select
+          width="sm"
+          value={kind}
+          onChange={(e) => setKind(e.target.value as "ext" | "name")}
+        >
           <option value="ext">Extension</option>
           <option value="name">File name</option>
-        </select>
-        <input
-          className="assoc-input"
+        </Select>
+        <TextInput
+          width="md"
           placeholder={kind === "ext" ? "astro" : "Dockerfile.*"}
           value={pattern}
           onChange={(e) => setPattern(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && add()}
         />
         <span className="assoc-arrow">→</span>
-        {picker(language, setLanguage)}
-        <button className="btn btn-accent" onClick={add}>
+        {picker(language, setLanguage, "sm")}
+        <Button variant="accent" onClick={add}>
           Add
-        </button>
+        </Button>
       </div>
       {error && <div className="assoc-error">{error}</div>}
-      <input
-        className="assoc-search"
+      <TextInput
+        search
+        width="full"
         placeholder="Search mappings…"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
@@ -482,13 +533,11 @@ function CustomClis({
                         ? "✓ found"
                         : "✗ not found"}
               </span>
-              <button
-                className="btn btn-small"
+              <Button
                 title={`Remove ${c.name || "this CLI"} from the launcher`}
-                onClick={() => commit(rows.filter((_, n) => n !== i))}
-              >
+                onClick={() => commit(rows.filter((_, n) => n !== i))}>
                 Remove
-              </button>
+              </Button>
             </div>
             <div className="cli-custom-args">
               <input
@@ -526,18 +575,20 @@ function CustomClis({
           either and it's appended
         </div>
       )}
-      <button
-        className="btn btn-small"
-        onClick={() => commit([...rows, { id: "", name: "", bin: "" }])}
-      >
+      <Button
+        onClick={() => commit([...rows, { id: "", name: "", bin: "" }])}>
         ＋ Add a CLI
-      </button>
+      </Button>
     </div>
   );
 }
 
 export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsDialogProps) {
-  const [tab, setTab] = useState<SettingsTab>(initialTab);
+  // "vault" is still a valid deep-link target (agentOps and the status bar
+  // both open it by name); it now lands on the tab the vault lives in.
+  const [tab, setTab] = useState<SettingsTab>(
+    initialTab === "vault" ? "browser" : initialTab,
+  );
   const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
   const [keysVersion, setKeysVersion] = useState(0);
   const [gh, setGh] = useState<ipc.GhAuth | null>(null);
@@ -566,7 +617,34 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
   useEffect(() => {
     void ipc.browserSupported().then(setBrowserOk);
   }, []);
-  const visibleTabs = TABS.filter((t) => t.id !== "dictation" || dictationOk);
+  // Memoised so the key handler below isn't rebound on every render.
+  const visibleTabs = useMemo(
+    () => TABS.filter((t) => t.id !== "dictation" || dictationOk),
+    [dictationOk],
+  );
+  // Only the first nine get a digit, because there are only nine digits. The
+  // hint is rendered from the same slice that the handler reads, so a tab
+  // never advertises a chord that does nothing (Dictation drops out on
+  // machines without it, and everything below it shifts up by one).
+  const shortcutTabs = useMemo(() => visibleTabs.slice(0, 9), [visibleTabs]);
+
+  // ⌘1–⌘9 jump between sections. Bound while the dialog is open and nowhere
+  // else, so it can't collide with anything the app binds behind it — ⌘0 is
+  // the window's zoom reset (App.tsx) and stays untouched. e.code, not e.key,
+  // so a non-US layout that puts a symbol on the number row still works.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+      const n = /^Digit([1-9])$/.exec(e.code)?.[1];
+      if (!n) return;
+      const target = shortcutTabs[Number(n) - 1];
+      if (!target) return;
+      e.preventDefault();
+      setTab(target.id);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [shortcutTabs]);
 
   const refreshGh = useCallback(() => {
     setGhBusy(true);
@@ -607,31 +685,71 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
     applyTheme(next, s.customAccent);
   };
 
-  const cursorControls = (
+  /** Font, size and caret for the editor or the terminal. One row, because
+   *  they are one decision about how text looks and none of them needs more
+   *  than a few characters of width — stacked full-width they read as three
+   *  unrelated settings and the pane becomes a column of near-empty boxes. */
+  const typeRow = (
+    familyKey: "editorFontFamily" | "terminalFontFamily",
+    sizeKey: "editorFontSize" | "fontSize",
     styleKey: "editorCursorStyle" | "terminalCursorStyle",
     blinkKey: "editorCursorBlink" | "terminalCursorBlink",
-  ) => (
-    <div className="set-inline">
-      <select
-        value={s[styleKey]}
-        onChange={(e) => patch({ [styleKey]: e.target.value as CursorStyle })}
-      >
-        {CURSOR_OPTIONS.map((o) => (
-          <option key={o.id} value={o.id}>
-            {o.label}
-          </option>
-        ))}
-      </select>
-      <label className="set-inline-check">
-        <input
-          type="checkbox"
-          checked={s[blinkKey]}
-          onChange={(e) => patch({ [blinkKey]: e.target.checked })}
-        />
-        <span>Blink</span>
-      </label>
-    </div>
-  );
+  ) => {
+    const family = fontLabel(s[familyKey]);
+    return (
+      <Row>
+        <Field label="Font family">
+          <Select
+            width="md"
+            value={family}
+            onChange={(e) => patch({ [familyKey]: fontStack(e.target.value) })}
+          >
+            <option value="">System default</option>
+            {fonts.map((f) => (
+              <option key={f} value={f}>
+                {f}
+              </option>
+            ))}
+            {/* A font stored from another machine (or an older text box) that
+                isn't installed here — keep it selectable rather than silently
+                switching them off it. */}
+            {family && !fonts.includes(family) && (
+              <option value={family}>{family} (not installed)</option>
+            )}
+          </Select>
+        </Field>
+        <Field label="Size">
+          <Stepper
+            aria-label="Font size"
+            value={s[sizeKey]}
+            min={8}
+            max={32}
+            onChange={(v) => patch({ [sizeKey]: v })}
+          />
+        </Field>
+        <Field label="Cursor">
+          <Select
+            width="sm"
+            value={s[styleKey]}
+            onChange={(e) => patch({ [styleKey]: e.target.value as CursorStyle })}
+          >
+            {CURSOR_OPTIONS.map((o) => (
+              <option key={o.id} value={o.id}>
+                {o.label}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field>
+          <Checkbox
+            checked={s[blinkKey]}
+            onChange={(v) => patch({ [blinkKey]: v })}
+            label="Blink"
+          />
+        </Field>
+      </Row>
+    );
+  };
 
   return (
     <div className="confirm-backdrop" onMouseDown={onClose}>
@@ -639,20 +757,35 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
         <div className="settings-layout">
           <nav className="settings-nav">
             <div className="settings-title">Settings</div>
-            {visibleTabs.map((t) => (
-              <button
-                key={t.id}
-                className={`settings-nav-item ${tab === t.id ? "settings-nav-active" : ""}`}
-                onClick={() => setTab(t.id)}
-              >
-                {t.label}
-              </button>
+            {visibleTabs.map((t, i) => (
+              <Fragment key={t.id}>
+                {/* A heading only where the group actually turns over. */}
+                {(i === 0 || visibleTabs[i - 1].group !== t.group) && (
+                  <div className="settings-nav-group">{t.group}</div>
+                )}
+                <button
+                  className={`settings-nav-item ${tab === t.id ? "settings-nav-active" : ""}`}
+                  onClick={() => setTab(t.id)}
+                >
+                  <span>{t.label}</span>
+                  {i < shortcutTabs.length && (
+                    <span className="settings-nav-key">
+                      {IS_MAC ? "⌘" : "^"}
+                      {i + 1}
+                    </span>
+                  )}
+                </button>
+              </Fragment>
             ))}
           </nav>
           <div className="settings-content">
             {tab === "appearance" && (
               <>
-                <Item name="Skin" desc="Colors for the whole app; applies immediately.">
+                <Item
+                  name="Skin"
+                  tag="Applies immediately"
+                  desc="Colours for the whole app. Nothing re-renders — one attribute flips."
+                >
                   <div className="skin-grid">
                     {THEMES.map((t) => {
                       const p = SKIN_PREVIEWS[t.id];
@@ -671,6 +804,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                             <span className="skin-chip" style={{ background: p.text }} />
                           </span>
                           <span className="skin-name">{t.label}</span>
+                          <span className="skin-note">{p.note}</span>
                         </button>
                       );
                     })}
@@ -693,15 +827,13 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                       {s.customAccent || "skin default"}
                     </code>
                     {s.customAccent && (
-                      <button
-                        className="btn"
+                      <Button
                         onClick={() => {
                           patch({ customAccent: "" });
                           applyTheme(s.theme, "");
-                        }}
-                      >
+                        }}>
                         Use skin colour
-                      </button>
+                      </Button>
                     )}
                   </div>
                 </Item>
@@ -808,15 +940,13 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                         {ALL_AGENT_TOOLS.length - s.disabledTools.length} of{" "}
                         {ALL_AGENT_TOOLS.length} on
                       </span>
-                      <button className="btn btn-small" onClick={() => patch({ disabledTools: [] })}>
+                      <Button onClick={() => patch({ disabledTools: [] })}>
                         Enable all
-                      </button>
-                      <button
-                        className="btn btn-small"
-                        onClick={() => patch({ disabledTools: [...ALL_AGENT_TOOLS] })}
-                      >
+                      </Button>
+                      <Button
+                        onClick={() => patch({ disabledTools: [...ALL_AGENT_TOOLS] })}>
                         Disable all
-                      </button>
+                      </Button>
                     </div>
                     {AGENT_TOOL_GROUPS.map((group) => {
                       const off = group.tools.filter((t) => s.disabledTools.includes(t.name));
@@ -934,38 +1064,18 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
 
             {tab === "editor" && (
               <>
-                <Item name="Font family" desc="Monospace fonts found on this machine. Applies to newly opened files.">
-                  <select
-                    className="set-wide"
-                    value={fontLabel(s.editorFontFamily)}
-                    onChange={(e) => patch({ editorFontFamily: fontStack(e.target.value) })}
-                  >
-                    <option value="">System default</option>
-                    {fonts.map((f) => (
-                      <option key={f} value={f}>
-                        {f}
-                      </option>
-                    ))}
-                    {/* A font stored from another machine (or an older text
-                        box) that isn't installed here — keep it selectable
-                        rather than silently switching them off it. */}
-                    {fontLabel(s.editorFontFamily) && !fonts.includes(fontLabel(s.editorFontFamily)) && (
-                      <option value={fontLabel(s.editorFontFamily)}>
-                        {fontLabel(s.editorFontFamily)} (not installed)
-                      </option>
-                    )}
-                  </select>
+                <Item
+                  name="Font and cursor"
+                  tag="New files only"
+                  desc="Monospace fonts found on this machine. Applies to files opened from now on."
+                >
+                  {typeRow(
+                    "editorFontFamily",
+                    "editorFontSize",
+                    "editorCursorStyle",
+                    "editorCursorBlink",
+                  )}
                 </Item>
-                <Item name="Font size">
-                  <input
-                    type="number"
-                    min={8}
-                    max={32}
-                    value={s.editorFontSize}
-                    onChange={(e) => patch({ editorFontSize: Number(e.target.value) || 13 })}
-                  />
-                </Item>
-                <Item name="Cursor">{cursorControls("editorCursorStyle", "editorCursorBlink")}</Item>
                 <Item
                   name="File associations"
                   desc="Which language each file type is highlighted as. Open files re-colour immediately."
@@ -980,45 +1090,24 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
 
             {tab === "terminal" && (
               <>
-                <Item name="Font family" desc="Monospace fonts found on this machine. Applies to newly opened terminals.">
-                  <select
-                    className="set-wide"
-                    value={fontLabel(s.terminalFontFamily)}
-                    onChange={(e) => patch({ terminalFontFamily: fontStack(e.target.value) })}
-                  >
-                    <option value="">System default</option>
-                    {fonts.map((f) => (
-                      <option key={f} value={f}>
-                        {f}
-                      </option>
-                    ))}
-                    {/* A font stored from another machine (or an older text
-                        box) that isn't installed here — keep it selectable
-                        rather than silently switching them off it. */}
-                    {fontLabel(s.terminalFontFamily) && !fonts.includes(fontLabel(s.terminalFontFamily)) && (
-                      <option value={fontLabel(s.terminalFontFamily)}>
-                        {fontLabel(s.terminalFontFamily)} (not installed)
-                      </option>
-                    )}
-                  </select>
-                </Item>
-                <Item name="Font size">
-                  <input
-                    type="number"
-                    min={8}
-                    max={32}
-                    value={s.fontSize}
-                    onChange={(e) => patch({ fontSize: Number(e.target.value) || 13 })}
-                  />
-                </Item>
-                <Item name="Cursor">
-                  {cursorControls("terminalCursorStyle", "terminalCursorBlink")}
+                <Item
+                  name="Font and cursor"
+                  tag="New terminals only"
+                  desc="Monospace fonts found on this machine. Applies to terminals opened from now on."
+                >
+                  {typeRow(
+                    "terminalFontFamily",
+                    "fontSize",
+                    "terminalCursorStyle",
+                    "terminalCursorBlink",
+                  )}
                 </Item>
                 <Item
                   name="Link click"
                   desc="How to follow a URL in terminal output. Requiring the modifier keeps a click on a link an agent printed from navigating."
                 >
-                  <select
+                  <Select
+                    width="lg"
                     value={s.terminalLinkClick}
                     onChange={(e) =>
                       patch({ terminalLinkClick: e.target.value as LinkClickMode })
@@ -1026,7 +1115,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   >
                     <option value="click">Click opens the link</option>
                     <option value="modifier">{`${LINK_CHORD} opens the link`}</option>
-                  </select>
+                  </Select>
                 </Item>
                 <Item
                   name="Scrollback"
@@ -1049,7 +1138,6 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
 
             {tab === "spotsearch" && <SpotSearchSettings s={s} patch={patch} />}
 
-            {tab === "vault" && <VaultSettings />}
 
             {tab === "dictation" && dictationOk && <DictationSettings />}
 
@@ -1077,7 +1165,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
               <>
                 <Item
                   name="Engine"
-                  desc="How preview tabs show a page. The loopback proxy shows it as an ordinary part of the window, so panels and menus draw over it and nothing has to be hidden for anything — at the cost of serving every site from one origin, which no login survives. The embedded browser keeps real origins and real logins, but macOS composites it above the whole window with no way to layer anything over it, and will not draw it while it is covered — so it disappears behind panels and menus, and needs forcing back."
+                  desc="How preview tabs show a page. The trade is logins against layering."
                 >
                   {browserOk ? (
                     <div className="set-checks">
@@ -1108,24 +1196,21 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                         </span>
                       </label>
                       <p className="set-item-desc">
-                        Preview tabs already open keep the engine they started on; reopen them to
-                        switch.
+                        Open tabs keep the engine they started on.
                       </p>
                     </div>
                   ) : (
                     <p className="set-item-desc">
-                      This build runs preview tabs through the loopback proxy. The embedded browser
-                      is macOS-only so far.
+                      Loopback proxy only — the embedded browser is macOS-only so far.
                     </p>
                   )}
                 </Item>
                 <Item
                   name="Browsing data"
-                  desc="One profile is shared by every preview tab, which is what keeps you signed in across them — so clearing it signs you out of everything at once, like a browser's own “clear browsing data”. Cookies, local storage and caches; nothing else on this machine is touched."
+                  desc="Every preview tab shares one profile. Clearing it signs you out of all of them."
                 >
                   <div className="set-inline">
-                    <button
-                      className="btn"
+                    <Button
                       disabled={!browserOk || clearing === "busy"}
                       onClick={() => {
                         setClearing("busy");
@@ -1133,10 +1218,9 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                           () => setClearing("done"),
                           (err) => setClearing(String(err)),
                         );
-                      }}
-                    >
+                      }}>
                       {clearing === "busy" ? "Clearing…" : "Clear browsing data"}
-                    </button>
+                    </Button>
                     {clearing === "done" && (
                       <span className="set-item-desc">Cleared. Reload any open page to see it.</span>
                     )}
@@ -1145,6 +1229,10 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     )}
                   </div>
                 </Item>
+                {/* The vault is the browser's other half: it exists to fill
+                    logins into these same preview tabs, and as its own tab it
+                    read as an unrelated feature. */}
+                <VaultSettings />
               </>
             )}
 
@@ -1163,15 +1251,13 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                             Connected. The key is stored locally on this machine only.
                           </div>
                           <div className="set-item-control">
-                            <button
-                              className="btn"
+                            <Button
                               onClick={() => {
                                 setTrackerKey(p.id, "");
                                 setKeysVersion((v) => v + 1);
-                              }}
-                            >
+                              }}>
                               Disconnect
-                            </button>
+                            </Button>
                           </div>
                         </>
                       ) : (
@@ -1187,17 +1273,15 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                                 setKeyDrafts((d) => ({ ...d, [p.id]: e.target.value }))
                               }
                             />
-                            <button
-                              className="btn btn-accent"
+                            <Button variant="accent"
                               disabled={!(keyDrafts[p.id] ?? "").trim()}
                               onClick={() => {
                                 setTrackerKey(p.id, (keyDrafts[p.id] ?? "").trim());
                                 setKeyDrafts((d) => ({ ...d, [p.id]: "" }));
                                 setKeysVersion((v) => v + 1);
-                              }}
-                            >
+                              }}>
                               Connect
-                            </button>
+                            </Button>
                           </div>
                         </>
                       )
@@ -1219,51 +1303,43 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                         </div>
                         <div className="set-item-control set-inline">
                           {gh && !gh.installed && (
-                            <button
-                              className="btn btn-accent"
+                            <Button variant="accent"
                               onClick={() =>
                                 runInTerminal("brew install gh", "install gh")
-                              }
-                            >
+                              }>
                               Install with Homebrew
-                            </button>
+                            </Button>
                           )}
                           {gh?.installed && !gh.authenticated && (
-                            <button
-                              className="btn btn-accent"
+                            <Button variant="accent"
                               onClick={() =>
                                 runInTerminal("gh auth login", "gh auth login")
-                              }
-                            >
+                              }>
                               Sign in to GitHub
-                            </button>
+                            </Button>
                           )}
                           {gh?.authenticated && (
                             <>
-                              <button
-                                className="btn"
+                              <Button
                                 onClick={() =>
                                   runInTerminal(
                                     "gh auth login",
                                     "gh auth login",
                                   )
-                                }
-                              >
+                                }>
                                 Switch account
-                              </button>
-                              <button
-                                className="btn"
+                              </Button>
+                              <Button
                                 onClick={() =>
                                   runInTerminal("gh auth logout", "gh auth logout")
-                                }
-                              >
+                                }>
                                 Sign out
-                              </button>
+                              </Button>
                             </>
                           )}
-                          <button className="btn" disabled={ghBusy} onClick={refreshGh}>
+                          <Button disabled={ghBusy} onClick={refreshGh}>
                             {ghBusy ? "Checking…" : "Recheck"}
-                          </button>
+                          </Button>
                         </div>
                         <div className="set-item-desc set-note">
                           Sign-in runs in a terminal because GitHub's flow is
@@ -1283,9 +1359,12 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
           </div>
         </div>
         <div className="settings-footer">
-          <button className="btn btn-accent" onClick={onClose}>
+          <div className="settings-footer-note">
+            Everything here applies immediately and is stored on this machine only.
+          </div>
+          <Button variant="accent" onClick={onClose}>
             Done
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -1412,40 +1491,6 @@ function RefreshIcon() {
 }
 
 /** An on/off switch. */
-function Toggle({ checked, disabled, onChange }: { checked: boolean; disabled?: boolean; onChange: () => void }) {
-  return (
-    <button
-      role="switch"
-      aria-checked={checked}
-      disabled={disabled}
-      onClick={onChange}
-      style={{
-        width: 40,
-        height: 23,
-        borderRadius: 12,
-        border: "none",
-        padding: 3,
-        cursor: "pointer",
-        flex: "none",
-        background: checked ? "var(--accent)" : "var(--border)",
-        transition: "background .15s",
-      }}
-    >
-      <span
-        style={{
-          display: "block",
-          width: 17,
-          height: 17,
-          borderRadius: "50%",
-          background: "#fff",
-          transform: checked ? "translateX(17px)" : "translateX(0)",
-          transition: "transform .15s",
-        }}
-      />
-    </button>
-  );
-}
-
 /** A click-to-copy pill: shows the value and a copy/✓ icon. */
 function Copyable({
   text,
@@ -1531,7 +1576,14 @@ function readThemeTokens(): Record<string, string> {
   const cs = getComputedStyle(document.documentElement);
   const out: Record<string, string> = {};
   for (const v of THEME_VARS) {
-    const val = cs.getPropertyValue(`--${v}`).trim();
+    // A skin whose surfaces are alpha (Vitrine's are — they composite over an
+    // ambient field this page paints and the portal's page does not) declares
+    // an opaque mirror per surface. Prefer it: sending `rgba(255,255,255,.03)`
+    // as the portal's background is a white page with near-white text on it.
+    const val = (
+      cs.getPropertyValue(`--${v}-opaque`).trim() ||
+      cs.getPropertyValue(`--${v}`).trim()
+    );
     if (val) out[v] = val;
   }
   return out;
@@ -1684,27 +1736,6 @@ function RemoteSettings({
     void ipc.tunnelStop().then(setTunnel).finally(() => setBusy(false));
   };
 
-  const seg = (opts: { id: string; label: string }[], value: string, onChange: (v: string) => void) => (
-    <div style={{ display: "inline-flex", border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
-      {opts.map((o) => (
-        <button
-          key={o.id}
-          onClick={() => onChange(o.id)}
-          style={{
-            padding: "5px 13px",
-            border: "none",
-            cursor: "pointer",
-            fontSize: 13,
-            background: value === o.id ? "var(--accent)" : "transparent",
-            color: value === o.id ? "var(--on-accent)" : "var(--text)",
-            fontWeight: 600,
-          }}
-        >
-          {o.label}
-        </button>
-      ))}
-    </div>
-  );
   const iconBtn = {
     background: "var(--bg-raised)",
     border: "1px solid var(--border)",
@@ -1719,11 +1750,16 @@ function RemoteSettings({
   return (
     <>
       <Item name="Remote access" desc="Drive your agents from your phone. A PIN unlocks a control panel; off by default.">
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <Toggle checked={on} disabled={busy} onChange={() => run(on ? ipc.remoteDisable : ipc.remoteEnable)} />
+        <div className="set-inline">
+          <Switch
+            checked={on}
+            disabled={busy}
+            aria-label="Remote access"
+            onChange={() => run(on ? ipc.remoteDisable : ipc.remoteEnable)}
+          />
           {on && (
-            <span style={{ fontSize: 12, color: "var(--text-dim)", lineHeight: 1.35, maxWidth: 460 }}>
-              ⚠ Anyone with the PIN can drive your agents — turn off when you're done.
+            <span className="set-warn">
+              Anyone with the PIN can drive your agents — turn this off when you're done.
             </span>
           )}
         </div>
@@ -1732,20 +1768,26 @@ function RemoteSettings({
       {on && (
         <>
           <Item name="Reach">
-            {seg(
-              [
+            <Segmented
+              aria-label="Reach"
+              options={[
                 { id: "local", label: "This network" },
                 { id: "internet", label: "Internet" },
-              ],
-              scope,
-              (v) => changeScope(v as "local" | "internet"),
-            )}
+              ]}
+              value={scope}
+              onChange={changeScope}
+            />
           </Item>
 
           {scope === "internet" && (
             <Item name="Public link" desc="One tunnel, loads in any browser — shared with internet team sessions.">
               <div style={{ display: "grid", gap: 12, justifyItems: "start", width: "100%" }}>
-                {seg(TUNNELS.map((t) => ({ id: t.id, label: t.name })), provider, changeProvider)}
+                <Segmented
+                  aria-label="Tunnel provider"
+                  options={TUNNELS.map((t) => ({ id: t.id, label: t.name }))}
+                  value={provider}
+                  onChange={changeProvider}
+                />
                 <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
                   {prov.note ? `${prov.blurb} ${prov.note}` : prov.blurb}
                 </div>
@@ -1773,17 +1815,17 @@ function RemoteSettings({
                 )}
 
                 {!provInstalled ? (
-                  <button className="btn" onClick={() => runInTerminal(prov.install[currentPlatform()], `Install ${prov.name}`)}>
+                  <Button onClick={() => runInTerminal(prov.install[currentPlatform()], `Install ${prov.name}`)}>
                     Install {prov.name}
-                  </button>
+                  </Button>
                 ) : tunnel.running && tunnel.provider === provider ? (
-                  <button className="btn" disabled={busy} onClick={stopTunnel}>
+                  <Button disabled={busy} onClick={stopTunnel}>
                     Stop public link
-                  </button>
+                  </Button>
                 ) : (
-                  <button className="btn" disabled={busy || (prov.needsToken && !token.trim())} onClick={startTunnel}>
+                  <Button disabled={busy || (prov.needsToken && !token.trim())} onClick={startTunnel}>
                     Start public link
-                  </button>
+                  </Button>
                 )}
 
                 {tunnel.message && tunnelForProvider && (
@@ -1874,9 +1916,9 @@ function HotkeyCapture({ value, onChange }: { value: Hotkey; onChange: (h: Hotke
       >
         {arming ? "Press a key…" : formatHotkey(value)}
       </button>
-      <button className="btn" onClick={() => onChange(DEFAULT_DICTATION_HOTKEY)}>
+      <Button onClick={() => onChange(DEFAULT_DICTATION_HOTKEY)}>
         Reset
-      </button>
+      </Button>
     </span>
   );
 }
@@ -2061,8 +2103,7 @@ function SpotSearchSettings({
             </p>
           )}
           <div className="tool-bulk">
-            <button
-              className="btn btn-small"
+            <Button
               disabled={busy !== ""}
               onClick={() => {
                 setBusy("reindex");
@@ -2073,16 +2114,14 @@ function SpotSearchSettings({
                     setBusy("");
                     refresh();
                   });
-              }}
-            >
+              }}>
               {busy === "reindex"
                 ? "Reading…"
                 : pending
                   ? "Keep reading"
                   : "Update now"}
-            </button>
-            <button
-              className="btn btn-small"
+            </Button>
+            <Button
               disabled={busy !== ""}
               onClick={() => {
                 setBusy("clear");
@@ -2094,10 +2133,9 @@ function SpotSearchSettings({
                     setBusy("");
                     refresh();
                   });
-              }}
-            >
+              }}>
               {busy === "clear" ? "Clearing…" : "Clear index"}
-            </button>
+            </Button>
           </div>
         </div>
       </Item>
@@ -2141,10 +2179,10 @@ function DictationSettings() {
     <>
       <Item
         name="Trigger"
-        desc="How to open the mic. Esc always cancels. Runs fully locally, and only while Canopy has focus."
+        desc="How to open the mic. Esc cancels. Runs locally."
       >
-        <select
-          className="set-wide"
+        <Select
+          width="lg"
           value={s.dictationTriggerMode}
           onChange={(e) =>
             patch({ dictationTriggerMode: e.target.value as DictationTriggerMode })
@@ -2153,7 +2191,7 @@ function DictationSettings() {
           <option value="combo">Key combo</option>
           <option value="hold">Hold a modifier — push to talk</option>
           <option value="doubleTap">Double-tap a modifier</option>
-        </select>
+        </Select>
       </Item>
 
       {s.dictationTriggerMode === "combo" ? (
@@ -2168,12 +2206,12 @@ function DictationSettings() {
           name="Key"
           desc={
             s.dictationTriggerMode === "hold"
-              ? "Hold it to talk, let go to insert. Double-tap instead to keep recording hands-free; a single tap then ends it."
+              ? "Hold to talk, let go to insert. Double-tap to keep it open hands-free."
               : "Two quick taps start recording, one tap ends it."
           }
         >
-          <select
-            className="set-wide"
+          <Select
+            width="lg"
             value={s.dictationModKey}
             onChange={(e) => patch({ dictationModKey: e.target.value as DictationModKey })}
           >
@@ -2182,23 +2220,22 @@ function DictationSettings() {
                 {modKeyLabel(k)}
               </option>
             ))}
-          </select>
+          </Select>
         </Item>
       )}
 
       {s.dictationTriggerMode !== "combo" && (
         <p className="set-note">
-          Using the key normally still works — {modKeyLabel(s.dictationModKey)} only
-          triggers dictation when nothing else is pressed with it, so ⇧A and ⌘S are
-          never mistaken for it.
+          {modKeyLabel(s.dictationModKey)} still works as a modifier — dictation only
+          fires when nothing else is pressed with it.
           {s.dictationModKey === "CapsLock" &&
-            " Caps Lock latches, so holding it means caps stay on while you speak."}
+            " Caps Lock latches, so caps stay on while you speak."}
         </p>
       )}
 
       <Item
         name="Live preview"
-        desc="Words appear in the text box as you speak, and are corrected in place as the decoder settles. Terminals and the code editor show the preview in the pill instead — text there can't be taken back. Costs a CPU core while recording; the final text is unaffected either way."
+        desc="Words appear as you speak and correct themselves. Costs a CPU core; the final text is the same either way."
       >
         <label className="set-inline-check">
           <input
@@ -2212,7 +2249,7 @@ function DictationSettings() {
 
       <Item
         name="Mute while recording"
-        desc="Silence the speakers for as long as the mic is open, so what's playing doesn't end up in the transcript. Mutes the system output device — it can't pause a player, and it affects everything, not just Canopy. Restored as soon as recording ends. macOS only for now."
+        desc="Silences the system output while the mic is open, so audio doesn't reach the transcript. macOS only."
       >
         <label className="set-inline-check">
           <input
@@ -2272,8 +2309,7 @@ function DictationSettings() {
                 {dl ? (
                   <span className="dictation-model-state">{dl}</span>
                 ) : m.downloaded ? (
-                  <button
-                    className="btn dictation-model-btn"
+                  <Button className="dictation-model-btn"
                     onClick={(e) => {
                       e.preventDefault();
                       setErr(null);
@@ -2281,13 +2317,11 @@ function DictationSettings() {
                         .dictationDeleteModel(m.id)
                         .then(refresh)
                         .catch((er) => setErr(String(er)));
-                    }}
-                  >
+                    }}>
                     Remove
-                  </button>
+                  </Button>
                 ) : (
-                  <button
-                    className="btn btn-accent dictation-model-btn"
+                  <Button variant="accent" className="dictation-model-btn"
                     onClick={(e) => {
                       e.preventDefault();
                       setErr(null);
@@ -2300,10 +2334,9 @@ function DictationSettings() {
                         });
                         setErr(String(er));
                       });
-                    }}
-                  >
+                    }}>
                     Install
-                  </button>
+                  </Button>
                 )}
               </label>
             );
@@ -2320,8 +2353,8 @@ function DictationSettings() {
               : "This model is English-only."
           }
         >
-          <select
-            className="set-wide"
+          <Select
+            width="lg"
             disabled={!active.multilingual}
             value={s.dictationLanguage}
             onChange={(e) => patch({ dictationLanguage: e.target.value })}
@@ -2332,7 +2365,7 @@ function DictationSettings() {
                 {langName(code)}
               </option>
             ))}
-          </select>
+          </Select>
         </Item>
       )}
 

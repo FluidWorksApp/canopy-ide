@@ -8,6 +8,7 @@ import { Dialog } from "./Dialog";
 import { fileIconUrl } from "./fileIcons";
 import { ChevronIcon } from "./icons";
 import { WindowedList } from "./WindowedList";
+import { Button } from "./ui";
 
 /** Must match .tree-row's CSS height — the windowing spacers are the scrollbar. */
 const ROW_H = 26;
@@ -546,16 +547,14 @@ export function FileTree({
           <span className="tree-root-name" title={item.root}>
             {item.root.split("/").pop()}
           </span>
-          <button
-            className="btn-icon"
+          <Button icon
             title="Remove from workspace"
             onClick={(e) => {
               e.stopPropagation();
               onRemoveRoot?.(item.root);
-            }}
-          >
+            }}>
             ✕
-          </button>
+          </Button>
         </div>
       );
     }

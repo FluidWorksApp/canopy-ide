@@ -1,5 +1,6 @@
 import { memo } from "react";
 import type { UpdateAvailability } from "../updater";
+import { Button } from "./ui";
 
 interface UpdateToastProps {
   /** Non-null when an update is available; the toast renders nothing otherwise. */
@@ -29,21 +30,21 @@ function UpdateToastImpl({
       {update.info.notes && <div className="update-notes">{update.info.notes}</div>}
       {update.kind === "manual" ? (
         <div className="update-actions">
-          <button className="btn btn-accent" onClick={onOpenDownloads}>
+          <Button variant="accent" onClick={onOpenDownloads}>
             Open downloads page
-          </button>
-          <button className="btn" onClick={onDismiss}>
+          </Button>
+          <Button onClick={onDismiss}>
             Later
-          </button>
+          </Button>
         </div>
       ) : progress === null ? (
         <div className="update-actions">
-          <button className="btn btn-accent" onClick={onInstall}>
+          <Button variant="accent" onClick={onInstall}>
             Install and restart
-          </button>
-          <button className="btn" onClick={onDismiss}>
+          </Button>
+          <Button onClick={onDismiss}>
             Later
-          </button>
+          </Button>
         </div>
       ) : (
         <div className="update-progress">

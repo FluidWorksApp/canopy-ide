@@ -13,6 +13,7 @@ import { TRACKERS } from "../trackers";
 import { AgentLaunchButton } from "./AgentLaunchButton";
 import { TrackerIcon } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
+import { Button } from "./ui";
 
 interface TicketViewProps {
   ticket: ipc.TicketInfo;
@@ -94,9 +95,9 @@ export function TicketView({
               </span>
             ))}
           <span className="status-spacer" />
-          <button className="btn" onClick={() => void openUrl(ticket.url)}>
+          <Button onClick={() => void openUrl(ticket.url)}>
             Open in {trackerName}
-          </button>
+          </Button>
         </div>
       </div>
 

@@ -38,6 +38,7 @@ import {
 } from "./icons";
 import { TaskProgress } from "./TaskProgress";
 import { RESEARCH_STEPS, stepsDone } from "../microTasks";
+import { Button } from "./ui";
 
 interface ResearchViewProps {
   projectId: string;
@@ -283,13 +284,11 @@ export function ResearchView({
               saying what changed is how you get the same answer twice. */}
           {onContinue && (
             <div className="research-steer">
-              <button
-                className="btn btn-mini"
+              <Button size="sm"
                 onClick={() => setSteer(steer === null ? "" : null)}
-                title="Put an agent back on this, with a nudge"
-              >
+                title="Put an agent back on this, with a nudge">
                 Continue research
-              </button>
+              </Button>
               {steer !== null && (
                 <div className="cli-menu research-steer-menu">
                   <input
@@ -310,15 +309,13 @@ export function ResearchView({
                     It gets this entry and everything already recorded in it.
                     Say what to focus on, or what the last run got wrong.
                   </p>
-                  <button
-                    className="btn btn-mini btn-accent"
+                  <Button size="sm" variant="accent"
                     onClick={() => {
                       onContinue(entry, steer.trim());
                       setSteer(null);
-                    }}
-                  >
+                    }}>
                     Continue
-                  </button>
+                  </Button>
                 </div>
               )}
             </div>
@@ -329,57 +326,45 @@ export function ResearchView({
               same-sized words competing with the one action that matters. */}
           <span className="research-crud">
             {moves.includes("researched") && (
-              <button
-                className="btn-icon"
+              <Button icon
                 title="Mark researched — there is a finding here"
-                onClick={() => move("researched")}
-              >
+                onClick={() => move("researched")}>
                 <CheckIcon />
-              </button>
+              </Button>
             )}
             {moves.includes("researching") && (
-              <button
-                className="btn-icon"
+              <Button icon
                 title="Reopen — put it back to being researched"
-                onClick={() => move("researching")}
-              >
+                onClick={() => move("researching")}>
                 <RestartIcon />
-              </button>
+              </Button>
             )}
             {moves.includes("blocked") && (
-              <button
-                className="btn-icon"
+              <Button icon
                 title="Mark blocked — it is waiting on you"
-                onClick={() => move("blocked")}
-              >
+                onClick={() => move("blocked")}>
                 <BlockedIcon />
-              </button>
+              </Button>
             )}
             {moves.includes("superseded") && (
-              <button
-                className="btn-icon"
+              <Button icon
                 title="Mark superseded — a later entry replaced this"
-                onClick={() => move("superseded")}
-              >
+                onClick={() => move("superseded")}>
                 <ExchangeIcon />
-              </button>
+              </Button>
             )}
             {moves.includes("archived") && (
-              <button
-                className="btn-icon"
+              <Button icon
                 title="Archive — put it down without deleting it"
-                onClick={() => move("archived")}
-              >
+                onClick={() => move("archived")}>
                 <ArchiveIcon />
-              </button>
+              </Button>
             )}
-            <button
-              className="btn-icon btn-icon-danger"
+            <Button icon variant="danger"
               title={`Delete this entry and everything in it (${entry.dir})`}
-              onClick={del}
-            >
+              onClick={del}>
               <TrashIcon />
-            </button>
+            </Button>
           </span>
         </div>
       </div>

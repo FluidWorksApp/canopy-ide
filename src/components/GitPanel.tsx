@@ -17,6 +17,7 @@ import {
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { RestartIcon } from "./icons";
 import { LooseEnds } from "./LooseEnds";
+import { Button } from "./ui";
 
 /** `askDialog` speaks the switch dialog's vocabulary of actions, which has no
  *  generic "yes" — it never needed one. These two stand in for it. The ids are
@@ -659,9 +660,9 @@ export function GitPanel({
     <div className="side-panel git-panel">
       <div className="side-panel-head">
         <span>Git</span>
-        <button className="icon-btn" title="Refresh" onClick={() => void refresh()}>
+        <Button icon title="Refresh" onClick={() => void refresh()}>
           <RestartIcon size={13} />
-        </button>
+        </Button>
       </div>
 
       {/* Repo picker — only when the project actually spans several repos. */}
@@ -700,24 +701,19 @@ export function GitPanel({
           </span>
         )}
         <span className="git-spacer" />
-        <button
-          className="btn-mini"
+        <Button size="sm"
           disabled={busy != null}
           title="git fetch --prune"
-          onClick={() => repo && void act("fetch", () => ipc.gitFetch(repo))}
-        >
+          onClick={() => repo && void act("fetch", () => ipc.gitFetch(repo))}>
           Fetch
-        </button>
-        <button
-          className="btn-mini"
+        </Button>
+        <Button size="sm"
           disabled={busy != null}
           title="git pull --ff-only"
-          onClick={() => repo && void act("pull", () => ipc.gitPull(repo))}
-        >
+          onClick={() => repo && void act("pull", () => ipc.gitPull(repo))}>
           Pull
-        </button>
-        <button
-          className="btn-mini"
+        </Button>
+        <Button size="sm"
           disabled={busy != null || status?.detached}
           title={
             // Greyed out in a snapshot: say where the way back is, not what an
@@ -728,10 +724,9 @@ export function GitPanel({
                 ? "git push"
                 : "git push --set-upstream origin (no upstream yet)"
           }
-          onClick={() => repo && void act("push", () => ipc.gitPush(repo, !status?.upstream))}
-        >
+          onClick={() => repo && void act("push", () => ipc.gitPush(repo, !status?.upstream))}>
           Push
-        </button>
+        </Button>
       </div>
 
       <div className="git-tabs">
@@ -768,14 +763,12 @@ export function GitPanel({
               onChange={(e) => setBranchFilter(e.target.value)}
             />
             {branchFilter.trim() && !rows.some((r) => r.branch === branchFilter.trim()) && (
-              <button
-                className="btn-mini btn-mini-accent"
+              <Button size="sm" variant="accent"
                 disabled={busy != null}
                 title="Start a branch in a workspace of its own, set up and ready to run"
-                onClick={() => void startFeature(branchFilter.trim())}
-              >
+                onClick={() => void startFeature(branchFilter.trim())}>
                 Start
-              </button>
+              </Button>
             )}
           </div>
 
@@ -855,13 +848,11 @@ export function GitPanel({
 
           {rows.some((r) => r.missing) && (
             <div className="git-branch-new">
-              <button
-                className="btn-mini"
+              <Button size="sm"
                 title="Forget the workspaces whose folders are gone. Nothing on disk is touched."
-                onClick={() => repo && void cleanupWorkspaces(repo)}
-              >
+                onClick={() => repo && void cleanupWorkspaces(repo)}>
                 Clear {rows.filter((r) => r.missing).length} missing
-              </button>
+              </Button>
             </div>
           )}
         </div>

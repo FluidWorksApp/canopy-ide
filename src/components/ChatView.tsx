@@ -7,6 +7,7 @@ import * as ipc from "../ipc";
 import type { Notify, RelayHandle } from "../types";
 import { TeamIcon } from "./icons";
 import { offerFileTo } from "./TeamPanel";
+import { Button } from "./ui";
 
 interface ChatViewProps {
   /** Member id for a DM; null for the everyone channel. */
@@ -193,13 +194,11 @@ export function ChatView({ peer, title, relay, onNotice }: ChatViewProps) {
             }
           }}
         />
-        <button
-          className="btn btn-accent"
+        <Button variant="accent"
           disabled={offline || peerGone || busy || !draft.trim()}
-          onClick={() => void send()}
-        >
+          onClick={() => void send()}>
           Send
-        </button>
+        </Button>
       </div>
     </div>
   );

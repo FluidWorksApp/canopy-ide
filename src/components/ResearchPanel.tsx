@@ -24,6 +24,7 @@ import {
 } from "../research";
 import { ago } from "./ProjectView/helpers";
 import { ResearchIcon } from "./icons";
+import { Button, TextInput } from "./ui";
 
 interface ResearchPanelProps {
   projectId: string;
@@ -83,8 +84,10 @@ export function ResearchPanel({
   return (
     <div className="side-panel research-panel">
       <div className="research-new">
-        <input
+        <TextInput
           className="research-input"
+          size="sm"
+          width="full"
           placeholder="Research a question…"
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
@@ -92,8 +95,7 @@ export function ResearchPanel({
             if (e.key === "Enter") submit();
           }}
         />
-        <button
-          className="btn btn-primary"
+        <Button
           disabled={!question.trim() || !canStart}
           onClick={submit}
           title={
@@ -101,9 +103,9 @@ export function ResearchPanel({
               ? "Start an agent on this question. It records the finding and changes no code."
               : "No agent CLI installed"
           }
-        >
+          size="sm">
           Research
-        </button>
+        </Button>
       </div>
 
       {all.length === 0 && (

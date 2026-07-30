@@ -12,6 +12,7 @@ import { LANE_LABEL, lanes, rowState, since, toPrInfo, type Lane } from "../prIn
 import { refresh } from "../prWatchStore";
 import { usePrWatch } from "../usePrWatch";
 import { PullRequestIcon } from "./icons";
+import { Button } from "./ui";
 
 interface PrsPanelProps {
   /** This project's repos. The panel shows these and nothing else — a PR queue
@@ -56,16 +57,17 @@ export function PrsPanel({ localRepos, onOpen, projectFor }: PrsPanelProps) {
       <div className="side-panel-head">
         <span>Pull requests</span>
         <span className="prs-head-actions">
-          <button
-            className={`btn-mini ${mineOnly ? "btn-accent" : ""}`}
+          <Button
+            size="sm"
+            variant={mineOnly ? "accent" : "default"}
             title={mineOnly ? "Show everyone's" : "Show only mine"}
             onClick={() => setMineOnly((v) => !v)}
           >
             mine
-          </button>
-          <button className="btn-mini" title="Check now" disabled={busy} onClick={refresh}>
+          </Button>
+          <Button size="sm" title="Check now" disabled={busy} onClick={refresh}>
             ↻
-          </button>
+          </Button>
         </span>
       </div>
 

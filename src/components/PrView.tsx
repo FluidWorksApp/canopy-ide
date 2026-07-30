@@ -87,6 +87,7 @@ import {
   saveLoop,
   type PrLoop,
 } from "../prLoop";
+import { Button } from "./ui";
 // NB: PR diffs arrive as real patches from `gh pr diff`, so they go straight
 // into the renderer. Working-tree diffs (components/DiffView.tsx) have to build
 // their patch first — see the note there about Monaco's diff not computing.
@@ -1775,14 +1776,12 @@ export function PrView({
                   <span className="pr-run-dot" /> working on it…
                 </span>
               ) : (
-                <button
-                  className="btn-mini btn-accent"
+                <Button size="sm" variant="accent"
                   disabled={busy}
                   title={move.hint}
-                  onClick={(e) => dispatchMove(move, e)}
-                >
+                  onClick={(e) => dispatchMove(move, e)}>
                   {move.action}
-                </button>
+                </Button>
               ))}
             {loop.status === "waiting" && loop.auto && (
               <span className="pr-next-note">watching for new comments</span>
@@ -1795,19 +1794,18 @@ export function PrView({
             {/* Agent used to sit here and now floats bottom-right, where it
                 follows you down the diff. Two of it would be one too many. */}
             {pr.draft && livePr.state === "OPEN" && (
-              <button
-                className="btn-mini btn-accent"
+              <Button size="sm" variant="accent"
                 title="Take this PR out of draft so it can be reviewed and merged"
                 disabled={busy}
-                onClick={() => void ready()}
-              >
+                onClick={() => void ready()}>
                 Mark ready
-              </button>
+              </Button>
             )}
             {!pr.draft && livePr.state === "OPEN" && (
               <div className="cli-menu-anchor">
-                <button
-                  className={`btn-mini ${mergeReady ? "btn-accent" : ""}`}
+                <Button
+                  size="sm"
+                  variant={mergeReady ? "accent" : "default"}
                   title={
                     mergeReady
                       ? "Merge this PR on GitHub"
@@ -1817,7 +1815,7 @@ export function PrView({
                   onClick={() => setMergeOpen((v) => !v)}
                 >
                   Merge ▾
-                </button>
+                </Button>
                 {mergeOpen && (
                   <div
                     className="cli-menu"
@@ -1841,13 +1839,11 @@ export function PrView({
                 )}
               </div>
             )}
-            <button
-              className="btn-mini pr-more"
+            <Button size="sm" className="pr-more"
               title="More actions"
-              onClick={openMoreMenu}
-            >
+              onClick={openMoreMenu}>
               ⋯
-            </button>
+            </Button>
           </div>
         </div>
         <div className="pr-sub">
@@ -1933,14 +1929,12 @@ export function PrView({
                   <AgentsIcon size={12} />
                   Review map
                   <span className="agent-byline-note">written by an agent</span>
-                  <button
-                    className="btn-mini"
+                  <Button size="sm"
                     disabled={reviewBusy}
                     title="Have an agent read it again"
-                    onClick={() => launch(prReviewTask, { repo, pr })}
-                  >
+                    onClick={() => launch(prReviewTask, { repo, pr })}>
                     {reviewBusy ? "Reviewing…" : "Review again"}
-                  </button>
+                  </Button>
                 </div>
                 <div
                   className="markdown-body"
@@ -1974,12 +1968,10 @@ export function PrView({
                 {/* The one thing this empty state exists to offer, so it wears
                     the primary tier. As a btn-mini it sat at the same weight as
                     "Regenerate" and "Drop" and nobody found it. */}
-                <button
-                  className="btn-mini btn-accent"
-                  onClick={() => launch(prReviewTask, { repo, pr })}
-                >
+                <Button size="sm" variant="accent"
+                  onClick={() => launch(prReviewTask, { repo, pr })}>
                   {prReviewTask.icon} Review this for me
-                </button>
+                </Button>
                 <span className="pr-files-note">
                   risk-ranked, findings staged as drafts, nothing posted
                 </span>
@@ -1998,13 +1990,11 @@ export function PrView({
                 <div className="pr-rail-section">
                   <div className="pr-rail-title">
                     Conversation
-                    <button
-                      className="btn-mini"
+                    <Button size="sm"
                       title="Refresh"
-                      onClick={() => void refreshConv()}
-                    >
+                      onClick={() => void refreshConv()}>
                       ↻
-                    </button>
+                    </Button>
                   </div>
                   {verdictList.length === 0 &&
                     conv.comments.length === 0 &&
@@ -2150,8 +2140,7 @@ export function PrView({
                   ))}
                   {livePr.state === "OPEN" && role === "author" && (
                     <div className="pr-thread-actions">
-                      <button
-                        className="btn-mini btn-accent"
+                      <Button size="sm" variant="accent"
                         disabled={busy || loop.status === "working"}
                         title={
                           gate.ok
@@ -2160,22 +2149,19 @@ export function PrView({
                               ? "Nothing to address yet — arm it and a round starts when comments arrive"
                               : gate.reason
                         }
-                        onClick={() => startRound(true)}
-                      >
+                        onClick={() => startRound(true)}>
                         {loop.rounds.length
                           ? "Next round"
                           : gate.ok
                             ? "Start loop"
                             : "Watch for comments"}
-                      </button>
+                      </Button>
                       {loop.auto && (
-                        <button
-                          className="btn-mini"
+                        <Button size="sm"
                           title="Stop starting rounds automatically"
-                          onClick={() => persist({ ...loop, auto: false })}
-                        >
+                          onClick={() => persist({ ...loop, auto: false })}>
                           Stop watching
-                        </button>
+                        </Button>
                       )}
                     </div>
                   )}
@@ -2195,20 +2181,16 @@ export function PrView({
                   </div>
                   {liveChecks === "FAIL" && (
                     <div className="pr-thread-actions">
-                      <button
-                        className="btn-mini"
+                      <Button size="sm"
                         disabled={busy}
-                        onClick={showLogs}
-                      >
+                        onClick={showLogs}>
                         Show failing logs
-                      </button>
+                      </Button>
                       {onMicroTask && (
-                        <button
-                          className="btn-mini"
-                          onClick={() => launch(fixCiTask, { repo, pr })}
-                        >
+                        <Button size="sm"
+                          onClick={() => launch(fixCiTask, { repo, pr })}>
                           Fix CI
-                        </button>
+                        </Button>
                       )}
                     </div>
                   )}
@@ -2248,37 +2230,34 @@ export function PrView({
                 not the whole PR again. The shas come from your own last review. */}
             {conv?.my_last_review_sha &&
               conv.my_last_review_sha !== conv.head_sha && (
-                <button
-                  className={`btn-mini ${deltaOn ? "btn-accent" : ""}`}
+                <Button
+                  size="sm"
+                  variant={deltaOn ? "accent" : "default"}
                   title="Only the commits pushed since your last review"
                   disabled={busy}
                   onClick={() => void toggleDelta()}
                 >
                   {deltaOn ? "Whole PR" : "Since your review"}
-                </button>
+                </Button>
               )}
             {/* Both diff controls live on the diff, not up in the header: this
                 is the bar they act on, and it keeps the header to actions that
                 change the PR rather than how you're looking at it. */}
-            <button
-              className="btn-mini"
+            <Button size="sm"
               title={
                 split ? "Show one column" : "Show old and new side by side"
               }
-              onClick={() => setSplit((v) => !v)}
-            >
+              onClick={() => setSplit((v) => !v)}>
               {split ? "Unified" : "Split"}
-            </button>
-            <button
-              className="btn-mini"
+            </Button>
+            <Button size="sm"
               onClick={() =>
                 setExpanded(
                   allOpen ? new Set() : new Set(files.map((f) => f.path)),
                 )
-              }
-            >
+              }>
               {allOpen ? "Collapse all" : "Expand all"}
-            </button>
+            </Button>
           </div>
         )}
 
@@ -2369,9 +2348,9 @@ export function PrView({
                 <div className="pr-rail-title">
                   {drafts.length} inline comment{drafts.length === 1 ? "" : "s"}{" "}
                   — not posted yet
-                  <button className="btn-mini" onClick={() => setDrafts([])}>
+                  <Button size="sm" onClick={() => setDrafts([])}>
                     Drop all
-                  </button>
+                  </Button>
                 </div>
                 {/* A manifest, not a second copy. Each of these is already
                     rendered in full on the line it belongs to, where the code
@@ -2408,16 +2387,14 @@ export function PrView({
                           </span>
                           <span className="pr-draft-gist">{gist(d.body)}</span>
                         </button>
-                        <button
-                          className="btn-mini"
+                        <Button size="sm"
                           onClick={() =>
                             setDrafts((prev) =>
                               prev.filter((x) => x.id !== d.id),
                             )
-                          }
-                        >
+                          }>
                           Drop
-                        </button>
+                        </Button>
                       </li>
                     );
                   })}
@@ -2633,16 +2610,14 @@ function LineComposer({
           blocking
         </label>
         <span className="git-spacer" />
-        <button className="btn-mini" onClick={onCancel}>
+        <Button size="sm" onClick={onCancel}>
           Cancel
-        </button>
-        <button
-          className="btn-mini btn-accent"
+        </Button>
+        <Button size="sm" variant="accent"
           disabled={!body.trim()}
-          onClick={() => onAdd(body.trim(), blocking)}
-        >
+          onClick={() => onAdd(body.trim(), blocking)}>
           Add
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -2706,23 +2681,19 @@ const ThreadCard = memo(function ThreadCard({
       )}
       {prOpen && (
         <div className="pr-thread-actions">
-          <button className="btn-mini" onClick={() => setReplying((v) => !v)}>
+          <Button size="sm" onClick={() => setReplying((v) => !v)}>
             Reply
-          </button>
-          <button
-            className="btn-mini"
-            onClick={() => onResolve(t.id, !t.resolved)}
-          >
+          </Button>
+          <Button size="sm"
+            onClick={() => onResolve(t.id, !t.resolved)}>
             {t.resolved ? "Reopen" : "Resolve"}
-          </button>
+          </Button>
           {suggestion && canSuggest && (
-            <button
-              className="btn-mini"
+            <Button size="sm"
               title="Apply the suggested change in a worktree, run the tests, and push"
-              onClick={() => onApplySuggestion(t, suggestion)}
-            >
+              onClick={() => onApplySuggestion(t, suggestion)}>
               Apply suggestion
-            </button>
+            </Button>
           )}
         </div>
       )}
@@ -2737,21 +2708,19 @@ const ThreadCard = memo(function ThreadCard({
             onChange={(e) => setReplyText(e.target.value)}
           />
           <div className="pr-thread-actions">
-            <button className="btn-mini" onClick={() => setReplying(false)}>
+            <Button size="sm" onClick={() => setReplying(false)}>
               Cancel
-            </button>
-            <button
-              className="btn-mini btn-accent"
+            </Button>
+            <Button size="sm" variant="accent"
               disabled={!replyText.trim()}
               onClick={() => {
                 const body = replyText.trim();
                 setReplying(false);
                 setReplyText("");
                 onReply(t.id, body);
-              }}
-            >
+              }}>
               Post reply
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -2808,15 +2777,13 @@ const DraftCard = memo(function DraftCard({
         onChange={(e) => onPatch(d.id, { body: e.target.value })}
       />
       <div className="pr-thread-actions">
-        <button
-          className="btn-mini"
-          onClick={() => onPatch(d.id, { blocking: !d.blocking })}
-        >
+        <Button size="sm"
+          onClick={() => onPatch(d.id, { blocking: !d.blocking })}>
           {d.blocking ? "Mark as nit" : "Mark blocking"}
-        </button>
-        <button className="btn-mini" onClick={() => onDrop(d.id)}>
+        </Button>
+        <Button size="sm" onClick={() => onDrop(d.id)}>
           Drop
-        </button>
+        </Button>
       </div>
     </div>
   );
