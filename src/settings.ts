@@ -403,6 +403,21 @@ export interface Settings {
    *  re-answer every time is a mode chooser nobody uses. */
   previewCaptureMode: CaptureMode;
 
+  /** Where an ordinary link goes when you click it: a preview tab in the
+   *  project you are in, or the OS browser.
+   *
+   *  On by default. Canopy has a real browser in it — one that holds logins
+   *  across restarts — and a link that leaves the app takes you out of the thing
+   *  you were doing to a window you then have to find your way back from. This
+   *  covers links, not buttons: a control whose label says it goes somewhere
+   *  else (Support, Open on GitHub, a file-an-issue flow) still goes there,
+   *  because that is what it promised.
+   *
+   *  Falls back to the OS browser whenever nothing internal can take the URL —
+   *  no project open, no view in front — since a click that does nothing at all
+   *  is the one outcome worse than either destination. */
+  openLinksInApp: boolean;
+
   // ---- Workspaces ----
   /** The number the repo's own checkout serves on. Workspaces lease offsets
    *  from it, so a second checkout of the same repo can run its dev server
@@ -475,6 +490,7 @@ const DEFAULTS: Settings = {
   remoteTunnelProvider: "cloudflare",
   browserEngine: "webview",
   previewCaptureMode: "visible",
+  openLinksInApp: true,
   workspaceBasePort: 5173,
   workspacePorts: {},
   workspaceBootstrap: true,

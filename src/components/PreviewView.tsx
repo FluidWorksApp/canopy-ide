@@ -632,9 +632,12 @@ export function PreviewView({
       //
       // Alone among the ops this one needs the tab actually in front — a
       // snapshot reads what is composited, and a hidden view has nothing in it.
-      // ProjectView brings the tab forward before dispatching a screenshot; the
-      // delay lets that paint land, and the visibility check catches the cases
-      // it can't fix (a hidden project, a minimized window).
+      //
+      // Nothing brings it forward to make that true. It used to: an agent asking
+      // for a screenshot moved the user's front tab, every time, which for an
+      // agent that photographs its own work is a window that will not sit still.
+      // So this reports what it found instead. The delay lets a paint land for
+      // the case where the tab IS in front and has only just got there.
       setTimeout(() => {
         const el = nativeRef.current ? hostRef.current : iframeRef.current;
         const rect = el?.getBoundingClientRect();
@@ -642,7 +645,7 @@ export function PreviewView({
           void ipc.browserResult(
             op.id,
             false,
-            "The preview isn't visible on screen right now, so there's nothing to capture. The page itself is still there — canopy_browser_snapshot reads it without needing the window.",
+            "The preview tab isn't in front, so there are no pixels to capture — and Canopy will not move the user's front tab to take a picture. The page itself is fine: canopy_browser_snapshot reads it, and click/type/eval all work on a background tab. If you genuinely need to see it rendered, ask the user to bring the preview tab forward.",
           );
           return;
         }

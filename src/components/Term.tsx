@@ -12,7 +12,7 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openLink } from "../links";
 import * as ipc from "../ipc";
 import { getSettings, THEME_CHANGE_EVENT, type Settings } from "../settings";
 import { terminalTheme } from "../terminalThemes";
@@ -187,7 +187,9 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         (event, uri) => {
           if (!opensLink(event, linkMode(), term.hasSelection())) return;
           linkHint.hide();
-          void openUrl(uri);
+          // Same route as every other link in the app — a dev server printing
+          // its address is the case the in-app browser was built for.
+          openLink(uri);
         },
         { hover: (event) => linkHint.show(event), leave: () => linkHint.hide() },
       ),

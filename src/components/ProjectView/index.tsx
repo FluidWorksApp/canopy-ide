@@ -179,6 +179,7 @@ import DeviceView from "../DeviceView";
 import type { PreviewServer } from "../../preview";
 import { dispatchBrowserOp } from "../../previewAgent";
 import { suppressBrowserViewsOver, useBrowserEngine } from "../../browserHost";
+import { OPEN_URL_EVENT, type OpenUrlDetail } from "../../links";
 import { serverForUrl } from "../../preview";
 import { ticketBranch, ticketContext, ticketWorktree } from "../../trackers";
 import { prConflictContext, prReviewContext } from "../../prs";
@@ -2890,13 +2891,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // answering the bridge, happens in the view; only the no-tab case must answer
   // here or the agent would wait out the bridge's timeout.
   //
-  // The op does NOT steal the front tab. Opening the preview brings it forward
-  // once (that's the moment worth showing); after that an agent clicking and
-  // typing must not yank the user off the file they're editing every few
-  // seconds. An open preview tab stays laid out while it's in the background
-  // (see the doc-host styling below) so its page keeps real geometry and the
-  // ops that need it — snapshot, click — work unwatched. Screenshot is the one
-  // exception: it captures pixels off the window, so it has to be in front.
+  // No op steals the front tab, screenshot included. Opening the preview brings
+  // it forward once — that is the moment worth showing, and it is the only one.
+  // After that an agent must never move what you are looking at: an agent that
+  // screenshots its own work every few seconds was yanking the user off the file
+  // they were editing every few seconds, which is the whole of the complaint.
+  //
+  // An open preview tab stays laid out while it's in the background (see the
+  // doc-host styling below) so its page keeps real geometry and the ops that
+  // need it — snapshot, click, type, eval — work unwatched.
+  //
+  // Screenshot is the one op that genuinely cannot: it reads composited pixels,
+  // and a backgrounded native view has none. So it fails, and says so, rather
+  // than fronting the tab to make itself work. PreviewView's message points at
+  // canopy_browser_snapshot, which reads the same page without the window.
   useEffect(() => {
     const originOf = (u: string): string | null => {
       try {
@@ -2923,7 +2931,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // A URL navigation can take over an empty (server-picker) preview tab.
         (op.op === "navigate" && op.url ? previews[0] : undefined);
       if (tab) {
-        if (op.op === "screenshot") setActiveTabId(tab.id);
         dispatchBrowserOp(tab.id, op);
       } else if (op.op === "navigate" && op.url) {
         dispatchBrowserOp(openPreview(op.url), op);
@@ -2939,6 +2946,27 @@ const ProjectViewBody = memo(function ProjectViewBody({
     return () =>
       window.removeEventListener("canopy:agent-browser", onBrowserOp);
   }, [project.id, openPreview]);
+
+  // A link the user clicked, from anywhere in the app: main.tsx delegates every
+  // anchor through links.ts, which asks here first when Settings → Browser says
+  // links open in Canopy.
+  //
+  // Only the project in front answers — every open project has one of these
+  // mounted, and a link clicked in the one you are looking at must not open a
+  // tab in a project you are not. Cancelling is the answer: links.ts reads a
+  // dispatch that nobody cancelled as "there was no view to take this" and
+  // sends it to the OS browser, so a click is never swallowed.
+  useEffect(() => {
+    if (!visible) return;
+    const onUrl = (e: Event) => {
+      const url = (e as CustomEvent<OpenUrlDetail>).detail?.url;
+      if (!url) return;
+      e.preventDefault();
+      openPreview(url);
+    };
+    window.addEventListener(OPEN_URL_EVENT, onUrl);
+    return () => window.removeEventListener(OPEN_URL_EVENT, onUrl);
+  }, [visible, openPreview]);
 
   const patchTab = useCallback(
     (id: string, patch: Partial<TermSubTab> & Partial<FileSubTab>) => {
