@@ -75,29 +75,81 @@ export function Row({
   )
 }
 
+/** Grey bars in the shape of the rows that are coming.
+ *
+ *  A skeleton rather than a spinner because it says *what* is loading and how
+ *  much of it, and because the list does not jump when the real rows land. */
+export function Skeleton({ rows = 6 }: { rows?: number }) {
+  return (
+    <div className="skel" aria-busy="true" aria-label="Loading">
+      {Array.from({ length: rows }, (_, i) => (
+        <div className="skel-row" key={i} style={{ ['--i' as string]: i }}>
+          <span className="skel-dot" />
+          <span className="skel-lines">
+            {/* Varied widths — equal bars read as a broken table, not as text. */}
+            <span className="skel-bar" style={{ width: `${52 + ((i * 17) % 34)}%` }} />
+            <span className="skel-bar thin" style={{ width: `${28 + ((i * 23) % 40)}%` }} />
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/** A hairline that sits under a panel header while a refresh is in flight.
+ *  Indeterminate, because the server cannot tell us how far along a `gh pr
+ *  list` is — and a fake percentage is worse than an honest sweep. */
+export function ProgressLine({ on }: { on: boolean }) {
+  return <div className={`progline ${on ? 'on' : ''}`} aria-hidden />
+}
+
 /**
- * The three states a remote list can be in, said out loud.
+ * Every state a remote list can be in, said out loud.
  *
  * A panel that shows nothing is ambiguous — still loading? nothing to show? the
  * command not granted? Over a phone link that ambiguity lands on every panel at
- * once, so each one answers it.
+ * once, so each one answers it: a skeleton while it is cold, the old rows plus
+ * a progress line while it refreshes, a named reason when it fails, and a
+ * "still going" note once it has taken long enough to worry about.
  */
 export function AsyncBody<T>({
   state,
   empty,
+  skeletonRows,
   children,
 }: {
   state: Async<T>
   empty: string
+  skeletonRows?: number
   children: (data: T) => ReactNode
 }) {
-  if (state.error) return <div className="panel-error">{state.error}</div>
-  if (state.loading && state.data === undefined) return <div className="panel-loading">Loading…</div>
+  if (state.error) {
+    return (
+      <div className="panel-error">
+        {state.error}
+        <button className="ghost sm" onClick={state.reload}>
+          Try again
+        </button>
+      </div>
+    )
+  }
+  if (state.cold) {
+    return (
+      <>
+        <Skeleton rows={skeletonRows} />
+        {state.slow && <div className="panel-note">Still loading — the link is slow.</div>}
+      </>
+    )
+  }
   const data = state.data
   if (data === undefined) return <div className="panel-empty">{empty}</div>
-  const rendered = children(data)
   if (Array.isArray(data) && data.length === 0) return <div className="panel-empty">{empty}</div>
-  return <>{rendered}</>
+  return (
+    <>
+      <ProgressLine on={state.loading} />
+      {children(data)}
+    </>
+  )
 }
 
 export function Pill({ children, tone }: { children: ReactNode; tone?: string }) {

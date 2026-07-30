@@ -9,6 +9,7 @@
 // comparing — a diff against the terminal that produced it — and one slot at a
 // time is the phone's constraint, not this one's.
 
+import { useEffect, useState } from 'react'
 import { IconClose, IconFolder, IconPlus, IconPower } from '@shared/icons'
 import { PANELS } from '../panels'
 import type { PanelCtx, Target } from '../panels/types'
@@ -69,6 +70,7 @@ export function WideShell(props: ShellProps) {
 
       <section className="pane list-pane" aria-label={panel.title}>
         <PanelHead title={panel.title} count={panel.badge?.(ctx)}>
+          <BusyDot ctx={ctx} />
           <ProjectPicker {...props} />
           <button className="ghost sm" onClick={props.onNewAgent}>
             <IconPlus s={14} /> Agent
@@ -114,6 +116,15 @@ export function WideShell(props: ShellProps) {
   )
 }
 
+/** One activity light for the whole app, driven by the RPC layer's in-flight
+ *  count. It is the answer to "did my tap do anything?" on a panel that already
+ *  has rows on screen and therefore shows no skeleton. */
+export function BusyDot({ ctx }: { ctx: PanelCtx }) {
+  const [busy, setBusy] = useState(false)
+  useEffect(() => ctx.rpc.onBusy(setBusy), [ctx.rpc])
+  return <span className={`busy-dot ${busy ? 'on' : ''}`} aria-hidden />
+}
+
 export function ProjectPicker({ projects, ctx, onProject }: ShellProps) {
   if (projects.length <= 1) {
     return projects.length === 1 ? (
@@ -154,6 +165,8 @@ export function tabLabel(t: Target): string {
     case 'pr':
       return `#${t.number}`
     case 'text':
+    case 'research':
+    case 'doc':
       return t.title.slice(0, 24)
   }
 }

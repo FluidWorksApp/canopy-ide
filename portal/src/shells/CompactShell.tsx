@@ -11,7 +11,7 @@ import { IconClose, IconFolder, IconMenu, IconPlus, IconPower } from '@shared/ic
 import { COMPACT_PRIMARY, PANELS } from '../panels'
 import { targetKey } from '../panels/types'
 import { Detail } from '../views/Detail'
-import type { ShellProps } from './WideShell'
+import { BusyDot, type ShellProps } from './WideShell'
 
 export function CompactShell(props: ShellProps) {
   const { ctx, up, panelId, onPanel, tabs, activeKey, onCloseTab, projects, onProject } = props
@@ -40,6 +40,7 @@ export function CompactShell(props: ShellProps) {
       <header className="cbar">
         <span className={`mark-dot ${up ? 'live' : 'down'}`} />
         <span className="cbar-title">{panel.title}</span>
+        <BusyDot ctx={ctx} />
         {projects.length > 1 ? (
           <label className="proj-pick">
             <IconFolder s={13} />

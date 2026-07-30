@@ -30,15 +30,6 @@ interface ResearchSummary {
   superseded_by?: string | null
 }
 
-/** `Detail` flattens `Summary` into itself in Rust (`#[serde(flatten)]`), so the
- *  wire shape is one flat object, not a nested `summary`. */
-interface ResearchDetail extends ResearchSummary {
-  question: string
-  recommendation: string
-  open_questions: string[]
-  body: string
-}
-
 interface McpSource {
   agent: string
   label: string
@@ -131,7 +122,7 @@ export const researchPanel: PanelDef = {
             {entries.map((e) => (
               <Row
                 key={e.id}
-                on={ctx.openKey === `text:${e.title}`}
+                on={ctx.openKey === `research:${projectId}:${e.id}`}
                 icon={<IconFlask s={15} />}
                 title={e.title}
                 sub={e.digest}
@@ -141,21 +132,13 @@ export const researchPanel: PanelDef = {
                     <Pill tone={e.status === 'implemented' ? 'ok' : ''}>{e.status}</Pill>
                   </>
                 }
-                onClick={() => {
-                  void ctx.rpc
-                    .call<ResearchDetail>('research_get', { projectId, id: e.id })
-                    .then((d) =>
-                      ctx.open({
-                        kind: 'text',
-                        title: e.title,
-                        subtitle: d.status ?? e.status,
-                        body: researchText(d),
-                      }),
-                    )
-                    .catch((err: Error) =>
-                      ctx.open({ kind: 'text', title: e.title, body: err.message }),
-                    )
-                }}
+                // Opens immediately; the detail pane does the fetching. The
+                // previous version awaited the RPC *before* opening anything, so
+                // a tap did nothing visible for the whole round trip.
+                onClick={() =>
+                  projectId &&
+                  ctx.open({ kind: 'research', projectId, id: e.id, title: e.title })
+                }
               />
             ))}
           </>
@@ -163,17 +146,6 @@ export const researchPanel: PanelDef = {
       </AsyncBody>
     )
   },
-}
-
-function researchText(d: ResearchDetail): string {
-  const parts: string[] = []
-  if (d.question) parts.push(`## Question\n\n${d.question}`)
-  if (d.recommendation) parts.push(`## Recommendation\n\n${d.recommendation}`)
-  if (d.open_questions?.length) {
-    parts.push(`## Open questions\n\n${d.open_questions.map((q) => `- ${q}`).join('\n')}`)
-  }
-  if (d.body) parts.push(d.body)
-  return parts.join('\n\n') || 'This entry has no body yet.'
 }
 
 export const toolsPanel: PanelDef = {
@@ -234,7 +206,7 @@ export const instructionsPanel: PanelDef = {
             {docs.map((d) => (
               <Row
                 key={d.path}
-                on={ctx.openKey === `text:${d.label || d.path}`}
+                on={ctx.openKey === `doc:${d.path}`}
                 icon={<IconBook s={15} />}
                 title={d.label || d.path.split('/').pop() || d.path}
                 sub={d.agents.length ? d.agents.join(', ') : d.path}
@@ -244,17 +216,14 @@ export const instructionsPanel: PanelDef = {
                     {d.scope === 'global' && <Pill tone="dim">global</Pill>}
                   </>
                 }
-                onClick={() => {
-                  const title = d.label || d.path.split('/').pop() || d.path
-                  void ctx.rpc
-                    .call<string>('instructions_read', { path: d.path, roots })
-                    .then((body) =>
-                      ctx.open({ kind: 'text', title, subtitle: d.path, body, mono: true }),
-                    )
-                    .catch((err: Error) =>
-                      ctx.open({ kind: 'text', title, body: err.message }),
-                    )
-                }}
+                onClick={() =>
+                  ctx.open({
+                    kind: 'doc',
+                    path: d.path,
+                    roots,
+                    title: d.label || d.path.split('/').pop() || d.path,
+                  })
+                }
               />
             ))}
           </>

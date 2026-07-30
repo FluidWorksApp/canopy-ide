@@ -97,7 +97,91 @@ export function Detail({
           <pre className={`doc ${target.mono ? 'mono' : ''}`}>{target.body}</pre>
         </Frame>
       )
+    case 'research':
+      return <ResearchDetailView ctx={ctx} target={target} onBack={onBack} showBack={showBack} />
+    case 'doc':
+      return <DocDetail ctx={ctx} target={target} onBack={onBack} showBack={showBack} />
   }
+}
+
+/** `Detail` flattens `Summary` into itself in Rust (`#[serde(flatten)]`), so the
+ *  wire shape is one flat object, not a nested `summary`. */
+interface ResearchDetail {
+  id: string
+  title: string
+  status: string
+  question: string
+  recommendation: string
+  open_questions: string[]
+  body: string
+}
+
+function ResearchDetailView({
+  ctx,
+  target,
+  onBack,
+  showBack,
+}: {
+  ctx: PanelCtx
+  target: Extract<Target, { kind: 'research' }>
+  onBack: () => void
+  showBack: boolean
+}) {
+  const state = useAsync<ResearchDetail>(
+    () =>
+      ctx.rpc.call<ResearchDetail>('research_get', {
+        projectId: target.projectId,
+        id: target.id,
+      }),
+    [target.projectId, target.id],
+  )
+  return (
+    <Frame
+      title={target.title}
+      subtitle={state.data?.status}
+      onBack={onBack}
+      showBack={showBack}
+    >
+      <AsyncBody state={state} empty="This entry is empty." skeletonRows={4}>
+        {(d) => <pre className="doc">{researchText(d)}</pre>}
+      </AsyncBody>
+    </Frame>
+  )
+}
+
+function researchText(d: ResearchDetail): string {
+  const parts: string[] = []
+  if (d.question) parts.push(`## Question\n\n${d.question}`)
+  if (d.recommendation) parts.push(`## Recommendation\n\n${d.recommendation}`)
+  if (d.open_questions?.length) {
+    parts.push(`## Open questions\n\n${d.open_questions.map((q) => `- ${q}`).join('\n')}`)
+  }
+  if (d.body) parts.push(d.body)
+  return parts.join('\n\n') || 'This entry has no body yet.'
+}
+
+function DocDetail({
+  ctx,
+  target,
+  onBack,
+  showBack,
+}: {
+  ctx: PanelCtx
+  target: Extract<Target, { kind: 'doc' }>
+  onBack: () => void
+  showBack: boolean
+}) {
+  const state = useAsync<string>(
+    () => ctx.rpc.call<string>('instructions_read', { path: target.path, roots: target.roots }),
+    [target.path],
+  )
+  return (
+    <Frame title={target.title} subtitle={target.path} onBack={onBack} showBack={showBack}>
+      <AsyncBody state={state} empty="This file is empty." skeletonRows={5}>
+        {(body) => <pre className="doc mono">{body}</pre>}
+      </AsyncBody>
+    </Frame>
+  )
 }
 
 /** The shared chrome: a back affordance that only exists where back means

@@ -22,6 +22,13 @@ export type Target =
   | { kind: 'commit'; repo: string; hash: string; subject: string }
   | { kind: 'pr'; repo: string; number: number; title: string }
   | { kind: 'text'; title: string; subtitle?: string; body: string; mono?: boolean }
+  /** A body the *detail pane* fetches, rather than the row that opened it.
+   *
+   *  The difference is the whole point: a row that awaits an RPC before calling
+   *  `open` looks broken, because nothing at all happens until the round trip
+   *  finishes. These open instantly onto a loading frame and fill in. */
+  | { kind: 'research'; projectId: string; id: string; title: string }
+  | { kind: 'doc'; path: string; roots: string[]; title: string }
 
 export function targetKey(t: Target): string {
   switch (t.kind) {
@@ -39,6 +46,10 @@ export function targetKey(t: Target): string {
       return `pr:${t.repo}:${t.number}`
     case 'text':
       return `text:${t.title}`
+    case 'research':
+      return `research:${t.projectId}:${t.id}`
+    case 'doc':
+      return `doc:${t.path}`
   }
 }
 

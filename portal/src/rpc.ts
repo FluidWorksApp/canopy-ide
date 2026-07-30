@@ -21,6 +21,10 @@ export interface Rpc {
   /** Drop every pending call — used when the socket drops, so a reconnect does
    *  not resolve promises against a server that has forgotten them. */
   reset(reason: string): void
+  /** Subscribe to "is anything in flight". The shell shows one activity light
+   *  from this, so a tap that kicks off a background load is acknowledged even
+   *  on a panel that already has rows on screen. */
+  onBusy(cb: (busy: boolean) => void): () => void
 }
 
 interface Waiter {
@@ -31,7 +35,18 @@ interface Waiter {
 
 export function makeRpc(wire: Wire): Rpc {
   const waiting = new Map<string, Waiter>()
+  const busyCbs = new Set<(busy: boolean) => void>()
   let seq = 0
+  let lastBusy = false
+
+  // Only on a transition — a callback per settled request would re-render the
+  // whole shell once per row on a panel that fires a dozen reads.
+  const pumpBusy = () => {
+    const busy = waiting.size > 0
+    if (busy === lastBusy) return
+    lastBusy = busy
+    busyCbs.forEach((cb) => cb(busy))
+  }
 
   wire.on((m) => {
     if (m.t !== 'act-ack') return
@@ -39,6 +54,7 @@ export function makeRpc(wire: Wire): Rpc {
     if (!w) return
     waiting.delete(m.id)
     clearTimeout(w.timer)
+    pumpBusy()
     if (m.ok) w.resolve(m.result)
     else w.reject(new Error(String(m.error ?? 'failed')))
   })
@@ -49,6 +65,7 @@ export function makeRpc(wire: Wire): Rpc {
       w.reject(new Error(reason))
     }
     waiting.clear()
+    pumpBusy()
   }
 
   return {
@@ -61,12 +78,19 @@ export function makeRpc(wire: Wire): Rpc {
       return new Promise<T>((resolve, reject) => {
         const timer = setTimeout(() => {
           waiting.delete(id)
+          pumpBusy()
           reject(new Error(`${action} timed out`))
         }, TIMEOUT_MS)
         waiting.set(id, { resolve: resolve as (v: unknown) => void, reject, timer })
+        pumpBusy()
         wire.send({ t: 'act', id, action, args })
       })
     },
     reset: settleAll,
+    onBusy(cb) {
+      busyCbs.add(cb)
+      cb(lastBusy)
+      return () => busyCbs.delete(cb)
+    },
   }
 }

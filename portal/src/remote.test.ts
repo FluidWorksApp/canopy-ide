@@ -56,6 +56,8 @@ describe('detail targets', () => {
     { kind: 'commit', repo: '/w/canopy', hash: 'abc123def', subject: 'Fix the thing' },
     { kind: 'pr', repo: '/w/canopy', number: 42, title: 'Add remote panels' },
     { kind: 'text', title: 'CLAUDE.md', body: '# hi' },
+    { kind: 'research', projectId: 'p1', id: 'e1', title: 'Vault' },
+    { kind: 'doc', path: '/w/c/CLAUDE.md', roots: ['/w/c'], title: 'CLAUDE.md' },
   ]
 
   it('keys every kind distinctly', () => {
@@ -174,5 +176,25 @@ describe('notification text', () => {
     // The key becomes the Notification `tag`; without that, every poll would
     // stack another copy of the same question.
     expect(alertFor(base).key).toBe('k1')
+  })
+})
+
+describe('taps are acknowledged before the network answers', () => {
+  it('gives research and instruction rows a target the detail pane resolves', () => {
+    // These two used to await an RPC and only then call `open`, so a tap did
+    // nothing at all — no frame, no spinner — until the round trip finished.
+    // Over a phone link that is seconds of an app that looks dead.
+    const research: Target = { kind: 'research', projectId: 'p1', id: 'e1', title: 'Vault' }
+    const doc: Target = { kind: 'doc', path: '/w/c/CLAUDE.md', roots: ['/w/c'], title: 'CLAUDE.md' }
+    expect(targetKey(research)).toBe('research:p1:e1')
+    expect(targetKey(doc)).toBe('doc:/w/c/CLAUDE.md')
+    expect(tabLabel(research)).toBe('Vault')
+    expect(tabLabel(doc)).toBe('CLAUDE.md')
+  })
+
+  it('keys two entries in one project apart', () => {
+    const a: Target = { kind: 'research', projectId: 'p', id: 'a', title: 'A' }
+    const b: Target = { kind: 'research', projectId: 'p', id: 'b', title: 'B' }
+    expect(targetKey(a)).not.toBe(targetKey(b))
   })
 })

@@ -70,7 +70,22 @@ pub struct RemoteManager {
     /// Canopy theme tokens the desktop pushes (var name → color), so the portal
     /// can render in the same skin. Persists across enable/disable.
     theme: Arc<Mutex<Option<Value>>>,
+    /// The scoping roots, cached — see `open_roots`.
+    roots: RootsCache,
 }
+
+/// Cached scoping roots and when they were computed.
+///
+/// Recomputing them means asking git for each repo's worktrees, and the
+/// snapshot runs every four seconds per connected client. Worktrees appear when
+/// someone creates one — minutes apart at best — so this is the difference
+/// between a couple of git processes a minute and a couple of git processes a
+/// second, for identical output.
+type RootsCache = Arc<Mutex<Option<(std::time::Instant, Vec<String>)>>>;
+
+/// How long a roots list stays good. A worktree created on the desktop shows up
+/// in the phone's scope within this; nothing else depends on it being fresher.
+const ROOTS_TTL: Duration = Duration::from_secs(60);
 
 struct Running {
     addr: SocketAddr,
@@ -103,6 +118,8 @@ struct Portal {
     events: broadcast::Sender<String>,
     /// Shared handle to the desktop-pushed theme tokens (see RemoteManager).
     theme: Arc<Mutex<Option<Value>>>,
+    /// Shared handle to the cached scoping roots (see RemoteManager).
+    roots: RootsCache,
     /// Replay and single-flight bookkeeping for desktop-executed verbs. Shared
     /// across sockets on purpose: a phone that reconnects mid-action gets the
     /// first answer back rather than starting a second run.
@@ -206,6 +223,7 @@ pub async fn remote_enable(
         tokens,
         events: events_tx,
         theme: mgr.theme.clone(),
+        roots: mgr.roots.clone(),
         verbs: Arc::new(VerbRouter::default()),
     };
     let router = Router::new()
@@ -442,7 +460,7 @@ async fn ws_conn(mut socket: WebSocket, p: Portal) {
     // Initial snapshot.
     let theme0 = p.theme.lock().unwrap().clone();
     if out_tx
-        .send(snapshot_msg(&p.app, theme0).await)
+        .send(snapshot_msg(&p.app, theme0, &p.roots).await)
         .await
         .is_err()
     {
@@ -565,8 +583,9 @@ fn handle_client_msg(
             let out = out.clone();
             let app = p.app.clone();
             let theme = p.theme.lock().unwrap().clone();
+            let roots = p.roots.clone();
             tokio::spawn(async move {
-                let _ = out.send(snapshot_msg(&app, theme).await).await;
+                let _ = out.send(snapshot_msg(&app, theme, &roots).await).await;
             });
         }
         _ => {}
@@ -743,12 +762,12 @@ const MAX_FILES: usize = 40;
 /// then filter by cwd prefix again. This does the same, from the same source of
 /// truth — the roots of the projects the IDE currently has open, plus each
 /// repo's worktrees, so an agent in another workspace is still reachable.
-async fn snapshot_msg(app: &AppHandle, theme: Option<Value>) -> String {
+async fn snapshot_msg(app: &AppHandle, theme: Option<Value>, roots_cache: &RootsCache) -> String {
     let projects = crate::fsx::store_load()
         .await
         .unwrap_or_else(|_| "null".into());
     let projects: Value = serde_json::from_str(&projects).unwrap_or(Value::Null);
-    let roots = open_roots(app, &projects).await;
+    let roots = cached_roots(app, &projects, roots_cache).await;
     let sessions = crate::agents::session_digests(Some(roots.clone()))
         .await
         .unwrap_or_default();
@@ -773,6 +792,27 @@ fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// The directories the IDE currently has open, cached for `ROOTS_TTL`.
+///
+/// The uncached version costs a git process per worktree, and the snapshot that
+/// wants it runs every four seconds per client. On a checkout with 66 worktrees
+/// that measured 3.4 seconds of git per refresh — which does not merely waste
+/// CPU, it starves every panel request queued behind it, so opening a file read
+/// as "the network is slow" when the network was idle.
+async fn cached_roots(app: &AppHandle, store: &Value, cache: &RootsCache) -> Vec<String> {
+    {
+        let guard = cache.lock().unwrap();
+        if let Some((at, roots)) = guard.as_ref() {
+            if at.elapsed() < ROOTS_TTL {
+                return roots.clone();
+            }
+        }
+    }
+    let roots = open_roots(app, store).await;
+    *cache.lock().unwrap() = Some((std::time::Instant::now(), roots.clone()));
+    roots
 }
 
 /// The directories the IDE currently has open: each open project's components,
@@ -815,9 +855,19 @@ async fn open_roots(app: &AppHandle, store: &Value) -> Vec<String> {
     // Worktrees of those components. An agent working in `.claude/worktrees/x`
     // has a cwd under the worktree, not under the checkout, so without this the
     // scope drops exactly the agents the user most wants to reach.
+    //
+    // `scan_worktrees`, NOT `git_worktrees`: the latter also counts uncommitted
+    // files, which is a `git status` per worktree. Scoping needs the paths and
+    // nothing else, and git.rs says so at the top of `list_worktrees` — "anything
+    // that only needs to know *which* worktree holds a branch calls
+    // scan_worktrees instead". This is one of those callers.
     let mut extra: Vec<String> = Vec::new();
+    let state = app.state::<crate::fsx::WorkspaceManager>();
     for root in &roots {
-        if let Ok(trees) = crate::git::git_worktrees(app.state(), root.clone()).await {
+        let Ok(top) = crate::fsx::check_scope(&state, std::path::Path::new(root)) else {
+            continue;
+        };
+        if let Ok(trees) = crate::git::scan_worktrees(&top) {
             extra.extend(trees.into_iter().map(|t| t.path));
         }
     }
@@ -1062,6 +1112,29 @@ mod tests {
         assert!(out
             .iter()
             .all(|d| d["state"] != "ended" || d["updated"].as_i64().unwrap() > stale));
+    }
+
+    /// The snapshot runs every four seconds per connected client, so nothing in
+    /// its path may cost a process per worktree.
+    ///
+    /// `git_worktrees` does exactly that — it counts uncommitted files, one
+    /// `git status` each — and using it here measured 3.4s of git per refresh on
+    /// a 66-worktree checkout. The symptom was not "the server is busy", it was
+    /// every panel request queuing behind the churn, which reads as a slow
+    /// network. Scoping needs paths only: `scan_worktrees` is one git process
+    /// for the whole repo.
+    #[test]
+    fn the_snapshot_path_never_counts_dirty_worktrees() {
+        let src = include_str!("portal.rs");
+        let body = src.split("#[cfg(test)]").next().unwrap();
+        // The call, not the word — the comment above the call site names it on
+        // purpose, to say why it is the wrong one.
+        assert!(
+            !body.contains("git::git_worktrees("),
+            "portal.rs must call scan_worktrees, not git_worktrees — the dirty \
+             count is a git process per worktree on a 4-second poll"
+        );
+        assert!(body.contains("git::scan_worktrees("));
     }
 
     #[test]
