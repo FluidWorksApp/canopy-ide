@@ -22,6 +22,13 @@ const app: ServerComponent = { label: "canopy", path: "/w/app", commands: [] };
 
 const noPorts = () => [];
 
+const claudeIn = (ptyId: number) => ({
+  sessionId: `s${ptyId}`,
+  ptyId,
+  name: "claude",
+  state: "working" as const,
+});
+
 describe("groupServers", () => {
   it("lists only components that have something to run", () => {
     const groups = groupServers([web, app], [], noPorts);
@@ -125,5 +132,75 @@ describe("runningCount", () => {
       term({ id: "t2", cwd: "/elsewhere", command: "make watch" }),
     ];
     expect(runningCount(groupServers([web], tabs, noPorts))).toBe(2);
+  });
+});
+
+describe("workspaces nest under their component", () => {
+  const wsWeb: ServerComponent = {
+    ...web,
+    workspaces: [
+      { label: "feat/a", path: "/w/site-wt-a", port: 5174, agents: [claudeIn(7)] },
+      { label: "feat/b", path: "/w/site-wt-b", port: 5175, agents: [] },
+    ],
+  };
+
+  it("does not make a top-level group per component-and-branch pair", () => {
+    const groups = groupServers([wsWeb], [], noPorts);
+    // Two workspaces must not become two more headings — that is what turned
+    // four components into sixteen.
+    expect(groups).toHaveLength(1);
+    expect(groups[0].label).toBe("canopy-website");
+    expect(groups[0].workspaces.map((w) => w.label)).toEqual(["feat/a", "feat/b"]);
+  });
+
+  it("gives each workspace the component's commands, in its own directory", () => {
+    const [g] = groupServers([wsWeb], [], noPorts);
+    const a = g.workspaces[0];
+    expect(a.path).toBe("/w/site-wt-a");
+    expect(a.entries.map((e) => e.name)).toEqual(["server", "build"]);
+    expect(a.agents.map((x) => x.ptyId)).toEqual([7]);
+  });
+
+  it("puts a run started on a branch under that branch, not the component", () => {
+    const [g] = groupServers(
+      [wsWeb],
+      [term({ id: "t1", cwd: "/w/site-wt-a", command: "npm run dev" })],
+      noPorts,
+    );
+    expect(g.entries.find((e) => e.name === "server")!.state).toBe("stopped");
+    expect(g.workspaces[0].entries.find((e) => e.name === "server")!.state).toBe(
+      "running",
+    );
+    expect(g.workspaces[0].running).toBe(1);
+  });
+
+  it("counts a branch's live server in the component header", () => {
+    const [g] = groupServers(
+      [wsWeb],
+      [term({ id: "t1", cwd: "/w/site-wt-a", command: "npm run dev" })],
+      noPorts,
+    );
+    // A collapsed component whose only live server is on a branch must not
+    // read as idle.
+    expect(g.running).toBe(1);
+    expect(runningCount([g])).toBe(1);
+  });
+
+  it("claims an unconfigured run in a workspace for that workspace", () => {
+    const [g] = groupServers(
+      [wsWeb],
+      [term({ id: "t9", cwd: "/w/site-wt-b/api", command: "npx tsx watch" })],
+      noPorts,
+    );
+    // Before this it fell through to the ad-hoc pass and became an orphan
+    // group named after a directory.
+    expect(g.workspaces[1].entries.some((e) => e.adhoc)).toBe(true);
+    expect(groupServers([wsWeb], [term({ id: "t9", cwd: "/w/site-wt-b/api" })], noPorts))
+      .toHaveLength(1);
+  });
+
+  it("leaves a project with no workspaces exactly as it was", () => {
+    const [g] = groupServers([web], [], noPorts);
+    expect(g.workspaces).toEqual([]);
   });
 });

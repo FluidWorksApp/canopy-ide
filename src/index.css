@@ -1993,6 +1993,118 @@ body.resizing-side * {
 /* Fixed height + always-reserved action slot. The buttons used to be
    display:none until hover, so showing them grew the row and shoved the whole
    list around under the pointer. Nothing here may change the row's box. */
+/* ---------- workspace runs (Servers panel) ----------
+   The same component on another branch, nested under it. One line each when
+   nothing is happening, because the alternative — a top-level heading per
+   component-and-branch pair — turned four components with four workspaces into
+   sixteen headings you had to read past. */
+
+.ws-run-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 8px 0 18px;
+  cursor: pointer;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.ws-run-head:hover { background: var(--bg-raised); color: var(--text); }
+
+/* Deliberately not uppercased the way a component heading is: this is a branch
+   name, and branch names are typed in the case they were written in.
+   `min-width: 0` is load-bearing: without it a long branch name refuses to
+   shrink below its intrinsic width, so the ellipsis never engages and the row's
+   buttons are pushed out past the panel edge and wrap onto a second line. */
+.ws-run-branch {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: none;
+}
+
+/* Its own container rather than the component header's: that one is only a
+   `margin-left: auto` on a taller, space-between row, and two icon buttons in
+   it had nothing keeping them on one line. */
+.ws-run-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  margin-left: 2px;
+}
+
+.ws-run-live .ws-run-branch { color: var(--text); }
+
+/* Who is working in here. A name and a state, not a count: the point of this
+   chip is that it identifies someone you can send a request to. */
+.ws-run-agent {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 9px;
+  padding: 0 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  cursor: pointer;
+  max-width: 96px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.ws-run-agent:hover { border-color: var(--accent); color: var(--text); }
+
+.ws-run-agent-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: 0 0 5px;
+}
+
+/* Mid-turn is the state worth catching your eye — it is the one that means
+   "asking for its server right now will interrupt something". */
+.ws-run-agent-working { border-color: var(--ok); color: var(--ok); }
+.ws-run-agent-waiting { border-color: var(--warn); color: var(--warn); }
+.ws-run-agent-idle,
+.ws-run-agent-unknown { opacity: 0.75; }
+
+.ws-run-port {
+  flex: 0 0 auto;
+  font-family: ui-monospace, monospace;
+  font-size: 9px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  color: var(--text-dim);
+  opacity: 0.65;
+}
+
+.ws-run-live .ws-run-port {
+  border-color: var(--ok);
+  color: var(--ok);
+  opacity: 1;
+}
+
+.ws-run-actions .icon-btn { visibility: hidden; }
+.ws-run-head:hover .ws-run-actions .icon-btn { visibility: visible; }
+
+/* A workspace's own commands sit one step further in than the component's, so
+   the nesting is readable without a rule or a box. */
+.ws-run-commands .command-run-row {
+  padding-left: 34px;
+  font-size: 11px;
+}
+
 .command-run-row {
   display: flex;
   align-items: center;
