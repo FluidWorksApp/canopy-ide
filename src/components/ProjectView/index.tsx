@@ -19,6 +19,7 @@ import * as ipc from "../../ipc";
 import { getSettings, SETTINGS_CHANGE_EVENT } from "../../settings";
 import { modelFor, monaco, languageForPath } from "../../monaco-setup";
 import { getCaret, subscribeCaret } from "../../editorState";
+import { useEscapeBackstop, useEscapeLayer } from "../../useEscape";
 import { subscribe as prWatchSubscribe } from "../../prWatchStore";
 import { GuestSession, OwnerSession } from "../../collab";
 import { CollabView } from "../CollabView";
@@ -3828,6 +3829,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
     setPeeking(false);
     setPinned(false);
   };
+  /** Escape puts the overlay panel away — the keyboard's answer to the click
+   *  outside that already dismisses it. Only in overlay mode: a docked panel
+   *  covers nothing, so there is nothing to get out from under, and Escape is
+   *  worth more to the terminal it would otherwise be taken from. */
+  const escapeSidePanel = useCallback(() => dismissPeekRef.current(), []);
+  useEscapeBackstop(escapeSidePanel, sidePrefs.overlay && sideOpen);
   useEffect(
     () => () => {
       if (openTimer.current !== null) window.clearTimeout(openTimer.current);
@@ -5143,7 +5150,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
       return next.size === prev.size ? prev : next;
     });
   }, [liveTermPtys]);
-  // Esc closes the overlay, matching every other overlay in the app.
+  // Esc closes the overlay, matching every other overlay in the app — and
+  // counts as a layer, so the press that closes it is not also the press that
+  // puts the side panel away underneath.
+  useEscapeLayer(wsDrawerOpen);
   useEffect(() => {
     if (!wsDrawerOpen) return;
     const onKey = (e: KeyboardEvent) => {
