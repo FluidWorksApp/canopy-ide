@@ -1,0 +1,178 @@
+// The portal's own logic, tested where it is testable: the pure functions that
+// decide what a row says and what a notification says. The panels themselves are
+// thin — a query and a projection — and their real failure mode is a Rust struct
+// changing shape, which the interfaces beside each query catch at compile time.
+
+import { describe, expect, it } from 'vitest'
+import { parseDiff } from './views/Diff'
+import { isStaged, rel, statusWord } from './panels/code'
+import { targetKey, type Target } from './panels/types'
+import { tabLabel } from './shells/WideShell'
+import { COMPACT_PRIMARY, PANELS, panelById } from './panels'
+import { alertFor } from './notify'
+import type { PendingItem } from '@shared/notifications'
+import { MANIFESTS } from '@shared/remote/modules'
+
+describe('the panel rail', () => {
+  it('has a panel for every module that lists something', () => {
+    // `browser` is capability:none — it declares why it cannot travel instead of
+    // pretending to. `core` is the project addressing space, which the shell
+    // renders as the project switcher rather than a panel of its own.
+    const listing = MANIFESTS.filter(
+      (m) => m.capability.level !== 'none' && m.id !== 'core',
+    ).map((m) => m.id)
+    for (const id of listing) {
+      // `agents` covers both the agents and terminals panels; `stats` renders as
+      // "usage". Everything else is one-to-one.
+      const covered = panelById(id) ?? (id === 'stats' ? panelById('usage') : undefined)
+      expect(covered, `module '${id}' has no panel in the rail`).toBeDefined()
+    }
+  })
+
+  it('gives every panel a unique id', () => {
+    const ids = PANELS.map((p) => p.id)
+    expect(new Set(ids).size).toBe(ids.length)
+  })
+
+  it("keeps the phone's primary tabs to a thumb's reach", () => {
+    // Four plus More. A fifth makes each target too narrow to hit reliably.
+    expect(COMPACT_PRIMARY.length).toBe(4)
+    for (const id of COMPACT_PRIMARY) expect(panelById(id)).toBeDefined()
+  })
+
+  it('leads with notifications', () => {
+    // It is why you picked the phone up.
+    expect(PANELS[0].id).toBe('notifications')
+    expect(COMPACT_PRIMARY[0]).toBe('notifications')
+  })
+})
+
+describe('detail targets', () => {
+  const targets: Target[] = [
+    { kind: 'terminal', pty: 4 },
+    { kind: 'history', key: 'sess-1' },
+    { kind: 'file', path: '/w/canopy/src/App.tsx' },
+    { kind: 'diff', repo: '/w/canopy', path: '/w/canopy/src/App.tsx', staged: false },
+    { kind: 'commit', repo: '/w/canopy', hash: 'abc123def', subject: 'Fix the thing' },
+    { kind: 'pr', repo: '/w/canopy', number: 42, title: 'Add remote panels' },
+    { kind: 'text', title: 'CLAUDE.md', body: '# hi' },
+  ]
+
+  it('keys every kind distinctly', () => {
+    const keys = targets.map(targetKey)
+    expect(new Set(keys).size).toBe(keys.length)
+  })
+
+  it('separates the staged and unstaged diff of one file', () => {
+    // They are different patches, so they are different tabs.
+    const unstaged: Target = { kind: 'diff', repo: '/w/c', path: '/w/c/a.ts', staged: false }
+    const staged: Target = { ...unstaged, staged: true }
+    expect(targetKey(unstaged)).not.toBe(targetKey(staged))
+  })
+
+  it('labels every kind for the tab strip', () => {
+    for (const t of targets) expect(tabLabel(t).length).toBeGreaterThan(0)
+  })
+})
+
+describe('git status codes', () => {
+  it('reads the index column, not the whole code, for staged-ness', () => {
+    expect(isStaged('M ')).toBe(true)
+    expect(isStaged('MM')).toBe(true)
+    expect(isStaged(' M')).toBe(false)
+    // Untracked is not staged, even though its first column is not a space.
+    expect(isStaged('??')).toBe(false)
+  })
+
+  it('says what changed in one word', () => {
+    expect(statusWord('??').word).toBe('new')
+    expect(statusWord(' M').word).toBe('modified')
+    expect(statusWord(' D').word).toBe('deleted')
+    expect(statusWord('R ').word).toBe('renamed')
+    expect(statusWord('A ').word).toBe('added')
+  })
+
+  it('shows a path relative to its repo', () => {
+    expect(rel('/w/canopy/src/App.tsx', '/w/canopy')).toBe('src/App.tsx')
+    expect(rel('/w/canopy/src/App.tsx', '/w/canopy/')).toBe('src/App.tsx')
+    // A path outside the root is left whole rather than mangled.
+    expect(rel('/elsewhere/a.ts', '/w/canopy')).toBe('/elsewhere/a.ts')
+  })
+})
+
+describe('unified diff parsing', () => {
+  const patch = [
+    'diff --git a/a.ts b/a.ts',
+    'index 111..222 100644',
+    '--- a/a.ts',
+    '+++ b/a.ts',
+    '@@ -1,3 +1,3 @@',
+    ' const a = 1',
+    '-const b = 2',
+    '+const b = 3',
+  ].join('\n')
+
+  it('classifies each line', () => {
+    const kinds = parseDiff(patch).map((l) => l.kind)
+    expect(kinds).toEqual(['meta', 'meta', 'meta', 'meta', 'hunk', 'ctx', 'del', 'add'])
+  })
+
+  it('does not colour the file headers as content', () => {
+    // `---`/`+++` are the classic tell of a diff view written in a hurry: they
+    // start with - and + but are headers, not a removed and an added line.
+    const lines = parseDiff(patch)
+    expect(lines[2].kind).toBe('meta')
+    expect(lines[3].kind).toBe('meta')
+  })
+
+  it('keeps a removed line that itself begins with a dash', () => {
+    const lines = parseDiff('@@ -1 +1 @@\n--- not a header, a deleted line')
+    expect(lines[1].kind).toBe('meta')
+  })
+})
+
+describe('notification text', () => {
+  const base: PendingItem = {
+    key: 'k1',
+    kind: 'question',
+    agent: 'claude',
+    sessionId: 's1',
+    cwd: '/Users/me/Documents/GitHub/canopy',
+    pty: 7,
+    ts: 1,
+  }
+
+  it('names the agent and the checkout, and asks the question', () => {
+    const a = alertFor({ ...base, questions: [{ question: 'Merge or rebase?', options: [] }] })
+    expect(a.title).toContain('Claude')
+    expect(a.title).toContain('canopy')
+    expect(a.body).toBe('Merge or rebase?')
+    expect(a.urgent).toBe(true)
+    expect(a.pty).toBe(7)
+  })
+
+  it('carries a permission request through as its message', () => {
+    const a = alertFor({ ...base, kind: 'notification', message: 'claude needs permission: Bash' })
+    expect(a.body).toBe('claude needs permission: Bash')
+    expect(a.urgent).toBe(true)
+  })
+
+  it('marks a finished turn as not urgent', () => {
+    // A finished agent is worth a line on the lock screen, not a buzz in your
+    // pocket — conflating the two is how a channel gets muted for good.
+    const a = alertFor({ ...base, kind: 'idle', message: 'Finished — waiting for you' })
+    expect(a.urgent).toBe(false)
+    expect(a.title).toContain('finished')
+  })
+
+  it('truncates a long body rather than shipping an essay to a lock screen', () => {
+    const a = alertFor({ ...base, kind: 'idle', message: 'x'.repeat(500) })
+    expect(a.body.length).toBe(180)
+  })
+
+  it('keys the alert by the pending item, so a re-derived card replaces it', () => {
+    // The key becomes the Notification `tag`; without that, every poll would
+    // stack another copy of the same question.
+    expect(alertFor(base).key).toBe('k1')
+  })
+})

@@ -133,3 +133,128 @@ export const IconResume = (p: IconProps) => (
     <path d="M8 5.5l10 6.5-10 6.5z" />
   </Svg>
 )
+
+// ---- the panel rail -------------------------------------------------------
+// One per remote module that lists something. Same hairline geometry as above,
+// and deliberately close to the desktop rail's shapes so the two apps read as
+// one product rather than two that happen to share a backend.
+
+export const IconDiff = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M6 4v10" />
+    <path d="M3 7h6" />
+    <path d="M18 20V10" />
+    <path d="M15 17h6" />
+  </Svg>
+)
+
+export const IconGit = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="6.5" cy="6" r="2.5" />
+    <circle cx="6.5" cy="18" r="2.5" />
+    <circle cx="17.5" cy="12" r="2.5" />
+    <path d="M6.5 8.5v7" />
+    <path d="M15 12H9a2.5 2.5 0 0 1-2.5-2.5" />
+  </Svg>
+)
+
+export const IconPr = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="6.5" cy="6" r="2.5" />
+    <circle cx="6.5" cy="18" r="2.5" />
+    <circle cx="17.5" cy="18" r="2.5" />
+    <path d="M6.5 8.5v7" />
+    <path d="M17.5 15.5V9a3 3 0 0 0-3-3h-2.5" />
+    <path d="M14 3.5 11.5 6 14 8.5" />
+  </Svg>
+)
+
+export const IconIssue = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="8.5" />
+    <path d="M12 8v4.5" />
+    <path d="M12 16h.01" />
+  </Svg>
+)
+
+export const IconServer = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="3.5" y="4" width="17" height="6" rx="1.5" />
+    <rect x="3.5" y="14" width="17" height="6" rx="1.5" />
+    <path d="M7 7h.01" />
+    <path d="M7 17h.01" />
+  </Svg>
+)
+
+export const IconBook = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H19v16H5.5A1.5 1.5 0 0 1 4 18.5z" />
+    <path d="M8 4v16" />
+  </Svg>
+)
+
+export const IconFlask = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M10 3.5v6L4.8 18a1.6 1.6 0 0 0 1.4 2.5h11.6a1.6 1.6 0 0 0 1.4-2.5L14 9.5v-6" />
+    <path d="M9 3.5h6" />
+    <path d="M7.5 14.5h9" />
+  </Svg>
+)
+
+export const IconPlug = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M9 3.5v5" />
+    <path d="M15 3.5v5" />
+    <path d="M6.5 8.5h11v3a5.5 5.5 0 0 1-11 0z" />
+    <path d="M12 17v3.5" />
+  </Svg>
+)
+
+export const IconBell = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M6 10a6 6 0 0 1 12 0c0 3.5.8 5.2 1.5 6H4.5C5.2 15.2 6 13.5 6 10z" />
+    <path d="M10 19.5a2 2 0 0 0 4 0" />
+  </Svg>
+)
+
+export const IconGauge = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M4 17a8 8 0 1 1 16 0" />
+    <path d="M12 17l4-4.5" />
+  </Svg>
+)
+
+export const IconSearch = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="11" cy="11" r="6.5" />
+    <path d="M15.8 15.8 20 20" />
+  </Svg>
+)
+
+export const IconClose = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M6 6l12 12" />
+    <path d="M18 6 6 18" />
+  </Svg>
+)
+
+export const IconMenu = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M4 7h16" />
+    <path d="M4 12h16" />
+    <path d="M4 17h16" />
+  </Svg>
+)
+
+export const IconRefresh = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M20 12a8 8 0 1 1-2.4-5.7" />
+    <path d="M20 4v4.5h-4.5" />
+  </Svg>
+)
+
+export const IconCheck = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M5 12.5 10 17.5 19 7" />
+  </Svg>
+)

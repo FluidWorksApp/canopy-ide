@@ -717,19 +717,42 @@ fn pty_chunk(id: u32, bytes: &[u8]) -> String {
     json!({ "t": "pty", "pty": id, "b64": b64 }).to_string()
 }
 
+/// How long an agent session that is no longer running stays interesting.
+///
+/// The same 30 minutes the Agents panel uses for shared context — past it a
+/// digest is history, and history belongs behind a deliberate tap, not in the
+/// list that reloads every four seconds.
+const RECENT_SECS: i64 = 30 * 60;
+
+/// Prompts kept per offline session. The history view wants the thread, not the
+/// transcript, and this is the difference between a 230KB snapshot and a 20KB
+/// one.
+const MAX_PROMPTS: usize = 12;
+/// Files kept per offline session, for the "files touched" list.
+const MAX_FILES: usize = 40;
+
 /// Projects + agent sessions + usage + live PTYs + theme, as the desktop reads
 /// them. `ptys` is the authoritative live set (from PtyManager) so the client
 /// knows which agents are attachable without waiting on the pty:stats event.
+///
+/// Scoped, deliberately. `session_digests(None)` walks every hook record on the
+/// machine *and* every conversation in every CLI's own store — on a working
+/// machine that is hundreds of sessions from dozens of checkouts, and it was
+/// being re-sent whole every four seconds to a phone. The IDE never does that:
+/// both callers (`AgentsPanel`, `ProjectView`) pass the open project's roots and
+/// then filter by cwd prefix again. This does the same, from the same source of
+/// truth — the roots of the projects the IDE currently has open, plus each
+/// repo's worktrees, so an agent in another workspace is still reachable.
 async fn snapshot_msg(app: &AppHandle, theme: Option<Value>) -> String {
     let projects = crate::fsx::store_load()
         .await
         .unwrap_or_else(|_| "null".into());
     let projects: Value = serde_json::from_str(&projects).unwrap_or(Value::Null);
-    // No roots: the portal snapshot describes every project this instance has
-    // open, and filtering is the client's job.
-    let sessions = crate::agents::session_digests(None)
+    let roots = open_roots(app, &projects).await;
+    let sessions = crate::agents::session_digests(Some(roots.clone()))
         .await
         .unwrap_or_default();
+    let sessions = scope_sessions(sessions, &roots, now_secs());
     let usage = crate::agents::agent_usage().await.unwrap_or_default();
     let ptys = app.state::<PtyManager>().summaries();
     json!({
@@ -738,10 +761,117 @@ async fn snapshot_msg(app: &AppHandle, theme: Option<Value>) -> String {
         "sessions": sessions,
         "usage": usage,
         "ptys": ptys,
+        "roots": roots,
         "instance": crate::pty::instance_token(),
         "theme": theme,
     })
     .to_string()
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// The directories the IDE currently has open: each open project's components,
+/// plus every worktree of the repos behind them.
+///
+/// `openIds` is the IDE's own tab list. When the store predates it (or nothing
+/// is open) we fall back to every registered project rather than sending an
+/// empty list, because an empty scope reads to the phone as "you have nothing",
+/// which is a worse lie than a slightly wide one.
+async fn open_roots(app: &AppHandle, store: &Value) -> Vec<String> {
+    let projects = store.get("projects").and_then(|p| p.as_array());
+    let Some(projects) = projects else {
+        return Vec::new();
+    };
+    let open: Option<HashSet<&str>> = store
+        .get("openIds")
+        .and_then(|v| v.as_array())
+        .map(|ids| ids.iter().filter_map(|v| v.as_str()).collect())
+        .filter(|s: &HashSet<&str>| !s.is_empty());
+
+    let mut roots: Vec<String> = Vec::new();
+    for p in projects {
+        if let (Some(open), Some(id)) = (&open, p.get("id").and_then(|v| v.as_str())) {
+            if !open.contains(id) {
+                continue;
+            }
+        }
+        for c in p
+            .get("components")
+            .and_then(|c| c.as_array())
+            .into_iter()
+            .flatten()
+        {
+            if let Some(path) = c.get("path").and_then(|v| v.as_str()) {
+                roots.push(path.to_string());
+            }
+        }
+    }
+
+    // Worktrees of those components. An agent working in `.claude/worktrees/x`
+    // has a cwd under the worktree, not under the checkout, so without this the
+    // scope drops exactly the agents the user most wants to reach.
+    let mut extra: Vec<String> = Vec::new();
+    for root in &roots {
+        if let Ok(trees) = crate::git::git_worktrees(app.state(), root.clone()).await {
+            extra.extend(trees.into_iter().map(|t| t.path));
+        }
+    }
+    roots.extend(extra);
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+/// Keep the sessions that belong to `roots`, drop the ones that stopped being
+/// interesting, and trim what survives to the fields a list row and a history
+/// view actually read.
+fn scope_sessions(sessions: Vec<Value>, roots: &[String], now: i64) -> Vec<Value> {
+    sessions
+        .into_iter()
+        .filter(|d| within(d.get("cwd").and_then(|v| v.as_str()), roots))
+        .filter(|d| {
+            // A session still running stays regardless of age — "ended" is the
+            // digest saying its own turn is over, and only then does the clock
+            // start mattering.
+            let ended = d.get("state").and_then(|v| v.as_str()) == Some("ended");
+            let updated = d.get("updated").and_then(|v| v.as_i64()).unwrap_or(0);
+            !ended || now - updated <= RECENT_SECS
+        })
+        .map(trim_digest)
+        .collect()
+}
+
+/// True when `cwd` is one of `roots` or sits inside one. Same rule the desktop
+/// applies in JS after its own `sessionDigests` call.
+fn within(cwd: Option<&str>, roots: &[String]) -> bool {
+    let Some(cwd) = cwd.map(|c| c.trim_end_matches('/')) else {
+        return false;
+    };
+    roots.iter().any(|r| {
+        let r = r.trim_end_matches('/');
+        cwd == r || cwd.starts_with(&format!("{r}/"))
+    })
+}
+
+fn trim_digest(mut d: Value) -> Value {
+    if let Some(map) = d.as_object_mut() {
+        // Keep the *last* N: a conversation's tail is what identifies it, and
+        // the history view reads it newest-last.
+        for (key, max) in [("prompts", MAX_PROMPTS), ("files", MAX_FILES)] {
+            if let Some(arr) = map.get_mut(key).and_then(|v| v.as_array_mut()) {
+                if arr.len() > max {
+                    let drop = arr.len() - max;
+                    arr.drain(0..drop);
+                }
+            }
+        }
+    }
+    d
 }
 
 // ---- helpers --------------------------------------------------------------
@@ -878,5 +1008,68 @@ mod tests {
         assert_eq!(content_type("a.css"), "text/css; charset=utf-8");
         assert_eq!(content_type("logo.svg"), "image/svg+xml");
         assert_eq!(content_type("noext"), "application/octet-stream");
+    }
+
+    fn digest(cwd: &str, state: &str, updated: i64) -> Value {
+        json!({ "cwd": cwd, "state": state, "updated": updated, "agent": "claude" })
+    }
+
+    #[test]
+    fn within_matches_a_root_and_anything_under_it() {
+        let roots = vec!["/w/canopy".to_string()];
+        assert!(within(Some("/w/canopy"), &roots));
+        assert!(within(Some("/w/canopy/"), &roots));
+        assert!(within(Some("/w/canopy/src-tauri"), &roots));
+        // A sibling whose name merely starts the same is NOT inside it.
+        assert!(!within(Some("/w/canopy-website"), &roots));
+        assert!(!within(Some("/w/other"), &roots));
+        assert!(!within(None, &roots));
+    }
+
+    #[test]
+    fn scope_keeps_the_open_projects_and_drops_the_rest_of_the_machine() {
+        let roots = vec!["/w/canopy".into()];
+        let now = 1_000_000;
+        let out = scope_sessions(
+            vec![
+                digest("/w/canopy", "working", now),
+                digest("/w/canopy/.claude/worktrees/x", "idle", now),
+                digest("/w/some-other-repo", "working", now),
+            ],
+            &roots,
+            now,
+        );
+        assert_eq!(out.len(), 2, "the other checkout must not travel");
+    }
+
+    #[test]
+    fn scope_ages_out_ended_sessions_but_never_running_ones() {
+        let roots = vec!["/w/canopy".into()];
+        let now = 1_000_000;
+        let stale = now - RECENT_SECS - 1;
+        let out = scope_sessions(
+            vec![
+                digest("/w/canopy", "ended", stale),
+                digest("/w/canopy", "ended", now - 60),
+                // A digest whose terminal died without a Stop stays "working"
+                // on disk forever; it is still attachable, so it stays.
+                digest("/w/canopy", "working", stale),
+            ],
+            &roots,
+            now,
+        );
+        assert_eq!(out.len(), 2);
+        assert!(out
+            .iter()
+            .all(|d| d["state"] != "ended" || d["updated"].as_i64().unwrap() > stale));
+    }
+
+    #[test]
+    fn trim_keeps_the_tail_of_a_long_conversation() {
+        let prompts: Vec<Value> = (0..40).map(|i| json!(format!("p{i}"))).collect();
+        let trimmed = trim_digest(json!({ "prompts": prompts, "files": [] }));
+        let out = trimmed["prompts"].as_array().unwrap();
+        assert_eq!(out.len(), MAX_PROMPTS);
+        assert_eq!(out.last().unwrap(), "p39", "the newest prompt must survive");
     }
 }
