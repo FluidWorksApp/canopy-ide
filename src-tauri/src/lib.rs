@@ -27,18 +27,18 @@ mod prwatch;
 mod pty;
 mod punch;
 mod relay;
-mod shortcuts;
 mod remote;
 mod research;
 mod selftest;
+mod shortcuts;
 mod snapshot;
 mod spot;
 mod stores;
 mod sysaudio;
 mod tunnel;
-mod webview_keys;
 mod vault;
 mod vault_kdbx;
+mod webview_keys;
 mod winproc;
 mod wsbridge;
 
@@ -100,7 +100,13 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 None::<&str>,
             )?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "settings", "Settings…", true, accel("settings").as_deref())?,
+            &MenuItem::with_id(
+                app,
+                "settings",
+                "Settings…",
+                true,
+                accel("settings").as_deref(),
+            )?,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::hide(app, None)?,
             &PredefinedMenuItem::separator(app)?,
@@ -129,7 +135,13 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             // The launcher (shell, preview, every agent CLI) as a typed list —
             // the ＋ menu's keyboard twin. Cmd/Ctrl+T stays the straight-to-a-
             // shell shortcut for when you already know what you want.
-            &MenuItem::with_id(app, "new-launcher", "New…", true, accel("new-launcher").as_deref())?,
+            &MenuItem::with_id(
+                app,
+                "new-launcher",
+                "New…",
+                true,
+                accel("new-launcher").as_deref(),
+            )?,
             &MenuItem::with_id(
                 app,
                 "new-terminal",
@@ -137,7 +149,13 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 true,
                 accel("new-terminal").as_deref(),
             )?,
-            &MenuItem::with_id(app, "close-tab", "Close Tab", true, accel("close-tab").as_deref())?,
+            &MenuItem::with_id(
+                app,
+                "close-tab",
+                "Close Tab",
+                true,
+                accel("close-tab").as_deref(),
+            )?,
             &PredefinedMenuItem::separator(app)?,
             // Tabs and projects share one mental model: Ctrl+Cmd moves between
             // tabs, Cmd+Alt between projects. Cmd+1..9 used to jump to a tab by

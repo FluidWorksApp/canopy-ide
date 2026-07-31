@@ -129,7 +129,10 @@ mod tests {
 
     #[test]
     fn mod_becomes_cmdorctrl_and_ctrl_stays_literal() {
-        assert_eq!(accelerator_for("quick-open", "macos").as_deref(), Some("CmdOrCtrl+P"));
+        assert_eq!(
+            accelerator_for("quick-open", "macos").as_deref(),
+            Some("CmdOrCtrl+P")
+        );
         assert_eq!(
             accelerator_for("next-tab", "macos").as_deref(),
             Some("Control+CmdOrCtrl+Right")
