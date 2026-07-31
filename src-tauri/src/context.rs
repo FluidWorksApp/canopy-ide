@@ -499,6 +499,7 @@ async fn research_op(
         "get" => crate::research::research_get(project_id.clone(), need_id(&req)?)
             .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
         "start" => crate::research::research_start(
+            app.clone(),
             store.clone(),
             project_id.clone(),
             Some(project_name.clone()),
@@ -516,6 +517,7 @@ async fn research_op(
         // tool boundary is what stops an agent treating the digest as somewhere
         // to put the whole finding.
         "digest" | "update" | "append" => crate::research::research_update(
+            app.clone(),
             store.clone(),
             project_id.clone(),
             need_id(&req)?,
@@ -529,6 +531,7 @@ async fn research_op(
         )
         .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
         "source" => crate::research::research_add_source(
+            app.clone(),
             store.clone(),
             project_id.clone(),
             need_id(&req)?,
@@ -538,6 +541,7 @@ async fn research_op(
         )
         .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
         "status" => crate::research::research_set_status(
+            app.clone(),
             store.clone(),
             project_id.clone(),
             need_id(&req)?,
@@ -549,6 +553,7 @@ async fn research_op(
         // The same adoption the file tab's button performs, reachable by an
         // agent that finds loose research while doing something else.
         "import" => crate::research::research_import(
+            app.clone(),
             store.clone(),
             project_id.clone(),
             Some(project_name.clone()),
@@ -558,6 +563,7 @@ async fn research_op(
         )
         .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
         "link" | "supersede" => crate::research::research_link(
+            app.clone(),
             store.clone(),
             project_id.clone(),
             need_id(&req)?,
@@ -625,6 +631,18 @@ struct NotesReq {
     /// attach: an absolute path already on disk, inside a workspace root.
     #[serde(default)]
     path: Option<String>,
+    /// remind: when. Any of the shapes `remind::parse_when` accepts — an ISO
+    /// stamp, a local wall clock, a bare date, or epoch seconds. Taken as a
+    /// string even when it is a number so a JSON integer and its digits are the
+    /// same request.
+    #[serde(default)]
+    at: Option<serde_json::Value>,
+    /// remind: a delay instead of a time — `45m`, `2h`, `3d`.
+    #[serde(default, rename = "in")]
+    within: Option<String>,
+    /// remind: `true` takes the reminder off.
+    #[serde(default)]
+    clear: Option<bool>,
 }
 
 async fn notes_op(
@@ -722,9 +740,44 @@ async fn notes_op(
             None,
         )
         .and_then(|a| serde_json::to_value(a).map_err(|e| e.to_string())),
+        // The agent's half of the reminder. Worth its own action rather than a
+        // field on `create`: the case that matters most is putting a time on a
+        // note that already exists — the user's own, written weeks ago — and an
+        // agent that could only set one while creating would be an agent that
+        // has to duplicate the note to remind you of it.
+        "remind" => {
+            let clear = req.clear.unwrap_or(false);
+            let at = if clear {
+                None
+            } else {
+                let raw = req.at.as_ref().and_then(|v| match v {
+                    serde_json::Value::String(s) => Some(s.clone()),
+                    serde_json::Value::Number(n) => Some(n.to_string()),
+                    _ => None,
+                });
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                Some(crate::remind::parse_when(
+                    raw.as_deref(),
+                    req.within.as_deref(),
+                    now,
+                )?)
+            };
+            crate::notes::notes_remind(
+                store.clone(),
+                project_id.clone(),
+                need_id(&req)?,
+                at,
+                req.text.clone().or_else(|| req.note.clone()),
+                req.by.clone().or_else(|| Some("an agent".into())),
+            )
+            .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string()))
+        }
         other => Err(format!(
             "unknown notes action: {other} — one of list, search, get, create, append, \
-             status, link, attach"
+             status, link, attach, remind"
         )),
     })();
 

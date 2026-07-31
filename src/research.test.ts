@@ -8,8 +8,12 @@ import {
   STATUS_LABELS,
   STATUS_ORDER,
   STATUS_STEP,
+  forget,
   implementContext,
+  refresh,
   researchContext,
+  resetStoreWatchForTest,
+  watchStore,
 } from "./research";
 
 const STATUSES = STATUS_ORDER;
@@ -222,5 +226,61 @@ describe("settling a run that ended badly", () => {
     const set = vi.spyOn(ipc, "researchSetStatus").mockResolvedValue({} as never);
     await settleIfRunning("p1", "0007-x", "blocked", "n/a");
     expect(set).not.toHaveBeenCalled();
+  });
+});
+
+// The bug this guards: an agent writing through `canopy_research_write` reaches
+// the Rust commands via the MCP endpoint and never touches this module, so the
+// window event the mutators below raise cannot fire. The panel fetches once per
+// project on mount, so the entry stayed invisible until the project was
+// reopened — which looks exactly like the write having failed.
+describe("writes that never came through this module", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    resetStoreWatchForTest();
+  });
+
+  const armed = () => {
+    let fire: ((projectId: string) => void) | undefined;
+    vi.spyOn(ipc, "onResearchChanged").mockImplementation((cb) => {
+      fire = cb;
+      return Promise.resolve(() => {});
+    });
+    return () => fire;
+  };
+
+  it("re-reads a project when the store says that project moved", async () => {
+    const get = armed();
+    const list = vi.spyOn(ipc, "researchList").mockResolvedValue([]);
+    await refresh("p1"); // the mount fetch, which is what puts p1 in the cache
+    watchStore();
+    list.mockClear();
+
+    get()?.("p1");
+    await Promise.resolve();
+    expect(list).toHaveBeenCalledWith("p1", ACTIVE_STATUSES, 50);
+  });
+
+  it("subscribes once however many surfaces ask", () => {
+    armed();
+    watchStore();
+    watchStore();
+    watchStore();
+    expect(ipc.onResearchChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores a project nothing is showing", async () => {
+    // `forget` drops a closed project's rows so they stop appearing in the
+    // palette. A background write to it must not bring them back.
+    const get = armed();
+    const list = vi.spyOn(ipc, "researchList").mockResolvedValue([]);
+    await refresh("p1");
+    forget("p1");
+    watchStore();
+    list.mockClear();
+
+    get()?.("p1");
+    await Promise.resolve();
+    expect(list).not.toHaveBeenCalled();
   });
 });

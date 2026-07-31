@@ -128,6 +128,43 @@ export function forget(projectId: string): void {
   announce();
 }
 
+/** Subscribe to the store's own change event, so writes that never touched this
+ *  module still reach the UI.
+ *
+ *  The mutators below announce on `RESEARCH_EVENT`, which covers everything the
+ *  user does here. It cannot cover an agent: `canopy_research_write` reaches the
+ *  Rust commands through the MCP endpoint, and the renderer is never told. The
+ *  panel fetches once per project on mount, so without this an agent's entry is
+ *  invisible until the project is reopened — which reads as the write having
+ *  failed. Rust therefore emits too, and this turns that into the same refresh.
+ *
+ *  Idempotent, and called by every surface that renders research, because no one
+ *  of them is guaranteed to be mounted. Only projects already in the cache are
+ *  re-read: a project nobody is showing has none, and `forget` clearing it must
+ *  not be undone by a background write. */
+let subscribed = false;
+export function watchStore(): void {
+  if (subscribed) return;
+  subscribed = true;
+  void ipc
+    .onResearchChanged((projectId) => {
+      if (cache.has(projectId)) void refresh(projectId);
+    })
+    // No event bridge — a test harness, a window that never got one — costs
+    // live updates, not correctness: the fetch on mount still runs. Swallowing
+    // it keeps a rendering surface from raising, and releasing the flag lets
+    // the next mount try again rather than disabling this for the session.
+    .catch(() => {
+      subscribed = false;
+    });
+}
+
+/** Test seam. `subscribed` is module state that outlives a test, so a test
+ *  arming its own fake listener needs the next one to be able to arm too. */
+export function resetStoreWatchForTest(): void {
+  subscribed = false;
+}
+
 // ---------- mutations ----------
 //
 // Thin wrappers whose only job is to refresh afterwards. Anything that changes

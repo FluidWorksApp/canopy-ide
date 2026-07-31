@@ -784,6 +784,13 @@ export const onClipboardChanged = (cb: () => void): Promise<UnlistenFn> =>
 export const onClipboardBlocked = (cb: () => void): Promise<UnlistenFn> =>
   listen("clipboard:blocked", () => cb());
 
+/** The research store changed, carrying the project id that moved. Raised by
+ *  the Rust commands themselves (RESEARCH_CHANGED in research.rs), so it fires
+ *  for an agent writing through MCP as well as for a button in the UI. */
+export const onResearchChanged = (
+  cb: (projectId: string) => void,
+): Promise<UnlistenFn> => listen<string>("research:changed", (e) => cb(e.payload));
+
 // ---------- Credential vault ----------
 //
 // The password never crosses this boundary in the fill direction: `vaultFill`
@@ -1118,6 +1125,19 @@ export interface NoteHistory {
   note: string;
 }
 
+/** A time this note should be handed back at. One per note; setting a second
+ *  replaces the first. `system` says launchd holds it — it will arrive with
+ *  Canopy closed, and the app must not announce it a second time. */
+export interface NoteReminder {
+  at: number;
+  note: string;
+  by: string;
+  created_at: number;
+  /** Set once the app has seen the time pass. Overdue notes stay overdue. */
+  fired_at?: number | null;
+  system: boolean;
+}
+
 export interface NoteSummary {
   id: string;
   title: string;
@@ -1133,6 +1153,7 @@ export interface NoteSummary {
   file_count: number;
   pr_count: number;
   research_count: number;
+  reminder?: NoteReminder | null;
 }
 
 export interface NoteDetail extends NoteSummary {
@@ -1248,6 +1269,38 @@ export const notesAttachFile = (args: {
 
 export const notesDelete = (projectId: string, id: string) =>
   invoke<void>("notes_delete", { projectId, id });
+
+/** Set, move or clear a note's reminder. `at` is epoch *seconds* (the store's
+ *  unit throughout, not JS milliseconds); `null` takes the reminder off.
+ *  Setting one hands it to the OS — see src-tauri/src/remind.rs. */
+export const notesRemind = (args: {
+  projectId: string;
+  id: string;
+  at: number | null;
+  note?: string;
+  by?: string;
+}) => invoke<NoteSummary>("notes_remind", { ...args });
+
+/** A reminder that has come due, with the note it belongs to. */
+export interface NoteDue {
+  project_id: string;
+  id: string;
+  title: string;
+  note: string;
+  at: number;
+  by: string;
+  /** launchd already put a banner on screen for this one. */
+  system: boolean;
+  /** `canopy://note?…` — composed in Rust, because the launchd job needs the
+   *  identical string and only one of them can be the original. */
+  link: string;
+}
+
+/** Every reminder due at or before `before` (epoch seconds), across every
+ *  project, marked fired as they are returned. Marking happens in the store so
+ *  a crash between reading and recording cannot announce one twice. */
+export const notesDue = (before: number) =>
+  invoke<NoteDue[]>("notes_due", { before });
 
 /** One PR's state — "OPEN", "MERGED" or "CLOSED". The watcher only holds open
  *  PRs, so this is the only way to tell a merge from a close. */

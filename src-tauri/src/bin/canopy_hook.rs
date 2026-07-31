@@ -92,10 +92,107 @@ fn main() {
         statusline_main();
         return;
     }
+    // Fifth job, and the only one nothing in a session calls: `canopy-hook
+    // --remind` is what launchd runs at a note reminder's due minute (see
+    // src-tauri/src/remind.rs). It exists in this binary rather than the app's
+    // because the app is precisely what is not running at that moment.
+    if std::env::args().any(|a| a == "--remind") {
+        remind_main();
+        return;
+    }
     // Any failure exits 0 with no stdout: a hook must never break the session
     // it's attached to.
     if let Err(_e) = real_main() {
         std::process::exit(0);
+    }
+}
+
+// ---------- reminders: the alarm that outlives the app ----------
+//
+// launchd starts this process at a note's due minute with everything it needs
+// baked into the plist, because there is nothing to ask: Canopy may be closed,
+// the note store must not be written by a process holding no lock on it, and
+// the whole job is two steps — put a banner on screen, and if the user clicks
+// it, open Canopy on the note.
+//
+// It deliberately does NOT mark the reminder fired. The app does that when it
+// next looks and sees the time has passed, so a reminder that fired while
+// Canopy was closed is still visibly overdue in the panel when it opens —
+// which is what someone who was away from the machine actually needs.
+
+/// One `--flag value` pair off our own argv.
+fn remind_arg(name: &str) -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if a == name {
+            return args.next();
+        }
+    }
+    None
+}
+
+fn remind_main() {
+    let title = remind_arg("--title").unwrap_or_default();
+    let body = remind_arg("--body").unwrap_or_default();
+    let link = remind_arg("--link").unwrap_or_default();
+    let app = remind_arg("--app").unwrap_or_else(|| "canopy".into());
+    let label = remind_arg("--label").unwrap_or_default();
+
+    // First, before anything can fail: a one-shot job whose plist survives is a
+    // job that fires again next year on the same date.
+    if !label.is_empty() {
+        if let Some(home) = std::env::var_os("HOME") {
+            let plist = std::path::PathBuf::from(home)
+                .join("Library/LaunchAgents")
+                .join(format!("{label}.plist"));
+            let _ = std::fs::remove_file(plist);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // "Reminder" as the title and the note's own words underneath: the
+        // banner has to say what it is before it says what it is about, or it
+        // reads as an agent reporting in.
+        let heading = if title.trim().is_empty() {
+            "Reminder".to_string()
+        } else {
+            format!("Reminder — {title}")
+        };
+        let message = if body.trim().is_empty() {
+            "Open the note".to_string()
+        } else {
+            body
+        };
+        // Attributed to Canopy so the banner carries its icon and name. Failing
+        // means an unbundled build, which is a dev machine, not a user's.
+        let _ = mac_notification_sys::set_application("app.causeconnect.canopy");
+        let mut n = mac_notification_sys::Notification::new();
+        n.title(&heading).message(&message);
+        // The point of this process: without waiting there is nobody left to
+        // act on the click, and the banner becomes an announcement with no way
+        // back to the thing it announced.
+        n.wait_for_click(true);
+        let clicked = matches!(
+            n.send(),
+            Ok(mac_notification_sys::NotificationResponse::Click)
+                | Ok(mac_notification_sys::NotificationResponse::ActionButton(_))
+        );
+        if clicked && !link.is_empty() {
+            // Running the binary rather than `open`: a second invocation is
+            // forwarded to the running app by the single-instance plugin, and
+            // becomes the app itself when there isn't one. `open --args` does
+            // neither — it drops the arguments when the app is already up.
+            let _ = std::process::Command::new(&app).arg(&link).spawn();
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Nothing schedules these off macOS today (remind.rs says so), so this
+        // is only reachable by hand. Say where the reminder went rather than
+        // exiting silently as if it had been delivered.
+        let _ = (title, body, app);
+        eprintln!("canopy-hook --remind: system reminders are macOS-only; {link} was not opened");
     }
 }
 
@@ -2169,9 +2266,9 @@ fn notes_tool_defs() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "canopy_notes_write",
-            "description": "Park a thought in the user's scratchpad. Use `create` for something you noticed that is real but is NOT part of the job you were given — a bug beside the one you were sent for, a refactor the code obviously wants, a missing test. Writing it down is how it survives; derailing onto it is not. Do not use this for the work you were asked to do, and do not use it as a progress log. `append` adds to a note, `status` moves it along, `link` ties it to a PR or a research entry, `attach` keeps a file with it.",
+            "description": "Park a thought in the user's scratchpad. Use `create` for something you noticed that is real but is NOT part of the job you were given — a bug beside the one you were sent for, a refactor the code obviously wants, a missing test. Writing it down is how it survives; derailing onto it is not. Do not use this for the work you were asked to do, and do not use it as a progress log. `append` adds to a note, `status` moves it along, `link` ties it to a PR or a research entry, `attach` keeps a file with it, `remind` puts a time on it and the user is notified then — by the operating system, so it arrives whether or not Canopy is running.",
             "inputSchema": { "type": "object", "properties": {
-                "action": { "type": "string", "enum": ["create", "append", "status", "link", "attach"], "description": "create | append | status | link | attach" },
+                "action": { "type": "string", "enum": ["create", "append", "status", "link", "attach", "remind"], "description": "create | append | status | link | attach | remind" },
                 "id": { "type": "string", "description": "Note id — required by everything except create" },
                 "title": { "type": "string", "description": "create: the thought, in one line. attach: what the file is." },
                 "text": { "type": "string", "description": "create: any detail beyond the title. append: markdown to add to the body." },
@@ -2182,7 +2279,10 @@ fn notes_tool_defs() -> Vec<serde_json::Value> {
                 "research": { "type": "string", "description": "link: id of a research entry started from this note" },
                 "branch": { "type": "string", "description": "link: branch carrying the work" },
                 "file": { "type": "object", "description": "link: { path, start_line, end_line, rev } — a file this note is about. Include `rev` (the commit you read it at) so the line numbers can be trusted later." },
-                "path": { "type": "string", "description": "attach: absolute path of a file to keep with the note (a log, a capture). Copied in, so it survives the worktree." }
+                "path": { "type": "string", "description": "attach: absolute path of a file to keep with the note (a log, a capture). Copied in, so it survives the worktree." },
+                "at": { "type": "string", "description": "remind: when. \"2026-08-03T09:00\" (the user's local wall clock), \"2026-08-03T09:00:00Z\" or with an offset for an exact instant, or \"2026-08-03\" for that date at 9am. Must be in the future." },
+                "in": { "type": "string", "description": "remind: a delay instead of a time — 45m, 2h, 3d, 1w, 1h30m. Prefer this when the user said \"in an hour\": it needs no timezone and cannot land in the past." },
+                "clear": { "type": "boolean", "description": "remind: true takes the note's reminder off" }
             }, "required": ["action"], "additionalProperties": false }
         }),
     ]
@@ -3055,7 +3155,7 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
             // annotated read-only so a host can auto-approve it, and a write
             // action reachable through it would make that a bypass.
             let reads = ["list", "search", "get"];
-            let writes = ["create", "append", "status", "link", "attach"];
+            let writes = ["create", "append", "status", "link", "attach", "remind"];
             let allowed: &[&str] = if name == "canopy_notes" {
                 &reads
             } else {
@@ -3086,6 +3186,20 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                     .is_some_and(|p| !p.trim().is_empty())
             {
                 return Err("attach needs a path — the file to keep with the note".into());
+            }
+            // Setting a reminder to no time at all is the one mistake here that
+            // would look like it worked: the note comes back unchanged and
+            // nothing ever fires.
+            if action == "remind" && !args.get("clear").and_then(|v| v.as_bool()).unwrap_or(false) {
+                let timed = ["at", "in"].iter().any(|k| {
+                    args.get(*k)
+                        .is_some_and(|v| !v.as_str().unwrap_or("x").trim().is_empty())
+                });
+                if !timed {
+                    return Err("remind needs `at` (2026-08-03T09:00) or `in` (2h) — or \
+                                clear: true to take the reminder off"
+                        .into());
+                }
             }
             text(notes_op(action, args))
         }
@@ -4771,6 +4885,47 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("path"), "{err}");
+    }
+
+    #[test]
+    fn a_reminder_with_no_time_on_it_is_refused_rather_than_silently_doing_nothing() {
+        // The one mistake here that would look like it worked: the note comes
+        // back unchanged and the agent reports it set a reminder that will
+        // never fire.
+        let err = call_tool(
+            "canopy_notes_write",
+            &serde_json::json!({ "action": "remind", "id": "0001-x" }),
+        )
+        .unwrap_err();
+        assert!(err.contains("at"), "{err}");
+        assert!(err.contains("in"), "{err}");
+
+        let err = call_tool(
+            "canopy_notes_write",
+            &serde_json::json!({ "action": "remind", "id": "0001-x", "at": "  " }),
+        )
+        .unwrap_err();
+        assert!(err.contains("clear"), "{err}");
+
+        // Clearing needs no time — that is the whole point of the flag.
+        assert!(!error_says_no_time(
+            &serde_json::json!({ "action": "remind", "id": "0001-x", "clear": true })
+        ));
+        // And a time given is a time accepted: whatever comes back, it is not
+        // this guard. (The parse itself lives in remind.rs, where it is tested
+        // against every shape.)
+        assert!(!error_says_no_time(
+            &serde_json::json!({ "action": "remind", "id": "0001-x", "in": "2h" })
+        ));
+    }
+
+    /// Whether the argument-shape guard rejected this call, as opposed to the
+    /// bridge being unreachable (which it always is in a unit test).
+    fn error_says_no_time(args: &serde_json::Value) -> bool {
+        match call_tool("canopy_notes_write", args) {
+            Err(e) => e.contains("remind needs"),
+            Ok(_) => false,
+        }
     }
 
     #[test]

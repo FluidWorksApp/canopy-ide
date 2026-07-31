@@ -23,8 +23,9 @@ import {
   create,
   refresh,
 } from "../notes";
+import { describe as describeReminder, nowSecs, reminderRank } from "../reminders";
 import { ago } from "./ProjectView/helpers";
-import { NoteIcon } from "./icons";
+import { BellIcon, NoteIcon } from "./icons";
 import { Button, TextInput } from "./ui";
 
 interface NotesPanelProps {
@@ -70,9 +71,22 @@ export function NotesPanel({
   }, [showArchived, projectId, rows]);
 
   const all = showArchived ? [...rows, ...archived] : rows;
+  // Reminders reorder *within* a group rather than making one of their own.
+  // The grouping is this panel's whole idea — which of these did I decide were
+  // worth doing — and a "Due" section above it would answer a different
+  // question by pulling notes out of the answer to that one. Overdue first
+  // (oldest first: the one that has waited longest is the one being ignored),
+  // then upcoming, then everything else in the order the store gave.
+  const now = nowSecs();
+  const byUrgency = (a: ipc.NoteSummary, b: ipc.NoteSummary) => {
+    const rank = reminderRank(a.reminder, now) - reminderRank(b.reminder, now);
+    if (rank !== 0) return rank;
+    if (!a.reminder || !b.reminder) return 0;
+    return a.reminder.at - b.reminder.at;
+  };
   const groups = STATUS_ORDER.map((status) => ({
     status,
-    notes: all.filter((r) => r.status === status),
+    notes: all.filter((r) => r.status === status).sort(byUrgency),
   })).filter((g) => g.notes.length > 0);
 
   const submit = () => {
@@ -153,6 +167,25 @@ export function NotesPanel({
                     <span className="notes-row-preview">{n.preview}</span>
                   )}
                   <span className="notes-row-facts">
+                    {/* Ahead of the counts: a note that asked to come back
+                        today is the one thing in this row that is about
+                        *now*. */}
+                    {n.reminder && (
+                      <span
+                        className={`notes-row-remind${
+                          n.reminder.at <= now ? " overdue" : ""
+                        }`}
+                        title={
+                          n.reminder.note ||
+                          (n.reminder.by && n.reminder.by !== "you"
+                            ? `Reminder set by ${n.reminder.by}`
+                            : "You asked to be reminded about this")
+                        }
+                      >
+                        <BellIcon size={11} />
+                        {describeReminder(n.reminder.at, now)}
+                      </span>
+                    )}
                     {/* What is worth knowing before opening: whether the note
                         carries anything, and whether anything came of it. */}
                     {n.image_count > 0 && (
