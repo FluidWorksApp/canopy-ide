@@ -435,6 +435,18 @@ export const chromiumStartCast = (tabId: string, width: number, height: number) 
 export const chromiumStopCast = (tabId: string) =>
   invoke<void>("chromium_stop_cast", { tabId }).catch(() => {});
 
+/** A full-quality PNG of a headless Chromium page. Unlike the WebKit engines'
+ *  capture this renders the page again rather than photographing a view, so it
+ *  works on a background tab and owes nothing to the lossy cast stream. */
+export const chromiumCapture = (
+  tabId: string,
+  clip?: [number, number, number, number],
+) => invoke<string>("chromium_capture", { tabId, clip: clip ?? null });
+
+/** The page's viewport, for mapping a pane click back to a page point. */
+export const chromiumMetrics = (tabId: string) =>
+  invoke<{ w: number; h: number } | null>("chromium_metrics", { tabId }).catch(() => null);
+
 /** Whether a Node runtime exists to run Stagehand in. Canopy bundles none. */
 export const stagehandNodeAvailable = () =>
   invoke<boolean>("stagehand_node_available").catch(() => false);

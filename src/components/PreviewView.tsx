@@ -189,6 +189,9 @@ export function PreviewView({
   // frame forever; now nothing that matters depends on this identity.
   const onPatchRef = useRef(onPatch);
   onPatchRef.current = onPatch;
+  // Read inside callbacks that must not re-create on every engine probe.
+  const engineRef = useRef(engine);
+  engineRef.current = engine;
   const nativeRef = useRef(native);
   nativeRef.current = native;
 
@@ -719,6 +722,15 @@ export function PreviewView({
    *  an image-space one. Under the webview engine the page is its own view and
    *  is captured whole; under the proxy it is one rectangle of this window. */
   const shootPane = useCallback(async (): Promise<{ png: string; cssWidth: number }> => {
+    // The Chromium engine renders the page again rather than photographing a
+    // view. That skips the "is it on screen" question entirely — a headless
+    // browser draws whether or not its tab is in front — and avoids capturing
+    // the cast stream, which is a lossy JPEG already scaled to the pane.
+    if (engineRef.current === "chromium") {
+      const png = await ipc.chromiumCapture(tabId);
+      const metrics = await ipc.chromiumMetrics(tabId);
+      return { png, cssWidth: metrics?.w ?? SHOOT_WIDTH };
+    }
     const el = nativeRef.current ? hostRef.current : iframeRef.current;
     const rect = el?.getBoundingClientRect();
     if (!rect || !painted() || rect.width < 1 || rect.height < 1) {
@@ -867,8 +879,18 @@ export function PreviewView({
       return (
         <div
           className="preview-frame preview-cast-host"
+          style={picking ? { cursor: "crosshair" } : undefined}
           ref={(el) => {
             if (el) cast.fit(el.getBoundingClientRect());
+          }}
+          // Annotate mode. The page cannot see the mouse — it is a headless
+          // browser somewhere else — so the pointer is translated into page
+          // coordinates and the picker resolves the element from those.
+          onPointerMove={(e) => {
+            if (picking) cast.pointAt(e.currentTarget, e, false);
+          }}
+          onClick={(e) => {
+            if (picking) cast.pointAt(e.currentTarget, e, true);
           }}
         >
           {cast.frame ? (

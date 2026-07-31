@@ -610,6 +610,8 @@ pub fn run() {
             chromium::chromium_close,
             chromium::chromium_start_cast,
             chromium::chromium_stop_cast,
+            chromium::chromium_capture,
+            chromium::chromium_metrics,
             stagehand::stagehand_node_available,
             stagehand::stagehand_bridge,
             cleanup::cleanup_scan,

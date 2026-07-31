@@ -520,6 +520,62 @@ impl ChromiumManager {
             .map(|_| ())
     }
 
+    /// A real picture of the page, as a PNG data URL.
+    ///
+    /// Not the cast stream: that is lossy JPEG already scaled down to whatever
+    /// the pane happens to be, and a screenshot of it would be a screenshot of
+    /// a screenshot. This asks the browser to render the page again at full
+    /// size, losslessly.
+    ///
+    /// It is also better than either WebKit engine can manage, in a way that
+    /// removes a real limitation rather than matching one: a headless browser
+    /// renders whether or not its tab is in front, so there is no "bring the
+    /// preview forward first" — a background tab photographs perfectly.
+    ///
+    /// `clip` is page CSS pixels, for a region capture.
+    pub async fn capture(
+        &self,
+        tab_id: &str,
+        clip: Option<(f64, f64, f64, f64)>,
+    ) -> Result<String, String> {
+        let cdp = self.live().await?;
+        let s = self.session(tab_id)?;
+        let mut params = serde_json::json!({
+            "format": "png",
+            // Past the viewport too. The pane shows one screen; a bug report
+            // usually wants the part that had to be scrolled to.
+            "captureBeyondViewport": clip.is_some(),
+        });
+        if let Some((x, y, width, height)) = clip {
+            params["clip"] = serde_json::json!({
+                "x": x, "y": y, "width": width, "height": height, "scale": 1,
+            });
+        }
+        let out = cdp
+            .call("Page.captureScreenshot", params, Some(&s.id))
+            .await?;
+        let data = out
+            .get("data")
+            .and_then(|d| d.as_str())
+            .ok_or_else(|| "the browser returned no image".to_string())?;
+        Ok(format!("data:image/png;base64,{data}"))
+    }
+
+    /// The page's own dimensions, so the pane can map a click in the picture
+    /// back to a point in the page. Without this the mapping would have to
+    /// guess, and every annotation would land near-but-not-on its target.
+    pub async fn metrics(&self, tab_id: &str) -> Result<serde_json::Value, String> {
+        self.eval_json(
+            tab_id,
+            "JSON.stringify({w:innerWidth,h:innerHeight})".into(),
+        )
+        .await
+        .and_then(|v| {
+            let text = v.as_str().unwrap_or("{}");
+            serde_json::from_str(text).map_err(|e| format!("bad page metrics: {e}"))
+        })
+    }
+
     fn session(&self, tab_id: &str) -> Result<Session, String> {
         self.sessions
             .lock()
@@ -834,6 +890,27 @@ pub async fn chromium_here(
 pub async fn chromium_close(app: tauri::AppHandle, tab_id: String) -> Result<(), String> {
     use tauri::Manager;
     app.state::<ChromiumManager>().close(&tab_id).await
+}
+
+/// A full-quality PNG of the page. `clip` is page CSS pixels for a region.
+#[tauri::command]
+pub async fn chromium_capture(
+    app: tauri::AppHandle,
+    tab_id: String,
+    clip: Option<(f64, f64, f64, f64)>,
+) -> Result<String, String> {
+    use tauri::Manager;
+    app.state::<ChromiumManager>().capture(&tab_id, clip).await
+}
+
+/// The page's viewport size, for mapping a pane click back to a page point.
+#[tauri::command]
+pub async fn chromium_metrics(
+    app: tauri::AppHandle,
+    tab_id: String,
+) -> Result<serde_json::Value, String> {
+    use tauri::Manager;
+    app.state::<ChromiumManager>().metrics(&tab_id).await
 }
 
 /// Start (or resize) the frame stream for a tab's pane.

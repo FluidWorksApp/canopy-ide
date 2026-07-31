@@ -531,14 +531,42 @@
     return el;
   }
 
-  function onMove(e) {
-    ensureChrome();
-    var el = targetFrom(e);
-    if (!el) {
-      hoverBox.style.display = hoverTag.style.display = "none";
-      return;
+  /** The element at a viewport point, crossing shadow and frame boundaries.
+   *
+   *  document.elementFromPoint stops at the boundary and hands back the HOST —
+   *  the <my-widget>, the <iframe> — so on a component-built page every hover
+   *  would name the wrapper and every annotation would point at it. Shadow
+   *  roots share the document's coordinate space; a frame does not, so the
+   *  point is translated into it before asking again. */
+  function deepElementFromPoint(x, y) {
+    var el = document.elementFromPoint(x, y);
+    var fx = x;
+    var fy = y;
+    // Bounded: a malformed tree that cycles must not hang the page.
+    for (var hops = 0; el && hops < 20; hops++) {
+      if (el.shadowRoot) {
+        var inner = el.shadowRoot.elementFromPoint(fx, fy);
+        if (!inner || inner === el) break;
+        el = inner;
+        continue;
+      }
+      var doc = frameDoc(el);
+      if (!doc) break;
+      var fr = el.getBoundingClientRect();
+      fx -= fr.left + el.clientLeft;
+      fy -= fr.top + el.clientTop;
+      var framed = doc.elementFromPoint(fx, fy);
+      if (!framed) break;
+      el = framed;
     }
-    var r = el.getBoundingClientRect();
+    return el;
+  }
+
+  /** Draw the hover outline and label over an element. Uses viewportRect, so an
+   *  element inside a frame is outlined where it actually appears rather than
+   *  offset by the frame's position. */
+  function highlight(el) {
+    var r = viewportRect(el);
     hoverBox.style.display = "block";
     hoverBox.style.left = r.left + "px";
     hoverBox.style.top = r.top + "px";
@@ -553,16 +581,52 @@
     hoverTag.style.top = Math.max(0, r.top - 22) + "px";
   }
 
-  function onClick(e) {
+  function onMove(e) {
+    ensureChrome();
     var el = targetFrom(e);
-    if (!el) return;
-    e.preventDefault();
-    e.stopPropagation();
+    if (!el) {
+      hoverBox.style.display = hoverTag.style.display = "none";
+      return;
+    }
+    highlight(el);
+  }
+
+  /** Record an annotation on an element and tell the host. The one place that
+   *  happens, so a pick driven by a real click and one driven by coordinates
+   *  produce identical annotations. */
+  function commitPick(el) {
     var payload = describe(el);
     var n = marks.length + 1;
     marks.push({ n: n, selector: payload.selector, el: el, badge: badgeFor(n) });
     layoutBadges();
     send({ canopy: "annotation", n: n, payload: payload });
+  }
+
+  /** Pick by coordinate rather than by mouse.
+   *
+   *  The Chromium engine's page is a headless browser streamed into an <img>,
+   *  so the user's pointer is over a picture in another window and the page
+   *  never sees a mouse. The host maps where the click landed back into page
+   *  pixels and calls this. It also cannot fire the page's own handlers, so
+   *  annotating a link does not navigate — which the real-click path has to
+   *  work to prevent (see swallow). */
+  function pickAt(d) {
+    ensureChrome();
+    var el = deepElementFromPoint(Number(d.x) || 0, Number(d.y) || 0);
+    if (!el || el === document.documentElement || el === document.body) {
+      hoverBox.style.display = hoverTag.style.display = "none";
+      return;
+    }
+    highlight(el);
+    if (d.commit) commitPick(el);
+  }
+
+  function onClick(e) {
+    var el = targetFrom(e);
+    if (!el) return;
+    e.preventDefault();
+    e.stopPropagation();
+    commitPick(el);
   }
 
   function swallow(e) {
@@ -1153,6 +1217,7 @@
   function onHostMessage(d) {
     if (!d || typeof d !== "object") return;
     if (d.canopy === "mode") setPicking(!!d.on);
+    else if (d.canopy === "pick-at") pickAt(d);
     else if (d.canopy === "region") setRegion(!!d.on);
     else if (d.canopy === "sync") syncMarks(d.marks);
     else if (d.canopy === "agent") onAgentMessage(d);

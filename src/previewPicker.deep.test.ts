@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import SCRIPT from "../src-tauri/src/preview_picker.js?raw";
 
 interface PickerBridge {
+  cmd: (d: Record<string, unknown>) => unknown;
   run: (d: Record<string, unknown>) => { done: boolean; ok?: boolean; data?: unknown };
   drain: () => { canopy: string; id: number; ok: boolean; data: unknown }[];
 }
@@ -282,5 +283,76 @@ describe("preview picker: deep traversal", () => {
     await expect(op({ op: "click", selector: "my-widget >>> input" })).rejects.toThrow(
       /no element matches selector/,
     );
+  });
+
+  // Annotate mode on the Chromium engine. The page is a headless browser
+  // streamed into an <img>, so the user's pointer is over a picture in another
+  // window and the page never sees a mouse. The host translates the point and
+  // the picker resolves the element from coordinates instead.
+  describe("coordinate picking", () => {
+    /** jsdom has no layout, so elementFromPoint answers nothing on its own.
+     *  Stand it up as a lookup the test controls. */
+    const at = (realm: Document, el: Element | null) => {
+      Object.defineProperty(realm, "elementFromPoint", {
+        configurable: true,
+        writable: true,
+        value: () => el,
+      });
+    };
+
+    it("annotates the element under a page coordinate", async () => {
+      document.body.innerHTML = `<button id="go">go</button>`;
+      at(document, document.querySelector("#go"));
+      picker().cmd({ canopy: "pick-at", x: 10, y: 10, commit: true });
+      const sent = picker().drain();
+      const ann = sent.find((m) => m.canopy === "annotation") as
+        | { payload: { selector: string; tag: string } }
+        | undefined;
+      expect(ann?.payload.selector).toBe("#go");
+      expect(ann?.payload.tag).toBe("button");
+    });
+
+    // Hover must highlight without recording, or moving the mouse across a
+    // page would annotate everything it passed over.
+    it("highlights without annotating when it is only a hover", async () => {
+      document.body.innerHTML = `<button id="go">go</button>`;
+      at(document, document.querySelector("#go"));
+      picker().cmd({ canopy: "pick-at", x: 10, y: 10, commit: false });
+      expect(picker().drain().find((m) => m.canopy === "annotation")).toBeUndefined();
+    });
+
+    // elementFromPoint stops at a shadow boundary and hands back the HOST, so
+    // without piercing, every annotation on a component-built page would point
+    // at the wrapper instead of the control.
+    it("resolves through a shadow root rather than naming the host", async () => {
+      document.body.innerHTML = `<my-widget></my-widget>`;
+      const host = document.querySelector("my-widget")!;
+      const root = shadow(host, `<button id="inner">go</button>`);
+      at(document, host);
+      Object.defineProperty(root, "elementFromPoint", {
+        configurable: true,
+        writable: true,
+        value: () => root.querySelector("#inner"),
+      });
+      picker().cmd({ canopy: "pick-at", x: 10, y: 10, commit: true });
+      const ann = picker().drain().find((m) => m.canopy === "annotation") as
+        | { payload: { selector: string } }
+        | undefined;
+      expect(ann?.payload.selector).toContain("#inner");
+    });
+
+    it("ignores a point that lands on nothing", async () => {
+      document.body.innerHTML = `<button>go</button>`;
+      at(document, null);
+      picker().cmd({ canopy: "pick-at", x: 5, y: 5, commit: true });
+      expect(picker().drain().find((m) => m.canopy === "annotation")).toBeUndefined();
+    });
+
+    // The page background is not a thing anyone means to annotate.
+    it("ignores the document and body themselves", async () => {
+      at(document, document.body);
+      picker().cmd({ canopy: "pick-at", x: 5, y: 5, commit: true });
+      expect(picker().drain().find((m) => m.canopy === "annotation")).toBeUndefined();
+    });
   });
 });
