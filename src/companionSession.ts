@@ -22,12 +22,13 @@ import {
 } from "./companion";
 import { buildCompanionPrompt, type PromptProject } from "./companionPrompt";
 import {
+  startOneshot,
   startStructured,
   startTerminal,
   type CompanionEvent,
   type CompanionTransport,
 } from "./companionTransport";
-import { getSettings } from "./settings";
+import { getSettings, updateSettings } from "./settings";
 import { AGENT_CLIS, shellBin, shellQuote } from "./projects";
 
 export type CompanionStatus =
@@ -312,7 +313,24 @@ export async function startCompanion(opts: StartOptions): Promise<void> {
     });
 
     try {
-      if (tierFor(cli.id) === "structured") {
+      const tier = tierFor(cli.id);
+      if (tier === "oneshot") {
+        // The thread id is reported by the CLI on its first turn rather than
+        // chosen up front, so an id we already hold is a conversation to
+        // resume and its absence is a first meeting.
+        const known = s.companionSessions[cli.id] || null;
+        attempt = { cliId: cli.id, resumed: Boolean(known), ready: false };
+        transport = startOneshot(cli.id, launch, { emit: onEvent }, {
+          sessionId: known,
+          onSession: (id) =>
+            updateSettings({
+              companionSessions: { ...getSettings().companionSessions, [cli.id]: id },
+            }),
+          cwd,
+          env,
+        });
+        markRun(cli.id);
+      } else if (tier === "structured") {
         // Resume when there is a conversation to resume — which there is on
         // every launch after the first, and is the whole of "remembers who it
         // is". A first run has the id but no transcript behind it yet.

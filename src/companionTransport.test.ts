@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  OneshotTransport,
   StructuredTransport,
   newText,
   type CompanionEvent,
@@ -163,5 +164,81 @@ describe("recovering a reply from a redrawing terminal", () => {
 
   it("ignores trailing-whitespace churn", () => {
     expect(newText("a   \nb", "a\nb  \nc")).toBe("c");
+  });
+});
+
+describe("the oneshot protocol (codex)", () => {
+  function oneshot() {
+    const host = collector();
+    const sent: { message: string; sessionId: string | null }[] = [];
+    let learned: string | null = null;
+    const t = new OneshotTransport({
+      host,
+      sessionId: null,
+      onSession: (id) => void (learned = id),
+      launch: async (message, sessionId) => void sent.push({ message, sessionId }),
+    });
+    return { t, host, sent, learned: () => learned };
+  }
+
+  it("learns the thread id from the first turn", () => {
+    // Unlike claude's --session-id, codex reports the id rather than accepting
+    // one — so this is what makes the next turn a continuation.
+    const o = oneshot();
+    o.t.handleLine(line({ type: "thread.started", thread_id: "019fb7e5-acdb" }));
+    expect(o.learned()).toBe("019fb7e5-acdb");
+    expect(o.host.events).toContainEqual({ kind: "ready" });
+  });
+
+  it("resumes that id on the next message rather than starting over", async () => {
+    const o = oneshot();
+    o.t.handleLine(line({ type: "thread.started", thread_id: "T1" }));
+    await o.t.send("second question");
+    expect(o.sent).toEqual([{ message: "second question", sessionId: "T1" }]);
+  });
+
+  it("reads the reply out of a completed agent_message", () => {
+    const o = oneshot();
+    o.t.handleLine(
+      line({ type: "item.completed", item: { type: "agent_message", text: "CODEX-OK" } }),
+    );
+    expect(o.host.events).toContainEqual({ kind: "reply", text: "CODEX-OK" });
+  });
+
+  it("surfaces shell and MCP calls as tool chips", () => {
+    const o = oneshot();
+    o.t.handleLine(
+      line({ type: "item.completed", item: { type: "command_execution", command: "git status" } }),
+    );
+    o.t.handleLine(
+      line({ type: "item.completed", item: { type: "mcp_tool_call", name: "canopy_workspace" } }),
+    );
+    expect(o.host.events).toContainEqual({ kind: "tool", name: "Shell", detail: "git status" });
+    expect(o.host.events).toContainEqual({
+      kind: "tool",
+      name: "canopy_workspace",
+      detail: undefined,
+    });
+  });
+
+  it("ends the turn on turn.completed, and reports one that failed", () => {
+    const o = oneshot();
+    o.t.handleLine(line({ type: "turn.completed" }));
+    expect(o.host.events).toEqual([{ kind: "turnEnd" }]);
+
+    const b = oneshot();
+    b.t.handleLine(line({ type: "turn.failed", error: { message: "rate limited" } }));
+    expect(b.host.events).toEqual([
+      { kind: "error", message: "rate limited" },
+      { kind: "turnEnd" },
+    ]);
+  });
+
+  it("ignores what it does not know", () => {
+    const o = oneshot();
+    o.t.handleLine("Reading additional input from stdin...");
+    o.t.handleLine(line({ type: "turn.started" }));
+    o.t.handleLine(line({ type: "item.started", item: { type: "reasoning" } }));
+    expect(o.host.events).toEqual([]);
   });
 });

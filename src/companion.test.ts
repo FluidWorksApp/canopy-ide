@@ -63,16 +63,61 @@ describe("tiers", () => {
   it("puts every unlisted CLI in the terminal tier rather than refusing it", () => {
     // The point of the fallback: an agent Canopy ships no runner for still
     // works as a companion on the day the user installs it.
-    expect(tierFor("codex")).toBe("terminal");
     expect(tierFor("amp")).toBe("terminal");
+    expect(tierFor("aider")).toBe("terminal");
     expect(tierFor("something-nobody-has-written-yet")).toBe("terminal");
   });
 
   it("only lists a CLI whose flags were verified", () => {
     expect(tierFor("claude")).toBe("structured");
+    expect(tierFor("codex")).toBe("oneshot");
     for (const [id, runner] of Object.entries(COMPANION_RUNNERS)) {
-      expect(runner.tier, id).toBe("structured");
+      expect(["structured", "oneshot"], id).toContain(runner.tier);
     }
+  });
+
+  it("gives codex the flags its non-interactive mode actually needs", () => {
+    // Verified against the installed CLI: `codex exec --json` emits
+    // thread.started / item.completed / turn.completed, and `exec resume <id>`
+    // recalled a fact from the previous turn.
+    const launch = {
+      bin: "codex",
+      sessionId: "019fb7e5-acdb-7781-863c-53947ee2436d",
+      systemPrompt: "you are the companion",
+      roots: ["/a"],
+      model: "",
+      authority: "confirm" as const,
+    };
+    const fresh = COMPANION_RUNNERS.codex.args(launch);
+    expect(fresh).toContain("exec");
+    expect(fresh).toContain("--json");
+    // The companion runs in ~/.canopy/companion, which is deliberately not a
+    // repo — codex refuses to start outside one without this.
+    expect(fresh).toContain("--skip-git-repo-check");
+    // The id is reported by codex, never chosen, so a first turn must not
+    // claim to resume one.
+    expect(fresh).not.toContain("resume");
+
+    const resumed = COMPANION_RUNNERS.codex.resumeArgs(launch);
+    expect(resumed).toContain("resume");
+    expect(resumed).toContain(launch.sessionId);
+  });
+
+  it("locks codex down for answer-only in its own sandbox", () => {
+    // Codex's built-in tools never pass Canopy's gate, same as claude's.
+    const base = {
+      bin: "codex",
+      sessionId: "id",
+      systemPrompt: "p",
+      roots: [],
+      model: "",
+    };
+    expect(COMPANION_RUNNERS.codex.args({ ...base, authority: "read" }).join(" ")).toContain(
+      "read-only",
+    );
+    expect(
+      COMPANION_RUNNERS.codex.args({ ...base, authority: "auto" }).join(" "),
+    ).not.toContain("read-only");
   });
 
   it("carries the session id, the reach and the brief into both launches", () => {

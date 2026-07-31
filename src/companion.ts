@@ -107,7 +107,7 @@ export function companionSlug(): string {
  *  for `resume` and `prompt`: only syntax verified against the CLI's own help
  *  is written down, because a wrong flag does not error — it silently produces
  *  a session that ignores half of what it was told. */
-export type CompanionTier = "structured" | "terminal";
+export type CompanionTier = "structured" | "oneshot" | "terminal";
 
 /** The verified way to run one CLI as a companion.
  *
@@ -116,7 +116,7 @@ export type CompanionTier = "structured" | "terminal";
  *  agent the user installs usable here on day one.
  */
 export interface CompanionRunner {
-  tier: "structured";
+  tier: "structured" | "oneshot";
   /** Build the argv tail for a fresh session. `bin` is the *resolved* binary
    *  (Settings → Agents can rebind it), never the vendor's name. */
   args(o: CompanionLaunch): string[];
@@ -232,11 +232,64 @@ const CLAUDE_RUNNER: CompanionRunner = {
   ],
 };
 
-/** Keyed by the registry id in projects.ts. One entry today — and that is a
- *  statement about what has been *verified*, not about what is supported:
- *  every other CLI runs, in the terminal tier, with no entry at all. */
+/**
+ * Codex, in the `oneshot` tier.
+ *
+ * `codex exec` is non-interactive and ends with its turn — there is no
+ * long-lived stdin to write the next message to, so a process per turn is not
+ * a workaround, it is the shape of the CLI. `exec resume <thread_id>` is what
+ * makes that a conversation rather than a series of strangers.
+ *
+ * Verified against the installed CLI, both halves:
+ *   codex exec --json                 -> {"type":"thread.started","thread_id":…}
+ *                                       {"type":"item.completed","item":{"type":"agent_message","text":…}}
+ *                                       {"type":"turn.completed",…}
+ *   codex exec resume <id> --json     -> same thread_id, and it recalled a fact
+ *                                       from the previous turn
+ *
+ * `--skip-git-repo-check` is required: the companion runs in ~/.canopy/companion,
+ * which is deliberately not a repo, and codex refuses to start outside one.
+ *
+ * The thread id comes back on the FIRST turn rather than being chosen up front
+ * (unlike claude's `--session-id`), which is why `sessionId` is ignored here and
+ * companionSession records what `thread.started` reports.
+ */
+const CODEX_RUNNER: CompanionRunner = {
+  tier: "oneshot",
+  args: (o) => [
+    "exec",
+    "--json",
+    "--skip-git-repo-check",
+    ...(o.model ? ["-m", o.model] : []),
+    ...codexSandbox(o.authority),
+  ],
+  resumeArgs: (o) => [
+    "exec",
+    "resume",
+    o.sessionId,
+    "--json",
+    "--skip-git-repo-check",
+    ...(o.model ? ["-m", o.model] : []),
+    ...codexSandbox(o.authority),
+  ],
+};
+
+/** Codex's own sandbox, set to match the authority the bridge enforces.
+ *
+ *  `read-only` is the honest mapping for answer-only: like claude's disallowed
+ *  built-ins, it stops the CLI changing anything through its own tools, which
+ *  never pass Canopy's gate. Anything above that is left to codex's default,
+ *  because the gate is what asks. */
+function codexSandbox(authority: CompanionAuthority): string[] {
+  return authority === "read" ? ["-c", "sandbox_mode=\"read-only\""] : [];
+}
+
+/** Keyed by the registry id in projects.ts. Each entry is a statement about
+ *  what has been *verified* against that CLI, not about what is supported:
+ *  every CLI without one still runs, in the terminal tier. */
 export const COMPANION_RUNNERS: Record<string, CompanionRunner> = {
   claude: CLAUDE_RUNNER,
+  codex: CODEX_RUNNER,
 };
 
 export function tierFor(cliId: string): CompanionTier {
@@ -246,9 +299,14 @@ export function tierFor(cliId: string): CompanionTier {
 /** One line for the settings row, so the choice is made with its consequence
  *  visible rather than discovered afterwards. */
 export function tierNote(cliId: string): string {
-  return tierFor(cliId) === "structured"
-    ? "Streams replies."
-    : "Replies arrive whole, not streamed.";
+  switch (tierFor(cliId)) {
+    case "structured":
+      return "Streams replies.";
+    case "oneshot":
+      return "Replies arrive whole; conversation is kept.";
+    default:
+      return "Replies arrive whole, not streamed.";
+  }
 }
 
 /** Which CLI the companion runs on.
