@@ -101,7 +101,7 @@ pub async fn companion_spawn(
     // a binary that is plainly installed. pty.rs never hits this because it
     // spawns through a login shell; this execs the binary directly, so it has
     // to resolve the name the way a login shell would.
-    let resolved = crate::mcp_client::resolve_command(&command);
+    let resolved = crate::procenv::resolve_command(&command);
     let mut cmd = tokio::process::Command::new(&resolved);
     cmd.args(&args)
         .stdin(Stdio::piped())
@@ -121,6 +121,13 @@ pub async fn companion_spawn(
     // answered, its new ops came back "unknown ui op", and every project it
     // asked about belonged to the other instance. Silent, and invisible from
     // inside the session, because nothing about it looks like a wrong address.
+    // Give the child the PATH a terminal would have. Resolving the binary is
+    // only half of it: the CLI we start goes on to run git, node and its own
+    // MCP servers, and in a GUI-launched app none of those are findable either.
+    // This is the whole of "works in dev, broken in the installed build".
+    if let Some(path) = crate::procenv::child_path() {
+        cmd.env("PATH", path);
+    }
     cmd.env("CANOPY", "1");
     if let Some(ctx) = app.try_state::<crate::context::ContextBridge>() {
         if let Some((port, token)) = ctx.env() {
@@ -360,23 +367,6 @@ pub async fn companion_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The companion execs the CLI directly rather than through a login shell,
-    /// so a bare name has to be resolved the way a shell would — `claude` lives
-    /// in /opt/homebrew/bin, which a GUI process's PATH does not contain, and
-    /// the failure reads as "No such file or directory" for a binary that is
-    /// plainly installed.
-    #[test]
-    fn a_bare_command_is_resolved_to_a_real_path() {
-        // An absolute path is returned untouched.
-        assert_eq!(crate::mcp_client::resolve_command("/bin/sh"), "/bin/sh");
-        // A name every machine has resolves to something runnable.
-        let found = crate::mcp_client::resolve_command("sh");
-        assert!(
-            found == "sh" || std::path::Path::new(&found).is_file(),
-            "sh resolved to {found:?}, which is neither on PATH nor a real file"
-        );
-    }
 
     #[test]
     fn the_store_refuses_anything_that_is_not_a_bare_filename() {

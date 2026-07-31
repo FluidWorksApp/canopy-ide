@@ -372,42 +372,7 @@ fn parse_http_body(text: &str, id: i64) -> Result<Value, String> {
 // Starting a server
 // ---------------------------------------------------------------------------
 
-/// GUI apps on macOS don't inherit the user's shell PATH, and MCP servers are
-/// overwhelmingly `npx`. Resolve a bare name the way a login shell would, or
-/// every stdio server fails to start with a bewildering "No such file".
-///
-/// `pub(crate)` because the companion spawns an agent CLI the same way and hit
-/// the same wall — `claude` sitting in /opt/homebrew/bin, invisible to a GUI
-/// process, reported as "could not start `claude`: No such file or directory".
-/// Anything that execs a user's binary directly rather than through a login
-/// shell needs this; a second copy would have been a second thing to fix.
-pub(crate) fn resolve_command(cmd: &str) -> String {
-    if cmd.contains('/') {
-        return cmd.to_string();
-    }
-    if std::env::var("PATH")
-        .map(|path| std::env::split_paths(&path).any(|dir| dir.join(cmd).is_file()))
-        .unwrap_or(false)
-    {
-        return cmd.to_string();
-    }
-    #[cfg(unix)]
-    {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-        if let Ok(out) = std::process::Command::new(shell)
-            .args(["-lc", &format!("command -v {cmd}")])
-            .output()
-        {
-            if out.status.success() {
-                let found = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !found.is_empty() {
-                    return found;
-                }
-            }
-        }
-    }
-    cmd.to_string()
-}
+use crate::procenv::resolve_command;
 
 fn start_stdio(spec: &LaunchSpec) -> Result<Transport, String> {
     let command = spec
