@@ -21,7 +21,7 @@ import {
   type TaskRun,
 } from "../taskHistory";
 import { ashFor } from "../ash";
-import { Ash } from "./Ash";
+import { Mascot } from "./Mascot";
 import { PlayIcon, StopIcon, TrashIcon } from "./icons";
 import { Button } from "./ui";
 import { matches } from "../shortcuts";
@@ -288,7 +288,7 @@ export function TasksPanel({
               className={`task-row task-row-running${r.blocked ? " task-row-blocked" : ""}`}
               key={r.tabId ?? `pty:${r.ptyId}`}
             >
-              <Ash
+              <Mascot
                 state={ashFor(r.state).state}
                 tone={ashFor(r.state).tone}
                 size={16}

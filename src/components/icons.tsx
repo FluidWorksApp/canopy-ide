@@ -58,6 +58,16 @@ export function CloseIcon({ size = 12, className }: IconProps) {
   );
 }
 
+// The attention channel's opener in the title bar.
+export function BellIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M18 8.5a6 6 0 1 0-12 0c0 5.5-2 7-2 7h16s-2-1.5-2-7" />
+      <path d="M13.7 19.5a2 2 0 0 1-3.4 0" />
+    </svg>
+  );
+}
+
 export function StopIcon({ size = 14, className }: IconProps) {
   return (
     <svg {...svgProps(size, className)} fill="currentColor" stroke="none">

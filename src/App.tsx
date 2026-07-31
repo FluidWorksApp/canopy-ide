@@ -27,8 +27,24 @@ import {
   projectForLink,
   type DeepLink,
 } from "./deepLinks";
+import {
+  attentionItems,
+  badgeFor,
+  dismissToast,
+  forProject,
+  isOutstanding,
+  liveToasts,
+  osPayload,
+  postAttention,
+  resolveAttention,
+  resolveAttentionByKey,
+  shouldReachOS,
+  toastMs,
+  type AttentionItem,
+} from "./attention";
+import { useAttention } from "./useAttention";
+import { NotificationCenter } from "./components/NotificationCenter";
 import { runUiOp } from "./agentOps";
-import { ashGlyph } from "./ash";
 import { getSettings, THEME_CHANGE_EVENT } from "./settings";
 import { useTabDrag } from "./tabDrag";
 import * as prWatch from "./prWatchStore";
@@ -154,34 +170,46 @@ export default function App() {
   // Transient "110%" chip shown for ~1s after a zoom change, then cleared.
   const [zoomPct, setZoomPct] = useState<number | null>(null);
   const zoomHideTimer = useRef<number | null>(null);
-  const [notice, setNotice] = useState<{
-    text: string;
-    kind: NoticeKind;
-  } | null>(null);
+  // Everything that has asked for the user's attention (attention.ts). One
+  // queue, one urgency model, one rule for when something leaves the app for
+  // the OS — replacing a single-slot toast that the next caller overwrote, and
+  // eight call sites that each decided for themselves whether to raise a
+  // native banner and what to call it.
+  const attention = useAttention();
+  // The old `Notify` signature, unchanged, because it is threaded through
+  // nearly every component and is the migration seam. A caller that knows more
+  // than a string and a tone — which project, where a click should land, and
+  // whether it is asking rather than announcing — calls `postAttention`
+  // directly instead.
   const notify = useCallback(
-    (text: string, kind: NoticeKind = "info") => setNotice({ text, kind }),
+    (text: string, kind: NoticeKind = "info") =>
+      void postAttention({ kind: "fyi", tone: kind, title: text, source: "app" }),
     [],
   );
-  // Native (macOS) notification for activity landing while Canopy isn't the
-  // focused app — the in-app toast can't be seen from another Space.
-  //
-  // `where` is where a click should land the user (deepLinks.ts). It is not
-  // optional in spirit: a notification about a thing, that doesn't take you to
-  // the thing, makes the user go find it themselves — which is what this whole
-  // path exists to stop. Pass the most specific target the caller honestly
-  // knows; the router degrades from there.
-  const nativeNotify = useCallback(
-    async (title: string, body: string, where?: DeepLink) => {
-      if (document.hasFocus()) return;
-      try {
-        await ipc.notifyNative(
-          title,
-          body,
-          formatDeepLink(where ?? { kind: "app" }),
-        );
-      } catch {
-        // Notifications are a garnish — never fail anything over them.
+  /** Which project a path belongs to, as the `projectId` / `projectName` pair
+   *  every posted item carries. The name is stamped in rather than looked up
+   *  later, like TaskRun.projectName: the history outlives the project being
+   *  closed or renamed, and an id alone tells the reader nothing.
+   *
+   *  Most specific component root wins, so a path inside a nested component
+   *  lands in the project that owns it rather than an ancestor containing it. */
+  const projectIdentity = useCallback(
+    (path: string | undefined): { projectId?: string; projectName?: string } => {
+      if (!path) return {};
+      const norm = (p: string) => p.replace(/\/+$/, "");
+      const c = norm(path);
+      let best: Project | undefined;
+      let bestLen = -1;
+      for (const p of wsRef.current.projects) {
+        for (const comp of p.components) {
+          const r = norm(comp.path);
+          if (r && (c === r || c.startsWith(r + "/")) && r.length > bestLen) {
+            bestLen = r.length;
+            best = p;
+          }
+        }
       }
+      return best ? { projectId: best.id, projectName: best.name } : {};
     },
     [],
   );
@@ -191,14 +219,63 @@ export default function App() {
   // forever: hidden from the history tab, still holding one of its slots.
   useEffect(() => {
     sweepStaleRuns();
+    // Its question goes with it, and so does every other question that was
+    // waiting on a process rather than on a fact. A micro-task's pty and an
+    // agent's session both died with the last launch, so nothing can answer
+    // them; left alone they sit in the waiting count for good — a stall that
+    // outlives the thing that stalled, which is a worse lie than no
+    // notification at all. Anything still genuinely pending is re-posted
+    // within the first tick by the bridge, off the live hook stream.
+    for (const item of attentionItems()) {
+      const key = item.dedupeKey;
+      if (!isOutstanding(item) || !key) continue;
+      if (key.startsWith("task:") || key.startsWith("agent:"))
+        resolveAttentionByKey(key, "withdrawn");
+    }
   }, []);
-  // Successes and status lines are transient; a failure stays until it has
-  // been read and dismissed.
+  // The one place anything leaves the app for the OS.
+  //
+  // Was `if (document.hasFocus()) return;` copied into every call site that
+  // wanted a banner, each with its own hand-written title. Now the decision is
+  // `shouldReachOS` (attention.ts) and the strings come from the item, so a new
+  // caller gets routing and a deep-linked click by posting — not by remembering
+  // to also call something.
+  //
+  // Keyed on ids already sent, because a question re-derived from a hook event
+  // stream updates its item in place and must not re-notify each time.
+  const notifiedIds = useRef(new Set<string>());
   useEffect(() => {
-    if (!notice || notice.kind === "error") return;
-    const t = window.setTimeout(() => setNotice(null), 4500);
-    return () => window.clearTimeout(t);
-  }, [notice]);
+    for (const item of attention) {
+      if (notifiedIds.current.has(item.id)) continue;
+      notifiedIds.current.add(item.id);
+      if (!shouldReachOS(item, document.hasFocus())) continue;
+      const { title, body } = osPayload(item);
+      void ipc
+        .notifyNative(
+          title,
+          body,
+          formatDeepLink(item.where ?? { kind: "app" }),
+        )
+        // Notifications are a garnish — never fail anything over them.
+        .catch(() => {});
+    }
+  }, [attention]);
+  // Toasts fade on a clock the store knows nothing about, so a tick drives the
+  // re-render that retires them. Only while something is actually on screen:
+  // an idle app should not hold a repeating timer for an empty overlay.
+  const [toastTick, setToastTick] = useState(0);
+  const toasts = useMemo(
+    () => liveToasts(attention, Date.now()),
+    // `toastTick` is the clock this depends on — the items themselves do not
+    // change when one merely ages out.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [attention, toastTick],
+  );
+  useEffect(() => {
+    if (!toasts.some((t) => toastMs(t) != null)) return;
+    const t = window.setInterval(() => setToastTick((n) => n + 1), 500);
+    return () => window.clearInterval(t);
+  }, [toasts]);
   // Team relay: one socket per app, so the state lives here and every
   // ProjectView renders the same picture. Chat keeps a rolling transcript
   // (received + our own sends); the inbox holds commands awaiting action.
@@ -227,6 +304,9 @@ export default function App() {
    *  answer — the agent's tool call is parked on the other end of `resolve`. */
   const [ask, setAsk] = useState<{
     id: number;
+    /** The channel item this question posted, so answering resolves it rather
+     *  than leaving it in the waiting count for good. */
+    attentionId: string;
     question: string;
     options: string[];
     resolve: (answer: string) => void;
@@ -241,14 +321,16 @@ export default function App() {
       if (relayIntentional.current) {
         relayIntentional.current = false;
       } else {
-        notify("Disconnected from the team relay.", "error");
-        void nativeNotify("Canopy — Team", "Disconnected from the team relay.", {
-          kind: "panel",
-          panel: "team",
+        postAttention({
+          kind: "fyi",
+          tone: "error",
+          title: "Disconnected from the team relay.",
+          source: "team",
+          where: { kind: "panel", panel: "team" },
         });
       }
     }
-  }, [relayStatus.role, notify, nativeNotify]);
+  }, [relayStatus.role]);
   // Live editing. The manager is a plain mutable object deliberately kept out
   // of React state — it holds Monaco models and per-keystroke session state,
   // neither of which survives being copied. `collabTick` is how a change in it
@@ -311,8 +393,19 @@ export default function App() {
       const o = mgr.projectOffers.get(doc);
       if (!o) return;
       const what = `${o.fromName} wants to share their project "${o.name}" with you`;
-      notify(`${what} — see the Team panel`);
-      void nativeNotify("Canopy — Team", what, { kind: "panel", panel: "team" });
+      // An FYI, though it reads like a question: an offer is accepted or
+      // declined in the Team panel, and nothing here is told which happened.
+      // A question that can never be resolved would sit in the waiting count
+      // for good, which is worse than one that fades — so it stays an FYI
+      // until the offer has a settle path to hang a `resolveAttention` on.
+      postAttention({
+        kind: "fyi",
+        tone: "info",
+        title: what,
+        body: "See the Team panel",
+        source: "team",
+        where: { kind: "panel", panel: "team" },
+      });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -498,18 +591,23 @@ export default function App() {
         const text = m.text.length > 120 ? `${m.text.slice(0, 120)}…` : m.text;
         // If the user is looking at this conversation, it's already read;
         // otherwise it stays unread (the panel badge) and we toast.
-        if (activeChatRef.current === convo) {
+        // "Already read" needs the conversation on screen AND someone in front
+        // of it. With the tab open but Canopy in the background, the message is
+        // not read — it is missed, which is exactly when the banner matters.
+        if (activeChatRef.current === convo && document.hasFocus()) {
           markSeen(convo);
         } else {
-          notify(`${m.from_name}: ${text}`);
+          postAttention({
+            kind: "fyi",
+            tone: "info",
+            title: `${m.from_name}${m.to === null ? " (team chat)" : ""}`,
+            body: text,
+            source: "team",
+            // Straight into the conversation it came from — the one target
+            // where "take me there" is unambiguous.
+            where: { kind: "chat", peer: convo },
+          });
         }
-        void nativeNotify(
-          m.to === null ? `${m.from_name} (team chat)` : m.from_name,
-          text,
-          // Straight into the conversation it came from — the one target where
-          // "take me there" is unambiguous.
-          { kind: "chat", peer: convo },
-        );
       }),
       ipc.onRelayCommand((m) => {
         setRelayInbox((prev) =>
@@ -527,10 +625,13 @@ export default function App() {
               : m.kind === "file-offer" && file
                 ? `${m.from_name} wants to send you ${file}`
                 : `${m.from_name} sent a ${m.kind} command`;
-        notify(`${text} — see the Team panel`);
-        void nativeNotify("Canopy — Team", text, {
-          kind: "panel",
-          panel: "team",
+        postAttention({
+          kind: "fyi",
+          tone: "info",
+          title: text,
+          body: "See the Team panel",
+          source: "team",
+          where: { kind: "panel", panel: "team" },
         });
       }),
       ipc.onRelayCollab((m) => {
@@ -542,10 +643,13 @@ export default function App() {
         // this channel is a keystroke.
         if (!known && m.body.kind === "offer") {
           const what = `${m.from_name} wants to edit ${safeName(m.body.name)} with you`;
-          notify(`${what} — see the Team panel`);
-          void nativeNotify("Canopy — Team", what, {
-            kind: "panel",
-            panel: "team",
+          postAttention({
+            kind: "fyi",
+            tone: "info",
+            title: what,
+            body: "See the Team panel",
+            source: "team",
+            where: { kind: "panel", panel: "team" },
           });
         }
       }),
@@ -574,10 +678,12 @@ export default function App() {
             : t.ok
               ? `Sent ${t.name} to ${t.detail}`
               : `Sending ${t.name} failed: ${t.detail}`;
-        notify(msg, t.ok ? "success" : "error");
-        void nativeNotify("Canopy — File transfer", msg, {
-          kind: "panel",
-          panel: "team",
+        postAttention({
+          kind: "fyi",
+          tone: t.ok ? "success" : "error",
+          title: msg,
+          source: "team",
+          where: { kind: "panel", panel: "team" },
         });
         // A completed transfer is part of the conversation, not just a toast
         // that scrolls away: record it in the transcript with the peer it was
@@ -1316,60 +1422,68 @@ export default function App() {
   // takes it as far as it can and says so if the exact surface is gone. With
   // no project to resolve at all, the window is already up, which is where
   // this used to stop for every notification.
+  //
+  // Extracted from the IPC listener so that clicking a row in the notification
+  // list goes down the identical path as clicking the OS banner for the same
+  // item. Two routers would drift, and the fallback chain is the part worth
+  // having exactly once.
+  const followDeepLink = useCallback(
+    async (link: DeepLink | null) => {
+      if (!link || link.kind === "app") return;
+      const state = wsRef.current;
+      // Team surfaces (chat, transfers, the inbox) are global but rendered
+      // inside a project, so they carry no project hint and are perfectly
+      // happy in whichever one is in front. A link that *does* name a
+      // project and doesn't resolve is a different story — dropping the user
+      // into an unrelated project would be worse than saying so.
+      const hinted = Boolean(link.projectId || link.path);
+      const projectId =
+        projectForLink(link, state.projects) ??
+        // An agent running in a worktree has a cwd (`<repo>-wt-…`) under no
+        // component root, so a hinted link can still fail to resolve. With
+        // exactly one project open there is only one place it could mean —
+        // the same fallback agent actions already take.
+        (hinted
+          ? state.openIds.length === 1
+            ? state.openIds[0]
+            : undefined
+          : (state.activeId ?? state.openIds[0]));
+      if (!projectId) {
+        notify(
+          hinted
+            ? "That notification's project isn't in this workspace any more."
+            : "Nothing to open — no project is open.",
+          "info",
+        );
+        return;
+      }
+      await openForActionRef.current(projectId);
+      if (link.kind === "project") return;
+      // Timer, not rAF — a project that was hibernating has only just
+      // mounted its ProjectView, and a listener registered during that
+      // mount would miss an event dispatched in the same frame.
+      window.setTimeout(
+        () =>
+          window.dispatchEvent(
+            new CustomEvent("canopy:deep-link", {
+              detail: { projectId, link },
+            }),
+          ),
+        80,
+      );
+    },
+    [notify],
+  );
   useEffect(() => {
     if (!loaded) return;
     let un: (() => void) | undefined;
     void ipc
-      .onDeepLink(async (raw) => {
-        const link = parseDeepLink(raw);
-        if (!link || link.kind === "app") return;
-        const state = wsRef.current;
-        // Team surfaces (chat, transfers, the inbox) are global but rendered
-        // inside a project, so they carry no project hint and are perfectly
-        // happy in whichever one is in front. A link that *does* name a
-        // project and doesn't resolve is a different story — dropping the user
-        // into an unrelated project would be worse than saying so.
-        const hinted = Boolean(link.projectId || link.path);
-        const projectId =
-          projectForLink(link, state.projects) ??
-          // An agent running in a worktree has a cwd (`<repo>-wt-…`) under no
-          // component root, so a hinted link can still fail to resolve. With
-          // exactly one project open there is only one place it could mean —
-          // the same fallback agent actions already take.
-          (hinted
-            ? state.openIds.length === 1
-              ? state.openIds[0]
-              : undefined
-            : (state.activeId ?? state.openIds[0]));
-        if (!projectId) {
-          notify(
-            hinted
-              ? "That notification's project isn't in this workspace any more."
-              : "Nothing to open — no project is open.",
-            "info",
-          );
-          return;
-        }
-        await openForActionRef.current(projectId);
-        if (link.kind === "project") return;
-        // Timer, not rAF — a project that was hibernating has only just
-        // mounted its ProjectView, and a listener registered during that
-        // mount would miss an event dispatched in the same frame.
-        window.setTimeout(
-          () =>
-            window.dispatchEvent(
-              new CustomEvent("canopy:deep-link", {
-                detail: { projectId, link },
-              }),
-            ),
-          80,
-        );
-      })
+      .onDeepLink((raw) => void followDeepLink(parseDeepLink(raw)))
       .then((u) => {
         un = u;
       });
     return () => un?.();
-  }, [loaded, notify]);
+  }, [loaded, followDeepLink]);
 
   // An action an agent requested via the MCP context bridge (canopy_start_server
   // / canopy_open_preview). Routed exactly like a phone-spawned PTY: find the
@@ -1416,21 +1530,37 @@ export default function App() {
         if (a.kind === "job_done") {
           const ok = a.status === "done";
           const summary = a.summary ?? "A micro-task finished.";
-          notify(
-            `${ok ? "Task done" : "Task blocked"}: ${summary}${a.url ? ` — ${a.url}` : ""}`,
-            ok ? "success" : "warn",
-          );
-          // Blocked means the agent is still there, waiting on an answer —
-          // send the click to its terminal. Done means the opposite: the
-          // ProjectView below is about to kill the pty and close the tab, so
-          // the only thing left to look at is the run's row in Tasks.
-          void nativeNotify(
-            `Canopy — Task ${ashGlyph(ok ? "done" : "blocked")}`,
-            summary,
-            !ok && a.ptyId != null
-              ? { kind: "terminal", ptyId: a.ptyId, path: a.route }
-              : { kind: "panel", panel: "tasks", path: a.route },
-          );
+          const taskKey = a.ptyId != null ? `task:${a.ptyId}` : undefined;
+          // A blocked task is a *question*, not an FYI, and this is the split
+          // the channel exists to close: a task that stops to ask and an agent
+          // that stops to ask are the same event to the user, and used to have
+          // completely different fates — one a toast that faded, the other a
+          // rail badge in a panel. Both post a question now, both are counted,
+          // and neither can be retired by a timer.
+          //
+          // Blocked means the agent is still there, waiting on an answer — send
+          // the click to its terminal. Done means the opposite: the ProjectView
+          // below is about to kill the pty and close the tab, so the only thing
+          // left to look at is the run's row in Tasks.
+          if (ok && taskKey) {
+            // It asked, then got unstuck on its own (or the user answered in
+            // the terminal without ever opening the list). Either way nothing
+            // is waiting any more.
+            resolveAttentionByKey(taskKey, "withdrawn");
+          }
+          postAttention({
+            kind: ok ? "fyi" : "question",
+            tone: ok ? "success" : "warn",
+            title: ok ? `Task done: ${summary}` : `Task blocked: ${summary}`,
+            body: a.url ?? undefined,
+            source: "task",
+            ...projectIdentity(a.route),
+            where:
+              !ok && a.ptyId != null
+                ? { kind: "terminal", ptyId: a.ptyId, path: a.route }
+                : { kind: "panel", panel: "tasks", path: a.route },
+            ...(ok ? {} : { dedupeKey: taskKey }),
+          });
           window.dispatchEvent(
             new CustomEvent("canopy:agent-action", {
               detail: { projectId: null, action: a },
@@ -1447,15 +1577,17 @@ export default function App() {
         // question. The sidecar stamps the terminal it ran in; without one
         // (an agent outside a Canopy tab) the cwd still names the project.
         if (a.kind === "notify") {
-          notify(a.text ?? "", (a.level ?? "info") as NoticeKind);
-          if (a.level === "error" || a.level === "warn")
-            void nativeNotify(
-              `Canopy — Agent ${ashGlyph(a.level === "error" ? "blocked" : "needs")}`,
-              a.text ?? "",
+          postAttention({
+            kind: "fyi",
+            tone: (a.level ?? "info") as NoticeKind,
+            title: a.text ?? "",
+            source: "agent",
+            ...projectIdentity(a.route),
+            where:
               a.ptyId != null
                 ? { kind: "terminal", ptyId: a.ptyId, path: a.route }
                 : { kind: "project", path: a.route },
-            );
+          });
           return;
         }
         const projectId =
@@ -1488,7 +1620,7 @@ export default function App() {
         un = u;
       });
     return () => un?.();
-  }, [notify, nativeNotify]);
+  }, [notify, projectIdentity]);
 
   // A browser-control op (canopy_browser_*). Routed like agent:action, but
   // request/response: an op that can't reach a project must answer the bridge
@@ -1595,9 +1727,25 @@ export default function App() {
             roots,
             repos,
             inbox: relayInboxRef.current,
+            // An agent's question, which until now was the one attention
+            // mechanism with no notification at all: a modal that existed only
+            // while you happened to be looking at Canopy, left no trace when
+            // answered, and never named the project it came from. The dialog
+            // stays — the agent is blocked, so interrupting is right — but the
+            // question also goes into the channel, where it is counted, it
+            // reaches the OS, and it survives as history.
             ask: (question, options) =>
               new Promise<string>((resolve) => {
-                setAsk({ id: op.id, question, options, resolve });
+                const attentionId = postAttention({
+                  kind: "question",
+                  tone: "info",
+                  title: question,
+                  body: "An agent is asking",
+                  source: "agent",
+                  ...projectIdentity(op.route),
+                  where: { kind: "project", path: op.route },
+                });
+                setAsk({ id: op.id, attentionId, question, options, resolve });
               }),
             // The page an agent's browser ops are driving, for the vault ops.
             // The tab id comes from the view snapshots; the URL comes from the
@@ -1623,7 +1771,7 @@ export default function App() {
         un = u;
       });
     return () => un?.();
-  }, []);
+  }, [projectIdentity]);
 
   const saveProject = useCallback(
     async (project: Project) => {
@@ -1723,7 +1871,25 @@ export default function App() {
     if (updateAvail) dismissedUpdate.current = updateAvail.info.version;
     setUpdateAvail(null);
   }, [updateAvail]);
-  const dismissNotice = useCallback(() => setNotice(null), []);
+  /** Clicking an item, from the toast or from the list.
+   *
+   *  Follows the target; deliberately does NOT resolve a question. Arriving at
+   *  a blocked agent's terminal is not answering it — the agent is still
+   *  waiting until something is typed, and the asker is what says so: the
+   *  bridge withdraws when the agent moves on, `AskDialog` resolves on answer.
+   *  Clearing the count on arrival would put the stall back exactly where it
+   *  was, invisible. */
+  const followAttention = useCallback(
+    async (item: AttentionItem) => {
+      dismissToast(item.id);
+      await followDeepLink(item.where ?? null);
+    },
+    [followDeepLink],
+  );
+  const [notifOpen, setNotifOpen] = useState(false);
+  const notifBadge = useMemo(() => badgeFor(attention), [attention]);
+  // Stable, so TitleBar's memo isn't defeated by a fresh closure every tick.
+  const openNotifications = useCallback(() => setNotifOpen(true), []);
 
   // The relay handle every ProjectView shares. Sends append the stamped
   // message locally — the relay never echoes a frame back to its author, so
@@ -1831,6 +1997,51 @@ export default function App() {
       derivePending(agentEvents).filter((i) => !dismissedPending.has(i.key)),
     [agentEvents, dismissedPending],
   );
+  // Agents blocked on the user, into the same queue as everything else.
+  //
+  // This is the other half of the split the channel closes. A micro-task that
+  // stopped to ask raised a toast and a banner; an agent that stopped to ask
+  // moved a number on a rail inside its own project — so the identical
+  // situation was loud in one case and, in a project you were not looking at,
+  // completely silent in the other. Both are questions now, both counted, and
+  // an agent blocked in a background project finally reaches the OS.
+  //
+  // Derived, not posted at the moment it happens: `derivePending` recomputes
+  // the whole picture from the hook stream on every event, so the bridge posts
+  // under a stable per-session key and withdraws whatever the new picture no
+  // longer contains. An agent that moved on withdraws its own question.
+  const bridgedAgentKeys = useRef(new Set<string>());
+  useEffect(() => {
+    // `idle` is an agent that finished and is waiting — worth a calm card in
+    // its panel, but nothing is blocked on the user, so it is not a question.
+    const blocked = allPending.filter((i) => i.kind !== "idle");
+    const live = new Set(blocked.map((i) => `agent:${i.sessionId}`));
+    for (const p of blocked) {
+      postAttention({
+        kind: "question",
+        tone: "info",
+        title:
+          p.kind === "question"
+            ? (p.questions?.[0]?.question ?? `${p.agent} is asking`)
+            : (p.message ?? `${p.agent} needs your attention`),
+        body: p.agent,
+        source: "agent",
+        ...projectIdentity(p.cwd),
+        // The terminal it is blocked in is the only place the answer can be
+        // typed. Without a pty stamp (codex, an agent outside a Canopy tab)
+        // the Agents panel is the nearest true answer.
+        where:
+          p.pty != null
+            ? { kind: "terminal", ptyId: p.pty, path: p.cwd }
+            : { kind: "panel", panel: "agents", path: p.cwd },
+        dedupeKey: `agent:${p.sessionId}`,
+      });
+    }
+    for (const key of bridgedAgentKeys.current) {
+      if (!live.has(key)) resolveAttentionByKey(key, "withdrawn");
+    }
+    bridgedAgentKeys.current = live;
+  }, [allPending, projectIdentity]);
   // Resolved rather than asserted: a project can be deleted from the manager
   // while its frost is still forming.
   const freezingProject = freezing
@@ -1850,14 +2061,17 @@ export default function App() {
   // Tab badges count only what's blocked on the user — an agent that finished
   // and is idling is not urgent. Content-stable: most hook events move no
   // badge, and only a count actually changing should break TitleBar's memo.
+  //
+  // Read off the channel rather than counted here from the hook stream, which
+  // is what made this a fourth independent mechanism. The number now means the
+  // same thing everywhere and covers everything that can wait on you in a
+  // project — a blocked agent, a micro-task that stopped to ask, an agent's
+  // `canopy_ask_user` — where before it saw only the first.
   const pendingCountsSig = JSON.stringify(
     Object.fromEntries(
       openProjects.map((p) => [
         p.id,
-        pendingForRoots(
-          allPending,
-          p.components.map((c) => c.path),
-        ).filter((i) => i.kind !== "idle").length,
+        forProject(attention, p.id).filter(isOutstanding).length,
       ]),
     ),
   );
@@ -1936,6 +2150,9 @@ export default function App() {
         tabDragItemProps={tabDrag.itemProps}
         hibernated={hibernated}
         showHints={projectHints}
+        notifCount={notifBadge.count}
+        notifUrgency={notifBadge.urgency}
+        onOpenNotifications={openNotifications}
         onSelectProject={selectProject}
         onCloseProject={handleCloseProject}
         onHibernateProject={hibernateProject}
@@ -2039,11 +2256,27 @@ export default function App() {
         />
       )}
 
-      {notice && (
-        <NoticeToast
-          text={notice.text}
-          kind={notice.kind}
-          onDismiss={dismissNotice}
+      {/* A stack, not a slot. Two things reporting at once used to mean the
+          first was destroyed before it could be read. Newest at the bottom,
+          nearest the corner the eye is already in. */}
+      {toasts.length > 0 && (
+        <div className="notice-stack">
+          {toasts.map((t) => (
+            <NoticeToast
+              key={t.id}
+              item={t}
+              onDismiss={() => dismissToast(t.id)}
+              onFollow={() => void followAttention(t)}
+            />
+          ))}
+        </div>
+      )}
+
+      {notifOpen && (
+        <NotificationCenter
+          items={attention}
+          onFollow={(item) => void followAttention(item)}
+          onClose={() => setNotifOpen(false)}
         />
       )}
 
@@ -2139,6 +2372,7 @@ export default function App() {
           options={ask.options}
           onAnswer={(answer) => {
             ask.resolve(answer);
+            resolveAttention(ask.attentionId, "answered");
             setAsk(null);
           }}
         />

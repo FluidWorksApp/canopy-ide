@@ -8137,6 +8137,69 @@ input[type="radio"]:disabled {
   text-align: left;
 }
 
+/* ---------- mascot picker ---------- */
+
+/* Wider cards than the skin grid: a mascot card carries four faces in a row,
+   where a skin card carries three dots. */
+.mascot-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.mascot-card {
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  corner-shape: squircle;
+  cursor: pointer;
+  color: var(--text);
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+
+.mascot-card:hover {
+  border-color: var(--border-strong);
+}
+
+.mascot-card-active {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-raised));
+}
+
+/* The four states that carry meaning, side by side — the card has to show what
+   distinguishes one mascot from another, and that is the range, not the
+   resting face. Sunk panel so the faces sit on a surface rather than floating
+   on the card. */
+.mascot-faces {
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  gap: 4px;
+  padding: 9px 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  background: var(--bg-deep);
+}
+
+.mascot-name {
+  margin-top: 9px;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.mascot-note {
+  margin-top: 1px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  text-align: left;
+}
+
 /* Help reuses the old section head style. */
 .set-head {
   font-size: 10px;
@@ -9104,11 +9167,28 @@ input[type="radio"]:disabled {
 }
 
 /* transient error/info toast (workspace import failures etc.) */
-.notice {
+/* The stack owns the corner; each notice is just a strip inside it. Was one
+   fixed-position element, because there could only ever be one. */
+.notice-stack {
   position: fixed;
   bottom: 34px;
   right: 16px;
   z-index: 300;
+  display: flex;
+  /* Reversed: the store is newest-first, so the newest lands at the bottom —
+     nearest the corner the eye is already in. */
+  flex-direction: column-reverse;
+  align-items: flex-end;
+  gap: 6px;
+  /* The strips take pointer events; the gaps between them must not, or the
+     stack would eat clicks on whatever it is floating over. */
+  pointer-events: none;
+  max-height: 60vh;
+  overflow: hidden;
+}
+
+.notice {
+  pointer-events: auto;
   max-width: 60vw;
   padding: 9px 14px;
   border-radius: var(--r-md);
@@ -13522,38 +13602,270 @@ a.btn-sm {
   border-left: 2px solid var(--warn);
 }
 
-/* Message kinds. The stripe carries the severity; the text stays readable
-   rather than being tinted into low contrast. */
-.notice::before {
-  content: "";
-  width: 3px;
-  align-self: stretch;
-  border-radius: 2px;
-  background: var(--text-dim);
-}
-
+/* Message kinds. Ash carries the severity now — the stripe that used to is
+   gone, because with a face in the strip the two disagreed: a question wore an
+   accent stripe while Ash wore `blocked` red for the same item. One vocabulary,
+   and it is the face. The border keeps a quiet tint so the strip still reads as
+   its kind from the corner of the eye, without competing. */
 .notice-success {
   border-color: color-mix(in srgb, var(--ok) 55%, var(--border));
-}
-
-.notice-success::before {
-  background: var(--ok);
 }
 
 .notice-warn {
   border-color: color-mix(in srgb, var(--warn) 55%, var(--border));
 }
 
-.notice-warn::before {
-  background: var(--warn);
-}
-
 .notice-error {
   border-color: var(--danger);
 }
 
-.notice-error::before {
-  background: var(--danger);
+.notice-question {
+  border-color: var(--accent);
+}
+
+.notice-ash {
+  margin-right: 2px;
+}
+
+.notice-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* Which project this came from — the thing the old app-global toast could
+   never say. */
+.notice-project {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.notice-body {
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* With a target, the strip's body follows it, so dismissing needs its own
+   affordance rather than being the whole surface. */
+.notice-clickable:hover {
+  border-color: var(--accent);
+}
+
+.notice-x {
+  margin-left: auto;
+  padding: 2px;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: var(--r-sm);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.notice-x:hover {
+  background: var(--bg-raised);
+  color: var(--text);
+}
+
+/* ---------- notification centre ---------- */
+
+.notif-bell {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 22px;
+  margin-right: 4px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--r-sm);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.notif-bell:hover {
+  background: var(--bg-raised);
+  color: var(--text);
+}
+
+.notif-bell-lit {
+  color: var(--text);
+}
+
+.notif-bell-badge {
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  min-width: 13px;
+  height: 13px;
+  padding: 0 3px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--on-accent);
+  background: var(--accent);
+}
+
+/* The one urgency model, wearing its colours. High means something is waiting
+   on you; low is a count of things that merely arrived. */
+.notif-bell-high {
+  background: var(--warn);
+}
+
+.notif-bell-low {
+  background: var(--border-strong);
+  color: var(--text);
+}
+
+.notif-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.notif-panel {
+  position: absolute;
+  top: 34px;
+  right: 12px;
+  width: min(420px, 92vw);
+  max-height: min(70vh, 620px);
+  overflow-y: auto;
+  padding-bottom: 6px;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  corner-shape: squircle;
+  box-shadow: var(--shadow-2), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.notif-panel-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bg-overlay);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-sm);
+}
+
+.notif-spacer {
+  flex: 1;
+}
+
+.notif-section {
+  padding: 8px 12px 4px;
+  color: var(--text-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.notif-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  border-left: 2px solid transparent;
+  font-size: var(--fs-sm);
+}
+
+/* Ash sits at the compact tier so the face actually draws — see the note in
+   NotificationCenter. Nudged down a hair to sit on the source line rather than
+   float above it. */
+.notif-ash {
+  margin-top: 1px;
+}
+
+.notif-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.notif-clickable {
+  cursor: pointer;
+}
+
+.notif-clickable:hover {
+  background: var(--bg-raised);
+}
+
+.notif-high {
+  border-left-color: var(--danger);
+}
+
+.notif-normal {
+  border-left-color: var(--warn);
+}
+
+/* Waiting outranks severity: this one is still owed an answer. */
+.notif-waiting {
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.notif-unread .notif-title {
+  font-weight: 600;
+}
+
+.notif-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.notif-project {
+  color: var(--accent);
+}
+
+.notif-age {
+  margin-left: auto;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.notif-title {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.notif-body,
+.notif-resolved {
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+
+.notif-cta {
+  color: var(--accent);
+  font-size: var(--fs-xs);
+}
+
+.notif-empty {
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
 }
 
 /* ---------- team relay panel ---------- */

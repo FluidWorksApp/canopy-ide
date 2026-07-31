@@ -4,6 +4,9 @@ import type { CustomMicroTask } from "./microTasks";
 // and never a runtime one.
 import type { CustomAgentCli } from "./projects";
 import type { BrowserEngine } from "./browserBounds";
+// Type-only for the same reason as projects.ts above: mascots.ts reads
+// getSettings(), so this pair must stay a compile-time cycle only.
+import type { MascotId } from "./mascots";
 import type { CaptureMode } from "./pageCapture";
 import { IS_MAC } from "./platform";
 import {
@@ -204,6 +207,12 @@ export interface Settings {
    *  --on-accent rides along so accent-filled buttons stay legible without
    *  the user having to pick a second colour. */
   customAccent: string;
+  /** Which mascot the app wears (mascots.ts). Stored as an id rather than
+   *  anything drawable, so a build that adds or drops one reads an old
+   *  settings file fine — `currentMascot` falls back when the id is unknown.
+   *  Not a boolean: "which" is the question, and a second mascot should be a
+   *  registry entry rather than a schema change. */
+  mascot: MascotId;
 
   // ---- Side panel behaviour (Appearance). Three independent choices about
   // one panel: how it opens, how it closes, and whether it covers the work or
@@ -477,7 +486,7 @@ export interface Settings {
 // does nothing for anyone who already has the key in localStorage. A setting
 // that must actually change for existing users has to be removed outright —
 // which is exactly why `webgl` is gone rather than defaulted to false.
-const DEFAULTS: Settings = {
+export const DEFAULTS: Settings = {
   scrollback: 10_000,
   fontSize: 13,
   runawayCpuPercent: 300,
@@ -498,6 +507,11 @@ const DEFAULTS: Settings = {
   trackerKeys: {},
   theme: "default",
   customAccent: "",
+  // The literal, not `DEFAULT_MASCOT`: mascots.ts reads settings, so importing
+  // a *value* back from it would be a live cycle evaluated while this very
+  // object is being built. The type import below is erased and safe, and
+  // mascots.test.ts asserts the two stay in agreement.
+  mascot: "ash",
   sidebarHover: false,
   sidebarClickOutsideCloses: true,
   sidebarOverlay: true,
