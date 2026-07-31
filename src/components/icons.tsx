@@ -44,16 +44,10 @@ export function FrostIcon({ size = 12, className }: IconProps) {
   );
 }
 
-// Disclosure caret — a hairline stroked "›". Rotate it 90° (via a class on the
-// wrapping element) to point down when the section/folder is open. Shared by
-// the file tree rows and the component-section headers so they read the same.
-export function ChevronIcon({ size = 10, className }: IconProps) {
-  return (
-    <svg {...svgProps(size, className)} strokeWidth={2.2}>
-      <path d="M9 5l7 7-7 7" />
-    </svg>
-  );
-}
+// Disclosure caret. Defined in shared/icons.tsx — the shared FileTree needs it
+// and cannot import from src/ — and re-exported here so every existing
+// `from "./icons"` still resolves and there is one shape, not two.
+export { ChevronIcon } from "../../shared/icons";
 
 // Close cross for tab/pill dismiss slots — replaces the bare ✕ glyph.
 export function CloseIcon({ size = 12, className }: IconProps) {
@@ -518,6 +512,17 @@ export function GlobeIcon({ size = 14, className }: IconProps) {
 }
 
 /** Settings: a gear. */
+/** A clipboard — the ⌘K section, and Settings' tab. */
+export function ClipboardIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.8}>
+      <rect x="6" y="4" width="12" height="17" rx="2" />
+      <path d="M9 4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v1.5a.5.5 0 0 1-.5.5h-5a.5.5 0 0 1-.5-.5Z" />
+      <path d="M9 11h6M9 15h4" />
+    </svg>
+  );
+}
+
 export function SettingsIcon({ size = 18, className }: IconProps) {
   return (
     <svg {...svgProps(size, className)}>

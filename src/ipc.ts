@@ -387,6 +387,87 @@ export const browserHere = (tabId: string) =>
 /** Wipe the shared browser profile — cookies, storage, caches, every site. */
 export const browserClearData = () => invoke<void>("browser_clear_data");
 
+// ---------- Embedded browser (chromium engine) ----------
+//
+// A browser the user already installed, driven over CDP. Same op vocabulary as
+// the webview engine — the page-side picker is identical, so only the transport
+// differs — which is why these mirror the shapes above rather than inventing
+// new ones.
+
+export interface DetectedBrowser {
+  name: string;
+  path: string;
+}
+
+/** Chromium-family browsers found on this machine, most preferred first.
+ *  Empty is the normal answer on a machine with only Safari. */
+export const chromiumDetect = () =>
+  invoke<DetectedBrowser[]>("chromium_detect").catch(() => [] as DetectedBrowser[]);
+
+/** Launch (or reuse) the browser and open a tab in it. `exe` is the binary the
+ *  user picked or that detection found. */
+export const chromiumOpen = (exe: string, tabId: string, url: string) =>
+  invoke<void>("chromium_open", { exe, tabId, url });
+
+export const chromiumNavigate = (tabId: string, url: string) =>
+  invoke<void>("chromium_navigate", { tabId, url });
+
+export const chromiumRunOp = (tabId: string, op: Record<string, unknown>) =>
+  invoke<BrowserOpAck | null>("chromium_run_op", { tabId, op });
+
+export const chromiumCommand = (tabId: string, message: Record<string, unknown>) =>
+  invoke<void>("chromium_command", { tabId, message });
+
+/** Queued page events. The webview engine gets these pushed by a doorbell it
+ *  can hook; a browser we do not host has no such hook, so this is pulled. */
+export const chromiumDrain = (tabId: string) =>
+  invoke<unknown[] | null>("chromium_drain", { tabId });
+
+export const chromiumHere = (tabId: string) =>
+  invoke<{ url: string; title: string } | null>("chromium_here", { tabId });
+
+export const chromiumClose = (tabId: string) =>
+  invoke<void>("chromium_close", { tabId }).catch(() => {});
+
+/** Start or resize the frame stream feeding a tab's pane. The browser runs
+ *  headless, so this stream IS the page as far as anyone can see it. */
+export const chromiumStartCast = (tabId: string, width: number, height: number) =>
+  invoke<void>("chromium_start_cast", { tabId, width, height });
+
+/** Stop streaming. Frames for a pane nobody is looking at are pure cost. */
+export const chromiumStopCast = (tabId: string) =>
+  invoke<void>("chromium_stop_cast", { tabId }).catch(() => {});
+
+/** A full-quality PNG of a headless Chromium page. Unlike the WebKit engines'
+ *  capture this renders the page again rather than photographing a view, so it
+ *  works on a background tab and owes nothing to the lossy cast stream. */
+export const chromiumCapture = (
+  tabId: string,
+  clip?: [number, number, number, number],
+) => invoke<string>("chromium_capture", { tabId, clip: clip ?? null });
+
+/** The page's viewport, for mapping a pane click back to a page point. */
+export const chromiumMetrics = (tabId: string) =>
+  invoke<{ w: number; h: number } | null>("chromium_metrics", { tabId }).catch(() => null);
+
+/** Whether a Node runtime exists to run Stagehand in. Canopy bundles none. */
+export const stagehandNodeAvailable = () =>
+  invoke<boolean>("stagehand_node_available").catch(() => false);
+
+/** Start the model bridge — a loopback OpenAI-shaped endpoint that is really
+ *  the user's own configured CLI. What comes back is what Stagehand takes as
+ *  its baseURL and apiKey, so it never needs a real API key. */
+export const stagehandBridge = (argv: string[]) =>
+  invoke<{ base_url: string; token: string }>("stagehand_bridge", { argv });
+
+/** A painted frame from a headless Chromium tab, as a data URL. */
+export const onChromiumFrame = (fn: (e: { tabId: string; frame: string }) => void) =>
+  listen<{ tabId: string; frame: string }>("chromium:frame", (e) => fn(e.payload));
+
+/** The page navigated itself — the URL bar can't see what it didn't cause. */
+export const onChromiumNav = (fn: (e: { tabId: string; url: string }) => void) =>
+  listen<{ tabId: string; url: string }>("chromium:nav", (e) => fn(e.payload));
+
 /** Messages a page pushed up: agent-op results, annotations, in-page
  *  navigations, the ready announcement after every load. */
 export interface BrowserEvents {
@@ -587,6 +668,88 @@ export const spotSearch = (
 
 /** What the index holds right now (Settings → SpotSearch). */
 export const spotIndexStats = () => invoke<SpotIndexStats>("spot_index_stats");
+
+// ---------- Clipboard history ----------
+//
+// Capture is entirely a backend concern (src-tauri/src/clipboard.rs): WKWebView
+// cannot poll `navigator.clipboard.readText`, so there is no frontend half of
+// it to write. This side declares the rules, lists what was kept, and asks for
+// one clip in full when the user picks it.
+
+export interface Clip {
+  id: number;
+  /** Unix seconds. */
+  ts: number;
+  /** One collapsed line. The whole clip is `clipboardRead(id)`. */
+  preview: string;
+  chars: number;
+  lines: number;
+  /** Project that was open when it was copied, "" when none was. */
+  project: string;
+}
+
+export interface ClipboardStatus {
+  supported: boolean;
+  watching: boolean;
+  persisted: boolean;
+  /** macOS 15+ pasteboard access state: "default" | "ask" | "allow" | "deny",
+   *  or "" on an OS without the API. */
+  access: string;
+  clips: number;
+  bytes: number;
+  skipped_secrets: number;
+  skipped_large: number;
+  skipped_concealed: number;
+}
+
+export interface ClipboardWatchOptions {
+  enabled: boolean;
+  /** False keeps the history in memory only — and deletes the file. */
+  persist: boolean;
+  keep: number;
+  retentionDays: number;
+  skipSecrets: boolean;
+  /** Active project id, stamped onto each clip. "" when none is open. */
+  project: string;
+}
+
+/** Declare whether to watch and under what rules. Idempotent — called on launch
+ *  and whenever the settings or the active project change. */
+export const clipboardWatchSet = (o: ClipboardWatchOptions) =>
+  invoke<void>("clipboard_watch_set", {
+    enabled: o.enabled,
+    persist: o.persist,
+    keep: o.keep,
+    retentionDays: o.retentionDays,
+    skipSecrets: o.skipSecrets,
+    project: o.project,
+  });
+
+export const clipboardRecent = (limit?: number) =>
+  invoke<Clip[]>("clipboard_recent", { limit });
+
+/** One clip in full — the only call that returns whole clip text. */
+export const clipboardRead = (id: number) =>
+  invoke<string>("clipboard_read", { id });
+
+export const clipboardForget = (id: number) =>
+  invoke<void>("clipboard_forget", { id });
+
+export const clipboardClear = () => invoke<void>("clipboard_clear");
+
+export const clipboardStatus = () =>
+  invoke<ClipboardStatus>("clipboard_status");
+
+/** A clip was captured. Carries no payload: the list is one cheap call away,
+ *  and shipping clip text on an app-wide event is the one thing this feature
+ *  must not do casually. */
+export const onClipboardChanged = (cb: () => void): Promise<UnlistenFn> =>
+  listen("clipboard:changed", () => cb());
+
+/** The user told macOS to always deny this app the pasteboard, so the watcher
+ *  stopped itself. */
+export const onClipboardBlocked = (cb: () => void): Promise<UnlistenFn> =>
+  listen("clipboard:blocked", () => cb());
 
 // ---------- Credential vault ----------
 //

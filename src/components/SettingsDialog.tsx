@@ -29,6 +29,7 @@ import { LINK_CHORD } from "../terminalLinks";
 import { useEscape } from "../useEscape";
 import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
 import * as ipc from "../ipc";
+import { refreshEngineSupport } from "../browserHost";
 import { VaultSettings } from "./VaultSettings";
 import { availableMonoFonts, fontLabel, fontStack } from "../fonts";
 import { AgentIcon, TrackerIcon } from "./icons";
@@ -52,6 +53,7 @@ import {
 } from "../profiles";
 import { AGENT_TOOL_GROUPS, ALL_AGENT_TOOLS } from "../agentTools";
 import { spotSources } from "../spotSources";
+import * as clipboardStore from "../clipboardStore";
 import { INDEXABLE_AGENTS, fmtBytes, runIngest } from "../spotIndex";
 import {
   BUILTIN_MAP,
@@ -69,6 +71,7 @@ export type SettingsTab =
   | "editor"
   | "terminal"
   | "spotsearch"
+  | "clipboard"
   | "dictation"
   | "integrations"
   | "browser"
@@ -92,6 +95,7 @@ const TABS: { id: SettingsTab; label: string; group: string }[] = [
   { id: "agents", label: "Agents", group: "Agents" },
   { id: "dictation", label: "Dictation", group: "Agents" },
   { id: "spotsearch", label: "SpotSearch", group: "Agents" },
+  { id: "clipboard", label: "Clipboard", group: "Agents" },
   { id: "integrations", label: "Integrations", group: "Access" },
   { id: "browser", label: "Browser & Vault", group: "Access" },
   { id: "remote", label: "Remote access", group: "Access" },
@@ -760,8 +764,16 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
   // does so far; everywhere else the engine choice is decoration and the
   // section says so instead of offering a switch that does nothing.
   const [browserOk, setBrowserOk] = useState(false);
+  // Chromium-family browsers found on this machine. Unlike browserOk this is an
+  // installation fact, not a platform one — it can change while the dialog is
+  // open, which is why the section offers a re-scan.
+  const [browsers, setBrowsers] = useState<ipc.DetectedBrowser[]>([]);
   const [clearing, setClearing] = useState<null | "busy" | "done" | string>(null);
   const fonts = availableMonoFonts();
+
+  useEffect(() => {
+    void ipc.chromiumDetect().then(setBrowsers).catch(() => {});
+  }, []);
 
   useEffect(() => {
     void ipc
@@ -1181,6 +1193,37 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   </div>
                 </Item>
                 <Item
+                  name="Stack tabs by status"
+                  desc="Fold the agent strip into three stacks — Needs you, Working, Idle. Tabs slide between them as their agent changes state; click a stack to fold it away or deal it back out. Idle starts folded, anything asking for you unfolds itself, and the tab you're on is never folded away."
+                >
+                  <label className="set-inline-check">
+                    <input
+                      type="checkbox"
+                      checked={s.groupTabsByStatus}
+                      onChange={(e) => patch({ groupTabsByStatus: e.target.checked })}
+                    />
+                    <span>Keep agents that need you on the left, quiet ones stacked away</span>
+                  </label>
+                </Item>
+                <Item
+                  name="Settle into Idle after"
+                  desc="Seconds of quiet before a tab drops into the Idle group. Anything asking for you moves out immediately, whatever this is set to."
+                >
+                  <input
+                    type="number"
+                    min={0}
+                    max={3600}
+                    step={5}
+                    value={s.idleGroupDelaySeconds}
+                    disabled={!s.groupTabsByStatus}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      if (Number.isFinite(v) && v >= 0)
+                        patch({ idleGroupDelaySeconds: Math.min(3600, Math.floor(v)) });
+                    }}
+                  />
+                </Item>
+                <Item
                   name="Hibernate idle agents"
                   desc="Auto-reclaim memory from idle/ended agents past the limit below; they stay resumable."
                 >
@@ -1316,6 +1359,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
             )}
 
             {tab === "spotsearch" && <SpotSearchSettings s={s} patch={patch} />}
+            {tab === "clipboard" && <ClipboardSettings s={s} patch={patch} />}
 
 
             {tab === "dictation" && dictationOk && <DictationSettings />}
@@ -1387,6 +1431,23 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                           a panel or menu covers it.</em>
                         </span>
                       </label>
+                      <label className="set-inline-check">
+                        <input
+                          type="radio"
+                          name="browser-engine"
+                          disabled={browsers.length === 0 && !s.chromiumPath.trim()}
+                          checked={s.browserEngine === "chromium"}
+                          onChange={() => patch({ browserEngine: "chromium" })}
+                        />
+                        <span>
+                          Chrome or Chromium
+                          <em>
+                            {browsers.length || s.chromiumPath.trim()
+                              ? "Drives a browser you already have, over its debugging protocol. Its own profile — logins here are separate from the embedded browser's."
+                              : "No Chrome, Chromium, Edge or Brave found. Install one, or point Canopy at a binary below."}
+                          </em>
+                        </span>
+                      </label>
                       <p className="set-item-desc">
                         Open tabs keep the engine they started on.
                       </p>
@@ -1396,6 +1457,41 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                       Loopback proxy only — the embedded browser is macOS-only so far.
                     </p>
                   )}
+                </Item>
+                <Item
+                  name="Chrome binary"
+                  desc="Which browser the Chrome engine drives. Canopy never downloads one — it uses what you have."
+                >
+                  <div className="set-inline">
+                    <select
+                      value={s.chromiumPath}
+                      onChange={(e) => patch({ chromiumPath: e.target.value })}
+                    >
+                      <option value="">
+                        {browsers.length
+                          ? `Detected — ${browsers[0].name}`
+                          : "Detected — nothing found"}
+                      </option>
+                      {browsers.map((b) => (
+                        <option key={b.path} value={b.path}>
+                          {b.name}
+                        </option>
+                      ))}
+                    </select>
+                    <Button
+                      onClick={() => {
+                        void ipc.chromiumDetect().then(setBrowsers);
+                        void refreshEngineSupport();
+                      }}
+                    >
+                      Re-scan
+                    </Button>
+                  </div>
+                  <p className="set-item-desc">
+                    Canopy launches it on a profile of its own, with an ephemeral
+                    debugging port bound to this machine — never your everyday Chrome
+                    profile, whose cookies that port would otherwise expose.
+                  </p>
                 </Item>
                 <Item
                   name="Browsing data"
@@ -2331,6 +2427,213 @@ function SpotSearchSettings({
                   });
               }}>
               {busy === "clear" ? "Clearing…" : "Clear index"}
+            </Button>
+          </div>
+        </div>
+      </Item>
+    </>
+  );
+}
+
+/** Access states macOS reports for this app's pasteboard, said in plain words.
+ *  "default" means no alert has fired yet, so the app isn't in System Settings
+ *  at all — which is worth saying, because otherwise someone goes looking for
+ *  a switch that isn't there until the first capture. */
+const PASTEBOARD_ACCESS: Record<string, string> = {
+  default: "macOS hasn't asked yet — it will, once, the first time a copy is captured.",
+  ask: "macOS asks before each programmatic read. Set Canopy to “Always Allow” in System Settings → Privacy & Security → Pasteboard to stop the prompts.",
+  allow: "macOS is set to always allow Canopy the pasteboard.",
+  deny: "macOS is set to always deny Canopy the pasteboard, so nothing can be captured. Change it in System Settings → Privacy & Security → Pasteboard.",
+};
+
+/**
+ * Clipboard history: keep what you copy so ⌘K can hand it back.
+ *
+ * Off by default, and the screen leads with why rather than with a switch. Two
+ * things here are genuinely the user's call and not a default anyone should
+ * pick for them: whether an app watches everything they copy at all, and
+ * whether that lands on disk.
+ */
+function ClipboardSettings({
+  s,
+  patch,
+}: {
+  s: Settings;
+  patch: (p: Partial<Settings>) => void;
+}) {
+  const [status, setStatus] = useState<ipc.ClipboardStatus | null>(null);
+  const refresh = useCallback(() => {
+    void ipc
+      .clipboardStatus()
+      .then(setStatus)
+      .catch(() => setStatus(null));
+  }, []);
+  useEffect(refresh, [refresh, s.clipboardHistory, s.clipboardPersist]);
+
+  if (status && !status.supported) {
+    return (
+      <Item
+        name="Clipboard history"
+        desc="Not available on this platform yet. Capture is a native pasteboard watcher, and only the macOS one has been verified against a running Canopy — a watcher that half-works would be worse than none."
+      >
+        <span className="set-item-desc">Unavailable here.</span>
+      </Item>
+    );
+  }
+
+  return (
+    <>
+      <Item
+        name="Keep what I copy"
+        desc="Every copy — from a terminal, the editor, or any other app — is kept and offered back under Clipboard in ⌘K. Enter puts it on the clipboard, and straight into the terminal if one is focused."
+      >
+        <label className="set-inline-check">
+          <input
+            type="checkbox"
+            checked={s.clipboardHistory}
+            onChange={(e) => patch({ clipboardHistory: e.target.checked })}
+          />
+          <span>Keep a clipboard history</span>
+        </label>
+        {status?.access && (
+          <p className="set-item-desc">
+            {PASTEBOARD_ACCESS[status.access] ?? ""}
+          </p>
+        )}
+        <p className="set-item-desc">
+          Canopy watches a counter that says the clipboard changed, and only
+          reads the contents when it moves — at most once per copy, never on a
+          timer.
+        </p>
+      </Item>
+
+      <Item
+        name="Passwords and keys"
+        desc="Terminals are where most copying in this app happens, and what comes out of one is often a token. A clip that looks like a credential is skipped outright — not stored and hidden, never written down at all."
+      >
+        <label className="set-inline-check">
+          <input
+            type="checkbox"
+            checked={s.clipboardSkipSecrets}
+            onChange={(e) => patch({ clipboardSkipSecrets: e.target.checked })}
+          />
+          <span>Skip clips that look like credentials</span>
+        </label>
+        <p className="set-item-desc">
+          Known key prefixes (<code>sk-</code>, <code>ghp_</code>,{" "}
+          <code>AKIA</code>…), private keys, <code>TOKEN=</code> lines, and
+          long high-entropy tokens. Paths, URLs, commit SHAs and prose are
+          deliberately exempt — those are what a clipboard is for.
+        </p>
+        <p className="set-item-desc">
+          Clips a password manager marks concealed are skipped whatever this
+          says: those are recognised from the clip's type, without reading it.
+        </p>
+      </Item>
+
+      <Item
+        name="Where it's kept"
+        desc="On disk the history survives a restart, in a file only your account can read (~/.canopy/clipboard.sqlite, mode 0600). It is not encrypted — nothing in Canopy is encrypted at rest, and a key the app can unlock by itself at launch would not be much of one."
+      >
+        <label className="set-inline-check">
+          <input
+            type="checkbox"
+            checked={s.clipboardPersist}
+            onChange={(e) => patch({ clipboardPersist: e.target.checked })}
+          />
+          <span>Keep the history on disk between launches</span>
+        </label>
+        <p className="set-item-desc">
+          Switching this off deletes the file and keeps the history in memory
+          for this session only.
+        </p>
+      </Item>
+
+      <Item
+        name="How much to keep"
+        desc="The newest clips, up to this many. Older ones fall off the end."
+      >
+        <div className="spot-set-days">
+          <input
+            type="number"
+            min={10}
+            max={2000}
+            step={50}
+            value={s.clipboardKeep}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isFinite(v) && v >= 1)
+                patch({ clipboardKeep: Math.floor(v) });
+            }}
+          />
+          <span className="set-item-desc">clips</span>
+        </div>
+        <div className="spot-set-days">
+          <input
+            type="number"
+            min={0}
+            max={365}
+            step={7}
+            value={s.clipboardRetentionDays}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isFinite(v) && v >= 0)
+                patch({ clipboardRetentionDays: Math.floor(v) });
+            }}
+          />
+          <span className="set-item-desc">
+            days
+            {s.clipboardRetentionDays === 0
+              ? " — no age limit, just the count above"
+              : ""}
+          </span>
+        </div>
+      </Item>
+
+      <Item
+        name="The history"
+        desc="Unlike the search index, this is the only copy of what's in it — nothing here can be rebuilt from a file that still exists, so clearing it is permanent."
+      >
+        <div className="spot-set-index">
+          <p className="set-item-desc">
+            {status
+              ? `${status.clips.toLocaleString()} clip${
+                  status.clips === 1 ? "" : "s"
+                } · ${fmtBytes(status.bytes)}${
+                  status.persisted ? "" : " · memory only"
+                }`
+              : "Nothing kept yet."}
+          </p>
+          {status &&
+            status.skipped_secrets +
+              status.skipped_concealed +
+              status.skipped_large >
+              0 && (
+              <p className="set-item-desc">
+                Skipped since launch:{" "}
+                {[
+                  status.skipped_secrets > 0
+                    ? `${status.skipped_secrets} that looked like credentials`
+                    : null,
+                  status.skipped_concealed > 0
+                    ? `${status.skipped_concealed} marked concealed`
+                    : null,
+                  status.skipped_large > 0
+                    ? `${status.skipped_large} too large to keep`
+                    : null,
+                ]
+                  .filter(Boolean)
+                  .join(", ")}
+                .
+              </p>
+            )}
+          <div className="tool-bulk">
+            <Button
+              onClick={() => {
+                clipboardStore.clear();
+                refresh();
+              }}>
+              Clear history
             </Button>
           </div>
         </div>

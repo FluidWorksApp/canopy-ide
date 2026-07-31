@@ -245,6 +245,7 @@ this table for the platform you are actually on.
 | Jump to a tab (hold to see the numbers) | `⌘1…9` | `Ctrl+1…9` |
 | Jump to a project | `⌥1…9` | `Alt+1…9` |
 | Previous / next tab | `⌃⌘←` / `⌃⌘→` | `Ctrl+PgUp` / `Ctrl+PgDn` |
+| Previous / next tab (browser chord) | `⌃⇧⇥` / `⌃⇥` | `Ctrl+Shift+Tab` / `Ctrl+Tab` |
 | Previous / next project | `⌥⌘←` / `⌥⌘→` | `Ctrl+Alt+PgUp` / `Ctrl+Alt+PgDn` |
 | Close project | `⇧⌘W` | `Ctrl+Alt+W` |
 | Toggle sidebar | `⌘B` | `Ctrl+Shift+B` |
@@ -273,6 +274,16 @@ shell EOF, and would close the terminal you were dictating into.
 
 `src/shortcuts.test.ts` enforces this: no chord may take a bare `Ctrl+<letter>`
 that readline binds, apart from four explicitly accepted exceptions.
+
+**Not every chord can be a menu item.** `Ctrl+Tab` is literal Ctrl on all three
+platforms — it is one chord worldwide, and `⌘⇥` belongs to the macOS app
+switcher — but it cannot be an accelerator: muda hands macOS the glyph `⇥`
+(U+21E5) as Tab's key equivalent rather than the character the key produces, so
+such a menu item renders perfectly and never fires. The manifest marks it
+`"surface": "app"` and the webview's capture-phase handler answers it, which is
+where it has to work anyway: focus is almost always inside xterm or Monaco, and
+macOS never routes an accelerator to the menu from there. The Tabs menu keeps
+`⌃⌘←/→`, the pair that does survive native focus; both move the same strip.
 
 **Windows only:** release builds switch off WebView2's own browser accelerator
 keys, so the registry really is the whole answer to "what does this key do".

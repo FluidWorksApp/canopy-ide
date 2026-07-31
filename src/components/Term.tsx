@@ -11,7 +11,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openLink } from "../links";
 import * as ipc from "../ipc";
 import { getSettings, THEME_CHANGE_EVENT, type Settings } from "../settings";
@@ -40,6 +40,11 @@ export interface TermHandle {
   focus: () => void;
   /** The text currently selected in the terminal, "" when none. */
   getSelection: () => string;
+  /** Put text in at the cursor, as a paste — bracketed-paste markers and all,
+   *  so zsh and TUIs treat it as pasted rather than typed. Never appends a
+   *  carriage return: a clipboard row hands you the text to look at, it does
+   *  not run it. */
+  paste: (text: string) => void;
   /** The scrollback as plain text, keeping the newest `maxChars`. Plain rather
    *  than ANSI on purpose: this is read back in the task-history pane, not
    *  replayed into a terminal, so escape sequences would only be noise. */
@@ -96,6 +101,14 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     },
     focus: () => termRef.current?.focus(),
     getSelection: () => termRef.current?.getSelection() ?? "",
+    paste: (text: string) => {
+      const term = termRef.current;
+      if (!term || !text) return;
+      // Same path the OS-drop and dictation handlers take (see below): xterm's
+      // ordered input, wrapped in bracketed-paste markers.
+      term.paste(text);
+      term.focus();
+    },
     captureText: (maxChars = 8000) => {
       const term = termRef.current;
       if (!term) return "";
@@ -521,16 +534,18 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // handler above) and wraps the text in bracketed-paste markers, so zsh and
     // TUIs treat it as pasted text rather than typed keystrokes.
     //
-    // The WINDOW, not the webview. Tauri picks the target by how many webviews
-    // the window has: one, and the drop goes to `AnyLabel` (which every kind of
-    // listener matches); more than one, and it goes to the `Window` target,
-    // which a webview listener does not match at all. Opening a preview adds a
-    // second webview — so a webview listener here meant that dropping a file
-    // onto ANY terminal, in ANY project, silently did nothing for as long as a
-    // browser tab existed anywhere in the window. A window listener is correct
-    // in both states.
+    // The WEBVIEW WINDOW, which is neither `getCurrentWindow()` nor
+    // `getCurrentWebview()` — and the difference is the whole bug. Tauri routes
+    // a drop by the main webview's `WebviewKind`, and `features = ["unstable"]`
+    // (which browser.rs needs for `add_child`) makes that kind `WindowChild`,
+    // so every drop is emitted to the `Webview` target. A `Window` listener
+    // does not match `Webview` (manager/mod.rs `filter_target`), which is why
+    // listening on the window silently killed drops everywhere. Only
+    // `WebviewWindow` is matched by all three routes Tauri can take —
+    // `emit_to_window`, `emit_to_webview` and `AnyLabel` — so it is correct
+    // however the app is built. Guarded by termDropTarget.test.ts.
     let unlistenDrop: (() => void) | undefined;
-    void getCurrentWindow()
+    void getCurrentWebviewWindow()
       .onDragDropEvent((e) => {
         if (e.payload.type !== "drop" || !activeRef.current) return;
         const paths = e.payload.paths;

@@ -1,5 +1,6 @@
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
+import { fileURLToPath } from "node:url";
 
 // A dedicated Vitest config rather than a `test` block in vite.config.ts: the
 // build config carries the material-icon-theme asset rule, which is irrelevant
@@ -7,11 +8,24 @@ import react from "@vitejs/plugin-react";
 // JSX/TSX in tests transforms the same way it does in the app.
 export default defineConfig({
   plugins: [react()],
+  // The portal imports the shared modules by alias, the same way its own Vite
+  // build does. Without this its tests resolve nothing and simply never run,
+  // which is indistinguishable from passing.
+  resolve: {
+    alias: {
+      "@shared": fileURLToPath(new URL("./shared", import.meta.url)),
+    },
+  },
   test: {
     environment: "jsdom",
     globals: true,
     setupFiles: ["src/test/setup.ts"],
-    include: ["src/**/*.test.{ts,tsx}", "shared/**/*.test.{ts,tsx}", "packages/**/src/**/*.test.{ts,tsx}"],
+    include: [
+      "src/**/*.test.{ts,tsx}",
+      "shared/**/*.test.{ts,tsx}",
+      "portal/src/**/*.test.{ts,tsx}",
+      "packages/**/src/**/*.test.{ts,tsx}",
+    ],
     coverage: {
       provider: "v8",
       // Only the modules we actually target — reporting 0% for the whole tree

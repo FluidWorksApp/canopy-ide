@@ -290,6 +290,16 @@ export interface Settings {
   /** How many agent terminals to keep live per project before auto-hibernation
    *  starts reclaiming the stalest idle ones. */
   maxLiveAgents: number;
+  /** Fold the agent tab strip into Needs you / Working / Idle stacks instead of
+   *  leaving it in open order. The tab you are looking at never changes when it
+   *  restacks — only where it sits in the strip, and it is never the one folded
+   *  away. */
+  groupTabsByStatus: boolean;
+  /** How long an agent has to stay quiet before its tab falls into the Idle
+   *  stack. Promotions (a question, fresh work) are always immediate; only the
+   *  fall is delayed, so an agent pausing between tool calls doesn't shuffle
+   *  the strip under your pointer. */
+  idleGroupDelaySeconds: number;
   /** Where the user's own micro-tasks used to live, back when they were
    *  app-wide. They belong to a project now (`Project.customTasks`), and
    *  adoptLegacyCustomTasks() empties this on first launch. Kept so that
@@ -324,6 +334,24 @@ export interface Settings {
    *  which is the default — this is a search index over your own work, not a
    *  log to be rotated. */
   spotRetentionDays: number;
+
+  // ---- Clipboard history ----
+  /** Keep what you copy, so ⌘K can hand it back. Off by default and it must
+   *  stay that way: the first programmatic pasteboard read is what raises
+   *  macOS's pasteboard alert, and that has to follow a decision the user
+   *  made rather than an upgrade. */
+  clipboardHistory: boolean;
+  /** Write the history to ~/.canopy/clipboard.sqlite. Off keeps it in memory
+   *  for the session only — and deletes the file that was there. */
+  clipboardPersist: boolean;
+  /** How many clips to keep. */
+  clipboardKeep: number;
+  /** Drop clips older than this many days. 0 keeps them all (up to the count). */
+  clipboardRetentionDays: number;
+  /** Skip clips that look like credentials — a known key prefix, a named
+   *  `TOKEN=` line, a high-entropy token. Clips marked concealed by their
+   *  producer are skipped whatever this says. */
+  clipboardSkipSecrets: boolean;
 
   // ---- Voice dictation ----
   /** Hotkey that toggles dictation (start/insert). Used by "combo" mode. */
@@ -396,6 +424,12 @@ export interface Settings {
    *  compensation above is the price; opening a preview closes the panel that
    *  would cover it, which is the case that actually bit. */
   browserEngine: BrowserEngine;
+  /** The Chromium-family binary the chromium engine drives. Empty means
+   *  "whatever detection finds"; a path is the user overriding that. */
+  chromiumPath: string;
+  /** Whether Stagehand drives the Chrome engine. On by default, but only ever
+   *  active where it can actually work — see stagehandState. */
+  stagehandEnabled: boolean;
 
   /** What the preview's Screenshot button grabs when clicked without opening
    *  its menu. Remembered rather than fixed: whichever mode you picked last is
@@ -457,6 +491,8 @@ const DEFAULTS: Settings = {
   relayAddr: "",
   autoHibernate: false,
   maxLiveAgents: 8,
+  groupTabsByStatus: true,
+  idleGroupDelaySeconds: 60,
   customMicroTasks: [],
   disabledTools: [],
   trackerKeys: {},
@@ -479,6 +515,11 @@ const DEFAULTS: Settings = {
   spotIndexTerminals: true,
   spotSearchAllProjects: false,
   spotRetentionDays: 0,
+  clipboardHistory: false,
+  clipboardPersist: true,
+  clipboardKeep: 200,
+  clipboardRetentionDays: 0,
+  clipboardSkipSecrets: true,
   dictationHotkey: DEFAULT_DICTATION_HOTKEY,
   dictationTriggerMode: "combo",
   dictationModKey: DEFAULT_DICTATION_MOD_KEY,
@@ -491,6 +532,8 @@ const DEFAULTS: Settings = {
   remoteReach: "local",
   remoteTunnelProvider: "cloudflare",
   browserEngine: "webview",
+  chromiumPath: "",
+  stagehandEnabled: true,
   previewCaptureMode: "visible",
   openLinksInApp: true,
   workspaceBasePort: 5173,
