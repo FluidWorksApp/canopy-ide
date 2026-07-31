@@ -3,6 +3,7 @@ mod agents;
 mod android;
 mod blocking;
 mod browser;
+mod change;
 mod chromium;
 mod cleanup;
 mod cli;
@@ -398,6 +399,10 @@ pub fn run() {
         .manage(cli::pending_from_env())
         .manage(cli::pending_link_from_env())
         .setup(|app| {
+            // Before anything writes a store: the change channel needs a handle
+            // to speak on, and a write that happens first would be silent.
+            change::install(app.handle().clone());
+
             // ONNX Runtime is loaded dynamically on every platform (Cargo.toml
             // builds ort with `load-dynamic`). Point ort at the libonnxruntime
             // bundled as an app resource before any dictation touches it. If it
