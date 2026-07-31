@@ -28,7 +28,7 @@ export type { SubTab, RailChip };
 
 function tabTitle(tab: SubTab): string {
   switch (tab.type) {
-    case "terminal": return `${tab.notice ? `${tab.notice}\n` : ""}${tab.command ?? ""} — ${tab.cwd}`;
+    case "terminal": return `${tab.notice ? `${tab.notice}\n` : ""}${tab.command ?? ""} — ${tab.cwd}${tab.profile ? `\naccount: ${tab.profile}` : ""}`;
     case "pr": return `${tab.pr.title} — ${tab.pr.url}`;
     case "ticket": return `${tab.ticket.id} — ${tab.ticket.title}\n${tab.ticket.url}`;
     case "research": return `Research ${tab.researchId} — ${tab.title}`;
@@ -373,6 +373,18 @@ function PaneBarImpl({
                       title={tab.type === "terminal" ? "Double-click or right-click to rename" : undefined}
                     >
                       {tabText(tab)}
+                    </span>
+                  )}
+                  {/* Which login this session is burning. Only ever rendered
+                      for a non-default account — every tab carrying one would
+                      be noise, and the point of the badge is that you can tell
+                      two sessions of the same CLI apart at a glance. */}
+                  {tab.type === "terminal" && tab.profile && (
+                    <span
+                      className="tab-profile"
+                      title={`Running under the "${tab.profile}" account`}
+                    >
+                      {tab.profile}
                     </span>
                   )}
                   {hints.has(tab.id) && (

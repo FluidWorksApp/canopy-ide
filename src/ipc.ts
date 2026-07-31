@@ -910,6 +910,9 @@ export const claudeSessionStats = (transcriptPath: string) =>
 export interface AgentSessionUsage {
   session_id: string;
   agent: string;
+  /** Which account profile ran it (see profiles.ts). "default" for the main
+   *  login and for CLIs that have no profile support. */
+  profile: string;
   cwd: string;
   title: string | null;
   model: string | null;
@@ -936,6 +939,9 @@ export interface PlanWindow {
  *  spend side in AgentSessionUsage. Only CLIs that actually report appear. */
 export interface PlanUsage {
   agent: string;
+  /** The account these limits belong to. Limits are per subscription, so a
+   *  machine with two logins reports two rows for the same CLI. */
+  profile: string;
   plan: string | null;
   windows: PlanWindow[];
   credits: number | null;
@@ -944,6 +950,35 @@ export interface PlanUsage {
   observed: number;
 }
 export const planUsage = () => invoke<PlanUsage[]>("plan_usage");
+
+// ---------- account profiles ----------
+
+/** One CLI account: a config directory plus the environment that points a CLI
+ *  at it. Canopy never holds the credential — the CLI logs in inside the
+ *  profile and owns the result. See src-tauri/src/profiles.rs. */
+export interface AgentProfile {
+  id: string;
+  label: string;
+  /** Absolute config root. `$HOME` for the default profile. */
+  root: string;
+  /** False for the default profile, which can't be renamed or removed. */
+  removable: boolean;
+}
+export const profilesList = () => invoke<AgentProfile[]>("profiles_list");
+/** Creates the directory layout and installs hooks + MCP into it. Does not log
+ *  anyone in; the caller opens a terminal for that. */
+export const profileCreate = (label: string) =>
+  invoke<AgentProfile>("profile_create", { label });
+/** Forgets the profile and answers where its files stayed — deleting a login
+ *  from under a misclick is not something this offers. */
+export const profileDelete = (id: string) => invoke<string>("profile_delete", { id });
+/** The env that points one CLI at one profile, as spawn-ready pairs. Empty for
+ *  the default profile and for CLIs with no config-home variable. */
+export const profileEnv = (agent: string, id: string) =>
+  invoke<[string, string][]>("profile_env", { agent, id });
+/** Re-run hook + MCP setup for one CLI inside one profile. */
+export const profileSetup = (agent: string, id: string) =>
+  invoke<SetupReport>("profile_setup", { agent, id });
 
 export interface FsChange {
   root: string;
@@ -1912,6 +1947,11 @@ export interface SessionDigest {
   /** Where the session was launched. Pinned at first sighting and never
    *  updated, unlike `cwd`, which follows the agent as it cds. */
   launch_cwd?: string;
+  /** Which account profile this conversation belongs to. Resuming has to
+   *  relaunch against the same config dir — `--resume <id>` under the other
+   *  login looks in a store that has never heard of this session. Absent on
+   *  digests written before profiles existed, which means the default. */
+  profile?: string;
   /** The terminal that owns this session — our PTY id, inherited through the
    *  spawn env, as a string. Present only for sessions started under a Canopy
    *  terminal. This is the deterministic session -> surface binding: matching

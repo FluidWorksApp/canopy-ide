@@ -40,6 +40,11 @@ export interface TermSubTab {
    *  Restored with the tab, or a woken project's servers would all come back
    *  fighting for the same port. */
   env?: [string, string][];
+  /** Which account profile this terminal's CLI was launched under, when it
+   *  wasn't the default one. Display only — the isolation is carried by `env`
+   *  — but it has to be restored with the tab, because a session's identity on
+   *  screen must not change just because the app was reopened. */
+  profile?: string;
   /** Launched from a component run command — lives in the run rail, not the
    *  terminal strip. */
   run?: boolean;

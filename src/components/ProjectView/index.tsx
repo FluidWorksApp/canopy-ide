@@ -24,6 +24,14 @@ import { GuestSession, OwnerSession } from "../../collab";
 import { CollabView } from "../CollabView";
 import { SharedProjectView } from "../SharedProjectView";
 import type { AgentCli } from "../../projects";
+import {
+  activeProfile,
+  launchEnv,
+  profileBadge,
+  setActiveProfile,
+  supportsProfiles,
+  PROFILE_CHANGE_EVENT,
+} from "../../profiles";
 import { startCommandParked } from "../../agentSeed";
 import {
   AGENT_CLIS,
@@ -489,6 +497,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
     refreshInstalled,
     refreshUpdates,
   } = useCliLauncher();
+  // The account profiles this machine has. One entry (the default) is the
+  // normal case and the launcher renders exactly as it did before profiles
+  // existed; the list only grows when the user makes a second login.
+  const [profiles, setProfiles] = useState<ipc.AgentProfile[]>([]);
+  useEffect(() => {
+    const pull = () => void ipc.profilesList().then(setProfiles).catch(() => {});
+    pull();
+    // Creating or removing a profile happens in Settings, which is a different
+    // component tree — the event is how this list learns about it without the
+    // user having to reopen the project.
+    window.addEventListener(PROFILE_CHANGE_EVENT, pull);
+    return () => window.removeEventListener(PROFILE_CHANGE_EVENT, pull);
+  }, []);
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
   const [palette, setPalette] = useState<PaletteMode | null>(null);
   /** The ⌘N launcher — the ＋ menu as a type-and-Enter list. */
@@ -771,6 +792,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
       title?: string,
       icon?: string,
       run = false,
+      // Stamped on top of the workspace port — an agent CLI launched under a
+      // non-default account profile carries the variable that points it at that
+      // login's config dir (see profiles.ts).
+      extraEnv?: [string, string][],
+      profile?: string,
     ) => {
       const id = tabId();
       // Every terminal opened inside a workspace gets that workspace's port,
@@ -778,7 +804,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // "run the dev server and check it" is the case that matters most, and it
       // types the command itself. Derived from the path alone (see
       // workspaces.portForPath) so this stays a synchronous, IPC-free lookup.
-      const env = portEnv(portForPath(cwd));
+      const env = [...portEnv(portForPath(cwd)), ...(extraEnv ?? [])];
       setTabs((prev) => [
         ...prev,
         {
@@ -790,6 +816,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           command,
           icon,
           env: env.length ? env : undefined,
+          profile,
           run,
         },
       ]);
@@ -1427,7 +1454,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
 
   const resumeSession = useCallback(
-    (r: Restorable) => {
+    async (r: Restorable) => {
       if (!r.command || !r.cwd) return;
       // Already open — focus that tab instead of spawning a second identical
       // resume. The resume command carries the session id, so command+cwd
@@ -1449,11 +1476,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
       setRestorable((prev) =>
         prev.filter((x) => x.digest.session_id !== r.digest.session_id),
       );
+      // Resume against the account that owns the conversation, not the one
+      // selected for new launches. `--resume <id>` is looked up inside the
+      // CLI's config dir, so the wrong login doesn't resume a different
+      // session — it reports this one as not existing.
+      const env =
+        r.profile && r.profile !== "default"
+          ? await ipc.profileEnv(r.agentId, r.profile).catch(() => [])
+          : [];
       addTerminal(
         r.cwd,
         r.command,
         r.digest.agent ?? "agent",
         AGENT_CLIS.find((c) => c.id === r.agentId)?.icon,
+        false,
+        env,
+        env.length ? r.profile : undefined,
       );
     },
     [addTerminal],
@@ -2663,10 +2701,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const d = (e as CustomEvent).detail as {
         command?: string;
         title?: string;
+        // Signing a profile in is one of these flows, and its whole point is
+        // the environment: the same `claude` has to start against the new
+        // account's config dir, or the login lands on the default one.
+        env?: [string, string][];
+        profile?: string;
       };
       const first = componentsRef.current[0];
       if (d?.command && first)
-        addTerminal(first.path, d.command, d.title ?? d.command, "⚙");
+        addTerminal(
+          first.path,
+          d.command,
+          d.title ?? d.command,
+          "⚙",
+          false,
+          d.env,
+          d.profile,
+        );
     };
     window.addEventListener("canopy:run-command", runCommand);
     window.addEventListener("menu:close-tab", closeTabHandler);
@@ -3524,7 +3575,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
             });
           }
           const { command } = terminalLaunch(t);
-          return addTerminal(t.cwd, command, t.title, t.icon, t.run);
+          // Back on the account it slept on. Without this the resume command
+          // is right and the store it reads is wrong, which surfaces as a
+          // woken agent that has forgotten the conversation.
+          const env =
+            t.agentId && t.profile && t.profile !== "default"
+              ? await ipc.profileEnv(t.agentId, t.profile).catch(() => [])
+              : [];
+          return addTerminal(
+            t.cwd,
+            command,
+            t.title,
+            t.icon,
+            t.run,
+            env,
+            env.length ? t.profile : undefined,
+          );
         }
         case "file": {
           await openFileRef.current(t.path, { diff: t.view === "diff" });
@@ -4255,13 +4321,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // Which CLI the front terminal is running, resolved independently of
   // modelTarget: that one is null for any CLI Canopy can't switch models on
   // (Codex among them), and the plan chip has to work there too.
-  const activeAgentId = useMemo(() => {
+  // The CLI *and* the account, resolved together off the same terminal. Read
+  // separately they drift: this falls back to the first terminal when the front
+  // tab isn't one, so taking the id from here and the account from the active
+  // tab would pair one session's CLI with another session's login — and the
+  // plan chip would report headroom belonging to neither.
+  const activeAgent = useMemo(() => {
     const termTabs = tabs.filter((t): t is TermSubTab => t.type === "terminal");
     const active = termTabs.find((t) => t.id === activeTabId) ?? termTabs[0];
-    if (!active || active.ptyId == null) return null;
+    if (!active || active.ptyId == null) return { id: null, profile: null };
     const s = projectStats.find((x) => x.id === active.ptyId);
-    return s ? (identifyAgent(s.agent_hint)?.id ?? null) : null;
+    return {
+      id: s ? (identifyAgent(s.agent_hint)?.id ?? null) : null,
+      profile: active.profile ?? null,
+    };
   }, [tabs, activeTabId, projectStats]);
+  const activeAgentId = activeAgent.id;
 
   // Change that session's model by typing the CLI's own command into its
   // terminal — the same thing the user would type, so the CLI's confirmations,
@@ -4292,11 +4367,31 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  component header passes that component's path so it starts in the right
    *  directory rather than wherever the ＋ menu would have put it. */
   const launchCli = useCallback(
-    (cli: AgentCli, at?: string) => {
+    async (cli: AgentCli, at?: string, asProfile?: string) => {
       const cwd = at ?? componentsRef.current[0]?.path;
       if (!cwd) return;
       if (installed[cli.bin]) {
-        addTerminal(cwd, shellBin(cli.bin), cli.name, cli.icon);
+        // Picking an account from the menu also makes it the selection: the
+        // next launch of this CLI should be the account you just chose, not the
+        // one you left behind two launches ago.
+        if (asProfile && asProfile !== activeProfile(cli.id)) {
+          setActiveProfile(cli.id, asProfile);
+        }
+        // Resolved before the terminal opens: the config-dir variable has to be
+        // in the child's environment from its first instruction, because the
+        // CLI reads it at startup. Exporting it afterwards would leave this
+        // session on the default login while the tab claimed otherwise.
+        const profile = activeProfile(cli.id);
+        const env = await launchEnv(cli.id);
+        addTerminal(
+          cwd,
+          shellBin(cli.bin),
+          cli.name,
+          cli.icon,
+          false,
+          env,
+          env.length ? profile : undefined,
+        );
         // Surface the new agent where it lives: the Agents section, expanded so
         // the just-launched row is actually in view.
         setSideTab("agents");
@@ -4346,18 +4441,45 @@ const ProjectViewBody = memo(function ProjectViewBody({
       onClick: () => addTerminal(cwd),
     },
     { label: "", separator: true },
-    ...AGENT_CLIS.map((cli) => ({
-      label: cli.name,
-      icon: <AgentIcon id={cli.id} size={15} />,
-      // A context-menu row has one click target, so the update hint here is
-      // informational — the ＋ menu and launch grid carry the clickable badge.
-      hint: installed[cli.bin]
+    ...AGENT_CLIS.map((cli) => {
+      const updateHint = installed[cli.bin]
         ? cliUpdates[cli.bin]?.hasUpdate
           ? `⇡ ${cliUpdates[cli.bin]?.latest}`
           : undefined
-        : "install",
-      onClick: () => launchCli(cli, cwd),
-    })),
+        : "install";
+      // A second login only appears once the user has made one. Until then
+      // every row is exactly the single-click launch it has always been —
+      // this feature must cost nothing to the people not using it.
+      const accounts =
+        supportsProfiles(cli.id) && profiles.length > 1 && installed[cli.bin]
+          ? profiles
+          : [];
+      if (accounts.length === 0) {
+        return {
+          label: cli.name,
+          icon: <AgentIcon id={cli.id} size={15} />,
+          // A context-menu row has one click target, so the update hint here is
+          // informational — the ＋ menu and launch grid carry the clickable badge.
+          hint: updateHint,
+          onClick: () => void launchCli(cli, cwd),
+        };
+      }
+      const current = activeProfile(cli.id);
+      return {
+        label: cli.name,
+        icon: <AgentIcon id={cli.id} size={15} />,
+        // The account in front, so which login the next launch uses is legible
+        // without opening anything.
+        hint: profileBadge(profiles, current) ?? updateHint,
+        submenu: accounts.map((p) => ({
+          label: p.label,
+          // A tick rather than a separate "current" row: the list is short and
+          // the question is only ever "which of these".
+          hint: p.id === current ? "✓" : undefined,
+          onClick: () => void launchCli(cli, cwd, p.id),
+        })),
+      };
+    }),
   ];
 
   const compMenu = useContextMenu();
@@ -7055,6 +7177,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         modelSwitch={modelTarget?.sw ?? null}
         agentLabel={modelTarget?.label}
         agentId={activeAgentId}
+        agentProfile={activeAgent.profile}
         activePtyId={activeTab?.type === "terminal" ? activeTab.ptyId : null}
       />
       {launcherOpen && visible && (

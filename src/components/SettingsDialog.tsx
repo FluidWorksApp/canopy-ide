@@ -42,9 +42,15 @@ import {
   namesArguments,
   newCustomCliId,
   refreshAgentClis,
+  type AgentCli,
   type AgentCliDef,
   type CustomAgentCli,
 } from "../projects";
+import {
+  loginCommand,
+  supportsProfiles,
+  PROFILE_CHANGE_EVENT,
+} from "../profiles";
 import { AGENT_TOOL_GROUPS, ALL_AGENT_TOOLS } from "../agentTools";
 import { spotSources } from "../spotSources";
 import { INDEXABLE_AGENTS, fmtBytes, runIngest } from "../spotIndex";
@@ -421,6 +427,154 @@ function AgentBinaries({
 }
 
 /**
+ * Account profiles: more than one login per CLI, side by side.
+ *
+ * What a profile is, and is not: it is a directory plus the environment that
+ * points a CLI at it. Canopy never sees a token — signing in happens in a
+ * terminal, in the CLI's own browser flow, against the profile's config dir.
+ * That is why there is no "paste your key" field here and never should be.
+ *
+ * Only CLIs that expose a config-home variable can hold one (claude, codex,
+ * opencode, amp). The rest are listed as single-account rather than given a
+ * picker that would isolate nothing — two entries quietly sharing one login is
+ * the one failure mode a user cannot see.
+ */
+function AgentAccounts({
+  onRunInTerminal,
+}: {
+  onRunInTerminal: (
+    command: string,
+    title: string,
+    env: [string, string][],
+    profile: string,
+  ) => void;
+}) {
+  const [profiles, setProfiles] = useState<ipc.AgentProfile[]>([]);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  const refresh = useCallback(() => {
+    void ipc.profilesList().then(setProfiles).catch(() => {});
+  }, []);
+  useEffect(refresh, [refresh]);
+
+  const create = () => {
+    const label = draft.trim();
+    if (!label || busy) return;
+    setBusy(true);
+    setNote(null);
+    void ipc
+      .profileCreate(label)
+      .then((p) => {
+        setDraft("");
+        refresh();
+        // Announced so open launchers pick the new account up without the user
+        // having to reopen anything.
+        window.dispatchEvent(new CustomEvent(PROFILE_CHANGE_EVENT));
+        setNote(
+          `Created "${p.label}". Sign it in below — the CLI opens its own login in a terminal.`,
+        );
+      })
+      .catch((e: unknown) => setNote(String(e)))
+      .finally(() => setBusy(false));
+  };
+
+  const remove = (p: ipc.AgentProfile) => {
+    setBusy(true);
+    void ipc
+      .profileDelete(p.id)
+      .then((where) => {
+        refresh();
+        window.dispatchEvent(new CustomEvent(PROFILE_CHANGE_EVENT));
+        // Said out loud, because it is the opposite of what "remove" usually
+        // means: the login is still on disk and can be re-adopted.
+        setNote(`Removed "${p.label}". Its login is still on disk at ${where}.`);
+      })
+      .catch((e: unknown) => setNote(String(e)))
+      .finally(() => setBusy(false));
+  };
+
+  const signIn = (p: ipc.AgentProfile, cli: AgentCli) => {
+    void ipc
+      .profileEnv(cli.id, p.id)
+      .then((env) =>
+        onRunInTerminal(loginCommand(cli.bin), `${cli.name} — ${p.label}`, env, p.id),
+      )
+      .catch((e: unknown) => setNote(String(e)));
+  };
+
+  const capable = AGENT_CLIS.filter((c) => supportsProfiles(c.id));
+
+  return (
+    <div className="cli-accounts">
+      <div className="cli-account-new">
+        <input
+          className="cli-bin-input"
+          type="text"
+          placeholder="Work, Personal, Client X…"
+          value={draft}
+          spellCheck={false}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              create();
+            }
+          }}
+        />
+        <Button onClick={create} disabled={busy || !draft.trim()}>
+          Add account
+        </Button>
+      </div>
+      {note && <p className="cli-account-note">{note}</p>}
+
+      {profiles.map((p) => (
+        <div key={p.id} className="cli-account-row">
+          <div className="cli-account-head">
+            <span className="cli-account-name">{p.label}</span>
+            {!p.removable && <span className="cli-account-tag">in use everywhere</span>}
+            {p.removable && (
+              <Button
+                size="sm"
+                onClick={() => remove(p)}
+                disabled={busy}
+                title="Forget this account. Its files, including the login, stay on disk."
+              >
+                Remove
+              </Button>
+            )}
+          </div>
+          <div className="cli-account-path" title={p.root}>
+            {p.root}
+          </div>
+          {p.removable && (
+            <div className="cli-account-signin">
+              {capable.map((cli) => (
+                <Button
+                  key={cli.id}
+                  size="sm"
+                  onClick={() => signIn(p, cli)}
+                  title={`Open a terminal running ${cli.bin} against this account — log in there`}
+                >
+                  <AgentIcon id={cli.id} size={12} /> Sign in
+                </Button>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+
+      <p className="cli-account-note">
+        Claude Code, Codex, OpenCode and Amp can hold a second login. Antigravity,
+        oh-my-pi and Aider can't — they keep credentials somewhere a directory
+        can't isolate, so they always use the account they're already signed into.
+      </p>
+    </div>
+  );
+}
+
+/**
  * Add an agent CLI Canopy ships no entry for.
  *
  * The four fields are the whole of what only the user can tell us: what to run,
@@ -662,9 +816,16 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
    *  hand-off, confirmations) so they belong in a real terminal the user can
    *  watch and answer — not a silent subprocess. ProjectView owns terminals;
    *  this asks it to open one. */
-  const runInTerminal = (command: string, title: string) => {
+  const runInTerminal = (
+    command: string,
+    title: string,
+    env?: [string, string][],
+    profile?: string,
+  ) => {
     window.dispatchEvent(
-      new CustomEvent("canopy:run-command", { detail: { command, title } }),
+      new CustomEvent("canopy:run-command", {
+        detail: { command, title, env, profile },
+      }),
     );
     onClose();
   };
@@ -916,6 +1077,16 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                       // probes and the resume commands all read the registry.
                       refreshAgentClis();
                     }}
+                  />
+                </Item>
+                <Item
+                  name="Accounts"
+                  desc="More than one login per CLI — work and personal, side by side. Pick which one a launch uses from the ＋ menu."
+                >
+                  <AgentAccounts
+                    onRunInTerminal={(command, title, env, profile) =>
+                      runInTerminal(command, title, env, profile)
+                    }
                   />
                 </Item>
                 <Item

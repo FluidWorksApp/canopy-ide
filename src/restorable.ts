@@ -17,6 +17,10 @@ export interface Restorable {
   command: string;
   /** Recognisable label: the last thing the human actually typed. */
   prompt: string;
+  /** The account it ran under, so the restore relaunches against the same
+   *  config dir. "default" for sessions from before profiles, and for CLIs
+   *  that can't hold a second login. */
+  profile: string;
 }
 
 /** The last human-authored prompt — tool output and injected context both
@@ -164,6 +168,7 @@ export function restorableFrom(
         command:
           digest.resumable === false ? null : restoreCommand(agentId, digest.session_id),
         prompt: lastHumanPrompt(digest.prompts) ?? "",
+        profile: digest.profile || "default",
       };
     })
     // No command, no offer. Both surfaces that read this are lists of things

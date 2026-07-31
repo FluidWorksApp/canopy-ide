@@ -23,6 +23,7 @@ mod mcp_client;
 mod notify;
 mod portal;
 mod preview;
+mod profiles;
 mod prwatch;
 mod pty;
 mod punch;
@@ -573,6 +574,11 @@ pub fn run() {
             agents::set_context_scopes,
             agents::session_digests,
             agents::session_forget,
+            profiles::profiles_list,
+            profiles::profile_create,
+            profiles::profile_delete,
+            profiles::profile_env,
+            profiles::profile_setup,
             relay::relay_host_start,
             relay::relay_host_stop,
             relay::relay_regenerate_code,
