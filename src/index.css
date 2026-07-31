@@ -1650,20 +1650,13 @@ body.resizing-side * {
   color: var(--text);
 }
 
+/* Positioned inline (fixed, measured from the chip) because .status-bar clips
+   its one-line row — see the comment on the anchor in StatusBar.tsx. Only the
+   look lives here; .status-menu carries the rest. */
 .status-account-menu {
-  position: absolute;
-  right: 0;
-  bottom: calc(100% + 6px);
-  z-index: 60;
   display: flex;
   flex-direction: column;
-  min-width: 220px;
-  padding: 4px;
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  corner-shape: squircle;
-  box-shadow: var(--shadow-2);
+  min-width: 240px;
 }
 
 .status-account-row {
@@ -16540,15 +16533,40 @@ a.btn-sm {
   corner-shape: squircle;
 }
 
+/* The head is the whole fold target: an account row is folded by default, and
+   its summary line is what answers "who is in this one" without opening it. */
 .cli-account-head {
   display: flex;
   align-items: center;
   gap: 8px;
+  cursor: pointer;
+}
+
+.cli-account-head:hover .cli-account-caret {
+  color: var(--text);
+}
+
+.cli-account-caret {
+  width: 10px;
+  color: var(--text-faint);
+  font-size: 9px;
 }
 
 .cli-account-name {
-  flex: 1;
+  flex: none;
   font-weight: 600;
+}
+
+/* Who this account is signed in as, on the folded row. Truncates rather than
+   wrapping — the head has to stay one line for the fold to read as a fold. */
+.cli-account-summary {
+  flex: 1;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .cli-account-tag {

@@ -404,6 +404,19 @@ describe("the account switcher", () => {
     expect(await screen.findByTitle(/New agents launch as Default/)).toBeTruthy();
   });
 
+  /** The status bar clips its one-line row, so a menu that pops above it as an
+   *  absolutely positioned child renders behind the terminal — only a sliver of
+   *  its own shadow shows. Every other popup on this bar is fixed and measured
+   *  from its chip; this one shipped absolute and had exactly that bug. */
+  it("escapes the status bar's clipping instead of opening behind it", async () => {
+    vi.mocked(ipc.profilesList).mockResolvedValue(twoAccounts as never);
+    render(<StatusBar {...base} events={[]} />);
+    fireEvent.click(await screen.findByTitle(/New agents launch as Default/));
+    const menu = document.querySelector(".status-account-menu") as HTMLElement;
+    expect(menu).toBeTruthy();
+    expect(menu.style.position).toBe("fixed");
+  });
+
   it("switches every CLI at once, and the chip follows", async () => {
     vi.mocked(ipc.profilesList).mockResolvedValue(twoAccounts as never);
     render(<StatusBar {...base} events={[]} />);
