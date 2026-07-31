@@ -95,7 +95,14 @@ pub async fn companion_spawn(
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         + 1;
 
-    let mut cmd = tokio::process::Command::new(&command);
+    // A bare `claude` is not findable from a GUI process: macOS gives an app
+    // launched from Finder (or from a dev server that was) a minimal PATH with
+    // no /opt/homebrew/bin, so exec fails with "No such file or directory" for
+    // a binary that is plainly installed. pty.rs never hits this because it
+    // spawns through a login shell; this execs the binary directly, so it has
+    // to resolve the name the way a login shell would.
+    let resolved = crate::mcp_client::resolve_command(&command);
+    let mut cmd = tokio::process::Command::new(&resolved);
     cmd.args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -153,9 +160,17 @@ pub async fn companion_spawn(
         None => {}
     }
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("could not start `{command}`: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        format!(
+            "could not start `{command}`: {e}{}",
+            if resolved == command {
+                " — Canopy could not find it on this machine's PATH. Install it, or set its \
+                     path in Settings → Agents."
+            } else {
+                ""
+            }
+        )
+    })?;
     let stdin = child.stdin.take().ok_or("the companion CLI has no stdin")?;
     let stdout = child
         .stdout
@@ -345,6 +360,23 @@ pub async fn companion_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The companion execs the CLI directly rather than through a login shell,
+    /// so a bare name has to be resolved the way a shell would — `claude` lives
+    /// in /opt/homebrew/bin, which a GUI process's PATH does not contain, and
+    /// the failure reads as "No such file or directory" for a binary that is
+    /// plainly installed.
+    #[test]
+    fn a_bare_command_is_resolved_to_a_real_path() {
+        // An absolute path is returned untouched.
+        assert_eq!(crate::mcp_client::resolve_command("/bin/sh"), "/bin/sh");
+        // A name every machine has resolves to something runnable.
+        let found = crate::mcp_client::resolve_command("sh");
+        assert!(
+            found == "sh" || std::path::Path::new(&found).is_file(),
+            "sh resolved to {found:?}, which is neither on PATH nor a real file"
+        );
+    }
 
     #[test]
     fn the_store_refuses_anything_that_is_not_a_bare_filename() {

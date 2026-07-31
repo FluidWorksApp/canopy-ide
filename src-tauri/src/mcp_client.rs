@@ -375,7 +375,13 @@ fn parse_http_body(text: &str, id: i64) -> Result<Value, String> {
 /// GUI apps on macOS don't inherit the user's shell PATH, and MCP servers are
 /// overwhelmingly `npx`. Resolve a bare name the way a login shell would, or
 /// every stdio server fails to start with a bewildering "No such file".
-fn resolve_command(cmd: &str) -> String {
+///
+/// `pub(crate)` because the companion spawns an agent CLI the same way and hit
+/// the same wall — `claude` sitting in /opt/homebrew/bin, invisible to a GUI
+/// process, reported as "could not start `claude`: No such file or directory".
+/// Anything that execs a user's binary directly rather than through a login
+/// shell needs this; a second copy would have been a second thing to fix.
+pub(crate) fn resolve_command(cmd: &str) -> String {
     if cmd.contains('/') {
         return cmd.to_string();
     }
