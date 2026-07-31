@@ -157,8 +157,23 @@ export function ResearchView({
   useEffect(() => {
     load();
     window.addEventListener(RESEARCH_EVENT, load);
-    return () => window.removeEventListener(RESEARCH_EVENT, load);
-  }, [load]);
+    // The store's own event, so an agent appending through MCP reaches an open
+    // reader as well. The poll below only runs for a live status, so without
+    // this an append to a finished entry sat unseen until the tab was reopened.
+    let alive = true;
+    let unlisten: (() => void) | undefined;
+    void ipc
+      .onResearchChanged((pid) => {
+        if (pid === projectId) load();
+      })
+      .then((off) => (alive ? (unlisten = off) : off()))
+      .catch(() => {});
+    return () => {
+      alive = false;
+      unlisten?.();
+      window.removeEventListener(RESEARCH_EVENT, load);
+    };
+  }, [load, projectId]);
 
   // While an agent is on it, the entry changes under the reader — findings are
   // appended, sources land, the status moves. Nothing in the window tells us,
