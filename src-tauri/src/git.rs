@@ -159,7 +159,10 @@ pub(crate) fn run(cmd: &mut Command) -> Result<String, String> {
 }
 
 /// Resolve + scope-check a repo path handed to us by the frontend.
-pub(crate) fn repo_path(state: &State<'_, WorkspaceManager>, path: &str) -> Result<PathBuf, String> {
+pub(crate) fn repo_path(
+    state: &State<'_, WorkspaceManager>,
+    path: &str,
+) -> Result<PathBuf, String> {
     let dir = check_scope(state, Path::new(path))?;
     let top = run(git(&dir).args(["rev-parse", "--show-toplevel"]))?;
     let top = PathBuf::from(top.trim());

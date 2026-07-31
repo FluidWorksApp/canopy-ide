@@ -200,7 +200,11 @@ fn dry_run_merge(top: &Path, base: &str) -> DryRun {
 
 /// Everything the UI needs to decide whether to ask the user anything, without
 /// touching the working tree. Safe to call on a timer.
-pub(crate) fn probe(top: &Path, fetch: bool, base_override: Option<&str>) -> Result<SyncProbe, String> {
+pub(crate) fn probe(
+    top: &Path,
+    fetch: bool,
+    base_override: Option<&str>,
+) -> Result<SyncProbe, String> {
     let (branch, detached) = head_branch(top);
 
     let base = match base_override.map(str::trim).filter(|s| !s.is_empty()) {
@@ -222,18 +226,30 @@ pub(crate) fn probe(top: &Path, fetch: bool, base_override: Option<&str>) -> Res
         }
     }
 
-    let base_head = run(git(top).args(["rev-parse", "--verify", "--quiet", &format!("{base}^{{commit}}")]))
-        .map(|s| s.trim().to_string())
-        .map_err(|_| format!("base branch \"{base}\" doesn't exist in this repository"))?;
+    let base_head = run(git(top).args([
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        &format!("{base}^{{commit}}"),
+    ]))
+    .map(|s| s.trim().to_string())
+    .map_err(|_| format!("base branch \"{base}\" doesn't exist in this repository"))?;
     if base_head.is_empty() {
-        return Err(format!("base branch \"{base}\" doesn't exist in this repository"));
+        return Err(format!(
+            "base branch \"{base}\" doesn't exist in this repository"
+        ));
     }
 
     // `A...B` with --left-right: left = ours only (ahead), right = theirs only
     // (behind). Both are measured from the merge base, which is exactly the
     // "since I cut the branch" the user has in mind.
     let (mut ahead, mut behind) = (0u32, 0u32);
-    if let Ok(counts) = run(git(top).args(["rev-list", "--left-right", "--count", &format!("HEAD...{base}")])) {
+    if let Ok(counts) = run(git(top).args([
+        "rev-list",
+        "--left-right",
+        "--count",
+        &format!("HEAD...{base}"),
+    ])) {
         let mut it = counts.split_whitespace();
         ahead = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
         behind = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -270,7 +286,11 @@ pub(crate) fn probe(top: &Path, fetch: bool, base_override: Option<&str>) -> Res
     };
     if blocked.is_some() {
         probe.blocked = blocked;
-        probe.state = if behind == 0 { SyncState::Current } else { SyncState::Blocked };
+        probe.state = if behind == 0 {
+            SyncState::Current
+        } else {
+            SyncState::Blocked
+        };
         return Ok(probe);
     }
 
@@ -293,12 +313,9 @@ pub(crate) fn probe(top: &Path, fetch: bool, base_override: Option<&str>) -> Res
     // "error: Your local changes would be overwritten" into something the user
     // can act on before clicking anything.
     if !dirty.is_empty() {
-        if let Ok(raw) = run(git(top).args([
-            "diff",
-            "--name-only",
-            "-z",
-            &format!("HEAD...{base}"),
-        ])) {
+        if let Ok(raw) =
+            run(git(top).args(["diff", "--name-only", "-z", &format!("HEAD...{base}")]))
+        {
             let incoming: std::collections::HashSet<&str> = nul_fields(&raw).collect();
             probe.overlap = dirty
                 .iter()
@@ -343,8 +360,13 @@ pub(crate) fn apply(top: &Path, base: &str) -> Result<SyncOutcome, String> {
     if base == branch {
         return Err("that's the branch you're on".into());
     }
-    run(git(top).args(["rev-parse", "--verify", "--quiet", &format!("{base}^{{commit}}")]))
-        .map_err(|_| format!("base branch \"{base}\" doesn't exist in this repository"))?;
+    run(git(top).args([
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        &format!("{base}^{{commit}}"),
+    ]))
+    .map_err(|_| format!("base branch \"{base}\" doesn't exist in this repository"))?;
 
     // --no-edit: take git's own merge message rather than opening an editor
     // there is no terminal for. Fast-forward stays enabled, so a branch with
@@ -367,9 +389,15 @@ pub(crate) fn apply(top: &Path, base: &str) -> Result<SyncOutcome, String> {
     // Unmerged paths mean the merge started and stopped: the worktree now
     // holds conflict markers and MERGE_HEAD, which is a state the user asked
     // for. No unmerged paths means git refused before writing anything.
-    let conflicts: Vec<String> = run(git(top).args(["diff", "--name-only", "--diff-filter=U", "-z"]))
-        .map(|raw| nul_fields(&raw).take(CONFLICT_LIMIT).map(str::to_string).collect())
-        .unwrap_or_default();
+    let conflicts: Vec<String> =
+        run(git(top).args(["diff", "--name-only", "--diff-filter=U", "-z"]))
+            .map(|raw| {
+                nul_fields(&raw)
+                    .take(CONFLICT_LIMIT)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
 
     if conflicts.is_empty() {
         return Err(if stderr.is_empty() { stdout } else { stderr });
@@ -384,16 +412,23 @@ pub(crate) fn apply(top: &Path, base: &str) -> Result<SyncOutcome, String> {
 }
 
 fn first_line(s: &str) -> Option<String> {
-    s.lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_string)
+    s.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(str::to_string)
 }
 
 /// Back out of a conflicted merge, restoring the pre-merge worktree. The escape
 /// hatch that makes "resolve now" a safe thing to click.
 pub(crate) fn abort(top: &Path) -> Result<String, String> {
-    if git_dir(top).map(|d| !d.join("MERGE_HEAD").exists()).unwrap_or(false) {
+    if git_dir(top)
+        .map(|d| !d.join("MERGE_HEAD").exists())
+        .unwrap_or(false)
+    {
         return Err("no merge in progress".into());
     }
-    run(git(top).args(["merge", "--abort"])).map(|_| "Merge aborted — your branch is back as it was".into())
+    run(git(top).args(["merge", "--abort"]))
+        .map(|_| "Merge aborted — your branch is back as it was".into())
 }
 
 // ---------- commands ----------
@@ -420,7 +455,10 @@ pub async fn git_sync_apply(
 }
 
 #[tauri::command]
-pub async fn git_sync_abort(state: State<'_, WorkspaceManager>, repo: String) -> Result<String, String> {
+pub async fn git_sync_abort(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+) -> Result<String, String> {
     let top = repo_path(&state, &repo)?;
     abort(&top)
 }
@@ -447,16 +485,7 @@ mod tests {
 
     impl Fixture {
         fn git(&self, args: &[&str]) -> String {
-            let out = git(&self.dir)
-                .args(args)
-                // Identity and hooks: a developer's global config must not be
-                // able to make these tests pass or fail.
-                .env("GIT_AUTHOR_NAME", "t")
-                .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
-                .env("GIT_COMMITTER_NAME", "t")
-                .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
-                .output()
-                .expect("git runs");
+            let out = git(&self.dir).args(args).output().expect("git runs");
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         }
 
@@ -472,11 +501,18 @@ mod tests {
         /// main has `f.txt` = a/b/c and `g.txt`; `feat` is cut from it.
         fn new() -> Self {
             let n = SEQ.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!("canopy-sync-test-{}-{n}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("canopy-sync-test-{}-{n}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             let f = Fixture { dir };
             f.git(&["init", "-q", "-b", "main"]);
+            // Identity lives in the repo, not in this process's environment:
+            // the merge under test is git run by `apply`, and it needs a
+            // committer too. A machine without a global identity — CI — has
+            // no other source for one.
+            f.git(&["config", "user.name", "t"]);
+            f.git(&["config", "user.email", "t@example.invalid"]);
             f.write("f.txt", "a\nb\nc\n");
             f.write("g.txt", "one\n");
             f.commit("base");
@@ -533,9 +569,18 @@ mod tests {
         assert_eq!(p.state, SyncState::Conflict);
         assert_eq!(p.conflicts, vec!["f.txt"]);
         // The whole promise of the probe: asking cost the user nothing.
-        assert_eq!(std::fs::read_to_string(f.dir.join("f.txt")).unwrap(), before);
-        assert!(f.git(&["status", "--porcelain"]).is_empty(), "worktree stays clean");
-        assert!(!f.dir.join(".git").join("MERGE_HEAD").exists(), "no merge started");
+        assert_eq!(
+            std::fs::read_to_string(f.dir.join("f.txt")).unwrap(),
+            before
+        );
+        assert!(
+            f.git(&["status", "--porcelain"]).is_empty(),
+            "worktree stays clean"
+        );
+        assert!(
+            !f.dir.join(".git").join("MERGE_HEAD").exists(),
+            "no merge started"
+        );
     }
 
     #[test]
@@ -546,7 +591,10 @@ mod tests {
         f.advance_main("f.txt", "a\nTHEIRS\nc\n", "their edit");
         let head = f.git(&["rev-parse", "HEAD"]);
         for _ in 0..3 {
-            assert_eq!(probe(&f.dir, false, Some("main")).unwrap().state, SyncState::Conflict);
+            assert_eq!(
+                probe(&f.dir, false, Some("main")).unwrap().state,
+                SyncState::Conflict
+            );
         }
         assert_eq!(f.git(&["rev-parse", "HEAD"]), head);
     }
@@ -564,12 +612,19 @@ mod tests {
         assert!(out.conflicts.is_empty());
         // Merge, not rebase: the commit I already pushed still exists.
         assert!(
-            f.git(&["merge-base", "--is-ancestor", &mine, "HEAD"]).is_empty()
+            f.git(&["merge-base", "--is-ancestor", &mine, "HEAD"])
+                .is_empty()
                 && f.git(&["cat-file", "-t", &mine]) == "commit",
             "my commit must survive untouched"
         );
-        assert_eq!(std::fs::read_to_string(f.dir.join("g.txt")).unwrap(), "two\n");
-        assert_eq!(probe(&f.dir, false, Some("main")).unwrap().state, SyncState::Current);
+        assert_eq!(
+            std::fs::read_to_string(f.dir.join("g.txt")).unwrap(),
+            "two\n"
+        );
+        assert_eq!(
+            probe(&f.dir, false, Some("main")).unwrap().state,
+            SyncState::Current
+        );
     }
 
     #[test]
@@ -595,11 +650,20 @@ mod tests {
         assert!(!out.merged);
         assert_eq!(out.conflicts, vec!["f.txt"]);
         assert!(f.dir.join(".git").join("MERGE_HEAD").exists());
-        assert!(std::fs::read_to_string(f.dir.join("f.txt")).unwrap().contains("<<<<<<<"));
+        assert!(std::fs::read_to_string(f.dir.join("f.txt"))
+            .unwrap()
+            .contains("<<<<<<<"));
 
         abort(&f.dir).unwrap();
-        assert_eq!(f.git(&["rev-parse", "HEAD"]), before, "abort restores the branch");
-        assert_eq!(std::fs::read_to_string(f.dir.join("f.txt")).unwrap(), "a\nMINE\nc\n");
+        assert_eq!(
+            f.git(&["rev-parse", "HEAD"]),
+            before,
+            "abort restores the branch"
+        );
+        assert_eq!(
+            std::fs::read_to_string(f.dir.join("f.txt")).unwrap(),
+            "a\nMINE\nc\n"
+        );
         assert!(!f.dir.join(".git").join("MERGE_HEAD").exists());
     }
 
@@ -624,7 +688,10 @@ mod tests {
         let err = apply(&f.dir, "main").unwrap_err();
         assert!(err.to_lowercase().contains("local changes"), "got: {err}");
         // Refused before starting: my edit is still exactly where I left it.
-        assert_eq!(std::fs::read_to_string(f.dir.join("g.txt")).unwrap(), "my uncommitted g\n");
+        assert_eq!(
+            std::fs::read_to_string(f.dir.join("g.txt")).unwrap(),
+            "my uncommitted g\n"
+        );
         assert_eq!(f.git(&["rev-parse", "HEAD"]), before);
         assert!(!f.dir.join(".git").join("MERGE_HEAD").exists());
     }
@@ -640,7 +707,10 @@ mod tests {
         let p = probe(&f.dir, false, Some("main")).unwrap();
         assert_eq!(p.state, SyncState::Blocked);
         assert!(p.blocked.unwrap().contains("merge"));
-        assert!(apply(&f.dir, "main").is_err(), "must not merge on top of a merge");
+        assert!(
+            apply(&f.dir, "main").is_err(),
+            "must not merge on top of a merge"
+        );
     }
 
     #[test]
