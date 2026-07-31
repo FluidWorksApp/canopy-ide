@@ -447,3 +447,13 @@ export function LiveShareIcon({ size = 14, className }: IconProps) {
     </svg>
   );
 }
+
+// A chevron, for anything that folds: rotated by CSS at the call site rather
+// than mirrored here, so open and closed are one element that turns.
+export function ChevronIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M6 9l6 6 6-6" />
+    </svg>
+  );
+}

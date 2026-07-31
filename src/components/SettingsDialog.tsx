@@ -277,6 +277,37 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   </div>
                 </Item>
                 <Item
+                  name="Stack tabs by status"
+                  desc="Fold the agent strip into three stacks — Needs you, Working, Idle. Tabs slide between them as their agent changes state; click a stack to fold it away or deal it back out. Idle starts folded, anything asking for you unfolds itself, and the tab you're on is never folded away."
+                >
+                  <label className="set-inline-check">
+                    <input
+                      type="checkbox"
+                      checked={s.groupTabsByStatus}
+                      onChange={(e) => patch({ groupTabsByStatus: e.target.checked })}
+                    />
+                    <span>Keep agents that need you on the left, quiet ones stacked away</span>
+                  </label>
+                </Item>
+                <Item
+                  name="Settle into Idle after"
+                  desc="Seconds of quiet before a tab drops into the Idle group. Anything asking for you moves out immediately, whatever this is set to."
+                >
+                  <input
+                    type="number"
+                    min={0}
+                    max={3600}
+                    step={5}
+                    value={s.idleGroupDelaySeconds}
+                    disabled={!s.groupTabsByStatus}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      if (Number.isFinite(v) && v >= 0)
+                        patch({ idleGroupDelaySeconds: Math.min(3600, Math.floor(v)) });
+                    }}
+                  />
+                </Item>
+                <Item
                   name="Hibernate idle agents"
                   desc="Auto-reclaim memory from idle/ended agents past the limit below; they stay resumable."
                 >

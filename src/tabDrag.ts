@@ -25,9 +25,27 @@ export interface TabDrag {
  *  new order. Ids outside `ids` (another strip, another group) are ignored, so
  *  a tab can only be dropped among its own kind. */
 export function useTabDrag(ids: string[], reorder: (ids: string[]) => void): TabDrag {
+  return useTabDragGroups([ids], reorder);
+}
+
+/** Drag-to-reorder across several strips at once. `groups` is one id list per
+ *  strip; a tab is constrained to the strip it was picked up from, so the rule
+ *  is the same as running a useTabDrag per group — but on one set of window
+ *  listeners instead of three per group. That matters once a bar carries a
+ *  dozen groups, and this one does: three agent stacks plus a stack per kind
+ *  of document, per open project. */
+export function useTabDragGroups(
+  groups: string[][],
+  reorder: (ids: string[]) => void,
+): TabDrag {
   const [dragId, setDragId] = useState<string | null>(null);
-  const idsRef = useRef(ids);
-  idsRef.current = ids;
+  // The list the drag is confined to, resolved once at pointerdown: which
+  // group a tab belongs to can change mid-drag (an agent finishing a turn
+  // restacks it), and a tab that changed lists underneath the pointer would
+  // start reordering strangers.
+  const idsRef = useRef<string[]>([]);
+  const groupsRef = useRef(groups);
+  groupsRef.current = groups;
   const reorderRef = useRef(reorder);
   reorderRef.current = reorder;
   const drag = useRef<{ id: string; startX: number; moved: boolean } | null>(null);
@@ -97,6 +115,9 @@ export function useTabDrag(ids: string[], reorder: (ids: string[]) => void): Tab
         if (e.button !== 0) return;
         // Close buttons and the rename input keep their own behaviour.
         if ((e.target as HTMLElement).closest("input, button, .tab-close")) return;
+        const own = groupsRef.current.find((list) => list.includes(id));
+        if (!own) return;
+        idsRef.current = own;
         drag.current = { id, startX: e.clientX, moved: false };
       },
     }),

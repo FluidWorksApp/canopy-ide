@@ -7,7 +7,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import * as ipc from "../ipc";
-import { getSettings } from "../settings";
+import { getSettings, THEME_CHANGE_EVENT } from "../settings";
+import {
+  DOC_STACKS,
+  STATUS_LABEL,
+  docStackFor,
+  shownInStack,
+  statusFor,
+  useSettledGroups,
+  type TabStatus,
+} from "../tabGroups";
+import { GROUP_ATTR, revealScroll, useStripOverflow } from "../tabSticky";
+import { useFlipStrip } from "../tabFlip";
 import { modelFor, monaco, languageForPath } from "../monaco-setup";
 import { GuestSession, OwnerSession } from "../collab";
 import { CollabView } from "./CollabView";
@@ -41,6 +52,7 @@ import {
   SettingsIcon,
   SidebarIcon,
   CheckIcon,
+  ChevronIcon,
   FailIcon,
   LiveDot,
   GlobeIcon,
@@ -67,7 +79,7 @@ import { FileTree } from "./FileTree";
 import { FileView } from "./FileView";
 import { ChangesPanel, type ChangeGroup } from "./ChangesPanel";
 import { useEscape } from "../useEscape";
-import { useTabDrag, applyOrder } from "../tabDrag";
+import { useTabDragGroups, applyOrder } from "../tabDrag";
 import { AgentsPanel, digestBySurface } from "./AgentsPanel";
 import { StatusBar } from "./StatusBar";
 import { Palette, type PaletteMode } from "./Palette";
@@ -269,6 +281,27 @@ const tabId = () =>
   typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
     : `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+
+/** A document stack wears its kind's icon where a status stack wears a dot —
+ *  the same icon its tabs carry, so a folded stack still says what is in it. */
+const DOC_STACK_ICONS: Record<string, ReactNode> = {
+  workspaces: <AgentsIcon size={11} />,
+  files: <FilesIcon size={11} />,
+  browser: <GlobeIcon size={11} />,
+  tasks: <IssueIcon size={11} />,
+  reviews: <PullRequestIcon size={11} />,
+  history: <GitBranchIcon size={11} />,
+  team: <TeamIcon size={11} />,
+};
+
+/** The two tab-strip settings, in the units the strip wants them in. */
+function readTabPrefs(): { grouped: boolean; idleDelayMs: number } {
+  const s = getSettings();
+  return {
+    grouped: s.groupTabsByStatus,
+    idleDelayMs: Math.max(0, s.idleGroupDelaySeconds) * 1000,
+  };
+}
 
 /** A one-line label for a tab, for the "all tabs" overflow menu. */
 function tabDisplayLabel(t: SubTab): string {
@@ -1536,12 +1569,10 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
   // Keep the active tab in view when it changes (cycling, jumping, closing) —
-  // a strip that scrolls but doesn't follow leaves you looking at the wrong tabs.
+  // a strip that scrolls but doesn't follow leaves you looking at the wrong
+  // tabs. The following itself is revealActiveTab, further down: it needs the
+  // strip and the pinned chip, which are measured there.
   const activeTabElRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    if (!visible) return;
-    activeTabElRef.current?.scrollIntoView({ inline: "nearest", block: "nearest" });
-  }, [activeTabId, visible]);
   useEffect(() => {
     if (!visible) return;
     const closeTabHandler = () => {
@@ -2431,27 +2462,193 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
   const shellTabs = stripTabs.filter(
     (t): t is TermSubTab => t.type === "terminal" && !isAgentTab(t),
   );
-  const tabGroups: SubTab[][] = [
-    stripTabs.filter(isAgentTab),
-    stripTabs.filter((t) => t.type !== "terminal"),
+  const agentTabs = stripTabs.filter(isAgentTab);
+  const refTabs = stripTabs.filter((t) => t.type !== "terminal");
+
+  // Tab-strip preferences, re-read on every settings write (the Settings dialog
+  // announces each patch on this event) so turning grouping on regroups the
+  // strip you are looking at rather than the one you get after a relaunch.
+  const [tabPrefs, setTabPrefs] = useState(readTabPrefs);
+  useEffect(() => {
+    const onChange = () =>
+      setTabPrefs((prev) => {
+        const next = readTabPrefs();
+        return prev.grouped === next.grouped && prev.idleDelayMs === next.idleDelayMs
+          ? prev
+          : next;
+      });
+    window.addEventListener(THEME_CHANGE_EVENT, onChange);
+    return () => window.removeEventListener(THEME_CHANGE_EVENT, onChange);
+  }, []);
+
+  // Where each agent tab sits in the strip follows its agent: blocked-on-you
+  // first, working next, quiet last — settled, so an agent pausing between tool
+  // calls doesn't shuffle the strip (see tabGroups.ts). Computed for every agent
+  // tab whether or not grouping is on: the state machine is cheap, and keeping
+  // it running means turning the setting back on doesn't start every tab from
+  // scratch in the wrong bucket.
+  const statusTargets = new Map<string, TabStatus>(
+    agentTabs.map((t) => [t.id, statusFor(tabState(t), t.unread)]),
+  );
+  const settledStatus = useSettledGroups(statusTargets, tabPrefs.idleDelayMs);
+  // Fall back to the raw status for a tab the settler hasn't seen yet (its
+  // effect runs after this render), so a new tab is never briefly homeless.
+  const groupOf = (id: string) => settledStatus.get(id) ?? statusTargets.get(id) ?? "idle";
+
+  const grouped = tabPrefs.grouped;
+  const byStatus = (s: TabStatus) => (grouped ? agentTabs.filter((t) => groupOf(t.id) === s) : []);
+  const attentionTabs = byStatus("attention");
+  const workingTabs = byStatus("active");
+  const quietTabs = byStatus("idle");
+
+  // Each status run is a stack: one chip standing in for the tabs folded behind
+  // it, opened and closed by clicking it. Idle starts folded — six finished
+  // agents are a pile you want out of the way, not six tabs to read past — and
+  // the two runs that are still yours to act on start open.
+  // Absent means open: only the fold you have actually asked for is stored, so
+  // a stack that appears for the first time (a kind of document you just
+  // opened) arrives open rather than guessing.
+  const [openStacks, setOpenStacks] = useState<Record<string, boolean>>({ idle: false });
+  const toggleStack = (key: string) =>
+    setOpenStacks((p) => ({ ...p, [key]: p[key] === false }));
+  // A tab that starts wanting you is never left folded away: arriving in Needs
+  // you pops that stack open, whatever state you last left it in. Fold it again
+  // and the next arrival opens it again — the stack is yours to close, but not
+  // at the cost of hiding a question.
+  const attentionKey = attentionTabs.map((t) => t.id).join(",");
+  const seenAttention = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const now = new Set(attentionKey ? attentionKey.split(",") : []);
+    const arrived = [...now].some((id) => !seenAttention.current.has(id));
+    seenAttention.current = now;
+    if (arrived) setOpenStacks((p) => (p.attention === false ? { ...p, attention: true } : p));
+  }, [attentionKey]);
+
+  /** A run of the strip. Agents stack by state, documents by kind — a PR has no
+   *  state to settle, but "put the pull requests away" is the same gesture as
+   *  folding Idle, so every run folds the same way. */
+  interface StripGroup {
+    key: string;
+    /** Chip caption, or null for a run with no chip: the flat agent run that
+     *  grouping-off renders, which has nothing to fold it into. */
+    label: string | null;
+    /** Set on the three agent runs — what colours the chip and its dot. */
+    status: TabStatus | null;
+    /** The kind icon a document run wears in place of a status dot. */
+    icon: ReactNode;
+    tabs: SubTab[];
+    /** What the strip actually renders. Everything while the stack is open;
+     *  when it's folded, only the tab you are on — folding away the tab whose
+     *  pane is in front would leave you looking at a view with nothing in the
+     *  strip to say what it is. */
+    shown: SubTab[];
+  }
+  const run = (
+    key: string,
+    label: string | null,
+    status: TabStatus | null,
+    icon: ReactNode,
+    group: SubTab[],
+  ): StripGroup => ({
+    key,
+    label,
+    status,
+    icon,
+    tabs: group,
+    shown: shownInStack(group, label == null || openStacks[key] !== false, activeTabId),
+  });
+  const tabGroups: StripGroup[] = [
+    ...(grouped
+      ? [
+          run("attention", STATUS_LABEL.attention, "attention", null, attentionTabs),
+          run("active", STATUS_LABEL.active, "active", null, workingTabs),
+          run("idle", STATUS_LABEL.idle, "idle", null, quietTabs),
+        ]
+      : [run("all", null, null, null, agentTabs)]),
+    ...DOC_STACKS.map((d) =>
+      run(
+        d.key,
+        d.label,
+        null,
+        DOC_STACK_ICONS[d.key],
+        refTabs.filter((t) => docStackFor(t.type) === d.key),
+      ),
+    ),
   ];
-  // Drag to reorder, one strip per group: agents stay left of docs however you
-  // shuffle them, and a tab dropped outside its own group simply snaps back.
-  // The order lives in `tabs` itself, so the panes (which are all mounted)
-  // follow along without anything else having to know about the drag.
+
+  // Drag to reorder, confined to the run the tab was picked up from: a tab can
+  // only be dropped among its own kind, and a tab dropped outside simply snaps
+  // back. The order lives in `tabs` itself, so the panes (which are all
+  // mounted) follow along without anything else having to know about the drag.
+  // Only what is on screen is draggable — ids folded into a stack have no
+  // element to hit. One handle for the whole strip rather than one per run:
+  // there are a dozen runs now, and each useTabDrag costs its own listeners.
   const reorderGroup = useCallback(
     (ids: string[]) => setTabs((prev) => applyOrder(prev, (t) => t.id, ids)),
     [],
   );
-  const agentDrag = useTabDrag(
-    tabGroups[0].map((t) => t.id),
+  const stripDrag = useTabDragGroups(
+    tabGroups.map((g) => g.shown.map((t) => t.id)),
     reorderGroup,
   );
-  const docDrag = useTabDrag(
-    tabGroups[1].map((t) => t.id),
-    reorderGroup,
+  // Regrouping never touches which tab is open — every pane stays mounted and
+  // `activeTabId` is untouched, so the view under a tab that goes idle is the
+  // same view, mid-scroll and all. It does move in the strip, though, so follow
+  // it there; a tab that slid out of sight would be the same disappearing act
+  // this grouping exists to prevent.
+  const activeGroupKey = activeTabId ? groupOf(activeTabId) : null;
+  // …and slide it there rather than cutting, so the move is something you can
+  // follow with your eyes instead of a tab teleporting mid-glance.
+  const stripRef = useRef<HTMLDivElement | null>(null);
+  useFlipStrip(stripRef);
+  /** Put the active tab somewhere you can actually see it. Every route that
+   *  changes tabs ends here — clicking, Ctrl-Tab, a jump from the agents panel,
+   *  a pick from a stack's overflow menu — because "the pane changed but the
+   *  strip still shows something else" is the same disappearing act whichever
+   *  door you came through.
+   *
+   *  Not `scrollIntoView`: it is happy to park a tab flush against the left
+   *  edge, which is precisely where the pinned chip is painted. */
+  const settleReveal = useRef(0);
+  const revealActiveTab = useCallback(() => {
+    const pass = () => {
+      const root = stripRef.current;
+      const el = activeTabElRef.current;
+      if (!root || !el || root.offsetParent === null) return;
+      const chip = el.closest(".tab-group")?.querySelector<HTMLElement>("[data-stack-chip]");
+      const to = revealScroll(
+        root.scrollLeft,
+        root.clientWidth,
+        el.offsetLeft,
+        el.offsetWidth,
+        chip?.offsetWidth ?? 0,
+      );
+      // Instant, not smooth: a smooth scroll is driven by the frame loop, and
+      // an occluded window's frame loop is asleep — the one case where the tab
+      // most needs to be found is the one where the easing would never arrive.
+      if (to != null) root.scrollLeft = to;
+    };
+    pass();
+    // Twice, because leaving a tab can shrink the strip in the same beat: the
+    // tab you were on was being held out of a folded stack, and it folds back
+    // the moment it stops being active. The strip narrows under the scroll we
+    // just set, the browser clamps it, and the tab we were revealing ends up
+    // short of the right edge. The second pass measures what actually settled.
+    window.clearTimeout(settleReveal.current);
+    settleReveal.current = window.setTimeout(pass, 0);
+  }, []);
+  useEffect(() => {
+    if (!visible) return;
+    revealActiveTab();
+    return () => window.clearTimeout(settleReveal.current);
+  }, [activeTabId, activeGroupKey, visible, revealActiveTab]);
+  // Which chips are pinned, and which tabs have scrolled in behind them. Keyed
+  // off the rendered runs so it re-measures when a tab opens, closes or
+  // restacks — not just when you scroll.
+  const stripOverflow = useStripOverflow(
+    stripRef,
+    tabGroups.map((g) => `${g.key}:${g.shown.length}`).join("|"),
   );
-  const groupDrags = [agentDrag, docDrag];
   // Shells and runs each get a compact rail; Rail collapses to a dropdown at 2+.
   const shellChips: RailChip[] = shellTabs.map((tab) => ({
     id: tab.id,
@@ -2974,20 +3171,89 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
         />
       )}
       <div className={`pane-bar pane-bar-focus-${activeSection}`}>
-        <div className={`tabs ${activeSection !== "tabs" ? "pane-section-dim" : ""}`}>
-          {tabGroups.map((group, gi) =>
-            group.length === 0 ? null : (
-              <div className="tab-group" key={gi}>
-                {group.map((tab) => (
+        <div
+          className={`tabs ${activeSection !== "tabs" ? "pane-section-dim" : ""}`}
+          ref={stripRef}
+        >
+          {tabGroups.map((group) => {
+            // An empty stack is not a stack: a strip with nothing idle says so
+            // by having no Idle chip at all, rather than an empty one to read
+            // past. Same for every kind of document you haven't opened.
+            if (group.tabs.length === 0) return null;
+            const open = group.label == null || openStacks[group.key] !== false;
+            const folded = group.tabs.length - group.shown.length;
+            // Tabs that have scrolled in behind the pinned chip. They are as
+            // gone as folded ones, so the chip offers them the same way.
+            const behind = open ? (stripOverflow[group.key]?.hidden ?? []) : [];
+            const away = folded + behind.length;
+            return (
+              <div
+                className={`tab-group tab-group-${group.key} ${
+                  group.label && !open ? "tab-group-folded" : ""
+                }`}
+                key={group.key}
+                {...{ [GROUP_ATTR]: group.key }}
+              >
+                {group.label && (
+                  <span
+                    className={`tab-stack ${away > 0 ? "tab-stack-away" : ""} ${
+                      away > 1 ? "tab-stack-deep" : ""
+                    } ${stripOverflow[group.key]?.stuck ? "tab-stack-stuck" : ""}`}
+                    data-stack-chip=""
+                  >
+                    <button
+                      type="button"
+                      className="tab-stack-face"
+                      aria-expanded={open}
+                      title={
+                        open
+                          ? `${group.tabs.length} ${group.label.toLowerCase()} — click to fold`
+                          : `${folded} ${group.label.toLowerCase()} folded — click to open`
+                      }
+                      onClick={() => toggleStack(group.key)}
+                    >
+                      {group.icon ?? <span className="tab-stack-dot" aria-hidden />}
+                      <span className="tab-stack-name">{group.label}</span>
+                      <span className="tab-stack-count">{group.tabs.length}</span>
+                      <ChevronIcon size={8} className="tab-stack-chevron" />
+                    </button>
+                    {/* Whatever is out of sight — folded, or scrolled in behind
+                        the pin — stays one click away rather than lost. */}
+                    {away > 0 && (
+                      <button
+                        type="button"
+                        className="tab-stack-more"
+                        title={`${away} out of sight — pick one`}
+                        onClick={(e) =>
+                          tabMenu.open(
+                            e,
+                            group.tabs.map((t) => ({
+                              label: `${t.id === activeTabId ? "› " : ""}${tabDisplayLabel(t)}`,
+                              onClick: () => setActiveTabId(t.id),
+                            })),
+                          )
+                        }
+                      >
+                        {/* The number only when it says something the chip's
+                            own count doesn't: with everything away, they are
+                            the same number twice. */}
+                        {away < group.tabs.length && away}
+                        <ChevronIcon size={8} />
+                      </button>
+                    )}
+                  </span>
+                )}
+                {group.shown.map((tab) => (
               <div
                 key={tab.id}
+                data-flip-id={tab.id}
                 ref={tab.id === activeTabId ? activeTabElRef : undefined}
                 className={`tab ${tab.id === activeTabId ? "tab-active" : ""} ${
                   tab.type === "chat" && tab.unread ? "tab-unread" : ""
                 } ${tab.type !== "terminal" ? "tab-doc" : isAgentTab(tab) ? "tab-agent" : ""} ${
                   tab.id === flashTabId ? "tab-flash" : ""
-                } ${tab.id === groupDrags[gi].dragId ? "tab-dragging" : ""}`}
-                {...groupDrags[gi].itemProps(tab.id)}
+                } ${tab.id === stripDrag.dragId ? "tab-dragging" : ""}`}
+                {...stripDrag.itemProps(tab.id)}
                 onClick={(e) => {
                   // e.detail is the click count and fires even though app chrome
                   // is user-select:none — unlike dblclick, which WebKit drops on
@@ -3128,8 +3394,8 @@ export function ProjectView({ project, visible, zen, events, hookPath, allProjec
               </div>
                 ))}
               </div>
-            ),
-          )}
+            );
+          })}
         </div>
         {/* Plain shells and long-running commands aren't the hero — they live
             in compact right-hand rails, each collapsing to a dropdown at 2+. */}
