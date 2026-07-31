@@ -57,6 +57,10 @@ const RAIL_GROUPS: { name: string; tabs: RailTab[] }[] = [
   {
     name: "Agents",
     tabs: [
+      // Agents leads its own group: it is the one the group is named for and
+      // the one that carries the pending badge, so it should be the icon the
+      // eye lands on when it crosses the boundary.
+      { key: "agents", Icon: AgentsIcon, title: "Agents" },
       { key: "tasks", Icon: TasksIcon, title: "Tasks — one-shot agent jobs" },
       // Beside Tasks and Research rather than up with Files, because those
       // three are one progression: a thought, the thing you found out about
@@ -74,19 +78,22 @@ const RAIL_GROUPS: { name: string; tabs: RailTab[] }[] = [
         Icon: ResearchIcon,
         title: "Research — what's been investigated, and what shipped from it",
       },
-      { key: "agents", Icon: AgentsIcon, title: "Agents" },
       { key: "team", Icon: TeamIcon, title: "Team — relay, chat, notifications" },
-      // In the Agents group rather than a group of its own: MCP servers are
-      // reach *for the agents*, and a fourth boundary here would divide the
-      // rail into more groups than it has meanings.
-      {
-        key: "tools",
-        Icon: PlugIcon,
-        title: "Tools — MCP servers your agents can reach, from every CLI",
-      },
     ],
   },
 ];
+
+/** Tools sits at the foot of the rail with Settings rather than in the Agents
+ *  group. It is configuration — which MCP servers exist and what they expose —
+ *  not a place work shows up, so it belongs with the other thing you go to set
+ *  something up and then leave. It still opens a panel, so unlike Settings and
+ *  the sidebar toggle it keeps the tab behaviour: hover-to-peek, click to pin,
+ *  and the active/pinned markers. */
+const TOOLS_TAB: RailTab = {
+  key: "tools",
+  Icon: PlugIcon,
+  title: "Tools — MCP servers your agents can reach, from every CLI",
+};
 
 interface ActivityRailProps {
   sideTab: SideTab;
@@ -136,6 +143,58 @@ function ActivityRailImpl({
   onOpenSettings,
   onToggleSidebar,
 }: ActivityRailProps) {
+  const tabButton = (t: RailTab, groupName?: string) => (
+    <button
+      key={t.key}
+      className={`rail-btn ${open && sideTab === t.key ? "rail-btn-active" : ""} ${
+        pinned && sideTab === t.key ? "rail-btn-pinned" : ""
+      }`}
+      /* No `title`. Hovering these now slides the panel out, and the
+         native tooltip fires on the same gesture — it lands on top of
+         the thing it was describing, a second later and less useful,
+         because the panel's own header already says what it is. The
+         label survives for screen readers, which get no panel. */
+      aria-label={groupName ? `${groupName} — ${t.title}` : t.title}
+      onClick={() => onSelectTab(t.key)}
+      /* The dwell is armed on the icon and disarmed the moment the
+         pointer leaves it. Without the leave half, the gap between rail
+         groups — which belongs to no button — would let a pointer that
+         has already moved on still trip the timer it left behind. */
+      onMouseEnter={() => onHoverTab(t.key)}
+      onMouseLeave={onHoverCancel}
+      onFocus={() => onHoverTab(t.key)}
+      onBlur={onHoverCancel}
+    >
+      <t.Icon size={22} />
+      {t.key === "changes" && changeBadge > 0 && (
+        <span className="rail-badge">{Math.min(changeBadge, 99)}</span>
+      )}
+      {t.key === "servers" && serversBadge > 0 && (
+        <span className="rail-badge rail-badge-live">{Math.min(serversBadge, 99)}</span>
+      )}
+      {t.key === "prs" && prsBadge > 0 && (
+        <span className="rail-badge rail-badge-urgent">{Math.min(prsBadge, 99)}</span>
+      )}
+      {t.key === "tasks" && tasksBadge > 0 && (
+        <span className="rail-badge">{Math.min(tasksBadge, 99)}</span>
+      )}
+      {t.key === "agents" && pendingCount > 0 && (
+        <span className={`rail-badge ${urgentCount > 0 ? "rail-badge-urgent" : ""}`}>
+          {pendingCount}
+        </span>
+      )}
+      {t.key === "team" && teamBadge > 0 && (
+        <span className="rail-badge rail-badge-urgent">{Math.min(teamBadge, 99)}</span>
+      )}
+      {t.key === "team" && relayRole !== "off" && (
+        <span
+          className="rail-conn"
+          title={relayRole === "host" ? "Hosting a relay" : "Connected to a relay"}
+        />
+      )}
+    </button>
+  );
+
   return (
     // Leaving the rail starts the retract clock; the panel itself cancels it
     // when the pointer arrives there. The two are edge-to-edge, so there is no
@@ -143,62 +202,15 @@ function ActivityRailImpl({
     <div className="rail" onMouseLeave={() => onHoverLeave()}>
       {RAIL_GROUPS.map((group) => (
         <div className="rail-group" key={group.name} role="group" aria-label={group.name}>
-          {group.tabs.map((t) => (
-            <button
-              key={t.key}
-              className={`rail-btn ${open && sideTab === t.key ? "rail-btn-active" : ""} ${
-                pinned && sideTab === t.key ? "rail-btn-pinned" : ""
-              }`}
-              /* No `title`. Hovering these now slides the panel out, and the
-                 native tooltip fires on the same gesture — it lands on top of
-                 the thing it was describing, a second later and less useful,
-                 because the panel's own header already says what it is. The
-                 label survives for screen readers, which get no panel. */
-              aria-label={`${group.name} — ${t.title}`}
-              onClick={() => onSelectTab(t.key)}
-              /* The dwell is armed on the icon and disarmed the moment the
-                 pointer leaves it. Without the leave half, the gap between rail
-                 groups — which belongs to no button — would let a pointer that
-                 has already moved on still trip the timer it left behind. */
-              onMouseEnter={() => onHoverTab(t.key)}
-              onMouseLeave={onHoverCancel}
-              onFocus={() => onHoverTab(t.key)}
-              onBlur={onHoverCancel}
-            >
-              <t.Icon size={22} />
-              {t.key === "changes" && changeBadge > 0 && (
-                <span className="rail-badge">{Math.min(changeBadge, 99)}</span>
-              )}
-              {t.key === "servers" && serversBadge > 0 && (
-                <span className="rail-badge rail-badge-live">
-                  {Math.min(serversBadge, 99)}
-                </span>
-              )}
-              {t.key === "prs" && prsBadge > 0 && (
-                <span className="rail-badge rail-badge-urgent">{Math.min(prsBadge, 99)}</span>
-              )}
-              {t.key === "tasks" && tasksBadge > 0 && (
-                <span className="rail-badge">{Math.min(tasksBadge, 99)}</span>
-              )}
-              {t.key === "agents" && pendingCount > 0 && (
-                <span className={`rail-badge ${urgentCount > 0 ? "rail-badge-urgent" : ""}`}>
-                  {pendingCount}
-                </span>
-              )}
-              {t.key === "team" && teamBadge > 0 && (
-                <span className="rail-badge rail-badge-urgent">{Math.min(teamBadge, 99)}</span>
-              )}
-              {t.key === "team" && relayRole !== "off" && (
-                <span
-                  className="rail-conn"
-                  title={relayRole === "host" ? "Hosting a relay" : "Connected to a relay"}
-                />
-              )}
-            </button>
-          ))}
+          {group.tabs.map((t) => tabButton(t, group.name))}
         </div>
       ))}
       <div className="rail-spacer" />
+      {/* Tools rides directly above Settings, flush with it rather than inside
+          a group of its own: the spacer is already the boundary, and a group
+          wrapper would only push it away from the button it belongs with. It
+          keeps a tab's hover-to-peek because it still opens a panel. */}
+      {tabButton(TOOLS_TAB)}
       {/* These two keep their tooltips — they open no panel, so the tooltip is
           still the only thing that names them. Reaching either one means you
           have left the tabs, so it starts the retract: the panel is on its way
