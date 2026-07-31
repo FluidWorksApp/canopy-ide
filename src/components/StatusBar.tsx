@@ -1,7 +1,18 @@
-// Bottom status tray: git branch, running agent, model, tokens, estimated
-// cost. Token/model data comes from Claude Code session transcripts (path
-// arrives via hook events); cost is an estimate from a static pricing map.
+// Bottom status tray: git branch, base-branch drift, running agent, model,
+// tokens, estimated cost. Token/model data comes from Claude Code session
+// transcripts (path arrives via hook events); cost is an estimate from a
+// static pricing map.
 import { memo, useEffect, useMemo, useRef, useState } from "react";
+import {
+  PROBE_INTERVAL_MS,
+  baseLabel,
+  describe as describeSync,
+  hasNews,
+  outcomeMessage,
+  probeKey,
+  remember,
+  shouldPrompt,
+} from "../branchSync";
 import { fmtTokens } from "../format";
 import * as ipc from "../ipc";
 import { estimateCost, sessionCost } from "../pricing";
@@ -56,6 +67,12 @@ interface StatusBarProps {
    *  plan's headroom the chip shows. Separate from agentLabel because that one
    *  is absent for CLIs Canopy can't switch models on. */
   agentId?: string | null;
+  /** Which account profile the session in front is running under. The chip
+   *  reports headroom for a subscription, so it must follow the tab's own
+   *  login rather than whichever profile is currently selected for new
+   *  launches — those differ the moment the user switches accounts with an
+   *  older session still open. */
+  agentProfile?: string | null;
   /** The pty of the active terminal tab — the model/token tray follows THIS
    *  tab's session, not whichever session in the project spoke last. */
   activePtyId?: number | null;
@@ -80,12 +97,44 @@ export const StatusBar = memo(function StatusBar({
   modelSwitch,
   agentLabel,
   agentId,
+  agentProfile,
   activePtyId,
 }: StatusBarProps) {
   const [branch, setBranch] = useState<string | null>(null);
   const [dirty, setDirty] = useState(0);
   const [branches, setBranches] = useState<ipc.BranchInfo[]>([]);
   const { switchTo, version } = useBranchSwitch();
+  // Base-branch drift: how far the branch this project is on has fallen behind
+  // the branch it was cut from, and whether catching up would conflict. The
+  // probe never writes, so this can sit on a timer; the merge is always a click.
+  const [sync, setSync] = useState<ipc.SyncProbe | null>(null);
+  const [syncOpen, setSyncOpen] = useState(false);
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncResult, setSyncResult] = useState<{
+    text: string;
+    conflicts: string[];
+    ok: boolean;
+  } | null>(null);
+  /** Base tips already waved off, so "not now" survives the next poll. */
+  const [dismissed, setDismissed] = useState<string[]>([]);
+  /** The tip we last opened the panel for — one interruption per set of
+   *  incoming commits, however many times the watcher re-probes them. */
+  const autoOpened = useRef<string | null>(null);
+  const syncAnchorRef = useRef<HTMLSpanElement>(null);
+  /** Fixed coordinates for the panel. The status bar scrolls its one-line row,
+   *  which clips anything popping above it, so this can't be an absolutely
+   *  positioned child — the same reason the model and resource menus are fixed.
+   *  Anchored by its LEFT edge: this chip sits at the far left, and a
+   *  right-anchored panel this wide would hang off the side of the window. */
+  const [syncPos, setSyncPos] = useState<{ left: number; bottom: number } | null>(null);
+  const placeSync = () => {
+    const r = syncAnchorRef.current?.getBoundingClientRect();
+    if (!r) return;
+    setSyncPos({
+      left: Math.max(8, Math.min(r.left, window.innerWidth - 388)),
+      bottom: window.innerHeight - r.top + 6,
+    });
+  };
   const branchMenu = useContextMenu();
   const [app, setApp] = useState<ipc.AppStats | null>(null);
   const [stats, setStats] = useState<ipc.ClaudeSessionStats | null>(null);
@@ -221,7 +270,10 @@ export const StatusBar = memo(function StatusBar({
       clearInterval(timer);
     };
   }, [visible]);
-  const plan = useMemo(() => planFor(plans, agentId), [plans, agentId]);
+  const plan = useMemo(
+    () => planFor(plans, agentId, agentProfile || "default"),
+    [plans, agentId, agentProfile],
+  );
 
   // The transcript whose model/tokens the tray shows. Per-TAB first: prefer
   // the latest event stamped with the active terminal's pty, so switching
@@ -286,6 +338,115 @@ export const StatusBar = memo(function StatusBar({
     // `version` bumps whenever the funnel moves a ref, so the chip catches up
     // with a switch immediately instead of waiting on the watcher.
   }, [roots[0], visible, version]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Base-branch watch. The probe dry-runs the merge in the object store and
+  // never touches the worktree, index or HEAD, so it is safe to run on a timer
+  // while the user is mid-edit. Everything that writes is behind a click in
+  // the panel below.
+  //
+  // Two triggers, deliberately: the timer is the only thing that costs a
+  // `git fetch` (news from the remote can't arrive any other way), while a
+  // local commit or checkout re-measures for free off what we already have.
+  useEffect(() => {
+    if (!roots[0] || !visible) return;
+    let cancelled = false;
+    const run = (fetch: boolean) =>
+      void ipc
+        .gitSyncProbe(roots[0], fetch)
+        .then((p) => !cancelled && setSync(p))
+        // No remote, no base branch, not a repo: this chip simply doesn't
+        // apply. Nothing to report and nothing broken.
+        .catch(() => !cancelled && setSync(null));
+    run(true);
+    const timer = setInterval(() => run(true), PROBE_INTERVAL_MS);
+    const sub = ipc.onGitChange(() => run(false));
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      void sub.then((fn) => fn());
+    };
+  }, [roots[0], visible, version]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Open the panel by itself the first time a given base tip is seen. Once per
+  // set of new commits — closing it counts as "not now", and it stays shut
+  // until the base actually moves again.
+  useEffect(() => {
+    if (!shouldPrompt(sync, dismissed) || !sync) return;
+    const k = probeKey(sync);
+    if (autoOpened.current === k) return;
+    autoOpened.current = k;
+    placeSync();
+    setSyncOpen(true);
+  }, [sync, dismissed]);
+
+  // Keep the panel over its chip when the window changes shape underneath it.
+  useEffect(() => {
+    if (!syncOpen) return;
+    const onResize = () => placeSync();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [syncOpen]);
+
+  // Any close is a "not now": the chip stays, the interruption doesn't repeat.
+  const closeSync = () => {
+    if (sync) setDismissed((prev) => remember(prev, probeKey(sync)));
+    setSyncOpen(false);
+    setSyncResult(null);
+  };
+
+  useEffect(() => {
+    if (!syncOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (!syncAnchorRef.current?.contains(e.target as Node)) closeSync();
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && closeSync();
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }); // no deps: closeSync must see the probe from this render
+
+  const runMerge = async () => {
+    if (!sync || !roots[0]) return;
+    setSyncBusy(true);
+    try {
+      const outcome = await ipc.gitSyncApply(roots[0], sync.base);
+      setSyncResult({
+        text: outcomeMessage(sync.base, outcome),
+        conflicts: outcome.conflicts,
+        ok: outcome.merged,
+      });
+      setSync(await ipc.gitSyncProbe(roots[0], false).catch(() => null));
+      if (outcome.merged) {
+        // Nothing left to decide — let the tray go quiet on its own.
+        setTimeout(() => {
+          setSyncOpen(false);
+          setSyncResult(null);
+        }, 2500);
+      }
+    } catch (err) {
+      // git refused before writing anything; its own message says why.
+      setSyncResult({ text: String(err), conflicts: [], ok: false });
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
+  const undoMerge = async () => {
+    if (!roots[0]) return;
+    setSyncBusy(true);
+    try {
+      const msg = await ipc.gitSyncAbort(roots[0]);
+      setSyncResult({ text: msg, conflicts: [], ok: true });
+      setSync(await ipc.gitSyncProbe(roots[0], false).catch(() => null));
+    } catch (err) {
+      setSyncResult({ text: String(err), conflicts: [], ok: false });
+    } finally {
+      setSyncBusy(false);
+    }
+  };
 
   // The branch list behind the chip's menu. Deliberately NOT on the status
   // poll's timer: one `for-each-ref` when the project appears and again after
@@ -383,6 +544,114 @@ export const StatusBar = memo(function StatusBar({
             {detached ? "⚠ snapshot" : `⎇ ${branch}`}
             {dirty > 0 && <span className="status-dirty"> ±{dirty}</span>}
           </button>
+        </span>
+      )}
+      {hasNews(sync) && (
+        <span className="status-item status-sync-anchor" ref={syncAnchorRef}>
+          <button
+            className={`status-sync-btn ${sync.state === "conflict" ? "is-conflict" : ""} ${
+              syncOpen ? "is-open" : ""
+            }`}
+            title={
+              `${baseLabel(sync.base)} has moved on since you branched — ` +
+              `${sync.behind} commit${sync.behind === 1 ? "" : "s"} you don't have yet. ` +
+              `Click to see what's coming.`
+            }
+            onClick={() => {
+              if (syncOpen) return closeSync();
+              placeSync();
+              setSyncOpen(true);
+            }}
+          >
+            {sync.state === "conflict" ? "⚠" : "⤓"} {baseLabel(sync.base)} +{sync.behind}
+          </button>
+          {syncOpen &&
+            (() => {
+              const d = describeSync(sync);
+              return (
+                <div
+                  className="status-menu status-sync-menu"
+                  style={
+                    syncPos
+                      ? {
+                          position: "fixed",
+                          left: syncPos.left,
+                          right: "auto",
+                          bottom: syncPos.bottom,
+                        }
+                      : undefined
+                  }
+                >
+                  <div className="sync-head">{d.headline}</div>
+                  <div className="sync-detail">{d.detail}</div>
+                  {d.files.length > 0 && (
+                    <ul className="sync-files">
+                      {d.files.slice(0, 8).map((f) => (
+                        <li key={f} title={f}>
+                          {f}
+                        </li>
+                      ))}
+                      {d.files.length > 8 && (
+                        <li className="sync-more">+{d.files.length - 8} more</li>
+                      )}
+                    </ul>
+                  )}
+                  {/* What's arriving, so the decision isn't made blind. */}
+                  {d.files.length === 0 && sync.subjects.length > 0 && (
+                    <ul className="sync-files sync-subjects">
+                      {sync.subjects.slice(0, 5).map((s, i) => (
+                        <li key={`${i}-${s}`} title={s}>
+                          {s}
+                        </li>
+                      ))}
+                      {sync.behind > 5 && <li className="sync-more">+{sync.behind - 5} more</li>}
+                    </ul>
+                  )}
+                  {sync.fetch_error && (
+                    <div className="sync-stale">
+                      Couldn't reach the remote just now — this is the last state fetched.
+                    </div>
+                  )}
+                  {syncResult && (
+                    <div className={`sync-result ${syncResult.ok ? "is-ok" : "is-warn"}`}>
+                      {syncResult.text}
+                    </div>
+                  )}
+                  <div className="sync-actions">
+                    {syncResult && !syncResult.ok && syncResult.conflicts.length > 0 ? (
+                      // The merge stopped in the worktree. Backing out is one
+                      // click, so "resolve now" was never a one-way door.
+                      <>
+                        <button
+                          className="btn-mini"
+                          disabled={syncBusy}
+                          onClick={() => void undoMerge()}
+                        >
+                          Undo the merge
+                        </button>
+                        <button className="btn btn-accent" onClick={closeSync}>
+                          Resolve in Changes
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button className="btn-mini" onClick={closeSync}>
+                          Keep working
+                        </button>
+                        <button
+                          className="btn btn-accent"
+                          disabled={!d.canMerge || syncBusy || (syncResult?.ok ?? false)}
+                          title={d.blockedReason ?? `git merge ${sync.base}`}
+                          onClick={() => void runMerge()}
+                        >
+                          {syncBusy ? "Merging…" : d.mergeLabel}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
         </span>
       )}
       {agents.length > 0 && (

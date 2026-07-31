@@ -9,6 +9,7 @@
 import { useState } from "react";
 import { useEscape } from "../useEscape";
 import { Button } from "./ui";
+import { formatHotkey, getSettings } from "../settings";
 
 interface OnboardingProps {
   /** Called when the walkthrough is dismissed any way (Skip, Esc, Done). */
@@ -295,7 +296,11 @@ const SLIDES: Slide[] = [
         </div>
         <div className="ob-dictpill">
           <span className="ob-recdot" />
-          <span>Listening — <span className="ob-mono">⌘D</span> inserts, Esc cancels</span>
+          <span>
+            Listening —{" "}
+            <span className="ob-mono">{formatHotkey(getSettings().dictationHotkey)}</span> inserts,
+            Esc cancels
+          </span>
         </div>
         <div className="ob-chip muted" style={{ position: "absolute", right: 9, bottom: 8 }}>Parakeet v3 · on-device</div>
       </Scene>

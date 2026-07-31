@@ -53,9 +53,21 @@ describe("snapshotTabs", () => {
         run: undefined,
         agentId: "claude",
         sessionId: "sess-42",
+        profile: undefined,
         attachId: undefined,
       },
     ]);
+  });
+
+  /** The resume command names a session id that only exists inside one
+   *  account's store, so waking on the default login comes back to an agent
+   *  that has forgotten the conversation. The account has to sleep with it. */
+  it("remembers which account the session was running under", () => {
+    const [t] = snapshotTabs(
+      [term({ command: "claude", ptyId: 7, profile: "work" })],
+      () => "sess-42",
+    );
+    expect(t).toMatchObject({ profile: "work", sessionId: "sess-42" });
   });
 
   it("reads the session out of a resume command when no hook has spoken", () => {

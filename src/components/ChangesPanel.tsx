@@ -8,6 +8,7 @@ import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { Dialog } from "./Dialog";
 import { WindowedList } from "./WindowedList";
 import { Button } from "./ui";
+import { matches, withShortcut } from "../shortcuts";
 
 /** Must match .change-row's CSS height — the windowing spacers are the scrollbar. */
 const ROW_H = 26;
@@ -247,11 +248,7 @@ export function ChangesPanel({
                   value={messages[g.repo] ?? ""}
                   onChange={(e) => setMessage(g.repo, e.target.value)}
                   onKeyDown={(e) => {
-                    if (
-                      (e.metaKey || e.ctrlKey) &&
-                      e.key === "Enter" &&
-                      stagedIn(g) > 0
-                    )
+                    if (matches(e, "submit") && stagedIn(g) > 0)
                       commit(g.repo);
                   }}
                 />
@@ -262,7 +259,7 @@ export function ChangesPanel({
                       !(messages[g.repo] ?? "").trim() ||
                       committing === g.repo
                     }
-                    title="Commit staged changes (Cmd+Enter)"
+                    title={withShortcut("Commit staged changes", "submit")}
                     onClick={() => commit(g.repo)}>
                     Commit {stagedIn(g) > 0 ? stagedIn(g) : ""}
                   </Button>

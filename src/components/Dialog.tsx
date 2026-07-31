@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import { Button } from "./ui";
+import { useEscapeLayer } from "../useEscape";
 
 export interface DialogAction {
   label: string;
@@ -67,6 +68,8 @@ function DialogImpl({
   // because the caller rebuilt its actions array inline.
   const actionsRef = useRef(actions);
   actionsRef.current = actions;
+  // While the dialog is up, Escape belongs to it and to nothing underneath.
+  useEscapeLayer(alive && !closing);
 
   // Enter / exit lifecycle
   useEffect(() => {

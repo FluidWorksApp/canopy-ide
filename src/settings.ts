@@ -6,14 +6,16 @@ import type { CustomAgentCli } from "./projects";
 import type { BrowserEngine } from "./browserBounds";
 import type { CaptureMode } from "./pageCapture";
 import { IS_MAC } from "./platform";
+import {
+  formatChord,
+  keyLabel as chordKeyLabel,
+  matchesChord,
+  modifierLabel,
+  requireKeyChord,
+} from "./shortcuts";
 
 export type Theme =
-  | "auto"
-  | "default"
-  | "gotham"
-  | "daylight"
-  | "vitrine"
-  | "custom";
+  "auto" | "default" | "gotham" | "daylight" | "vitrine" | "custom";
 
 /** What "auto" means right now: Default when macOS is in dark mode, Daylight
  *  in light mode. Every consumer of the skin (CSS data-theme, terminal
@@ -70,11 +72,16 @@ export interface Hotkey {
   code: string;
 }
 
-/** Default dictation hotkey: ⌘D on Mac, Alt+D elsewhere (plain Ctrl+D is shell
- *  EOF, so it's deliberately avoided). */
-export const DEFAULT_DICTATION_HOTKEY: Hotkey = IS_MAC
-  ? { meta: true, ctrl: false, alt: false, shift: false, code: "KeyD" }
-  : { meta: false, ctrl: false, alt: true, shift: false, code: "KeyD" };
+/** Default dictation hotkey — ⌘D on Mac, Alt+D elsewhere, per the manifest
+ *  (plain Ctrl+D is shell EOF, so it's deliberately avoided off Mac). */
+export const DEFAULT_DICTATION_HOTKEY: Hotkey = requireKeyChord("dictation");
+
+/** Default hotkey for the recent-dictation picker: ⌃⌘V on Mac (SuprFlow's
+ *  binding, and free of any system paste), ⌃⌥V elsewhere — Ctrl+Shift+V is
+ *  terminal paste on Windows and Linux, so it is deliberately avoided. */
+export const DEFAULT_DICTATION_HISTORY_HOTKEY: Hotkey = IS_MAC
+  ? { meta: true, ctrl: true, alt: false, shift: false, code: "KeyV" }
+  : { meta: false, ctrl: true, alt: true, shift: false, code: "KeyV" };
 
 /** How dictation is triggered.
  *
@@ -125,26 +132,26 @@ export const DEFAULT_DICTATION_MOD_KEY: DictationModKey = IS_MAC
 
 /** Display label for a bare-modifier trigger key. */
 export function modKeyLabel(k: DictationModKey): string {
-  const side = k.endsWith("Left") ? "Left " : k.endsWith("Right") ? "Right " : "";
+  const side = k.endsWith("Left")
+    ? "Left "
+    : k.endsWith("Right")
+      ? "Right "
+      : "";
   const base = k.replace(/(Left|Right)$/, "");
   if (base === "CapsLock") return "Caps Lock";
-  const glyph: Record<string, string> = IS_MAC
-    ? { Shift: "⇧ Shift", Control: "⌃ Control", Alt: "⌥ Option", Meta: "⌘ Command" }
-    : { Shift: "Shift", Control: "Ctrl", Alt: "Alt", Meta: "Win" };
-  return side + (glyph[base] ?? base);
+  return side + modifierLabel(base as "Shift" | "Control" | "Alt" | "Meta");
 }
 
 /** The visualiser drawn in the recording pill while the mic is live. Ported
  *  from SuprFlow's wave styles; each is a canvas renderer in waveStyles.ts. */
 export type DictationWaveStyle =
-  | "classic"
-  | "equalizer"
-  | "particle"
-  | "ribbon"
-  | "pulse"
-  | "neon";
+  "classic" | "equalizer" | "particle" | "ribbon" | "pulse" | "neon";
 
-export const DICTATION_WAVE_STYLES: { id: DictationWaveStyle; label: string; hint: string }[] = [
+export const DICTATION_WAVE_STYLES: {
+  id: DictationWaveStyle;
+  label: string;
+  hint: string;
+}[] = [
   { id: "classic", label: "Classic", hint: "Simple animated bars" },
   { id: "equalizer", label: "Equalizer", hint: "Audio bars with reflection" },
   { id: "particle", label: "Particle", hint: "Flowing wave with particles" },
@@ -153,40 +160,22 @@ export const DICTATION_WAVE_STYLES: { id: DictationWaveStyle; label: string; hin
   { id: "neon", label: "Neon", hint: "Glowing double sine" },
 ];
 
-/** Render a hotkey for display, e.g. "⌘D" or "Alt+Shift+D". */
+/** Render a hotkey for display, e.g. "⌘D" or "Alt+Shift+D". A Hotkey is
+ *  structurally a resolved Chord, so display and comparison come from the
+ *  registry — this is the one shortcut the user can rebind, which is why it is
+ *  stored rather than looked up by id. */
 export function formatHotkey(h: Hotkey): string {
-  const parts: string[] = [];
-  if (IS_MAC) {
-    if (h.ctrl) parts.push("⌃");
-    if (h.alt) parts.push("⌥");
-    if (h.shift) parts.push("⇧");
-    if (h.meta) parts.push("⌘");
-  } else {
-    if (h.ctrl) parts.push("Ctrl");
-    if (h.alt) parts.push("Alt");
-    if (h.shift) parts.push("Shift");
-    if (h.meta) parts.push("Win");
-  }
-  parts.push(keyLabel(h.code));
-  return IS_MAC ? parts.join("") : parts.join("+");
+  return formatChord(h);
 }
 
 /** Human label for a KeyboardEvent.code (KeyD → "D", Digit1 → "1"). */
 export function keyLabel(code: string): string {
-  if (code.startsWith("Key")) return code.slice(3);
-  if (code.startsWith("Digit")) return code.slice(5);
-  return code;
+  return chordKeyLabel(code);
 }
 
 /** Does this keydown match the configured hotkey? */
 export function matchesHotkey(e: KeyboardEvent, h: Hotkey): boolean {
-  return (
-    e.code === h.code &&
-    e.metaKey === h.meta &&
-    e.ctrlKey === h.ctrl &&
-    e.altKey === h.alt &&
-    e.shiftKey === h.shift
-  );
+  return matchesChord(e, h);
 }
 
 export const TERMINAL_FONT_DEFAULT =
@@ -275,6 +264,14 @@ export interface Settings {
    *  a launch command, and a multi-token value would break both `command -v`
    *  and the basename match that recognises the CLI once it is running. */
   cliBins: Record<string, string>;
+  /** Registry id -> which account profile that CLI launches under (see
+   *  profiles.ts). Absent means the default login, which is why this stores
+   *  only the exceptions: a user who never opens the feature has an empty map
+   *  and every launch behaves exactly as it did before profiles existed.
+   *
+   *  Machine-wide rather than per-project, for the same reason as `cliBins`: a
+   *  login is a property of the person at the workstation. */
+  cliProfiles: Record<string, string>;
   /** Agent CLIs Canopy ships no entry for, described by the user (Settings →
    *  Agents). Machine-wide for the same reason as `cliBins`: an in-house agent
    *  is a property of the workstation, not of one repo. See CustomAgentCli for
@@ -336,6 +333,9 @@ export interface Settings {
   dictationTriggerMode: DictationTriggerMode;
   /** Which bare modifier carries the trigger in "hold"/"doubleTap" mode. */
   dictationModKey: DictationModKey;
+  /** Hotkey that opens the recent-dictation picker. Hold its modifiers and tap
+   *  its key to walk back through what you said; release to paste. */
+  dictationHistoryHotkey: Hotkey;
   /** Registry id of the ASR model to use (see dictation.rs MODELS). Empty
    *  means "the default model" so a stored blank never pins a missing id. */
   dictationModel: string;
@@ -451,6 +451,7 @@ const DEFAULTS: Settings = {
   ptyHighWater: 2 * 1024 * 1024,
   defaultAgent: "claude",
   cliBins: {},
+  cliProfiles: {},
   customClis: [],
   relayName: "",
   relayAddr: "",
@@ -481,6 +482,7 @@ const DEFAULTS: Settings = {
   dictationHotkey: DEFAULT_DICTATION_HOTKEY,
   dictationTriggerMode: "combo",
   dictationModKey: DEFAULT_DICTATION_MOD_KEY,
+  dictationHistoryHotkey: DEFAULT_DICTATION_HISTORY_HOTKEY,
   dictationModel: "",
   dictationLanguage: "",
   dictationStreaming: false,

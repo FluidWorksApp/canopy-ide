@@ -638,7 +638,82 @@ pub async fn fill_into_tab(
             entry.domain.clone(),
         )
     };
-    let raw = crate::browser::eval_json(app, tab_id, script).await?;
+    // Filling a login is a race against the page, and the page starts first.
+    //
+    // A login form is rarely ready when the fill is asked for: the document is
+    // still loading, or it is a single-page app whose form does not exist until
+    // its JS has run, or — the one that actually bit — the fields exist but the
+    // framework has not hydrated them yet, so it writes its own empty state
+    // over the values a moment after they go in. React's own long-standing
+    // report of this is the same shape: the fill lands "before React is
+    // completely running", and hydration then puts the field back to empty.
+    //
+    // None of that is knowable from one attempt, and none of it is the caller's
+    // problem to solve — an agent asked to sign in cannot be told to work out
+    // when a page has finished settling. So this waits, and keeps filling until
+    // the values survive, which is the only definition of done that means
+    // anything.
+    let mut attempt = fill_once(app, tab_id, &script).await?;
+    let deadline = Instant::now() + FILL_DEADLINE;
+    while !attempt.stuck() && !attempt.hopeless() && Instant::now() < deadline {
+        tokio::time::sleep(FILL_GAP).await;
+        attempt = fill_once(app, tab_id, &script).await?;
+    }
+    // Stuck once is not stuck: a framework that hydrates late takes the value
+    // back *after* the write returns, so the first pass can look clean and be
+    // undone a moment later. Fill again after a settle and require the values
+    // to still be there — the second pass is a no-op when they are.
+    if attempt.stuck() {
+        tokio::time::sleep(FILL_SETTLE).await;
+        let confirm = fill_once(app, tab_id, &script).await?;
+        if confirm.stuck() {
+            return Ok(FillReport {
+                filled: confirm.filled,
+                label,
+                domain,
+                form: confirm.form,
+            });
+        }
+        attempt = confirm;
+    }
+    Err(attempt.why.unwrap_or_else(|| {
+        "no login fields on this page — it never loaded a form Canopy could fill".into()
+    }))
+}
+
+/// How long to keep trying before calling it: long enough for a slow app to
+/// render and hydrate a login form, short enough that a page which will never
+/// have one does not hang the caller.
+const FILL_DEADLINE: Duration = Duration::from_secs(10);
+const FILL_GAP: Duration = Duration::from_millis(200);
+/// Long enough for a late hydration pass to undo the fill, if it is going to.
+const FILL_SETTLE: Duration = Duration::from_millis(400);
+
+/// One pass of the fill script over the page.
+struct Attempt {
+    filled: Vec<String>,
+    refused: bool,
+    /// The page said no in a way that waiting cannot change.
+    signup: bool,
+    ready: bool,
+    form: bool,
+    why: Option<String>,
+}
+
+impl Attempt {
+    /// The values are in the fields and the page has left them there.
+    fn stuck(&self) -> bool {
+        !self.filled.is_empty() && !self.refused
+    }
+    /// Trying again would only ask the same question. A sign-up form is a
+    /// refusal on purpose; a loaded page with no login fields has none coming.
+    fn hopeless(&self) -> bool {
+        self.signup || (self.ready && self.filled.is_empty() && !self.refused)
+    }
+}
+
+async fn fill_once(app: &tauri::AppHandle, tab_id: &str, script: &str) -> Result<Attempt, String> {
+    let raw = crate::browser::eval_json(app, tab_id, script.to_string()).await?;
     // The script answers with a JSON string; depending on how the webview
     // serialises a completion value that arrives either already parsed or as a
     // string holding the JSON. Accept both rather than depend on which.
@@ -646,27 +721,28 @@ pub async fn fill_into_tab(
         serde_json::Value::String(s) => serde_json::from_str(&s).unwrap_or(serde_json::Value::Null),
         other => other,
     };
-    let filled: Vec<String> = report
-        .get("filled")
-        .and_then(|f| f.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|s| s.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    let form = report
-        .get("form")
-        .and_then(|f| f.as_bool())
-        .unwrap_or(false);
-    if filled.is_empty() {
-        return Err("no login fields on this page — it may not have loaded the form yet".into());
-    }
-    Ok(FillReport {
-        filled,
-        label,
-        domain,
-        form,
+    let strings = |key: &str| -> Vec<String> {
+        report
+            .get(key)
+            .and_then(|f| f.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let flag = |key: &str| report.get(key).and_then(|f| f.as_bool()).unwrap_or(false);
+    Ok(Attempt {
+        filled: strings("filled"),
+        refused: !strings("refused").is_empty(),
+        signup: report.get("skipped").and_then(|s| s.as_str()) == Some("signup"),
+        ready: flag("ready"),
+        form: flag("form"),
+        // The script's own account of why: it saw the page and this side did
+        // not. A fill that did not take has to fail rather than report the
+        // fields it aimed at — a caller told "filled" submits the form.
+        why: report.get("why").and_then(|w| w.as_str()).map(String::from),
     })
 }
 
@@ -1015,5 +1091,60 @@ mod tests {
         assert!(state.key.is_none());
         assert!(state.data.entries.is_empty());
         assert!(state.key().is_err());
+    }
+}
+
+#[cfg(test)]
+mod fill_retry_tests {
+    use super::*;
+
+    fn attempt(filled: &[&str], refused: bool, ready: bool, signup: bool) -> Attempt {
+        Attempt {
+            filled: filled.iter().map(|s| s.to_string()).collect(),
+            refused,
+            signup,
+            ready,
+            form: true,
+            why: None,
+        }
+    }
+
+    #[test]
+    fn a_fill_that_landed_and_stayed_is_done() {
+        assert!(attempt(&["username", "password"], false, true, false).stuck());
+    }
+
+    /// The bug this whole path exists for: the fields were found and written
+    /// to, and the page put them back to empty. Reporting that as a fill is
+    /// what sends a caller on to submit a blank form.
+    #[test]
+    fn a_fill_the_page_took_back_is_not_done() {
+        let a = attempt(&["username"], true, true, false);
+        assert!(!a.stuck());
+        // ...and worth waiting on: the page is still settling.
+        assert!(!a.hopeless());
+    }
+
+    /// A form that has not rendered yet is the normal case for a single-page
+    /// app, and the only cure is waiting.
+    #[test]
+    fn no_fields_on_a_page_still_loading_is_worth_waiting_for() {
+        let a = attempt(&[], false, false, false);
+        assert!(!a.stuck());
+        assert!(!a.hopeless());
+    }
+
+    /// Once the page is done loading and still has no login fields, waiting
+    /// only asks the same question again.
+    #[test]
+    fn no_fields_on_a_settled_page_is_the_end_of_it() {
+        assert!(attempt(&[], false, true, false).hopeless());
+    }
+
+    /// A sign-up form is a refusal on purpose, not a race — retrying it would
+    /// eventually type the stored password into a "choose a password" box.
+    #[test]
+    fn a_signup_form_is_never_retried() {
+        assert!(attempt(&[], false, false, true).hopeless());
     }
 }

@@ -664,6 +664,17 @@
     return r.width > 0 || r.height > 0;
   }
 
+  /** A field whose contents must never leave the page.
+   *
+   *  The vault's promise to the user is that filling a login does not show the
+   *  agent the password ("Canopy types it into the page's own fields; you never
+   *  see it"). A snapshot taken after a fill walks straight around that promise
+   *  unless the value is masked here — the agent asked for the page, not for
+   *  the secret, and a transcript keeps whatever it is handed. */
+  function isSecret(el) {
+    return el.localName === "input" && el.type === "password";
+  }
+
   function labelFor(el) {
     var t =
       el.getAttribute("aria-label") ||
@@ -671,7 +682,9 @@
       el.getAttribute("placeholder") ||
       el.getAttribute("title") ||
       el.getAttribute("alt") ||
-      (el.localName === "input" ? el.value : "") ||
+      // Never the value of a password field: an unlabelled one would otherwise
+      // arrive as its own label.
+      (el.localName === "input" && !isSecret(el) ? el.value : "") ||
       "";
     return t.replace(/\s+/g, " ").slice(0, 80);
   }
@@ -699,7 +712,14 @@
       if (role) entry.role = role;
       if (el.localName === "a") entry.href = el.getAttribute("href");
       if (el.localName === "input" || el.localName === "textarea" || el.localName === "select") {
-        entry.value = String(el.value == null ? "" : el.value).slice(0, 120);
+        // Whether the field has been filled is the useful part and is safe to
+        // say; the characters are not. A fixed-width mask so the length does
+        // not leak either.
+        entry.value = isSecret(el)
+          ? el.value
+            ? "••••••••"
+            : ""
+          : String(el.value == null ? "" : el.value).slice(0, 120);
         if (el.type) entry.type = el.type;
         if (el.checked != null && (el.type === "checkbox" || el.type === "radio"))
           entry.checked = el.checked;

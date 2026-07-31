@@ -5,6 +5,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
 import { fuzzy } from "../fuzzy";
+import { useEscapeLayer } from "../useEscape";
 
 export type PaletteMode = "files" | "search";
 
@@ -26,6 +27,8 @@ interface Row {
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1);
 
 export function Palette({ mode, components, onOpen, onClose }: PaletteProps) {
+  // Escape is the palette's own, all the way down to the panel behind it.
+  useEscapeLayer();
   const [query, setQuery] = useState("");
   // null = every component (the default)
   const [scope, setScope] = useState<string | null>(null);

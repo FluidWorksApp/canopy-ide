@@ -3,15 +3,17 @@
 // is where you land — so the shortcut teaches itself instead of living in a
 // help sheet nobody opens.
 import { useEffect, useState } from "react";
-import { IS_MAC } from "./platform";
+import { resolve } from "./shortcuts";
 
 /** "tabs" is ⌘/Ctrl, "projects" is ⌥/Alt — named for what they reveal rather
  *  than for a key, because the key differs per platform. */
 export type HintKey = "tabs" | "projects";
 
-/** KeyboardEvent.key of the physical modifier behind each hint layer. */
+/** KeyboardEvent.key of the physical modifier behind each hint layer, taken
+ *  from the chord each layer reveals — so the key you hold is by construction
+ *  the key that then jumps you there, on every platform. */
 const HINT_KEY: Record<HintKey, string> = {
-  tabs: IS_MAC ? "Meta" : "Control",
+  tabs: resolve("tab-jump")?.meta ? "Meta" : "Control",
   projects: "Alt",
 };
 
@@ -19,7 +21,7 @@ const HINT_KEY: Record<HintKey, string> = {
  *  ⌘⇧N or Ctrl+⌘→ is somebody else's shortcut, not a request for hints. */
 export function hintModifierOnly(e: KeyboardEvent, which: HintKey): boolean {
   if (e.shiftKey) return false;
-  const wanted = which === "tabs" ? (IS_MAC ? "meta" : "ctrl") : "alt";
+  const wanted = which === "tabs" ? (resolve("tab-jump")?.meta ? "meta" : "ctrl") : "alt";
   const down = { meta: e.metaKey, ctrl: e.ctrlKey, alt: e.altKey };
   return (Object.keys(down) as (keyof typeof down)[]).every(
     (k) => down[k] === (k === wanted),

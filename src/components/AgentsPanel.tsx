@@ -8,7 +8,7 @@ import { AGENT_CLIS } from "../projects";
 import { identifyAgent, observeForLearning } from "../agentIdentity";
 import { agentDisplayName, type TabName } from "../agentDisplayName";
 import { effectiveState, silenceLabel } from "../agentState";
-import { forgetSessions, restorableFrom } from "../restorable";
+import { forgetSessions, markRestored, restorableFrom } from "../restorable";
 import { AgentRuntime } from "./AgentRuntime";
 import {
   AgentIcon,
@@ -23,6 +23,7 @@ import {
 import { useEscape } from "../useEscape";
 import type { PendingItem } from "../notifications";
 import { Button } from "./ui";
+import { format, matchesModifierClick } from "../shortcuts";
 
 /** Colour + label for the lifecycle dot on a running-agent row. `working` is
  *  the only state that pulses — a moving dot in a column of still ones is
@@ -110,7 +111,8 @@ interface AgentsPanelProps {
    *  for numbered-prompt CLIs (claude/codex). */
   onRespond?: (item: PendingItem, decision: "approve" | "deny") => void;
   onJumpToTerminal?: (item: PendingItem) => void;
-  /** Open a detected server URL in the in-app preview tab (⌘-click on the
+  /** Open a detected server URL in the in-app preview tab (Cmd-click — Ctrl
+   *  off a Mac — on the
    *  chip still opens the system browser). */
   onPreviewUrl?: (url: string) => void;
   /** Focus the tab a running session is in. Separate from onJumpToTerminal:
@@ -813,12 +815,14 @@ export function AgentsPanel({
               className="agent-port"
               title={
                 onPreviewUrl
-                  ? `Preview http://localhost:${p} in Canopy — ⌘-click for your browser`
+                  ? `Preview http://localhost:${p} in Canopy — ${format(
+                      "open-external",
+                    )}-click for your browser`
                   : `Open http://localhost:${p} in your browser`
               }
               onClick={(e) => {
                 e.stopPropagation();
-                if (onPreviewUrl && !e.metaKey && !e.ctrlKey) {
+                if (onPreviewUrl && !matchesModifierClick(e, "open-external")) {
                   onPreviewUrl(`http://localhost:${p}`);
                 } else {
                   void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
@@ -1276,7 +1280,7 @@ export function AgentsPanel({
             Not open right now — reopening runs the agent's own resume, so it
             comes back with its history.
           </div>
-          {restorable.map(({ digest: d, agentId, cwd: runIn, command: cmd }) => {
+          {restorable.map(({ digest: d, agentId, cwd: runIn, command: cmd, superseded }) => {
             // runIn is resume_cwd, not cwd: claude looks the conversation up
             // under its project root, so resuming from the subdirectory the
             // agent ran in reports "No conversation found".
@@ -1315,15 +1319,29 @@ export function AgentsPanel({
                   <button
                     className="row-act row-act-go"
                     title={`Restore this session — ${cmd}`}
-                    onClick={() => onRestore?.(runIn, cmd, agentId, agentId)}
+                    onClick={() => {
+                      // Bridge the gap until the resumed agent's first hook
+                      // event rewrites the digest's surface; without it the row
+                      // sits here looking un-restored for a few seconds.
+                      markRestored(d.session_id);
+                      onRestore?.(runIn, cmd, agentId, agentId);
+                    }}
                   >
                     <RestartIcon size={13} />
                     <span className="row-act-label">Restore</span>
                   </button>
                   <button
                     className="row-act row-act-del"
-                    title="Forget this session — removes it from this list"
+                    title={
+                      superseded.length > 0
+                        ? `Forget this directory's ${superseded.length + 1} sessions — removes them from this list`
+                        : "Forget this session — removes it from this list"
+                    }
                     onClick={() => {
+                      // The row stands for its whole directory (see
+                      // newestPerDirectory), so forgetting only the session on
+                      // show would just promote the next one behind it.
+                      const gone = [d, ...superseded];
                       // Tombstone first: sessions read from a CLI's own on-disk
                       // store (omp) aren't in ~/.canopy/sessions, so deleting
                       // that file can't stop them — the next poll re-reads them
@@ -1331,9 +1349,12 @@ export function AgentsPanel({
                       // persistent forget is what restorableFrom actually
                       // filters on, so it's the only thing that makes an omp
                       // session stay gone.
-                      forgetSessions([d]);
-                      void ipc.sessionForget(d.session_id).catch(() => {});
-                      setDigests((prev) => prev.filter((x) => x.session_id !== d.session_id));
+                      forgetSessions(gone);
+                      for (const g of gone) {
+                        void ipc.sessionForget(g.session_id).catch(() => {});
+                      }
+                      const ids = new Set(gone.map((g) => g.session_id));
+                      setDigests((prev) => prev.filter((x) => !ids.has(x.session_id)));
                     }}
                   >
                     <TrashIcon size={13} />

@@ -114,11 +114,29 @@ fn main() {
 // for foreign sessions: the per-session cost below only updates a digest that
 // already exists, and only Canopy ever creates one.
 
-/// Where the plan chip reads from. One file per agent, overwritten in place.
-fn plan_usage_path(agent: &str) -> std::path::PathBuf {
+/// Which account profile this process is running under, stamped into the PTY by
+/// profiles.rs. Absent for the default profile — and absent for a `claude` run
+/// outside Canopy entirely, which is the same account, so the same answer.
+fn current_profile() -> String {
+    std::env::var("CANOPY_PROFILE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "default".into())
+}
+
+/// Where the plan chip reads from. One file per agent *per profile*, overwritten
+/// in place: rate limits belong to a subscription, so two logins on one machine
+/// have two independent readings, and a single file would have them overwrite
+/// each other with whichever account happened to render a status line last.
+fn plan_usage_path(agent: &str, profile: &str) -> std::path::PathBuf {
+    let name = if profile == "default" {
+        format!("{agent}.json")
+    } else {
+        format!("{agent}@{profile}.json")
+    };
     std::path::PathBuf::from(home())
         .join(".canopy/plan-usage")
-        .join(format!("{agent}.json"))
+        .join(name)
 }
 
 /// Normalize Claude's `rate_limits` into the shape the frontend consumes:
@@ -148,7 +166,8 @@ fn claude_windows(rate_limits: &serde_json::Value) -> Option<Vec<serde_json::Val
 /// windows (not the whole record, which carries a timestamp) is what keeps a
 /// per-repaint hook from becoming a per-repaint disk write.
 fn store_plan_usage(agent: &str, windows: &[serde_json::Value], plan: Option<String>) {
-    let path = plan_usage_path(agent);
+    let profile = current_profile();
+    let path = plan_usage_path(agent, &profile);
     if let Ok(raw) = std::fs::read_to_string(&path) {
         if let Ok(prev) = serde_json::from_str::<serde_json::Value>(&raw) {
             if prev["windows"] == serde_json::Value::Array(windows.to_vec()) {
@@ -158,6 +177,7 @@ fn store_plan_usage(agent: &str, windows: &[serde_json::Value], plan: Option<Str
     }
     let record = serde_json::json!({
         "agent": agent,
+        "profile": profile,
         "plan": plan,
         "windows": windows,
         "observed": now_secs(),
@@ -174,8 +194,15 @@ fn store_plan_usage(agent: &str, windows: &[serde_json::Value], plan: Option<Str
 /// the right field and is not — it reads "not_max" on a Max 20x account. The
 /// organization tier is the one that tracks reality.
 fn claude_plan_label() -> Option<String> {
-    let raw =
-        std::fs::read_to_string(std::path::PathBuf::from(home()).join(".claude.json")).ok()?;
+    // Verified against the CLI: with CLAUDE_CONFIG_DIR set, `.claude.json` is
+    // created *inside* that directory rather than beside it, so a profile's
+    // account details are there and `$HOME/.claude.json` still describes the
+    // default login. Reading the wrong one labels the chip with the wrong plan.
+    let state = match std::env::var("CLAUDE_CONFIG_DIR") {
+        Ok(dir) if !dir.is_empty() => std::path::PathBuf::from(dir).join(".claude.json"),
+        _ => std::path::PathBuf::from(home()).join(".claude.json"),
+    };
+    let raw = std::fs::read_to_string(state).ok()?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let acct = &v["oauthAccount"];
     acct["organizationRateLimitTier"]
@@ -670,6 +697,11 @@ fn update_digest(
         digest["surface"] = serde_json::json!(pty);
         digest["instance"] = serde_json::json!(std::env::var("CANOPY_INSTANCE").ok());
     }
+    // Which account this conversation belongs to. Recorded on every write, like
+    // the surface and for the same reason: resuming it has to relaunch the CLI
+    // against the same config dir, or `--resume <id>` looks in the other
+    // login's store and reports a session that plainly exists as missing.
+    digest["profile"] = serde_json::json!(current_profile());
     // Read before it is overwritten: the working-time clock below measures from
     // the previous event, and this field is where the previous event's time is.
     let prev_updated = digest["updated"].as_u64();
@@ -1437,6 +1469,12 @@ results stay inspectable:
   you go. Never leave research in a scratch markdown file — it is lost the \
   moment the session ends. Long raw material (file dumps, logs, fetched pages) \
   goes in `source`, not in the body: the body is what the next agent reads.
+- Noticing something real that is NOT the job you were given (a bug beside the \
+  one you were sent for, a refactor the code obviously wants, a missing test) \
+  -> canopy_notes_write create. Park it and carry on: writing it down is how it \
+  survives, and chasing it is how you deliver the wrong change. Search \
+  canopy_notes first so the same observation is not recorded twice. This is not \
+  a progress log — do not narrate the work you were asked to do into it.
 
 Call canopy_project first for component paths, configured run commands, \
 terminal ids, and the ports servers are listening on. Fall back to the shell \
@@ -1859,6 +1897,8 @@ fn tools_list() -> serde_json::Value {
         _ => Vec::new(),
     };
     tools.extend(research_tool_defs());
+    tools.extend(notes_tool_defs());
+    tools.extend(session_tool_defs());
     // canopy_job_done is on by default everywhere (reporting an outcome is
     // core product), and inside a micro-task session (CANOPY_MICRO_TASK=1 on
     // the launch command) it survives even the Settings disable list — a
@@ -1917,6 +1957,7 @@ const READ_ONLY_TOOLS: &[&str] = &[
     "canopy_reviews",
     "canopy_agents",
     "canopy_research",
+    "canopy_notes",
     "canopy_wait_for",
     "canopy_screenshot",
     "canopy_browser_snapshot",
@@ -1935,6 +1976,7 @@ const DESTRUCTIVE_TOOLS: &[&str] = &[
     "canopy_stop_server",
     "canopy_restart_server",
     "canopy_message_agent",
+    "canopy_close_session",
 ];
 
 /// Loose but real: names the fields an agent should expect, without pinning a
@@ -1999,6 +2041,43 @@ fn output_schema(name: &str) -> Option<serde_json::Value> {
 /// `json!` expands recursively and the combined literal exceeds the default
 /// recursion limit. Splitting is the cheaper fix than raising it, and it leaves
 /// room for the next addition.
+/// The scratchpad pair. Split read from write for the same reason research is:
+/// the reader is annotated `readOnlyHint` so a host may auto-approve it, and an
+/// annotation that a write action can slip through is a bypass, not a hint.
+fn notes_tool_defs() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "name": "canopy_notes",
+            "description": "Read the user's scratchpad for this project: thoughts, ideas and to-dos they parked to pick up later. Call `search` before writing a note, so the same observation is not recorded twice. Scoped to the project you are working in.",
+            "inputSchema": { "type": "object", "properties": {
+                "action": { "type": "string", "enum": ["list", "search", "get"], "description": "list = current notes, newest first; search = match on title, tags, body and referenced files; get = one note in full, with its attachments and links" },
+                "id": { "type": "string", "description": "Note id for get, e.g. 0007-tier-donations" },
+                "query": { "type": "string", "description": "Search text" },
+                "statuses": { "type": "array", "items": { "type": "string" }, "description": "Filter list to these: ideation, ready, doing, done, parked, archived. Default hides archived." },
+                "limit": { "type": "integer", "description": "Max rows (default 200)" }
+            }, "required": ["action"], "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_notes_write",
+            "description": "Park a thought in the user's scratchpad. Use `create` for something you noticed that is real but is NOT part of the job you were given — a bug beside the one you were sent for, a refactor the code obviously wants, a missing test. Writing it down is how it survives; derailing onto it is not. Do not use this for the work you were asked to do, and do not use it as a progress log. `append` adds to a note, `status` moves it along, `link` ties it to a PR or a research entry, `attach` keeps a file with it.",
+            "inputSchema": { "type": "object", "properties": {
+                "action": { "type": "string", "enum": ["create", "append", "status", "link", "attach"], "description": "create | append | status | link | attach" },
+                "id": { "type": "string", "description": "Note id — required by everything except create" },
+                "title": { "type": "string", "description": "create: the thought, in one line. attach: what the file is." },
+                "text": { "type": "string", "description": "create: any detail beyond the title. append: markdown to add to the body." },
+                "tags": { "type": "array", "items": { "type": "string" } },
+                "status": { "type": "string", "description": "status: ideation | ready | doing | done | parked | archived" },
+                "note": { "type": "string", "description": "status: why it moved" },
+                "pr": { "type": "object", "description": "link: { repo, number, url, state } — a PR that came out of this note" },
+                "research": { "type": "string", "description": "link: id of a research entry started from this note" },
+                "branch": { "type": "string", "description": "link: branch carrying the work" },
+                "file": { "type": "object", "description": "link: { path, start_line, end_line, rev } — a file this note is about. Include `rev` (the commit you read it at) so the line numbers can be trusted later." },
+                "path": { "type": "string", "description": "attach: absolute path of a file to keep with the note (a log, a capture). Copied in, so it survives the worktree." }
+            }, "required": ["action"], "additionalProperties": false }
+        }),
+    ]
+}
+
 fn research_tool_defs() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
@@ -2037,6 +2116,22 @@ fn research_tool_defs() -> Vec<serde_json::Value> {
             }, "required": ["action"], "additionalProperties": false }
         }),
     ]
+}
+
+/// Closing your own session. Split out for the same reason as the research
+/// pair: the array below is already at `json!`'s recursion limit.
+///
+/// It deliberately takes no arguments. A terminal id would make "close only
+/// your own" a rule the tool has to enforce; with no way to name a terminal,
+/// the identity is the sidecar's own environment (CANOPY_PTY, stamped by the
+/// PTY that launched this agent) and the restriction is a property of the
+/// surface instead of a check inside it.
+fn session_tool_defs() -> Vec<serde_json::Value> {
+    vec![serde_json::json!({
+        "name": "canopy_close_session",
+        "description": "Close the Canopy terminal you are running in — this ends your own session and kills this CLI. Call it ONLY when the user has told you to close this session (\"close yourself when you're done\", \"shut down after the PR is up\"); finishing a job is never on its own a reason to. It takes no arguments and can only ever close your own terminal — there is no way to name another agent's. Say your last words first: the tab goes when your turn ends.",
+        "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+    })]
 }
 
 fn tool_defs() -> serde_json::Value {
@@ -2625,6 +2720,49 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
             }
             text(research_op(action, args))
         }
+        "canopy_notes" | "canopy_notes_write" => {
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .ok_or("missing required argument: action")?;
+            // Same split, same reason as canopy_research: the reader is
+            // annotated read-only so a host can auto-approve it, and a write
+            // action reachable through it would make that a bypass.
+            let reads = ["list", "search", "get"];
+            let writes = ["create", "append", "status", "link", "attach"];
+            let allowed: &[&str] = if name == "canopy_notes" {
+                &reads
+            } else {
+                &writes
+            };
+            if !allowed.contains(&action) {
+                return Err(format!(
+                    "canopy_notes{} has no action \"{action}\" — use {}",
+                    if name == "canopy_notes" { "" } else { "_write" },
+                    allowed.join(", ")
+                ));
+            }
+            // Caught here rather than after a round trip, so the correction
+            // costs the agent nothing.
+            if name == "canopy_notes_write" && action == "create" {
+                let titled = args
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|t| !t.trim().is_empty());
+                if !titled {
+                    return Err("create needs a title — the thought, in one line".into());
+                }
+            }
+            if action == "attach"
+                && !args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|p| !p.trim().is_empty())
+            {
+                return Err("attach needs a path — the file to keep with the note".into());
+            }
+            text(notes_op(action, args))
+        }
         "canopy_vault_list" => {
             let mut body = args.clone();
             body["vaultOp"] = serde_json::json!("list");
@@ -2772,6 +2910,27 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 "status": status,
                 "summary": summary,
                 "url": args.get("url").and_then(|v| v.as_str()),
+            })))
+        }
+        "canopy_close_session" => {
+            // Which terminal to close is not the agent's to say: it comes from
+            // the environment this sidecar was launched with, so the only tab
+            // this call can ever reach is the one the caller is sitting in.
+            // Outside a Canopy terminal there is nothing to close, and saying
+            // so beats a silent ack.
+            let Some(pty) = std::env::var("CANOPY_PTY")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+            else {
+                return Err(
+                    "you aren't running in a Canopy terminal, so there is no tab to close — tell the user you're done instead".into(),
+                );
+            };
+            text(ctx_post(serde_json::json!({
+                "kind": "close_session",
+                "cwd": cwd(),
+                "ptyId": pty,
+                "instance": std::env::var("CANOPY_INSTANCE").ok(),
             })))
         }
         "canopy_device_list" => text(device_op("list", args)),
@@ -3515,6 +3674,31 @@ fn browser_op(op: &str, args: &serde_json::Value) -> Result<String, String> {
 /// project and runs there. There is deliberately no project argument — a tool
 /// that could name another project would be a tool that reads another project's
 /// research, and the agent has no business doing that.
+/// Same shape as `research_op`: the project is resolved from the cwd on the
+/// app's side, never taken from the caller.
+fn notes_op(action: &str, args: &serde_json::Value) -> Result<String, String> {
+    let mut body = args.clone();
+    if !body.is_object() {
+        body = serde_json::json!({});
+    }
+    // Never taken from the caller, whatever it passed.
+    body.as_object_mut().map(|o| o.remove("project_id"));
+    body["action"] = serde_json::json!(action);
+    body["cwd"] = serde_json::json!(cwd());
+    // Who moved a note is the one thing its history records, so it is filled in
+    // here rather than trusted from the arguments.
+    if body.get("by").is_none() {
+        body["by"] = serde_json::json!(claim_owner());
+    }
+    ctx_request_with_timeout(
+        "POST",
+        "/ctx/notes",
+        Some(body.to_string()),
+        std::time::Duration::from_secs(20),
+    )
+    .map(pretty)
+}
+
 fn research_op(action: &str, args: &serde_json::Value) -> Result<String, String> {
     let mut body = args.clone();
     if !body.is_object() {
@@ -4119,6 +4303,93 @@ mod tests {
     }
 
     #[test]
+    fn the_notes_reader_cannot_reach_a_write_action() {
+        // canopy_notes is annotated readOnlyHint so a host may auto-approve it.
+        // If naming a write action through it worked, that annotation would be
+        // a lie and the approval a bypass.
+        let err = call_tool(
+            "canopy_notes",
+            &serde_json::json!({ "action": "create", "title": "sneak" }),
+        )
+        .unwrap_err();
+        assert!(err.contains("no action"), "{err}");
+        assert!(
+            err.contains("list"),
+            "the error should name what is allowed"
+        );
+
+        // And the write tool is not a way to read.
+        let err = call_tool(
+            "canopy_notes_write",
+            &serde_json::json!({ "action": "get" }),
+        )
+        .unwrap_err();
+        assert!(err.contains("no action"), "{err}");
+    }
+
+    #[test]
+    fn notes_actions_are_required_and_checked_before_a_round_trip() {
+        let err = call_tool("canopy_notes", &serde_json::json!({})).unwrap_err();
+        assert!(err.contains("action"), "{err}");
+
+        // A note with nothing in it is the one thing the store must never hold,
+        // and catching it here costs the agent nothing.
+        for empty in ["", "   "] {
+            let err = call_tool(
+                "canopy_notes_write",
+                &serde_json::json!({ "action": "create", "title": empty }),
+            )
+            .unwrap_err();
+            assert!(err.contains("title"), "{err}");
+        }
+
+        let err = call_tool(
+            "canopy_notes_write",
+            &serde_json::json!({ "action": "attach", "id": "0001-x" }),
+        )
+        .unwrap_err();
+        assert!(err.contains("path"), "{err}");
+    }
+
+    #[test]
+    fn notes_tools_are_annotated_and_only_the_reader_is_read_only() {
+        let names: Vec<String> = notes_tool_defs()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(str::to_string))
+            .collect();
+        assert_eq!(names, ["canopy_notes", "canopy_notes_write"]);
+        assert!(READ_ONLY_TOOLS.contains(&"canopy_notes"));
+        assert!(!READ_ONLY_TOOLS.contains(&"canopy_notes_write"));
+        // Parking a thought takes nothing away from anyone — it only ever adds.
+        assert!(!DESTRUCTIVE_TOOLS.contains(&"canopy_notes_write"));
+    }
+
+    #[test]
+    fn the_notes_tools_are_published_to_the_host() {
+        // A tool defined but never added to the *published* list is invisible,
+        // which is the failure this catches. `tool_defs()` is only the base
+        // array — notes and research are built in their own functions (to keep
+        // the json! macro under its recursion limit) and spliced in by
+        // `tools_list()`, so that is what has to be asserted against.
+        let published = tools_list();
+        let tools = published["tools"].as_array().unwrap().clone();
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(names.contains(&"canopy_notes"), "{names:?}");
+        assert!(names.contains(&"canopy_notes_write"), "{names:?}");
+
+        // The annotation a host reads to decide about auto-approval has to
+        // survive the trip through tools_list, not merely exist in the const.
+        let hint = |want: &str| {
+            tools.iter().find(|t| t["name"] == want).unwrap()["annotations"]["readOnlyHint"].clone()
+        };
+        assert_eq!(hint("canopy_notes"), true);
+        assert_eq!(hint("canopy_notes_write"), false);
+    }
+
+    #[test]
     fn research_tools_are_annotated_and_only_the_reader_is_read_only() {
         let names: Vec<String> = research_tool_defs()
             .iter()
@@ -4130,6 +4401,38 @@ mod tests {
         // Writing research changes nothing anyone else can lose, so it is not
         // destructive either — it only ever adds.
         assert!(!DESTRUCTIVE_TOOLS.contains(&"canopy_research_write"));
+    }
+
+    #[test]
+    fn closing_a_session_can_name_no_session_but_your_own() {
+        // The restriction is the schema, not a check: an empty property set
+        // with additionalProperties false leaves an agent no way to say *which*
+        // terminal, so the only one it can reach is the one it runs in. Anyone
+        // adding a ptyId argument here has to delete this test first.
+        let defs = session_tool_defs();
+        assert_eq!(defs.len(), 1);
+        let tool = &defs[0];
+        assert_eq!(tool["name"], "canopy_close_session");
+        let schema = &tool["inputSchema"];
+        assert_eq!(
+            schema["properties"].as_object().map(|p| p.len()),
+            Some(0),
+            "canopy_close_session must take no arguments"
+        );
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+        // Ending a session is not something a host should auto-approve.
+        assert!(DESTRUCTIVE_TOOLS.contains(&"canopy_close_session"));
+        assert!(!READ_ONLY_TOOLS.contains(&"canopy_close_session"));
+    }
+
+    #[test]
+    fn closing_outside_a_canopy_terminal_says_so_instead_of_acking() {
+        // No CANOPY_PTY means no tab — the sidecar is running under a bare
+        // shell. Refuse locally rather than posting an action the app would
+        // have to guess a target for.
+        std::env::remove_var("CANOPY_PTY");
+        let err = call_tool("canopy_close_session", &serde_json::json!({})).unwrap_err();
+        assert!(err.contains("Canopy terminal"), "{err}");
     }
 
     #[test]

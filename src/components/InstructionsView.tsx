@@ -23,6 +23,7 @@ import {
 import type { Notify } from "../types";
 import { AgentIcon, BRAND_ICONS, InstructionKindIcon, TrashIcon } from "./icons";
 import { Button } from "./ui";
+import { matches } from "../shortcuts";
 
 /** Display names for agents Canopy doesn't ship a launcher for. Their files
  *  still turn up on disk — a `.cursor/rules` or a `.windsurfrules` is worth
@@ -464,7 +465,7 @@ export function InstructionsView({
   useEffect(() => {
     if (!active || !dirty) return;
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+      if (matches(e, "save-file")) {
         e.preventDefault();
         saveRef.current();
       }
