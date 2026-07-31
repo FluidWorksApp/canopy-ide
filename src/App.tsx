@@ -28,6 +28,7 @@ import {
   type DeepLink,
 } from "./deepLinks";
 import { runUiOp } from "./agentOps";
+import { ashGlyph } from "./ash";
 import { getSettings, THEME_CHANGE_EVENT } from "./settings";
 import { useTabDrag } from "./tabDrag";
 import * as prWatch from "./prWatchStore";
@@ -1424,7 +1425,7 @@ export default function App() {
           // ProjectView below is about to kill the pty and close the tab, so
           // the only thing left to look at is the run's row in Tasks.
           void nativeNotify(
-            "Canopy — Task",
+            `Canopy — Task ${ashGlyph(ok ? "done" : "blocked")}`,
             summary,
             !ok && a.ptyId != null
               ? { kind: "terminal", ptyId: a.ptyId, path: a.route }
@@ -1449,7 +1450,7 @@ export default function App() {
           notify(a.text ?? "", (a.level ?? "info") as NoticeKind);
           if (a.level === "error" || a.level === "warn")
             void nativeNotify(
-              "Canopy — Agent",
+              `Canopy — Agent ${ashGlyph(a.level === "error" ? "blocked" : "needs")}`,
               a.text ?? "",
               a.ptyId != null
                 ? { kind: "terminal", ptyId: a.ptyId, path: a.route }

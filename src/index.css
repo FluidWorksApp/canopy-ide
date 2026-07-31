@@ -1529,6 +1529,13 @@ body.resizing-side * {
   white-space: nowrap;
 }
 
+/* At 16px the face collapses to arc-plus-two-dots and goes monochrome: it
+   reads as an icon rather than a character, which is what a status tray wants.
+   Negative margins keep the 30px bar from growing around it. */
+.status-agent-ash {
+  margin: -3px 0;
+}
+
 /* "+22": the part that has to stay legible when the names are a blur. */
 .status-agent-more {
   margin-left: 4px;
@@ -6026,6 +6033,267 @@ body.dragging-tab * {
   color: var(--accent);
 }
 
+/* ---------- Ash, the mascot ---------- */
+/* One character across every surface. Motion is deceleration only and nothing
+   overshoots rest except Celebrating; every loop is stopped by reduced-motion
+   and by the tab going to the background (the class comes off in Ash.tsx). */
+
+.ash {
+  display: block;
+  flex: 0 0 auto;
+  transform-origin: 50% 60%;
+}
+
+.ash-anim {
+  animation-timing-function: cubic-bezier(0.2, 0.9, 0.2, 1);
+  animation-iteration-count: infinite;
+}
+
+.ash-anim-idle {
+  animation-name: ash-idle;
+  animation-duration: 3.6s;
+  animation-timing-function: ease-in-out;
+}
+.ash-anim-thinking {
+  animation-name: ash-think;
+  animation-duration: 2.4s;
+}
+/* One pop, then it is just idle again — a finished agent that keeps bouncing is
+   an agent still asking for attention. */
+.ash-anim-done {
+  animation-name: ash-done;
+  animation-duration: 0.5s;
+  animation-iteration-count: 1;
+}
+.ash-anim-needs {
+  animation-name: ash-need;
+  animation-duration: 2.4s;
+  animation-timing-function: ease-in-out;
+}
+.ash-anim-blocked {
+  animation-name: ash-block;
+  animation-duration: 2.4s;
+}
+.ash-anim-sleeping {
+  animation-name: ash-sleep;
+  animation-duration: 4s;
+  animation-timing-function: ease-in-out;
+}
+.ash-anim-celebrating {
+  animation-name: ash-celebrate;
+  animation-duration: 1.2s;
+  animation-iteration-count: 1;
+}
+.ash-anim-explaining {
+  animation-name: ash-explain;
+  animation-duration: 2.4s;
+  animation-timing-function: ease-in-out;
+}
+
+/* At 16-24px Ash is an icon, not a character: it holds still. The exception is
+   a turn in flight, where the old pulsing dot was the only thing saying the
+   agent had not died. */
+.ash-alive {
+  animation: agent-pulse 1.4s ease-in-out infinite;
+}
+
+.ash-blink {
+  animation: ash-blink 5.2s ease-in-out infinite;
+}
+/* The terminal's own cadence — Ash borrows it rather than inventing one. */
+.ash-cursor {
+  animation: ash-cursor 1.1s steps(1, end) infinite;
+}
+.ash-point {
+  animation: ash-point 1.6s ease-in-out infinite;
+}
+.ash-sparks {
+  transform-origin: 20px 20px;
+  animation: ash-spark 1.5s ease-in-out infinite;
+}
+.ash-z {
+  font-family: var(--mono, ui-monospace, monospace);
+  opacity: 0.5;
+  animation: ash-z 2.6s ease-out infinite;
+}
+
+@keyframes ash-idle {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-2.5%);
+  }
+}
+@keyframes ash-think {
+  0%,
+  100% {
+    transform: translate(0, 0) rotate(0deg);
+  }
+  30% {
+    transform: translate(1%, -1%) rotate(-1.6deg);
+  }
+  70% {
+    transform: translate(-1%, 0) rotate(1.2deg);
+  }
+}
+@keyframes ash-done {
+  0% {
+    transform: scale(0.86) translateY(4%);
+  }
+  42% {
+    transform: scale(1.09) translateY(-3%);
+  }
+  64% {
+    transform: scale(0.98);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+@keyframes ash-need {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.055);
+  }
+}
+@keyframes ash-block {
+  0%,
+  72%,
+  100% {
+    transform: translateX(0);
+  }
+  76% {
+    transform: translateX(-2.4%);
+  }
+  80% {
+    transform: translateX(2.4%);
+  }
+  84% {
+    transform: translateX(-1.6%);
+  }
+  88% {
+    transform: translateX(1.2%);
+  }
+}
+@keyframes ash-sleep {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(1.6%) scale(0.985);
+  }
+}
+@keyframes ash-celebrate {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  22% {
+    transform: translateY(-9%) rotate(-4deg);
+  }
+  44% {
+    transform: translateY(0) rotate(3deg);
+  }
+  66% {
+    transform: translateY(-4%) rotate(-1.5deg);
+  }
+}
+@keyframes ash-explain {
+  0%,
+  100% {
+    transform: translateX(0) rotate(0deg);
+  }
+  50% {
+    transform: translateX(3%) rotate(2.4deg);
+  }
+}
+@keyframes ash-blink {
+  0%,
+  92%,
+  100% {
+    opacity: 1;
+  }
+  95% {
+    opacity: 0.12;
+  }
+}
+@keyframes ash-cursor {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0.1;
+  }
+}
+@keyframes ash-point {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+@keyframes ash-spark {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: scale(0.7);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes ash-z {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0) scale(0.7);
+  }
+  30% {
+    opacity: 0.9;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(14%, -26%) scale(1.15);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ash-anim,
+  .ash-alive,
+  .ash-blink,
+  .ash-cursor,
+  .ash-point,
+  .ash-sparks,
+  .ash-z {
+    animation: none;
+  }
+}
+
+/* Ash in the middle of an empty panel or a crashed one: the largest it is ever
+   allowed to be, and the only place it gets room of its own. */
+.ash-scene {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 26px 18px;
+  text-align: center;
+}
+
+.ash-scene .ash {
+  margin-bottom: 2px;
+}
+
 /* ---------- agents panel ---------- */
 
 .agent-row {
@@ -6054,6 +6322,13 @@ body.dragging-tab * {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Lifecycle, as Ash: one glance tells working from waiting-on-you from
+   finished, and it is the same face the status bar and the workspace banner
+   show for the same session. */
+.agent-state-ash {
+  margin: -3px -1px -3px 0;
 }
 
 /* Lifecycle dot: one glance tells working from waiting-on-you from finished. */
@@ -6161,6 +6436,9 @@ body.dragging-tab * {
 .task-row-running .agent-state-dot,
 .task-row-done .task-done-dot {
   margin-top: 5px;
+}
+.task-row-running .agent-state-ash {
+  margin-top: 1px;
 }
 .task-note-inline {
   display: block;
@@ -7862,6 +8140,15 @@ input[type="radio"]:disabled {
   color: var(--text);
   line-height: 1.4;
   margin-bottom: 6px;
+}
+
+/* Ash replaces the 🔔 / ✓ this line used to open with — same slot, same
+   reading order, and now the same character the rest of the app uses. It has to
+   sit *in* the sentence, so it overrides .ash's display:block. */
+.pending-ash {
+  display: inline-block;
+  vertical-align: -3px;
+  margin-right: 5px;
 }
 
 .pending-options {
@@ -12064,6 +12351,11 @@ textarea,
   font-weight: 600;
   color: var(--danger);
 }
+/* Blocked is the only state that gets to be this large — the broken canopy
+   carries the bad news so the copy doesn't have to raise its voice. */
+.crash-ash {
+  margin-bottom: -4px;
+}
 .crash-msg {
   font-family: ui-monospace, monospace;
   font-size: 12px;
@@ -14259,10 +14551,18 @@ a.btn-sm {
   to { opacity: 1; transform: none; }
 }
 .coach-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   font-size: 13px;
   font-weight: 600;
   color: var(--accent);
   margin-bottom: 5px;
+}
+/* Ash points; it never covers what it is pointing at, so it stays inside the
+   callout beside the title rather than out over the spotlight. */
+.coach-ash {
+  margin: -2px 0;
 }
 .coach-body {
   font-size: 12px;
