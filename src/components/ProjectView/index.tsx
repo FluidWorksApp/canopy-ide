@@ -5437,6 +5437,35 @@ const ProjectViewBody = memo(function ProjectViewBody({
         case "open-task-run":
           openTaskHistory(action.runId);
           return;
+        // A clip, put back. Two things happen, and both are wanted: it goes on
+        // the system clipboard (which is what a clipboard manager is *for* —
+        // ⌘V then works anywhere, including the editor and other apps), and if
+        // a terminal has the focus it also lands at the cursor, because
+        // reaching for ⌘K and then still having to press ⌘V is the version of
+        // this feature nobody would use.
+        //
+        // The text is fetched here rather than carried on the row: the palette
+        // holds previews, and one clip's worth of text crosses the boundary
+        // only when the user picks it.
+        case "paste-clip": {
+          const clipId = action.clipId;
+          const active = tabsRef.current.find(
+            (t) => t.id === activeTabIdRef.current,
+          );
+          void ipc
+            .clipboardRead(clipId)
+            .then(async (text) => {
+              if (!text) return;
+              await navigator.clipboard.writeText(text).catch(() => {});
+              if (active?.type === "terminal") {
+                termHandles.current.get(active.id)?.paste(text);
+              } else {
+                onNotice("Clip is on the clipboard — ⌘V to paste it in.");
+              }
+            })
+            .catch(() => onNotice("That clip is gone.", "error"));
+          return;
+        }
         // A registered source's own opener (see registerSpotSource). It ran
         // from a click, so a rejection here is the source's to report — this
         // only keeps it from surfacing as an unhandled rejection.
@@ -5462,6 +5491,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       switchTo,
       startResearch,
       openResearch,
+      onNotice,
       project.id,
     ],
   );

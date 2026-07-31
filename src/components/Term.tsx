@@ -39,6 +39,11 @@ export interface TermHandle {
   focus: () => void;
   /** The text currently selected in the terminal, "" when none. */
   getSelection: () => string;
+  /** Put text in at the cursor, as a paste — bracketed-paste markers and all,
+   *  so zsh and TUIs treat it as pasted rather than typed. Never appends a
+   *  carriage return: a clipboard row hands you the text to look at, it does
+   *  not run it. */
+  paste: (text: string) => void;
   /** The scrollback as plain text, keeping the newest `maxChars`. Plain rather
    *  than ANSI on purpose: this is read back in the task-history pane, not
    *  replayed into a terminal, so escape sequences would only be noise. */
@@ -95,6 +100,14 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     },
     focus: () => termRef.current?.focus(),
     getSelection: () => termRef.current?.getSelection() ?? "",
+    paste: (text: string) => {
+      const term = termRef.current;
+      if (!term || !text) return;
+      // Same path the OS-drop and dictation handlers take (see below): xterm's
+      // ordered input, wrapped in bracketed-paste markers.
+      term.paste(text);
+      term.focus();
+    },
     captureText: (maxChars = 8000) => {
       const term = termRef.current;
       if (!term) return "";

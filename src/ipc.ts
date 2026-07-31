@@ -583,6 +583,88 @@ export const spotSearch = (
 /** What the index holds right now (Settings → SpotSearch). */
 export const spotIndexStats = () => invoke<SpotIndexStats>("spot_index_stats");
 
+// ---------- Clipboard history ----------
+//
+// Capture is entirely a backend concern (src-tauri/src/clipboard.rs): WKWebView
+// cannot poll `navigator.clipboard.readText`, so there is no frontend half of
+// it to write. This side declares the rules, lists what was kept, and asks for
+// one clip in full when the user picks it.
+
+export interface Clip {
+  id: number;
+  /** Unix seconds. */
+  ts: number;
+  /** One collapsed line. The whole clip is `clipboardRead(id)`. */
+  preview: string;
+  chars: number;
+  lines: number;
+  /** Project that was open when it was copied, "" when none was. */
+  project: string;
+}
+
+export interface ClipboardStatus {
+  supported: boolean;
+  watching: boolean;
+  persisted: boolean;
+  /** macOS 15+ pasteboard access state: "default" | "ask" | "allow" | "deny",
+   *  or "" on an OS without the API. */
+  access: string;
+  clips: number;
+  bytes: number;
+  skipped_secrets: number;
+  skipped_large: number;
+  skipped_concealed: number;
+}
+
+export interface ClipboardWatchOptions {
+  enabled: boolean;
+  /** False keeps the history in memory only — and deletes the file. */
+  persist: boolean;
+  keep: number;
+  retentionDays: number;
+  skipSecrets: boolean;
+  /** Active project id, stamped onto each clip. "" when none is open. */
+  project: string;
+}
+
+/** Declare whether to watch and under what rules. Idempotent — called on launch
+ *  and whenever the settings or the active project change. */
+export const clipboardWatchSet = (o: ClipboardWatchOptions) =>
+  invoke<void>("clipboard_watch_set", {
+    enabled: o.enabled,
+    persist: o.persist,
+    keep: o.keep,
+    retentionDays: o.retentionDays,
+    skipSecrets: o.skipSecrets,
+    project: o.project,
+  });
+
+export const clipboardRecent = (limit?: number) =>
+  invoke<Clip[]>("clipboard_recent", { limit });
+
+/** One clip in full — the only call that returns whole clip text. */
+export const clipboardRead = (id: number) =>
+  invoke<string>("clipboard_read", { id });
+
+export const clipboardForget = (id: number) =>
+  invoke<void>("clipboard_forget", { id });
+
+export const clipboardClear = () => invoke<void>("clipboard_clear");
+
+export const clipboardStatus = () =>
+  invoke<ClipboardStatus>("clipboard_status");
+
+/** A clip was captured. Carries no payload: the list is one cheap call away,
+ *  and shipping clip text on an app-wide event is the one thing this feature
+ *  must not do casually. */
+export const onClipboardChanged = (cb: () => void): Promise<UnlistenFn> =>
+  listen("clipboard:changed", () => cb());
+
+/** The user told macOS to always deny this app the pasteboard, so the watcher
+ *  stopped itself. */
+export const onClipboardBlocked = (cb: () => void): Promise<UnlistenFn> =>
+  listen("clipboard:blocked", () => cb());
+
 // ---------- Credential vault ----------
 //
 // The password never crosses this boundary in the fill direction: `vaultFill`

@@ -5,6 +5,7 @@ mod blocking;
 mod browser;
 mod cleanup;
 mod cli;
+mod clipboard;
 mod context;
 mod crash;
 #[cfg(feature = "dictation")]
@@ -335,6 +336,7 @@ pub fn run() {
         .manage(spot::SpotIndex::default())
         .manage(research::ResearchStore::default())
         .manage(vault::Vault::default())
+        .manage(clipboard::Clipboard::default())
         .manage(cli::pending_from_env())
         .setup(|app| {
             // ONNX Runtime is loaded dynamically on every platform (Cargo.toml
@@ -429,6 +431,12 @@ pub fn run() {
             android::android_logcat,
             android::android_describe,
             android::android_run,
+            clipboard::clipboard_watch_set,
+            clipboard::clipboard_recent,
+            clipboard::clipboard_read,
+            clipboard::clipboard_forget,
+            clipboard::clipboard_clear,
+            clipboard::clipboard_status,
             spot::spot_ingest,
             spot::spot_search,
             spot::spot_index_stats,
@@ -650,6 +658,8 @@ pub fn run() {
                 app.state::<tunnel::TunnelManager>().kill_all();
                 // ... and stop polling GitHub for pull requests.
                 app.state::<prwatch::PrWatcher>().shutdown();
+                // ... and stop watching the pasteboard.
+                app.state::<clipboard::Clipboard>().shutdown();
             }
         });
 }
