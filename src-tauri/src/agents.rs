@@ -2391,8 +2391,28 @@ static STATS_CACHE: std::sync::LazyLock<
     std::sync::Mutex<HashMap<std::path::PathBuf, (u64, ClaudeSessionStats)>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
+/// Whether a path is a Claude transcript this machine owns.
+///
+/// A whitelist, not a sanity check: the path arrives from a hook event and this
+/// command turns it into a file read, so anything outside a config directory we
+/// installed must stay refused.
+///
+/// Every profile's config dir counts, not just `$HOME/.claude`. A session run
+/// under a second account writes its transcript inside that account's
+/// CLAUDE_CONFIG_DIR, and refusing it there cost the tray everything it reads
+/// from a transcript — model, tokens, cost — for exactly the sessions the
+/// account feature exists to run.
+fn is_claude_transcript(home: &str, path: &std::path::Path) -> bool {
+    if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+        return false;
+    }
+    crate::profiles::roots(home)
+        .into_iter()
+        .any(|(_, root)| path.starts_with(root.join(".claude")))
+}
+
 /// Aggregate token usage + model from a Claude Code session transcript
-/// (~/.claude/projects/**/*.jsonl — the path arrives via hook events).
+/// (`<config dir>/projects/**/*.jsonl` — the path arrives via hook events).
 /// Powers the status tray (model / tokens / cost). Incremental: parses only
 /// bytes appended since the previous call for the same path.
 #[tauri::command]
@@ -2402,9 +2422,7 @@ pub async fn claude_session_stats(transcript_path: String) -> Result<ClaudeSessi
     let path = std::path::Path::new(&transcript_path)
         .canonicalize()
         .map_err(|e| e.to_string())?;
-    let claude_dir = std::path::PathBuf::from(&home).join(".claude");
-    if !path.starts_with(&claude_dir) || path.extension().and_then(|e| e.to_str()) != Some("jsonl")
-    {
+    if !is_claude_transcript(&home, &path) {
         return Err("not a claude transcript".into());
     }
     let (mut offset, mut stats) = STATS_CACHE
@@ -4368,6 +4386,42 @@ mod integration_tests {
         assert!(found.starts_with(crate::profiles::root_for(h, "work")));
         // And it is attributed to the account that produced it.
         assert_eq!(crate::profiles::profile_of_path(h, &found), "work");
+    }
+
+    /// The tray reads model, tokens and cost out of the transcript named by a
+    /// hook event, behind a whitelist of directories we installed. That
+    /// whitelist was `$HOME/.claude` alone, so every session run under a second
+    /// account was refused — and its footer lost the model, the token counts
+    /// and the cost, which is precisely the state the account feature creates.
+    #[test]
+    fn a_profiles_transcript_is_readable_and_a_stranger_is_still_refused() {
+        let home = scratch_home("transcript-guard");
+        let h = home.to_str().unwrap();
+        crate::profiles::create(h, "work").unwrap();
+
+        let in_profile =
+            crate::profiles::root_for(h, "work").join(".claude/projects/-tmp-app/a.jsonl");
+        std::fs::create_dir_all(in_profile.parent().unwrap()).unwrap();
+        std::fs::write(&in_profile, "{}\n").unwrap();
+        assert!(is_claude_transcript(h, &in_profile));
+
+        let in_default = home.join(".claude/projects/-tmp-app/b.jsonl");
+        std::fs::create_dir_all(in_default.parent().unwrap()).unwrap();
+        std::fs::write(&in_default, "{}\n").unwrap();
+        assert!(is_claude_transcript(h, &in_default));
+
+        // Still a whitelist: the path arrives from a hook event and becomes a
+        // file read, so anywhere we did not install stays refused.
+        assert!(!is_claude_transcript(h, &home.join("secrets.jsonl")));
+        assert!(!is_claude_transcript(
+            h,
+            std::path::Path::new("/etc/passwd")
+        ));
+        // And the extension check survives the widening.
+        assert!(!is_claude_transcript(
+            h,
+            &home.join(".claude/projects/-tmp-app/notes.txt")
+        ));
     }
 
     /// Each login has its own rollout store and its own rate limits, so the

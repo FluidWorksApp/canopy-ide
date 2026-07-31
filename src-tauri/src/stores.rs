@@ -134,14 +134,24 @@ pub fn source_files(roots: &[String], wanted: &dyn Fn(&str) -> bool) -> Vec<Sour
         });
     };
 
+    // Claude and Codex both file their transcripts inside the config directory
+    // the session ran under, so every account profile is its own store. Scanning
+    // only `$HOME` would leave a second login's sessions out of search and out
+    // of the digests entirely — invisible rather than merely unlabelled.
+    let cfg_roots: Vec<PathBuf> = crate::profiles::roots(&home.to_string_lossy())
+        .into_iter()
+        .map(|(_, root)| root)
+        .collect();
     if wanted("claude") {
         let mut files = Vec::new();
-        walk(
-            &home.join(".claude/projects"),
-            1,
-            &|p| has_ext(p, "jsonl"),
-            &mut files,
-        );
+        for root in &cfg_roots {
+            walk(
+                &root.join(".claude/projects"),
+                1,
+                &|p| has_ext(p, "jsonl"),
+                &mut files,
+            );
+        }
         for f in files {
             push("claude", f, Layout::Append);
         }
@@ -149,12 +159,14 @@ pub fn source_files(roots: &[String], wanted: &dyn Fn(&str) -> bool) -> Vec<Sour
     if wanted("codex") {
         // Bucketed YYYY/MM/DD, so three levels below the root.
         let mut files = Vec::new();
-        walk(
-            &home.join(".codex/sessions"),
-            3,
-            &|p| has_ext(p, "jsonl"),
-            &mut files,
-        );
+        for root in &cfg_roots {
+            walk(
+                &root.join(".codex/sessions"),
+                3,
+                &|p| has_ext(p, "jsonl"),
+                &mut files,
+            );
+        }
         for f in files {
             push("codex", f, Layout::Append);
         }

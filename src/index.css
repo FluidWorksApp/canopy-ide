@@ -2075,6 +2075,18 @@ body.resizing-side * {
   font-weight: 600;
 }
 
+/* Which account a plan row belongs to. Only rendered for a non-default one,
+   so it reads as a qualifier on the CLI name rather than a permanent label. */
+.plan-account {
+  padding: 0 5px;
+  color: var(--text-dim);
+  font-size: 10px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+}
+
 .plan-tier {
   font-size: 10px;
   color: var(--text-dim);
