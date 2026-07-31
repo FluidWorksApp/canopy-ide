@@ -406,6 +406,12 @@ export interface Settings {
    *  compensation above is the price; opening a preview closes the panel that
    *  would cover it, which is the case that actually bit. */
   browserEngine: BrowserEngine;
+  /** The Chromium-family binary the chromium engine drives. Empty means
+   *  "whatever detection finds"; a path is the user overriding that. */
+  chromiumPath: string;
+  /** Whether Stagehand drives the Chrome engine. On by default, but only ever
+   *  active where it can actually work — see stagehandState. */
+  stagehandEnabled: boolean;
 
   /** What the preview's Screenshot button grabs when clicked without opening
    *  its menu. Remembered rather than fixed: whichever mode you picked last is
@@ -503,6 +509,8 @@ const DEFAULTS: Settings = {
   remoteReach: "local",
   remoteTunnelProvider: "cloudflare",
   browserEngine: "webview",
+  chromiumPath: "",
+  stagehandEnabled: true,
   previewCaptureMode: "visible",
   openLinksInApp: true,
   workspaceBasePort: 5173,
