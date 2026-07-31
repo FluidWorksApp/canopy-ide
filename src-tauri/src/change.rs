@@ -31,12 +31,14 @@ use tauri::{AppHandle, Emitter};
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Store {
     Notes,
+    Research,
 }
 
 impl Store {
     pub fn as_str(self) -> &'static str {
         match self {
             Store::Notes => "notes",
+            Store::Research => "research",
         }
     }
 
@@ -50,6 +52,11 @@ impl Store {
     fn settle(self) -> Duration {
         match self {
             Store::Notes => Duration::from_millis(60),
+            // A research write arrives as a burst: an entry's meta, its body,
+            // its sources, and — on a supersede — a second entry's meta, all
+            // within microseconds of each other inside one command. 200ms is
+            // comfortably above that burst and still under a blink.
+            Store::Research => Duration::from_millis(200),
         }
     }
 
@@ -57,8 +64,15 @@ impl Store {
     /// Without this a continuous writer — an agent appending in a loop — resets
     /// the settle window forever and the panel never updates, which is the bug
     /// in a more embarrassing costume.
+    ///
+    /// Per variant, and always greater than that variant's settle: a store
+    /// whose cap is below its own settle window would emit on the cap every
+    /// time and never coalesce at all. The test below pins that ordering.
     fn max_wait(self) -> Duration {
-        Duration::from_millis(1000)
+        match self {
+            Store::Notes => Duration::from_millis(1000),
+            Store::Research => Duration::from_millis(1000),
+        }
     }
 }
 
@@ -180,10 +194,21 @@ mod tests {
     }
 
     /// A settle window shorter than the cadence of the writes it coalesces is
-    /// the same as no coalescing at all.
+    /// the same as no coalescing at all — and a cap below the settle window
+    /// means the cap fires first, every time, so nothing ever coalesces.
+    /// Checked for every variant, because this is per-store arithmetic and the
+    /// next one added is where it gets got wrong.
     #[test]
-    fn settle_is_below_human_perception_and_max_wait_bounds_it() {
-        assert!(Store::Notes.settle() < Duration::from_millis(100));
-        assert!(Store::Notes.max_wait() >= Store::Notes.settle());
+    fn every_store_settles_below_perception_and_is_bounded_by_its_cap() {
+        for store in [Store::Notes, Store::Research] {
+            assert!(
+                store.settle() < Duration::from_millis(500),
+                "{store:?} settles too slowly to feel live"
+            );
+            assert!(
+                store.max_wait() > store.settle(),
+                "{store:?} caps at or below its settle window, so it never coalesces"
+            );
+        }
     }
 }

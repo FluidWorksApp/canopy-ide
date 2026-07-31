@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as ipc from "./ipc";
+import { resetForTests as resetStoresForTest } from "./stores";
 import {
   settleIfRunning,
   ACTIVE_STATUSES,
@@ -240,13 +241,18 @@ describe("writes that never came through this module", () => {
     resetStoreWatchForTest();
   });
 
+  // The store now listens on the shared channel (`store:change`, routed by
+  // store id in stores.ts) rather than on its own `research:changed` event, so
+  // one subscription serves every store and arms with a retry.
   const armed = () => {
-    let fire: ((projectId: string) => void) | undefined;
-    vi.spyOn(ipc, "onResearchChanged").mockImplementation((cb) => {
+    let fire: ((e: ipc.StoreChange) => void) | undefined;
+    resetStoresForTest();
+    vi.spyOn(ipc, "onStoreChange").mockImplementation((cb) => {
       fire = cb;
       return Promise.resolve(() => {});
     });
-    return () => fire;
+    return () => (projectId: string) =>
+      fire?.({ store: "research", scope: projectId, id: "" });
   };
 
   it("re-reads a project when the store says that project moved", async () => {
@@ -266,7 +272,7 @@ describe("writes that never came through this module", () => {
     watchStore();
     watchStore();
     watchStore();
-    expect(ipc.onResearchChanged).toHaveBeenCalledTimes(1);
+    expect(ipc.onStoreChange).toHaveBeenCalledTimes(1);
   });
 
   it("ignores a project nothing is showing", async () => {

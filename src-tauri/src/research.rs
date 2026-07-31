@@ -473,9 +473,23 @@ fn read_meta(dir: &Path) -> Result<Meta, String> {
     serde_json::from_str(&raw).map_err(|e| format!("meta.json is unreadable: {e}"))
 }
 
+/// The store's write boundary. Every mutation reaches it — an entry's
+/// `updated_at` moves whenever anything about it does — so this is the one
+/// place that can say a change happened without depending on which of the four
+/// authors made it. `RESEARCH_CHANGED` announces from the command wrappers
+/// instead, which is the arrangement that left agent-written notes invisible;
+/// it stays for now only because removing it would change seven command
+/// signatures that an in-flight branch owns. See `change.rs`.
 fn write_meta(dir: &Path, meta: &Meta) -> Result<(), String> {
     let body = serde_json::to_string_pretty(meta).map_err(|e| e.to_string())?;
-    write_atomic(&dir.join("meta.json"), &body)
+    write_atomic(&dir.join("meta.json"), &body)?;
+    // From the record, never from the directory path.
+    crate::change::pulse(
+        crate::change::Store::Research,
+        &meta.project_id,
+        &meta.id,
+    );
+    Ok(())
 }
 
 fn body_path(dir: &Path) -> PathBuf {
@@ -1448,11 +1462,17 @@ pub fn research_delete(
     if !dir.join("meta.json").exists() {
         return Err("no research entry there".into());
     }
-    emit_changed(
+    let out = emit_changed(
         &app,
         &project_id,
         std::fs::remove_dir_all(&dir).map_err(|e| e.to_string()),
-    )
+    );
+    // A delete writes no meta, so it is one of the two mutations the write
+    // boundary cannot speak for.
+    if out.is_ok() {
+        crate::change::pulse(crate::change::Store::Research, &project_id, &id);
+    }
+    out
 }
 
 // ---- the harness's view ---------------------------------------------------

@@ -8,6 +8,7 @@
 // first keystroke instead of after a round trip, and refreshes it whenever the
 // store changes.
 import * as ipc from "./ipc";
+import { registerStore } from "./stores";
 
 export type ResearchStatus = ipc.ResearchStatus;
 
@@ -146,18 +147,21 @@ let subscribed = false;
 export function watchStore(): void {
   if (subscribed) return;
   subscribed = true;
-  void ipc
-    .onResearchChanged((projectId) => {
-      if (cache.has(projectId)) void refresh(projectId);
-    })
-    // No event bridge — a test harness, a window that never got one — costs
-    // live updates, not correctness: the fetch on mount still runs. Swallowing
-    // it keeps a rendering surface from raising, and releasing the flag lets
-    // the next mount try again rather than disabling this for the session.
-    .catch(() => {
-      subscribed = false;
-    });
+  // On the shared channel rather than this store's own event: one subscription
+  // for the app, armed once, with the retry-on-failure that `onResearchChanged`
+  // never had. `stores.ts` routes by store id.
+  registerStore("research", (e) => {
+    if (cache.has(e.scope)) void refresh(e.scope);
+  });
 }
+
+// Armed here rather than from a component. It used to be called only by
+// ResearchPanel's mount effect, and ProjectView refuses to mount a side pane
+// until that tab has been selected at least once — so until the user clicked
+// Research, an agent's entry reached no surface at all: not the palette, not a
+// wikilink, not the import prompt. Module scope is what makes "subscribe could
+// be anyone" true for a panel nobody has opened yet.
+watchStore();
 
 /** Test seam. `subscribed` is module state that outlives a test, so a test
  *  arming its own fake listener needs the next one to be able to arm too. */

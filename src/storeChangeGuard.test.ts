@@ -39,7 +39,24 @@ const STORES = [
     file: "notes.rs",
     variant: "Notes",
     boundary: "write_meta",
+    // Mutations that write no record, so the boundary cannot speak for them.
     delete_boundaries: ["notes_delete"],
+    frontend_module: "notes.ts",
+    /** Read commands in this file. None of them may pulse: a pulse a read can
+     *  reach is a refetch loop that paces itself on the settle window and runs
+     *  forever on no user action. */
+    read_verbs: ["_list", "_get", "_search", "_due"],
+  },
+  {
+    id: "research",
+    file: "research.rs",
+    variant: "Research",
+    boundary: "write_meta",
+    delete_boundaries: ["research_delete"],
+    frontend_module: "research.ts",
+    // `link_impl` ends by calling research_get, so research_get sits on the
+    // tail of a write path — pulsing from it would be the loop exactly.
+    read_verbs: ["_list", "_get", "_search", "_read_file", "_for_file", "_dir"],
   },
 ] as const;
 
@@ -95,10 +112,15 @@ describe("the store change channel", () => {
   it("pulses with the record's own ids, never derived from the path", () => {
     // Deriving scope from directory components is correct until a layout
     // changes, and then it is silently wrong. Every record carries both ids.
-    const body = fnBody(read("notes.rs"), "write_meta") ?? "";
-    expect(body).toContain("meta.project_id");
-    expect(body).toContain("meta.id");
-    expect(body).not.toContain("file_name()");
+    for (const store of STORES) {
+      const body = fnBody(read(store.file), store.boundary) ?? "";
+      expect(body, `${store.file}: ${store.boundary}`).toContain("meta.project_id");
+      expect(body, `${store.file}: ${store.boundary}`).toContain("meta.id");
+      expect(
+        body,
+        `${store.file}: ${store.boundary} derives a value from the path — use the record's fields`,
+      ).not.toContain("file_name()");
+    }
   });
 
   it("routes every Rust store variant to a frontend handler", () => {
@@ -110,18 +132,34 @@ describe("the store change channel", () => {
     expect(variants.length).toBeGreaterThan(0);
 
     const frontend = readFileSync(join(__dirname, "stores.ts"), "utf8");
-    const registered = readFileSync(join(__dirname, "notes.ts"), "utf8");
     expect(frontend).toContain("registerStore");
 
     for (const variant of variants) {
       const store = STORES.find((s) => s.variant === variant);
       expect(store, `change.rs has ${variant} but storeChangeGuard has no entry for it`).toBeTruthy();
-      // The handler is registered at module scope in the store's own module.
+      // Each store registers in its OWN module — read that file rather than a
+      // hardcoded one, or adding the second store fails a rule it satisfies.
+      const own = readFileSync(join(__dirname, store!.frontend_module), "utf8");
       expect(
-        registered.includes(`registerStore("${store!.id}"`) ||
-          frontend.includes(`registerStore("${store!.id}"`),
-        `Store::${variant} emits "store:change" but nothing in the frontend routes "${store!.id}" — ` +
+        own.includes(`registerStore("${store!.id}"`),
+        `Store::${variant} emits "store:change" but ${store!.frontend_module} does not route "${store!.id}" — ` +
           `the event would land nowhere, which looks exactly like the bug this channel closes`,
+      ).toBe(true);
+    }
+  });
+
+  it("arms every store's subscription at module scope, not on mount", () => {
+    // A subscription armed by a component's mount effect does not exist until
+    // that component has been rendered — and side panes are not mounted until
+    // their tab has been selected once. That is how research writes reached no
+    // surface at all until the user happened to click Research.
+    for (const store of STORES) {
+      const own = readFileSync(join(__dirname, store.frontend_module), "utf8");
+      const armedAtModuleScope = /^(watchStore\(\);|registerStore\()/m.test(own);
+      expect(
+        armedAtModuleScope,
+        `${store.frontend_module} registers "${store.id}" but never arms it at module scope, ` +
+          `so a surface that has not been opened yet hears nothing`,
       ).toBe(true);
     }
   });
@@ -129,12 +167,11 @@ describe("the store change channel", () => {
   it("never pulses from a function the read path can reach", () => {
     // A pulse inside a read is a loop: change -> refetch -> read -> change.
     // It paces itself on the settle window and never stops.
-    const readVerbs = ["_list", "_get", "_search", "_due"];
     for (const store of STORES) {
       const src = stripComments(read(store.file));
       for (const m of src.matchAll(/(^|\s)fn\s+(\w+)\s*[(<]/gm)) {
         const name = m[2];
-        if (!readVerbs.some((v) => name.includes(v))) continue;
+        if (!store.read_verbs.some((v) => name.includes(v))) continue;
         const body = fnBody(src, name) ?? "";
         expect(
           body.includes("change::pulse"),
