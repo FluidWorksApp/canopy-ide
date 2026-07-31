@@ -2223,7 +2223,9 @@ export interface DictationStatus {
 export interface DictationProgress {
   /** Which model this event is about. */
   model: string;
-  phase: "download" | "extract" | "load" | "ready" | "error";
+  /** "transcribe" arrives only for recordings long enough to be split into
+   *  chunks; `pct` is the share of chunks already through the model. */
+  phase: "download" | "extract" | "load" | "transcribe" | "ready" | "error";
   pct: number;
   message: string | null;
 }
