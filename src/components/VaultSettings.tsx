@@ -24,7 +24,7 @@ import {
   suggestedLabel,
   tint,
 } from "../vaultUi";
-import { Button } from "./ui";
+import { Button, TextInput } from "./ui";
 
 function Item({
   name,
@@ -119,7 +119,8 @@ function EntryForm({
 
       <div className="vault-grid">
         <Field label="Site">
-          <input
+          <TextInput
+            width="full"
             autoFocus={!startDomain}
             placeholder="github.com"
             value={domain}
@@ -134,14 +135,16 @@ function EntryForm({
           />
         </Field>
         <Field label="Name" hint="what you call it">
-          <input
+          <TextInput
+            width="full"
             placeholder={suggestedLabel(domain) || "GitHub"}
             value={label}
             onChange={(e) => setLabel(e.target.value)}
           />
         </Field>
         <Field label="Username">
-          <input
+          <TextInput
+            width="full"
             autoFocus={!!startDomain}
             placeholder="you@example.com"
             autoComplete="off"
@@ -151,7 +154,8 @@ function EntryForm({
         </Field>
         <Field label="Password" hint={entry ? "blank keeps the current one" : undefined}>
           <div className="vault-pw">
-            <input
+            <TextInput
+              width="full"
               type={reveal ? "text" : "password"}
               autoComplete="new-password"
               value={password}
@@ -188,8 +192,8 @@ function EntryForm({
           <span className="vault-consent-name">Let agents read this password</span>
           <span className="vault-consent-why">
             {readable
-              ? "An agent can be told this one in plain text, and anything it later reads from a page could try to talk it into repeating it. Right for a database URL or an SSH passphrase — nothing with a login form."
-              : "Off: Canopy types this into the page itself and the agent never sees it. Turn it on only for logins no browser form can take."}
+              ? "An agent can be told this one in plain text. Right for a database URL or an SSH passphrase — nothing with a login form."
+              : "Canopy types this into the page itself; the agent never sees it."}
           </span>
         </span>
       </label>
@@ -383,9 +387,8 @@ function ImportPanel({ onDone }: { onDone: () => void }) {
         <h4>Import from KeePass</h4>
       </div>
       <p className="vault-empty">
-        A .kdbx file, which is what KeePassXC saves and what Bitwarden, 1Password
-        and Strongbox export. Nothing already here is overwritten, and imported
-        logins are fill-only until you say otherwise.
+        A .kdbx file from KeePassXC, Bitwarden, 1Password or Strongbox. Nothing
+        here is overwritten, and imports are fill-only.
       </p>
       <div className="vault-add">
         <Button onClick={() => void pick()}>
@@ -395,7 +398,8 @@ function ImportPanel({ onDone }: { onDone: () => void }) {
       </div>
       {path && (
         <Field label="Password for that file">
-          <input
+          <TextInput
+            width="full"
             autoFocus
             type="password"
             value={password}
@@ -479,7 +483,7 @@ export function VaultSettings() {
     return (
       <Item
         name="Create a vault"
-        desc="Logins for the built-in browser, encrypted on this machine with a passphrase only you know. There is no recovery — forget it and the vault is gone, the same trade every password manager makes."
+        desc="Logins for the built-in browser, encrypted with a passphrase only you know. There is no recovery."
       >
         <form
           className="vault-card"
@@ -490,7 +494,8 @@ export function VaultSettings() {
         >
           <div className="vault-grid">
             <Field label="Passphrase" hint="8 characters or more">
-              <input
+              <TextInput
+                width="full"
                 type="password"
                 autoComplete="new-password"
                 value={passphrase}
@@ -498,7 +503,8 @@ export function VaultSettings() {
               />
             </Field>
             <Field label="Again">
-              <input
+              <TextInput
+                width="full"
                 type="password"
                 autoComplete="new-password"
                 value={confirm}
@@ -533,7 +539,8 @@ export function VaultSettings() {
           }}
         >
           <Field label="Passphrase">
-            <input
+            <TextInput
+              width="full"
               autoFocus
               type="password"
               // The webview will offer to remember this otherwise — the one
@@ -562,7 +569,7 @@ export function VaultSettings() {
     <>
       <Item
         name="Logins"
-        desc="Canopy types these into the built-in browser. An agent driving that browser signs in with them without ever being told the password."
+        desc="Canopy types these into the browser; the agent never sees the password."
       >
         <div className="vault-list">
           {items.map((item) => (
@@ -606,7 +613,7 @@ export function VaultSettings() {
 
       <Item
         name="Bring in an existing set"
-        desc="If you already keep passwords somewhere else, export them as .kdbx and import that — rather than typing them all in again."
+        desc="Export from your current manager as .kdbx and import it here."
       >
         {importing ? (
           <ImportPanel

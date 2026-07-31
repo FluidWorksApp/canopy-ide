@@ -5,6 +5,7 @@
 export { Button, type ButtonProps, type ButtonSize, type ButtonVariant } from "./Button";
 export { Checkbox, type CheckboxProps } from "./Checkbox";
 export { Field, Row, type ControlWidth, widthClass } from "./Field";
+export { Radio, type RadioProps } from "./Radio";
 export { Select, type SelectProps } from "./Select";
 export { Stepper, type StepperProps } from "./Stepper";
 export { TextInput, type TextInputProps } from "./TextInput";

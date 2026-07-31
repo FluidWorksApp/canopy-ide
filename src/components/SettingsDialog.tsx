@@ -25,7 +25,7 @@ import {
 } from "../settings";
 import { MASCOTS } from "../mascots";
 import { Mascot } from "./Mascot";
-import { Button, Checkbox, Field, Row, Segmented, Select, Stepper, Switch, TextInput } from "./ui";
+import { Button, Checkbox, Field, Radio, Row, Segmented, Select, Stepper, Switch, TextInput } from "./ui";
 import { drawWave } from "../waveStyles";
 import { LINK_CHORD } from "../terminalLinks";
 import { useEscape } from "../useEscape";
@@ -650,8 +650,7 @@ function AgentAccounts({
 
       <p className="cli-account-note">
         Claude Code, Codex, OpenCode and Amp can hold a second login. Antigravity,
-        oh-my-pi and Aider can't — they keep credentials somewhere a directory
-        can't isolate, so they always use the account they're already signed into.
+        oh-my-pi and Aider always use the account they're signed into.
       </p>
     </div>
   );
@@ -781,7 +780,7 @@ function CustomClis({
                 className="cli-bin-input"
                 placeholder="Resume args, e.g. --resume {id}"
                 spellCheck={false}
-                title="How this CLI reopens a session by id. Leave blank if it can't — a flag that doesn't exist starts a fresh session while Canopy says the conversation was restored."
+                title="How this CLI reopens a session by id. Leave blank if it can't."
                 value={c.resumeArgs ?? ""}
                 onChange={(e) => edit(i, { resumeArgs: e.target.value })}
                 onBlur={(e) =>
@@ -792,7 +791,7 @@ function CustomClis({
                 className="cli-bin-input"
                 placeholder="Prompt args, e.g. {prompt}"
                 spellCheck={false}
-                title="How this CLI takes an opening prompt and stays interactive. Leave blank to have Canopy launch it bare and type the prompt in instead."
+                title="How this CLI takes an opening prompt. Leave blank to type it in instead."
                 value={c.promptArgs ?? ""}
                 onChange={(e) => edit(i, { promptArgs: e.target.value })}
                 onBlur={(e) =>
@@ -1044,7 +1043,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 <Item
                   name="Skin"
                   tag="Applies immediately"
-                  desc="Colours for the whole app. Nothing re-renders — one attribute flips."
+                  desc="Colours for the whole app."
                 >
                   <div className="skin-grid">
                     {THEMES.map((t) => {
@@ -1100,7 +1099,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 <Item
                   name="Mascot"
                   tag="Applies immediately"
-                  desc="The face Canopy uses to say what it's doing — in the agents list, notifications, empty screens and crash reports."
+                  desc="The face Canopy shows in agents, notifications and empty screens."
                 >
                   <div className="mascot-grid">
                     {MASCOTS.map((m) => (
@@ -1132,45 +1131,27 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 </Item>
                 <Item
                   name="Side panel"
-                  desc="How the file tree, changes and the rest of the rail's panels come and go."
+                  desc="How the rail's panels open and close."
                 >
                   <div className="set-checks">
-                    <label className="set-inline-check">
-                      <input
-                        type="checkbox"
-                        checked={s.sidebarHover}
-                        onChange={(e) => patch({ sidebarHover: e.target.checked })}
-                      />
-                      <span>
-                        Hover to view
-                        <em>Rest on a rail icon and its panel opens; otherwise click to open.</em>
-                      </span>
-                    </label>
-                    <label className="set-inline-check">
-                      <input
-                        type="checkbox"
-                        checked={s.sidebarClickOutsideCloses}
-                        onChange={(e) => patch({ sidebarClickOutsideCloses: e.target.checked })}
-                      />
-                      <span>
-                        Click outside to close
-                        <em>A click in the editor puts the panel away.</em>
-                      </span>
-                    </label>
-                    <label className="set-inline-check">
-                      <input
-                        type="checkbox"
-                        checked={s.sidebarOverlay}
-                        onChange={(e) => patch({ sidebarOverlay: e.target.checked })}
-                      />
-                      <span>
-                        Sidebar as overlay
-                        <em>
-                          The panel floats over your work. Off docks it in a column of its own,
-                          which moves the editor across each time it opens.
-                        </em>
-                      </span>
-                    </label>
+                    <Checkbox
+                      checked={s.sidebarHover}
+                      onChange={(v) => patch({ sidebarHover: v })}
+                      label="Hover to view"
+                      hint="Rest on a rail icon to open its panel."
+                    />
+                    <Checkbox
+                      checked={s.sidebarClickOutsideCloses}
+                      onChange={(v) => patch({ sidebarClickOutsideCloses: v })}
+                      label="Click outside to close"
+                      hint="A click in the editor puts the panel away."
+                    />
+                    <Checkbox
+                      checked={s.sidebarOverlay}
+                      onChange={(v) => patch({ sidebarOverlay: v })}
+                      label="Sidebar as overlay"
+                      hint="Floats over your work instead of docking beside it."
+                    />
                   </div>
                 </Item>
               </>
@@ -1180,7 +1161,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
               <>
                 <Item
                   name="Default agent"
-                  desc="The CLI the primary Start button launches; you can pick another per ticket."
+                  desc="What the Start button launches; pick another per ticket."
                 >
                   {/* Chips, not cards: picking a CLI is a one-line choice, and
                       the card grid took half the page to say it. */}
@@ -1199,7 +1180,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 </Item>
                 <Item
                   name="CLI commands"
-                  desc="What each CLI is called here. Leave blank unless yours was renamed or lives off your PATH."
+                  desc="Leave blank unless yours was renamed or lives off your PATH."
                 >
                   <AgentBinaries
                     value={s.cliBins}
@@ -1213,7 +1194,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 </Item>
                 <Item
                   name="Accounts"
-                  desc="More than one login per CLI — work and personal, side by side. Pick which one a launch uses from the ＋ menu."
+                  desc="Several logins per CLI. Pick one from the ＋ menu."
                 >
                   <AgentAccounts
                     onRunInTerminal={(command, title, env, profile) =>
@@ -1223,7 +1204,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 </Item>
                 <Item
                   name="Other CLIs"
-                  desc="Agents Canopy ships no entry for. Each one joins the launcher; no installer, and hooks stay yours to wire."
+                  desc="Agents Canopy ships no entry for. Each one joins the launcher."
                 >
                   <CustomClis
                     value={s.customClis}
@@ -1235,7 +1216,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 </Item>
                 <Item
                   name="Tools available"
-                  desc="What MCP-capable agents running in a Canopy terminal can do through the built-in MCP server. Switching one off removes it from the agent's tool list entirely — it costs no context and can't be called."
+                  desc="What agents can do through Canopy's MCP server. Off means never offered."
                 >
                   <div className="tool-groups">
                     <div className="tool-bulk">
@@ -1306,23 +1287,22 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 </Item>
                 <Item
                   name="Stack tabs by status"
-                  desc="Fold the agent strip into three stacks — Needs you, Working, Idle. Tabs slide between them as their agent changes state; click a stack to fold it away or deal it back out. Idle starts folded, anything asking for you unfolds itself, and the tab you're on is never folded away."
+                  desc="Fold the agent strip into three stacks: Needs you, Working, Idle."
                 >
-                  <label className="set-inline-check">
-                    <input
-                      type="checkbox"
-                      checked={s.groupTabsByStatus}
-                      onChange={(e) => patch({ groupTabsByStatus: e.target.checked })}
-                    />
-                    <span>Keep agents that need you on the left, quiet ones stacked away</span>
-                  </label>
+                  <Checkbox
+                    checked={s.groupTabsByStatus}
+                    onChange={(v) => patch({ groupTabsByStatus: v })}
+                    label="Keep agents that need you on the left, quiet ones stacked away"
+                  />
                 </Item>
                 <Item
                   name="Settle into Idle after"
-                  desc="Seconds of quiet before a tab drops into the Idle group. Anything asking for you moves out immediately, whatever this is set to."
+                  desc="Seconds of quiet before a tab drops into Idle."
                 >
-                  <input
+                  <TextInput
                     type="number"
+                    width="xs"
+                    aria-label="Settle into Idle after"
                     min={0}
                     max={3600}
                     step={5}
@@ -1337,52 +1317,45 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 </Item>
                 <Item
                   name="Hibernate idle agents"
-                  desc="Auto-reclaim memory from idle/ended agents past the limit below; they stay resumable."
+                  desc="Reclaim memory from idle agents past the limit below; they stay resumable."
                 >
-                  <label className="set-inline-check">
-                    <input
-                      type="checkbox"
-                      checked={s.autoHibernate}
-                      onChange={(e) => patch({ autoHibernate: e.target.checked })}
-                    />
-                    <span>Hibernate the stalest idle agents past the limit</span>
-                  </label>
+                  <Checkbox
+                    checked={s.autoHibernate}
+                    onChange={(v) => patch({ autoHibernate: v })}
+                    label="Hibernate the stalest idle agents past the limit"
+                  />
                 </Item>
                 <Item
                   name="Live agents per project"
                   desc="Agent terminals to keep before hibernation reclaims the stalest idle ones."
                 >
-                  <input
-                    type="number"
+                  <Stepper
+                    aria-label="Live agents per project"
+                    value={s.maxLiveAgents}
                     min={1}
                     max={64}
-                    value={s.maxLiveAgents}
                     disabled={!s.autoHibernate}
-                    onChange={(e) => {
-                      const v = Number(e.target.value);
-                      if (Number.isFinite(v) && v >= 1) patch({ maxLiveAgents: Math.floor(v) });
-                    }}
+                    onChange={(v) => patch({ maxLiveAgents: v })}
                   />
                 </Item>
                 <Item
                   name="Set up new workspaces"
-                  desc="Carry the gitignored config across and clone the dependencies, so a new workspace can build the moment it exists."
+                  desc="Copy the gitignored config and install dependencies, so it builds right away."
                 >
-                  <label className="set-inline-check">
-                    <input
-                      type="checkbox"
-                      checked={s.workspaceBootstrap}
-                      onChange={(e) => patch({ workspaceBootstrap: e.target.checked })}
-                    />
-                    <span>Prepare a workspace when it's created</span>
-                  </label>
+                  <Checkbox
+                    checked={s.workspaceBootstrap}
+                    onChange={(v) => patch({ workspaceBootstrap: v })}
+                    label="Prepare a workspace when it's created"
+                  />
                 </Item>
                 <Item
                   name="Workspace ports"
-                  desc="What your main checkout serves on. Each workspace is held the next free number up, so several branches can run at once."
+                  desc="What your main checkout serves on; each workspace takes the next free port."
                 >
-                  <input
+                  <TextInput
                     type="number"
+                    width="sm"
+                    aria-label="Workspace ports"
                     min={1024}
                     max={65000}
                     value={s.workspaceBasePort}
@@ -1401,7 +1374,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 <Item
                   name="Font and cursor"
                   tag="New files only"
-                  desc="Monospace fonts found on this machine. Applies to files opened from now on."
+                  desc="Monospace fonts found on this machine."
                 >
                   {typeRow(
                     "editorFontFamily",
@@ -1412,7 +1385,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 </Item>
                 <Item
                   name="File associations"
-                  desc="Which language each file type is highlighted as. Open files re-colour immediately."
+                  desc="Which language each file type is highlighted as."
                 >
                   <FileAssociations
                     value={s.fileAssociations}
@@ -1427,7 +1400,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 <Item
                   name="Font and cursor"
                   tag="New terminals only"
-                  desc="Monospace fonts found on this machine. Applies to terminals opened from now on."
+                  desc="Monospace fonts found on this machine."
                 >
                   {typeRow(
                     "terminalFontFamily",
@@ -1438,7 +1411,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 </Item>
                 <Item
                   name="Link click"
-                  desc="How to follow a URL in terminal output. Requiring the modifier keeps a click on a link an agent printed from navigating."
+                  desc="How to follow a URL an agent printed."
                 >
                   <Select
                     width="lg"
@@ -1455,8 +1428,10 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   name="Scrollback"
                   desc="Lines of history each terminal keeps; applies to new terminals."
                 >
-                  <input
+                  <TextInput
                     type="number"
+                    width="sm"
+                    aria-label="Scrollback"
                     min={1000}
                     max={100000}
                     step={1000}
@@ -1482,16 +1457,13 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
               <>
                 <Item
                   name="Crash reporting"
-                  desc="A crashed panel always offers to file a GitHub issue — public, under your own account, and shown to you in full before anything is sent. This setting governs the other route: an anonymous email to the maintainers with no name attached, which is also what a native crash found on the next launch uses. Either way the report is the error and stack, app version and your OS, and nothing else."
+                  desc="An anonymous email to the maintainers — the error and stack, app version and OS. Filing a GitHub issue instead is always offered."
                 >
-                  <label className="set-inline-check">
-                    <input
-                      type="checkbox"
-                      checked={s.crashReporting}
-                      onChange={(e) => patch({ crashReporting: e.target.checked })}
-                    />
-                    <span>Offer to send anonymous crash reports</span>
-                  </label>
+                  <Checkbox
+                    checked={s.crashReporting}
+                    onChange={(v) => patch({ crashReporting: v })}
+                    label="Offer to send anonymous crash reports"
+                  />
                 </Item>
               </>
             )}
@@ -1500,16 +1472,13 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
               <>
                 <Item
                   name="Links"
-                  desc="Where a link goes when you click one — in a commit message, an issue body, rendered markdown, or a terminal. Opening it here keeps you in the app, in a preview tab you can close; the OS browser is a window you have to find your way back from. Either way, controls that say they leave (Support, Open on GitHub, filing an issue) still do, and a URL that no project can take falls back to the OS browser rather than doing nothing."
+                  desc="Where a link opens: a preview tab here, or your OS browser."
                 >
-                  <label className="set-inline-check">
-                    <input
-                      type="checkbox"
-                      checked={s.openLinksInApp}
-                      onChange={(e) => patch({ openLinksInApp: e.target.checked })}
-                    />
-                    <span>Open links in Canopy</span>
-                  </label>
+                  <Checkbox
+                    checked={s.openLinksInApp}
+                    onChange={(v) => patch({ openLinksInApp: v })}
+                    label="Open links in Canopy"
+                  />
                 </Item>
                 <Item
                   name="Engine"
@@ -1517,49 +1486,32 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 >
                   {browserOk ? (
                     <div className="set-checks">
-                      <label className="set-inline-check">
-                        <input
-                          type="radio"
-                          name="browser-engine"
-                          checked={s.browserEngine === "proxy"}
-                          onChange={() => patch({ browserEngine: "proxy" })}
-                        />
-                        <span>
-                          Loopback proxy
-                          <em>Always visible, always screenshot-able. One shared session, and it
-                          logs every request it forwards.</em>
-                        </span>
-                      </label>
-                      <label className="set-inline-check">
-                        <input
-                          type="radio"
-                          name="browser-engine"
-                          checked={s.browserEngine === "webview"}
-                          onChange={() => patch({ browserEngine: "webview" })}
-                        />
-                        <span>
-                          Embedded browser
-                          <em>Real origins and real logins, kept across restarts. Disappears while
-                          a panel or menu covers it.</em>
-                        </span>
-                      </label>
-                      <label className="set-inline-check">
-                        <input
-                          type="radio"
-                          name="browser-engine"
-                          disabled={browsers.length === 0 && !s.chromiumPath.trim()}
-                          checked={s.browserEngine === "chromium"}
-                          onChange={() => patch({ browserEngine: "chromium" })}
-                        />
-                        <span>
-                          Chrome or Chromium
-                          <em>
-                            {browsers.length || s.chromiumPath.trim()
-                              ? "Drives a browser you already have, over its debugging protocol. Its own profile — logins here are separate from the embedded browser's."
-                              : "No Chrome, Chromium, Edge or Brave found. Install one, or point Canopy at a binary below."}
-                          </em>
-                        </span>
-                      </label>
+                      <Radio
+                        name="browser-engine"
+                        checked={s.browserEngine === "proxy"}
+                        onChange={() => patch({ browserEngine: "proxy" })}
+                        label="Loopback proxy"
+                        hint="Always visible and screenshot-able. One shared session."
+                      />
+                      <Radio
+                        name="browser-engine"
+                        checked={s.browserEngine === "webview"}
+                        onChange={() => patch({ browserEngine: "webview" })}
+                        label="Embedded browser"
+                        hint="Real logins, kept across restarts. Hidden while a panel covers it."
+                      />
+                      <Radio
+                        name="browser-engine"
+                        disabled={browsers.length === 0 && !s.chromiumPath.trim()}
+                        checked={s.browserEngine === "chromium"}
+                        onChange={() => patch({ browserEngine: "chromium" })}
+                        label="Chrome or Chromium"
+                        hint={
+                          browsers.length || s.chromiumPath.trim()
+                            ? "Drives a browser you already have, on a profile of its own."
+                            : "None found. Install one, or point Canopy at a binary below."
+                        }
+                      />
                       <p className="set-item-desc">
                         Open tabs keep the engine they started on.
                       </p>
@@ -1572,10 +1524,11 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 </Item>
                 <Item
                   name="Chrome binary"
-                  desc="Which browser the Chrome engine drives. Canopy never downloads one — it uses what you have."
+                  desc="Which browser the Chrome engine drives. Canopy never downloads one."
                 >
                   <div className="set-inline">
-                    <select
+                    <Select
+                      width="lg"
                       value={s.chromiumPath}
                       onChange={(e) => patch({ chromiumPath: e.target.value })}
                     >
@@ -1589,7 +1542,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                           {b.name}
                         </option>
                       ))}
-                    </select>
+                    </Select>
                     <Button
                       onClick={() => {
                         void ipc.chromiumDetect().then(setBrowsers);
@@ -1600,9 +1553,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     </Button>
                   </div>
                   <p className="set-item-desc">
-                    Canopy launches it on a profile of its own, with an ephemeral
-                    debugging port bound to this machine — never your everyday Chrome
-                    profile, whose cookies that port would otherwise expose.
+                    Launched on a profile of its own, never your everyday one.
                   </p>
                 </Item>
                 <Item
@@ -1696,7 +1647,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                               ? "Checking the GitHub CLI…"
                               : "Couldn't check the GitHub CLI."
                             : !gh.installed
-                              ? "The GitHub CLI (gh) isn't installed. Canopy uses it for issues and pull requests — no token of its own."
+                              ? "The GitHub CLI (gh) isn't installed; Canopy uses it for issues and pull requests."
                               : gh.authenticated
                                 ? `Signed in as ${gh.account}${gh.host ? ` on ${gh.host}` : ""} · ${gh.path}`
                                 : `Installed at ${gh.path}, but not signed in.${gh.detail ? ` ${gh.detail}` : ""}`}
@@ -1742,17 +1693,15 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                           </Button>
                         </div>
                         <div className="set-item-desc set-note">
-                          Sign-in runs in a terminal because GitHub's flow is
-                          interactive — Canopy never sees the token; gh stores
-                          it in your keychain.
+                          Sign-in runs in a terminal; gh keeps the token in your
+                          keychain, Canopy never sees it.
                         </div>
                       </>
                     )}
                   </div>
                 ))}
                 <div className="set-item-desc" data-v={keysVersion}>
-                  Issues from connected trackers appear unified in the ◎ Issues
-                  panel in the sidebar.
+                  Connected trackers show up in the ◎ Issues panel.
                 </div>
               </>
             )}
@@ -2149,7 +2098,7 @@ function RemoteSettings({
 
   return (
     <>
-      <Item name="Remote access" desc="Drive your agents from your phone. A PIN unlocks a control panel; off by default.">
+      <Item name="Remote access" desc="Drive your agents from your phone, behind a PIN.">
         <div className="set-inline">
           <Switch
             checked={on}
@@ -2180,7 +2129,7 @@ function RemoteSettings({
           </Item>
 
           {scope === "internet" && (
-            <Item name="Public link" desc="One tunnel, loads in any browser — shared with internet team sessions.">
+            <Item name="Public link" desc="One tunnel, shared with internet team sessions.">
               <div style={{ display: "grid", gap: 12, justifyItems: "start", width: "100%" }}>
                 <Segmented
                   aria-label="Tunnel provider"
@@ -2201,16 +2150,15 @@ function RemoteSettings({
                 </div>
 
                 {prov.needsToken && (
-                  <input
+                  <TextInput
                     type="password"
-                    className="set-wide"
+                    width="lg"
                     placeholder={prov.tokenHelp ?? "ngrok authtoken"}
                     value={token}
                     onChange={(e) => {
                       setToken(e.target.value);
                       setTrackerKey("ngrok", e.target.value.trim());
                     }}
-                    style={{ maxWidth: 380 }}
                   />
                 )}
 
@@ -2370,7 +2318,7 @@ function SpotSearchSettings({
     <>
       <Item
         name={`What ${format("spot-search")} searches`}
-        desc="Every kind of result the omnibox can offer. Switching one off only stops it being asked — nothing is deleted, and it comes back the moment you switch it on."
+        desc="Which kinds of result the omnibox offers. Nothing is deleted when you switch one off."
       >
         <div className="spot-set-list">
           {sources.map((src) => {
@@ -2396,9 +2344,9 @@ function SpotSearchSettings({
 
       <Item
         name="Conversations to index"
-        desc={`Canopy reads each agent CLI's own session files and keeps a full-text index of them, so ${format(
+        desc={`Full-text search over each CLI's own session files, so ${format(
           "spot-search",
-        )} can find a conversation by something said in it. Switching an agent off deletes what it already indexed, on the next search.`}
+        )} finds a conversation by something said in it. Off deletes what it indexed.`}
       >
         <div className="spot-set-list" style={{ ["--spot-set-name-w" as string]: "150px" }}>
           {INDEXABLE_AGENTS.map((agent) => {
@@ -2428,49 +2376,44 @@ function SpotSearchSettings({
             );
           })}
           <p className="set-item-desc">
-            Amp is not listed because there is nothing local to read: its threads
-            live on Sourcegraph's servers.
+            Amp isn't listed — its threads live on Sourcegraph's servers.
           </p>
         </div>
       </Item>
 
       <Item
         name="Terminal scrollback"
-        desc="What your live terminals have printed, searchable while they are open. A terminal that closes is dropped from the index — its pty is gone, so there would be nothing for the row to open."
+        desc="Searchable while a terminal is open; dropped when it closes."
       >
-        <label className="set-inline-check">
-          <input
-            type="checkbox"
-            checked={s.spotIndexTerminals}
-            onChange={(e) => patch({ spotIndexTerminals: e.target.checked })}
-          />
-          <span>Index open terminals' scrollback</span>
-        </label>
+        <Checkbox
+          checked={s.spotIndexTerminals}
+          onChange={(v) => patch({ spotIndexTerminals: v })}
+          label="Index open terminals' scrollback"
+        />
       </Item>
 
       <Item
         name="Scope"
-        desc="By default the index answers for the project the palette is floating over. Widen it and a search reaches every project on this machine — useful when you remember the conversation but not where it happened."
+        desc="How far a search reaches: this project, or every one on this machine."
       >
-        <label className="set-inline-check">
-          <input
-            type="checkbox"
-            checked={s.spotSearchAllProjects}
-            onChange={(e) => patch({ spotSearchAllProjects: e.target.checked })}
-          />
-          <span>Search every project, not just this one</span>
-        </label>
+        <Checkbox
+          checked={s.spotSearchAllProjects}
+          onChange={(v) => patch({ spotSearchAllProjects: v })}
+          label="Search every project, not just this one"
+        />
       </Item>
 
       <Item
         name="Keep history for"
-        desc={`Indexed messages older than this are dropped. Zero keeps everything — the transcripts on disk are the real record, and this only decides how far back ${format(
+        desc={`How far back ${format(
           "spot-search",
-        )} can see.`}
+        )} can see. Older messages are dropped from the index; zero keeps everything.`}
       >
         <div className="spot-set-days">
-          <input
+          <TextInput
             type="number"
+            width="xs"
+            aria-label="Keep history for"
             min={0}
             max={3650}
             step={30}
@@ -2489,7 +2432,7 @@ function SpotSearchSettings({
 
       <Item
         name="The index"
-        desc="A SQLite database in ~/.canopy. Everything in it is derived from files that still exist, so clearing it costs recall until the next search and nothing else."
+        desc="A SQLite database in ~/.canopy, rebuilt from files that still exist."
       >
         <div className="spot-set-index">
           <p className="set-item-desc">
@@ -2502,8 +2445,8 @@ function SpotSearchSettings({
           {pending !== null && (
             <p className="set-item-desc">
               {pending > 0
-                ? `${fmtBytes(pending)} of transcript still unread — the count grows until this reaches zero. Canopy keeps reading in the background; this button only hurries it along.`
-                : "Everything on disk has been read; the count only moves when your agents write more."}
+                ? `${fmtBytes(pending)} of transcript still unread — Canopy keeps reading in the background.`
+                : "Everything on disk has been read."}
             </p>
           )}
           <div className="tool-bulk">
@@ -2552,10 +2495,10 @@ function SpotSearchSettings({
  *  at all — which is worth saying, because otherwise someone goes looking for
  *  a switch that isn't there until the first capture. */
 const PASTEBOARD_ACCESS: Record<string, string> = {
-  default: "macOS hasn't asked yet — it will, once, the first time a copy is captured.",
-  ask: "macOS asks before each programmatic read. Set Canopy to “Always Allow” in System Settings → Privacy & Security → Pasteboard to stop the prompts.",
-  allow: "macOS is set to always allow Canopy the pasteboard.",
-  deny: "macOS is set to always deny Canopy the pasteboard, so nothing can be captured. Change it in System Settings → Privacy & Security → Pasteboard.",
+  default: "macOS will ask once, the first time a copy is captured.",
+  ask: "macOS asks before each read. Set Canopy to “Always Allow” in System Settings → Privacy & Security → Pasteboard.",
+  allow: "macOS always allows Canopy the pasteboard.",
+  deny: "macOS denies Canopy the pasteboard, so nothing is captured. Change it in System Settings → Privacy & Security → Pasteboard.",
 };
 
 /**
@@ -2586,7 +2529,7 @@ function ClipboardSettings({
     return (
       <Item
         name="Clipboard history"
-        desc="Not available on this platform yet. Capture is a native pasteboard watcher, and only the macOS one has been verified against a running Canopy — a watcher that half-works would be worse than none."
+        desc="Not available on this platform yet — capture is macOS-only so far."
       >
         <span className="set-item-desc">Unavailable here.</span>
       </Item>
@@ -2597,67 +2540,53 @@ function ClipboardSettings({
     <>
       <Item
         name="Keep what I copy"
-        desc="Every copy — from a terminal, the editor, or any other app — is kept and offered back under Clipboard in ⌘K. Enter puts it on the clipboard, and straight into the terminal if one is focused."
+        desc="Every copy is kept and offered back under Clipboard in ⌘K."
       >
-        <label className="set-inline-check">
-          <input
-            type="checkbox"
-            checked={s.clipboardHistory}
-            onChange={(e) => patch({ clipboardHistory: e.target.checked })}
-          />
-          <span>Keep a clipboard history</span>
-        </label>
+        <Checkbox
+          checked={s.clipboardHistory}
+          onChange={(v) => patch({ clipboardHistory: v })}
+          label="Keep a clipboard history"
+        />
         {status?.access && (
           <p className="set-item-desc">
             {PASTEBOARD_ACCESS[status.access] ?? ""}
           </p>
         )}
         <p className="set-item-desc">
-          Canopy watches a counter that says the clipboard changed, and only
-          reads the contents when it moves — at most once per copy, never on a
-          timer.
+          Read only when the clipboard changes — never on a timer.
         </p>
       </Item>
 
       <Item
         name="Passwords and keys"
-        desc="Terminals are where most copying in this app happens, and what comes out of one is often a token. A clip that looks like a credential is skipped outright — not stored and hidden, never written down at all."
+        desc="A clip that looks like a credential is never written down at all."
       >
-        <label className="set-inline-check">
-          <input
-            type="checkbox"
-            checked={s.clipboardSkipSecrets}
-            onChange={(e) => patch({ clipboardSkipSecrets: e.target.checked })}
-          />
-          <span>Skip clips that look like credentials</span>
-        </label>
+        <Checkbox
+          checked={s.clipboardSkipSecrets}
+          onChange={(v) => patch({ clipboardSkipSecrets: v })}
+          label="Skip clips that look like credentials"
+        />
         <p className="set-item-desc">
-          Known key prefixes (<code>sk-</code>, <code>ghp_</code>,{" "}
-          <code>AKIA</code>…), private keys, <code>TOKEN=</code> lines, and
-          long high-entropy tokens. Paths, URLs, commit SHAs and prose are
-          deliberately exempt — those are what a clipboard is for.
+          Key prefixes (<code>sk-</code>, <code>ghp_</code>, <code>AKIA</code>…),
+          private keys, <code>TOKEN=</code> lines and long high-entropy tokens.
+          Paths, URLs and prose are exempt.
         </p>
         <p className="set-item-desc">
-          Clips a password manager marks concealed are skipped whatever this
-          says: those are recognised from the clip's type, without reading it.
+          Clips marked concealed by a password manager are always skipped.
         </p>
       </Item>
 
       <Item
         name="Where it's kept"
-        desc="On disk the history survives a restart, in a file only your account can read (~/.canopy/clipboard.sqlite, mode 0600). It is not encrypted — nothing in Canopy is encrypted at rest, and a key the app can unlock by itself at launch would not be much of one."
+        desc="Kept in ~/.canopy/clipboard.sqlite — your account only, and not encrypted."
       >
-        <label className="set-inline-check">
-          <input
-            type="checkbox"
-            checked={s.clipboardPersist}
-            onChange={(e) => patch({ clipboardPersist: e.target.checked })}
-          />
-          <span>Keep the history on disk between launches</span>
-        </label>
+        <Checkbox
+          checked={s.clipboardPersist}
+          onChange={(v) => patch({ clipboardPersist: v })}
+          label="Keep the history on disk between launches"
+        />
         <p className="set-item-desc">
-          Switching this off deletes the file and keeps the history in memory
-          for this session only.
+          Off deletes the file and keeps this session in memory only.
         </p>
       </Item>
 
@@ -2666,8 +2595,10 @@ function ClipboardSettings({
         desc="The newest clips, up to this many. Older ones fall off the end."
       >
         <div className="spot-set-days">
-          <input
+          <TextInput
             type="number"
+            width="xs"
+            aria-label="Clips to keep"
             min={10}
             max={2000}
             step={50}
@@ -2681,8 +2612,10 @@ function ClipboardSettings({
           <span className="set-item-desc">clips</span>
         </div>
         <div className="spot-set-days">
-          <input
+          <TextInput
             type="number"
+            width="xs"
+            aria-label="Days to keep clips"
             min={0}
             max={365}
             step={7}
@@ -2704,7 +2637,7 @@ function ClipboardSettings({
 
       <Item
         name="The history"
-        desc="Unlike the search index, this is the only copy of what's in it — nothing here can be rebuilt from a file that still exists, so clearing it is permanent."
+        desc="The only copy — nothing here can be rebuilt, so clearing it is permanent."
       >
         <div className="spot-set-index">
           <p className="set-item-desc">
@@ -2817,7 +2750,7 @@ function DictationSettings() {
           name="Key"
           desc={
             s.dictationTriggerMode === "hold"
-              ? "Hold to talk, let go to insert. Double-tap to keep it open hands-free."
+              ? "Hold to talk, let go to insert. Double-tap for hands-free."
               : "Two quick taps start recording, one tap ends it."
           }
         >
@@ -2837,16 +2770,15 @@ function DictationSettings() {
 
       {s.dictationTriggerMode !== "combo" && (
         <p className="set-note">
-          {modKeyLabel(s.dictationModKey)} still works as a modifier — dictation only
-          fires when nothing else is pressed with it.
-          {s.dictationModKey === "CapsLock" &&
-            " Caps Lock latches, so caps stay on while you speak."}
+          {modKeyLabel(s.dictationModKey)} still works as a modifier — dictation
+          fires only when nothing else is pressed with it.
+          {s.dictationModKey === "CapsLock" && " Caps Lock still latches."}
         </p>
       )}
 
       <Item
         name="Recent dictation"
-        desc="Hold it and tap to walk back through what you said; let go to paste. Tap once and release for the last one."
+        desc="Hold and tap to walk back through what you said; let go to paste."
       >
         <HotkeyCapture
           value={s.dictationHistoryHotkey}
@@ -2856,30 +2788,24 @@ function DictationSettings() {
 
       <Item
         name="Live preview"
-        desc="Words appear as you speak and correct themselves. Costs a CPU core; the final text is the same either way."
+        desc="Words appear as you speak. Costs a CPU core; the final text is the same."
       >
-        <label className="set-inline-check">
-          <input
-            type="checkbox"
-            checked={s.dictationStreaming}
-            onChange={(e) => patch({ dictationStreaming: e.target.checked })}
-          />
-          <span>Stream as I talk</span>
-        </label>
+        <Checkbox
+          checked={s.dictationStreaming}
+          onChange={(v) => patch({ dictationStreaming: v })}
+          label="Stream as I talk"
+        />
       </Item>
 
       <Item
         name="Mute while recording"
-        desc="Silences the system output while the mic is open, so audio doesn't reach the transcript. macOS only."
+        desc="Silences system audio while the mic is open. macOS only."
       >
-        <label className="set-inline-check">
-          <input
-            type="checkbox"
-            checked={s.dictationMuteOutput}
-            onChange={(e) => patch({ dictationMuteOutput: e.target.checked })}
-          />
-          <span>Mute other audio</span>
-        </label>
+        <Checkbox
+          checked={s.dictationMuteOutput}
+          onChange={(v) => patch({ dictationMuteOutput: v })}
+          label="Mute other audio"
+        />
       </Item>
 
       <Item name="Indicator" desc="The visualiser drawn in the recording pill.">
@@ -2970,7 +2896,7 @@ function DictationSettings() {
           name="Language"
           desc={
             active.multilingual
-              ? "Auto-detect works well; pick a language to bias transcription when you always dictate in one."
+              ? "Auto-detect works well; pick one to bias transcription."
               : "This model is English-only."
           }
         >
