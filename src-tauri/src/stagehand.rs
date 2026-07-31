@@ -147,21 +147,24 @@ async fn chat_completions(
         "no CLI configured".to_string(),
     ))?;
 
-    let out = tokio::time::timeout(
-        COMPLETION_TIMEOUT,
-        tokio::process::Command::new(exe)
-            .args(args)
-            .stdin(Stdio::null())
-            .output(),
-    )
-    .await
-    .map_err(|_| {
-        (
-            StatusCode::GATEWAY_TIMEOUT,
-            "the CLI didn't answer in time".to_string(),
-        )
-    })?
-    .map_err(|e| (StatusCode::BAD_GATEWAY, format!("could not run {exe}: {e}")))?;
+    // `exe` is the user's own CLI by bare name, built by stagehand.ts. A
+    // GUI-launched app cannot find it, and cannot find the tools it goes on to
+    // run either — the same pair of problems the companion had. See procenv.
+    let resolved = crate::procenv::resolve_command(exe);
+    let mut cmd = tokio::process::Command::new(&resolved);
+    cmd.args(args).stdin(Stdio::null());
+    if let Some(path) = crate::procenv::child_path() {
+        cmd.env("PATH", path);
+    }
+    let out = tokio::time::timeout(COMPLETION_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::GATEWAY_TIMEOUT,
+                "the CLI didn't answer in time".to_string(),
+            )
+        })?
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("could not run {exe}: {e}")))?;
 
     if !out.status.success() {
         // stderr is the only diagnosis available and it is usually the whole
@@ -204,7 +207,12 @@ fn gen_token() -> String {
 /// formality.
 #[tauri::command]
 pub async fn stagehand_node_available() -> bool {
-    tokio::process::Command::new("node")
+    // Resolved rather than execed bare: node lives in /opt/homebrew/bin or a
+    // version manager's shims, and an app launched from Finder has neither on
+    // PATH. Unresolved, this answered "no Node runtime" on machines with node
+    // plainly installed — and Stagehand then disabled itself for a reason the
+    // user could not act on.
+    tokio::process::Command::new(crate::procenv::resolve_command("node"))
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
