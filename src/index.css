@@ -1,3 +1,5 @@
+@import "../shared/fileTree.css";
+
 /* ---------- theme ----------
    Every color in this file (with a handful of deliberate exceptions — a docx
    page, an embedded HTML preview, a notebook image cell — which stay a fixed
@@ -4099,199 +4101,9 @@ body.resizing-side * {
 
 /* ---------- file tree ---------- */
 
-.file-tree {
-  overflow-y: auto;
-  flex: 1;
-  padding: 4px 0;
-  /* No focus ring on the list itself — the cursor row (seeded to the top row
-     on focus) is the focus indicator, so a border around the whole panel would
-     just be noise in a narrow sidebar. Suppress the browser's default outline
-     for the same reason. */
-  outline: none;
-}
+/* The tree's own rules now live beside its component, in
+ * shared/fileTree.css — imported at the top of this file. */
 
-.tree-root-header {
-  display: flex;
-  align-items: center;
-  /* Fixed to the tree row height: headers ride in the same windowed list as
-     the rows, and the spacer math needs every line at one height. */
-  height: 26px;
-  padding: 0 8px;
-  font-weight: 600;
-  cursor: pointer;
-  color: var(--text);
-}
-
-.tree-root-header .btn-icon {
-  margin-left: auto;
-  visibility: hidden;
-}
-
-.tree-root-header:hover .btn-icon {
-  visibility: visible;
-}
-
-.tree-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  height: 26px;
-  padding: 0 8px 0 6px;
-  margin: 0 6px;
-  cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  border-radius: var(--r-sm);
-  corner-shape: squircle;
-  transition:
-    background var(--dur-fast) var(--ease-out),
-    color var(--dur-fast) var(--ease-out),
-    /* Git status lands a beat after the rows do (it's a slower call than
-       reading the directory), so ignored rows dim slightly late — ease the
-       opacity change so it reads as intentional, not a pop. */
-    opacity var(--dur-fast) var(--ease-out);
-}
-
-.tree-row:hover {
-  background: color-mix(in srgb, var(--bg-raised) 60%, transparent);
-}
-
-/* Selected file: accent-soft wash, brightened label — the row you're editing. */
-.tree-row-selected,
-.tree-row-selected:hover {
-  background: var(--accent-soft);
-}
-
-.tree-row-selected .tree-file {
-  color: var(--text);
-  font-weight: 550;
-}
-
-/* Keyboard cursor: an inset accent ring, kept on box-shadow (not background) so
-   a row that is BOTH the open file (accent-soft wash) and under the cursor reads
-   as both at once. On a plain, unselected row the ring alone reads as a hollow
-   outline, so those rows also take a whisper of accent fill — enough to feel
-   like a solid highlight without competing with the selected wash. */
-.tree-row-cursor {
-  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 55%, transparent);
-}
-
-.tree-row-cursor:not(.tree-row-selected),
-.tree-row-cursor:not(.tree-row-selected):hover {
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-}
-
-.tree-changed .tree-file {
-  color: var(--warn);
-}
-
-/* Trailing git-changed dot — the diff-first workflow's entry point. */
-.tree-changed-dot {
-  margin-left: auto;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--warn);
-  flex: 0 0 auto;
-}
-
-/* Nesting: each level indents with a guide line, one span per ancestor level,
-   drawn by each row for its own 26px slice — rows are flat siblings now (the
-   windowed list needs that), so the continuous hairline the nested wrappers
-   used to draw is these slices stacking. The line falls near the parent row's
-   chevron center, and stays dimmed below the panel's own borders: on a deep
-   tree a full-strength line at every level reads as a hard ladder. */
-.tree-guide {
-  flex: 0 0 20px;
-  align-self: stretch;
-  margin-left: 5px;
-  border-left: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-}
-
-.tree-chevron {
-  width: 11px;
-  flex: 0 0 11px;
-  /* Faint at rest so a column of carets doesn't compete with the file names;
-     it lifts to full dim-grey when the row is hovered or under the cursor (see
-     below), which is when the disclosure affordance actually matters. */
-  color: var(--text-faint);
-  /* Centers the 10×10 SVG caret so it rotates about its own middle. */
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  /* Rotates in place when the directory opens, rather than swapping glyphs;
-     colour eases on the same beat as the row background. */
-  transition:
-    transform var(--dur-fast) var(--ease-out),
-    color var(--dur-fast) var(--ease-out);
-}
-
-.tree-row:hover .tree-chevron,
-.tree-row-cursor .tree-chevron,
-.tree-chevron-open {
-  color: var(--text-dim);
-}
-
-.tree-chevron-open {
-  transform: rotate(90deg);
-}
-
-/* In a component-section header the chevron sits beside the accent-coloured
-   title, so let it take the header's colour rather than the tree's dim grey. */
-.component-header .tree-chevron {
-  color: inherit;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .tree-chevron {
-    transition: none;
-  }
-}
-
-.tree-file-icon {
-  font-size: 11px;
-  width: 16px;
-  flex: 0 0 16px;
-  text-align: center;
-  filter: saturate(0.8);
-}
-
-.tree-icon {
-  width: 14px;
-  flex: 0 0 14px;
-  color: var(--text-dim);
-  font-size: 10px;
-}
-
-.tree-dir {
-  color: var(--text);
-}
-
-.tree-file {
-  color: var(--text-dim);
-}
-
-/* git-aware states */
-.git-ignored {
-  opacity: 0.4;
-}
-
-.git-modified .tree-file,
-.git-modified .tree-dir {
-  color: var(--warn);
-}
-
-.git-new .tree-file,
-.git-new .tree-dir {
-  color: var(--ok);
-}
-
-.tree-empty {
-  padding: 16px 12px;
-  color: var(--text-dim);
-  line-height: 1.5;
-}
 /* Secondary line under an empty state — e.g. why a shared-checkout agent's
    changes can't be attributed. */
 .aw-note {
@@ -10666,12 +10478,6 @@ input[type="radio"]:disabled {
   flex: 1;
 }
 
-.tree-icon-img {
-  width: 15px;
-  height: 15px;
-  display: block;
-  flex: 0 0 15px;
-}
 
 /* Context menu (ContextMenu.tsx). Above the confirm backdrop (400) so a menu
    opened from a dialog is still reachable. */
