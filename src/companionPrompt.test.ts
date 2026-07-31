@@ -112,6 +112,13 @@ describe("the brief", () => {
     expect(p).toContain("No preamble");
   });
 
+  it("steers off canopy_project, which cannot see the workspace", () => {
+    // It reached for canopy_project, got the one project the bridge routed it
+    // to, and told the user their other seven did not exist.
+    const p = buildCompanionPrompt(base);
+    expect(p).toContain("Do not use `canopy_project`");
+  });
+
   it("makes it say which project — it is in none of them", () => {
     expect(buildCompanionPrompt(base)).toContain("**Say which project.**");
   });

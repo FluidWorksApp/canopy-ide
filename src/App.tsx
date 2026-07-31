@@ -1613,6 +1613,13 @@ export default function App() {
           return;
         }
         const projectId =
+          // A path the action NAMES beats the directory its caller happens to
+          // sit in. This is what the companion needs and every agent benefits
+          // from: `canopy_start_server({ dir })` says which checkout it means,
+          // and honouring the caller's cwd instead sent it to whichever project
+          // that cwd fell in — for the companion, which deliberately runs
+          // inside no project, that was always the same wrong one.
+          (a.dir ? projectForCwd(a.dir) : undefined) ??
           projectForCwd(a.route) ??
           // A worktree the agent runs in follows `<repo>-wt-…`; fall back to the
           // single open project so an action still lands somewhere sensible.
