@@ -1336,6 +1336,21 @@ export interface AgentProfile {
   removable: boolean;
 }
 export const profilesList = () => invoke<AgentProfile[]>("profiles_list");
+
+/** Which account one CLI holds inside one profile. Read from what the CLI
+ *  records about the account (Claude's `oauthAccount`, Codex's id_token), never
+ *  from the credential itself. */
+export interface AccountStatus {
+  agent: string;
+  /** "in" — an account is recorded; "out" — none is; "unknown" — this CLI
+   *  gives no signal we have verified, so the UI must not claim either. */
+  state: "in" | "out" | "unknown";
+  /** The account as the CLI recorded it, usually an email. Null when the
+   *  sign-in carries no identity (an API key). */
+  account: string | null;
+}
+export const profileAccounts = (id: string) =>
+  invoke<AccountStatus[]>("profile_accounts", { id });
 /** Creates the directory layout and installs hooks + MCP into it. Does not log
  *  anyone in; the caller opens a terminal for that. */
 export const profileCreate = (label: string) =>

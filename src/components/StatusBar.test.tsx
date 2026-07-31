@@ -5,6 +5,7 @@ import { BranchSwitchProvider } from "../useBranchSwitch";
 import * as ipc from "../ipc";
 import { modelSwitchFor } from "../agentModels";
 import type { AgentEventEntry } from "../types";
+import { getSettings } from "../settings";
 
 vi.mock("../ipc", () => ({
   gitStatus: vi.fn(),
@@ -16,6 +17,8 @@ vi.mock("../ipc", () => ({
   onPtyStats: vi.fn(),
   agentUsage: vi.fn(),
   planUsage: vi.fn(),
+  profilesList: vi.fn(),
+  profileAccounts: vi.fn(),
   gitSyncProbe: vi.fn(),
   gitSyncApply: vi.fn(),
   gitSyncAbort: vi.fn(),
@@ -63,6 +66,12 @@ beforeEach(() => {
   vi.mocked(ipc.onPtyStats).mockImplementation(noSub as never);
   vi.mocked(ipc.agentUsage).mockResolvedValue([]);
   vi.mocked(ipc.planUsage).mockResolvedValue([]);
+  // One account is the normal machine: the switcher hides itself entirely
+  // there, which is what every test below expects to see.
+  vi.mocked(ipc.profilesList).mockResolvedValue([
+    { id: "default", label: "Default", root: "/Users/dev", removable: false },
+  ]);
+  vi.mocked(ipc.profileAccounts).mockResolvedValue([]);
   vi.mocked(ipc.claudeSessionStats).mockResolvedValue({
     model: "claude-opus-5",
     input_tokens: 10,
@@ -370,5 +379,54 @@ describe("the running-agents chip", () => {
   it("says nothing when nothing is running", () => {
     render(<StatusBar {...base} agents={[]} events={[]} />);
     expect(screen.queryByTitle(/running agents/)).toBeNull();
+  });
+});
+
+describe("the account switcher", () => {
+  const twoAccounts = [
+    { id: "default", label: "Default", root: "/Users/dev", removable: false },
+    { id: "vj", label: "VJ", root: "/Users/dev/.canopy/profiles/vj", removable: true },
+  ];
+
+  beforeEach(() => localStorage.clear());
+
+  /** One account is not a choice. A chip that can never change is furniture,
+   *  and it would land on every existing user's status bar. */
+  it("hides itself entirely until a second account exists", async () => {
+    render(<StatusBar {...base} events={[]} />);
+    await screen.findByText(/main/);
+    expect(screen.queryByTitle(/click to switch/)).toBeNull();
+  });
+
+  it("names the account new agents launch as", async () => {
+    vi.mocked(ipc.profilesList).mockResolvedValue(twoAccounts as never);
+    render(<StatusBar {...base} events={[]} />);
+    expect(await screen.findByTitle(/New agents launch as Default/)).toBeTruthy();
+  });
+
+  it("switches every CLI at once, and the chip follows", async () => {
+    vi.mocked(ipc.profilesList).mockResolvedValue(twoAccounts as never);
+    render(<StatusBar {...base} events={[]} />);
+    fireEvent.click(await screen.findByTitle(/New agents launch as Default/));
+    fireEvent.click(await screen.findByText("VJ"));
+    expect(await screen.findByTitle(/New agents launch as VJ/)).toBeTruthy();
+    expect(getSettings().activeProfile).toBe("vj");
+  });
+
+  /** The footgun this defuses: an account holding a Claude login but no Codex
+   *  one is legitimate, and finding out by landing at a login prompt is not. */
+  it("says which CLIs an account can actually launch", async () => {
+    vi.mocked(ipc.profilesList).mockResolvedValue(twoAccounts as never);
+    vi.mocked(ipc.profileAccounts).mockImplementation(async (id: string) =>
+      id === "vj"
+        ? ([
+            { agent: "claude", state: "in", account: "vj@example.com" },
+            { agent: "codex", state: "out", account: null },
+          ] as never)
+        : ([] as never),
+    );
+    render(<StatusBar {...base} events={[]} />);
+    fireEvent.click(await screen.findByTitle(/New agents launch as Default/));
+    expect(await screen.findByText("claude")).toBeTruthy();
   });
 });

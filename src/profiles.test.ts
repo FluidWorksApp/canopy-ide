@@ -3,7 +3,6 @@ import {
   DEFAULT_PROFILE,
   activeProfile,
   launchEnv,
-  profileBadge,
   profileLabel,
   setActiveProfile,
   supportsProfiles,
@@ -29,52 +28,44 @@ const profiles: AgentProfile[] = [
   },
 ];
 
-describe("selection", () => {
-  it("is the default login until something says otherwise", () => {
-    expect(activeProfile("claude")).toBe(DEFAULT_PROFILE);
-    expect(getSettings().cliProfiles).toEqual({});
+describe("the active account", () => {
+  it("is the login the machine already had, until switched", () => {
+    expect(activeProfile()).toBe(DEFAULT_PROFILE);
+    expect(getSettings().activeProfile).toBe(DEFAULT_PROFILE);
   });
 
-  it("remembers a choice per CLI, not globally", () => {
-    setActiveProfile("claude", "work");
-    expect(activeProfile("claude")).toBe("work");
-    // Switching one CLI's account must not move another's — they are separate
-    // subscriptions and often separate people's.
-    expect(activeProfile("codex")).toBe(DEFAULT_PROFILE);
+  /** One switch, not one per CLI: "who am I working as" is a single question,
+   *  and answering it seven times is how the state stops being legible. */
+  it("moves every CLI at once", () => {
+    setActiveProfile("work");
+    expect(activeProfile()).toBe("work");
   });
 
-  /** The stored map is a list of exceptions. Writing "default" into it would be
-   *  a second way to say the same thing, and the first upgrade that renames the
-   *  default profile would then have two truths to reconcile. */
-  it("stores nothing when the default is chosen", () => {
-    setActiveProfile("claude", "work");
-    setActiveProfile("claude", DEFAULT_PROFILE);
-    expect(getSettings().cliProfiles).toEqual({});
-    expect(activeProfile("claude")).toBe(DEFAULT_PROFILE);
+  it("goes back to the default account", () => {
+    setActiveProfile("work");
+    setActiveProfile(DEFAULT_PROFILE);
+    expect(activeProfile()).toBe(DEFAULT_PROFILE);
   });
 
-  it("announces a change so open launchers re-render", () => {
+  it("announces a change so the chip and launchers re-read", () => {
     const seen: string[] = [];
-    const onChange = () => seen.push(activeProfile("claude"));
+    const onChange = () => seen.push(activeProfile());
     window.addEventListener("canopy:cli-profile-changed", onChange);
-    setActiveProfile("claude", "work");
+    setActiveProfile("work");
     window.removeEventListener("canopy:cli-profile-changed", onChange);
     expect(seen).toEqual(["work"]);
   });
 });
 
 describe("labels", () => {
-  it("badges a real account and stays quiet about the default", () => {
-    expect(profileBadge(profiles, "work")).toBe("Work");
-    // Every tab would carry it, so it would be decoration rather than a signal.
-    expect(profileBadge(profiles, DEFAULT_PROFILE)).toBeNull();
-    expect(profileBadge(profiles, "")).toBeNull();
+  it("names an account the way the user named it", () => {
+    expect(profileLabel(profiles, "work")).toBe("Work");
   });
 
-  /** A selection can outlive the profile it names (removed in Settings while a
-   *  CLI still points at it). Rendering the id keeps the row actionable instead
-   *  of showing blank space the user cannot reason about. */
-  it("falls back to the id for a profile that is gone", () => {
+  /** A tab can outlive the account it names (removed in Settings while its
+   *  session is still open). Rendering the id keeps the badge meaningful
+   *  instead of showing blank space the user cannot reason about. */
+  it("falls back to the id for an account that is gone", () => {
     expect(profileLabel(profiles, "vanished")).toBe("vanished");
   });
 });
@@ -92,7 +83,7 @@ describe("launchEnv", () => {
       ["CANOPY_PROFILE", "work"],
       ["CLAUDE_CONFIG_DIR", "/Users/dev/.canopy/profiles/work/.claude"],
     ]);
-    setActiveProfile("claude", "work");
+    setActiveProfile("work");
     expect(await launchEnv("claude")).toEqual([
       ["CANOPY_PROFILE", "work"],
       ["CLAUDE_CONFIG_DIR", "/Users/dev/.canopy/profiles/work/.claude"],
@@ -105,8 +96,17 @@ describe("launchEnv", () => {
    *  starting is neither. */
   it("still launches when the lookup fails", async () => {
     vi.mocked(ipc.profileEnv).mockRejectedValue(new Error("no home dir"));
-    setActiveProfile("claude", "work");
+    setActiveProfile("work");
     expect(await launchEnv("claude")).toEqual([]);
+  });
+
+  /** A CLI that can't hold a second login keeps the one account it has, even
+   *  while the rest of the app is switched — anything else would imply an
+   *  isolation that isn't happening. */
+  it("leaves CLIs with no config-home variable on their single account", async () => {
+    setActiveProfile("work");
+    expect(await launchEnv("agy")).toEqual([]);
+    expect(ipc.profileEnv).not.toHaveBeenCalled();
   });
 });
 

@@ -40,8 +40,6 @@ import type { AgentCli } from "../../projects";
 import {
   activeProfile,
   launchEnv,
-  profileBadge,
-  setActiveProfile,
   supportsProfiles,
   PROFILE_CHANGE_EVENT,
 } from "../../profiles";
@@ -562,15 +560,53 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // normal case and the launcher renders exactly as it did before profiles
   // existed; the list only grows when the user makes a second login.
   const [profiles, setProfiles] = useState<ipc.AgentProfile[]>([]);
+  const [activeAccounts, setActiveAccounts] = useState<ipc.AccountStatus[]>([]);
+  const [activeProfileId, setActiveProfileId] = useState(activeProfile());
   useEffect(() => {
-    const pull = () => void ipc.profilesList().then(setProfiles).catch(() => {});
+    const pull = () => {
+      const id = activeProfile();
+      setActiveProfileId(id);
+      void ipc.profilesList().then(setProfiles).catch(() => {});
+      void ipc.profileAccounts(id).then(setActiveAccounts).catch(() => {});
+    };
     pull();
-    // Creating or removing a profile happens in Settings, which is a different
-    // component tree — the event is how this list learns about it without the
-    // user having to reopen the project.
+    // Creating a profile, switching accounts and signing one in all happen
+    // elsewhere — Settings, the status bar, a terminal. The event covers the
+    // first two; focus covers the third, which finishes in a shell we can't
+    // observe.
     window.addEventListener(PROFILE_CHANGE_EVENT, pull);
-    return () => window.removeEventListener(PROFILE_CHANGE_EVENT, pull);
+    window.addEventListener("focus", pull);
+    return () => {
+      window.removeEventListener(PROFILE_CHANGE_EVENT, pull);
+      window.removeEventListener("focus", pull);
+    };
   }, []);
+
+  /** What the ＋ menu says about the account it is launching into. Null on the
+   *  default account: naming it there would put a banner on every launcher for
+   *  the people who never opened this feature.
+   *
+   *  `missing` is the footgun this exists to defuse — switching to an account
+   *  that holds a Claude login but no Codex one is legitimate, and finding out
+   *  by landing at a login prompt is not. */
+  const accountBanner = useMemo(() => {
+    if (activeProfileId === "default") return null;
+    const label =
+      profiles.find((p) => p.id === activeProfileId)?.label ?? activeProfileId;
+    const missing = AGENT_CLIS.filter(
+      (c) =>
+        supportsProfiles(c.id) &&
+        activeAccounts.find((a) => a.agent === c.id)?.state === "out",
+    ).map((c) => c.id);
+    return { label, missing };
+  }, [activeProfileId, profiles, activeAccounts]);
+
+  /** One name per account, wherever it appears — the tab badge would otherwise
+   *  show the slug while the switcher shows the label the user typed. */
+  const profileLabels = useMemo(
+    () => Object.fromEntries(profiles.map((p) => [p.id, p.label])),
+    [profiles],
+  );
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
   const [palette, setPalette] = useState<PaletteMode | null>(null);
   /** The ⌘N launcher — the ＋ menu as a type-and-Enter list. */
@@ -4934,21 +4970,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  component header passes that component's path so it starts in the right
    *  directory rather than wherever the ＋ menu would have put it. */
   const launchCli = useCallback(
-    async (cli: AgentCli, at?: string, asProfile?: string) => {
+    async (cli: AgentCli, at?: string) => {
       const cwd = at ?? componentsRef.current[0]?.path;
       if (!cwd) return;
       if (installed[cli.bin]) {
-        // Picking an account from the menu also makes it the selection: the
-        // next launch of this CLI should be the account you just chose, not the
-        // one you left behind two launches ago.
-        if (asProfile && asProfile !== activeProfile(cli.id)) {
-          setActiveProfile(cli.id, asProfile);
-        }
         // Resolved before the terminal opens: the config-dir variable has to be
         // in the child's environment from its first instruction, because the
         // CLI reads it at startup. Exporting it afterwards would leave this
         // session on the default login while the tab claimed otherwise.
-        const profile = activeProfile(cli.id);
+        const profile = activeProfile();
         const env = await launchEnv(cli.id);
         addTerminal(
           cwd,
@@ -5008,45 +5038,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
       onClick: () => addTerminal(cwd),
     },
     { label: "", separator: true },
-    ...AGENT_CLIS.map((cli) => {
-      const updateHint = installed[cli.bin]
+    ...AGENT_CLIS.map((cli) => ({
+      label: cli.name,
+      icon: <AgentIcon id={cli.id} size={15} />,
+      // A context-menu row has one click target, so the update hint here is
+      // informational — the ＋ menu and launch grid carry the clickable badge.
+      // Which account it launches as is the status bar's job, not a per-row
+      // choice repeated seven times.
+      hint: installed[cli.bin]
         ? cliUpdates[cli.bin]?.hasUpdate
           ? `⇡ ${cliUpdates[cli.bin]?.latest}`
           : undefined
-        : "install";
-      // A second login only appears once the user has made one. Until then
-      // every row is exactly the single-click launch it has always been —
-      // this feature must cost nothing to the people not using it.
-      const accounts =
-        supportsProfiles(cli.id) && profiles.length > 1 && installed[cli.bin]
-          ? profiles
-          : [];
-      if (accounts.length === 0) {
-        return {
-          label: cli.name,
-          icon: <AgentIcon id={cli.id} size={15} />,
-          // A context-menu row has one click target, so the update hint here is
-          // informational — the ＋ menu and launch grid carry the clickable badge.
-          hint: updateHint,
-          onClick: () => void launchCli(cli, cwd),
-        };
-      }
-      const current = activeProfile(cli.id);
-      return {
-        label: cli.name,
-        icon: <AgentIcon id={cli.id} size={15} />,
-        // The account in front, so which login the next launch uses is legible
-        // without opening anything.
-        hint: profileBadge(profiles, current) ?? updateHint,
-        submenu: accounts.map((p) => ({
-          label: p.label,
-          // A tick rather than a separate "current" row: the list is short and
-          // the question is only ever "which of these".
-          hint: p.id === current ? "✓" : undefined,
-          onClick: () => void launchCli(cli, cwd, p.id),
-        })),
-      };
-    }),
+        : "install",
+      onClick: () => void launchCli(cli, cwd),
+    })),
   ];
 
   const compMenu = useContextMenu();
@@ -6836,6 +6841,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
         collabPaths={collabPaths}
         isAgentTab={isAgentTab}
         tabState={tabState}
+        account={accountBanner}
+        profileLabels={profileLabels}
         shellChips={shellChips}
         runChips={runChips}
         runSummary={runSummary}
