@@ -20,6 +20,8 @@ import {
   TASK_HISTORY_EVENT,
   type TaskRun,
 } from "../taskHistory";
+import { ashFor } from "../ash";
+import { Ash } from "./Ash";
 import { PlayIcon, StopIcon, TrashIcon } from "./icons";
 import { Button } from "./ui";
 import { matches } from "../shortcuts";
@@ -286,8 +288,11 @@ export function TasksPanel({
               className={`task-row task-row-running${r.blocked ? " task-row-blocked" : ""}`}
               key={r.tabId ?? `pty:${r.ptyId}`}
             >
-              <span
-                className={`agent-state-dot st-${r.state}`}
+              <Ash
+                state={ashFor(r.state).state}
+                tone={ashFor(r.state).tone}
+                size={16}
+                className="agent-state-ash"
                 title={r.state}
               />
               {/* The whole row opens the run: a task with no tab needs one
