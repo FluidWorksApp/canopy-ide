@@ -6,6 +6,7 @@
 // in prs.ts / trackers.ts, but registered so any surface can host a CTA.
 import type * as ipc from "./ipc";
 import { cleanupLine, detachedPushLine } from "./prs";
+import { format } from "./shortcuts";
 
 /** A task that edits files can't run in the shared checkout — other agents live
  *  there, and switching its branch under them is how you lose an afternoon. A
@@ -794,7 +795,7 @@ export const researchTask: MicroTaskDef<ResearchRunPayload> = {
   placeholder: "anything else it should focus on…",
   blurb: "Investigate a question and record the finding. Changes no code.",
   effect: "reads",
-  surfaceNote: "from the Research panel, or by typing a question into ⌘K",
+  surfaceNote: `from the Research panel, or by typing a question into ${format("spot-search")}`,
   cwd: (p) => p.dir,
   env: (p) => [
     ["CANOPY_RESEARCH", p.entryId],

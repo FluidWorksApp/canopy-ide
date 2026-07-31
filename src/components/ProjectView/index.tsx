@@ -16,6 +16,7 @@ import {
 } from "react";
 import { Panel, PanelGroup } from "react-resizable-panels";
 import * as ipc from "../../ipc";
+import { format, matches, matchesModifierClick } from "../../shortcuts";
 import { getSettings, SETTINGS_CHANGE_EVENT } from "../../settings";
 import { modelFor, monaco, languageForPath } from "../../monaco-setup";
 import { getCaret, subscribeCaret } from "../../editorState";
@@ -330,8 +331,9 @@ function TermPorts({
 }: {
   ptyId: number | null | undefined;
   stats: ipc.SessionStats[];
-  /** Open in the in-app preview tab; plain click. ⌘/ctrl-click still goes to
-   *  the system browser for the times a real browser is the point. */
+  /** Open in the in-app preview tab; plain click. Cmd-click (Ctrl-click off a
+   *  Mac) still goes to the system browser for the times a real browser is the
+   *  point. */
   onPreview: (url: string) => void;
 }) {
   if (ptyId == null) return null;
@@ -343,9 +345,11 @@ function TermPorts({
         <button
           key={p}
           className="term-port"
-          title={`Preview http://localhost:${p} in Canopy — ⌘-click for your browser`}
+          title={`Preview http://localhost:${p} in Canopy — ${format(
+            "open-external",
+          )}-click for your browser`}
           onClick={(e) => {
-            if (e.metaKey || e.ctrlKey) {
+            if (matchesModifierClick(e, "open-external")) {
               void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
                 openUrl(`http://localhost:${p}`),
               );
@@ -2753,26 +2757,25 @@ const ProjectViewBody = memo(function ProjectViewBody({
         setActiveTabId(tab.id);
         return;
       }
-      // ⌘K — the menu accelerator never fires while focus is in xterm/Monaco
-      // (same macOS routing gap as the tab-cycle chord above), so the palette
-      // must also open from here. Opening an open palette is a no-op.
-      if (
-        (e.metaKey || e.ctrlKey) &&
-        !e.shiftKey &&
-        !e.altKey &&
-        e.code === "KeyK"
-      ) {
+      // SpotSearch — the menu accelerator never fires while focus is in
+      // xterm/Monaco (same macOS routing gap as the tab-cycle chord below), so
+      // the palette must also open from here. Opening an open palette is a
+      // no-op.
+      if (matches(e, "spot-search")) {
         e.preventDefault();
         setSpotOpen(true);
         return;
       }
-      // Ctrl+Cmd+Arrow (matches the "Next/Previous Tab" accelerators).
-      if (!(e.ctrlKey && (e.metaKey || e.altKey))) return;
-      if (e.code === "ArrowRight" || e.code === "ArrowLeft") {
-        e.preventDefault();
-        lastKeydownNav.t = Date.now();
-        cycleTabs(e.code === "ArrowRight" ? 1 : -1);
-      }
+      // The registry's chord, so this is by construction the same key the
+      // "Next/Previous Tab" accelerators advertise — on Windows and Linux too,
+      // where they are Ctrl+PageDown/PageUp rather than the Mac's ⌃⌘→/←. The
+      // hand-written test accepted Ctrl+Alt+Arrow off a Mac, answering a chord
+      // the menu never offered.
+      const dir = matches(e, "next-tab") ? 1 : matches(e, "prev-tab") ? -1 : 0;
+      if (dir === 0) return;
+      e.preventDefault();
+      lastKeydownNav.t = Date.now();
+      cycleTabs(dir);
     };
     const next = () => {
       if (recentKeydown()) return;
