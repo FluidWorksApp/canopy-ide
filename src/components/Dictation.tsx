@@ -17,6 +17,7 @@ import {
   type DictationWaveStyle,
 } from "../settings";
 import { DictationTrigger, describeTrigger } from "../dictationTrigger";
+import { useEscapeLayer } from "../useEscape";
 import { drawWave, normalizeLevel, smoothLevel } from "../waveStyles";
 import {
   applyEdit,
@@ -100,6 +101,9 @@ export function Dictation() {
   const [partial, setPartial] = useState<ipc.DictationPartial | null>(null);
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
+  // Escape cancels the recording, and only the recording — nothing behind the
+  // pill may take the same press as a dismissal.
+  useEscapeLayer(phase === "recording");
   const noticeTimer = useRef<number | undefined>(undefined);
   const level = useRef(0);
   /** A release that arrived while the mic was still opening. Push-to-talk can
