@@ -17,6 +17,7 @@ use transcribe_rs::onnx::moonshine::{MoonshineModel, MoonshineVariant};
 use transcribe_rs::onnx::parakeet::ParakeetModel;
 use transcribe_rs::onnx::sense_voice::SenseVoiceModel;
 use transcribe_rs::onnx::Quantization;
+use transcribe_rs::transcriber::{EnergyAdaptiveChunked, EnergyAdaptiveConfig, Transcriber};
 use transcribe_rs::{SpeechModel, TranscribeOptions};
 
 #[derive(Clone, Copy)]
@@ -40,6 +41,13 @@ struct ModelDef {
     size_mb: u64,
     languages: &'static [&'static str],
     multilingual: bool,
+    /// Longest audio this engine gets in a single inference pass. Every model
+    /// has a ceiling — Moonshine refuses anything past 64s outright, SenseVoice
+    /// was trained on 30s windows, and Parakeet's encoder memory grows with
+    /// length — so anything longer is split into chunks of about this size.
+    /// Leave headroom: an actual chunk can run to `chunk_secs + CHUNK_SEARCH_SECS
+    /// + 2 * CHUNK_PADDING_SECS`.
+    chunk_secs: f32,
 }
 
 // First entry is the default. Sizes are approximate (for the UI + download
@@ -58,6 +66,7 @@ const MODELS: &[ModelDef] = &[
             "bg", "hu", "fi", "da", "sv", "el", "et", "lv", "lt", "sl", "mt",
         ],
         multilingual: true,
+        chunk_secs: 45.0,
     },
     ModelDef {
         id: "sensevoice",
@@ -68,6 +77,9 @@ const MODELS: &[ModelDef] = &[
         size_mb: 250,
         languages: &["zh", "yue", "ja", "ko", "en"],
         multilingual: true,
+        // SenseVoice was trained on 30s windows; accuracy falls off past that
+        // even though nothing errors.
+        chunk_secs: 25.0,
     },
     ModelDef {
         id: "moonshine-base",
@@ -78,6 +90,8 @@ const MODELS: &[ModelDef] = &[
         size_mb: 200,
         languages: &["en"],
         multilingual: false,
+        // Hard 64s ceiling in the engine itself, padding included.
+        chunk_secs: 45.0,
     },
 ];
 
@@ -85,6 +99,18 @@ const TARGET_RATE: u32 = 16_000;
 // Bound the capture buffer: 10 minutes of speech at 48 kHz mono f32 is
 // ~115 MB. Past the cap the stream keeps running but stops accumulating.
 const MAX_SECONDS: u32 = 600;
+
+// How far either side of a chunk boundary to hunt for the quietest frame, so
+// splits land in a pause rather than mid-word.
+const CHUNK_SEARCH_SECS: f32 = 3.0;
+// Silence wrapped around every chunk. 250ms matches what Parakeet prepends on
+// its own — its mel preprocessor attenuates the very start of the audio — and
+// costs the other two engines nothing.
+const CHUNK_PADDING_SECS: f32 = 0.25;
+// Remainders below this are dropped rather than transcribed: a fifth of a
+// second is a fragment of one phoneme, and Moonshine rejects anything under
+// 0.1s outright.
+const CHUNK_MIN_SECS: f32 = 0.2;
 
 fn find_def(id: &str) -> Result<&'static ModelDef, String> {
     // Settings store a blank id to mean "the default model" (so a stored id can
@@ -790,10 +816,73 @@ pub async fn dictation_start(
     Ok("recording".into())
 }
 
+/// Feed the audio through the model in bounded chunks, split at the quietest
+/// frame near each boundary so a cut lands in a pause rather than mid-word.
+/// Every engine has a length ceiling — Moonshine rejects anything past 64s
+/// outright, the others silently get worse — so long dictation is transcribed
+/// piecewise and the texts merged.
+///
+/// Audio short enough for a single pass goes through the same path as one
+/// chunk, so there is only one route to keep working.
+fn transcribe_chunked(
+    engine: &mut dyn SpeechModel,
+    chunk_secs: f32,
+    config: EnergyAdaptiveConfig,
+    options: TranscribeOptions,
+    samples: &[f32],
+    on_progress: &dyn Fn(f64),
+) -> Result<String, String> {
+    let fail = |e| format!("Transcription failed: {e}");
+    let total = samples.len();
+    let step = ((chunk_secs * TARGET_RATE as f32) as usize).max(1);
+    let mut chunker = EnergyAdaptiveChunked::new(config, options);
+    // Minutes of CPU inference behind a motionless "Transcribing…" reads as a
+    // hang, so hand over one chunk's worth at a time and report the chunks that
+    // come back. Short dictation completes in one pass and stays silent.
+    let expected = total.div_ceil(step).max(1);
+    let mut done = 0usize;
+    let mut fed = 0usize;
+    while fed < total {
+        let end = (fed + step).min(total);
+        done += chunker
+            .feed(engine, &samples[fed..end])
+            .map_err(fail)?
+            .len();
+        fed = end;
+        if expected > 1 {
+            // Never 100%: finish() still has the tail of the buffer to run.
+            on_progress((done as f64 / expected as f64 * 100.0).min(99.0));
+        }
+    }
+    chunker.finish(engine).map(|r| r.text).map_err(fail)
+}
+
+/// The chunking setup for a model: how long a piece it can take, and how the
+/// pieces are joined back together.
+fn chunk_config(def: &ModelDef, language: Option<&str>) -> EnergyAdaptiveConfig {
+    // Chunk texts are joined with a space — except for CJK, which is written
+    // without word separators. Take the cue from the language hint, falling
+    // back to the model's primary language (SenseVoice is the CJK one).
+    let lang = language.unwrap_or(def.languages[0]);
+    let cjk = matches!(
+        lang.split(['-', '_']).next().unwrap_or(lang),
+        "zh" | "yue" | "ja" | "ko" | "th"
+    );
+    EnergyAdaptiveConfig {
+        target_chunk_secs: def.chunk_secs,
+        search_window_secs: CHUNK_SEARCH_SECS,
+        padding_secs: CHUNK_PADDING_SECS,
+        min_chunk_secs: CHUNK_MIN_SECS,
+        merge_separator: if cjk { "" } else { " " }.to_string(),
+        ..Default::default()
+    }
+}
+
 /// Stop recording and return the transcription. `language` is an optional
 /// BCP-47 hint; multilingual models auto-detect and use it only as a nudge.
 #[tauri::command]
 pub async fn dictation_stop(
+    app: tauri::AppHandle,
     state: tauri::State<'_, DictationManager>,
     language: Option<String>,
 ) -> Result<String, String> {
@@ -866,20 +955,31 @@ pub async fn dictation_stop(
         samples
     };
 
-    // The authoritative decode: the whole recording, in one pass, with full
-    // context. Whatever the streaming preview showed has no bearing on it.
-    let engine = state.0.lock().unwrap().engine.clone();
+    // The authoritative decode: the whole recording, with full context, in
+    // pieces no longer than the engine can take in one pass. Whatever the
+    // streaming preview showed has no bearing on it.
+    let (engine, loaded) = {
+        let inner = state.0.lock().unwrap();
+        (inner.engine.clone(), inner.loaded_model.clone())
+    };
+    let def = find_def(loaded.as_deref().unwrap_or(""))?;
+    let language = language.filter(|l| !l.is_empty());
+    let config = chunk_config(def, language.as_deref());
     let options = TranscribeOptions {
-        language: language.filter(|l| !l.is_empty()),
+        language,
         ..Default::default()
     };
     let result = tauri::async_runtime::spawn_blocking(move || {
         let mut guard = engine.lock().unwrap();
         let model = guard.as_mut().ok_or("Voice model not loaded")?;
-        model
-            .transcribe(&samples, &options)
-            .map(|r| r.text)
-            .map_err(|e| format!("Transcription failed: {e}"))
+        transcribe_chunked(
+            &mut **model,
+            def.chunk_secs,
+            config,
+            options,
+            &samples,
+            &|pct| emit_progress(&app, def.id, "transcribe", pct, None),
+        )
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -909,4 +1009,96 @@ pub fn dictation_cancel(state: tauri::State<'_, DictationManager>) {
 #[tauri::command]
 pub fn dictation_supported() -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A chunk runs to its target plus the split-search window plus padding on
+    /// both sides, and that worst case is what the engine actually sees.
+    /// Moonshine hard-errors past 64s ("Audio duration must be between 0.1s and
+    /// 64s"), which is how long dictation used to fail outright — so every
+    /// model's worst case has to stay well under it.
+    #[test]
+    fn worst_case_chunk_stays_under_the_engine_ceiling() {
+        for m in MODELS {
+            let worst = m.chunk_secs + CHUNK_SEARCH_SECS + 2.0 * CHUNK_PADDING_SECS;
+            assert!(worst <= 60.0, "{}: worst-case chunk is {worst}s", m.id);
+        }
+    }
+
+    /// The streaming preview decodes a rolling window rather than the whole
+    /// recording, which is why it never hit the ceiling the final pass did.
+    /// It only stays that way while the window is the shorter of the two.
+    #[test]
+    fn streaming_window_needs_no_chunking() {
+        for m in MODELS {
+            assert!(
+                STREAM_WINDOW_SECS <= m.chunk_secs,
+                "{}: preview window {STREAM_WINDOW_SECS}s exceeds one pass",
+                m.id
+            );
+        }
+    }
+
+    /// CJK is written without spaces between words, so chunk texts must not be
+    /// rejoined with one.
+    #[test]
+    fn chunk_texts_join_without_a_space_for_cjk() {
+        let sensevoice = find_def("sensevoice").unwrap();
+        let parakeet = find_def("parakeet-v3").unwrap();
+        // No hint: the model's own primary language decides.
+        assert_eq!(chunk_config(sensevoice, None).merge_separator, "");
+        assert_eq!(chunk_config(parakeet, None).merge_separator, " ");
+        // An explicit hint wins, region subtag and all.
+        assert_eq!(chunk_config(sensevoice, Some("en")).merge_separator, " ");
+        assert_eq!(chunk_config(parakeet, Some("ja-JP")).merge_separator, "");
+    }
+
+    /// The reported failure, end to end: 74s of audio through Moonshine, which
+    /// refuses anything past 64s in a single pass. Needs the model on disk, so
+    /// it is ignored by default — run with
+    /// `cargo test --features dictation -- --ignored long_audio`.
+    #[test]
+    #[ignore = "requires a downloaded model"]
+    fn long_audio_transcribes_instead_of_erroring() {
+        for def in MODELS {
+            if !model_ready(def.id) {
+                eprintln!("skipping {} — not downloaded", def.id);
+                continue;
+            }
+            let mut engine = load_engine(def).expect("load model");
+            // 74.07s, the length from the bug report. Content doesn't matter —
+            // the length check fires before any inference — so this is a tone
+            // with pauses punched in, which also gives the splitter somewhere
+            // sensible to cut.
+            let n = (74.07 * TARGET_RATE as f32) as usize;
+            let samples: Vec<f32> = (0..n)
+                .map(|i| {
+                    let t = i as f32 / TARGET_RATE as f32;
+                    if t % 5.0 < 0.4 {
+                        0.0
+                    } else {
+                        0.2 * (t * 220.0 * std::f32::consts::TAU).sin()
+                    }
+                })
+                .collect();
+            let reported = std::cell::RefCell::new(Vec::new());
+            let result = transcribe_chunked(
+                &mut *engine,
+                def.chunk_secs,
+                chunk_config(def, None),
+                TranscribeOptions::default(),
+                &samples,
+                &|pct| reported.borrow_mut().push(pct),
+            );
+            assert!(result.is_ok(), "{}: {:?}", def.id, result.err());
+            assert!(
+                !reported.borrow().is_empty(),
+                "{}: no progress reported",
+                def.id
+            );
+        }
+    }
 }

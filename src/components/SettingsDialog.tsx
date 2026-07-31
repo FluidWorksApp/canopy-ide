@@ -2418,6 +2418,16 @@ function DictationSettings() {
       )}
 
       <Item
+        name="Recent dictation"
+        desc="Hold it and tap to walk back through what you said; let go to paste. Tap once and release for the last one."
+      >
+        <HotkeyCapture
+          value={s.dictationHistoryHotkey}
+          onChange={(h) => patch({ dictationHistoryHotkey: h })}
+        />
+      </Item>
+
+      <Item
         name="Live preview"
         desc="Words appear as you speak and correct themselves. Costs a CPU core; the final text is the same either way."
       >
