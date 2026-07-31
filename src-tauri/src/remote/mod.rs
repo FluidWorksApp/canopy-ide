@@ -200,7 +200,9 @@ pub async fn dispatch(
             app.state(),
             str_arg(args, "repo")?,
             str_arg(args, "path")?,
-            args.get("staged").and_then(|v| v.as_bool()).unwrap_or(false),
+            args.get("staged")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         )
         .await
         .and_then(to_value),
