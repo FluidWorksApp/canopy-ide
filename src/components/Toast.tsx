@@ -1,5 +1,7 @@
 import { memo } from "react";
 import type { UpdateAvailability } from "../updater";
+import type { AttentionItem } from "../attention";
+import { CloseIcon } from "./icons";
 import { Button } from "./ui";
 
 interface UpdateToastProps {
@@ -61,16 +63,48 @@ function UpdateToastImpl({
 export const UpdateToast = memo(UpdateToastImpl);
 
 interface NoticeToastProps {
-  text: string;
-  kind: string;
+  item: AttentionItem;
   onDismiss: () => void;
+  onFollow: () => void;
 }
 
-// The lightweight click-to-dismiss notice strip (info/success/warn/error).
-function NoticeToastImpl({ text, kind, onDismiss }: NoticeToastProps) {
+// One item from the attention channel, as a strip in the corner.
+//
+// The click used to mean "dismiss", because there was nothing else it could
+// mean — a notice was a string with no idea what it was about. An item carries
+// a target, so the body follows it and dismissing moves to its own affordance.
+// Without a target it keeps the old behaviour rather than offering a click that
+// would land nowhere.
+function NoticeToastImpl({ item, onDismiss, onFollow }: NoticeToastProps) {
+  const clickable = item.where != null;
   return (
-    <div className={`notice notice-${kind}`} onClick={onDismiss} title="dismiss">
-      {text}
+    <div
+      className={`notice notice-${item.tone}${
+        item.kind === "question" ? " notice-question" : ""
+      }${clickable ? " notice-clickable" : ""}`}
+      onClick={clickable ? onFollow : onDismiss}
+      title={clickable ? "Open" : "dismiss"}
+    >
+      <div className="notice-text">
+        {item.projectName && (
+          <span className="notice-project">{item.projectName}</span>
+        )}
+        {item.title}
+        {item.body && <span className="notice-body">{item.body}</span>}
+      </div>
+      {clickable && (
+        <button
+          className="notice-x"
+          title="Dismiss"
+          aria-label="Dismiss"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDismiss();
+          }}
+        >
+          <CloseIcon size={11} />
+        </button>
+      )}
     </div>
   );
 }

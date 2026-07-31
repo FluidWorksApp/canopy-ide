@@ -67,6 +67,8 @@ import {
   pendingForRoots,
   type PendingItem,
 } from "../../notifications";
+import { isOutstanding } from "../../attention";
+import { useAttention } from "../../useAttention";
 import {
   findRun,
   patchRun,
@@ -4172,9 +4174,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [projectEvents, rootsKey, dismissedPending],
   );
   // Blocked-on-you items drive the urgent styling; completions are quiet.
-  const urgentPending = useMemo(
-    () => pending.filter((i) => i.kind !== "idle"),
-    [pending],
+  //
+  // Read off the attention channel rather than counted here from the hook
+  // stream a second time. The rail badge, this project's tab pill and the bell
+  // in the title bar are three views of one number, and while each derived its
+  // own they could disagree — and did, because only this one could see an
+  // agent, while a micro-task that stopped to ask was invisible to all three.
+  // `roots` is the same set the channel attributes a project by, so nothing
+  // that used to be counted here stops being counted.
+  const urgentCount = useAttention(
+    useCallback(
+      (items) =>
+        items.filter((x) => x.projectId === project.id && isOutstanding(x))
+          .length,
+      [project.id],
+    ),
   );
 
   // Stable ActivityRail handlers. Identity only changes with pinned/sideTab
@@ -7483,7 +7497,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             prsBadge={prsBadge}
             tasksBadge={runningMicro.length}
             pendingCount={pending.length}
-            urgentCount={urgentPending.length}
+            urgentCount={urgentCount}
             teamBadge={teamBadge}
             relayRole={relay.status.role}
             onSelectTab={selectSideTab}
