@@ -531,9 +531,18 @@ fn read_meta(dir: &Path) -> Result<Meta, String> {
     serde_json::from_str(&raw).map_err(|e| format!("meta.json is unreadable: {e}"))
 }
 
+/// The store's write boundary. Every mutation lands here — a note's
+/// `updated_at` moves whenever anything about it does — so this is the one
+/// place that can tell the app a note changed without depending on which of
+/// the four possible authors did it. See `change.rs`.
 fn write_meta(dir: &Path, meta: &Meta) -> Result<(), String> {
     let body = serde_json::to_string_pretty(meta).map_err(|e| e.to_string())?;
-    write_atomic(&dir.join("meta.json"), body.as_bytes())
+    write_atomic(&dir.join("meta.json"), body.as_bytes())?;
+    // From the meta, never from the directory path: `Meta` carries both fields
+    // already, and deriving them from path components would break silently the
+    // day a store's layout changes.
+    crate::change::pulse(crate::change::Store::Notes, &meta.project_id, &meta.id);
+    Ok(())
 }
 
 fn body_path(dir: &Path) -> PathBuf {
@@ -1547,7 +1556,11 @@ pub fn notes_delete(
     if !dir.exists() {
         return Ok(());
     }
-    std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())
+    std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+    // A delete writes no meta, so it is the one mutation the write boundary
+    // cannot speak for.
+    crate::change::pulse(crate::change::Store::Notes, &project_id, &id);
+    Ok(())
 }
 
 // ---- the index's view -----------------------------------------------------

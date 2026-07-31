@@ -12,6 +12,7 @@
 // the same *kind* of thing to the app, and two stores that behave differently
 // would be two things to learn for no gain.
 import * as ipc from "./ipc";
+import { registerStore } from "./stores";
 
 export type NoteStatus = ipc.NoteStatus;
 
@@ -91,7 +92,17 @@ export const NEXT_STATUSES: Record<NoteStatus, NoteStatus[]> = {
  *  so no write can forget it — the same arrangement research.ts uses. */
 export const NOTES_EVENT = "canopy:notes-changed";
 
-const announce = () => window.dispatchEvent(new CustomEvent(NOTES_EVENT));
+/** What moved, when the change knew. A detail view uses it to ignore a change
+ *  to a note it is not showing: without it, one agent write cost one IPC round
+ *  trip per open note tab, in every open project. `id: ""` means "something in
+ *  this project's list moved, item unknown" — a reader that cares reloads. */
+export interface NotesChanged {
+  projectId: string;
+  id: string;
+}
+
+const announce = (detail?: NotesChanged) =>
+  window.dispatchEvent(new CustomEvent(NOTES_EVENT, { detail }));
 
 // ---------- the cache ----------
 //
@@ -108,12 +119,29 @@ export const cached = (projectId: string): ipc.NoteSummary[] =>
   cache.get(projectId) ?? [];
 
 /** Re-read a project's notes and publish them. */
-export async function refresh(projectId: string): Promise<ipc.NoteSummary[]> {
+export async function refresh(
+  projectId: string,
+  changed?: string,
+): Promise<ipc.NoteSummary[]> {
   const rows = await ipc.notesList(projectId, ACTIVE_STATUSES).catch(() => []);
   cache.set(projectId, rows);
-  announce();
+  // Announced unconditionally, never gated on whether the summary list looks
+  // different. An archived note is not in ACTIVE_STATUSES at all, so a
+  // list-shaped comparison can never see an edit to one, and the tab showing it
+  // would sit stale — the same bug one layer up.
+  announce({ projectId, id: changed ?? "" });
   return rows;
 }
+
+// A store moved on disk — this window's own write, or an agent's through the
+// context bridge, or the portal's. Registered at module scope, so a project
+// whose panel has never been opened is still listening. Guarded on the cache:
+// a change to a project nothing is showing has nobody to tell, and refetching
+// for it would be the poll we are removing, wearing a different hat.
+registerStore("notes", (e) => {
+  if (!cache.has(e.scope)) return;
+  void refresh(e.scope, e.id);
+});
 
 /** Drop a project's cache — it closed, so its notes should stop appearing in a
  *  palette that is now floating over something else. */

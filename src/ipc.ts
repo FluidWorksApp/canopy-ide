@@ -1463,6 +1463,24 @@ export interface GitChange {
 export const onGitChange = (cb: (e: GitChange) => void): Promise<UnlistenFn> =>
   listen<GitChange>("git:change", (event) => cb(event.payload));
 
+/** A store under ~/.canopy moved, whoever moved it — this window, an agent
+ *  through the context bridge, or the portal. A notification, not the data:
+ *  the reader asks for what it needs, and a store nobody is showing costs one
+ *  ignored event. Subscribe through `src/stores.ts`, never directly. */
+export interface StoreChange {
+  /** Matches a `change::Store` variant in Rust: "notes". */
+  store: string;
+  /** Which slice moved — a project id, for notes. */
+  scope: string;
+  /** The item that moved, or "" when the change is not about one item. */
+  id: string;
+}
+
+export const onStoreChange = (
+  cb: (e: StoreChange) => void,
+): Promise<UnlistenFn> =>
+  listen<StoreChange>("store:change", (event) => cb(event.payload));
+
 // ---------- Context bridge (agent-facing MCP context) ----------
 
 /** Publish a project's live context snapshot (components, run servers,

@@ -9,6 +9,7 @@
 // not in it.
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as ipc from "../ipc";
+import type { NotesChanged } from "../notes";
 import {
   NEXT_STATUSES,
   NOTES_EVENT,
@@ -93,9 +94,19 @@ export function NoteView({
 
   useEffect(() => {
     load();
-    window.addEventListener(NOTES_EVENT, load);
-    return () => window.removeEventListener(NOTES_EVENT, load);
-  }, [load]);
+    // Only when the change was about this note. The channel now carries writes
+    // from agents too, and an unfiltered listener meant one agent write cost a
+    // `notesGet` per open note tab across every open project. A change that
+    // does not say which note moved (`id: ""`) still reloads: it came from a
+    // list refresh, where the cost is the one we already paid.
+    const onChanged = (e: Event) => {
+      const detail = (e as CustomEvent<NotesChanged | undefined>).detail;
+      if (detail && (detail.projectId !== projectId || (detail.id && detail.id !== id))) return;
+      load();
+    };
+    window.addEventListener(NOTES_EVENT, onChanged);
+    return () => window.removeEventListener(NOTES_EVENT, onChanged);
+  }, [load, projectId, id]);
 
   useEffect(() => {
     if (titleDraft !== null) titleInput.current?.select();
