@@ -5923,7 +5923,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
               if (active?.type === "terminal") {
                 termHandles.current.get(active.id)?.paste(text);
               } else {
-                onNotice("Clip is on the clipboard — ⌘V to paste it in.");
+                // No chord in the copy: paste is the OS's shortcut, not one of
+                // ours, so there is nothing in the registry to format and
+                // spelling it here is exactly what the guard test forbids.
+                onNotice("Clip is back on the clipboard — paste it where you want it.");
               }
             })
             .catch(() => onNotice("That clip is gone.", "error"));
