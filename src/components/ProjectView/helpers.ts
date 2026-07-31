@@ -50,6 +50,11 @@ export interface TermSubTab {
   /** Launched from a component run command — lives in the run rail, not the
    *  terminal strip. */
   run?: boolean;
+  /** A run that is an errand rather than a service: installing a CLI, updating
+   *  one, installing a prerequisite. It has one outcome worth knowing and the
+   *  chip's ✓ carries it, so a successful one closes itself (see runReap.ts).
+   *  A failed one stays — that scrollback is why you'd look. */
+  chore?: boolean;
   /** Run tabs outlive their process: a one-shot command (build, install) ends
    *  on its own, and the tab stays so the output and exit status remain
    *  readable. Undefined while still running. */
