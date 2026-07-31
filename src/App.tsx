@@ -89,7 +89,11 @@ import { Dictation } from "./components/Dictation";
 import { Companion } from "./components/Companion";
 import { startCompanion, stopCompanion } from "./companionSession";
 import { companionToolNames } from "./companionTools";
-import { checkInstalledClis } from "./projects";
+import {
+  AGENT_CLIS_CHANGED_EVENT,
+  CLI_INSTALLS_CHANGED_EVENT,
+  checkInstalledClis,
+} from "./projects";
 import { TooltipLayer } from "./components/TooltipLayer";
 import { Onboarding } from "./components/Onboarding";
 import { Welcome } from "./components/Welcome";
@@ -2123,19 +2127,32 @@ export default function App() {
       return;
     }
     let cancelled = false;
-    void checkInstalledClis().then((installed) => {
-      if (cancelled) return;
-      void startCompanion({
-        projects: companionProjects,
-        installed: (bin) => Boolean(installed[bin]),
-        tools: companionToolNames(
-          getSettings().disabledTools,
-          getSettings().companionAuthority,
-        ),
+    const attempt = () =>
+      void checkInstalledClis().then((installed) => {
+        if (cancelled) return;
+        void startCompanion({
+          projects: companionProjects,
+          installed: (bin) => Boolean(installed[bin]),
+          tools: companionToolNames(
+            getSettings().disabledTools,
+            getSettings().companionAuthority,
+          ),
+        });
       });
-    });
+    attempt();
+    // Try again when an install finishes. The companion ships on, so a machine
+    // with no agent CLI is an ordinary starting state rather than an error —
+    // and installing one from Settings has to bring the companion to life
+    // there and then. Without this, `unavailable` is a dead end until the app
+    // is restarted, which is not something anyone would think to do.
+    // `startCompanion` no-ops while one is already running, so a stray event
+    // costs a `which` probe and nothing else.
+    window.addEventListener(CLI_INSTALLS_CHANGED_EVENT, attempt);
+    window.addEventListener(AGENT_CLIS_CHANGED_EVENT, attempt);
     return () => {
       cancelled = true;
+      window.removeEventListener(CLI_INSTALLS_CHANGED_EVENT, attempt);
+      window.removeEventListener(AGENT_CLIS_CHANGED_EVENT, attempt);
     };
   }, [companionOn, companionProjects]);
   // Quitting must not leave an agent running and billing.

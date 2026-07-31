@@ -44,3 +44,22 @@ describe("no agent CLI installed", () => {
     expect(companionState().error).toBeNull();
   });
 });
+
+describe("recovering once a CLI appears", () => {
+  it("is not a dead end — a later start is allowed to proceed", async () => {
+    // `unavailable` must stay retryable. The companion ships on, so a machine
+    // with no agent CLI starts there; installing one from Settings has to
+    // bring it to life then and there, not on the next app launch. The guard
+    // in startCompanion only short-circuits while a session is actually
+    // running, which is what makes the retry possible.
+    const mod = await import("./companionSession");
+    await mod.startCompanion({ projects: [], installed: () => false, tools: [] });
+    expect(mod.companionState().status).toBe("unavailable");
+
+    // Now one exists. The spawn itself cannot succeed under vitest — there is
+    // no Tauri — but it must get far enough to try, which is the thing that
+    // was broken.
+    await mod.startCompanion({ projects: [], installed: () => true, tools: [] });
+    expect(mod.companionState().status).not.toBe("unavailable");
+  });
+});
