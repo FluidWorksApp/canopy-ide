@@ -114,18 +114,10 @@ fn main() {
 // for foreign sessions: the per-session cost below only updates a digest that
 // already exists, and only Canopy ever creates one.
 
-/// Which account profile this process is running under.
-///
-/// Two sources, argument first. `--profile` is written into the statusLine
-/// command inside one profile's own settings.json, so it is a property of the
-/// file being read and holds even for a `claude` started outside Canopy — which
-/// the statusLine path explicitly supports, since rate limits belong to the
-/// account rather than to a session. The environment is the fallback, stamped
-/// on the PTY by profiles.rs, and covers the hook events (which are gated on
-/// $CANOPY and therefore always ours).
-///
-/// Absent from both means the default account, which is also the right answer
-/// for a plain `claude` in any terminal.
+/// Which account this process runs under. Argument first: `--profile` is
+/// written into one profile's own settings.json, so it holds even for a
+/// `claude` started outside Canopy. The env is the fallback, stamped on the PTY
+/// for the hook events (which are gated on $CANOPY and always ours).
 fn current_profile() -> String {
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -141,10 +133,8 @@ fn current_profile() -> String {
         .unwrap_or_else(|| "default".into())
 }
 
-/// Where the plan chip reads from. One file per agent *per profile*, overwritten
-/// in place: rate limits belong to a subscription, so two logins on one machine
-/// have two independent readings, and a single file would have them overwrite
-/// each other with whichever account happened to render a status line last.
+/// Where the plan chip reads from. One file per agent per account — limits are
+/// per subscription, and a single file would have them overwrite each other.
 fn plan_usage_path(agent: &str, profile: &str) -> std::path::PathBuf {
     let name = if profile == "default" {
         format!("{agent}.json")
@@ -211,10 +201,8 @@ fn store_plan_usage(agent: &str, windows: &[serde_json::Value], plan: Option<Str
 /// the right field and is not — it reads "not_max" on a Max 20x account. The
 /// organization tier is the one that tracks reality.
 fn claude_plan_label() -> Option<String> {
-    // Verified against the CLI: with CLAUDE_CONFIG_DIR set, `.claude.json` is
-    // created *inside* that directory rather than beside it, so a profile's
-    // account details are there and `$HOME/.claude.json` still describes the
-    // default login. Reading the wrong one labels the chip with the wrong plan.
+    // With CLAUDE_CONFIG_DIR set the CLI puts `.claude.json` inside it, so a
+    // profile's account details are there, not in `$HOME`.
     let state = match std::env::var("CLAUDE_CONFIG_DIR") {
         Ok(dir) if !dir.is_empty() => std::path::PathBuf::from(dir).join(".claude.json"),
         _ => std::path::PathBuf::from(home()).join(".claude.json"),
@@ -714,10 +702,8 @@ fn update_digest(
         digest["surface"] = serde_json::json!(pty);
         digest["instance"] = serde_json::json!(std::env::var("CANOPY_INSTANCE").ok());
     }
-    // Which account this conversation belongs to. Recorded on every write, like
-    // the surface and for the same reason: resuming it has to relaunch the CLI
-    // against the same config dir, or `--resume <id>` looks in the other
-    // login's store and reports a session that plainly exists as missing.
+    // Which account owns this conversation: resuming has to relaunch against
+    // the same config dir, or `--resume <id>` looks in the wrong store.
     digest["profile"] = serde_json::json!(current_profile());
     // Read before it is overwritten: the working-time clock below measures from
     // the previous event, and this field is where the previous event's time is.

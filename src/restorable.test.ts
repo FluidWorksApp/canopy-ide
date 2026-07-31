@@ -35,10 +35,7 @@ describe("restorableFrom", () => {
     expect(restorableFrom([old], [], [])).toHaveLength(1);
   });
 
-  /** `--resume <id>` is resolved inside the CLI's own config dir, so the row
-   *  has to carry the account that owns the conversation. Restoring it under
-   *  another login doesn't reopen something else — it reports a session that
-   *  plainly exists as missing. */
+  /** `--resume <id>` resolves inside the CLI's own config dir. */
   it("carries the account a session belongs to", () => {
     const [row] = restorableFrom([digest({ profile: "work" })], [], []);
     expect(row.profile).toBe("work");

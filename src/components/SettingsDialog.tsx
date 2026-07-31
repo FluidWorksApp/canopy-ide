@@ -433,17 +433,11 @@ function AgentBinaries({
 }
 
 /**
- * Account profiles: more than one login per CLI, side by side.
+ * Account profiles: more than one login per CLI.
  *
- * What a profile is, and is not: it is a directory plus the environment that
- * points a CLI at it. Canopy never sees a token — signing in happens in a
- * terminal, in the CLI's own browser flow, against the profile's config dir.
- * That is why there is no "paste your key" field here and never should be.
- *
- * Only CLIs that expose a config-home variable can hold one (claude, codex,
- * opencode, amp). The rest are listed as single-account rather than given a
- * picker that would isolate nothing — two entries quietly sharing one login is
- * the one failure mode a user cannot see.
+ * Canopy never sees a token — signing in happens in a terminal, in the CLI's
+ * own browser flow, against the profile's config dir. Hence no "paste your
+ * key" field here. Only CLIs with a config-home variable can hold one.
  */
 function AgentAccounts({
   onRunInTerminal,
@@ -456,9 +450,7 @@ function AgentAccounts({
   ) => void;
 }) {
   const [profiles, setProfiles] = useState<ipc.AgentProfile[]>([]);
-  // Who each profile is signed in as, keyed by profile id. Without this the
-  // panel can only offer "Sign in" — including to a profile that is already
-  // signed in, which is exactly what it looked like when this shipped.
+  // Who each profile is signed in as, keyed by id.
   const [accounts, setAccounts] = useState<
     Record<string, ipc.AccountStatus[]>
   >({});
@@ -485,10 +477,7 @@ function AgentAccounts({
   }, []);
   useEffect(refresh, [refresh]);
 
-  // A sign-in happens in a terminal this dialog closes to open, so the panel is
-  // gone by the time it completes. Re-reading whenever the window regains focus
-  // is what makes the new account show up on the way back in, rather than on
-  // the next app launch.
+  // The dialog closes to open the sign-in terminal, so re-read on focus.
   useEffect(() => {
     window.addEventListener("focus", refresh);
     return () => window.removeEventListener("focus", refresh);
@@ -504,11 +493,9 @@ function AgentAccounts({
       .then((p) => {
         setDraft("");
         refresh();
-        // Open the one just created: the next thing to do is sign it in, and
-        // the buttons for that are inside the fold.
+        // Open it: signing in is the next step, and those buttons are inside.
         setExpanded((prev) => ({ ...prev, [p.id]: true }));
-        // Announced so open launchers pick the new account up without the user
-        // having to reopen anything.
+        // So open launchers pick it up.
         window.dispatchEvent(new CustomEvent(PROFILE_CHANGE_EVENT));
         setNote(
           `Created "${p.label}". Sign it in below — the CLI opens its own login in a terminal.`,
@@ -525,8 +512,7 @@ function AgentAccounts({
       .then((where) => {
         refresh();
         window.dispatchEvent(new CustomEvent(PROFILE_CHANGE_EVENT));
-        // Said out loud, because it is the opposite of what "remove" usually
-        // means: the login is still on disk and can be re-adopted.
+        // The opposite of what "remove" usually means — say so.
         setNote(`Removed "${p.label}". Its login is still on disk at ${where}.`);
       })
       .catch((e: unknown) => setNote(String(e)))
@@ -568,10 +554,8 @@ function AgentAccounts({
       {note && <p className="cli-account-note">{note}</p>}
 
       {profiles.map((p) => {
-        // Folded by default. Four CLI rows per account is a page of settings
-        // once you have two or three of them, and the question you open this
-        // screen with — "which accounts do I have, and who is in them" — is
-        // answered by the summary line alone.
+        // Folded by default: four CLI rows per account is a page of settings,
+        // and the summary line already answers "who is in this one".
         const isOpen = expanded[p.id] ?? false;
         const signedIn = (accounts[p.id] ?? []).filter((a) => a.state === "in");
         return (
@@ -593,8 +577,7 @@ function AgentAccounts({
           >
             <span className="cli-account-caret">{isOpen ? "▾" : "▸"}</span>
             <span className="cli-account-name">{p.label}</span>
-            {/* The whole point of the row, said without expanding it: who is
-                actually in this account. */}
+            {/* Who is in this account, without expanding it. */}
             <span className="cli-account-summary">
               {signedIn.length
                 ? signedIn
@@ -607,8 +590,7 @@ function AgentAccounts({
               <Button
                 size="sm"
                 onClick={(e) => {
-                  // The head is a fold toggle; removing an account must not
-                  // also fold the row it just deleted.
+                  // The head is a fold toggle.
                   e.stopPropagation();
                   remove(p);
                 }}
@@ -624,10 +606,7 @@ function AgentAccounts({
           <div className="cli-account-path" title={p.root}>
             {p.root}
           </div>
-          {/* One row per CLI, showing the account it actually holds. The whole
-              point of a profile is knowing which login is in it — an
-              undifferentiated "Sign in" on a profile that is already signed in
-              is indistinguishable from the feature not working. */}
+          {/* One row per CLI, showing the account it holds. */}
           <div className="cli-account-clis">
             {capable.map((cli) => {
               const st = (accounts[p.id] ?? []).find((a) => a.agent === cli.id);

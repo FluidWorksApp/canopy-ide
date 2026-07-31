@@ -392,8 +392,6 @@ describe("the account switcher", () => {
 
   beforeEach(() => localStorage.clear());
 
-  /** One account is not a choice. A chip that can never change is furniture,
-   *  and it would land on every existing user's status bar. */
   it("hides itself entirely until a second account exists", async () => {
     render(<StatusBar {...base} events={[]} />);
     await screen.findByText(/main/);
@@ -406,10 +404,8 @@ describe("the account switcher", () => {
     expect(await screen.findByTitle(/New agents launch as Default/)).toBeTruthy();
   });
 
-  /** The status bar clips its one-line row, so a menu that pops above it as an
-   *  absolutely positioned child renders behind the terminal — only a sliver of
-   *  its own shadow shows. Every other popup on this bar is fixed and measured
-   *  from its chip; this one shipped absolute and had exactly that bug. */
+  /** .status-bar clips its row, so an absolutely positioned menu renders
+   *  behind the page. Every other popup here is fixed. */
   it("escapes the status bar's clipping instead of opening behind it", async () => {
     vi.mocked(ipc.profilesList).mockResolvedValue(twoAccounts as never);
     render(<StatusBar {...base} events={[]} />);
@@ -428,8 +424,6 @@ describe("the account switcher", () => {
     expect(getSettings().activeProfile).toBe("vj");
   });
 
-  /** The footgun this defuses: an account holding a Claude login but no Codex
-   *  one is legitimate, and finding out by landing at a login prompt is not. */
   it("says which CLIs an account can actually launch", async () => {
     vi.mocked(ipc.profilesList).mockResolvedValue(twoAccounts as never);
     vi.mocked(ipc.profileAccounts).mockImplementation(async (id: string) =>

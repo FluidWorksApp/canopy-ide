@@ -101,11 +101,8 @@ interface StatusBarProps {
    *  plan's headroom the chip shows. Separate from agentLabel because that one
    *  is absent for CLIs Canopy can't switch models on. */
   agentId?: string | null;
-  /** Which account profile the session in front is running under. The chip
-   *  reports headroom for a subscription, so it must follow the tab's own
-   *  login rather than whichever profile is currently selected for new
-   *  launches — those differ the moment the user switches accounts with an
-   *  older session still open. */
+  /** The account the session in front runs under. Headroom is per
+   *  subscription, so the chip follows the tab, not the current selection. */
   agentProfile?: string | null;
   /** The pty of the active terminal tab — the model/token tray follows THIS
    *  tab's session, not whichever session in the project spoke last. */
@@ -1095,10 +1092,8 @@ export const StatusBar = memo(function StatusBar({
           {chipText(plan)}
         </span>
       )}
-      {/* Which account new agents launch as. Beside the plan chip on purpose:
-          that headroom belongs to *this* account, and the two are unreadable
-          apart. Hidden entirely until a second account exists — one account is
-          not a choice, and a chip that never changes is furniture. */}
+      {/* Beside the plan chip: that headroom belongs to this account. Hidden
+          until a second account exists — one account is not a choice. */}
       <AccountSwitcher />
       {/* Between the spend and the stats: the two things either side of it are
           what Canopy costs you and what it is doing, which is exactly where
@@ -1154,10 +1149,8 @@ export const StatusBar = memo(function StatusBar({
   );
 });
 
-/** The global account switch. Sessions already running keep the account they
- *  were launched with — the config-dir variable is read by the CLI at startup
- *  — so this changes what the *next* launch uses, and the tab badge is what
- *  tells the two apart on screen. */
+/** The global account switch. Running sessions keep the account they started
+ *  with; this changes what the next launch uses. */
 function AccountSwitcher() {
   const [profiles, setProfiles] = useState<ipc.AgentProfile[]>([]);
   const [accounts, setAccounts] = useState<Record<string, ipc.AccountStatus[]>>(
@@ -1166,11 +1159,9 @@ function AccountSwitcher() {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(activeProfile());
   const anchorRef = useRef<HTMLSpanElement>(null);
-  // The status bar clips its one-line row, so a menu popping above it as an
-  // absolutely positioned child shows nothing but a sliver of its own shadow —
-  // which is exactly what this did on the first cut. Fixed coordinates,
-  // measured from the chip at click time, ignore ancestor clipping entirely.
-  // Same pattern as the model and stats popups above.
+  // .status-bar clips its row, so an absolutely positioned child renders
+  // behind the page. Fixed coordinates measured from the chip, same as the
+  // model and stats popups above.
   const [pos, setPos] = useState<{ right: number; bottom: number } | null>(
     null,
   );
@@ -1183,8 +1174,7 @@ function AccountSwitcher() {
     });
   };
 
-  // Dismissal that matches the neighbouring popups: an outside click or
-  // Escape. Mouse-leave is flimsy on a menu you have to travel to.
+  // Outside click or Escape, like the neighbouring popups.
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
@@ -1220,8 +1210,7 @@ function AccountSwitcher() {
   useEffect(() => {
     refresh();
     window.addEventListener(PROFILE_CHANGE_EVENT, refresh);
-    // A sign-in finishes in a terminal, not here: re-read on focus so the
-    // account appears without the app being restarted.
+    // A sign-in finishes in a terminal; re-read on focus.
     window.addEventListener("focus", refresh);
     return () => {
       window.removeEventListener(PROFILE_CHANGE_EVENT, refresh);
@@ -1231,8 +1220,7 @@ function AccountSwitcher() {
 
   if (profiles.length < 2) return null;
   const current = profiles.find((p) => p.id === active) ?? profiles[0];
-  /** The CLIs this account actually holds a login for — the one thing that
-   *  makes switching predictable instead of a surprise login prompt. */
+  /** The CLIs this account holds a login for. */
   const heldBy = (id: string) =>
     (accounts[id] ?? []).filter((a) => a.state === "in");
 
@@ -1276,7 +1264,7 @@ function AccountSwitcher() {
                   {p.id === active ? "✓ " : ""}
                   {p.label}
                 </span>
-                {/* Said up front rather than discovered at a login prompt. */}
+                {/* Said up front, not at a login prompt. */}
                 <span className="status-account-held">
                   {p.id === "default"
                     ? "your existing logins"

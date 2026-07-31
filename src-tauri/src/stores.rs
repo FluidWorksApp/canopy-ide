@@ -134,10 +134,8 @@ pub fn source_files(roots: &[String], wanted: &dyn Fn(&str) -> bool) -> Vec<Sour
         });
     };
 
-    // Claude and Codex both file their transcripts inside the config directory
-    // the session ran under, so every account profile is its own store. Scanning
-    // only `$HOME` would leave a second login's sessions out of search and out
-    // of the digests entirely — invisible rather than merely unlabelled.
+    // Both file transcripts inside the config dir the session ran under, so
+    // every account is its own store.
     let cfg_roots: Vec<PathBuf> = crate::profiles::roots(&home.to_string_lossy())
         .into_iter()
         .map(|(_, root)| root)

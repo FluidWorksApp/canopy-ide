@@ -17,9 +17,7 @@ export interface Restorable {
   command: string;
   /** Recognisable label: the last thing the human actually typed. */
   prompt: string;
-  /** The account it ran under, so the restore relaunches against the same
-   *  config dir. "default" for sessions from before profiles, and for CLIs
-   *  that can't hold a second login. */
+  /** The account it ran under, so the restore uses the same config dir. */
   profile: string;
   /** Older sessions in this same directory, which this row stands in for. Not
    *  offered — but "forget" has to tombstone them too, or dismissing the row

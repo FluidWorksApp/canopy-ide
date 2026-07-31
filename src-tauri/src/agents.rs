@@ -538,15 +538,11 @@ pub fn setup_agent(agent: &str, home: &str) -> Result<SetupReport, String> {
     setup_agent_in(agent, home, home)
 }
 
-/// The same setup, writing into an arbitrary config root — how a profile gets
-/// hooked (see profiles.rs).
+/// The same setup against an arbitrary config root — how a profile gets hooked.
 ///
-/// Two roots, because they answer different questions. `cfg` is where the CLI
-/// keeps its own configuration, and moves with the profile. `home` is the real
-/// home, and never moves: the helper binary lives there, and so do the event
-/// bus and the session digests it writes. Collapsing them would either point a
-/// profile's hooks at a binary that isn't there, or fork the digest store per
-/// profile and hide half the user's sessions from the panels.
+/// Two roots: `cfg` is the CLI's own configuration and moves with the profile;
+/// `home` never moves, because the helper binary, the event bus and the session
+/// digests all live there.
 pub fn setup_agent_in(agent: &str, cfg: &str, home: &str) -> Result<SetupReport, String> {
     let bridge = format!("{home}/.canopy/agent-events.jsonl");
     // Eager, not `?`-chained: every step runs even when an earlier one failed,
@@ -1164,18 +1160,15 @@ fn claude_bucket(path: &str) -> String {
 /// Deterministic: an exact filename match on a uuid. Never newest-by-mtime and
 /// never a title match — those guess, and a wrong guess resumes a stranger's
 /// conversation.
-/// Scans every profile's transcript store, not just the default one: a session
-/// started under a second login writes its transcript inside that profile's
-/// CLAUDE_CONFIG_DIR, and looking only under `$HOME/.claude` would report it as
-/// having no transcript at all — no resume, no usage, no cost.
+/// Scans every profile's transcript store: a session under a second login
+/// writes inside that profile's config dir.
 fn transcript_bucket(session_id: &str) -> Option<String> {
     let home = std::env::var("HOME").ok()?;
     claude_transcript_file(&home, session_id).map(|(bucket, _)| bucket)
 }
 
-/// The bucket name and full path of a session's Claude transcript, searched
-/// across profile roots. Deterministic: an exact filename match on a uuid, in
-/// registry order, so the same session always resolves to the same file.
+/// Bucket name + path of a session's transcript, across profile roots. Exact
+/// filename match on a uuid, in registry order.
 fn claude_transcript_file(home: &str, session_id: &str) -> Option<(String, std::path::PathBuf)> {
     let name = format!("{session_id}.jsonl");
     for (_, root) in crate::profiles::roots(home) {
@@ -1479,17 +1472,11 @@ fn install_claude_statusline(settings: &mut serde_json::Value, helper: &str, pro
         None => None,
     };
     let mut command = format!("{} --statusline", sh_quote(helper));
-    // Which account's limits this status line reports, written into the command
-    // rather than left to the environment.
-    //
-    // The statusLine path is deliberately not gated on $CANOPY — rate limits
-    // belong to the account, so a `claude` run in any terminal reports the same
-    // numbers. That is exactly why the environment cannot be trusted here: a
-    // session started outside Canopy against this config dir carries no
-    // CANOPY_PROFILE, and its reading would be filed under the default account
-    // — showing one account's usage as another's. This hook lives in one
-    // profile's settings.json and can only ever be invoked by a session using
-    // that profile, so the id is a property of the file, not of the launch.
+    // The account is written into the command, not left to the environment:
+    // this path is deliberately not gated on $CANOPY, so a `claude` started
+    // outside Canopy against this config dir carries no CANOPY_PROFILE and its
+    // reading would be filed under the default account. The hook lives in one
+    // profile's settings.json, so the id is a property of the file.
     if profile != crate::profiles::DEFAULT_ID {
         command.push_str(&format!(" --profile {}", sh_quote(profile)));
     }
@@ -1547,24 +1534,8 @@ fn setup_claude_mcp(cfg: &str, home: &str) -> Result<String, String> {
     Ok(registered_msg(changed, "claude"))
 }
 
-/// Where Claude Code keeps `.claude.json` — its own state file, and the only
-/// path in this module that does *not* follow the home-mirror layout a profile
-/// root otherwise gives us.
-///
-/// Verified against the CLI: with `CLAUDE_CONFIG_DIR` set, `.claude.json`,
-/// `projects/` and `backups/` are all created *inside* that directory, not
-/// beside it. So the default profile keeps `~/.claude.json` while a profile
-/// gets `<root>/.claude/.claude.json`. Deriving it as `<root>/.claude.json`
-/// would write an MCP registration the CLI never reads, and the profile's
-/// agents would silently come up without the Canopy context tools.
 fn claude_state_path(cfg: &str, home: &str) -> std::path::PathBuf {
-    if cfg == home {
-        std::path::PathBuf::from(home).join(".claude.json")
-    } else {
-        std::path::PathBuf::from(cfg)
-            .join(".claude")
-            .join(".claude.json")
-    }
+    crate::profiles::claude_state_file(home, std::path::Path::new(cfg))
 }
 
 /// Every MCP installer needs the helper on disk first, and says so the same
@@ -2134,10 +2105,9 @@ pub fn heal_integrations_in(
     let mut repaired = Vec::new();
     let mut failed = Vec::new();
 
-    // Every profile is healed, not just the default one. A release that changes
-    // a generated plugin changes it for all of them, and a profile silently
-    // running last version's bridge is the failure this pass exists to prevent.
-    // The default root comes first so its report lines stay unprefixed.
+    // Every profile, not just the default: a release that changes a generated
+    // plugin changes it for all of them. Default first, so its lines stay
+    // unprefixed.
     let mut roots: Vec<(String, String)> = vec![(crate::profiles::DEFAULT_ID.into(), home.into())];
     for (id, root) in crate::profiles::roots(home) {
         if id != crate::profiles::DEFAULT_ID {
@@ -2147,8 +2117,7 @@ pub fn heal_integrations_in(
 
     for (profile, cfg) in &roots {
         let default_profile = profile == crate::profiles::DEFAULT_ID;
-        // A profile only ever holds the CLIs it can actually isolate; healing
-        // the rest would write configs into a root no CLI will ever read.
+        // A profile holds only the CLIs it can isolate.
         let scoped: Vec<IntegrationHealth> = integration_health(cfg, home, installed)
             .into_iter()
             .filter(|h| default_profile || crate::profiles::supports_profiles(&h.agent))
@@ -2253,9 +2222,8 @@ fn finish_heal(
     HealthReport {
         version: version.into(),
         upgraded,
-        // Re-read after repairing so the report describes the end state. The
-        // default root only: the panel's readout is about this machine's CLIs,
-        // and a profile's rows would read as duplicates of the same agent.
+        // Re-read after repairing. Default root only — a profile's rows would
+        // read as duplicates of the same agent.
         agents: integration_health(home, home, installed),
         repaired,
         failed,
@@ -2411,15 +2379,9 @@ static STATS_CACHE: std::sync::LazyLock<
 
 /// Whether a path is a Claude transcript this machine owns.
 ///
-/// A whitelist, not a sanity check: the path arrives from a hook event and this
-/// command turns it into a file read, so anything outside a config directory we
-/// installed must stay refused.
-///
-/// Every profile's config dir counts, not just `$HOME/.claude`. A session run
-/// under a second account writes its transcript inside that account's
-/// CLAUDE_CONFIG_DIR, and refusing it there cost the tray everything it reads
-/// from a transcript — model, tokens, cost — for exactly the sessions the
-/// account feature exists to run.
+/// A whitelist, not a sanity check: the path arrives from a hook event and
+/// becomes a file read. Every profile's config dir counts — a session under a
+/// second account writes its transcript inside that account's config dir.
 fn is_claude_transcript(home: &str, path: &std::path::Path) -> bool {
     if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
         return false;
@@ -2510,9 +2472,7 @@ pub async fn claude_session_stats(transcript_path: String) -> Result<ClaudeSessi
 pub struct AgentSessionUsage {
     pub session_id: String,
     pub agent: String,
-    /// Which account profile ran this session, derived from which config root
-    /// its transcript was found under. "default" when it can't be placed, which
-    /// is also the honest answer for a CLI that has no profile support.
+    /// Which account ran it, from the config root its transcript sits under.
     pub profile: String,
     pub cwd: String,
     pub title: Option<String>,
@@ -2916,9 +2876,7 @@ pub async fn agent_usage() -> Result<Vec<AgentSessionUsage>, String> {
     for c in omp_sessions(&home) {
         upsert(&mut by_key, c);
     }
-    // Codex files its rollouts under CODEX_HOME, so each profile has its own
-    // store — scanning only the default one would leave a second account's
-    // sessions out of the usage panel entirely.
+    // Codex files rollouts under CODEX_HOME, so each profile has its own.
     for (_, root) in crate::profiles::roots(&home) {
         for c in codex_sessions(&root.to_string_lossy()) {
             upsert(&mut by_key, c);
@@ -3005,10 +2963,7 @@ pub struct PlanWindow {
 #[derive(Serialize, Clone)]
 pub struct PlanUsage {
     pub agent: String,
-    /// Which account these limits belong to. Rate limits are per subscription,
-    /// so a machine with two logins has two independent answers for the same
-    /// CLI — collapsing them onto one chip would show the user headroom that
-    /// belongs to an account they are not currently running.
+    /// Which account these limits belong to — they are per subscription.
     pub profile: String,
     /// The subscription's name when we can name it ("default_claude_max_20x",
     /// "free"), for labelling only.
@@ -3073,9 +3028,7 @@ fn stored_plan_usage(home: &str) -> Vec<PlanUsage> {
         }
         out.push(PlanUsage {
             agent: v["agent"].as_str().unwrap_or("").to_string(),
-            // Read from the payload rather than parsed back out of the file
-            // name: the helper knows which profile it ran under, and a file
-            // name is not a place to keep meaning.
+            // From the payload, not the file name.
             profile: v["profile"]
                 .as_str()
                 .unwrap_or(crate::profiles::DEFAULT_ID)
@@ -3170,9 +3123,7 @@ fn codex_plan_usage(cfg: &str, profile: &str) -> Option<PlanUsage> {
 pub async fn plan_usage() -> Result<Vec<PlanUsage>, String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
     let mut out = stored_plan_usage(&home);
-    // Codex is read live rather than from a stored snapshot, so drop any stale
-    // stored copy of it in favour of what the rollouts say now — per profile,
-    // because each login has its own store and its own limits.
+    // Codex is read live; drop any stale stored copy, per profile.
     for (id, root) in crate::profiles::roots(&home) {
         if let Some(codex) = codex_plan_usage(&root.to_string_lossy(), &id) {
             out.retain(|p| !(p.agent == "codex" && p.profile == id));
@@ -4329,10 +4280,8 @@ mod integration_tests {
 
     // ---------- setup into an account profile ----------
 
-    /// The load-bearing claim of the profile feature: a profile's agents are
-    /// hooked exactly like the default's, in the profile's own config root, and
-    /// pointing at the one helper binary in the real home. Get either half wrong
-    /// and the profile launches agents that look like plain shells.
+    /// A profile's agents are hooked like the default's, in its own config
+    /// root, pointing at the one helper binary in the real home.
     #[test]
     fn setting_up_a_profile_writes_into_its_root_and_leaves_the_default_alone() {
         let home = scratch_home("profile-root");
@@ -4364,9 +4313,7 @@ mod integration_tests {
         );
     }
 
-    /// Verified against the CLI: `.claude.json` lives *inside* CLAUDE_CONFIG_DIR
-    /// when that variable is set. Registering the MCP server one level up would
-    /// write a file Claude never reads.
+    /// `.claude.json` lives inside CLAUDE_CONFIG_DIR when it is set.
     #[test]
     fn a_profiles_mcp_registration_lands_where_claude_actually_reads_it() {
         let home = scratch_home("profile-mcp");
@@ -4387,9 +4334,7 @@ mod integration_tests {
         assert_eq!(claude_state_path(h, h), home.join(".claude.json"));
     }
 
-    /// A session run under a second login writes its transcript inside that
-    /// profile's config dir. Scanning only $HOME would report no transcript —
-    /// which the panels read as "no usage, no cost, nothing to resume".
+    /// A session under a second login writes inside that profile's config dir.
     #[test]
     fn transcripts_are_found_inside_profile_roots_too() {
         let home = scratch_home("profile-transcript");
@@ -4406,13 +4351,9 @@ mod integration_tests {
         assert_eq!(crate::profiles::profile_of_path(h, &found), "work");
     }
 
-    /// The statusLine path is deliberately not gated on $CANOPY — rate limits
-    /// belong to the account, so a `claude` in any terminal reports the same
-    /// numbers. That is exactly why the account cannot come from the
-    /// environment here: a session started outside Canopy against a profile's
-    /// config dir carries no CANOPY_PROFILE, and its reading would be filed
-    /// under the default account, showing one account's usage as another's.
-    /// The id belongs to the file the hook lives in.
+    /// Not gated on $CANOPY, so the account cannot come from the environment:
+    /// a `claude` started outside Canopy carries no CANOPY_PROFILE. The id
+    /// belongs to the file the hook lives in.
     #[test]
     fn a_profiles_statusline_names_its_account_in_the_command() {
         let home = scratch_home("statusline-account");
@@ -4442,11 +4383,9 @@ mod integration_tests {
         );
     }
 
-    /// The tray reads model, tokens and cost out of the transcript named by a
-    /// hook event, behind a whitelist of directories we installed. That
-    /// whitelist was `$HOME/.claude` alone, so every session run under a second
-    /// account was refused — and its footer lost the model, the token counts
-    /// and the cost, which is precisely the state the account feature creates.
+    /// The tray reads the transcript named by a hook event, behind a whitelist
+    /// of directories we installed. `$HOME/.claude` alone refused every session
+    /// run under a second account.
     #[test]
     fn a_profiles_transcript_is_readable_and_a_stranger_is_still_refused() {
         let home = scratch_home("transcript-guard");
@@ -4464,8 +4403,7 @@ mod integration_tests {
         std::fs::write(&in_default, "{}\n").unwrap();
         assert!(is_claude_transcript(h, &in_default));
 
-        // Still a whitelist: the path arrives from a hook event and becomes a
-        // file read, so anywhere we did not install stays refused.
+        // Still a whitelist.
         assert!(!is_claude_transcript(h, &home.join("secrets.jsonl")));
         assert!(!is_claude_transcript(
             h,
@@ -4478,9 +4416,7 @@ mod integration_tests {
         ));
     }
 
-    /// Each login has its own rollout store and its own rate limits, so the
-    /// chip must carry one reading per account rather than whichever was
-    /// written last.
+    /// Each login has its own rollout store and its own limits.
     #[test]
     fn codex_plan_limits_are_reported_per_profile() {
         let home = scratch_home("profile-plan");

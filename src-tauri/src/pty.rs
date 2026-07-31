@@ -502,9 +502,8 @@ impl PtyManager {
         cwd: Option<String>,
         command: Option<String>,
     ) -> Result<u32, String> {
-        // A remote launch runs under the same account as a desktop one. The
-        // choice lives in the frontend, which this path has no way to ask, so
-        // it is read from the registry Rust also writes (see profiles::active).
+        // A remote launch uses the same account as a desktop one; this path
+        // has no webview to ask, so it reads profiles::active.
         let account = std::env::var("HOME")
             .ok()
             .zip(command.as_deref())

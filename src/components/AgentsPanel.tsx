@@ -783,10 +783,8 @@ export function AgentsPanel({
               {digest.branch}
             </span>
           )}
-          {/* Which account it is spending. Two agents of the same CLI on the
-              same branch are otherwise identical rows, and they can be drawing
-              down two different subscriptions. Absent for the default account,
-              which would put a badge on every row. */}
+          {/* Which account it is spending — two agents of the same CLI on one
+              branch are otherwise identical rows. */}
           {digest?.profile && digest.profile !== "default" && (
             <span
               className="agent-account"
