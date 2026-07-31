@@ -34,6 +34,7 @@ const SOURCE_LABEL: Record<AttentionItem["source"], string> = {
   task: "Task",
   agent: "Agent",
   project: "Project",
+  reminder: "Reminder",
 };
 
 function Row({

@@ -13,8 +13,15 @@
 //   canopy://panel?name=tasks&path=/Users/me/src/api  a side panel
 //   canopy://chat?peer=ab12                           a teammate's conversation
 //   canopy://file?path=/Users/me/src/api/main.rs&line=40
+//   canopy://note?note=0007-tier-donations&id=p1      one scratchpad note
 //   canopy://project?id=p1                            the project itself
 //   canopy://app                                      nothing in particular
+//
+// The note target is the one composed *outside* the app: a reminder's launchd
+// job holds it in a plist and hands it to a Canopy that may not be running yet
+// (remind.rs, cli.rs). That is the case the scheme shape was always for, and
+// it is why the parser has to be as forgiving about where the string came from
+// as it is strict about what the string says.
 //
 // URLs rather than a bag of fields because a deep link has to survive leaving
 // the process: it goes out to the OS with the notification and comes back as a
@@ -59,7 +66,9 @@ export type DeepLink =
   | ({ kind: "panel"; panel: SideTab } & ProjectHint)
   /** `peer: null` is the team-wide conversation, not a DM. */
   | ({ kind: "chat"; peer: string | null } & ProjectHint)
-  | ({ kind: "file"; path: string; line?: number } & ProjectHint);
+  | ({ kind: "file"; path: string; line?: number } & ProjectHint)
+  /** A scratchpad note, by store id (`nnnn-slug`). */
+  | ({ kind: "note"; noteId: string } & ProjectHint);
 
 export const DEEP_LINK_SCHEME = "canopy:";
 
@@ -73,6 +82,10 @@ export function formatDeepLink(link: DeepLink): string {
   if (link.kind === "panel") q.set("name", link.panel);
   if (link.kind === "chat" && link.peer !== null) q.set("peer", link.peer);
   if (link.kind === "file" && link.line != null) q.set("line", String(link.line));
+  // `note`, not `id` — `id` is already the project hint on every kind, and a
+  // link that spelled the note with it would be a link that can never carry
+  // both. The Rust side composes the same string (notes.rs `note_link`).
+  if (link.kind === "note") q.set("note", link.noteId);
   const query = q.toString();
   return `canopy://${link.kind}${query ? `?${query}` : ""}`;
 }
@@ -119,6 +132,11 @@ export function parseDeepLink(raw: string): DeepLink | null {
     }
     case "chat":
       return { kind: "chat", peer: p.get("peer"), ...hint };
+    case "note": {
+      const noteId = p.get("note");
+      if (!noteId) return null;
+      return { kind: "note", noteId, ...hint };
+    }
     case "file": {
       if (!path) return null;
       const line = Number(p.get("line"));
@@ -145,6 +163,7 @@ export type DeepLinkAction =
   | { do: "panel"; panel: SideTab; note?: string }
   | { do: "chat"; peer: string | null; name: string }
   | { do: "file"; path: string; line?: number }
+  | { do: "note"; noteId: string }
   | { do: "nothing" };
 
 /** The project's surfaces as they are right now — what the link is resolved
@@ -201,6 +220,12 @@ export function followLink(
     }
     case "file":
       return { do: "file", path: link.path, line: link.line };
+    // Unlike a terminal or a peer, a note cannot have gone away underneath the
+    // link: the store is the authority and it is still there. So there is no
+    // fallback chain here — opening the tab either finds it or reports that it
+    // was deleted, which is a truer answer than landing on the panel.
+    case "note":
+      return { do: "note", noteId: link.noteId };
     // The project is already open by the time this runs; that was the whole
     // instruction.
     case "app":

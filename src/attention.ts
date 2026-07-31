@@ -47,7 +47,12 @@ export type AttentionSource =
   | "team"
   | "task"
   | "agent"
-  | "project";
+  | "project"
+  /** A note's reminder came due. Reaches the OS like `team` does and for the
+   *  same reason: the user asked, ahead of time, to be interrupted — that is
+   *  the entire content of a reminder, and one that waits politely for you to
+   *  look at the app is one you set for nothing. */
+  | "reminder";
 
 /** The single urgency model, replacing `NoticeKind` + `rail-badge-urgent` +
  *  per-panel counts each deciding independently.
@@ -97,6 +102,9 @@ export interface AttentionItem {
    *  swatting a toast is not answering a question, and conflating the two is
    *  how a stall becomes invisible again. */
   toastDismissedAt?: number;
+  /** The banner for this item was delivered by something outside the app, so
+   *  the OS half is already done. See `shouldReachOS`. */
+  osHandled?: boolean;
   /** Identity of the *thing* asking, not of the posting. Re-posting with a
    *  key that already has an outstanding item updates it in place instead of
    *  queueing a second one — which is what lets a derived source (an agent's
@@ -189,9 +197,19 @@ export function ashStateFor(item: AttentionItem): AshState {
  *  so both wear `done` — and on `main` today both raise a banner. Dropping the
  *  source clause would silently stop shipping those. */
 export function shouldReachOS(item: AttentionItem, focused: boolean): boolean {
+  // Something outside the app has already put this on screen. The item still
+  // belongs in the list — it is a thing that happened — but posting it again
+  // would be two banners for one event. Today the only such thing is a note
+  // reminder that launchd fired (src-tauri/src/remind.rs), which is delivered
+  // whether or not Canopy is even running.
+  if (item.osHandled) return false;
   if (focused) return false;
   if (ashMayInterrupt(ashStateFor(item))) return true;
-  return item.source === "team" || item.source === "task";
+  return (
+    item.source === "team" ||
+    item.source === "task" ||
+    item.source === "reminder"
+  );
 }
 
 /** The native banner's title. Was hand-written per call site — `"Canopy — Team"`,
@@ -202,6 +220,7 @@ const SOURCE_TITLE: Record<AttentionSource, string> = {
   task: "Canopy — Task",
   agent: "Canopy — Agent",
   project: "Canopy — Project",
+  reminder: "Canopy — Reminder",
 };
 
 /** Title and body for the OS, project named where there is one. A banner read

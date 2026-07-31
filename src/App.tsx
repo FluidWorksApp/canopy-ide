@@ -99,6 +99,7 @@ import { isSelftest, setSelftestMode } from "./selftest/mode";
 import { startBrowserWatchdog } from "./browserWatchdog";
 import { browserViewSnapshots } from "./browserSignals";
 import { startSpotIndexJob } from "./spotIndexJob";
+import { useNoteReminders } from "./useNoteReminders";
 import { loadZoom, setZoom, applyZoom, STEP } from "./zoom";
 import { stopWorkspaceServers } from "./lsp/client";
 import { sweepStaleRuns } from "./taskHistory";
@@ -227,6 +228,15 @@ export default function App() {
     },
     [],
   );
+  // Note reminders that have come due, in any project — including ones a
+  // launchd job already put on screen while Canopy was closed. Named here
+  // rather than inside the hook because only App holds the workspace, and a
+  // banner with no project on it is the thing deepLinks.ts exists to end.
+  const projectNameFor = useCallback(
+    (id: string) => wsRef.current.projects.find((p) => p.id === id)?.name,
+    [],
+  );
+  useNoteReminders(projectNameFor);
   // A micro-task in flight when Canopy last quit has no terminal to come back
   // to — its tab is ephemeral and never restored — so it can never report.
   // Settle those before anything new is recorded, or they stay "running"
@@ -1497,6 +1507,21 @@ export default function App() {
         un = u;
       });
     return () => un?.();
+  }, [loaded, followDeepLink]);
+
+  // The same link, delivered by a cold start. A reminder's banner is posted by
+  // launchd while Canopy is closed (src-tauri/src/remind.rs), so clicking it
+  // launches the app with `canopy://note?…` in argv — there was no process to
+  // send an event to. The link waited in Rust state through boot; collect it
+  // once the workspace is loaded, exactly as `canopy <dir>` does, or resolving
+  // the project would race the workspace it resolves against.
+  useEffect(() => {
+    if (!loaded) return;
+    void import("@tauri-apps/api/core").then(({ invoke }) =>
+      invoke<string | null>("cli_take_pending_link")
+        .then((raw) => (raw ? followDeepLink(parseDeepLink(raw)) : undefined))
+        .catch(() => {}),
+    );
   }, [loaded, followDeepLink]);
 
   // An action an agent requested via the MCP context bridge (canopy_start_server

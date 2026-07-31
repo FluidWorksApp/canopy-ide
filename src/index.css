@@ -276,6 +276,7 @@
 :root[data-theme="vitrine"] .status-menu,
 :root[data-theme="vitrine"] .cli-menu,
 :root[data-theme="vitrine"] .review-menu,
+:root[data-theme="vitrine"] .note-remind-menu,
 :root[data-theme="vitrine"] .cnp-tooltip,
 :root[data-theme="vitrine"] .notice,
 :root[data-theme="vitrine"] .update-toast {
@@ -18682,6 +18683,19 @@ a.btn-sm {
   color: var(--text-dim);
 }
 
+/* A note that asked to come back. Dim like every other fact until it is due —
+   at which point it is the only thing in the row that wants you now, and the
+   warning colour is the whole reason the state is on screen at all. */
+.notes-row-remind {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.notes-row-remind.overdue {
+  color: var(--warn);
+}
+
 .notes-more {
   width: 100%;
   padding: 10px;
@@ -18820,6 +18834,152 @@ a.btn-sm {
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 4px;
+}
+
+/* ---------- the reminder control ---------- */
+
+.note-remind {
+  position: relative;
+  display: inline-flex;
+}
+
+/* A chip that is also a button. It sits in a row of chips and must not look
+   like a control until you reach for it — the row would otherwise read as a
+   toolbar with one live item in it. */
+.note-remind-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font: inherit;
+  font-size: inherit;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.note-remind-chip:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
+.note-remind-chip.on {
+  color: var(--text);
+}
+
+.note-remind-chip.overdue {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+/* The same material and the same manners as .ctx-menu — it is the app's one
+   popover surface, and a second one with its own greys is how a skin ends up
+   with two kinds of menu. Absolute rather than fixed because this one is
+   anchored to its chip, not to a click. */
+.note-remind-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 500;
+  width: 262px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.note-remind-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 10px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  cursor: pointer;
+}
+
+.note-remind-item:hover,
+.note-remind-item:focus-visible {
+  background: var(--accent);
+  color: var(--on-accent);
+  outline: none;
+}
+
+.note-remind-when {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* The time on a hovered row has to come with it, or it drops to unreadable
+   against the accent fill. */
+.note-remind-item:hover .note-remind-when,
+.note-remind-item:focus-visible .note-remind-when {
+  color: inherit;
+  opacity: 0.75;
+}
+
+.note-remind-custom {
+  display: flex;
+  gap: 4px;
+  padding: 4px 8px 2px;
+}
+
+.note-remind-custom input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 4px;
+}
+
+.note-remind-note {
+  margin: 0 8px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 5px;
+}
+
+/* Which alarm is going to hold this. Not a footnote — it is the difference
+   between a reminder that arrives with the app closed and one that doesn't. */
+.note-remind-foot {
+  margin: 4px 8px 2px;
+  /* 11px rather than the 10px the rest of the chip row uses: this is dim text
+     on a raised surface, which is already the weakest pairing in the skin, and
+     at 10px it sits under the contrast the sentence needs to be read once. */
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+
+.note-remind-clear {
+  justify-content: flex-start;
+  gap: 6px;
+  color: var(--danger);
+}
+
+.note-remind-clear:hover,
+.note-remind-clear:focus-visible {
+  background: var(--danger);
+  color: var(--on-danger);
 }
 
 /* One scrolling region for the note and everything attached to it. */

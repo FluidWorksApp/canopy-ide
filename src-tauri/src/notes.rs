@@ -63,6 +63,10 @@ const ARTIFACT_MAX: usize = 512 * 1024;
 const MAX_ATTACHMENTS: usize = 32;
 /// What a list row carries of the body.
 const PREVIEW_MAX: usize = 240;
+/// The line a reminder carries into the banner. A notification body is two
+/// lines on screen whatever you put in it, and the note itself is one click
+/// away.
+const REMINDER_NOTE_MAX: usize = 200;
 /// The panel shows the user's whole scratchpad, so this is far higher than
 /// research's — that list is read by agents, this one by a person scrolling.
 const LIST_DEFAULT: usize = 200;
@@ -234,6 +238,42 @@ pub struct Attachment {
     pub bytes: u64,
 }
 
+/// A time to be handed this note back at.
+///
+/// One per note, not a list. A note is a single thought, and "remind me about
+/// this on Friday, and again on Monday" is a thing nobody has ever wanted from
+/// a scratchpad — while two live alarms on one note is a UI that has to explain
+/// which one the row's chip means. Re-setting replaces.
+///
+/// `system` is the load-bearing field. It records that launchd took the job, so
+/// the app knows to stay quiet when the time comes: the banner is already
+/// coming from outside, and an app that announces it too is an app that
+/// double-notifies for every reminder set while it happened to be open.
+#[derive(Clone, Serialize, Deserialize, Default, Debug)]
+pub struct Reminder {
+    /// When it is due, epoch seconds.
+    pub at: i64,
+    /// What to say beyond the title — the user's or the agent's own words.
+    #[serde(default)]
+    pub note: String,
+    /// Who set it: "you", or the agent's name. Same convention as history's
+    /// `by`, and for the same reason — a reminder you did not set yourself is
+    /// a different thing to see at 9am than one you did.
+    #[serde(default)]
+    pub by: String,
+    #[serde(default)]
+    pub created_at: i64,
+    /// Set once the time has passed and the app has noticed. Kept rather than
+    /// cleared: an overdue note stays visibly overdue until it is dealt with,
+    /// which is the entire point of having asked to be reminded.
+    #[serde(default)]
+    pub fired_at: Option<i64>,
+    /// The OS holds this one — it fires with Canopy closed. False means the
+    /// in-app tick is the only alarm, and the UI says so.
+    #[serde(default)]
+    pub system: bool,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub at: i64,
@@ -285,6 +325,8 @@ pub struct Meta {
     pub links: Links,
     #[serde(default)]
     pub history: Vec<HistoryEntry>,
+    #[serde(default)]
+    pub reminder: Option<Reminder>,
 }
 
 /// A list row. Carries a preview rather than the body — the panel renders
@@ -303,6 +345,10 @@ pub struct Summary {
     pub file_count: usize,
     pub pr_count: usize,
     pub research_count: usize,
+    /// The whole reminder, not just its time: a row has to distinguish "due in
+    /// two hours" from "was due yesterday and nobody looked", and the panel
+    /// sorts overdue notes to the top, which needs `fired_at` too.
+    pub reminder: Option<Reminder>,
 }
 
 #[derive(Serialize)]
@@ -536,6 +582,7 @@ fn summarize(m: &Meta, body: &str) -> Summary {
         file_count: m.links.files.len(),
         pr_count: m.links.prs.len(),
         research_count: m.links.research.len(),
+        reminder: m.reminder.clone(),
     }
 }
 
@@ -801,6 +848,7 @@ fn create_impl(
         attachments: Vec::new(),
         links: Links::default(),
         history: Vec::new(),
+        reminder: None,
     };
     write_meta(&dir, &meta)?;
     write_atomic(&body_path(&dir), body.as_bytes())?;
@@ -1170,6 +1218,201 @@ fn set_status_impl(
     Ok(summarize(&meta, &body))
 }
 
+// ---- reminders ------------------------------------------------------------
+//
+// A note is a thought you were not ready to act on. The missing half was always
+// "and bring it back to me on Friday" — without it, coming back is a thing you
+// have to remember to do, which is what the scratchpad exists to stop being
+// your job. See remind.rs for why the alarm is handed to the OS rather than
+// kept in a timer here.
+
+/// Where clicking the banner has to land: this note, in this project.
+///
+/// Built here rather than in the frontend because the string leaves the
+/// process — it goes into a launchd plist that may be read months from now, by
+/// a helper that has no idea what a project is. `path` rides along as the
+/// second way to find the project: ids are derived from the workspace file and
+/// a project removed and re-added gets a new one, at which point the note's own
+/// cwd is the only surviving evidence of where it belongs.
+pub fn note_link(meta: &Meta) -> String {
+    let mut link = format!(
+        "canopy://note?note={}&id={}",
+        urlish(&meta.id),
+        urlish(&meta.project_id)
+    );
+    if !meta.cwd.is_empty() {
+        link.push_str(&format!("&path={}", urlish(&meta.cwd)));
+    }
+    link
+}
+
+/// Percent-encoding for the few characters a path or an id can carry that would
+/// end the query parameter. Not a general encoder: ids are `nnnn-slug` and the
+/// only realistic hazard is a space or an ampersand in a directory name.
+fn urlish(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Set, move or clear a note's reminder.
+///
+/// `at` of `None` clears. Everything else is one path: whatever job was there
+/// is taken away first, so a reminder moved from Friday to Monday cannot leave
+/// Friday's still armed — which is the failure that would teach someone never
+/// to trust this again.
+#[tauri::command]
+pub fn notes_remind(
+    store: State<'_, NotesStore>,
+    project_id: String,
+    id: String,
+    at: Option<i64>,
+    note: Option<String>,
+    by: Option<String>,
+) -> Result<Summary, String> {
+    let _guard = store.0.lock().unwrap();
+    remind_impl(project_id, id, at, note, by)
+}
+
+fn remind_impl(
+    project_id: String,
+    id: String,
+    at: Option<i64>,
+    note: Option<String>,
+    by: Option<String>,
+) -> Result<Summary, String> {
+    let dir = note_dir(&project_id, &id)?;
+    let mut meta = read_meta(&dir)?;
+    let text = note.unwrap_or_default();
+    cap(
+        "the reminder note",
+        &text,
+        REMINDER_NOTE_MAX,
+        "Put the detail in the note itself — the reminder is one line.",
+    )?;
+
+    // Unconditional, including on the way to setting a new one.
+    crate::remind::unschedule(&project_id, &id);
+
+    meta.reminder = match at {
+        None => None,
+        Some(at) => {
+            if at <= now_secs() {
+                return Err(
+                    "that time has already passed — a reminder has to be in the \
+                            future"
+                        .into(),
+                );
+            }
+            let scheduled = crate::remind::schedule(&crate::remind::Job {
+                project_id: &project_id,
+                note_id: &id,
+                title: &meta.title,
+                note: &text,
+                at,
+                link: &note_link(&meta),
+            });
+            Some(Reminder {
+                at,
+                note: text,
+                by: by.unwrap_or_default(),
+                created_at: now_secs(),
+                fired_at: None,
+                system: scheduled.is_system(),
+            })
+        }
+    };
+    meta.updated_at = now_secs();
+    write_meta(&dir, &meta)?;
+    let body = read_body(&dir);
+    Ok(summarize(&meta, &body))
+}
+
+/// A reminder whose time has come, with enough of its note to announce it.
+#[derive(Serialize)]
+pub struct Due {
+    pub project_id: String,
+    pub id: String,
+    pub title: String,
+    pub note: String,
+    pub at: i64,
+    pub by: String,
+    /// launchd already announced this one — the app must not announce it again.
+    pub system: bool,
+    /// The click target, so the caller never has to compose one.
+    pub link: String,
+}
+
+/// Every reminder due at or before `before`, across every project, marked fired
+/// as they are returned.
+///
+/// One call, one pass, and the marking happens here rather than in a second
+/// round trip: whatever the app does with these, it must not be able to show
+/// the same reminder twice because it crashed between reading and recording.
+///
+/// The scan is over `meta.json` files the app has already loaded for its
+/// panels; a scratchpad is hundreds of notes, not millions, and a separate
+/// index would be a second source of truth for the one field whose whole job is
+/// to be right.
+#[tauri::command]
+pub fn notes_due(store: State<'_, NotesStore>, before: i64) -> Result<Vec<Due>, String> {
+    let _guard = store.0.lock().unwrap();
+    due_impl(before)
+}
+
+fn due_impl(before: i64) -> Result<Vec<Due>, String> {
+    let root = root()?;
+    let Ok(projects) = std::fs::read_dir(&root) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for p in projects
+        .filter_map(Result::ok)
+        .filter(|p| p.path().is_dir())
+    {
+        let project_id = p.file_name().to_string_lossy().to_string();
+        let Ok(notes) = load_project(&project_id) else {
+            continue;
+        };
+        for (mut meta, dir) in notes {
+            let Some(reminder) = meta.reminder.clone() else {
+                continue;
+            };
+            if reminder.fired_at.is_some() || reminder.at > before {
+                continue;
+            }
+            out.push(Due {
+                project_id: project_id.clone(),
+                id: meta.id.clone(),
+                title: meta.title.clone(),
+                note: reminder.note.clone(),
+                at: reminder.at,
+                by: reminder.by.clone(),
+                system: reminder.system,
+                link: note_link(&meta),
+            });
+            // The job has run (or never existed); either way nothing outside
+            // this note should still be holding it.
+            crate::remind::unschedule(&project_id, &meta.id);
+            if let Some(r) = meta.reminder.as_mut() {
+                r.fired_at = Some(now_secs());
+            }
+            // Not `updated_at`: firing is not an edit, and bumping it would
+            // reorder the whole panel every time a reminder came due.
+            let _ = write_meta(&dir, &meta);
+        }
+    }
+    out.sort_by_key(|d| d.at);
+    Ok(out)
+}
+
 /// Tie the note to what came out of it.
 ///
 /// This is what makes the note the spine rather than a duplicate: a research
@@ -1298,6 +1541,9 @@ pub fn notes_delete(
 ) -> Result<(), String> {
     let _guard = store.0.lock().unwrap();
     let dir = note_dir(&project_id, &id)?;
+    // Before the directory goes: a launchd job outliving its note would fire a
+    // banner for a thought that no longer exists, pointing at a dead link.
+    crate::remind::unschedule(&project_id, &id);
     if !dir.exists() {
         return Ok(());
     }
@@ -1512,6 +1758,10 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             std::env::set_var("CANOPY_NOTES_HOME", &dir);
+            // Nothing under test may install a launchd job on the machine
+            // running it: a real one would outlive the test directory and
+            // start posting banners for notes that no longer exist.
+            std::env::set_var("CANOPY_REMIND_HOME", dir.join("agents"));
             Home(dir)
         }
     }
@@ -1520,6 +1770,7 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
             std::env::remove_var("CANOPY_NOTES_HOME");
+            std::env::remove_var("CANOPY_REMIND_HOME");
         }
     }
 
@@ -1907,6 +2158,112 @@ mod tests {
         assert!(doc.body.contains("badge on the profile"));
         // The cwd fell back to the project's root, which is what scopes a hit.
         assert_eq!(doc.cwd, "/tmp/canopy");
+    }
+
+    #[test]
+    fn a_reminder_is_set_moved_fired_once_and_cleared() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _home = Home::new("reminders");
+        let p = "proj";
+        let note = create(p, "Chase the pricing page copy");
+        let now = now_secs();
+
+        let set = remind_impl(
+            p.into(),
+            note.id.clone(),
+            Some(now + 3_600),
+            Some("before the call".into()),
+            Some("you".into()),
+        )
+        .unwrap();
+        let r = set.reminder.clone().expect("set");
+        assert_eq!(r.at, now + 3_600);
+        assert_eq!(r.note, "before the call");
+        assert_eq!(r.by, "you");
+        assert!(r.fired_at.is_none());
+        // Sandboxed: no launchctl ran, so the store must not claim the system
+        // has it. The claim is what the UI suppresses its own banner on.
+        assert!(!r.system);
+
+        // Nothing is due yet, and asking must not disturb it.
+        assert!(due_impl(now).unwrap().is_empty());
+        assert!(notes_get(p.into(), note.id.clone())
+            .unwrap()
+            .summary
+            .reminder
+            .is_some());
+
+        // Moved earlier. One reminder per note — the second replaces the first
+        // rather than arming two.
+        let moved = remind_impl(p.into(), note.id.clone(), Some(now - 60), None, None);
+        assert!(moved.is_err(), "the past is refused: {moved:?}");
+        remind_impl(
+            p.into(),
+            note.id.clone(),
+            Some(now + 60),
+            Some("actually, sooner".into()),
+            Some("an agent".into()),
+        )
+        .unwrap();
+        let r = notes_get(p.into(), note.id.clone())
+            .unwrap()
+            .summary
+            .reminder
+            .expect("still set");
+        assert_eq!(r.at, now + 60);
+        assert_eq!(r.by, "an agent");
+
+        // It comes due. Exactly once — the second sweep is what would
+        // double-announce if firing were not recorded in the store.
+        let due = due_impl(now + 120).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, note.id);
+        assert_eq!(due[0].note, "actually, sooner");
+        assert_eq!(
+            due[0].link,
+            // Slashes stay slashes: legal in a query value, and a plist a
+            // human may have to read should not be a wall of %2F.
+            format!("canopy://note?note={}&id=proj&path=/tmp/canopy", note.id)
+        );
+        assert!(due_impl(now + 120).unwrap().is_empty(), "fired twice");
+
+        // Fired, not cleared: the note stays visibly overdue until dealt with.
+        let after = notes_get(p.into(), note.id.clone()).unwrap();
+        assert!(after.summary.reminder.as_ref().unwrap().fired_at.is_some());
+
+        // And taking it off leaves nothing behind.
+        let cleared = remind_impl(p.into(), note.id.clone(), None, None, None).unwrap();
+        assert!(cleared.reminder.is_none());
+        assert!(due_impl(now + 10_000).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_reminder_link_survives_a_path_that_needs_encoding() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _home = Home::new("reminder-link");
+        let meta = Meta {
+            id: "0007-x".into(),
+            project_id: "p1".into(),
+            cwd: "/Users/me/My Projects/café".into(),
+            title: "t".into(),
+            status: Status::Ideation,
+            tags: Vec::new(),
+            context: String::new(),
+            origin: String::new(),
+            created_at: 0,
+            updated_at: 0,
+            attachments: Vec::new(),
+            links: Links::default(),
+            history: Vec::new(),
+            reminder: None,
+        };
+        // A raw space would end the query parameter, and the link is read back
+        // by a parser in another language after a trip through a plist.
+        let link = note_link(&meta);
+        assert!(link.contains("note=0007-x"), "{link}");
+        assert!(link.contains("id=p1"), "{link}");
+        assert!(link.contains("%20"), "{link}");
+        assert!(!link.contains(' '), "{link}");
     }
 
     /// The command takes `State`, which a unit test has no way to build, so the

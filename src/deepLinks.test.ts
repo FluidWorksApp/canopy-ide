@@ -27,6 +27,8 @@ describe("round trip", () => {
     { kind: "chat", peer: null },
     { kind: "file", path: "/src/api/main.rs", line: 40 },
     { kind: "file", path: "/src/api/main.rs" },
+    { kind: "note", noteId: "0007-tier-donations", projectId: "p1" },
+    { kind: "note", noteId: "0007-tier-donations", path: "/src/api" },
   ];
   for (const link of cases) {
     it(`survives ${formatDeepLink(link)}`, () => {
@@ -45,6 +47,28 @@ describe("round trip", () => {
 });
 
 describe("parseDeepLink", () => {
+  // The one link composed outside this file: notes.rs writes it into a launchd
+  // plist that may be read months later, by which time the two spellings
+  // drifting apart would mean a reminder that opens nothing. Asserted as a
+  // literal string on purpose — a test that built it with formatDeepLink would
+  // pass no matter what Rust writes.
+  it("reads the string Rust puts in a reminder's launchd job", () => {
+    expect(
+      parseDeepLink(
+        "canopy://note?note=0007-tier-donations&id=p1&path=/Users/me/src/api",
+      ),
+    ).toEqual({
+      kind: "note",
+      noteId: "0007-tier-donations",
+      projectId: "p1",
+      path: "/Users/me/src/api",
+    });
+  });
+
+  it("drops a note link with no note on it", () => {
+    expect(parseDeepLink("canopy://note?id=p1")).toBeNull();
+  });
+
   it("rejects anything that isn't ours", () => {
     expect(parseDeepLink("https://example.com/project?id=p1")).toBeNull();
     expect(parseDeepLink("not a url at all")).toBeNull();
@@ -234,6 +258,12 @@ describe("followLink", () => {
     expect(
       followLink({ kind: "file", path: "/a.rs", line: 12 }, ctx()),
     ).toEqual({ do: "file", path: "/a.rs", line: 12 });
+  });
+
+  it("opens the note a reminder points at", () => {
+    expect(
+      followLink({ kind: "note", noteId: "0007-x", projectId: "p1" }, ctx()),
+    ).toEqual({ do: "note", noteId: "0007-x" });
   });
 
   it("does nothing more for a project link — it is already open", () => {

@@ -101,6 +101,28 @@ describe("routing to the OS", () => {
     );
   });
 
+  it("routes a reminder — being interrupted is what was asked for", () => {
+    expect(shouldReachOS(item({ source: "reminder", tone: "warn" }), false)).toBe(
+      true,
+    );
+  });
+
+  it("stays out of the OS when something else already put it there", () => {
+    // A note reminder fired by launchd: the banner is already on screen, from
+    // a job that runs whether or not Canopy is open. Posting it again is the
+    // one way this feature becomes two notifications for one reminder.
+    expect(
+      shouldReachOS(
+        item({ source: "reminder", tone: "warn", osHandled: true }),
+        false,
+      ),
+    ).toBe(false);
+    // Even a question, which otherwise always routes.
+    expect(
+      shouldReachOS(item({ kind: "question", osHandled: true }), false),
+    ).toBe(false);
+  });
+
   it("routes low-tone items from sources that assume you are away", () => {
     // A teammate's file lands as "success", and a micro-task's whole promise is
     // that you tabbed away — the tone describes the event, not how much it

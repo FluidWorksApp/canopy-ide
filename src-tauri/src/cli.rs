@@ -18,6 +18,18 @@ use tauri::{AppHandle, Emitter, Manager};
 /// Directory from the first launch's argv, held until the frontend is ready.
 pub struct PendingOpen(pub Mutex<Option<String>>);
 
+/// `canopy://…` from the first launch's argv, held the same way and for the
+/// same reason.
+///
+/// This is the cold-start half of a deep link, and until reminders there was
+/// nothing that needed it: every link came from a notification this process had
+/// posted, so this process was by definition running. A note reminder is the
+/// opposite case — launchd posts the banner precisely when Canopy is closed,
+/// and the click launches us with the link in argv. Without this the app would
+/// come up on whatever was last open, which is the exact failure notify.rs was
+/// written to end.
+pub struct PendingLink(pub Mutex<Option<String>>);
+
 /// First `canopy://…` argument. The same targets a notification click carries
 /// (see `src/deepLinks.ts`), reachable from a terminal: `canopy
 /// 'canopy://panel?name=tasks'` raises the running app and lands there. Not a
@@ -53,6 +65,10 @@ pub fn pending_from_env() -> PendingOpen {
     PendingOpen(Mutex::new(dir_from_args(std::env::args(), &cwd)))
 }
 
+pub fn pending_link_from_env() -> PendingLink {
+    PendingLink(Mutex::new(link_from_args(std::env::args())))
+}
+
 /// Second-instance argv, forwarded by the single-instance plugin.
 #[cfg_attr(debug_assertions, allow(dead_code))]
 pub fn open_forwarded(app: &AppHandle, argv: Vec<String>, cwd: String) {
@@ -76,6 +92,11 @@ pub fn open_forwarded(app: &AppHandle, argv: Vec<String>, cwd: String) {
 
 #[tauri::command]
 pub fn cli_take_pending_open(state: tauri::State<'_, PendingOpen>) -> Option<String> {
+    state.0.lock().unwrap().take()
+}
+
+#[tauri::command]
+pub fn cli_take_pending_link(state: tauri::State<'_, PendingLink>) -> Option<String> {
     state.0.lock().unwrap().take()
 }
 

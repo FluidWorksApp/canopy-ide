@@ -134,6 +134,24 @@ export async function create(args: ipc.NoteCreateArgs): Promise<ipc.NoteSummary>
   return note;
 }
 
+/** Put a time on a note, move it, or take it off with `at: null`.
+ *
+ *  Nothing here schedules anything: the store hands the reminder to the OS
+ *  (src-tauri/src/remind.rs) so it survives the app being closed, which is the
+ *  case reminders exist for. This wrapper's only job is the refresh, so a chip
+ *  appears on the row the moment it is set. */
+export async function remind(
+  projectId: string,
+  id: string,
+  at: number | null,
+  note?: string,
+  by = "you",
+): Promise<ipc.NoteSummary> {
+  const summary = await ipc.notesRemind({ projectId, id, at, note, by });
+  await refresh(projectId);
+  return summary;
+}
+
 /** `by` defaults to the user because most moves are a button they pressed; the
  *  reconciler passes "Canopy" for the ones the app makes on its own, so the
  *  history never credits a person for something they did not do. */
