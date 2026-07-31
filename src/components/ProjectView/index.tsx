@@ -96,6 +96,7 @@ import {
   type MicroRun,
 } from "../../microRuns";
 import { renderPtyText } from "../../ptyText";
+import { scheduleReap } from "../../runReap";
 import { followLink, type DeepLink } from "../../deepLinks";
 import {
   addressPrCommentsTask,
@@ -845,13 +846,28 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   // ---------- terminals ----------
 
+  // Pending self-closes for finished chore runs, by tab id. Held so leaving the
+  // project doesn't leave a timer holding a closure over tabs that are gone.
+  const reapTimers = useRef(new Map<string, number>());
+  useEffect(
+    () => () => {
+      for (const t of reapTimers.current.values()) window.clearTimeout(t);
+      reapTimers.current.clear();
+    },
+    [],
+  );
+
   const addTerminal = useCallback(
     (
       cwd: string,
       command?: string,
       title?: string,
       icon?: string,
-      run = false,
+      // "chore" is a run with one thing to say — an install, an update — which
+      // closes itself once it says it (see runReap.ts). Spelled as a value of
+      // this argument rather than another positional flag: a chore is a kind of
+      // run, and the two could never be set independently.
+      run: boolean | "chore" = false,
       // Stamped on top of the workspace port — an agent CLI launched under a
       // non-default account profile carries the variable that points it at that
       // login's config dir (see profiles.ts).
@@ -877,7 +893,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
           icon,
           env: env.length ? env : undefined,
           profile,
-          run,
+          run: run !== false,
+          chore: run === "chore" || undefined,
         },
       ]);
       setActiveTabId(id);
@@ -1463,11 +1480,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // quit never runs cleanup, and those are precisely the cases this exists
   // for.
   // Micro-task tabs are excluded: they're one-shot and ephemeral, so
-  // "reopen it" would re-run a task that already finished.
+  // "reopen it" would re-run a task that already finished. Chore runs go for
+  // the same reason — "restore my terminals" must not mean "install that again".
   useEffect(() => {
     const open: RememberedTerminal[] = tabs
       .filter(
-        (t): t is TermSubTab => t.type === "terminal" && !t.exited && !t.micro,
+        (t): t is TermSubTab =>
+          t.type === "terminal" && !t.exited && !t.micro && !t.chore,
       )
       .map((t) => ({
         cwd: t.cwd,
@@ -4955,7 +4974,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       } else {
         // A run tab, so the installer exits when done — and that exit is the
         // signal to re-probe (see onExited below). No timers, no staleness.
-        addTerminal(cwd, cli.install, `install ${cli.name}`, "⬇", true);
+        addTerminal(cwd, cli.install, `install ${cli.name}`, "⬇", "chore");
       }
     },
     [installed, addTerminal, onNotice],
@@ -4974,7 +4993,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // custom CLI) never badges an update in the first place, so this is the
       // belt to that brace rather than a state a user can reach.
       if (!cmd) return;
-      addTerminal(cwd, cmd, `update ${cli.name}`, "⬆", true);
+      addTerminal(cwd, cmd, `update ${cli.name}`, "⬆", "chore");
     },
     [cliUpdates, addTerminal],
   );
@@ -6955,6 +6974,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     ) {
                       announceCliInstallsChanged();
                     }
+                    // A chore that worked has nothing left to show: let the ✓
+                    // land, then take the chip away. Re-checked when the timer
+                    // fires, because "Run again" in the meantime puts a live
+                    // process on this same tab.
+                    scheduleReap(
+                      tab.id,
+                      code,
+                      tab,
+                      reapTimers.current,
+                      (id) =>
+                        tabsRef.current.find(
+                          (t): t is TermSubTab =>
+                            t.type === "terminal" && t.id === id,
+                        ),
+                      closeTab,
+                    );
                   } else closeTab(tab.id);
                 }}
                 onTitle={(title) =>
@@ -7014,7 +7049,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                           p.install[currentPlatform()],
                           `install ${p.name}`,
                           "⬇",
-                          true,
+                          "chore",
                         )
                       }
                     >
