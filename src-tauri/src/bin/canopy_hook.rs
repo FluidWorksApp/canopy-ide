@@ -1899,16 +1899,20 @@ fn tools_list() -> serde_json::Value {
     tools.extend(research_tool_defs());
     tools.extend(notes_tool_defs());
     tools.extend(session_tool_defs());
+    tools.extend(task_tool_defs());
     // canopy_job_done is on by default everywhere (reporting an outcome is
     // core product), and inside a micro-task session (CANOPY_MICRO_TASK=1 on
     // the launch command) it survives even the Settings disable list — a
     // completion tool the user switched off would strand the ephemeral tab
-    // open forever. See the matching note in agentTools.ts.
+    // open forever. canopy_name_task rides with it for a smaller reason: the
+    // micro-task protocol instructs every run to call it, and a brief that
+    // names a tool the session doesn't have is a brief that lies.
+    // See the matching note in agentTools.ts.
     let micro = std::env::var("CANOPY_MICRO_TASK").is_ok();
     tools.retain(|t| {
-        t.get("name")
-            .and_then(|n| n.as_str())
-            .is_some_and(|n| !disabled.iter().any(|d| d == n) || (n == "canopy_job_done" && micro))
+        t.get("name").and_then(|n| n.as_str()).is_some_and(|n| {
+            !disabled.iter().any(|d| d == n) || (micro && MICRO_ALWAYS_TOOLS.contains(&n))
+        })
     });
     for tool in &mut tools {
         let Some(name) = tool
@@ -1939,6 +1943,12 @@ fn tools_list() -> serde_json::Value {
     }
     serde_json::json!({ "tools": tools })
 }
+
+/// The tools a micro-task session keeps whatever the user switched off. Both
+/// are things the micro-task protocol instructs every run to call: without the
+/// first the ephemeral tab is never told the job ended, and without the second
+/// the brief names a tool that isn't there.
+const MICRO_ALWAYS_TOOLS: &[&str] = &["canopy_job_done", "canopy_name_task"];
 
 /// Tools that only look. Everything else changes something the user can see.
 const READ_ONLY_TOOLS: &[&str] = &[
@@ -2132,6 +2142,38 @@ fn session_tool_defs() -> Vec<serde_json::Value> {
         "description": "Close the Canopy terminal you are running in — this ends your own session and kills this CLI. Call it ONLY when the user has told you to close this session (\"close yourself when you're done\", \"shut down after the PR is up\"); finishing a job is never on its own a reason to. It takes no arguments and can only ever close your own terminal — there is no way to name another agent's. Say your last words first: the tab goes when your turn ends.",
         "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
     })]
+}
+
+/// The two tools a Canopy task talks to the IDE with: one that names the run
+/// while it is going, one that ends it. In their own function rather than the
+/// big literal above for the same reason notes and research are — `json!` hits
+/// its macro recursion limit somewhere around this many entries, and the next
+/// property added to either of these is what would tip it over.
+fn task_tool_defs() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "name": "canopy_name_task",
+            "description": "Name the job you are doing, so the user's Tasks list shows what you are working on rather than the first line of the brief you were given. Call it once, early — as soon as you know what the job actually is — and never instead of canopy_job_done, which is how a job ends. Outside a Canopy task this does nothing.",
+            "inputSchema": { "type": "object", "properties": {
+                "title": { "type": "string", "description": "A few words naming this specific run — \"Flaky PTY test, under load\", not \"Fix tests\"" },
+                "icon": { "type": "string", "description": "One Unicode symbol to show beside it (◎ ⚒ ⇈ ◍ ◇ ⌕ ▶). Not a letter, a word, or a :shortcode:" },
+                "tags": { "type": "array", "items": { "type": "string" }, "description": "Up to four one-word tags: the area and the kind of work (\"review\", \"rust\", \"flaky-test\")" }
+            }, "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_job_done",
+            "description": "Report that the job you were given is finished (or stuck) — the user gets the outcome as a notification, wherever they are. In a Canopy micro-task terminal, `done` also closes the terminal. Call it exactly once, as your last act, never mid-work. `blocked` keeps the session open and tells the user what you need.",
+            "inputSchema": { "type": "object", "properties": {
+                "status": { "type": "string", "enum": ["done", "blocked"], "description": "done = the job is complete; blocked = you need something from the user before you can finish" },
+                "summary": { "type": "string", "description": "One sentence: what happened, or what you need" },
+                "asked": { "type": "string", "description": "One line: what you understood the ask to be, in your own words. Recorded above your summary, so the user reads the question and the answer together" },
+                "url": { "type": "string", "description": "The artifact's URL if the job produced one (e.g. the pull request)" },
+                "title": { "type": "string", "description": "A few words naming this run — pass it if you never called canopy_name_task, or would name it differently now" },
+                "icon": { "type": "string", "description": "One Unicode symbol to show beside it (◎ ⚒ ⇈ ◍ ◇ ⌕ ▶)" },
+                "tags": { "type": "array", "items": { "type": "string" }, "description": "Up to four one-word tags for the area and kind of work" }
+            }, "required": ["status", "summary"], "additionalProperties": false }
+        }),
+    ]
 }
 
 fn tool_defs() -> serde_json::Value {
@@ -2427,15 +2469,6 @@ fn tool_defs() -> serde_json::Value {
             "name": "canopy_reviews",
             "description": "What's waiting on a review: requests teammates sent over Canopy's team relay (which exist nowhere else), and the open pull requests for this project's repos with their review state.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
-        },
-        {
-            "name": "canopy_job_done",
-            "description": "Report that the job you were given is finished (or stuck) — the user gets the outcome as a notification, wherever they are. In a Canopy micro-task terminal, `done` also closes the terminal. Call it exactly once, as your last act, never mid-work. `blocked` keeps the session open and tells the user what you need.",
-            "inputSchema": { "type": "object", "properties": {
-                "status": { "type": "string", "enum": ["done", "blocked"], "description": "done = the job is complete; blocked = you need something from the user before you can finish" },
-                "summary": { "type": "string", "description": "One sentence: what happened, or what you need" },
-                "url": { "type": "string", "description": "The artifact's URL if the job produced one (e.g. the pull request)" }
-            }, "required": ["status", "summary"], "additionalProperties": false }
         }
     ]);
     // Split out rather than one literal: `json!` blows its recursion limit
@@ -2909,7 +2942,26 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 "instance": std::env::var("CANOPY_INSTANCE").ok(),
                 "status": status,
                 "summary": summary,
+                "asked": args.get("asked").and_then(|v| v.as_str()),
                 "url": args.get("url").and_then(|v| v.as_str()),
+                "title": args.get("title").and_then(|v| v.as_str()),
+                "icon": args.get("icon").and_then(|v| v.as_str()),
+                "tags": args.get("tags").cloned(),
+            })))
+        }
+        "canopy_name_task" => {
+            // Same identity as job_done — the terminal, never the cwd — so a
+            // task naming itself can only ever rename its own row. Nothing is
+            // required: an agent that has a title but no glyph yet should send
+            // the title rather than wait until it has both.
+            text(ctx_post(serde_json::json!({
+                "kind": "task_named",
+                "cwd": cwd(),
+                "ptyId": std::env::var("CANOPY_PTY").ok().and_then(|v| v.parse::<u64>().ok()),
+                "instance": std::env::var("CANOPY_INSTANCE").ok(),
+                "title": args.get("title").and_then(|v| v.as_str()),
+                "icon": args.get("icon").and_then(|v| v.as_str()),
+                "tags": args.get("tags").cloned(),
             })))
         }
         "canopy_close_session" => {
@@ -4401,6 +4453,40 @@ mod tests {
         // Writing research changes nothing anyone else can lose, so it is not
         // destructive either — it only ever adds.
         assert!(!DESTRUCTIVE_TOOLS.contains(&"canopy_research_write"));
+    }
+
+    #[test]
+    fn a_task_can_name_itself_and_the_naming_survives_the_disable_list() {
+        // The tool has to be published (a def nobody lists is invisible), and
+        // it has to be one of the two a micro-task session keeps whatever the
+        // user switched off — the protocol in microTasks.ts instructs every run
+        // to call it, so a session without it is one whose brief is wrong.
+        let published = tools_list();
+        let tools = published["tools"].as_array().unwrap().clone();
+        let tool = tools
+            .iter()
+            .find(|t| t["name"] == "canopy_name_task")
+            .expect("canopy_name_task is not published");
+        let props = tool["inputSchema"]["properties"].as_object().unwrap();
+        for field in ["title", "icon", "tags"] {
+            assert!(props.contains_key(field), "missing {field}");
+        }
+        // Naming is not an outcome: nothing about it is required, so an agent
+        // with a title and no glyph yet can still say the title.
+        assert!(tool["inputSchema"].get("required").is_none());
+        assert!(MICRO_ALWAYS_TOOLS.contains(&"canopy_name_task"));
+        assert!(MICRO_ALWAYS_TOOLS.contains(&"canopy_job_done"));
+
+        // The ending carries the same three, for a job short enough that one
+        // call is the whole run — plus the ask, restated.
+        let done = tools
+            .iter()
+            .find(|t| t["name"] == "canopy_job_done")
+            .unwrap();
+        let done_props = done["inputSchema"]["properties"].as_object().unwrap();
+        for field in ["status", "summary", "asked", "url", "title", "icon", "tags"] {
+            assert!(done_props.contains_key(field), "job_done missing {field}");
+        }
     }
 
     #[test]

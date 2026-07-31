@@ -17,6 +17,8 @@ import {
 import { BUILT_IN_HEADING } from "../taskMenu";
 import {
   completedTaskRuns,
+  runIcon,
+  runTitle,
   TASK_HISTORY_EVENT,
   type TaskRun,
 } from "../taskHistory";
@@ -344,13 +346,23 @@ export function TasksPanel({
                   landing on an undifferentiated list means finding it again by
                   eye, which is the one thing clicking the row should have
                   spared you. */}
+              {/* The agent's name for the run over the launcher's. For a
+                  built-in the two mostly agree; for everything ad-hoc the
+                  launcher's is the head of whatever was typed ("Can you please
+                  help in setting…"), and this is the first time the row says
+                  what the job actually was. */}
               <span
                 className="task-label task-label-link"
                 title={r.summary ?? "No summary reported."}
                 onClick={() => onOpenHistory(r.id)}
               >
-                {r.icon ? `${r.icon} ` : ""}
-                {r.label}
+                {runIcon(r) ? `${runIcon(r)} ` : ""}
+                {runTitle(r)}
+                {r.tags?.map((t) => (
+                  <span className="task-tag" key={t}>
+                    {t}
+                  </span>
+                ))}
                 {r.summary && (
                   <span className="task-note-inline">{r.summary}</span>
                 )}

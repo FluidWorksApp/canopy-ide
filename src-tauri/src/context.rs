@@ -957,6 +957,17 @@ struct Action {
     /// summary. The artifact URL, if any, rides in `url` above.
     status: Option<String>,
     summary: Option<String>,
+    /// job_done: the agent's one-line reading of what it was asked for — the
+    /// "before" the summary is the "after" of.
+    asked: Option<String>,
+    /// job_done / task_named: what the agent decided to call this run, the
+    /// glyph it picked, and a few tags for the kind of work. Passed through
+    /// unvalidated on purpose: the shape (one glyph, four tags, a title that
+    /// fits a row) is a display concern, and it is enforced once, in
+    /// taskIdentity.ts, rather than twice in two languages.
+    title: Option<String>,
+    icon: Option<String>,
+    tags: Option<Vec<String>>,
     /// job_done / close_session: the launching app instance (env
     /// CANOPY_INSTANCE), so a pty id recycled across an app restart can't
     /// close an unrelated tab.
@@ -1088,8 +1099,12 @@ async fn action(
                         "ptyId": act.pty_id,
                         "status": status,
                         "summary": summary,
+                        "asked": act.asked,
                         "url": act.url,
                         "cwd": act.cwd,
+                        "title": act.title,
+                        "icon": act.icon,
+                        "tags": act.tags,
                     }),
                 );
             }
@@ -1097,6 +1112,37 @@ async fn action(
                 "done" => "Acknowledged — the user has been told. If this terminal is a Canopy micro-task it now closes: say goodbye in one sentence and start nothing new.".to_string(),
                 _ => "Noted — Canopy told the user what you need. This session stays open; wait for their reply here.".to_string(),
             }
+        }
+        "task_named" => {
+            // A name is not an outcome: nothing is settled, nothing closes, and
+            // an empty call is a no-op rather than an error — an agent that
+            // sends only a title has still said something useful.
+            if act.title.is_none() && act.icon.is_none() && act.tags.is_none() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "canopy_name_task needs at least one of title, icon or tags".into(),
+                );
+            }
+            let stale = act
+                .instance
+                .as_deref()
+                .is_some_and(|i| i != crate::pty::instance_token());
+            if !stale {
+                let _ = app.emit(
+                    "agent:action",
+                    serde_json::json!({
+                        "kind": "task_named",
+                        "route": "",
+                        "ptyId": act.pty_id,
+                        "cwd": act.cwd,
+                        "title": act.title,
+                        "icon": act.icon,
+                        "tags": act.tags,
+                    }),
+                );
+            }
+            "Noted — the user's Tasks list now shows this run by that name. Carry on with the job."
+                .to_string()
         }
         "close_session" => {
             // The id is the sidecar's own CANOPY_PTY, never an argument — an

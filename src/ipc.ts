@@ -136,6 +136,7 @@ export interface AgentAction {
     | "show_diff"
     | "notify"
     | "job_done"
+    | "task_named"
     | "close_session";
   route: string;
   dir?: string;
@@ -152,6 +153,14 @@ export interface AgentAction {
   /** job_done: how the micro-task ended and its one-line summary. */
   status?: "done" | "blocked";
   summary?: string;
+  /** job_done: what the agent understood it was asked for. */
+  asked?: string;
+  /** job_done / task_named: what the agent calls this run. Straight from the
+   *  model and clamped where it is read (taskIdentity.ts) — nothing here has
+   *  been checked for length, for being one glyph, or for being a string. */
+  title?: string;
+  icon?: string;
+  tags?: unknown;
 }
 export const onAgentAction = (
   cb: (a: AgentAction) => void,

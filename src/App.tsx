@@ -1515,7 +1515,15 @@ export default function App() {
         // Same routing for an agent closing itself: the tab lives in whichever
         // ProjectView owns that pty, and the terminal is the only address the
         // action has — canopy_close_session takes no arguments at all.
-        if (a.kind === "restart_server" || a.kind === "close_session") {
+        // A task naming itself (canopy_name_task). Routed like the rest of the
+        // pty-keyed actions and deliberately silent: it changes a row's label
+        // in a panel the user may not even have open, and a toast for every
+        // agent that gets around to introducing itself would be noise.
+        if (
+          a.kind === "restart_server" ||
+          a.kind === "close_session" ||
+          a.kind === "task_named"
+        ) {
           window.dispatchEvent(
             new CustomEvent("canopy:agent-action", {
               detail: { projectId: null, action: a },
