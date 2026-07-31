@@ -95,7 +95,14 @@ pub async fn companion_spawn(
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         + 1;
 
-    let mut cmd = tokio::process::Command::new(&command);
+    // A bare `claude` is not findable from a GUI process: macOS gives an app
+    // launched from Finder (or from a dev server that was) a minimal PATH with
+    // no /opt/homebrew/bin, so exec fails with "No such file or directory" for
+    // a binary that is plainly installed. pty.rs never hits this because it
+    // spawns through a login shell; this execs the binary directly, so it has
+    // to resolve the name the way a login shell would.
+    let resolved = crate::procenv::resolve_command(&command);
+    let mut cmd = tokio::process::Command::new(&resolved);
     cmd.args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -114,6 +121,13 @@ pub async fn companion_spawn(
     // answered, its new ops came back "unknown ui op", and every project it
     // asked about belonged to the other instance. Silent, and invisible from
     // inside the session, because nothing about it looks like a wrong address.
+    // Give the child the PATH a terminal would have. Resolving the binary is
+    // only half of it: the CLI we start goes on to run git, node and its own
+    // MCP servers, and in a GUI-launched app none of those are findable either.
+    // This is the whole of "works in dev, broken in the installed build".
+    if let Some(path) = crate::procenv::child_path() {
+        cmd.env("PATH", path);
+    }
     cmd.env("CANOPY", "1");
     if let Some(ctx) = app.try_state::<crate::context::ContextBridge>() {
         if let Some((port, token)) = ctx.env() {
@@ -153,9 +167,17 @@ pub async fn companion_spawn(
         None => {}
     }
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("could not start `{command}`: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        format!(
+            "could not start `{command}`: {e}{}",
+            if resolved == command {
+                " — Canopy could not find it on this machine's PATH. Install it, or set its \
+                     path in Settings → Agents."
+            } else {
+                ""
+            }
+        )
+    })?;
     let stdin = child.stdin.take().ok_or("the companion CLI has no stdin")?;
     let stdout = child
         .stdout

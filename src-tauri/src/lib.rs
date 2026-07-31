@@ -28,6 +28,7 @@ mod notes;
 mod notify;
 mod portal;
 mod preview;
+mod procenv;
 mod profiles;
 mod prwatch;
 mod pty;

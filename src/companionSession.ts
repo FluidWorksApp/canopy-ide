@@ -14,6 +14,7 @@
 import * as ipc from "./ipc";
 import {
   actionPolicy,
+  companionCli,
   companionSessionId,
   forgetCompanionSession,
   tierFor,
@@ -29,7 +30,7 @@ import {
   type CompanionTransport,
 } from "./companionTransport";
 import { getSettings, updateSettings } from "./settings";
-import { AGENT_CLIS, shellBin, shellQuote } from "./projects";
+import { shellBin, shellQuote } from "./projects";
 
 export type CompanionStatus =
   | "off"
@@ -258,10 +259,11 @@ export async function startCompanion(opts: StartOptions): Promise<void> {
   lastStart = opts;
   starting = (async () => {
     const s = getSettings();
-    const cli =
-      AGENT_CLIS.find((c) => c.id === s.companionCli && opts.installed(c.bin)) ??
-      AGENT_CLIS.find((c) => c.id === s.defaultAgent && opts.installed(c.bin)) ??
-      AGENT_CLIS.find((c) => opts.installed(c.bin));
+    // One resolver, in companion.ts. This used to be a second copy of the same
+    // three lines, and a third lived in the settings screen — which is how the
+    // dead one drifted into ranking CLIs by whether Canopy had a verified
+    // runner for them, a preference the user never expressed.
+    const cli = companionCli(opts.installed);
     if (!cli) {
       // Not an error, and deliberately not shown as one — see "unavailable".
       set({
