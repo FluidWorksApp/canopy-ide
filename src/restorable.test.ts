@@ -35,6 +35,20 @@ describe("restorableFrom", () => {
     expect(restorableFrom([old], [], [])).toHaveLength(1);
   });
 
+  /** `--resume <id>` is resolved inside the CLI's own config dir, so the row
+   *  has to carry the account that owns the conversation. Restoring it under
+   *  another login doesn't reopen something else — it reports a session that
+   *  plainly exists as missing. */
+  it("carries the account a session belongs to", () => {
+    const [row] = restorableFrom([digest({ profile: "work" })], [], []);
+    expect(row.profile).toBe("work");
+  });
+
+  it("treats a digest from before profiles as the default account", () => {
+    const [row] = restorableFrom([digest()], [], []);
+    expect(row.profile).toBe("default");
+  });
+
   it("keeps a session out while its terminal is still alive", () => {
     const stats = [
       { id: 7, title: "claude", cwd: "/repo", total_cpu: 0, total_mem_bytes: 0, procs: [], ports: [], agent_hint: null },

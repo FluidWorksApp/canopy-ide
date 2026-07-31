@@ -264,6 +264,14 @@ export interface Settings {
    *  a launch command, and a multi-token value would break both `command -v`
    *  and the basename match that recognises the CLI once it is running. */
   cliBins: Record<string, string>;
+  /** Registry id -> which account profile that CLI launches under (see
+   *  profiles.ts). Absent means the default login, which is why this stores
+   *  only the exceptions: a user who never opens the feature has an empty map
+   *  and every launch behaves exactly as it did before profiles existed.
+   *
+   *  Machine-wide rather than per-project, for the same reason as `cliBins`: a
+   *  login is a property of the person at the workstation. */
+  cliProfiles: Record<string, string>;
   /** Agent CLIs Canopy ships no entry for, described by the user (Settings →
    *  Agents). Machine-wide for the same reason as `cliBins`: an in-house agent
    *  is a property of the workstation, not of one repo. See CustomAgentCli for
@@ -443,6 +451,7 @@ const DEFAULTS: Settings = {
   ptyHighWater: 2 * 1024 * 1024,
   defaultAgent: "claude",
   cliBins: {},
+  cliProfiles: {},
   customClis: [],
   relayName: "",
   relayAddr: "",

@@ -4574,6 +4574,27 @@ body.dragging-tab * {
   animation: tab-hint-in var(--dur-fast) var(--ease-out);
 }
 
+/* Which account a session is running under. In the flow of the tab, unlike
+   .tab-hint: this is part of the tab's identity ("claude · work"), not a
+   transient badge floating over it, and it must not cover the close button. */
+.tab-profile {
+  flex: none;
+  max-width: 9ch;
+  overflow: hidden;
+  padding: 0 4px;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 14px;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+}
+
 /* The ✕ is underneath the badge, so it steps aside — hidden rather than
    removed, because removing it is exactly the reflow this avoids. */
 .tab:has(.tab-hint) .tab-close,
@@ -14544,6 +14565,71 @@ a.btn-sm {
   grid-template-columns: 150px minmax(0, 1fr) 90px;
   align-items: center;
   gap: 10px;
+}
+
+/* Account profiles. Each row is a login, not a setting, so it reads as a card
+   with its directory underneath rather than as another labelled input. */
+.cli-accounts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cli-account-new {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.cli-account-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+}
+
+.cli-account-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cli-account-name {
+  flex: 1;
+  font-weight: 600;
+}
+
+.cli-account-tag {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.cli-account-path {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* keep the profile name visible when the path is long */
+  text-align: left;
+}
+
+.cli-account-signin {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cli-account-note {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .cli-bin-name {
