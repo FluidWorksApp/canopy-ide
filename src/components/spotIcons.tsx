@@ -10,6 +10,7 @@ import type { SpotRow } from "../spotSources";
 import {
   AgentIcon,
   AgentsIcon,
+  ClipboardIcon,
   CommitIcon,
   DiffIcon,
   DocumentIcon,
@@ -17,6 +18,7 @@ import {
   GitBranchIcon,
   GlobeIcon,
   IssueIcon,
+  NoteIcon,
   PlayIcon,
   PullRequestIcon,
   ResearchIcon,
@@ -46,12 +48,14 @@ export const SPOT_ICONS: Record<string, () => ReactNode> = {
   review: () => <DiffIcon size={14} />,
   ticket: () => <IssueIcon size={14} />,
   research: () => <ResearchIcon size={14} />,
+  note: () => <NoteIcon size={14} />,
   chat: () => <ExchangeIcon />,
   task: () => <TasksIcon size={14} />,
   "task-history": () => <TasksIcon size={14} />,
   collab: () => <TeamIcon />,
   "shared-project": () => <TeamIcon />,
   agent: () => <AgentsIcon size={14} />,
+  clip: () => <ClipboardIcon />,
 };
 
 /** Parametric kinds — `cli:claude`, `agent:codex`, `tracker:linear` — resolved

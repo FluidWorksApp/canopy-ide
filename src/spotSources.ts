@@ -15,10 +15,12 @@ import { tabDisplayLabel } from "./components/ProjectView/helpers";
 import { completedTaskRuns, type TaskRun } from "./taskHistory";
 import { TRACKERS } from "./trackers";
 import { cached as researchCached, STATUS_LABELS as RESEARCH_STATUS_LABELS } from "./research";
+import { cached as notesCached, STATUS_LABELS as NOTE_STATUS_LABELS } from "./notes";
 import { getSnapshot as prSnapshot } from "./prWatchStore";
 import { toPrInfo } from "./prInbox";
 import { getSettings } from "./settings";
 import { heldBadge, heldBranches } from "./branchSwitch";
+import { getSnapshot as clipboardSnapshot } from "./clipboardStore";
 
 /** What Enter does on a row — ProjectView owns the dispatch, this names it. */
 export type SpotAction =
@@ -37,6 +39,22 @@ export type SpotAction =
    *  `switch-branch` is: creating the entry and launching the agent has to
    *  reach ProjectView's launcher, and a module-level closure cannot. */
   | { type: "start-research"; question: string }
+  /** Park what was typed in the scratchpad instead of acting on it.
+   *
+   *  The third thing you can do with a sentence, and the one the omnibox was
+   *  missing: run it, research it, or write it down for later. Named rather
+   *  than run through `custom` for the same reason the two above are — creating
+   *  the note has to carry the palette's pasted images and the page context,
+   *  and a module-level closure can reach neither. */
+  | {
+      type: "save-note";
+      text: string;
+      /** Absolute paths of images pasted into the palette. The palette staged
+       *  them under `.canopy/spot/`; the note copies them into itself, because
+       *  that directory is inside the repo and dies with a worktree. */
+      attachments?: string[];
+    }
+  | { type: "open-note"; id: string }
   | { type: "open-pr"; repo: string; pr: ipc.PrInfo }
   | { type: "open-server"; path: string; tabId: string | null }
   | { type: "open-task-run"; runId: string }
@@ -45,6 +63,13 @@ export type SpotAction =
    *  module-level closure can't — only ProjectView's dispatch is inside the
    *  provider. */
   | { type: "switch-branch"; repo: string; branch: string }
+  /** Put a clip back: onto the system clipboard always, and straight into the
+   *  focused terminal when there is one. Named rather than `custom` for the
+   *  same reason as the two above — pasting has to reach the active tab's
+   *  handle, which lives in ProjectView and not in a module-level closure. The
+   *  row carries the id, never the text: the palette holds previews, and the
+   *  clip is fetched whole only when this runs. */
+  | { type: "paste-clip"; clipId: number }
   /** The escape hatch for registered sources: the row does its own opening.
    *  Still bound by the rule above — `run` must land the user on something
    *  native, not open a browser and call it a result. */
@@ -176,9 +201,54 @@ export function actionRows(query: string, ctx: SpotContext, attachments = 0): Sp
         score: -1,
         action: { type: "start-research", question: q },
       },
+      // The third verb, and the reason the scratchpad exists. Both rows above
+      // act now; this is the one that doesn't. It sits last of the three
+      // because the two that spend an agent are the ones you came here for
+      // more often — but it is always offered, because the whole failure this
+      // fixes is having a thought with nowhere to put it.
+      {
+        id: "act:save-note",
+        group: "Actions",
+        kind: "note",
+        title: q ? `Save for later: “${q}”` : "Save the pasted image for later",
+        detail: "into the scratchpad · nothing runs",
+        score: -0.5,
+        action: { type: "save-note", text: q },
+      },
     );
   }
   return rows;
+}
+
+/** Notes already in this project's scratchpad. Instant, from the cache notes.ts
+ *  keeps — so a thought you already wrote down surfaces on the first keystroke.
+ *  That is the whole point: a scratchpad you cannot find your way back into is
+ *  a place thoughts go to be lost politely. */
+export function noteRows(query: string, projectId: string): SpotRow[] {
+  return ranked(
+    query,
+    notesCached(projectId).map((note) => ({
+      hay: `${note.title} ${note.preview} ${note.tags.join(" ")}`,
+      row: {
+        id: `note:${note.id}`,
+        group: "Scratchpad",
+        kind: "note",
+        title: note.title,
+        // Status leads, as it does on a research row: whether this is a raw
+        // thought or something already in flight changes what you do with it,
+        // and that is worth knowing before the click rather than after.
+        detail: [
+          NOTE_STATUS_LABELS[note.status],
+          note.image_count > 0 ? `${note.image_count} image${note.image_count === 1 ? "" : "s"}` : "",
+          note.preview,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+        score: 0,
+        action: { type: "open-note", id: note.id } as SpotAction,
+      },
+    })),
+  );
 }
 
 /** Research already recorded in this project. Instant, from the cache
@@ -209,6 +279,60 @@ export function researchRows(query: string, projectId: string): SpotRow[] {
       },
     })),
   );
+}
+
+/** What you copied. Instant, from the store clipboardStore keeps in sync — the
+ *  point of the feature is that a clip is there the moment you reach for it,
+ *  and a debounced round trip per keystroke would not be that.
+ *
+ *  Empty query shows the most recent, which is the whole recall story: ⌘K, look,
+ *  Enter. Clips from other projects are kept but ranked behind this one's — the
+ *  history is machine-wide (every ~/.canopy store except research is), and a
+ *  snippet you copied in the repo next door is still yours. */
+export function clipRows(query: string, ctx: SpotContext): SpotRow[] {
+  const clips = clipboardSnapshot();
+  const elsewhere = (c: ipc.Clip) => !!c.project && c.project !== ctx.projectId;
+  // Same project first with nothing typed; once something is typed the ranking
+  // is on the text, where where-you-copied-it matters much less than what it
+  // says. The store hands them over newest-first, so this is the only ordering
+  // decision made here.
+  const ordered = query.trim()
+    ? clips
+    : [...clips.filter((c) => !elsewhere(c)), ...clips.filter(elsewhere)];
+  return ranked(
+    query,
+    ordered.map((c) => ({
+      hay: c.preview,
+      row: {
+        id: `clip:${c.id}`,
+        group: "Clipboard",
+        kind: "clip",
+        // A clip whose preview is empty is whitespace — still worth offering
+        // back, still needs something on the row to be a row at all.
+        title: c.preview || `${c.chars.toLocaleString()} characters`,
+        detail: [
+          relativeTime(c.ts),
+          c.lines > 1 ? `${c.lines} lines` : null,
+          c.chars > 280 ? `${c.chars.toLocaleString()} chars` : null,
+          elsewhere(c) ? "another project" : null,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+        score: 0,
+        action: { type: "paste-clip", clipId: c.id } as SpotAction,
+      },
+    })),
+  );
+}
+
+/** "just now" / "14m" / "3h" / "2d". A clipboard row's whole job is telling you
+ *  which of three similar-looking snippets is the one you just copied. */
+function relativeTime(ts: number): string {
+  const secs = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+  if (secs < 45) return "just now";
+  if (secs < 3600) return `${Math.round(secs / 60)}m ago`;
+  if (secs < 86_400) return `${Math.round(secs / 3600)}h ago`;
+  return `${Math.round(secs / 86_400)}d ago`;
 }
 
 export function tabRows(query: string, ctx: SpotContext): SpotRow[] {
@@ -624,6 +748,10 @@ export interface SpotSource {
 const SOURCES: SpotSource[] = [
   { id: "actions", group: "Actions", blurb: "The launcher entries, and running what you typed as a one-shot task.", timing: "instant", rows: (q) => actionRows(q.query, q.ctx, q.attachments) },
   { id: "tabs", group: "Open Tabs", blurb: "Everything open in this project's tab strip.", timing: "instant", rows: (q) => tabRows(q.query, q.ctx) },
+  // High, and above Files on purpose: what you copied a minute ago is the thing
+  // you are most likely to be reaching for, and it is the one row here that
+  // disappears if you go and find it somewhere else first.
+  { id: "clipboard", group: "Clipboard", blurb: "What you copied. Off until you switch it on in Settings → Clipboard.", timing: "instant", rows: (q) => clipRows(q.query, q.ctx) },
   { id: "files", group: "Files", blurb: "File names under the project's components.", timing: "deferred", rows: (q) => fileRows(q.query, q.corpus) },
   { id: "symbols", group: "Symbols", blurb: "Workspace symbols from language servers already running — never starts one.", timing: "deferred", minQuery: 2, rows: (q) => codeSymbolRows(q.query, q.roots) },
   { id: "content", group: "In Files", blurb: "Text inside the project's files (ripgrep, live per query).", timing: "deferred", minQuery: 2, rows: (q) => contentRows(q.query, q.roots) },
@@ -633,6 +761,10 @@ const SOURCES: SpotSource[] = [
   { id: "sessions", group: "Agent Sessions", blurb: "Agent sessions by prompt, branch and files touched (from their digests).", timing: "instant", rows: (q) => sessionRows(q.query, q.ctx) },
   // Above tickets and PRs deliberately: if what you are about to go and find
   // out has already been found out, that is the most useful row on the page.
+  // Above research and everything below it: if what you are about to type has
+  // already been written down, that is the most useful row on the page — the
+  // same argument research makes against tickets, one level further up.
+  { id: "notes", group: "Scratchpad", blurb: "Your own captured thoughts, ideas and to-dos in this project.", timing: "instant", rows: (q) => noteRows(q.query, q.ctx.projectId) },
   { id: "research", group: "Research", blurb: "Findings recorded in this project — what was investigated, and what shipped from it.", timing: "instant", rows: (q) => researchRows(q.query, q.ctx.projectId) },
   { id: "tickets", group: "Tickets", blurb: "Issues from the configured trackers. Fetches over the network, cached 60s.", timing: "deferred", rows: (q) => ticketRows(q.query, q.roots) },
   { id: "prs", group: "Pull Requests", blurb: "Open PRs the watcher has already fetched — no round trip here.", timing: "instant", rows: (q) => prRows(q.query) },

@@ -228,6 +228,7 @@ describe("addressPrCommentsTask", () => {
 describe("MICRO_TASKS", () => {
   it("registers every built-in with a unique id and a surface to run from", () => {
     expect(MICRO_TASKS.map((t) => t.id)).toEqual([
+      "note",
       "research",
       "implement-research",
       "raise-pr",
@@ -614,6 +615,18 @@ describe("microTaskProtocol", () => {
     expect(p).toContain('"blocked"');
     expect(p).toContain("JOB DONE:");
     expect(p).not.toMatch(/[\r\n]/);
+  });
+
+  /** A name that arrives with the outcome names a run only once it is over,
+   *  which is when the Tasks list has stopped needing it. */
+  it("asks for the run's name early, not at the end", () => {
+    const p = microTaskProtocol();
+    expect(p).toContain("canopy_name_task");
+    expect(p.indexOf("canopy_name_task")).toBeLessThan(
+      p.indexOf("canopy_job_done"),
+    );
+    for (const field of ["title", "icon", "tags", "asked"])
+      expect(p).toContain(field);
   });
 });
 

@@ -1469,6 +1469,12 @@ results stay inspectable:
   you go. Never leave research in a scratch markdown file — it is lost the \
   moment the session ends. Long raw material (file dumps, logs, fetched pages) \
   goes in `source`, not in the body: the body is what the next agent reads.
+- Noticing something real that is NOT the job you were given (a bug beside the \
+  one you were sent for, a refactor the code obviously wants, a missing test) \
+  -> canopy_notes_write create. Park it and carry on: writing it down is how it \
+  survives, and chasing it is how you deliver the wrong change. Search \
+  canopy_notes first so the same observation is not recorded twice. This is not \
+  a progress log — do not narrate the work you were asked to do into it.
 
 Call canopy_project first for component paths, configured run commands, \
 terminal ids, and the ports servers are listening on. Fall back to the shell \
@@ -1891,17 +1897,22 @@ fn tools_list() -> serde_json::Value {
         _ => Vec::new(),
     };
     tools.extend(research_tool_defs());
+    tools.extend(notes_tool_defs());
     tools.extend(session_tool_defs());
+    tools.extend(task_tool_defs());
     // canopy_job_done is on by default everywhere (reporting an outcome is
     // core product), and inside a micro-task session (CANOPY_MICRO_TASK=1 on
     // the launch command) it survives even the Settings disable list — a
     // completion tool the user switched off would strand the ephemeral tab
-    // open forever. See the matching note in agentTools.ts.
+    // open forever. canopy_name_task rides with it for a smaller reason: the
+    // micro-task protocol instructs every run to call it, and a brief that
+    // names a tool the session doesn't have is a brief that lies.
+    // See the matching note in agentTools.ts.
     let micro = std::env::var("CANOPY_MICRO_TASK").is_ok();
     tools.retain(|t| {
-        t.get("name")
-            .and_then(|n| n.as_str())
-            .is_some_and(|n| !disabled.iter().any(|d| d == n) || (n == "canopy_job_done" && micro))
+        t.get("name").and_then(|n| n.as_str()).is_some_and(|n| {
+            !disabled.iter().any(|d| d == n) || (micro && MICRO_ALWAYS_TOOLS.contains(&n))
+        })
     });
     for tool in &mut tools {
         let Some(name) = tool
@@ -1933,6 +1944,12 @@ fn tools_list() -> serde_json::Value {
     serde_json::json!({ "tools": tools })
 }
 
+/// The tools a micro-task session keeps whatever the user switched off. Both
+/// are things the micro-task protocol instructs every run to call: without the
+/// first the ephemeral tab is never told the job ended, and without the second
+/// the brief names a tool that isn't there.
+const MICRO_ALWAYS_TOOLS: &[&str] = &["canopy_job_done", "canopy_name_task"];
+
 /// Tools that only look. Everything else changes something the user can see.
 const READ_ONLY_TOOLS: &[&str] = &[
     "canopy_project",
@@ -1950,6 +1967,7 @@ const READ_ONLY_TOOLS: &[&str] = &[
     "canopy_reviews",
     "canopy_agents",
     "canopy_research",
+    "canopy_notes",
     "canopy_wait_for",
     "canopy_screenshot",
     "canopy_browser_snapshot",
@@ -2033,6 +2051,43 @@ fn output_schema(name: &str) -> Option<serde_json::Value> {
 /// `json!` expands recursively and the combined literal exceeds the default
 /// recursion limit. Splitting is the cheaper fix than raising it, and it leaves
 /// room for the next addition.
+/// The scratchpad pair. Split read from write for the same reason research is:
+/// the reader is annotated `readOnlyHint` so a host may auto-approve it, and an
+/// annotation that a write action can slip through is a bypass, not a hint.
+fn notes_tool_defs() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "name": "canopy_notes",
+            "description": "Read the user's scratchpad for this project: thoughts, ideas and to-dos they parked to pick up later. Call `search` before writing a note, so the same observation is not recorded twice. Scoped to the project you are working in.",
+            "inputSchema": { "type": "object", "properties": {
+                "action": { "type": "string", "enum": ["list", "search", "get"], "description": "list = current notes, newest first; search = match on title, tags, body and referenced files; get = one note in full, with its attachments and links" },
+                "id": { "type": "string", "description": "Note id for get, e.g. 0007-tier-donations" },
+                "query": { "type": "string", "description": "Search text" },
+                "statuses": { "type": "array", "items": { "type": "string" }, "description": "Filter list to these: ideation, ready, doing, done, parked, archived. Default hides archived." },
+                "limit": { "type": "integer", "description": "Max rows (default 200)" }
+            }, "required": ["action"], "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_notes_write",
+            "description": "Park a thought in the user's scratchpad. Use `create` for something you noticed that is real but is NOT part of the job you were given — a bug beside the one you were sent for, a refactor the code obviously wants, a missing test. Writing it down is how it survives; derailing onto it is not. Do not use this for the work you were asked to do, and do not use it as a progress log. `append` adds to a note, `status` moves it along, `link` ties it to a PR or a research entry, `attach` keeps a file with it.",
+            "inputSchema": { "type": "object", "properties": {
+                "action": { "type": "string", "enum": ["create", "append", "status", "link", "attach"], "description": "create | append | status | link | attach" },
+                "id": { "type": "string", "description": "Note id — required by everything except create" },
+                "title": { "type": "string", "description": "create: the thought, in one line. attach: what the file is." },
+                "text": { "type": "string", "description": "create: any detail beyond the title. append: markdown to add to the body." },
+                "tags": { "type": "array", "items": { "type": "string" } },
+                "status": { "type": "string", "description": "status: ideation | ready | doing | done | parked | archived" },
+                "note": { "type": "string", "description": "status: why it moved" },
+                "pr": { "type": "object", "description": "link: { repo, number, url, state } — a PR that came out of this note" },
+                "research": { "type": "string", "description": "link: id of a research entry started from this note" },
+                "branch": { "type": "string", "description": "link: branch carrying the work" },
+                "file": { "type": "object", "description": "link: { path, start_line, end_line, rev } — a file this note is about. Include `rev` (the commit you read it at) so the line numbers can be trusted later." },
+                "path": { "type": "string", "description": "attach: absolute path of a file to keep with the note (a log, a capture). Copied in, so it survives the worktree." }
+            }, "required": ["action"], "additionalProperties": false }
+        }),
+    ]
+}
+
 fn research_tool_defs() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
@@ -2087,6 +2142,38 @@ fn session_tool_defs() -> Vec<serde_json::Value> {
         "description": "Close the Canopy terminal you are running in — this ends your own session and kills this CLI. Call it ONLY when the user has told you to close this session (\"close yourself when you're done\", \"shut down after the PR is up\"); finishing a job is never on its own a reason to. It takes no arguments and can only ever close your own terminal — there is no way to name another agent's. Say your last words first: the tab goes when your turn ends.",
         "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
     })]
+}
+
+/// The two tools a Canopy task talks to the IDE with: one that names the run
+/// while it is going, one that ends it. In their own function rather than the
+/// big literal above for the same reason notes and research are — `json!` hits
+/// its macro recursion limit somewhere around this many entries, and the next
+/// property added to either of these is what would tip it over.
+fn task_tool_defs() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "name": "canopy_name_task",
+            "description": "Name the job you are doing, so the user's Tasks list shows what you are working on rather than the first line of the brief you were given. Call it once, early — as soon as you know what the job actually is — and never instead of canopy_job_done, which is how a job ends. Outside a Canopy task this does nothing.",
+            "inputSchema": { "type": "object", "properties": {
+                "title": { "type": "string", "description": "A few words naming this specific run — \"Flaky PTY test, under load\", not \"Fix tests\"" },
+                "icon": { "type": "string", "description": "One Unicode symbol to show beside it (◎ ⚒ ⇈ ◍ ◇ ⌕ ▶). Not a letter, a word, or a :shortcode:" },
+                "tags": { "type": "array", "items": { "type": "string" }, "description": "Up to four one-word tags: the area and the kind of work (\"review\", \"rust\", \"flaky-test\")" }
+            }, "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_job_done",
+            "description": "Report that the job you were given is finished (or stuck) — the user gets the outcome as a notification, wherever they are. In a Canopy micro-task terminal, `done` also closes the terminal. Call it exactly once, as your last act, never mid-work. `blocked` keeps the session open and tells the user what you need.",
+            "inputSchema": { "type": "object", "properties": {
+                "status": { "type": "string", "enum": ["done", "blocked"], "description": "done = the job is complete; blocked = you need something from the user before you can finish" },
+                "summary": { "type": "string", "description": "One sentence: what happened, or what you need" },
+                "asked": { "type": "string", "description": "One line: what you understood the ask to be, in your own words. Recorded above your summary, so the user reads the question and the answer together" },
+                "url": { "type": "string", "description": "The artifact's URL if the job produced one (e.g. the pull request)" },
+                "title": { "type": "string", "description": "A few words naming this run — pass it if you never called canopy_name_task, or would name it differently now" },
+                "icon": { "type": "string", "description": "One Unicode symbol to show beside it (◎ ⚒ ⇈ ◍ ◇ ⌕ ▶)" },
+                "tags": { "type": "array", "items": { "type": "string" }, "description": "Up to four one-word tags for the area and kind of work" }
+            }, "required": ["status", "summary"], "additionalProperties": false }
+        }),
+    ]
 }
 
 fn tool_defs() -> serde_json::Value {
@@ -2382,15 +2469,6 @@ fn tool_defs() -> serde_json::Value {
             "name": "canopy_reviews",
             "description": "What's waiting on a review: requests teammates sent over Canopy's team relay (which exist nowhere else), and the open pull requests for this project's repos with their review state.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
-        },
-        {
-            "name": "canopy_job_done",
-            "description": "Report that the job you were given is finished (or stuck) — the user gets the outcome as a notification, wherever they are. In a Canopy micro-task terminal, `done` also closes the terminal. Call it exactly once, as your last act, never mid-work. `blocked` keeps the session open and tells the user what you need.",
-            "inputSchema": { "type": "object", "properties": {
-                "status": { "type": "string", "enum": ["done", "blocked"], "description": "done = the job is complete; blocked = you need something from the user before you can finish" },
-                "summary": { "type": "string", "description": "One sentence: what happened, or what you need" },
-                "url": { "type": "string", "description": "The artifact's URL if the job produced one (e.g. the pull request)" }
-            }, "required": ["status", "summary"], "additionalProperties": false }
         }
     ]);
     // Split out rather than one literal: `json!` blows its recursion limit
@@ -2675,6 +2753,49 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
             }
             text(research_op(action, args))
         }
+        "canopy_notes" | "canopy_notes_write" => {
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .ok_or("missing required argument: action")?;
+            // Same split, same reason as canopy_research: the reader is
+            // annotated read-only so a host can auto-approve it, and a write
+            // action reachable through it would make that a bypass.
+            let reads = ["list", "search", "get"];
+            let writes = ["create", "append", "status", "link", "attach"];
+            let allowed: &[&str] = if name == "canopy_notes" {
+                &reads
+            } else {
+                &writes
+            };
+            if !allowed.contains(&action) {
+                return Err(format!(
+                    "canopy_notes{} has no action \"{action}\" — use {}",
+                    if name == "canopy_notes" { "" } else { "_write" },
+                    allowed.join(", ")
+                ));
+            }
+            // Caught here rather than after a round trip, so the correction
+            // costs the agent nothing.
+            if name == "canopy_notes_write" && action == "create" {
+                let titled = args
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|t| !t.trim().is_empty());
+                if !titled {
+                    return Err("create needs a title — the thought, in one line".into());
+                }
+            }
+            if action == "attach"
+                && !args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|p| !p.trim().is_empty())
+            {
+                return Err("attach needs a path — the file to keep with the note".into());
+            }
+            text(notes_op(action, args))
+        }
         "canopy_vault_list" => {
             let mut body = args.clone();
             body["vaultOp"] = serde_json::json!("list");
@@ -2821,7 +2942,26 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 "instance": std::env::var("CANOPY_INSTANCE").ok(),
                 "status": status,
                 "summary": summary,
+                "asked": args.get("asked").and_then(|v| v.as_str()),
                 "url": args.get("url").and_then(|v| v.as_str()),
+                "title": args.get("title").and_then(|v| v.as_str()),
+                "icon": args.get("icon").and_then(|v| v.as_str()),
+                "tags": args.get("tags").cloned(),
+            })))
+        }
+        "canopy_name_task" => {
+            // Same identity as job_done — the terminal, never the cwd — so a
+            // task naming itself can only ever rename its own row. Nothing is
+            // required: an agent that has a title but no glyph yet should send
+            // the title rather than wait until it has both.
+            text(ctx_post(serde_json::json!({
+                "kind": "task_named",
+                "cwd": cwd(),
+                "ptyId": std::env::var("CANOPY_PTY").ok().and_then(|v| v.parse::<u64>().ok()),
+                "instance": std::env::var("CANOPY_INSTANCE").ok(),
+                "title": args.get("title").and_then(|v| v.as_str()),
+                "icon": args.get("icon").and_then(|v| v.as_str()),
+                "tags": args.get("tags").cloned(),
             })))
         }
         "canopy_close_session" => {
@@ -3586,6 +3726,31 @@ fn browser_op(op: &str, args: &serde_json::Value) -> Result<String, String> {
 /// project and runs there. There is deliberately no project argument — a tool
 /// that could name another project would be a tool that reads another project's
 /// research, and the agent has no business doing that.
+/// Same shape as `research_op`: the project is resolved from the cwd on the
+/// app's side, never taken from the caller.
+fn notes_op(action: &str, args: &serde_json::Value) -> Result<String, String> {
+    let mut body = args.clone();
+    if !body.is_object() {
+        body = serde_json::json!({});
+    }
+    // Never taken from the caller, whatever it passed.
+    body.as_object_mut().map(|o| o.remove("project_id"));
+    body["action"] = serde_json::json!(action);
+    body["cwd"] = serde_json::json!(cwd());
+    // Who moved a note is the one thing its history records, so it is filled in
+    // here rather than trusted from the arguments.
+    if body.get("by").is_none() {
+        body["by"] = serde_json::json!(claim_owner());
+    }
+    ctx_request_with_timeout(
+        "POST",
+        "/ctx/notes",
+        Some(body.to_string()),
+        std::time::Duration::from_secs(20),
+    )
+    .map(pretty)
+}
+
 fn research_op(action: &str, args: &serde_json::Value) -> Result<String, String> {
     let mut body = args.clone();
     if !body.is_object() {
@@ -4190,6 +4355,93 @@ mod tests {
     }
 
     #[test]
+    fn the_notes_reader_cannot_reach_a_write_action() {
+        // canopy_notes is annotated readOnlyHint so a host may auto-approve it.
+        // If naming a write action through it worked, that annotation would be
+        // a lie and the approval a bypass.
+        let err = call_tool(
+            "canopy_notes",
+            &serde_json::json!({ "action": "create", "title": "sneak" }),
+        )
+        .unwrap_err();
+        assert!(err.contains("no action"), "{err}");
+        assert!(
+            err.contains("list"),
+            "the error should name what is allowed"
+        );
+
+        // And the write tool is not a way to read.
+        let err = call_tool(
+            "canopy_notes_write",
+            &serde_json::json!({ "action": "get" }),
+        )
+        .unwrap_err();
+        assert!(err.contains("no action"), "{err}");
+    }
+
+    #[test]
+    fn notes_actions_are_required_and_checked_before_a_round_trip() {
+        let err = call_tool("canopy_notes", &serde_json::json!({})).unwrap_err();
+        assert!(err.contains("action"), "{err}");
+
+        // A note with nothing in it is the one thing the store must never hold,
+        // and catching it here costs the agent nothing.
+        for empty in ["", "   "] {
+            let err = call_tool(
+                "canopy_notes_write",
+                &serde_json::json!({ "action": "create", "title": empty }),
+            )
+            .unwrap_err();
+            assert!(err.contains("title"), "{err}");
+        }
+
+        let err = call_tool(
+            "canopy_notes_write",
+            &serde_json::json!({ "action": "attach", "id": "0001-x" }),
+        )
+        .unwrap_err();
+        assert!(err.contains("path"), "{err}");
+    }
+
+    #[test]
+    fn notes_tools_are_annotated_and_only_the_reader_is_read_only() {
+        let names: Vec<String> = notes_tool_defs()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(str::to_string))
+            .collect();
+        assert_eq!(names, ["canopy_notes", "canopy_notes_write"]);
+        assert!(READ_ONLY_TOOLS.contains(&"canopy_notes"));
+        assert!(!READ_ONLY_TOOLS.contains(&"canopy_notes_write"));
+        // Parking a thought takes nothing away from anyone — it only ever adds.
+        assert!(!DESTRUCTIVE_TOOLS.contains(&"canopy_notes_write"));
+    }
+
+    #[test]
+    fn the_notes_tools_are_published_to_the_host() {
+        // A tool defined but never added to the *published* list is invisible,
+        // which is the failure this catches. `tool_defs()` is only the base
+        // array — notes and research are built in their own functions (to keep
+        // the json! macro under its recursion limit) and spliced in by
+        // `tools_list()`, so that is what has to be asserted against.
+        let published = tools_list();
+        let tools = published["tools"].as_array().unwrap().clone();
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(names.contains(&"canopy_notes"), "{names:?}");
+        assert!(names.contains(&"canopy_notes_write"), "{names:?}");
+
+        // The annotation a host reads to decide about auto-approval has to
+        // survive the trip through tools_list, not merely exist in the const.
+        let hint = |want: &str| {
+            tools.iter().find(|t| t["name"] == want).unwrap()["annotations"]["readOnlyHint"].clone()
+        };
+        assert_eq!(hint("canopy_notes"), true);
+        assert_eq!(hint("canopy_notes_write"), false);
+    }
+
+    #[test]
     fn research_tools_are_annotated_and_only_the_reader_is_read_only() {
         let names: Vec<String> = research_tool_defs()
             .iter()
@@ -4201,6 +4453,40 @@ mod tests {
         // Writing research changes nothing anyone else can lose, so it is not
         // destructive either — it only ever adds.
         assert!(!DESTRUCTIVE_TOOLS.contains(&"canopy_research_write"));
+    }
+
+    #[test]
+    fn a_task_can_name_itself_and_the_naming_survives_the_disable_list() {
+        // The tool has to be published (a def nobody lists is invisible), and
+        // it has to be one of the two a micro-task session keeps whatever the
+        // user switched off — the protocol in microTasks.ts instructs every run
+        // to call it, so a session without it is one whose brief is wrong.
+        let published = tools_list();
+        let tools = published["tools"].as_array().unwrap().clone();
+        let tool = tools
+            .iter()
+            .find(|t| t["name"] == "canopy_name_task")
+            .expect("canopy_name_task is not published");
+        let props = tool["inputSchema"]["properties"].as_object().unwrap();
+        for field in ["title", "icon", "tags"] {
+            assert!(props.contains_key(field), "missing {field}");
+        }
+        // Naming is not an outcome: nothing about it is required, so an agent
+        // with a title and no glyph yet can still say the title.
+        assert!(tool["inputSchema"].get("required").is_none());
+        assert!(MICRO_ALWAYS_TOOLS.contains(&"canopy_name_task"));
+        assert!(MICRO_ALWAYS_TOOLS.contains(&"canopy_job_done"));
+
+        // The ending carries the same three, for a job short enough that one
+        // call is the whole run — plus the ask, restated.
+        let done = tools
+            .iter()
+            .find(|t| t["name"] == "canopy_job_done")
+            .unwrap();
+        let done_props = done["inputSchema"]["properties"].as_object().unwrap();
+        for field in ["status", "summary", "asked", "url", "title", "icon", "tags"] {
+            assert!(done_props.contains_key(field), "job_done missing {field}");
+        }
     }
 
     #[test]

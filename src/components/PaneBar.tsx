@@ -2,6 +2,7 @@ import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type React from "react";
 import {
   AgentIcon,
+  ChevronIcon,
   CloseIcon,
   CommitIcon,
   GitBranchIcon,
@@ -16,10 +17,12 @@ import {
 import type { AgentCli } from "../projects";
 import { AGENT_CLIS } from "../projects";
 import type { TabDrag } from "../tabDrag";
+import { GROUP_ATTR, type StackOverflow } from "../tabSticky";
 import type {
   SubTab,
   TermSubTab,
   RailChip,
+  StripGroup,
 } from "./ProjectView";
 import { tabDisplayLabel, previewLabel, deviceLabel } from "./ProjectView";
 import { Button } from "./ui";
@@ -32,6 +35,7 @@ function tabTitle(tab: SubTab): string {
     case "pr": return `${tab.pr.title} — ${tab.pr.url}`;
     case "ticket": return `${tab.ticket.id} — ${tab.ticket.title}\n${tab.ticket.url}`;
     case "research": return `Research ${tab.researchId} — ${tab.title}`;
+    case "note": return `Note ${tab.noteId} — ${tab.title}`;
     case "commit": return `${tab.short} — ${tab.subject}`;
     case "branch": return `${tab.branch.branch}\n${tab.branch.worktree ?? "no worktree"}`;
     case "agent": return `${tab.agent} workspace\n${tab.cwd}`;
@@ -54,6 +58,7 @@ function tabText(tab: SubTab): string {
     case "pr": return `#${tab.pr.number} ${tab.pr.title}`;
     case "ticket": return `${tab.ticket.id} ${tab.ticket.title}`;
     case "research": return tabDisplayLabel(tab);
+    case "note": return tabDisplayLabel(tab);
     case "commit": return `${tab.short} ${tab.subject}`;
     case "branch": return tab.branch.branch;
     case "agent": return tabDisplayLabel(tab);
@@ -128,7 +133,9 @@ function Rail({
 
 export interface PaneBarProps {
   // tab data
-  tabGroups: SubTab[][];
+  /** One run of the strip per entry: three agent stacks (or one flat agent run
+   *  when grouping is off), then one per kind of document. */
+  tabGroups: StripGroup[];
   stripTabs: SubTab[];
   activeTabId: string | null;
   flashTabId: string | null;
@@ -137,8 +144,24 @@ export interface PaneBarProps {
   collabPaths: Set<string>;
   isAgentTab: (t: SubTab) => t is TermSubTab;
   tabState: (t: TermSubTab) => "working" | "waiting" | "idle" | "ended";
-  /** Drag-to-reorder, one per tab group (agents, docs) — index-aligned with tabGroups. */
-  groupDrags: TabDrag[];
+  /** Drag-to-reorder for the whole strip. One handle, not one per run: a tab is
+   *  still confined to the run it was picked up from (the runs are handed to
+   *  useTabDragGroups), but a dozen runs must not cost a dozen sets of window
+   *  listeners. */
+  stripDrag: TabDrag;
+  /** The scroll container itself, measured by the owner: which chips are pinned
+   *  and where the active tab has to be scrolled to are both questions about
+   *  this element, and both are answered where the strip's state lives. */
+  stripRef: React.RefObject<HTMLDivElement | null>;
+  /** Folded stacks, by run key. Absent means open — only a fold the user
+   *  actually asked for is stored. */
+  openStacks: Record<string, boolean>;
+  onToggleStack: (key: string) => void;
+  /** Per-run: is the chip pinned, and which of its tabs have scrolled behind
+   *  it. Keyed by run key. */
+  stripOverflow: Record<string, StackOverflow>;
+  /** Offer everything a run is hiding — folded or scrolled behind the pin. */
+  onStackOverflow: (e: React.MouseEvent, group: StripGroup) => void;
   /** True while ⌘/Ctrl is held: the first nine tabs show the digit that jumps
    *  to them, numbered left to right across the groups (see useHeldModifier). */
   showHints: boolean;
@@ -202,7 +225,8 @@ export interface PaneBarProps {
 // ── PaneBar ───────────────────────────────────────────────────────────────────
 
 function PaneBarImpl({
-  tabGroups, groupDrags, stripTabs, activeTabId, flashTabId, renamingTabId, renameDraft,
+  tabGroups, stripDrag, stripRef, openStacks, onToggleStack, stripOverflow, onStackOverflow,
+  stripTabs, activeTabId, flashTabId, renamingTabId, renameDraft,
   collabPaths, isAgentTab, tabState, showHints,
   shellChips, runChips, runSummary, shellMenuOpen, setShellMenuOpen,
   runMenuOpen, setRunMenuOpen, activeSection,
@@ -222,7 +246,7 @@ function PaneBarImpl({
   // between tabs, staying fused with the editor surface below, instead of the
   // .tab-active styling teleporting. We measure the active tab (via the ref the
   // container already threads to it) and animate a blob to its box.
-  const tabsRowRef = useRef<HTMLDivElement>(null);
+  const tabsRowRef = useRef<HTMLDivElement | null>(null);
   const blobElRef = useRef<HTMLSpanElement>(null);
   const [blob, setBlob] = useState<{ left: number; width: number } | null>(null);
 
@@ -283,18 +307,23 @@ function PaneBarImpl({
 
   // Numbered left to right across every group, so a hint matches what the eye
   // counts: the agent/doc split is a visual grouping, not a numbering reset.
-  // Only the first nine — ⌘0 is zoom reset, and nobody counts past a row.
+  // Only what is actually on screen — a digit pointing at a tab folded into a
+  // stack would be a hint for something you can't see. Only the first nine —
+  // ⌘0 is zoom reset, and nobody counts past a row.
   const hints = new Map<string, number>();
   if (showHints)
     tabGroups
-      .flat()
+      .flatMap((g) => g.shown)
       .slice(0, 9)
       .forEach((t, i) => hints.set(t.id, i + 1));
 
   return (
     <div className={`pane-bar pane-bar-focus-${activeSection}`}>
       <div
-        ref={tabsRowRef}
+        ref={(el) => {
+          tabsRowRef.current = el;
+          stripRef.current = el;
+        }}
         className={`tabs tabs-harbor ${activeSection !== "tabs" ? "pane-section-dim" : ""}`}
       >
         {blob && (
@@ -307,19 +336,77 @@ function PaneBarImpl({
             style={{ transform: `translateX(${blob.left}px)`, width: blob.width }}
           />
         )}
-        {tabGroups.map((group, gi) =>
-          group.length === 0 ? null : (
-            <div className="tab-group" key={gi}>
-              {group.map((tab) => (
+        {tabGroups.map((group) => {
+          // An empty stack is not a stack: a strip with nothing idle says so by
+          // having no Idle chip at all, rather than an empty one to read past.
+          // Same for every kind of document you haven't opened.
+          if (group.tabs.length === 0) return null;
+          const open = group.label == null || openStacks[group.key] !== false;
+          const folded = group.tabs.length - group.shown.length;
+          // Tabs that have scrolled in behind the pinned chip. They are as gone
+          // as folded ones, so the chip offers them the same way.
+          const behind = open ? (stripOverflow[group.key]?.hidden ?? []) : [];
+          const away = folded + behind.length;
+          return (
+            <div
+              className={`tab-group tab-group-${group.key} ${
+                group.label && !open ? "tab-group-folded" : ""
+              }`}
+              key={group.key}
+              {...{ [GROUP_ATTR]: group.key }}
+            >
+              {group.label && (
+                <span
+                  className={`tab-stack ${away > 0 ? "tab-stack-away" : ""} ${
+                    away > 1 ? "tab-stack-deep" : ""
+                  } ${stripOverflow[group.key]?.stuck ? "tab-stack-stuck" : ""}`}
+                  data-stack-chip=""
+                >
+                  <button
+                    type="button"
+                    className="tab-stack-face"
+                    aria-expanded={open}
+                    title={
+                      open
+                        ? `${group.tabs.length} ${group.label.toLowerCase()} — click to fold`
+                        : `${folded} ${group.label.toLowerCase()} folded — click to open`
+                    }
+                    onClick={() => onToggleStack(group.key)}
+                  >
+                    {group.icon ?? <span className="tab-stack-dot" aria-hidden />}
+                    <span className="tab-stack-name">{group.label}</span>
+                    <span className="tab-stack-count">{group.tabs.length}</span>
+                    <ChevronIcon size={8} className="tab-stack-chevron" />
+                  </button>
+                  {/* Whatever is out of sight — folded, or scrolled in behind
+                      the pin — stays one click away rather than lost. */}
+                  {away > 0 && (
+                    <button
+                      type="button"
+                      className="tab-stack-more"
+                      title={`${away} out of sight — pick one`}
+                      onClick={(e) => onStackOverflow(e, group)}
+                    >
+                      {/* The number only when it says something the chip's own
+                          count doesn't: with everything away, they are the
+                          same number twice. */}
+                      {away < group.tabs.length && away}
+                      <ChevronIcon size={8} />
+                    </button>
+                  )}
+                </span>
+              )}
+              {group.shown.map((tab) => (
                 <div
                   key={tab.id}
+                  data-flip-id={tab.id}
                   ref={tab.id === activeTabId ? (activeTabElRef as React.RefObject<HTMLDivElement>) : undefined}
                   className={`tab ${tab.id === activeTabId ? "tab-active" : ""} ${
                     tab.type === "chat" && tab.unread ? "tab-unread" : ""
                   } ${tab.type !== "terminal" ? "tab-doc" : isAgentTab(tab) ? "tab-agent" : ""} ${
                     tab.id === flashTabId ? "tab-flash" : ""
-                  } ${tab.id === groupDrags[gi].dragId ? "tab-dragging" : ""}`}
-                  {...groupDrags[gi].itemProps(tab.id)}
+                  } ${tab.id === stripDrag.dragId ? "tab-dragging" : ""}`}
+                  {...stripDrag.itemProps(tab.id)}
                   onClick={(e) => onSelectTab(tab.id, e.detail)}
                   onContextMenu={(e) => onTabContextMenu(e, tab)}
                   title={tabTitle(tab)}
@@ -407,8 +494,8 @@ function PaneBarImpl({
                 </div>
               ))}
             </div>
-          ),
-        )}
+          );
+        })}
       </div>
 
       <Rail

@@ -3,12 +3,15 @@ mod agents;
 mod android;
 mod blocking;
 mod browser;
+mod chromium;
 mod cleanup;
 mod cli;
+mod clipboard;
 mod context;
 mod crash;
 #[cfg(feature = "dictation")]
 mod dictation;
+mod stagehand;
 // Intel macOS builds compile dictation out (no compatible ONNX Runtime); a stub
 // keeps the command surface identical so the rest of this file is unchanged.
 #[cfg(not(feature = "dictation"))]
@@ -20,6 +23,7 @@ mod instructions;
 mod lsp;
 mod mcp;
 mod mcp_client;
+mod notes;
 mod notify;
 mod portal;
 mod preview;
@@ -31,6 +35,7 @@ mod relay;
 mod remote;
 mod research;
 mod selftest;
+mod shortcuts;
 mod snapshot;
 mod spot;
 mod stores;
@@ -39,11 +44,40 @@ mod sysaudio;
 mod tunnel;
 mod vault;
 mod vault_kdbx;
+mod webview_keys;
 mod winproc;
 mod wsbridge;
 
+use shortcuts::accel;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager};
+
+/// Every shortcut id this menu binds. The list is what the parity test walks —
+/// it is how a chord added to a menu row here is proven to resolve on Windows
+/// and Linux too, not just on the Mac it was written on.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const MENU_SHORTCUT_IDS: &[&str] = &[
+    "settings",
+    "new-launcher",
+    "new-terminal",
+    "close-tab",
+    "next-tab",
+    "prev-tab",
+    "close-project",
+    "next-project",
+    "prev-project",
+    "toggle-sidebar",
+    "toggle-zen",
+    "new-project",
+    "open-project",
+    "manage-projects",
+    "open-workspace",
+    "save-workspace",
+    "quick-open",
+    "find-in-files",
+    "spot-search",
+    "help",
+];
 
 /// Custom menu: keeps Edit (clipboard in WKWebView needs it) but replaces the
 /// default Cmd+W "Close Window" with tab-scoped shortcuts the frontend handles.
@@ -72,7 +106,13 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 None::<&str>,
             )?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?,
+            &MenuItem::with_id(
+                app,
+                "settings",
+                "Settings…",
+                true,
+                accel("settings").as_deref(),
+            )?,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::hide(app, None)?,
             &PredefinedMenuItem::separator(app)?,
@@ -101,15 +141,27 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             // The launcher (shell, preview, every agent CLI) as a typed list —
             // the ＋ menu's keyboard twin. Cmd/Ctrl+T stays the straight-to-a-
             // shell shortcut for when you already know what you want.
-            &MenuItem::with_id(app, "new-launcher", "New…", true, Some("CmdOrCtrl+N"))?,
+            &MenuItem::with_id(
+                app,
+                "new-launcher",
+                "New…",
+                true,
+                accel("new-launcher").as_deref(),
+            )?,
             &MenuItem::with_id(
                 app,
                 "new-terminal",
                 "New Terminal",
                 true,
-                Some("CmdOrCtrl+T"),
+                accel("new-terminal").as_deref(),
             )?,
-            &MenuItem::with_id(app, "close-tab", "Close Tab", true, Some("CmdOrCtrl+W"))?,
+            &MenuItem::with_id(
+                app,
+                "close-tab",
+                "Close Tab",
+                true,
+                accel("close-tab").as_deref(),
+            )?,
             &PredefinedMenuItem::separator(app)?,
             // Tabs and projects share one mental model: Ctrl+Cmd moves between
             // tabs, Cmd+Alt between projects. Cmd+1..9 used to jump to a tab by
@@ -119,14 +171,14 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 "next-tab",
                 "Next Tab",
                 true,
-                Some("Control+CmdOrCtrl+Right"),
+                accel("next-tab").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "prev-tab",
                 "Previous Tab",
                 true,
-                Some("Control+CmdOrCtrl+Left"),
+                accel("prev-tab").as_deref(),
             )?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(
@@ -134,21 +186,21 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 "close-project",
                 "Close Project",
                 true,
-                Some("CmdOrCtrl+Shift+W"),
+                accel("close-project").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "next-project",
                 "Next Project",
                 true,
-                Some("CmdOrCtrl+Alt+Right"),
+                accel("next-project").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "prev-project",
                 "Previous Project",
                 true,
-                Some("CmdOrCtrl+Alt+Left"),
+                accel("prev-project").as_deref(),
             )?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(
@@ -156,14 +208,14 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 "toggle-sidebar",
                 "Toggle Sidebar",
                 true,
-                Some("CmdOrCtrl+B"),
+                accel("toggle-sidebar").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "toggle-zen",
                 "Focus Mode",
                 true,
-                Some("CmdOrCtrl+Shift+Enter"),
+                accel("toggle-zen").as_deref(),
             )?,
         ],
     )?;
@@ -182,21 +234,21 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 true,
                 // Cmd/Ctrl+N is the new-tab launcher (Tabs menu); a whole new
                 // project is the rarer, bigger thing, so it takes the Shift.
-                Some("CmdOrCtrl+Shift+N"),
+                accel("new-project").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "open-project",
                 "Open Project…",
                 true,
-                Some("CmdOrCtrl+O"),
+                accel("open-project").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "manage-projects",
                 "Manage Projects…",
                 true,
-                Some("CmdOrCtrl+Shift+M"),
+                accel("manage-projects").as_deref(),
             )?,
             &MenuItem::with_id(app, "save-project", "Save Project As…", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
@@ -205,14 +257,14 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 "open-workspace",
                 "Open Workspace…",
                 true,
-                Some("CmdOrCtrl+Shift+O"),
+                accel("open-workspace").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "save-workspace",
                 "Save Workspace As…",
                 true,
-                Some("CmdOrCtrl+Shift+S"),
+                accel("save-workspace").as_deref(),
             )?,
         ],
     )?;
@@ -228,21 +280,21 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 "quick-open",
                 "Quick Open File…",
                 true,
-                Some("CmdOrCtrl+P"),
+                accel("quick-open").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "find-in-files",
                 "Find in Files…",
                 true,
-                Some("CmdOrCtrl+Shift+F"),
+                accel("find-in-files").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "spot-search",
                 "SpotSearch Everything…",
                 true,
-                Some("CmdOrCtrl+K"),
+                accel("spot-search").as_deref(),
             )?,
         ],
     )?;
@@ -261,7 +313,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         "Help",
         true,
         &[
-            &MenuItem::with_id(app, "help", "Canopy Help", true, Some("CmdOrCtrl+Shift+H"))?,
+            &MenuItem::with_id(app, "help", "Canopy Help", true, accel("help").as_deref())?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "support", "Support Us", true, None::<&str>)?,
         ],
@@ -328,6 +380,7 @@ pub fn run() {
         .manage(portal::RemoteManager::default())
         .manage(preview::PreviewManager::default())
         .manage(browser::BrowserManager::default())
+        .manage(chromium::ChromiumManager::default())
         .manage(context::ContextBridge::default())
         .manage(agents::StatsCache::default())
         .manage(tunnel::TunnelManager::default())
@@ -336,7 +389,9 @@ pub fn run() {
         .manage(selftest::SelftestState::default())
         .manage(spot::SpotIndex::default())
         .manage(research::ResearchStore::default())
+        .manage(notes::NotesStore::default())
         .manage(vault::Vault::default())
+        .manage(clipboard::Clipboard::default())
         .manage(cli::pending_from_env())
         .setup(|app| {
             // ONNX Runtime is loaded dynamically on every platform (Cargo.toml
@@ -368,6 +423,15 @@ pub fn run() {
                         .level(log::LevelFilter::Info)
                         .build(),
                 )?;
+            }
+            // Edge's built-in shortcuts are not Canopy's to hand out — see
+            // webview_keys.rs. Done here rather than at window creation
+            // because the setting lives on CoreWebView2, which only exists
+            // once the webview has been created.
+            // Every window rather than a label: tauri.conf.json does not name
+            // this one, so "main" is a default we would be relying on.
+            for w in app.webview_windows().values() {
+                webview_keys::disable_browser_accelerators(w);
             }
             // Install the hook helper before hooks are (re)written, so the
             // path they point at exists.
@@ -431,6 +495,12 @@ pub fn run() {
             android::android_logcat,
             android::android_describe,
             android::android_run,
+            clipboard::clipboard_watch_set,
+            clipboard::clipboard_recent,
+            clipboard::clipboard_read,
+            clipboard::clipboard_forget,
+            clipboard::clipboard_clear,
+            clipboard::clipboard_status,
             spot::spot_ingest,
             spot::spot_search,
             spot::spot_index_stats,
@@ -465,6 +535,19 @@ pub fn run() {
             research::research_import,
             research::research_for_file,
             research::research_delete,
+            notes::notes_list,
+            notes::notes_get,
+            notes::notes_search,
+            notes::notes_create,
+            notes::notes_update,
+            notes::notes_add_attachment,
+            notes::notes_attach_file,
+            notes::notes_set_status,
+            notes::notes_link,
+            notes::notes_read_file,
+            notes::notes_read_image,
+            notes::notes_dir,
+            notes::notes_delete,
             spot::spot_save_context_text,
             fsx::workspace_add,
             fsx::workspace_remove,
@@ -608,6 +691,20 @@ pub fn run() {
             browser::browser_command,
             browser::browser_here,
             browser::browser_clear_data,
+            chromium::chromium_detect,
+            chromium::chromium_open,
+            chromium::chromium_navigate,
+            chromium::chromium_run_op,
+            chromium::chromium_command,
+            chromium::chromium_drain,
+            chromium::chromium_here,
+            chromium::chromium_close,
+            chromium::chromium_start_cast,
+            chromium::chromium_stop_cast,
+            chromium::chromium_capture,
+            chromium::chromium_metrics,
+            stagehand::stagehand_node_available,
+            stagehand::stagehand_bridge,
             cleanup::cleanup_scan,
             cleanup::cleanup_run,
             cleanup::cleanup_disk,
@@ -657,10 +754,19 @@ pub fn run() {
                 app.state::<preview::PreviewManager>().shutdown_all();
                 // ... and any embedded-browser views.
                 app.state::<browser::BrowserManager>().shutdown_all(app);
+                // A browser Canopy started is Canopy's to stop: left
+                // running it holds the profile lock and the next launch
+                // attaches to a window nobody can see.
+                let handle = app.clone();
+                tauri::async_runtime::block_on(async move {
+                    handle.state::<chromium::ChromiumManager>().shutdown().await;
+                });
                 // ... and any public-link tunnel process.
                 app.state::<tunnel::TunnelManager>().kill_all();
                 // ... and stop polling GitHub for pull requests.
                 app.state::<prwatch::PrWatcher>().shutdown();
+                // ... and stop watching the pasteboard.
+                app.state::<clipboard::Clipboard>().shutdown();
             }
         });
 }

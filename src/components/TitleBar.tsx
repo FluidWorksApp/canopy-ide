@@ -1,6 +1,7 @@
 import { memo, useEffect, useState } from "react";
-import { CloseIcon, FrostIcon } from "./icons";
+import { BellIcon, CloseIcon, FrostIcon } from "./icons";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
+import type { Urgency } from "../attention";
 import type { Project } from "../projects";
 import type { TabDrag } from "../tabDrag";
 // macOS gets the frameless "Overlay" titlebar (set in tauri.conf.json), so our
@@ -65,6 +66,11 @@ interface TitleBarProps {
   /** True while ⌥/Alt is held: each of the first nine pills shows the digit
    *  that jumps to it (see useHeldModifier). */
   showHints: boolean;
+  /** The attention channel's badge: how many, and how loudly (attention.ts).
+   *  Zero means no badge at all. */
+  notifCount: number;
+  notifUrgency: Urgency;
+  onOpenNotifications: () => void;
   onSelectProject: (id: string) => void;
   onCloseProject: (id: string) => void;
   onHibernateProject: (id: string) => void;
@@ -88,6 +94,9 @@ function TitleBarImpl({
   tabDragItemProps,
   hibernated,
   showHints,
+  notifCount,
+  notifUrgency,
+  onOpenNotifications,
   onSelectProject,
   onCloseProject,
   onHibernateProject,
@@ -203,6 +212,26 @@ function TitleBarImpl({
           </button>
         </div>
       )}
+      {/* The channel's one opener. App-level rather than in a project's rail,
+          because the queue is the workspace's: the whole point is to see that
+          a project you are NOT looking at is waiting on you. */}
+      <button
+        className={`notif-bell${notifCount > 0 ? " notif-bell-lit" : ""}`}
+        title={
+          notifCount > 0
+            ? `${notifCount} ${notifUrgency === "high" ? "waiting on you" : "unread"}`
+            : "Notifications"
+        }
+        aria-label="Notifications"
+        onClick={onOpenNotifications}
+      >
+        <BellIcon size={15} />
+        {notifCount > 0 && (
+          <span className={`notif-bell-badge notif-bell-${notifUrgency}`}>
+            {Math.min(notifCount, 99)}
+          </span>
+        )}
+      </button>
       <Button className="project-manage-btn"
         title="Manage projects — open, create, edit, delete"
         onClick={onManageProjects}>

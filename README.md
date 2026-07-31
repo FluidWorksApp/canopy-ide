@@ -55,7 +55,7 @@ result.
   the last thing you asked it, CPU/memory, and the port it's listening on.
 - **A real editor.** Monaco with TypeScript diagnostics, plus native viewers for
   Markdown (incl. Mermaid), HTML, PDF, spreadsheets, Jupyter notebooks and images.
-- **Dictate anywhere.** A configurable hotkey (`⌘D`) transcribes speech straight
+- **Dictate anywhere.** A configurable hotkey (`⌘D`, `Alt+D` off macOS) transcribes speech straight
   to the cursor — a terminal, the editor, or an agent prompt. Fully on-device
   (Parakeet / SenseVoice / Moonshine): no cloud, no upload, no formatting pass.
 
@@ -103,7 +103,7 @@ no auto-PR; that stays yours.
 
 <img src="docs/screenshots/issue.png" alt="A GitHub issue opened in Canopy — the full markdown body rendered inline with a worktree branch chip and a Start-work · Claude Code button" width="820">
 
-**Dictate anywhere.** Press `⌘D` and talk — the transcript lands wherever your
+**Dictate anywhere.** Press `⌘D` (`Alt+D` off macOS) and talk — the transcript lands wherever your
 cursor is: a terminal, the editor, a commit message, an agent prompt. Speech
 recognition runs entirely on your machine; nothing is uploaded.
 
@@ -210,7 +210,7 @@ runs are fast and the frontend hot-reloads.
   rail** — kept apart from shells because they're services, not sessions. Each
   reports real state: a pulsing dot while live, a green check when a one-shot
   finishes, or a red exit code when it fails.
-- **Quick Open (`Cmd+P`) and Find in Files (`Cmd+Shift+F`)** search every
+- **Quick Open (`⌘P` / `Ctrl+P`) and Find in Files (`⇧⌘F` / `Ctrl+Shift+F`)** search every
   component of the project by default; chips scope to a single component.
 - **Diff-first.** A file changed on disk gives you a side-by-side diff — Accept
   disk version / Keep mine — never a silent reload. The Changes tab lists
@@ -224,21 +224,76 @@ runs are fast and the frontend hot-reloads.
 ### Keyboard shortcuts
 
 VS Code-standard where an equivalent exists. All scoped to the active window and
-visible project — `Cmd+W` closes a tab, never the app.
+visible project — Close Tab closes a tab, never the app.
 
-| Shortcut | Action |
-| --- | --- |
-| `Cmd+P` | Quick Open file (fuzzy) |
-| `Cmd+Shift+F` | Find in Files |
-| `Cmd+N` / `Cmd+O` | New project / Open project folder |
-| `Cmd+Shift+O` / `Cmd+Shift+S` | Open / Save workspace file |
-| `Cmd+T` | New terminal |
-| `Cmd+W` | Close tab |
-| `Ctrl+Cmd+←` / `Ctrl+Cmd+→` | Previous / next tab |
-| `Cmd+Shift+W` | Close project |
-| `Cmd+B` | Toggle sidebar |
-| `Cmd+Shift+Enter` | Focus mode (`Esc` exits) |
-| `Cmd+Q` | Quit |
+Every chord is defined once in [`shared/shortcuts.json`](shared/shortcuts.json),
+read by both the webview and the native menu, and resolved per platform: `Mod`
+is Command on macOS and Control on Windows/Linux, and a chord that cannot mean
+the same thing on both carries an explicit override. The Help dialog renders
+this table for the platform you are actually on.
+
+| Action | macOS | Windows / Linux |
+| --- | --- | --- |
+| New tab (shell, preview or agent) | `⌘N` | `Ctrl+N` |
+| SpotSearch — search everything | `⌘K` | `Ctrl+Shift+K` |
+| Quick Open file (fuzzy) | `⌘P` | `Ctrl+Shift+P` |
+| Find in Files | `⇧⌘F` | `Ctrl+Shift+F` |
+| New project / Open project folder | `⇧⌘N` / `⌘O` | `Ctrl+Shift+N` / `Ctrl+O` |
+| Open / Save workspace file | `⇧⌘O` / `⇧⌘S` | `Ctrl+Shift+O` / `Ctrl+Shift+S` |
+| New terminal | `⌘T` | `Ctrl+T` |
+| Close tab | `⌘W` | `Ctrl+Shift+W` |
+| Jump to a tab (hold to see the numbers) | `⌘1…9` | `Ctrl+1…9` |
+| Jump to a project | `⌥1…9` | `Alt+1…9` |
+| Previous / next tab | `⌃⌘←` / `⌃⌘→` | `Ctrl+PgUp` / `Ctrl+PgDn` |
+| Previous / next tab (browser chord) | `⌃⇧⇥` / `⌃⇥` | `Ctrl+Shift+Tab` / `Ctrl+Tab` |
+| Previous / next project | `⌥⌘←` / `⌥⌘→` | `Ctrl+Alt+PgUp` / `Ctrl+Alt+PgDn` |
+| Close project | `⇧⌘W` | `Ctrl+Alt+W` |
+| Toggle sidebar | `⌘B` | `Ctrl+Shift+B` |
+| Focus mode (`Esc` exits) | `⇧⌘Enter` | `Ctrl+Shift+Enter` |
+| Voice dictation | `⌘D` | `Alt+D` |
+| Quit | `⌘Q` | `Alt+F4` |
+
+Chords move off macOS for two reasons, both recorded as notes in the manifest.
+
+**The desktop already owns it.** `Ctrl+←` is word-jump in every text field, so
+the tab chords take PageUp/PageDown; `Ctrl+Alt+←` is workspace switching on
+Linux and screen rotation on some Windows graphics drivers, so the project
+chords do too.
+
+**The shell needs it.** Off macOS `Mod` is Ctrl — the same key readline and the
+terminal driver use for line editing — and a menu accelerator is consumed
+before the shell ever sees it. Canopy is terminal-first, so a chord that would
+eat a key people press constantly takes Shift instead: Quick Open, SpotSearch,
+Close Tab and Toggle Sidebar become `Ctrl+Shift+P/K/W/B`, leaving
+`Ctrl+P` (previous-history), `Ctrl+K` (kill-line), `Ctrl+W` (werase) and
+`Ctrl+B` (backward-char, and the tmux prefix) to the shell. Ctrl+Shift is the
+namespace terminal emulators already reserve for app commands. Close Project
+then moves to `Ctrl+Alt+W`, keeping the rule that tabs are Ctrl+Shift and
+projects are Ctrl+Alt. Dictation avoids `Ctrl+D` for the same reason — it is
+shell EOF, and would close the terminal you were dictating into.
+
+`src/shortcuts.test.ts` enforces this: no chord may take a bare `Ctrl+<letter>`
+that readline binds, apart from four explicitly accepted exceptions.
+
+**Not every chord can be a menu item.** `Ctrl+Tab` is literal Ctrl on all three
+platforms — it is one chord worldwide, and `⌘⇥` belongs to the macOS app
+switcher — but it cannot be an accelerator: muda hands macOS the glyph `⇥`
+(U+21E5) as Tab's key equivalent rather than the character the key produces, so
+such a menu item renders perfectly and never fires. The manifest marks it
+`"surface": "app"` and the webview's capture-phase handler answers it, which is
+where it has to work anyway: focus is almost always inside xterm or Monaco, and
+macOS never routes an accelerator to the menu from there. The Tabs menu keeps
+`⌃⌘←/→`, the pair that does survive native focus; both move the same strip.
+
+**Windows only:** release builds switch off WebView2's own browser accelerator
+keys, so the registry really is the whole answer to "what does this key do".
+Left on, Edge's shortcuts sit underneath the app — `Ctrl+R`/`F5` reload it and
+take unsaved editor buffers with them, `Ctrl+F` opens a find bar Canopy never
+drew, and `Ctrl+Plus/Minus` zooms the webview on top of Canopy's own zoom. Dev
+builds keep them, because reload and `F12` are how you work on the thing.
+
+The three Cmd-based terminal chords (start/end of line, delete line) are
+unbound off macOS, where Home/End already do the job.
 
 ## Contributing
 

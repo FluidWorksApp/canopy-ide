@@ -26,45 +26,16 @@ export interface OpenFile {
   blocked?: import("./fileOpen").OpenBlock | null;
 }
 
-export interface QuestionOption {
-  label: string;
-  description?: string;
-}
-
-export interface PendingQuestion {
-  question: string;
-  header?: string;
-  multiSelect?: boolean;
-  options: QuestionOption[];
-}
-
-/** The projection of one agent hook event that the app actually reads. The raw
- *  line can carry tens of KB of tool payload (tool_input/tool_response) and
- *  used to be re-JSON.parsed by every consumer on every render — it is parsed
- *  exactly once, at ingest, and only these fields are kept. */
-export interface AgentEventData {
-  sessionId: string;
-  cwd: string;
-  /** canopy_pty stamp; null when the agent's hooks can't carry it (codex). */
-  pty: number | null;
-  /** hook_event_name, falling back to codex's `type`. */
-  event: string;
-  tool: string;
-  /** Empty when the hook carried no agent stamp (a bare claude). */
-  agent: string;
-  message?: string;
-  /** codex's turn-complete carries the agent's last words. */
-  lastAssistantMessage?: string;
-  transcriptPath?: string;
-  /** AskUserQuestion payload, when this event is its PreToolUse. */
-  questions?: PendingQuestion[];
-}
-
-export interface AgentEventEntry {
-  ts: number;
-  /** null: the line wasn't JSON. */
-  data: AgentEventData | null;
-}
+// The agent-hook event shapes live in shared/notifications.ts, beside the
+// `derivePending` that reads them — the portal derives the same cards from the
+// same forwarded events, and one definition is what keeps the two honest. They
+// are re-exported here so every `from "./types"` in the app still resolves.
+export type {
+  AgentEventData,
+  AgentEventEntry,
+  PendingQuestion,
+  QuestionOption,
+} from "../shared/notifications";
 
 /** Message severity for the toast. Everything used to render with a red
  *  border, so "Switched to origin" looked like a failure. */

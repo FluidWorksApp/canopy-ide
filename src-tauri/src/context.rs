@@ -127,6 +127,7 @@ pub fn start(app: tauri::AppHandle) {
             .route("/ctx/wait", get(wait))
             .route("/ctx/claims", get(claims_list).post(claims_post))
             .route("/ctx/research", post(research_op))
+            .route("/ctx/notes", post(notes_op))
             .route("/ctx/tools", get(tools))
             .with_state(app.clone());
         let _ = axum::serve(listener, router).await;
@@ -581,6 +582,158 @@ async fn research_op(
     }
 }
 
+// ---- the scratchpad ------------------------------------------------------
+//
+// The half of notes that agents get. The panel and ⌘K are how a human parks a
+// thought; this is how an agent does — "I noticed three unrelated things while
+// fixing this" is the case, and before this the only options were to derail
+// onto them or to lose them.
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NotesReq {
+    action: String,
+    cwd: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    statuses: Option<Vec<String>>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    note: Option<String>,
+    #[serde(default)]
+    by: Option<String>,
+    #[serde(default)]
+    pr: Option<crate::notes::PrLink>,
+    #[serde(default)]
+    research: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    file: Option<crate::notes::FileRef>,
+    /// attach: an absolute path already on disk, inside a workspace root.
+    #[serde(default)]
+    path: Option<String>,
+}
+
+async fn notes_op(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+    Json(req): Json<NotesReq>,
+) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let Some((project_id, project_name, roots)) = project_for_cwd(&app, &req.cwd) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "{} is not inside any project open in Canopy, and a note belongs to the \
+                 project it was written in. A worktree resolves to the checkout it came \
+                 from, so this means neither is open here — open the project and try again.",
+                req.cwd
+            ),
+        );
+    };
+    let store = app.state::<crate::notes::NotesStore>();
+    let ws = app.state::<crate::fsx::WorkspaceManager>();
+    let need_id = |r: &NotesReq| -> Result<String, String> {
+        r.id.clone()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "this action needs an id — call list to see them".to_string())
+    };
+
+    let out: Result<serde_json::Value, String> = (|| match req.action.as_str() {
+        "list" => crate::notes::notes_list(project_id.clone(), req.statuses.clone(), req.limit)
+            .map(|rows| serde_json::json!({ "notes": rows })),
+        "search" => crate::notes::notes_search(
+            project_id.clone(),
+            req.query.clone().unwrap_or_default(),
+            req.limit,
+        )
+        .map(|rows| serde_json::json!({ "notes": rows })),
+        "get" => crate::notes::notes_get(project_id.clone(), need_id(&req)?)
+            .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
+        "create" => crate::notes::notes_create(
+            store.clone(),
+            project_id.clone(),
+            Some(project_name.clone()),
+            Some(roots.clone()),
+            req.title.clone().unwrap_or_default(),
+            req.text.clone(),
+            req.tags.clone(),
+            // No page context: an agent has no page. The `origin` is what
+            // answers "where do my notes come from" later.
+            None,
+            Some("agent".into()),
+            Some(req.cwd.clone()),
+        )
+        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        "append" => crate::notes::notes_update(
+            store.clone(),
+            project_id.clone(),
+            need_id(&req)?,
+            req.title.clone(),
+            None,
+            req.text.clone(),
+            req.tags.clone(),
+        )
+        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        "status" => crate::notes::notes_set_status(
+            store.clone(),
+            project_id.clone(),
+            need_id(&req)?,
+            req.status.clone().unwrap_or_default(),
+            // Credited to the agent, not to the user: the history is the one
+            // record of who moved a note, and it has to stay honest.
+            req.by.clone().or_else(|| Some("an agent".into())),
+            req.note.clone(),
+        )
+        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        "link" => crate::notes::notes_link(
+            store.clone(),
+            project_id.clone(),
+            need_id(&req)?,
+            req.pr.clone(),
+            req.research.clone(),
+            None,
+            req.branch.clone(),
+            req.file.clone(),
+        )
+        .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
+        "attach" => crate::notes::notes_attach_file(
+            store.clone(),
+            ws.clone(),
+            project_id.clone(),
+            need_id(&req)?,
+            req.path.clone().unwrap_or_default(),
+            req.title.clone(),
+            None,
+        )
+        .and_then(|a| serde_json::to_value(a).map_err(|e| e.to_string())),
+        other => Err(format!(
+            "unknown notes action: {other} — one of list, search, get, create, append, \
+             status, link, attach"
+        )),
+    })();
+
+    match out {
+        Ok(value) => (StatusCode::OK, value.to_string()),
+        Err(text) => (StatusCode::BAD_REQUEST, text),
+    }
+}
+
 /// The tool switches from Settings → Agents. Answered even when nothing has
 /// been published (nothing disabled), so the sidecar can treat any error as
 /// "everything is on" rather than hiding tools on a hiccup.
@@ -804,6 +957,17 @@ struct Action {
     /// summary. The artifact URL, if any, rides in `url` above.
     status: Option<String>,
     summary: Option<String>,
+    /// job_done: the agent's one-line reading of what it was asked for — the
+    /// "before" the summary is the "after" of.
+    asked: Option<String>,
+    /// job_done / task_named: what the agent decided to call this run, the
+    /// glyph it picked, and a few tags for the kind of work. Passed through
+    /// unvalidated on purpose: the shape (one glyph, four tags, a title that
+    /// fits a row) is a display concern, and it is enforced once, in
+    /// taskIdentity.ts, rather than twice in two languages.
+    title: Option<String>,
+    icon: Option<String>,
+    tags: Option<Vec<String>>,
     /// job_done / close_session: the launching app instance (env
     /// CANOPY_INSTANCE), so a pty id recycled across an app restart can't
     /// close an unrelated tab.
@@ -935,8 +1099,12 @@ async fn action(
                         "ptyId": act.pty_id,
                         "status": status,
                         "summary": summary,
+                        "asked": act.asked,
                         "url": act.url,
                         "cwd": act.cwd,
+                        "title": act.title,
+                        "icon": act.icon,
+                        "tags": act.tags,
                     }),
                 );
             }
@@ -944,6 +1112,37 @@ async fn action(
                 "done" => "Acknowledged — the user has been told. If this terminal is a Canopy micro-task it now closes: say goodbye in one sentence and start nothing new.".to_string(),
                 _ => "Noted — Canopy told the user what you need. This session stays open; wait for their reply here.".to_string(),
             }
+        }
+        "task_named" => {
+            // A name is not an outcome: nothing is settled, nothing closes, and
+            // an empty call is a no-op rather than an error — an agent that
+            // sends only a title has still said something useful.
+            if act.title.is_none() && act.icon.is_none() && act.tags.is_none() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "canopy_name_task needs at least one of title, icon or tags".into(),
+                );
+            }
+            let stale = act
+                .instance
+                .as_deref()
+                .is_some_and(|i| i != crate::pty::instance_token());
+            if !stale {
+                let _ = app.emit(
+                    "agent:action",
+                    serde_json::json!({
+                        "kind": "task_named",
+                        "route": "",
+                        "ptyId": act.pty_id,
+                        "cwd": act.cwd,
+                        "title": act.title,
+                        "icon": act.icon,
+                        "tags": act.tags,
+                    }),
+                );
+            }
+            "Noted — the user's Tasks list now shows this run by that name. Carry on with the job."
+                .to_string()
         }
         "close_session" => {
             // The id is the sidecar's own CANOPY_PTY, never an argument — an

@@ -13,6 +13,8 @@ import type { Notify } from "../types";
 import { useBranchSwitch } from "../useBranchSwitch";
 import { splitPatch } from "./PrView";
 import { STATE_META, lastHumanPrompt } from "./AgentsPanel";
+import { ashFor } from "../ash";
+import { Mascot } from "./Mascot";
 import { AgentRuntime } from "./AgentRuntime";
 import { effectiveState } from "../agentState";
 import { AgentIcon, GitBranchIcon, RestartIcon } from "./icons";
@@ -30,6 +32,7 @@ import {
   type TaskChoice,
 } from "../taskMenu";
 import { Button } from "./ui";
+import { format, matches } from "../shortcuts";
 
 const fmtCost = (n: number) =>
   n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`;
@@ -286,7 +289,7 @@ export const sameMap = (a: Map<string, string>, b: Map<string, string>) =>
   a.size === b.size && [...b].every(([k, v]) => a.get(k) === v);
 
 // The inline composer the diff viewer drops on a line when you click the "+".
-// Deliberately tiny: a textarea, add/cancel, ⌘/Ctrl+Enter to add. The saved
+// Deliberately tiny: a textarea, add/cancel, and the submit chord. The saved
 // comment lives in the workspace's state — and so does the half-typed one:
 // holding the draft here would lose it every time the agent under review
 // touched a file and the diff below rebuilt.
@@ -320,11 +323,11 @@ export function CommentComposer({
       <textarea
         ref={ref}
         className="aw-cc-input"
-        placeholder="Comment for the agent — ⌘⏎ to add"
+        placeholder={`Comment for the agent — ${format("submit")} to add`}
         value={text}
         onChange={(e) => onText(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+          if (matches(e, "submit")) {
             e.preventDefault();
             commit();
           } else if (e.key === "Escape") {
@@ -658,11 +661,8 @@ export function AgentWorkspaceView({
     onNotice,
   ]);
 
-  const st = ws?.state
-    ? STATE_META[ws.state]
-    : digest?.state
-      ? STATE_META[digest.state]
-      : undefined;
+  const lifecycle = ws?.state ?? digest?.state;
+  const st = lifecycle ? STATE_META[lifecycle] : undefined;
   const task = lastHumanPrompt(digest?.prompts);
   // The working-time clock, preferring the freshly-joined workspace (re-read on
   // every poll) over the digest the panel handed us when the tab opened.
@@ -1006,9 +1006,19 @@ export function AgentWorkspaceView({
           and the scoped diff below carry the real numbers. */}
       <div className="ticket-view-head aw-banner">
         <div className="ticket-view-title">
-          {st && (
-            <span className={`agent-state-dot ${st.cls}`} title={st.label} />
-          )}
+          {st &&
+            (() => {
+              const look = ashFor(lifecycle);
+              return (
+                <Mascot
+                  state={look.state}
+                  tone={look.tone}
+                  size={18}
+                  className="agent-state-ash"
+                  title={st.label}
+                />
+              );
+            })()}
           <AgentIcon id={agent} size={16} className="ticket-view-mark" />
           <span className="aw-agent">{agent}</span>
           {ws?.branch && (
@@ -1147,7 +1157,7 @@ export function AgentWorkspaceView({
                         />
                         <div className="oneoff-actions">
                           <span className="oneoff-hint">
-                            <kbd>↵</kbd> run · <kbd>⇧↵</kbd> new line ·{" "}
+                            <kbd>↵</kbd> run · <kbd>{format("newline")}</kbd> new line ·{" "}
                             <kbd>esc</kbd> cancel
                           </span>
                           <Button variant="accent"

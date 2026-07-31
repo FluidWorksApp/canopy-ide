@@ -17,11 +17,16 @@ import {
 import { BUILT_IN_HEADING } from "../taskMenu";
 import {
   completedTaskRuns,
+  runIcon,
+  runTitle,
   TASK_HISTORY_EVENT,
   type TaskRun,
 } from "../taskHistory";
+import { ashFor } from "../ash";
+import { Mascot } from "./Mascot";
 import { PlayIcon, StopIcon, TrashIcon } from "./icons";
 import { Button } from "./ui";
+import { matches } from "../shortcuts";
 
 /** A task in flight. Detached runs (the usual kind) carry a `ptyId` and no tab —
  *  this row is the only place they appear, so it has to say what a tab would
@@ -285,8 +290,11 @@ export function TasksPanel({
               className={`task-row task-row-running${r.blocked ? " task-row-blocked" : ""}`}
               key={r.tabId ?? `pty:${r.ptyId}`}
             >
-              <span
-                className={`agent-state-dot st-${r.state}`}
+              <Mascot
+                state={ashFor(r.state).state}
+                tone={ashFor(r.state).tone}
+                size={16}
+                className="agent-state-ash"
                 title={r.state}
               />
               {/* The whole row opens the run: a task with no tab needs one
@@ -338,13 +346,23 @@ export function TasksPanel({
                   landing on an undifferentiated list means finding it again by
                   eye, which is the one thing clicking the row should have
                   spared you. */}
+              {/* The agent's name for the run over the launcher's. For a
+                  built-in the two mostly agree; for everything ad-hoc the
+                  launcher's is the head of whatever was typed ("Can you please
+                  help in setting…"), and this is the first time the row says
+                  what the job actually was. */}
               <span
                 className="task-label task-label-link"
                 title={r.summary ?? "No summary reported."}
                 onClick={() => onOpenHistory(r.id)}
               >
-                {r.icon ? `${r.icon} ` : ""}
-                {r.label}
+                {runIcon(r) ? `${runIcon(r)} ` : ""}
+                {runTitle(r)}
+                {r.tags?.map((t) => (
+                  <span className="task-tag" key={t}>
+                    {t}
+                  </span>
+                ))}
                 {r.summary && (
                   <span className="task-note-inline">{r.summary}</span>
                 )}
@@ -456,9 +474,9 @@ export function TasksPanel({
               value={oneOff}
               onChange={(e) => setOneOff(e.target.value)}
               onKeyDown={(e) => {
-                // ⌘/Ctrl+Enter submits; plain Enter is a newline, since a brief
-                // typed here is usually a paragraph rather than a line.
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) runOneOff();
+                // The submit chord sends; plain Enter is a newline, since a
+                // brief typed here is usually a paragraph rather than a line.
+                if (matches(e, "submit")) runOneOff();
                 if (e.key === "Escape") setOneOff(null);
               }}
             />

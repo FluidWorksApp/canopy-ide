@@ -6,6 +6,7 @@
 // in prs.ts / trackers.ts, but registered so any surface can host a CTA.
 import type * as ipc from "./ipc";
 import { cleanupLine, detachedPushLine } from "./prs";
+import { format } from "./shortcuts";
 
 /** A task that edits files can't run in the shared checkout — other agents live
  *  there, and switching its branch under them is how you lose an afternoon. A
@@ -101,14 +102,29 @@ export const EFFECT_HEADING: Record<TaskEffect, string> = {
  *  context builder honors; this makes it structural for micro-task briefs. */
 export const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim();
 
-/** The completion contract appended to every micro-task brief: do the one job,
- *  call canopy_job_done, stop. The print fallback covers CLIs without the MCP
- *  bridge (only claude registers it today) so the ending is still legible. */
+/** The contract appended to every micro-task brief: name the job, do the one
+ *  job, call canopy_job_done, stop. The print fallback covers CLIs without the
+ *  MCP bridge (only claude registers it today) so the ending is still legible.
+ *
+ *  The naming half is asked for early and deliberately so. A run is named at
+ *  launch from what the launcher had — a payload, or the head of the brief —
+ *  and for anything ad-hoc that is a row reading "Can you please help in
+ *  setting…", which says what was typed and nothing about the work. The agent
+ *  is the only party that can say what the job turned out to be, and it knows
+ *  within a minute of starting; asking for it at the end would name a run only
+ *  once it was over, which is exactly when the name stops being useful. */
 export function microTaskProtocol(): string {
   return (
     `This is a one-shot micro-task: do exactly this job and nothing else — no follow-up work, ` +
-    `no servers, no unrelated fixes. When finished, call the \`canopy_job_done\` tool with ` +
-    `status "done", a one-sentence summary, and the url if the job produced one. If you cannot ` +
+    `no servers, no unrelated fixes. As soon as you know what the job actually is — after your ` +
+    `first look at it, not at the end — call \`canopy_name_task\` once with: a \`title\` of a few ` +
+    `words naming this specific run, an \`icon\` that is a single Unicode symbol (◎ ⚒ ⇈ ◍ ◇ ⌕ ▶ — ` +
+    `not a letter, a word, or a \`:shortcode:\`), and up to four one-word \`tags\` for the area and ` +
+    `kind of work ("review", "rust", "flaky-test"). That is what the user sees in their Tasks ` +
+    `list instead of the first line of this brief. When finished, call the \`canopy_job_done\` ` +
+    `tool with status "done", a one-sentence summary of what happened, \`asked\`: one line saying ` +
+    `what you understood the ask to be, and the url if the job produced one — plus title, icon ` +
+    `and tags if you never named the task or would name it differently now. If you cannot ` +
     `finish, call it with status "blocked" and say what you need. If the canopy_job_done tool ` +
     `is not available, print \`JOB DONE: <summary>\` as your final line instead. After Canopy ` +
     `acknowledges, stop — one closing sentence at most; Canopy will close this terminal.`
@@ -794,7 +810,7 @@ export const researchTask: MicroTaskDef<ResearchRunPayload> = {
   placeholder: "anything else it should focus on…",
   blurb: "Investigate a question and record the finding. Changes no code.",
   effect: "reads",
-  surfaceNote: "from the Research panel, or by typing a question into ⌘K",
+  surfaceNote: `from the Research panel, or by typing a question into ${format("spot-search")}`,
   cwd: (p) => p.dir,
   env: (p) => [
     ["CANOPY_RESEARCH", p.entryId],
@@ -883,10 +899,65 @@ export const implementResearchTask: MicroTaskDef<ImplementResearchPayload> = {
     ),
 };
 
+// ---------- the scratchpad ----------
+
+export interface NoteRunPayload {
+  /** Where to run — the project directory. */
+  dir: string;
+  projectId: string;
+  noteId: string;
+  title: string;
+  /** The whole note, rendered for an agent: the thought, its attachments as
+   *  absolute paths, and the captured context marked as historical. Built by
+   *  notes.noteContext, because only that module knows the record's shape. */
+  brief: string;
+}
+
+/** Pick a parked thought up and do it.
+ *
+ *  Deliberately not isolated into a worktree, and deliberately not told to
+ *  commit or push. A note is the least-specified thing in the app — it may be
+ *  "rename this variable" or "rethink how sessions are stored" — and a task
+ *  that opens a branch and starts pushing on the strength of one sentence
+ *  someone typed three weeks ago is how you get an afternoon of cleanup. So
+ *  this one lands the agent in the project with the full note in hand and stops
+ *  there; the human decides what it becomes.
+ *
+ *  It also has no `steps`. Every other rail here describes a job whose shape is
+ *  known before it starts — read the diff, fix the cause, push. A note's shape
+ *  is unknown by construction, and four invented milestones would be a rail
+ *  that lies. Those runs fall back to the live "last tool used" note in the
+ *  Tasks panel, which is the honest thing to show. */
+export const noteTask: MicroTaskDef<NoteRunPayload> = {
+  id: "note",
+  label: "Work on note",
+  icon: "◇",
+  runLabel: (p) => adhocLabel(p.title),
+  placeholder: "anything to add since you wrote it…",
+  blurb: "Pick up a note from the scratchpad, with everything attached to it.",
+  effect: "reads",
+  surfaceNote: "on a note, from the Scratchpad panel",
+  cwd: (p) => p.dir,
+  env: (p) => [["CANOPY_NOTE", p.noteId]],
+  buildContext: (p, query) =>
+    oneLine(
+      p.brief +
+        ` Start by getting your bearings: call canopy_project for the components and` +
+        ` what is already running. The note was written at some point in the past and` +
+        ` the code has moved since — check what it describes still holds before acting` +
+        ` on it, and say so if it does not.` +
+        ` Do the work in this checkout; do not create a branch, commit, or push —` +
+        ` this note is a starting point, not an approved change, and what it becomes` +
+        ` stays the user's call.` +
+        (query ? ` The user adds: "${query}".` : ""),
+    ),
+};
+
 /** Every built-in micro-task a CTA can launch. These are surface-bound: their
  *  payload comes from where the button lives (see each task's surfaceNote),
  *  which is why the Tasks panel lists them read-only — run them from there. */
 export const MICRO_TASKS: MicroTaskDef<never>[] = [
+  noteTask as MicroTaskDef<never>,
   researchTask as MicroTaskDef<never>,
   implementResearchTask as MicroTaskDef<never>,
   raisePrTask as MicroTaskDef<never>,

@@ -16,7 +16,19 @@ import {
 } from "react";
 import { Panel, PanelGroup } from "react-resizable-panels";
 import * as ipc from "../../ipc";
+import { format, matches, matchesModifierClick } from "../../shortcuts";
 import { getSettings, SETTINGS_CHANGE_EVENT } from "../../settings";
+import {
+  DOC_STACKS,
+  STATUS_LABEL,
+  docStackFor,
+  shownInStack,
+  statusFor,
+  useSettledGroups,
+  type TabStatus,
+} from "../../tabGroups";
+import { revealScroll, useStripOverflow } from "../../tabSticky";
+import { useFlipStrip } from "../../tabFlip";
 import { modelFor, monaco, languageForPath } from "../../monaco-setup";
 import { getCaret, subscribeCaret } from "../../editorState";
 import { useEscapeBackstop, useEscapeLayer } from "../../useEscape";
@@ -46,13 +58,20 @@ import {
 } from "../../projects";
 import {
   AgentIcon,
+  AgentsIcon,
   CheckIcon,
   ChevronIcon,
   FailIcon,
+  FilesIcon,
+  GitBranchIcon,
+  GlobeIcon,
+  IssueIcon,
   LiveDot,
   PlayIcon,
+  PullRequestIcon,
   RestartIcon,
   StopIcon,
+  TeamIcon,
   TerminalIcon,
 } from "../icons";
 import type { OpenFile } from "../../types";
@@ -64,6 +83,8 @@ import {
   pendingForRoots,
   type PendingItem,
 } from "../../notifications";
+import { isOutstanding } from "../../attention";
+import { useAttention } from "../../useAttention";
 import {
   findRun,
   patchRun,
@@ -73,6 +94,7 @@ import {
   type MicroRun,
 } from "../../microRuns";
 import { renderPtyText } from "../../ptyText";
+import { scheduleReap } from "../../runReap";
 import { followLink, type DeepLink } from "../../deepLinks";
 import {
   addressPrCommentsTask,
@@ -85,6 +107,7 @@ import {
   progressBrief,
   runLabelFor,
   raisePrTask,
+  noteTask,
   researchTask,
   reviewPrTask,
   type CustomMicroTask,
@@ -92,6 +115,8 @@ import {
   type MicroTaskEnv,
 } from "../../microTasks";
 import { TasksPanel, type RunningMicroTask } from "../TasksPanel";
+import { NotesPanel } from "../NotesPanel";
+import { NoteView } from "../NoteView";
 import { ResearchPanel } from "../ResearchPanel";
 import { ResearchImportCta } from "../ResearchImportCta";
 import { ResearchView } from "../ResearchView";
@@ -105,6 +130,15 @@ import {
   settleIfRunning as researchSettleIfRunning,
   start as researchStart,
 } from "../../research";
+import { resolveWikilink } from "../../wikilinks";
+import {
+  NEXT_STATUSES as NEXT_NOTE_STATUSES,
+  cached as notesCached,
+  create as createNote,
+  noteContext,
+  refresh as refreshNotes,
+  setStatus as setNoteStatus,
+} from "../../notes";
 import { TaskHistoryView } from "../TaskHistoryView";
 import { InstructionsView } from "../InstructionsView";
 import {
@@ -112,9 +146,16 @@ import {
   recordTaskEnd,
   recordTaskStart,
   researchEntryForFile,
+  runTitle,
   updateTaskRun,
   type TaskRun,
 } from "../../taskHistory";
+import {
+  askedLine,
+  hasIdentity,
+  identityPatch,
+  taskIdentity,
+} from "../../taskIdentity";
 import {
   hasTasksToList,
   taskMenuItem,
@@ -137,7 +178,7 @@ import { ChangesPanel, type ChangeGroup } from "../ChangesPanel";
 import { Dialog } from "../Dialog";
 import { BranchSwitchProvider, useBranchSwitch } from "../../useBranchSwitch";
 import { askDialog } from "../../branchSwitch";
-import { useTabDrag, applyOrder } from "../../tabDrag";
+import { useTabDragGroups, applyOrder } from "../../tabDrag";
 import { agentIdForCommand, identifyAgent } from "../../agentIdentity";
 import { tabNamesByPty } from "../../agentDisplayName";
 import {
@@ -236,12 +277,15 @@ import {
   previewLabel,
   tabDisplayLabel,
   tabId,
+  tabPrefs as readTabPrefs,
   type SideTab,
+  type StripGroup,
   type SubTab,
   type DocSubTab,
   type TermSubTab,
   type FileSubTab,
   type TicketSubTab,
+  type NoteSubTab,
   type ResearchSubTab,
   type BranchSubTab,
   type CommitSubTab,
@@ -283,6 +327,19 @@ export type {
   PreviewSubTab,
   DeviceSubTab,
   RailChip,
+  StripGroup,
+};
+
+/** A document stack wears its kind's icon where a status stack wears a dot —
+ *  the same icon its tabs carry, so a folded stack still says what is in it. */
+const DOC_STACK_ICONS: Record<string, ReactNode> = {
+  workspaces: <AgentsIcon size={11} />,
+  files: <FilesIcon size={11} />,
+  browser: <GlobeIcon size={11} />,
+  tasks: <IssueIcon size={11} />,
+  reviews: <PullRequestIcon size={11} />,
+  history: <GitBranchIcon size={11} />,
+  team: <TeamIcon size={11} />,
 };
 
 const decoder = new TextDecoder();
@@ -336,8 +393,9 @@ function TermPorts({
 }: {
   ptyId: number | null | undefined;
   stats: ipc.SessionStats[];
-  /** Open in the in-app preview tab; plain click. ⌘/ctrl-click still goes to
-   *  the system browser for the times a real browser is the point. */
+  /** Open in the in-app preview tab; plain click. Cmd-click (Ctrl-click off a
+   *  Mac) still goes to the system browser for the times a real browser is the
+   *  point. */
   onPreview: (url: string) => void;
 }) {
   if (ptyId == null) return null;
@@ -349,9 +407,11 @@ function TermPorts({
         <button
           key={p}
           className="term-port"
-          title={`Preview http://localhost:${p} in Canopy — ⌘-click for your browser`}
+          title={`Preview http://localhost:${p} in Canopy — ${format(
+            "open-external",
+          )}-click for your browser`}
           onClick={(e) => {
-            if (e.metaKey || e.ctrlKey) {
+            if (matchesModifierClick(e, "open-external")) {
               void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
                 openUrl(`http://localhost:${p}`),
               );
@@ -822,13 +882,28 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   // ---------- terminals ----------
 
+  // Pending self-closes for finished chore runs, by tab id. Held so leaving the
+  // project doesn't leave a timer holding a closure over tabs that are gone.
+  const reapTimers = useRef(new Map<string, number>());
+  useEffect(
+    () => () => {
+      for (const t of reapTimers.current.values()) window.clearTimeout(t);
+      reapTimers.current.clear();
+    },
+    [],
+  );
+
   const addTerminal = useCallback(
     (
       cwd: string,
       command?: string,
       title?: string,
       icon?: string,
-      run = false,
+      // "chore" is a run with one thing to say — an install, an update — which
+      // closes itself once it says it (see runReap.ts). Spelled as a value of
+      // this argument rather than another positional flag: a chore is a kind of
+      // run, and the two could never be set independently.
+      run: boolean | "chore" = false,
       // Stamped on top of the workspace port — an agent CLI launched under a
       // non-default account profile carries the variable that points it at that
       // login's config dir (see profiles.ts).
@@ -854,7 +929,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
           icon,
           env: env.length ? env : undefined,
           profile,
-          run,
+          run: run !== false,
+          chore: run === "chore" || undefined,
         },
       ]);
       setActiveTabId(id);
@@ -1440,11 +1516,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // quit never runs cleanup, and those are precisely the cases this exists
   // for.
   // Micro-task tabs are excluded: they're one-shot and ephemeral, so
-  // "reopen it" would re-run a task that already finished.
+  // "reopen it" would re-run a task that already finished. Chore runs go for
+  // the same reason — "restore my terminals" must not mean "install that again".
   useEffect(() => {
     const open: RememberedTerminal[] = tabs
       .filter(
-        (t): t is TermSubTab => t.type === "terminal" && !t.exited && !t.micro,
+        (t): t is TermSubTab =>
+          t.type === "terminal" && !t.exited && !t.micro && !t.chore,
       )
       .map((t) => ({
         cwd: t.cwd,
@@ -1993,6 +2071,27 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [patchTabRaw],
   );
 
+  /** Open a note as a tab. Same shape as openResearch: the tab holds the id
+   *  and the last known title, and the view re-reads the store itself. */
+  const openNote = useCallback(
+    (noteId: string, title: string) => {
+      const existing = tabsRef.current.find(
+        (t): t is NoteSubTab => t.type === "note" && t.noteId === noteId,
+      );
+      if (existing) {
+        if (title && title !== existing.title) {
+          patchTabRaw(existing.id, { title } as Partial<SubTab>);
+        }
+        setActiveTabId(existing.id);
+        return;
+      }
+      const id = tabId();
+      setTabs((prev) => [...prev, { id, type: "note", noteId, title }]);
+      setActiveTabId(id);
+    },
+    [patchTabRaw],
+  );
+
   /** Hand ticket context to an agent terminal that is already running. */
   const sendTicketToAgent = useCallback((target: AgentTarget, text: string) => {
     // Same two-write pattern as the model switcher: text, then Enter a beat
@@ -2191,6 +2290,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
           projectId: project.id,
           projectName: project.name,
           brief: def.buildContext(payload, userQuery, env),
+          // A worktree we made for this run is one the brief tells the agent
+          // to delete, which takes the conversation's directory with it — and
+          // `--resume` is resolved inside the CLI's config dir, keyed by that
+          // directory. Recorded now, while the launcher is the only thing that
+          // knows: afterwards there is nothing on disk to tell a throwaway
+          // worktree from a real one the user happened to be working in.
+          ephemeralCwd: Boolean(env?.cleanup),
         });
       /** Type the brief in for a CLI that takes no prompt argument: write, then
        *  submit a beat later, once the agent has had time to come up. */
@@ -2283,6 +2389,97 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  binding is the harness), and a run that dies halfway still leaves the
    *  question and whatever it managed to record, which is the whole complaint
    *  this module answers. */
+  /** Park what the user typed, with whatever was on screen and whatever they
+   *  pasted. The third verb in ⌘K, and the only one that starts nothing.
+   *
+   *  Page context is captured as text only — no screenshot. The pixel capture
+   *  is a native call that is macOS-only (issue #211) and costs a frame, and a
+   *  picture of whatever page happened to be open is usually noise weeks later;
+   *  the text half (active tab, caret, selection, terminal tail) is free and is
+   *  the part that still means something when you come back. */
+  const saveNote = useCallback(
+    async (text: string, attachments: string[] = []) => {
+      const body = text.trim();
+      if (!body && attachments.length === 0) return;
+      const dir = componentsRef.current[0]?.path;
+      const active = tabsRef.current.find((t) => t.id === activeTabIdRef.current);
+      const termText =
+        active?.type === "terminal"
+          ? (termHandles.current.get(active.id)?.captureText(2000) ?? undefined)
+          : undefined;
+      try {
+        const context = dir
+          ? await capturePageContext({ activeTab: active, dir, termText, rect: null })
+          : "";
+        const note = await createNote({
+          projectId: project.id,
+          projectName: project.name,
+          roots,
+          // An image with nothing typed is still a thought worth keeping; it
+          // just has to name itself something.
+          title: body || "Pasted image",
+          context,
+          origin: "spot",
+          cwd: roots[0],
+        });
+        // Copied one at a time and failures reported per image: a note that
+        // saved but lost its screenshot should say so, not look like a success.
+        let lost = 0;
+        for (const path of attachments) {
+          await ipc
+            .notesAttachFile({ projectId: project.id, id: note.id, path, kind: "image" })
+            .catch(() => {
+              lost += 1;
+            });
+        }
+        await refreshNotes(project.id);
+        onNotice(
+          lost > 0
+            ? `Saved “${note.title}” — but ${lost} image${lost === 1 ? "" : "s"} could not be attached.`
+            : `Saved “${note.title}” to the scratchpad.`,
+          lost > 0 ? "error" : "success",
+        );
+      } catch (err) {
+        onNotice(String(err), "error");
+      }
+    },
+    [project.id, project.name, roots, onNotice],
+  );
+
+  /** Hand a note to an agent. Moves it to `doing` only when the launch
+   *  actually happened and only when the store would accept the move — a note
+   *  in the archive stays where it is rather than being quietly resurrected by
+   *  a button press. */
+  const workOnNote = useCallback(
+    async (note: ipc.NoteDetail, userQuery = "", agentId?: string) => {
+      const dir = await ipc
+        .notesDir(project.id, note.id)
+        .catch(() => note.dir);
+      const ok = await startMicroTask(
+        noteTask,
+        {
+          dir: roots[0] ?? "",
+          projectId: project.id,
+          noteId: note.id,
+          title: note.title,
+          brief: noteContext(note, dir),
+        },
+        userQuery,
+        agentId,
+      );
+      if (ok && (NEXT_NOTE_STATUSES[note.status] ?? []).includes("doing")) {
+        await setNoteStatus(
+          project.id,
+          note.id,
+          "doing",
+          "Canopy",
+          "handed to an agent",
+        ).catch(() => {});
+      }
+    },
+    [project.id, roots, startMicroTask],
+  );
+
   const startResearch = useCallback(
     async (question: string, userQuery = "") => {
       const q = question.trim();
@@ -2426,6 +2623,63 @@ const ProjectViewBody = memo(function ProjectViewBody({
       void startMicroTask(adhocTaskDef(brief, label), { dir }, "");
     },
     [startMicroTask],
+  );
+
+  /** Carry a finished task's conversation on as an ordinary agent session.
+   *
+   *  The whole design of a micro-task is that it ends: the tab closes, the
+   *  session is forgotten, and the run becomes a row with a summary under it.
+   *  That is right until the moment you read the summary and want to say "good
+   *  — now do the other half", which today means starting a fresh agent and
+   *  re-explaining everything the last one already worked out.
+   *
+   *  This is the door out of the one-shot. The agent's own transcript survives
+   *  the teardown (session_forget only drops Canopy's digest), so resuming by
+   *  the recorded session id reopens the conversation with every file it read
+   *  and every conclusion it reached still in context — as a normal terminal,
+   *  restorable and persistent, not a task. It ends where the task ended, which
+   *  is the point: the next thing the user types is the next turn. */
+  const continueTaskSession = useCallback(
+    (run: TaskRun) => {
+      if (!run.sessionId) {
+        onNotice("This run never reported a session, so there is nothing to reopen.");
+        return;
+      }
+      if (run.ephemeralCwd) {
+        // Honest rather than hopeful: `--resume` is looked up inside the CLI's
+        // config dir, keyed by the directory the conversation ran in, so a
+        // throwaway worktree that has since been removed takes the only way
+        // back with it. Better said here than as a CLI error in a new tab.
+        onNotice(
+          "This task ran in a temporary worktree that has been removed, so its conversation can't be reopened.",
+        );
+        return;
+      }
+      const cmd = restoreCommand(run.agent, run.sessionId);
+      if (!cmd) {
+        onNotice(`${run.agent} can't reopen a past conversation.`);
+        return;
+      }
+      // Same guard as restoring any other session: command + cwd names this
+      // exact conversation, so a second click focuses it instead of running a
+      // second copy of the same agent against the same transcript.
+      const open = tabsRef.current.find(
+        (t): t is TermSubTab =>
+          t.type === "terminal" && t.command === cmd && t.cwd === run.cwd,
+      );
+      if (open) {
+        setActiveTabId(open.id);
+        return;
+      }
+      const id = addTerminal(
+        run.cwd,
+        cmd,
+        runTitle(run),
+        AGENT_CLIS.find((c) => c.id === run.agent)?.icon,
+      );
+      if (id) onNotice(`Picked “${runTitle(run)}” back up where it left off.`);
+    },
+    [addTerminal, onNotice],
   );
 
   /** Micro-tasks waiting to be torn down: job_done was acknowledged, and we hold
@@ -2763,15 +3017,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
   // Keep the active tab in view when it changes (cycling, jumping, closing) —
-  // a strip that scrolls but doesn't follow leaves you looking at the wrong tabs.
+  // a strip that scrolls but doesn't follow leaves you looking at the wrong
+  // tabs. The following itself is revealActiveTab, further down: it needs the
+  // strip and the pinned chip, which are measured there.
   const activeTabElRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    if (!visible) return;
-    activeTabElRef.current?.scrollIntoView({
-      inline: "nearest",
-      block: "nearest",
-    });
-  }, [activeTabId, visible]);
   useEffect(() => {
     if (!visible) return;
     const closeTabHandler = () => {
@@ -2827,26 +3076,42 @@ const ProjectViewBody = memo(function ProjectViewBody({
         setActiveTabId(tab.id);
         return;
       }
-      // ⌘K — the menu accelerator never fires while focus is in xterm/Monaco
-      // (same macOS routing gap as the tab-cycle chord above), so the palette
-      // must also open from here. Opening an open palette is a no-op.
-      if (
-        (e.metaKey || e.ctrlKey) &&
-        !e.shiftKey &&
-        !e.altKey &&
-        e.code === "KeyK"
-      ) {
+      // SpotSearch — the menu accelerator never fires while focus is in
+      // xterm/Monaco (same macOS routing gap as the tab-cycle chord below), so
+      // the palette must also open from here. Opening an open palette is a
+      // no-op.
+      if (matches(e, "spot-search")) {
         e.preventDefault();
         setSpotOpen(true);
         return;
       }
-      // Ctrl+Cmd+Arrow (matches the "Next/Previous Tab" accelerators).
-      if (!(e.ctrlKey && (e.metaKey || e.altKey))) return;
-      if (e.code === "ArrowRight" || e.code === "ArrowLeft") {
-        e.preventDefault();
-        lastKeydownNav.t = Date.now();
-        cycleTabs(e.code === "ArrowRight" ? 1 : -1);
-      }
+      // Both tab-cycle pairs, and both out of the registry — so this is by
+      // construction the same key the "Next/Previous Tab" accelerators
+      // advertise, on Windows and Linux too, where they are Ctrl+PageDown/PageUp
+      // rather than the Mac's ⌃⌘→/←. The hand-written test accepted
+      // Ctrl+Alt+Arrow off a Mac, answering a chord the menu never offered.
+      //
+      // Ctrl+Tab / Ctrl+Shift+Tab is the pair every IDE and browser trains, and
+      // Help advertised it for releases with nothing answering it. It is an
+      // "app" shortcut rather than a menu one on purpose: muda gives macOS the
+      // glyph "⇥" as Tab's key equivalent rather than the character the key
+      // produces, so such a menu item renders perfectly and never fires. Here
+      // is where it has to work anyway.
+      const dir =
+        matches(e, "next-tab") || matches(e, "cycle-tab-next")
+          ? 1
+          : matches(e, "prev-tab") || matches(e, "cycle-tab-prev")
+            ? -1
+            : 0;
+      if (dir === 0) return;
+      e.preventDefault();
+      // Tab is the one chord here that means something downstream — xterm
+      // would send it to the shell as a completion request, and it is the
+      // browser's own focus key — so it stops at the capture phase rather than
+      // merely losing its default action.
+      if (e.code === "Tab") e.stopPropagation();
+      lastKeydownNav.t = Date.now();
+      cycleTabs(dir);
     };
     const next = () => {
       if (recentKeydown()) return;
@@ -2950,6 +3215,42 @@ const ProjectViewBody = memo(function ProjectViewBody({
         else beginSelfClose(tab.ptyId, tab.id);
         return;
       }
+      // A task naming itself, mid-run. The row it renames may be a detached
+      // run's (the usual case) or a tab's, and either way the history entry
+      // takes the same name — a run that is renamed while it works and reverts
+      // to the launcher's label the moment it finishes would be worse than
+      // never having been renamed.
+      if (a.kind === "task_named") {
+        const named = taskIdentity(a);
+        if (!hasIdentity(named)) return;
+        const tab = tabsRef.current.find(
+          (t): t is TermSubTab =>
+            t.type === "terminal" &&
+            a.ptyId != null &&
+            t.ptyId === a.ptyId &&
+            Boolean(t.micro),
+        );
+        const detached = findRun(microRunsRef.current, a.ptyId);
+        const ptyId = tab?.ptyId ?? detached?.ptyId;
+        if (ptyId == null) return;
+        const runId = tab?.micro?.runId ?? detached?.runId;
+        if (runId) updateTaskRun(runId, identityPatch(a));
+        if (detached)
+          updateMicroRuns((runs) =>
+            patchRun(runs, ptyId, {
+              label: named.title ?? detached.label,
+              icon: named.icon ?? detached.icon,
+            }),
+          );
+        else if (tab)
+          patchTabRaw(tab.id, {
+            customTitle: named.title
+              ? `${named.title} · task`
+              : tab.customTitle,
+            icon: named.icon ?? tab.icon,
+          } as Partial<SubTab>);
+        return;
+      }
       // A micro-task reported in (App already surfaced the notice). Done →
       // wait out the turn, then kill + forget, closing the tab if it had one.
       // Blocked → the agent wants the user: bring its tab forward, or mark the
@@ -2968,6 +3269,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
         const ptyId = tab?.ptyId ?? detached?.ptyId;
         if (ptyId == null) return;
         const runId = tab?.micro?.runId ?? detached?.runId;
+        // A run that never called canopy_name_task can still name itself here,
+        // and one that did may have learnt something since.
+        const named = taskIdentity(a);
+        const asked = askedLine(a.asked);
+        const identity = {
+          ...identityPatch(a),
+          ...(asked ? { asked } : {}),
+        };
+        // The conversation behind the run, while there is still a live binding
+        // to read it from: the session is forgotten seconds from now and the
+        // pty→session map dies with the PTY.
+        const sessionId = liveSessionByPtyRef.current.get(ptyId);
         // A run bound to a research entry has to move it. Nothing else will:
         // the agent may have finished without calling `status`, or — as
         // happened with a sidecar older than the research module — may never
@@ -3001,14 +3314,24 @@ const ProjectViewBody = memo(function ProjectViewBody({
               summary: a.summary,
               url: a.url,
               files,
+              sessionId,
               askedForUser: true,
+              ...identity,
             });
           // A detached run does not steal the window — the toast App raised
           // said what happened, and the Tasks row now says "Needs you" with the
           // terminal one click away.
           if (tab) setActiveTabId(tab.id);
           else
-            updateMicroRuns((runs) => patchRun(runs, ptyId, { blocked: true }));
+            updateMicroRuns((runs) =>
+              patchRun(runs, ptyId, {
+                blocked: true,
+                // A blocked run stays on screen, so a name it sent with the
+                // block is worth taking; an absent one leaves what is there.
+                ...(named.title ? { label: named.title } : {}),
+                ...(named.icon ? { icon: named.icon } : {}),
+              }),
+            );
         } else {
           if (runId)
             recordTaskEnd(runId, {
@@ -3016,6 +3339,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
               summary: a.summary,
               url: a.url,
               files,
+              sessionId,
+              ...identity,
             });
           finishMicroTask(ptyId, tab?.id);
         }
@@ -3067,6 +3392,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     finishMicroTask,
     beginSelfClose,
     updateMicroRuns,
+    patchTabRaw,
   ]);
 
   // The tail of a deep link (deepLinks.ts): App resolved the project and
@@ -3417,6 +3743,50 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
   openFileRef.current = openFile;
 
+  /** Follow a `[[wikilink]]` from any surface that owns its text.
+   *
+   *  One handler for all of them, so a link resolves identically in a note and
+   *  in a research write-up. An unresolved target becomes a new note — that is
+   *  Obsidian's behaviour and the reason the syntax earns its place: linking to
+   *  a thought is how you record it before you have written it. */
+  const followWikilink = useCallback(
+    async (target: string) => {
+      // The file list is fetched per click rather than held: following a
+      // wikilink is a rare, deliberate act, and a corpus kept warm for it would
+      // be a tree walk's worth of strings resident for the life of the tab.
+      const files = await ipc.fsListFiles(roots).catch(() => [] as string[]);
+      const hit = resolveWikilink(target, {
+        notes: notesCached(project.id),
+        research: researchCached(project.id),
+        files,
+      });
+      switch (hit.kind) {
+        case "note":
+          openNote(hit.id, hit.title);
+          return;
+        case "research":
+          openResearch(hit.id, hit.title);
+          return;
+        case "file":
+          void openFile(hit.path);
+          return;
+        case "new":
+          if (!hit.title) return;
+          void createNote({
+            projectId: project.id,
+            projectName: project.name,
+            roots,
+            title: hit.title,
+            origin: "wikilink",
+            cwd: roots[0],
+          })
+            .then((n) => openNote(n.id, n.title))
+            .catch((e) => onNotice(String(e), "error"));
+      }
+    },
+    [project.id, project.name, roots, openNote, openResearch, openFile, onNotice],
+  );
+
   const saveFile = useCallback(
     async (path: string) => {
       const model = monaco.editor.getModel(monaco.Uri.file(path));
@@ -3658,6 +4028,33 @@ const ProjectViewBody = memo(function ProjectViewBody({
   liveSessionIdsRef.current = liveSessionIds;
   const liveSessionByPtyRef = useRef(liveSessionByPty);
   liveSessionByPtyRef.current = liveSessionByPty;
+
+  /** Write each running task's conversation id into its history entry, as soon
+   *  as the CLI's first hook event reveals it.
+   *
+   *  Stamped while the run is alive because there is no later. When a task
+   *  ends, Canopy forgets its session (session_forget, so a one-shot never
+   *  turns up in restorables) and the pty dies, taking the pty→session binding
+   *  with it — but the CLI's own transcript stays on disk, and this id is the
+   *  only handle left on it. That is what "Continue as a session" resumes.
+   *
+   *  Guarded by a set rather than by comparing the store: updateTaskRun writes
+   *  localStorage and fires the history event, and doing that on every poll for
+   *  every running task would repaint every panel watching it, forever. */
+  const sessionStamped = useRef(new Set<string>());
+  useEffect(() => {
+    const stamp = (runId: string | undefined, ptyId: number) => {
+      if (!runId || sessionStamped.current.has(runId)) return;
+      const sid = liveSessionByPty.get(ptyId);
+      if (!sid) return;
+      sessionStamped.current.add(runId);
+      updateTaskRun(runId, { sessionId: sid });
+    };
+    for (const r of microRuns) stamp(r.runId, r.ptyId);
+    for (const t of tabs)
+      if (t.type === "terminal" && t.micro?.runId && t.ptyId != null)
+        stamp(t.micro.runId, t.ptyId);
+  }, [liveSessionByPty, microRuns, tabs]);
 
   // ---------- hibernation ----------
   // Sits here rather than up with the other tab plumbing because a snapshot is
@@ -4036,9 +4433,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [projectEvents, rootsKey, dismissedPending],
   );
   // Blocked-on-you items drive the urgent styling; completions are quiet.
-  const urgentPending = useMemo(
-    () => pending.filter((i) => i.kind !== "idle"),
-    [pending],
+  //
+  // Read off the attention channel rather than counted here from the hook
+  // stream a second time. The rail badge, this project's tab pill and the bell
+  // in the title bar are three views of one number, and while each derived its
+  // own they could disagree — and did, because only this one could see an
+  // agent, while a micro-task that stopped to ask was invisible to all three.
+  // `roots` is the same set the channel attributes a project by, so nothing
+  // that used to be counted here stops being counted.
+  const urgentCount = useAttention(
+    useCallback(
+      (items) =>
+        items.filter((x) => x.projectId === project.id && isOutstanding(x))
+          .length,
+      [project.id],
+    ),
   );
 
   // Stable ActivityRail handlers. Identity only changes with pinned/sideTab
@@ -4595,7 +5004,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       } else {
         // A run tab, so the installer exits when done — and that exit is the
         // signal to re-probe (see onExited below). No timers, no staleness.
-        addTerminal(cwd, cli.install, `install ${cli.name}`, "⬇", true);
+        addTerminal(cwd, cli.install, `install ${cli.name}`, "⬇", "chore");
       }
     },
     [installed, addTerminal, onNotice],
@@ -4614,7 +5023,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // custom CLI) never badges an update in the first place, so this is the
       // belt to that brace rather than a state a user can reach.
       if (!cmd) return;
-      addTerminal(cwd, cmd, `update ${cli.name}`, "⬆", true);
+      addTerminal(cwd, cmd, `update ${cli.name}`, "⬆", "chore");
     },
     [cliUpdates, addTerminal],
   );
@@ -4872,31 +5281,231 @@ const ProjectViewBody = memo(function ProjectViewBody({
       ),
     [stripTabs, isAgentTab],
   );
-  const tabGroups: SubTab[][] = useMemo(
-    () => [
-      stripTabs.filter(isAgentTab),
-      stripTabs.filter((t) => t.type !== "terminal"),
-    ],
+  const agentTabs = useMemo(
+    () => stripTabs.filter(isAgentTab),
     [stripTabs, isAgentTab],
   );
-  barTabsRef.current = useMemo(() => tabGroups.flat(), [tabGroups]);
-  // Drag to reorder, one strip per group: agents stay left of docs however you
-  // shuffle them, and a tab dropped outside its own group simply snaps back.
-  // The order lives in `tabs` itself, so the panes (which are all mounted)
-  // follow along without anything else having to know about the drag.
+  const refTabs = useMemo(
+    () => stripTabs.filter((t) => t.type !== "terminal"),
+    [stripTabs],
+  );
+
+  // Tab-strip preferences, re-read on every settings write (updateSettings
+  // announces each patch on this event) so turning grouping on regroups the
+  // strip you are looking at rather than the one you get after a relaunch.
+  const [tabPrefs, setTabPrefs] = useState(readTabPrefs);
+  useEffect(() => {
+    const onChange = () =>
+      setTabPrefs((prev) => {
+        const next = readTabPrefs();
+        return prev.grouped === next.grouped &&
+          prev.idleDelayMs === next.idleDelayMs
+          ? prev
+          : next;
+      });
+    window.addEventListener(SETTINGS_CHANGE_EVENT, onChange);
+    return () => window.removeEventListener(SETTINGS_CHANGE_EVENT, onChange);
+  }, []);
+
+  // Where each agent tab sits in the strip follows its agent: blocked-on-you
+  // first, working next, quiet last — settled, so an agent pausing between tool
+  // calls doesn't shuffle the strip (see tabGroups.ts). Computed for every agent
+  // tab whether or not grouping is on: the state machine is cheap, and keeping
+  // it running means turning the setting back on doesn't start every tab from
+  // scratch in the wrong bucket.
+  const statusTargets = useMemo(
+    () =>
+      new Map<string, TabStatus>(
+        agentTabs.map((t) => [t.id, statusFor(tabState(t), t.unread)]),
+      ),
+    [agentTabs, tabState],
+  );
+  const settledStatus = useSettledGroups(statusTargets, tabPrefs.idleDelayMs);
+  // Fall back to the raw status for a tab the settler hasn't seen yet (its
+  // effect runs after this render), so a new tab is never briefly homeless.
+  const groupOf = useCallback(
+    (id: string): TabStatus =>
+      settledStatus.get(id) ?? statusTargets.get(id) ?? "idle",
+    [settledStatus, statusTargets],
+  );
+
+  const grouped = tabPrefs.grouped;
+  const byStatus = useCallback(
+    (s: TabStatus) => (grouped ? agentTabs.filter((t) => groupOf(t.id) === s) : []),
+    [grouped, agentTabs, groupOf],
+  );
+  const attentionTabs = useMemo(() => byStatus("attention"), [byStatus]);
+  const workingTabs = useMemo(() => byStatus("active"), [byStatus]);
+  const quietTabs = useMemo(() => byStatus("idle"), [byStatus]);
+
+  // Each status run is a stack: one chip standing in for the tabs folded behind
+  // it, opened and closed by clicking it. Idle starts folded — six finished
+  // agents are a pile you want out of the way, not six tabs to read past — and
+  // the two runs that are still yours to act on start open.
+  // Absent means open: only the fold you have actually asked for is stored, so
+  // a stack that appears for the first time (a kind of document you just
+  // opened) arrives open rather than guessing.
+  const [openStacks, setOpenStacks] = useState<Record<string, boolean>>({
+    idle: false,
+  });
+  const toggleStack = useCallback(
+    (key: string) => setOpenStacks((p) => ({ ...p, [key]: p[key] === false })),
+    [],
+  );
+  // A tab that starts wanting you is never left folded away: arriving in Needs
+  // you pops that stack open, whatever state you last left it in. Fold it again
+  // and the next arrival opens it again — the stack is yours to close, but not
+  // at the cost of hiding a question.
+  const attentionKey = attentionTabs.map((t) => t.id).join(",");
+  const seenAttention = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const now = new Set(attentionKey ? attentionKey.split(",") : []);
+    const arrived = [...now].some((id) => !seenAttention.current.has(id));
+    seenAttention.current = now;
+    if (arrived)
+      setOpenStacks((p) => (p.attention === false ? { ...p, attention: true } : p));
+  }, [attentionKey]);
+
+  const tabGroups: StripGroup[] = useMemo(() => {
+    const run = (
+      key: string,
+      label: string | null,
+      status: TabStatus | null,
+      icon: ReactNode,
+      group: SubTab[],
+    ): StripGroup => ({
+      key,
+      label,
+      status,
+      icon,
+      tabs: group,
+      shown: shownInStack(
+        group,
+        label == null || openStacks[key] !== false,
+        activeTabId,
+      ),
+    });
+    return [
+      ...(grouped
+        ? [
+            run("attention", STATUS_LABEL.attention, "attention", null, attentionTabs),
+            run("active", STATUS_LABEL.active, "active", null, workingTabs),
+            run("idle", STATUS_LABEL.idle, "idle", null, quietTabs),
+          ]
+        : [run("all", null, null, null, agentTabs)]),
+      ...DOC_STACKS.map((d) =>
+        run(
+          d.key,
+          d.label,
+          null,
+          DOC_STACK_ICONS[d.key],
+          refTabs.filter((t) => docStackFor(t.type) === d.key),
+        ),
+      ),
+    ];
+  }, [
+    grouped,
+    agentTabs,
+    refTabs,
+    attentionTabs,
+    workingTabs,
+    quietTabs,
+    openStacks,
+    activeTabId,
+  ]);
+  // The number hints, and the digits that jump to them, count what is on
+  // screen — a hint on a tab folded into a stack would point at nothing.
+  barTabsRef.current = useMemo(
+    () => tabGroups.flatMap((g) => g.shown),
+    [tabGroups],
+  );
+
+  // Drag to reorder, confined to the run the tab was picked up from: a tab can
+  // only be dropped among its own kind, and a tab dropped outside simply snaps
+  // back. The order lives in `tabs` itself, so the panes (which are all
+  // mounted) follow along without anything else having to know about the drag.
+  // Only what is on screen is draggable — ids folded into a stack have no
+  // element to hit. One handle for the whole strip rather than one per run:
+  // there are a dozen runs now, and each useTabDrag costs its own listeners.
   const reorderGroup = useCallback(
     (ids: string[]) => setTabs((prev) => applyOrder(prev, (t) => t.id, ids)),
     [],
   );
-  const agentDrag = useTabDrag(
-    tabGroups[0].map((t) => t.id),
+  const stripDrag = useTabDragGroups(
+    useMemo(() => tabGroups.map((g) => g.shown.map((t) => t.id)), [tabGroups]),
     reorderGroup,
   );
-  const docDrag = useTabDrag(
-    tabGroups[1].map((t) => t.id),
-    reorderGroup,
+  // Regrouping never touches which tab is open — every pane stays mounted and
+  // `activeTabId` is untouched, so the view under a tab that goes idle is the
+  // same view, mid-scroll and all. It does move in the strip, though, so follow
+  // it there; a tab that slid out of sight would be the same disappearing act
+  // this grouping exists to prevent.
+  const activeGroupKey = activeTabId ? groupOf(activeTabId) : null;
+  // …and slide it there rather than cutting, so the move is something you can
+  // follow with your eyes instead of a tab teleporting mid-glance.
+  const stripRef = useRef<HTMLDivElement | null>(null);
+  useFlipStrip(stripRef);
+  /** Put the active tab somewhere you can actually see it. Every route that
+   *  changes tabs ends here — clicking, Ctrl-Tab, a jump from the agents panel,
+   *  a pick from a stack's overflow menu — because "the pane changed but the
+   *  strip still shows something else" is the same disappearing act whichever
+   *  door you came through.
+   *
+   *  Not `scrollIntoView`: it is happy to park a tab flush against the left
+   *  edge, which is precisely where the pinned chip is painted. */
+  const settleReveal = useRef(0);
+  const revealActiveTab = useCallback(() => {
+    const pass = () => {
+      const root = stripRef.current;
+      const el = activeTabElRef.current;
+      if (!root || !el || root.offsetParent === null) return;
+      const chip = el
+        .closest(".tab-group")
+        ?.querySelector<HTMLElement>("[data-stack-chip]");
+      const to = revealScroll(
+        root.scrollLeft,
+        root.clientWidth,
+        el.offsetLeft,
+        el.offsetWidth,
+        chip?.offsetWidth ?? 0,
+      );
+      // Instant, not smooth: a smooth scroll is driven by the frame loop, and
+      // an occluded window's frame loop is asleep — the one case where the tab
+      // most needs to be found is the one where the easing would never arrive.
+      if (to != null) root.scrollLeft = to;
+    };
+    pass();
+    // Twice, because leaving a tab can shrink the strip in the same beat: the
+    // tab you were on was being held out of a folded stack, and it folds back
+    // the moment it stops being active. The strip narrows under the scroll we
+    // just set, the browser clamps it, and the tab we were revealing ends up
+    // short of the right edge. The second pass measures what actually settled.
+    window.clearTimeout(settleReveal.current);
+    settleReveal.current = window.setTimeout(pass, 0);
+  }, []);
+  useEffect(() => {
+    if (!visible) return;
+    revealActiveTab();
+    return () => window.clearTimeout(settleReveal.current);
+  }, [activeTabId, activeGroupKey, visible, revealActiveTab]);
+  // Which chips are pinned, and which tabs have scrolled in behind them. Keyed
+  // off the rendered runs so it re-measures when a tab opens, closes or
+  // restacks — not just when you scroll.
+  const stripOverflow = useStripOverflow(
+    stripRef,
+    tabGroups.map((g) => `${g.key}:${g.shown.length}`).join("|"),
   );
-  const groupDrags = useMemo(() => [agentDrag, docDrag], [agentDrag, docDrag]);
+  const onStackOverflow = useCallback(
+    (e: React.MouseEvent, group: StripGroup) =>
+      tabMenu.open(
+        e,
+        group.tabs.map((t) => ({
+          label: `${t.id === activeTabId ? "› " : ""}${tabDisplayLabel(t)}`,
+          onClick: () => setActiveTabId(t.id),
+        })),
+      ),
+    [tabMenu.open, activeTabId],
+  );
   // Shells and runs each get a compact rail; Rail collapses to a dropdown at 2+.
   const shellChips: RailChip[] = useMemo(
     () =>
@@ -5664,6 +6273,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
         case "start-research":
           void startResearch(action.question);
           return;
+        case "save-note":
+          void saveNote(action.text, action.attachments);
+          return;
+        case "open-note": {
+          const row = notesCached(project.id).find((n) => n.id === action.id);
+          openNote(action.id, row?.title ?? action.id);
+          return;
+        }
         case "open-research":
           openResearch(
             action.id,
@@ -5725,6 +6342,38 @@ const ProjectViewBody = memo(function ProjectViewBody({
         case "open-task-run":
           openTaskHistory(action.runId);
           return;
+        // A clip, put back. Two things happen, and both are wanted: it goes on
+        // the system clipboard (which is what a clipboard manager is *for* —
+        // ⌘V then works anywhere, including the editor and other apps), and if
+        // a terminal has the focus it also lands at the cursor, because
+        // reaching for ⌘K and then still having to press ⌘V is the version of
+        // this feature nobody would use.
+        //
+        // The text is fetched here rather than carried on the row: the palette
+        // holds previews, and one clip's worth of text crosses the boundary
+        // only when the user picks it.
+        case "paste-clip": {
+          const clipId = action.clipId;
+          const active = tabsRef.current.find(
+            (t) => t.id === activeTabIdRef.current,
+          );
+          void ipc
+            .clipboardRead(clipId)
+            .then(async (text) => {
+              if (!text) return;
+              await navigator.clipboard.writeText(text).catch(() => {});
+              if (active?.type === "terminal") {
+                termHandles.current.get(active.id)?.paste(text);
+              } else {
+                // No chord in the copy: paste is the OS's shortcut, not one of
+                // ours, so there is nothing in the registry to format and
+                // spelling it here is exactly what the guard test forbids.
+                onNotice("Clip is back on the clipboard — paste it where you want it.");
+              }
+            })
+            .catch(() => onNotice("That clip is gone.", "error"));
+          return;
+        }
         // A registered source's own opener (see registerSpotSource). It ran
         // from a click, so a rejection here is the source's to report — this
         // only keeps it from surfacing as an unhandled rejection.
@@ -5750,6 +6399,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
       switchTo,
       startResearch,
       openResearch,
+      onNotice,
+      saveNote,
+      openNote,
       project.id,
     ],
   );
@@ -5899,11 +6551,29 @@ const ProjectViewBody = memo(function ProjectViewBody({
               if (entry) openResearch(entry.id, entry.id);
               else void openFile(path);
             }}
+            onWikilink={(t) => void followWikilink(t)}
             onClosed={() => closeTab(tab.id)}
             // The tab strip keeps its own copy of the title so it has a label
             // before the first read; a rename has to reach it or the tab keeps
             // showing the name the entry no longer has.
             onRenamed={(title) => patchTabRaw(tab.id, { title } as Partial<SubTab>)}
+            onNotice={onNotice}
+          />
+        );
+      case "note":
+        return (
+          <NoteView
+            projectId={project.id}
+            id={tab.noteId}
+            agentTargets={agentTargets}
+            installed={installed}
+            onStartNew={(note, agentId) => void workOnNote(note, "", agentId)}
+            onSendToAgent={(note, target) =>
+              sendTicketToAgent(target, noteContext(note, note.dir))
+            }
+            onOpenResearch={(rid) => openResearch(rid, rid)}
+            onWikilink={(t) => void followWikilink(t)}
+            onClosed={() => closeTab(tab.id)}
             onNotice={onNotice}
           />
         );
@@ -6019,6 +6689,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             onRunAgain={(run: TaskRun) =>
               runAdhocTask(run.brief, run.cwd, run.label)
             }
+            onContinueSession={continueTaskSession}
             onOpenFile={(path) => void openFile(path)}
             focus={tab.focus}
           />
@@ -6156,7 +6827,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
       )}
       <PaneBar
         tabGroups={tabGroups}
-        groupDrags={groupDrags}
+        stripDrag={stripDrag}
+        stripRef={stripRef}
+        openStacks={openStacks}
+        onToggleStack={toggleStack}
+        stripOverflow={stripOverflow}
+        onStackOverflow={onStackOverflow}
         stripTabs={stripTabs}
         activeTabId={activeTabId}
         flashTabId={flashTabId}
@@ -6305,6 +6981,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     ) {
                       announceCliInstallsChanged();
                     }
+                    // A chore that worked has nothing left to show: let the ✓
+                    // land, then take the chip away. Re-checked when the timer
+                    // fires, because "Run again" in the meantime puts a live
+                    // process on this same tab.
+                    scheduleReap(
+                      tab.id,
+                      code,
+                      tab,
+                      reapTimers.current,
+                      (id) =>
+                        tabsRef.current.find(
+                          (t): t is TermSubTab =>
+                            t.type === "terminal" && t.id === id,
+                        ),
+                      closeTab,
+                    );
                   } else closeTab(tab.id);
                 }}
                 onTitle={(title) =>
@@ -6364,7 +7056,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                           p.install[currentPlatform()],
                           `install ${p.name}`,
                           "⬇",
-                          true,
+                          "chore",
                         )
                       }
                     >
@@ -7213,6 +7905,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
           projectId={project.id}
         />
       ))}
+      {sidePane("notes", () => (
+        <NotesPanel
+          projectId={project.id}
+          projectName={project.name}
+          roots={roots}
+          onOpen={(n) => openNote(n.id, n.title)}
+        />
+      ))}
       {sidePane("research", () => (
         <ResearchPanel
           projectId={project.id}
@@ -7282,7 +7982,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             prsBadge={prsBadge}
             tasksBadge={runningMicro.length}
             pendingCount={pending.length}
-            urgentCount={urgentPending.length}
+            urgentCount={urgentCount}
             teamBadge={teamBadge}
             relayRole={relay.status.role}
             onSelectTab={selectSideTab}

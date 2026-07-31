@@ -44,22 +44,26 @@ export function FrostIcon({ size = 12, className }: IconProps) {
   );
 }
 
-// Disclosure caret — a hairline stroked "›". Rotate it 90° (via a class on the
-// wrapping element) to point down when the section/folder is open. Shared by
-// the file tree rows and the component-section headers so they read the same.
-export function ChevronIcon({ size = 10, className }: IconProps) {
-  return (
-    <svg {...svgProps(size, className)} strokeWidth={2.2}>
-      <path d="M9 5l7 7-7 7" />
-    </svg>
-  );
-}
+// Disclosure caret. Defined in shared/icons.tsx — the shared FileTree needs it
+// and cannot import from src/ — and re-exported here so every existing
+// `from "./icons"` still resolves and there is one shape, not two.
+export { ChevronIcon } from "../../shared/icons";
 
 // Close cross for tab/pill dismiss slots — replaces the bare ✕ glyph.
 export function CloseIcon({ size = 12, className }: IconProps) {
   return (
     <svg {...svgProps(size, className)}>
       <path d="M6.5 6.5l11 11M17.5 6.5l-11 11" />
+    </svg>
+  );
+}
+
+// The attention channel's opener in the title bar.
+export function BellIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M18 8.5a6 6 0 1 0-12 0c0 5.5-2 7-2 7h16s-2-1.5-2-7" />
+      <path d="M13.7 19.5a2 2 0 0 1-3.4 0" />
     </svg>
   );
 }
@@ -334,6 +338,22 @@ export function ResearchIcon({ size = 18, className }: IconProps) {
   );
 }
 
+/** Scratchpad: a lightbulb.
+ *
+ *  It has to survive sitting one row above Research (a page with a magnifier)
+ *  and Tasks (a checklist) at 14px, where interior detail turns to mush and
+ *  only the silhouette reads. Nothing else in the set is a round top on a short
+ *  stem, so this one stays legible when the strokes blur together — and "idea"
+ *  is the right word for what the list mostly holds. */
+export function NoteIcon({ size = 18, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M9 17.5a5.8 5.8 0 1 1 6 0v1.2a1.3 1.3 0 0 1-1.3 1.3h-3.4A1.3 1.3 0 0 1 9 18.7z" />
+      <path d="M9.6 17.4h4.8" />
+    </svg>
+  );
+}
+
 /** Archive: a lidded box. The lid is what separates it from a plain rectangle
  *  at 14px, and from the document mark it sits beside. */
 export function ArchiveIcon({ size = 14, className }: IconProps) {
@@ -502,6 +522,17 @@ export function GlobeIcon({ size = 14, className }: IconProps) {
 }
 
 /** Settings: a gear. */
+/** A clipboard — the ⌘K section, and Settings' tab. */
+export function ClipboardIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.8}>
+      <rect x="6" y="4" width="12" height="17" rx="2" />
+      <path d="M9 4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v1.5a.5.5 0 0 1-.5.5h-5a.5.5 0 0 1-.5-.5Z" />
+      <path d="M9 11h6M9 15h4" />
+    </svg>
+  );
+}
+
 export function SettingsIcon({ size = 18, className }: IconProps) {
   return (
     <svg {...svgProps(size, className)}>

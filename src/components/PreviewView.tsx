@@ -31,6 +31,7 @@ import {
   useBrowserEngine,
   useBrowserPane,
 } from "../browserHost";
+import { useChromiumFrame } from "../chromiumPane";
 import * as ipc from "../ipc";
 import {
   previewFeedbackContext,
@@ -147,6 +148,9 @@ export function PreviewView({
 }: PreviewViewProps) {
   const engine = useBrowserEngine();
   const native = engine === "webview";
+  // The Chromium engine's page is a frame stream, not a view: the browser runs
+  // headless, so there is no window to place and nothing to hide it from.
+  const cast = useChromiumFrame(tabId, engine === "chromium" && visible);
   // What the placeholder stands in with while the native view is out of the
   // way: a still of the page, or the app's own background — never a white hole.
   const pane = useBrowserPane(tabId, native);
@@ -185,6 +189,9 @@ export function PreviewView({
   // frame forever; now nothing that matters depends on this identity.
   const onPatchRef = useRef(onPatch);
   onPatchRef.current = onPatch;
+  // Read inside callbacks that must not re-create on every engine probe.
+  const engineRef = useRef(engine);
+  engineRef.current = engine;
   const nativeRef = useRef(native);
   nativeRef.current = native;
 
@@ -715,6 +722,15 @@ export function PreviewView({
    *  an image-space one. Under the webview engine the page is its own view and
    *  is captured whole; under the proxy it is one rectangle of this window. */
   const shootPane = useCallback(async (): Promise<{ png: string; cssWidth: number }> => {
+    // The Chromium engine renders the page again rather than photographing a
+    // view. That skips the "is it on screen" question entirely — a headless
+    // browser draws whether or not its tab is in front — and avoids capturing
+    // the cast stream, which is a lossy JPEG already scaled to the pane.
+    if (engineRef.current === "chromium") {
+      const png = await ipc.chromiumCapture(tabId);
+      const metrics = await ipc.chromiumMetrics(tabId);
+      return { png, cssWidth: metrics?.w ?? SHOOT_WIDTH };
+    }
     const el = nativeRef.current ? hostRef.current : iframeRef.current;
     const rect = el?.getBoundingClientRect();
     if (!rect || !painted() || rect.width < 1 || rect.height < 1) {
@@ -856,6 +872,35 @@ export function PreviewView({
 
   const body = useMemo(() => {
     if (engine === null) return null;
+    if (engine === "chromium") {
+      // An ordinary <img> of an extraordinary thing. Because it is ordinary,
+      // every overlay in the app already layers over it correctly and none of
+      // the child-webview occlusion machinery is involved.
+      return (
+        <div
+          className="preview-frame preview-cast-host"
+          style={picking ? { cursor: "crosshair" } : undefined}
+          ref={(el) => {
+            if (el) cast.fit(el.getBoundingClientRect());
+          }}
+          // Annotate mode. The page cannot see the mouse — it is a headless
+          // browser somewhere else — so the pointer is translated into page
+          // coordinates and the picker resolves the element from those.
+          onPointerMove={(e) => {
+            if (picking) cast.pointAt(e.currentTarget, e, false);
+          }}
+          onClick={(e) => {
+            if (picking) cast.pointAt(e.currentTarget, e, true);
+          }}
+        >
+          {cast.frame ? (
+            <img className="preview-cast" src={cast.frame} alt="" draggable={false} />
+          ) : (
+            <div className="preview-cast-waiting">Starting the browser…</div>
+          )}
+        </div>
+      );
+    }
     if (native) {
       // Almost nothing is rendered into this div — it exists to be measured,
       // and the page is a native view browserHost parks on top of it. The one

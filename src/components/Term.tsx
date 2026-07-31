@@ -11,12 +11,13 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openLink } from "../links";
 import * as ipc from "../ipc";
 import { getSettings, THEME_CHANGE_EVENT, type Settings } from "../settings";
 import { terminalTheme } from "../terminalThemes";
 import { createLinkHint, opensLink } from "../terminalLinks";
+import { matchesChord, resolve } from "../shortcuts";
 
 /** Quote a dropped path for the shell, the way iTerm2/Terminal.app do. Paths
  *  that are pure safe chars pass through bare; anything else is single-quoted,
@@ -39,6 +40,11 @@ export interface TermHandle {
   focus: () => void;
   /** The text currently selected in the terminal, "" when none. */
   getSelection: () => string;
+  /** Put text in at the cursor, as a paste — bracketed-paste markers and all,
+   *  so zsh and TUIs treat it as pasted rather than typed. Never appends a
+   *  carriage return: a clipboard row hands you the text to look at, it does
+   *  not run it. */
+  paste: (text: string) => void;
   /** The scrollback as plain text, keeping the newest `maxChars`. Plain rather
    *  than ANSI on purpose: this is read back in the task-history pane, not
    *  replayed into a terminal, so escape sequences would only be noise. */
@@ -95,6 +101,14 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     },
     focus: () => termRef.current?.focus(),
     getSelection: () => termRef.current?.getSelection() ?? "",
+    paste: (text: string) => {
+      const term = termRef.current;
+      if (!term || !text) return;
+      // Same path the OS-drop and dictation handlers take (see below): xterm's
+      // ordered input, wrapped in bracketed-paste markers.
+      term.paste(text);
+      term.focus();
+    },
     captureText: (maxChars = 8000) => {
       const term = termRef.current;
       if (!term) return "";
@@ -209,7 +223,8 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // Deleted rather than made a setting: stored settings win over DEFAULTS, so
     // a `webgl: false` default would silently do nothing for existing users.
 
-    // macOS natural text editing — the same mapping iTerm2 ships under that name.
+    // Natural text editing — on a Mac, the same mapping iTerm2 ships under
+    // that name; off it, only the parts that make sense without a Cmd key.
     //
     // xterm.js's defaults are wrong for a Mac shell, and actively destructive.
     // From its own Keyboard.ts, with `modifiers = alt?2 | meta?8`:
@@ -242,15 +257,28 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // reads it as kill-whole-line (bash: to line start) — the accepted
     // terminal meaning of the chord. Option+Backspace needs no entry: xterm
     // itself sends ESC+DEL, which zsh binds to backward-kill-word.
-    const NATURAL_EDITING: Record<string, string> = {
-      "alt+ArrowLeft": "\x1bb", // backward-word
-      "alt+ArrowRight": "\x1bf", // forward-word
-      "meta+ArrowLeft": "\x01", // beginning-of-line (C-a)
-      "meta+ArrowRight": "\x05", // end-of-line       (C-e)
-      "meta+Backspace": "\x15", // kill line         (C-u)
-    };
+    //
+    // The chords come from the registry, which is what keeps this map from
+    // shipping macOS semantics to everyone. The three Cmd-based entries are
+    // unbound off a Mac (see shared/shortcuts.json): there is no Command key
+    // there — Mod resolves to Ctrl, where Ctrl+Left already means word-jump,
+    // and Super belongs to the window manager. Home/End cover line start/end
+    // on those platforms natively. The Option ones stay: ESC-b/ESC-f is what
+    // readline binds to word movement on every platform.
+    const NATURAL_EDITING = (
+      [
+        ["term-word-left", "\x1bb"], // backward-word
+        ["term-word-right", "\x1bf"], // forward-word
+        ["term-line-start", "\x01"], // beginning-of-line (C-a)
+        ["term-line-end", "\x05"], // end-of-line       (C-e)
+        ["term-kill-line", "\x15"], // kill line         (C-u)
+      ] as const
+    ).flatMap(([id, seq]) => {
+      const chord = resolve(id);
+      return chord && chord.code ? [{ chord, seq }] : [];
+    });
     term.attachCustomKeyEventHandler((ev) => {
-      if (ev.type !== "keydown" || ev.ctrlKey) return true;
+      if (ev.type !== "keydown") return true;
       // Never touch a key that is mid-composition. Option+letter starts a dead
       // key on a US layout (Option+e = acute), and WebKit then reports a
       // collapsed, length-2 ev.key and stops honouring preventDefault. Bailing
@@ -258,14 +286,12 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       // handler, so returning false here would skip it and strand the
       // composition, making the next keypress behave as if Option were held.
       if (ev.isComposing || ev.keyCode === 229) return true;
-      // Only named keys (arrows, Backspace), and only with exactly one of
-      // Cmd/Option. `ev.key` for those is always a multi-char name, so a
-      // composed character can never collide with these entries.
-      if (ev.altKey === ev.metaKey) return true;
-      const seq = NATURAL_EDITING[`${ev.metaKey ? "meta" : "alt"}+${ev.key}`];
-      if (!seq) return true;
+      // Every modifier flag must agree, so a composed character can never
+      // collide with these entries and Option+Cmd+Left matches nothing.
+      const hit = NATURAL_EDITING.find(({ chord }) => matchesChord(ev, chord));
+      if (!hit) return true;
       ev.preventDefault();
-      term.input(seq);
+      term.input(hit.seq);
       return false;
     });
 
@@ -508,16 +534,18 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // handler above) and wraps the text in bracketed-paste markers, so zsh and
     // TUIs treat it as pasted text rather than typed keystrokes.
     //
-    // The WINDOW, not the webview. Tauri picks the target by how many webviews
-    // the window has: one, and the drop goes to `AnyLabel` (which every kind of
-    // listener matches); more than one, and it goes to the `Window` target,
-    // which a webview listener does not match at all. Opening a preview adds a
-    // second webview — so a webview listener here meant that dropping a file
-    // onto ANY terminal, in ANY project, silently did nothing for as long as a
-    // browser tab existed anywhere in the window. A window listener is correct
-    // in both states.
+    // The WEBVIEW WINDOW, which is neither `getCurrentWindow()` nor
+    // `getCurrentWebview()` — and the difference is the whole bug. Tauri routes
+    // a drop by the main webview's `WebviewKind`, and `features = ["unstable"]`
+    // (which browser.rs needs for `add_child`) makes that kind `WindowChild`,
+    // so every drop is emitted to the `Webview` target. A `Window` listener
+    // does not match `Webview` (manager/mod.rs `filter_target`), which is why
+    // listening on the window silently killed drops everywhere. Only
+    // `WebviewWindow` is matched by all three routes Tauri can take —
+    // `emit_to_window`, `emit_to_webview` and `AnyLabel` — so it is correct
+    // however the app is built. Guarded by termDropTarget.test.ts.
     let unlistenDrop: (() => void) | undefined;
-    void getCurrentWindow()
+    void getCurrentWebviewWindow()
       .onDragDropEvent((e) => {
         if (e.payload.type !== "drop" || !activeRef.current) return;
         const paths = e.payload.paths;

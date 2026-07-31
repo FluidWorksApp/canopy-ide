@@ -16,6 +16,7 @@ vi.mock("./ipc", async (orig) => ({
 import {
   actionRows,
   branchRows,
+  clipRows,
   indexRows,
   deferredRows,
   instantRows,
@@ -29,6 +30,7 @@ import {
   type SpotRow,
 } from "./spotSources";
 import type { SubTab } from "./components/ProjectView/helpers";
+import * as clipboardStore from "./clipboardStore";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -447,5 +449,62 @@ describe("indexRows", () => {
     await indexRows("retry", ctx(), ["/repo"]);
     expect(spy).toHaveBeenLastCalledWith("retry", 14, ["/repo"], true);
     localStorage.clear();
+  });
+});
+
+describe("clipRows", () => {
+  const clip = (
+    id: number,
+    preview: string,
+    over: Partial<ipcTypes.Clip> = {},
+  ): ipcTypes.Clip => ({
+    id,
+    ts: Math.floor(Date.now() / 1000),
+    preview,
+    chars: preview.length,
+    lines: 1,
+    project: "p1",
+    ...over,
+  });
+
+  const withClips = (clips: ipcTypes.Clip[]) =>
+    vi.spyOn(clipboardStore, "getSnapshot").mockReturnValue(clips);
+
+  it("offers the most recent clips with nothing typed — the whole recall story", () => {
+    withClips([clip(1, "npm run typecheck"), clip(2, "git rebase -i main")]);
+    const rows = clipRows("", ctx());
+    expect(rows.map((r) => r.title)).toEqual([
+      "npm run typecheck",
+      "git rebase -i main",
+    ]);
+    expect(rows[0].group).toBe("Clipboard");
+  });
+
+  it("carries the id and never the text — Enter fetches the clip", () => {
+    withClips([clip(7, "a snippet")]);
+    expect(clipRows("snip", ctx())[0].action).toEqual({
+      type: "paste-clip",
+      clipId: 7,
+    });
+  });
+
+  it("ranks this project's clips first, but keeps the others", () => {
+    withClips([
+      clip(1, "from elsewhere", { project: "p2" }),
+      clip(2, "from here", { project: "p1" }),
+    ]);
+    const rows = clipRows("", ctx());
+    expect(rows.map((r) => r.title)).toEqual(["from here", "from elsewhere"]);
+    expect(rows[1].detail).toContain("another project");
+  });
+
+  it("matches on what the clip says", () => {
+    withClips([clip(1, "npm run typecheck"), clip(2, "cargo test --lib")]);
+    expect(clipRows("cargo", ctx()).map((r) => r.id)).toEqual(["clip:2"]);
+  });
+
+  it("has nothing to show when the feature is off", () => {
+    withClips([]);
+    expect(clipRows("anything", ctx())).toEqual([]);
   });
 });

@@ -4,6 +4,7 @@ import type { ReviewPayload } from "../ReviewView";
 import type { PreviewAnnotation, PreviewShot } from "../../preview";
 import type { DeviceAnnotation } from "../../android";
 import type { Project } from "../../projects";
+import type { TabStatus } from "../../tabGroups";
 import { getSettings } from "../../settings";
 
 export type SideTab =
@@ -14,6 +15,7 @@ export type SideTab =
   | "prs"
   | "trackers"
   | "tasks"
+  | "notes"
   | "research"
   | "agents"
   | "team"
@@ -48,6 +50,11 @@ export interface TermSubTab {
   /** Launched from a component run command — lives in the run rail, not the
    *  terminal strip. */
   run?: boolean;
+  /** A run that is an errand rather than a service: installing a CLI, updating
+   *  one, installing a prerequisite. It has one outcome worth knowing and the
+   *  chip's ✓ carries it, so a successful one closes itself (see runReap.ts).
+   *  A failed one stays — that scrollback is why you'd look. */
+  chore?: boolean;
   /** Run tabs outlive their process: a one-shot command (build, install) ends
    *  on its own, and the tab stays so the output and exit status remain
    *  readable. Undefined while still running. */
@@ -87,6 +94,18 @@ export interface ResearchSubTab {
   id: string;
   type: "research";
   researchId: string;
+  /** Last known title, so the tab strip has a label before the first read. */
+  title: string;
+}
+
+/** One note, open. Holds only the id, for the same reason ResearchSubTab does:
+ *  the note changes while it is on screen (you edit it, an agent links a PR)
+ *  and the view re-reads the store on every notes event, so a copy on the tab
+ *  would be a second version of the truth going stale in the background. */
+export interface NoteSubTab {
+  id: string;
+  type: "note";
+  noteId: string;
   /** Last known title, so the tab strip has a label before the first read. */
   title: string;
 }
@@ -238,6 +257,7 @@ export type SubTab =
   | PrSubTab
   | TicketSubTab
   | ResearchSubTab
+  | NoteSubTab
   | CommitSubTab
   | BranchSubTab
   | ReviewSubTab
@@ -264,6 +284,35 @@ export interface RailChip {
   action?: React.ReactNode;
   onSelect: () => void;
   onClose: () => void;
+}
+
+/** A run of the tab strip. Agents stack by state, documents by kind — a PR has
+ *  no state to settle, but "put the pull requests away" is the same gesture as
+ *  folding Idle, so every run folds the same way. */
+export interface StripGroup {
+  key: string;
+  /** Chip caption, or null for a run with no chip: the flat agent run that
+   *  grouping-off renders, which has nothing to fold it into. */
+  label: string | null;
+  /** Set on the three agent runs — what colours the chip and its dot. */
+  status: TabStatus | null;
+  /** The kind icon a document run wears in place of a status dot. */
+  icon: React.ReactNode;
+  tabs: SubTab[];
+  /** What the strip actually renders. Everything while the stack is open; when
+   *  it's folded, only the tab you are on — folding away the tab whose pane is
+   *  in front would leave you looking at a view with nothing in the strip to
+   *  say what it is. */
+  shown: SubTab[];
+}
+
+/** The two tab-strip settings, in the units the strip wants them in. */
+export function tabPrefs(): { grouped: boolean; idleDelayMs: number } {
+  const s = getSettings();
+  return {
+    grouped: s.groupTabsByStatus,
+    idleDelayMs: Math.max(0, s.idleGroupDelaySeconds) * 1000,
+  };
 }
 
 /** The side panel's three behaviour settings, read together — they're one
@@ -331,6 +380,8 @@ export function describeTab(tab: SubTab | undefined) {
       // The id, not just the title: an agent told the user is looking at
       // research can call canopy_research get on it.
       return { kind: "research", label: tab.title, researchId: tab.researchId };
+    case "note":
+      return { kind: "note", label: tab.title, noteId: tab.noteId };
     case "pr":
       return { kind: "pr", label: `#${tab.pr.number} ${tab.pr.title}` };
     case "commit":
@@ -382,6 +433,9 @@ export function tabDisplayLabel(t: SubTab): string {
       // Number first, the way the entry is cited everywhere else (a PR body, a
       // supersedes link), so the tab and the reference read the same.
       return `${t.researchId.split("-")[0]} ${t.title}`;
+    case "note":
+      // Same reasoning as research: the number is how a note is referred to.
+      return `${t.noteId.split("-")[0]} ${t.title}`;
     case "commit":
       return `${t.short} ${t.subject}`;
     case "branch":

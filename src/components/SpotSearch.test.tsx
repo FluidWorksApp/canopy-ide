@@ -69,7 +69,7 @@ describe("SpotSearch", () => {
   });
 
   it("stops searching once the text is a prompt rather than a query", async () => {
-    // A paragraph or a line break means the palette will only offer the two
+    // A paragraph or a line break means the palette will only offer the three
     // actions — so asking the slow sources to rank it against filenames buys a
     // list that is filtered away, and shows a sweeping progress hairline and
     // "searching…" for a search whose every result was already discarded.
@@ -89,16 +89,19 @@ describe("SpotSearch", () => {
     expect(screen.queryByText("searching…")).not.toBeInTheDocument();
     // ...and only the actions are left to choose from.
     expect(
-      screen.getAllByRole("option").every((o) => /Run task|Research/.test(o.textContent ?? "")),
+      screen
+        .getAllByRole("option")
+        .every((o) => /Run task|Research|Save for later/.test(o.textContent ?? "")),
     ).toBe(true);
   });
 
   it("navigates with arrows and opens a tab row", async () => {
     const { onAction } = open();
     await userEvent.keyboard("dev ser");
-    // Rows 0 and 1 are the two pinned actions a typed query always offers —
-    // run it as a task, or research it — so the tab match is the third.
-    await userEvent.keyboard("{ArrowDown}{ArrowDown}{Enter}");
+    // Rows 0-2 are the three pinned actions a typed query always offers — run
+    // it as a task, research it, or save it for later — so the tab match is
+    // the fourth.
+    await userEvent.keyboard("{ArrowDown}{ArrowDown}{ArrowDown}{Enter}");
     expect(onAction).toHaveBeenCalledWith({ type: "focus-tab", tabId: "t1" });
   });
 
@@ -184,8 +187,8 @@ describe("SpotSearch", () => {
     });
     await userEvent.keyboard("relay handshake");
     expect(screen.getByText("Agent Sessions")).toBeInTheDocument();
-    // Past both pinned action rows to the session itself.
-    await userEvent.keyboard("{ArrowDown}{ArrowDown}{Enter}");
+    // Past all three pinned action rows to the session itself.
+    await userEvent.keyboard("{ArrowDown}{ArrowDown}{ArrowDown}{Enter}");
     expect(onAction).toHaveBeenCalledWith(
       expect.objectContaining({
         type: "open-session",

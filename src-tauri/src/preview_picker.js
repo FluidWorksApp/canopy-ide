@@ -252,7 +252,7 @@
     for (var i = 0; i < marks.length; i++) {
       var m = marks[i];
       if (!m.el || !m.el.isConnected) {
-        m.el = m.selector ? document.querySelector(m.selector) : null;
+        m.el = m.selector ? deepQuery(m.selector) : null;
       }
       if (m.el && m.el.isConnected) {
         var r = m.el.getBoundingClientRect();
@@ -270,10 +270,69 @@
 
   // ---------- element description ----------
 
-  function cssPath(el) {
+  // ---------- deep DOM ----------
+  // A page is not one document. Design systems put their controls inside open
+  // shadow roots, and embedded checkout/auth/payment flows put them inside
+  // same-origin iframes. A flat document.querySelectorAll sees into neither, so
+  // on those pages an agent is told the button it needs does not exist — the
+  // worst possible answer, because it reads as fact.
+  //
+  // Everything below is therefore written in terms of *roots* rather than
+  // `document`. Refs stay live element references, which is what lets them keep
+  // working once handed out: `isConnected` is true inside a shadow root and
+  // inside a frame document exactly as it is at the top level.
+  //
+  // Cross-origin frames stay opaque. contentDocument throws by design and no
+  // amount of in-page cleverness changes that, so they are reported as blocked
+  // rather than skipped — an agent should see a locked door, not a blank wall.
+
+  /** Separator between hops of a deep selector. Playwright's spelling, because
+   *  anyone who has automated a browser already reads it as "pierce here". */
+  var HOP = " >>> ";
+  /** Elements examined per traversal while hunting for shadow hosts. Bounds the
+   *  cost on pages that build thousands of nodes; a page past this is already
+   *  past the element cap too. */
+  var WALK_BUDGET = 20000;
+
+  /** The frame's document, or null if it is cross-origin or not yet loaded. */
+  function frameDoc(el) {
+    var ln = el.localName;
+    if (ln !== "iframe" && ln !== "frame") return null;
+    try {
+      return el.contentDocument || null;
+    } catch (_) {
+      return null; // cross-origin: the throw IS the answer
+    }
+  }
+
+  /** The element a root hangs off — a shadow host, or the frame holding a
+   *  document — or null at the top document. */
+  function rootHost(root) {
+    if (!root) return null;
+    if (root.nodeType === 11) return root.host || null; // ShadowRoot
+    if (root.nodeType === 9) {
+      try {
+        return (root.defaultView && root.defaultView.frameElement) || null;
+      } catch (_) {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  function rootOf(el) {
+    return el.getRootNode ? el.getRootNode() : document;
+  }
+
+  /** A CSS path within one root, stopping at that root's boundary. */
+  function localPath(el) {
     var path = [];
+    var root = rootOf(el);
+    // Documents carry an <html> that adds nothing; shadow roots have no such
+    // wrapper, so their walk ends when parentElement runs out.
+    var stop = root.nodeType === 9 ? root.documentElement : null;
     var node = el;
-    while (node && node.nodeType === 1 && node !== document.documentElement) {
+    while (node && node.nodeType === 1 && node !== stop) {
       // An id anchors the path — everything above it is redundant.
       if (node.id) {
         path.unshift("#" + CSS.escape(node.id));
@@ -291,6 +350,140 @@
       node = parent;
     }
     return path.join(" > ");
+  }
+
+  /** A selector that finds `el` from the top document, hopping shadow and frame
+   *  boundaries with HOP. Round-trips through deepQuery, so an agent can hand a
+   *  reported selector straight back to click or type. */
+  function cssPath(el) {
+    var out = localPath(el);
+    var host = rootHost(rootOf(el));
+    while (host) {
+      out = localPath(host) + HOP + out;
+      host = rootHost(rootOf(host));
+    }
+    return out;
+  }
+
+  /** Every root worth searching, breadth-first from the top document. Also
+   *  returns the frames that could not be opened, so a snapshot can name them
+   *  instead of silently omitting what is inside. */
+  function deepRoots() {
+    var roots = [document];
+    var blocked = [];
+    var budget = WALK_BUDGET;
+    for (var i = 0; i < roots.length; i++) {
+      var all;
+      try {
+        all = roots[i].querySelectorAll("*");
+      } catch (_) {
+        continue;
+      }
+      for (var j = 0; j < all.length; j++) {
+        if (budget-- <= 0) return { roots: roots, blocked: blocked, truncated: true };
+        var el = all[j];
+        // Open roots only. A closed one is null here and there is no way in.
+        if (el.shadowRoot) roots.push(el.shadowRoot);
+        if (el.localName === "iframe" || el.localName === "frame") {
+          var d = frameDoc(el);
+          if (d) roots.push(d);
+          else blocked.push(cssPath(el));
+        }
+      }
+    }
+    return { roots: roots, blocked: blocked, truncated: false };
+  }
+
+  /** querySelector that crosses boundaries. Honours explicit HOP hops, and
+   *  falls back to searching every root so a plain selector aimed at something
+   *  inside a shadow root or frame still lands. */
+  function deepQuery(selector) {
+    var hops = String(selector).split(">>>");
+    if (hops.length > 1) {
+      var root = document;
+      var el = null;
+      for (var i = 0; i < hops.length; i++) {
+        var part = hops[i].trim();
+        if (!part) continue;
+        try {
+          el = root.querySelector(part);
+        } catch (_) {
+          return null;
+        }
+        if (!el) return null;
+        if (i < hops.length - 1) {
+          var next = el.shadowRoot || frameDoc(el);
+          if (!next) return null;
+          root = next;
+        }
+      }
+      return el;
+    }
+    var flat = String(selector).trim();
+    var all = deepRoots().roots;
+    for (var k = 0; k < all.length; k++) {
+      var hit = null;
+      try {
+        hit = all[k].querySelector(flat);
+      } catch (_) {
+        return null; // a malformed selector fails the same way everywhere
+      }
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  /** How far `el`'s document is from the top one, in top-viewport pixels.
+   *
+   *  Overlays (the cursor, the flash box, the ripple) are drawn in the TOP
+   *  document, but getBoundingClientRect inside a frame is relative to that
+   *  frame's own viewport. Without this correction every highlight on a framed
+   *  element lands in the wrong place — usually up and to the left, over the
+   *  app's own chrome. Shadow roots need no correction: they share their host
+   *  document's coordinate space. */
+  function frameOffsetOf(el) {
+    var x = 0;
+    var y = 0;
+    var doc = el.ownerDocument;
+    while (doc && doc !== document) {
+      var fe = rootHost(doc);
+      if (!fe) break; // cross-origin or detached — nothing better to offer
+      var r = fe.getBoundingClientRect();
+      // The content box starts inside the border; clientLeft/Top is its width.
+      x += r.left + fe.clientLeft;
+      y += r.top + fe.clientTop;
+      doc = fe.ownerDocument;
+    }
+    return { x: x, y: y };
+  }
+
+  /** An element's rect in TOP-viewport pixels — what an overlay drawn in the
+   *  top document needs. Identical to getBoundingClientRect outside a frame. */
+  function viewportRect(el) {
+    var r = el.getBoundingClientRect();
+    var o = frameOffsetOf(el);
+    return {
+      left: r.left + o.x,
+      top: r.top + o.y,
+      right: r.right + o.x,
+      bottom: r.bottom + o.y,
+      width: r.width,
+      height: r.height,
+      x: r.x + o.x,
+      y: r.y + o.y,
+    };
+  }
+
+  /** Scroll an element into view, and then every frame containing it — an
+   *  element centred in its own frame is still off screen if the frame is. */
+  function deepScrollIntoView(el, instant) {
+    var opts = { block: "center", inline: "center", behavior: instant ? "auto" : "smooth" };
+    el.scrollIntoView(opts);
+    var host = rootHost(rootOf(el));
+    while (host) {
+      if (host.scrollIntoView) host.scrollIntoView(opts);
+      host = rootHost(rootOf(host));
+    }
   }
 
   // Best-effort React component names, walked up the fiber tree — the single
@@ -338,14 +531,42 @@
     return el;
   }
 
-  function onMove(e) {
-    ensureChrome();
-    var el = targetFrom(e);
-    if (!el) {
-      hoverBox.style.display = hoverTag.style.display = "none";
-      return;
+  /** The element at a viewport point, crossing shadow and frame boundaries.
+   *
+   *  document.elementFromPoint stops at the boundary and hands back the HOST —
+   *  the <my-widget>, the <iframe> — so on a component-built page every hover
+   *  would name the wrapper and every annotation would point at it. Shadow
+   *  roots share the document's coordinate space; a frame does not, so the
+   *  point is translated into it before asking again. */
+  function deepElementFromPoint(x, y) {
+    var el = document.elementFromPoint(x, y);
+    var fx = x;
+    var fy = y;
+    // Bounded: a malformed tree that cycles must not hang the page.
+    for (var hops = 0; el && hops < 20; hops++) {
+      if (el.shadowRoot) {
+        var inner = el.shadowRoot.elementFromPoint(fx, fy);
+        if (!inner || inner === el) break;
+        el = inner;
+        continue;
+      }
+      var doc = frameDoc(el);
+      if (!doc) break;
+      var fr = el.getBoundingClientRect();
+      fx -= fr.left + el.clientLeft;
+      fy -= fr.top + el.clientTop;
+      var framed = doc.elementFromPoint(fx, fy);
+      if (!framed) break;
+      el = framed;
     }
-    var r = el.getBoundingClientRect();
+    return el;
+  }
+
+  /** Draw the hover outline and label over an element. Uses viewportRect, so an
+   *  element inside a frame is outlined where it actually appears rather than
+   *  offset by the frame's position. */
+  function highlight(el) {
+    var r = viewportRect(el);
     hoverBox.style.display = "block";
     hoverBox.style.left = r.left + "px";
     hoverBox.style.top = r.top + "px";
@@ -360,16 +581,52 @@
     hoverTag.style.top = Math.max(0, r.top - 22) + "px";
   }
 
-  function onClick(e) {
+  function onMove(e) {
+    ensureChrome();
     var el = targetFrom(e);
-    if (!el) return;
-    e.preventDefault();
-    e.stopPropagation();
+    if (!el) {
+      hoverBox.style.display = hoverTag.style.display = "none";
+      return;
+    }
+    highlight(el);
+  }
+
+  /** Record an annotation on an element and tell the host. The one place that
+   *  happens, so a pick driven by a real click and one driven by coordinates
+   *  produce identical annotations. */
+  function commitPick(el) {
     var payload = describe(el);
     var n = marks.length + 1;
     marks.push({ n: n, selector: payload.selector, el: el, badge: badgeFor(n) });
     layoutBadges();
     send({ canopy: "annotation", n: n, payload: payload });
+  }
+
+  /** Pick by coordinate rather than by mouse.
+   *
+   *  The Chromium engine's page is a headless browser streamed into an <img>,
+   *  so the user's pointer is over a picture in another window and the page
+   *  never sees a mouse. The host maps where the click landed back into page
+   *  pixels and calls this. It also cannot fire the page's own handlers, so
+   *  annotating a link does not navigate — which the real-click path has to
+   *  work to prevent (see swallow). */
+  function pickAt(d) {
+    ensureChrome();
+    var el = deepElementFromPoint(Number(d.x) || 0, Number(d.y) || 0);
+    if (!el || el === document.documentElement || el === document.body) {
+      hoverBox.style.display = hoverTag.style.display = "none";
+      return;
+    }
+    highlight(el);
+    if (d.commit) commitPick(el);
+  }
+
+  function onClick(e) {
+    var el = targetFrom(e);
+    if (!el) return;
+    e.preventDefault();
+    e.stopPropagation();
+    commitPick(el);
   }
 
   function swallow(e) {
@@ -507,7 +764,7 @@
     clearMarks();
     (list || []).forEach(function (item) {
       var el = null;
-      try { el = document.querySelector(item.selector); } catch (_) {}
+      try { el = deepQuery(item.selector); } catch (_) {}
       marks.push({ n: item.n, selector: item.selector, el: el, badge: badgeFor(item.n) });
     });
     layoutBadges();
@@ -607,7 +864,7 @@
 
   /** Outline the element being acted on, so "where" is unambiguous. */
   function flashBox(el, ms) {
-    var r = el.getBoundingClientRect();
+    var r = viewportRect(el);
     var b = document.createElement("div");
     b.style.cssText =
       "position:fixed;pointer-events:none;z-index:" + (Z + 4) + ";border-radius:4px;" +
@@ -640,12 +897,12 @@
   function withCursor(el, label) {
     ensureCursor();
     var instant = reducedMotion();
-    el.scrollIntoView({ block: "center", inline: "center", behavior: instant ? "auto" : "smooth" });
+    deepScrollIntoView(el, instant);
     clearTimeout(cursorHideTimer);
     cursorLabelEl.textContent = label;
     return new Promise(function (resolve) {
       setTimeout(function () {
-        var r = el.getBoundingClientRect();
+        var r = viewportRect(el);
         var x = Math.round(r.left + r.width / 2);
         var y = Math.round(r.top + r.height / 2);
         cursorEl.style.transition = instant
@@ -694,7 +951,18 @@
       "a[href],button,input,select,textarea,summary,[role=button],[role=link]," +
       "[role=tab],[role=checkbox],[role=radio],[role=menuitem],[role=option]," +
       "[role=switch],[role=combobox],[onclick],[contenteditable=true],[contenteditable='']";
-    var all = document.querySelectorAll(sel);
+    var found = deepRoots();
+    var all = [];
+    for (var r = 0; r < found.roots.length; r++) {
+      var root = found.roots[r];
+      var hit;
+      try {
+        hit = root.querySelectorAll(sel);
+      } catch (_) {
+        continue;
+      }
+      for (var h = 0; h < hit.length; h++) all.push(hit[h]);
+    }
     agentRefs = [];
     var els = [];
     var cap = Math.min(Number(d.max) || 150, 400);
@@ -708,6 +976,10 @@
         text: labelFor(el),
         selector: cssPath(el),
       };
+      // Only when it isn't the top document — saying so on every entry of an
+      // ordinary page would be noise on the majority to serve the minority.
+      var host = rootHost(rootOf(el));
+      if (host) entry.frame = cssPath(host);
       var role = el.getAttribute("role");
       if (role) entry.role = role;
       if (el.localName === "a") entry.href = el.getAttribute("href");
@@ -730,13 +1002,18 @@
       els.push(entry);
     }
     var text = (document.body && document.body.innerText) || "";
-    return {
+    var out = {
       url: location.href,
       title: document.title,
       text: text.length > 6000 ? text.slice(0, 6000) + "\n…(page text truncated)" : text,
       elements: els,
       elementsTruncated: agentRefs.length >= cap && all.length > agentRefs.length,
     };
+    // Named, not omitted: an agent that cannot find a control is better served
+    // by "there is a cross-origin frame here" than by an honest-looking list.
+    if (found.blocked.length) out.blockedFrames = found.blocked;
+    if (found.truncated) out.domTruncated = true;
+    return out;
   }
 
   function resolveTarget(d) {
@@ -749,61 +1026,83 @@
       return el;
     }
     if (d.selector) {
-      var found = document.querySelector(d.selector);
+      var found = deepQuery(d.selector);
       if (!found) throw new Error("no element matches selector: " + d.selector);
       return found;
     }
     throw new Error("pass a ref (from canopy_browser_snapshot) or a CSS selector");
   }
 
+  /** The window an element actually belongs to. Inside an iframe that is the
+   *  frame's own window, and the distinction is not academic: every frame is a
+   *  separate realm with its own constructors and prototypes, so an event built
+   *  from the top realm is rejected there and a setter borrowed from the top
+   *  realm throws "Illegal invocation". */
+  function realmOf(el) {
+    return (el.ownerDocument && el.ownerDocument.defaultView) || window;
+  }
+
   function clickTarget(el) {
     // Scrolling into view is the cursor's job now (withCursor), so the pointer
-    // aims at where the element ends up rather than where it started.
+    // aims at where the element ends up rather than where it started. The rect
+    // stays frame-local: a page's own handler reads clientX against its own
+    // viewport, so this is the one place the offset must NOT be applied.
     var r = el.getBoundingClientRect();
+    var view = realmOf(el);
     var opts = {
       bubbles: true,
       cancelable: true,
-      view: window,
+      view: view,
       clientX: r.x + r.width / 2,
       clientY: r.y + r.height / 2,
     };
     if (el.focus) el.focus();
+    var Ctor = view.MouseEvent || MouseEvent;
     ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach(function (type) {
-      el.dispatchEvent(new MouseEvent(type, opts));
+      el.dispatchEvent(new Ctor(type, opts));
     });
   }
 
   function typeInto(el, d) {
     if (el.focus) el.focus();
     var text = String(d.text == null ? "" : d.text);
+    var view = realmOf(el);
+    var Ev = view.Event || Event;
     if (el.localName === "input" || el.localName === "textarea") {
-      // Through the prototype's setter so controlled (React) inputs see it.
-      var proto = el.localName === "textarea" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      // Through the prototype's setter so controlled (React) inputs see it —
+      // and through the setter from the element's OWN realm, or a framed input
+      // gets "Illegal invocation" from a prototype it was never built against.
+      var ctor = el.localName === "textarea" ? "HTMLTextAreaElement" : "HTMLInputElement";
+      var proto = (view[ctor] || window[ctor]).prototype;
       var desc = Object.getOwnPropertyDescriptor(proto, "value");
       var next = d.append ? el.value + text : text;
       if (desc && desc.set) desc.set.call(el, next);
       else el.value = next;
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
+      el.dispatchEvent(new Ev("input", { bubbles: true }));
+      el.dispatchEvent(new Ev("change", { bubbles: true }));
     } else if (el.localName === "select") {
       var opt = Array.prototype.find.call(el.options, function (o) {
         return o.value === text || o.textContent.trim() === text;
       });
       if (!opt) throw new Error('no <option> matches "' + text + '"');
       el.value = opt.value;
-      el.dispatchEvent(new Event("change", { bubbles: true }));
+      el.dispatchEvent(new Ev("change", { bubbles: true }));
     } else if (el.isContentEditable) {
-      document.execCommand("selectAll", false, null);
-      if (!d.append) document.execCommand("delete", false, null);
-      else window.getSelection().collapseToEnd();
-      document.execCommand("insertText", false, text);
+      // The editing commands act on their own document's selection, so they
+      // must be issued against the document the element is actually in.
+      var doc = el.ownerDocument || document;
+      doc.execCommand("selectAll", false, null);
+      if (!d.append) doc.execCommand("delete", false, null);
+      else view.getSelection().collapseToEnd();
+      doc.execCommand("insertText", false, text);
     } else {
       throw new Error("<" + el.localName + "> is not a text input, select, or contenteditable");
     }
     if (d.submit) {
       var key = { bubbles: true, cancelable: true, key: "Enter", code: "Enter", keyCode: 13 };
-      el.dispatchEvent(new KeyboardEvent("keydown", key));
-      el.dispatchEvent(new KeyboardEvent("keyup", key));
+      var KEv = view.KeyboardEvent || KeyboardEvent;
+      el.dispatchEvent(new KEv("keydown", key));
+      el.dispatchEvent(new KEv("keyup", key));
     }
   }
 
@@ -938,6 +1237,7 @@
   function onHostMessage(d) {
     if (!d || typeof d !== "object") return;
     if (d.canopy === "mode") setPicking(!!d.on);
+    else if (d.canopy === "pick-at") pickAt(d);
     else if (d.canopy === "region") setRegion(!!d.on);
     else if (d.canopy === "sync") syncMarks(d.marks);
     else if (d.canopy === "agent") onAgentMessage(d);

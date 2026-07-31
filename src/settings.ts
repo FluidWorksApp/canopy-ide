@@ -4,8 +4,18 @@ import type { CustomMicroTask } from "./microTasks";
 // and never a runtime one.
 import type { CustomAgentCli } from "./projects";
 import type { BrowserEngine } from "./browserBounds";
+// Type-only for the same reason as projects.ts above: mascots.ts reads
+// getSettings(), so this pair must stay a compile-time cycle only.
+import type { MascotId } from "./mascots";
 import type { CaptureMode } from "./pageCapture";
 import { IS_MAC } from "./platform";
+import {
+  formatChord,
+  keyLabel as chordKeyLabel,
+  matchesChord,
+  modifierLabel,
+  requireKeyChord,
+} from "./shortcuts";
 
 export type Theme =
   "auto" | "default" | "gotham" | "daylight" | "vitrine" | "custom";
@@ -65,11 +75,9 @@ export interface Hotkey {
   code: string;
 }
 
-/** Default dictation hotkey: ⌘D on Mac, Alt+D elsewhere (plain Ctrl+D is shell
- *  EOF, so it's deliberately avoided). */
-export const DEFAULT_DICTATION_HOTKEY: Hotkey = IS_MAC
-  ? { meta: true, ctrl: false, alt: false, shift: false, code: "KeyD" }
-  : { meta: false, ctrl: false, alt: true, shift: false, code: "KeyD" };
+/** Default dictation hotkey — ⌘D on Mac, Alt+D elsewhere, per the manifest
+ *  (plain Ctrl+D is shell EOF, so it's deliberately avoided off Mac). */
+export const DEFAULT_DICTATION_HOTKEY: Hotkey = requireKeyChord("dictation");
 
 /** Default hotkey for the recent-dictation picker: ⌃⌘V on Mac (SuprFlow's
  *  binding, and free of any system paste), ⌃⌥V elsewhere — Ctrl+Shift+V is
@@ -134,15 +142,7 @@ export function modKeyLabel(k: DictationModKey): string {
       : "";
   const base = k.replace(/(Left|Right)$/, "");
   if (base === "CapsLock") return "Caps Lock";
-  const glyph: Record<string, string> = IS_MAC
-    ? {
-        Shift: "⇧ Shift",
-        Control: "⌃ Control",
-        Alt: "⌥ Option",
-        Meta: "⌘ Command",
-      }
-    : { Shift: "Shift", Control: "Ctrl", Alt: "Alt", Meta: "Win" };
-  return side + (glyph[base] ?? base);
+  return side + modifierLabel(base as "Shift" | "Control" | "Alt" | "Meta");
 }
 
 /** The visualiser drawn in the recording pill while the mic is live. Ported
@@ -163,40 +163,22 @@ export const DICTATION_WAVE_STYLES: {
   { id: "neon", label: "Neon", hint: "Glowing double sine" },
 ];
 
-/** Render a hotkey for display, e.g. "⌘D" or "Alt+Shift+D". */
+/** Render a hotkey for display, e.g. "⌘D" or "Alt+Shift+D". A Hotkey is
+ *  structurally a resolved Chord, so display and comparison come from the
+ *  registry — this is the one shortcut the user can rebind, which is why it is
+ *  stored rather than looked up by id. */
 export function formatHotkey(h: Hotkey): string {
-  const parts: string[] = [];
-  if (IS_MAC) {
-    if (h.ctrl) parts.push("⌃");
-    if (h.alt) parts.push("⌥");
-    if (h.shift) parts.push("⇧");
-    if (h.meta) parts.push("⌘");
-  } else {
-    if (h.ctrl) parts.push("Ctrl");
-    if (h.alt) parts.push("Alt");
-    if (h.shift) parts.push("Shift");
-    if (h.meta) parts.push("Win");
-  }
-  parts.push(keyLabel(h.code));
-  return IS_MAC ? parts.join("") : parts.join("+");
+  return formatChord(h);
 }
 
 /** Human label for a KeyboardEvent.code (KeyD → "D", Digit1 → "1"). */
 export function keyLabel(code: string): string {
-  if (code.startsWith("Key")) return code.slice(3);
-  if (code.startsWith("Digit")) return code.slice(5);
-  return code;
+  return chordKeyLabel(code);
 }
 
 /** Does this keydown match the configured hotkey? */
 export function matchesHotkey(e: KeyboardEvent, h: Hotkey): boolean {
-  return (
-    e.code === h.code &&
-    e.metaKey === h.meta &&
-    e.ctrlKey === h.ctrl &&
-    e.altKey === h.alt &&
-    e.shiftKey === h.shift
-  );
+  return matchesChord(e, h);
 }
 
 export const TERMINAL_FONT_DEFAULT =
@@ -225,6 +207,12 @@ export interface Settings {
    *  --on-accent rides along so accent-filled buttons stay legible without
    *  the user having to pick a second colour. */
   customAccent: string;
+  /** Which mascot the app wears (mascots.ts). Stored as an id rather than
+   *  anything drawable, so a build that adds or drops one reads an old
+   *  settings file fine — `currentMascot` falls back when the id is unknown.
+   *  Not a boolean: "which" is the question, and a second mascot should be a
+   *  registry entry rather than a schema change. */
+  mascot: MascotId;
 
   // ---- Side panel behaviour (Appearance). Three independent choices about
   // one panel: how it opens, how it closes, and whether it covers the work or
@@ -314,6 +302,16 @@ export interface Settings {
   /** How many agent terminals to keep live per project before auto-hibernation
    *  starts reclaiming the stalest idle ones. */
   maxLiveAgents: number;
+  /** Fold the agent tab strip into Needs you / Working / Idle stacks instead of
+   *  leaving it in open order. The tab you are looking at never changes when it
+   *  restacks — only where it sits in the strip, and it is never the one folded
+   *  away. */
+  groupTabsByStatus: boolean;
+  /** How long an agent has to stay quiet before its tab falls into the Idle
+   *  stack. Promotions (a question, fresh work) are always immediate; only the
+   *  fall is delayed, so an agent pausing between tool calls doesn't shuffle
+   *  the strip under your pointer. */
+  idleGroupDelaySeconds: number;
   /** Where the user's own micro-tasks used to live, back when they were
    *  app-wide. They belong to a project now (`Project.customTasks`), and
    *  adoptLegacyCustomTasks() empties this on first launch. Kept so that
@@ -348,6 +346,24 @@ export interface Settings {
    *  which is the default — this is a search index over your own work, not a
    *  log to be rotated. */
   spotRetentionDays: number;
+
+  // ---- Clipboard history ----
+  /** Keep what you copy, so ⌘K can hand it back. Off by default and it must
+   *  stay that way: the first programmatic pasteboard read is what raises
+   *  macOS's pasteboard alert, and that has to follow a decision the user
+   *  made rather than an upgrade. */
+  clipboardHistory: boolean;
+  /** Write the history to ~/.canopy/clipboard.sqlite. Off keeps it in memory
+   *  for the session only — and deletes the file that was there. */
+  clipboardPersist: boolean;
+  /** How many clips to keep. */
+  clipboardKeep: number;
+  /** Drop clips older than this many days. 0 keeps them all (up to the count). */
+  clipboardRetentionDays: number;
+  /** Skip clips that look like credentials — a known key prefix, a named
+   *  `TOKEN=` line, a high-entropy token. Clips marked concealed by their
+   *  producer are skipped whatever this says. */
+  clipboardSkipSecrets: boolean;
 
   // ---- Voice dictation ----
   /** Hotkey that toggles dictation (start/insert). Used by "combo" mode. */
@@ -420,6 +436,12 @@ export interface Settings {
    *  compensation above is the price; opening a preview closes the panel that
    *  would cover it, which is the case that actually bit. */
   browserEngine: BrowserEngine;
+  /** The Chromium-family binary the chromium engine drives. Empty means
+   *  "whatever detection finds"; a path is the user overriding that. */
+  chromiumPath: string;
+  /** Whether Stagehand drives the Chrome engine. On by default, but only ever
+   *  active where it can actually work — see stagehandState. */
+  stagehandEnabled: boolean;
 
   /** What the preview's Screenshot button grabs when clicked without opening
    *  its menu. Remembered rather than fixed: whichever mode you picked last is
@@ -467,7 +489,7 @@ export interface Settings {
 // does nothing for anyone who already has the key in localStorage. A setting
 // that must actually change for existing users has to be removed outright —
 // which is exactly why `webgl` is gone rather than defaulted to false.
-const DEFAULTS: Settings = {
+export const DEFAULTS: Settings = {
   scrollback: 10_000,
   fontSize: 13,
   runawayCpuPercent: 300,
@@ -481,11 +503,18 @@ const DEFAULTS: Settings = {
   relayAddr: "",
   autoHibernate: false,
   maxLiveAgents: 8,
+  groupTabsByStatus: true,
+  idleGroupDelaySeconds: 60,
   customMicroTasks: [],
   disabledTools: [],
   trackerKeys: {},
   theme: "default",
   customAccent: "",
+  // The literal, not `DEFAULT_MASCOT`: mascots.ts reads settings, so importing
+  // a *value* back from it would be a live cycle evaluated while this very
+  // object is being built. The type import below is erased and safe, and
+  // mascots.test.ts asserts the two stay in agreement.
+  mascot: "ash",
   sidebarHover: false,
   sidebarClickOutsideCloses: true,
   sidebarOverlay: true,
@@ -503,6 +532,11 @@ const DEFAULTS: Settings = {
   spotIndexTerminals: true,
   spotSearchAllProjects: false,
   spotRetentionDays: 0,
+  clipboardHistory: false,
+  clipboardPersist: true,
+  clipboardKeep: 200,
+  clipboardRetentionDays: 0,
+  clipboardSkipSecrets: true,
   dictationHotkey: DEFAULT_DICTATION_HOTKEY,
   dictationTriggerMode: "combo",
   dictationModKey: DEFAULT_DICTATION_MOD_KEY,
@@ -515,6 +549,8 @@ const DEFAULTS: Settings = {
   remoteReach: "local",
   remoteTunnelProvider: "cloudflare",
   browserEngine: "webview",
+  chromiumPath: "",
+  stagehandEnabled: true,
   previewCaptureMode: "visible",
   openLinksInApp: true,
   workspaceBasePort: 5173,

@@ -136,6 +136,7 @@ export interface AgentAction {
     | "show_diff"
     | "notify"
     | "job_done"
+    | "task_named"
     | "close_session";
   route: string;
   dir?: string;
@@ -152,6 +153,14 @@ export interface AgentAction {
   /** job_done: how the micro-task ended and its one-line summary. */
   status?: "done" | "blocked";
   summary?: string;
+  /** job_done: what the agent understood it was asked for. */
+  asked?: string;
+  /** job_done / task_named: what the agent calls this run. Straight from the
+   *  model and clamped where it is read (taskIdentity.ts) — nothing here has
+   *  been checked for length, for being one glyph, or for being a string. */
+  title?: string;
+  icon?: string;
+  tags?: unknown;
 }
 export const onAgentAction = (
   cb: (a: AgentAction) => void,
@@ -387,6 +396,87 @@ export const browserHere = (tabId: string) =>
 /** Wipe the shared browser profile — cookies, storage, caches, every site. */
 export const browserClearData = () => invoke<void>("browser_clear_data");
 
+// ---------- Embedded browser (chromium engine) ----------
+//
+// A browser the user already installed, driven over CDP. Same op vocabulary as
+// the webview engine — the page-side picker is identical, so only the transport
+// differs — which is why these mirror the shapes above rather than inventing
+// new ones.
+
+export interface DetectedBrowser {
+  name: string;
+  path: string;
+}
+
+/** Chromium-family browsers found on this machine, most preferred first.
+ *  Empty is the normal answer on a machine with only Safari. */
+export const chromiumDetect = () =>
+  invoke<DetectedBrowser[]>("chromium_detect").catch(() => [] as DetectedBrowser[]);
+
+/** Launch (or reuse) the browser and open a tab in it. `exe` is the binary the
+ *  user picked or that detection found. */
+export const chromiumOpen = (exe: string, tabId: string, url: string) =>
+  invoke<void>("chromium_open", { exe, tabId, url });
+
+export const chromiumNavigate = (tabId: string, url: string) =>
+  invoke<void>("chromium_navigate", { tabId, url });
+
+export const chromiumRunOp = (tabId: string, op: Record<string, unknown>) =>
+  invoke<BrowserOpAck | null>("chromium_run_op", { tabId, op });
+
+export const chromiumCommand = (tabId: string, message: Record<string, unknown>) =>
+  invoke<void>("chromium_command", { tabId, message });
+
+/** Queued page events. The webview engine gets these pushed by a doorbell it
+ *  can hook; a browser we do not host has no such hook, so this is pulled. */
+export const chromiumDrain = (tabId: string) =>
+  invoke<unknown[] | null>("chromium_drain", { tabId });
+
+export const chromiumHere = (tabId: string) =>
+  invoke<{ url: string; title: string } | null>("chromium_here", { tabId });
+
+export const chromiumClose = (tabId: string) =>
+  invoke<void>("chromium_close", { tabId }).catch(() => {});
+
+/** Start or resize the frame stream feeding a tab's pane. The browser runs
+ *  headless, so this stream IS the page as far as anyone can see it. */
+export const chromiumStartCast = (tabId: string, width: number, height: number) =>
+  invoke<void>("chromium_start_cast", { tabId, width, height });
+
+/** Stop streaming. Frames for a pane nobody is looking at are pure cost. */
+export const chromiumStopCast = (tabId: string) =>
+  invoke<void>("chromium_stop_cast", { tabId }).catch(() => {});
+
+/** A full-quality PNG of a headless Chromium page. Unlike the WebKit engines'
+ *  capture this renders the page again rather than photographing a view, so it
+ *  works on a background tab and owes nothing to the lossy cast stream. */
+export const chromiumCapture = (
+  tabId: string,
+  clip?: [number, number, number, number],
+) => invoke<string>("chromium_capture", { tabId, clip: clip ?? null });
+
+/** The page's viewport, for mapping a pane click back to a page point. */
+export const chromiumMetrics = (tabId: string) =>
+  invoke<{ w: number; h: number } | null>("chromium_metrics", { tabId }).catch(() => null);
+
+/** Whether a Node runtime exists to run Stagehand in. Canopy bundles none. */
+export const stagehandNodeAvailable = () =>
+  invoke<boolean>("stagehand_node_available").catch(() => false);
+
+/** Start the model bridge — a loopback OpenAI-shaped endpoint that is really
+ *  the user's own configured CLI. What comes back is what Stagehand takes as
+ *  its baseURL and apiKey, so it never needs a real API key. */
+export const stagehandBridge = (argv: string[]) =>
+  invoke<{ base_url: string; token: string }>("stagehand_bridge", { argv });
+
+/** A painted frame from a headless Chromium tab, as a data URL. */
+export const onChromiumFrame = (fn: (e: { tabId: string; frame: string }) => void) =>
+  listen<{ tabId: string; frame: string }>("chromium:frame", (e) => fn(e.payload));
+
+/** The page navigated itself — the URL bar can't see what it didn't cause. */
+export const onChromiumNav = (fn: (e: { tabId: string; url: string }) => void) =>
+  listen<{ tabId: string; url: string }>("chromium:nav", (e) => fn(e.payload));
+
 /** Messages a page pushed up: agent-op results, annotations, in-page
  *  navigations, the ready announcement after every load. */
 export interface BrowserEvents {
@@ -541,6 +631,8 @@ export interface SpotIngestReport {
   terminals: number;
   /** Research entries in the index after this call. */
   research: number;
+  /** Notes in the index after this call. */
+  notes: number;
   /** Documents dropped: vanished files, disabled agents, retention. */
   pruned: number;
 }
@@ -585,6 +677,88 @@ export const spotSearch = (
 
 /** What the index holds right now (Settings → SpotSearch). */
 export const spotIndexStats = () => invoke<SpotIndexStats>("spot_index_stats");
+
+// ---------- Clipboard history ----------
+//
+// Capture is entirely a backend concern (src-tauri/src/clipboard.rs): WKWebView
+// cannot poll `navigator.clipboard.readText`, so there is no frontend half of
+// it to write. This side declares the rules, lists what was kept, and asks for
+// one clip in full when the user picks it.
+
+export interface Clip {
+  id: number;
+  /** Unix seconds. */
+  ts: number;
+  /** One collapsed line. The whole clip is `clipboardRead(id)`. */
+  preview: string;
+  chars: number;
+  lines: number;
+  /** Project that was open when it was copied, "" when none was. */
+  project: string;
+}
+
+export interface ClipboardStatus {
+  supported: boolean;
+  watching: boolean;
+  persisted: boolean;
+  /** macOS 15+ pasteboard access state: "default" | "ask" | "allow" | "deny",
+   *  or "" on an OS without the API. */
+  access: string;
+  clips: number;
+  bytes: number;
+  skipped_secrets: number;
+  skipped_large: number;
+  skipped_concealed: number;
+}
+
+export interface ClipboardWatchOptions {
+  enabled: boolean;
+  /** False keeps the history in memory only — and deletes the file. */
+  persist: boolean;
+  keep: number;
+  retentionDays: number;
+  skipSecrets: boolean;
+  /** Active project id, stamped onto each clip. "" when none is open. */
+  project: string;
+}
+
+/** Declare whether to watch and under what rules. Idempotent — called on launch
+ *  and whenever the settings or the active project change. */
+export const clipboardWatchSet = (o: ClipboardWatchOptions) =>
+  invoke<void>("clipboard_watch_set", {
+    enabled: o.enabled,
+    persist: o.persist,
+    keep: o.keep,
+    retentionDays: o.retentionDays,
+    skipSecrets: o.skipSecrets,
+    project: o.project,
+  });
+
+export const clipboardRecent = (limit?: number) =>
+  invoke<Clip[]>("clipboard_recent", { limit });
+
+/** One clip in full — the only call that returns whole clip text. */
+export const clipboardRead = (id: number) =>
+  invoke<string>("clipboard_read", { id });
+
+export const clipboardForget = (id: number) =>
+  invoke<void>("clipboard_forget", { id });
+
+export const clipboardClear = () => invoke<void>("clipboard_clear");
+
+export const clipboardStatus = () =>
+  invoke<ClipboardStatus>("clipboard_status");
+
+/** A clip was captured. Carries no payload: the list is one cheap call away,
+ *  and shipping clip text on an app-wide event is the one thing this feature
+ *  must not do casually. */
+export const onClipboardChanged = (cb: () => void): Promise<UnlistenFn> =>
+  listen("clipboard:changed", () => cb());
+
+/** The user told macOS to always deny this app the pasteboard, so the watcher
+ *  stopped itself. */
+export const onClipboardBlocked = (cb: () => void): Promise<UnlistenFn> =>
+  listen("clipboard:blocked", () => cb());
 
 // ---------- Credential vault ----------
 //
@@ -856,6 +1030,200 @@ export const researchForFile = (projectId: string, path: string) =>
 
 export const researchDelete = (projectId: string, id: string) =>
   invoke<void>("research_delete", { projectId, id });
+
+// ---------- Notes (the scratchpad) ----------
+//
+// Scoped to one project exactly as research is, and for the same reason: a note
+// is about a codebase, and a list that mixed projects would answer "what should
+// I do here?" with everything you have ever thought. The store is Rust
+// (src-tauri/src/notes.rs) and is the only authority.
+
+export type NoteStatus =
+  | "ideation"
+  | "ready"
+  | "doing"
+  | "done"
+  | "parked"
+  | "archived";
+
+export interface NotePrLink {
+  repo: string;
+  number: number;
+  url: string;
+  /** "open" | "merged" | "closed" — a linked PR reaching "merged" is what moves
+   *  a note to `done` without anyone asserting it. */
+  state: string;
+}
+
+/** A file a note is about. `rev` is the commit it was captured at, so a stale
+ *  reference can say so instead of quietly showing you something else. */
+export interface NoteFileRef {
+  path: string;
+  start_line?: number | null;
+  end_line?: number | null;
+  rev: string;
+  /** Relative path under `attachments/` holding the frozen lines, if any. */
+  snapshot?: string | null;
+}
+
+export interface NoteLinks {
+  prs: NotePrLink[];
+  /** Research entry ids started from this note. */
+  research: string[];
+  /** TaskRun ids (taskHistory.ts) launched from this note. */
+  task_runs: string[];
+  branches: string[];
+  files: NoteFileRef[];
+}
+
+export interface NoteAttachment {
+  /** Relative to the note directory, always under `attachments/`. */
+  file: string;
+  /** "image" | "artifact". */
+  kind: string;
+  title: string;
+  origin: string;
+  bytes: number;
+}
+
+export interface NoteHistory {
+  at: number;
+  from: string;
+  to: string;
+  by: string;
+  note: string;
+}
+
+export interface NoteSummary {
+  id: string;
+  title: string;
+  status: NoteStatus;
+  /** The opening of the body, headings skipped — what a row shows under the
+   *  title. */
+  preview: string;
+  tags: string[];
+  created_at: number;
+  updated_at: number;
+  attachment_count: number;
+  image_count: number;
+  file_count: number;
+  pr_count: number;
+  research_count: number;
+}
+
+export interface NoteDetail extends NoteSummary {
+  body: string;
+  /** What the user was looking at when they captured it, as
+   *  `capturePageContext` composed it. Verbatim — it describes a moment. */
+  context: string;
+  /** Which surface captured it: "spot", "menu", "panel". */
+  origin: string;
+  attachments: NoteAttachment[];
+  links: NoteLinks;
+  history: NoteHistory[];
+  /** Absolute path to the note directory — what an agent handed the note reads
+   *  its attachments from. */
+  dir: string;
+}
+
+/** Without `status`, the archived are hidden: the scratchpad is a worklist. */
+export const notesList = (
+  projectId: string,
+  status?: NoteStatus[],
+  limit?: number,
+) => invoke<NoteSummary[]>("notes_list", { projectId, status, limit });
+
+export const notesGet = (projectId: string, id: string) =>
+  invoke<NoteDetail>("notes_get", { projectId, id });
+
+export interface NoteCreateArgs {
+  projectId: string;
+  projectName?: string;
+  roots?: string[];
+  /** May be the whole thought — a paragraph is cut for the title and kept in
+   *  full as the body rather than being refused. */
+  title: string;
+  body?: string;
+  tags?: string[];
+  context?: string;
+  origin?: string;
+  cwd?: string;
+}
+
+export const notesCreate = (args: NoteCreateArgs) =>
+  invoke<NoteSummary>("notes_create", { ...args });
+
+export interface NoteUpdateArgs {
+  projectId: string;
+  id: string;
+  title?: string;
+  body?: string;
+  append?: string;
+  tags?: string[];
+}
+
+export const notesUpdate = (args: NoteUpdateArgs) =>
+  invoke<NoteSummary>("notes_update", { ...args });
+
+/** `data` is base64 for kind "image", plain text otherwise. */
+export const notesAddAttachment = (args: {
+  projectId: string;
+  id: string;
+  kind: "image" | "artifact";
+  title: string;
+  data: string;
+  origin?: string;
+  ext?: string;
+}) => invoke<NoteAttachment>("notes_add_attachment", { ...args });
+
+export const notesSetStatus = (
+  projectId: string,
+  id: string,
+  status: NoteStatus,
+  by?: string,
+  note?: string,
+) => invoke<NoteSummary>("notes_set_status", { projectId, id, status, by, note });
+
+export interface NoteLinkArgs {
+  projectId: string;
+  id: string;
+  pr?: NotePrLink;
+  research?: string;
+  taskRun?: string;
+  branch?: string;
+  file?: NoteFileRef;
+}
+
+export const notesLink = (args: NoteLinkArgs) =>
+  invoke<NoteDetail>("notes_link", { ...args });
+
+/** Read a text attachment. The store lives outside every registered workspace
+ *  root, so fs_read_file cannot reach it — this is the only reader. */
+export const notesReadFile = (projectId: string, id: string, path: string) =>
+  invoke<string>("notes_read_file", { projectId, id, path });
+
+/** Read an image attachment as base64, for a `data:` URL in the detail tab. */
+export const notesReadImage = (projectId: string, id: string, path: string) =>
+  invoke<string>("notes_read_image", { projectId, id, path });
+
+/** Where a note lives — what an agent picking it up is pointed at. */
+export const notesDir = (projectId: string, id: string) =>
+  invoke<string>("notes_dir", { projectId, id });
+
+/** Copy a file already on disk into the note — a pasted image the palette
+ *  staged under `.canopy/spot/`, or a file the user attached. Copied into the
+ *  note's own directory because the source is inside the repo and dies with a
+ *  worktree; the note's directory does not. */
+export const notesAttachFile = (args: {
+  projectId: string;
+  id: string;
+  path: string;
+  title?: string;
+  kind?: "image" | "artifact";
+}) => invoke<NoteAttachment>("notes_attach_file", { ...args });
+
+export const notesDelete = (projectId: string, id: string) =>
+  invoke<void>("notes_delete", { projectId, id });
 
 /** One PR's state — "OPEN", "MERGED" or "CLOSED". The watcher only holds open
  *  PRs, so this is the only way to tell a merge from a close. */

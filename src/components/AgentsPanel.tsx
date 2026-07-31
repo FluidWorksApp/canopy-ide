@@ -8,7 +8,9 @@ import { AGENT_CLIS } from "../projects";
 import { identifyAgent, observeForLearning } from "../agentIdentity";
 import { agentDisplayName, type TabName } from "../agentDisplayName";
 import { effectiveState, silenceLabel } from "../agentState";
+import { ashFor } from "../ash";
 import { forgetSessions, markRestored, restorableFrom } from "../restorable";
+import { Mascot } from "./Mascot";
 import { AgentRuntime } from "./AgentRuntime";
 import {
   AgentIcon,
@@ -23,6 +25,7 @@ import {
 import { useEscape } from "../useEscape";
 import type { PendingItem } from "../notifications";
 import { Button } from "./ui";
+import { format, matchesModifierClick } from "../shortcuts";
 
 /** Colour + label for the lifecycle dot on a running-agent row. `working` is
  *  the only state that pulses — a moving dot in a column of still ones is
@@ -110,7 +113,8 @@ interface AgentsPanelProps {
    *  for numbered-prompt CLIs (claude/codex). */
   onRespond?: (item: PendingItem, decision: "approve" | "deny") => void;
   onJumpToTerminal?: (item: PendingItem) => void;
-  /** Open a detected server URL in the in-app preview tab (⌘-click on the
+  /** Open a detected server URL in the in-app preview tab (Cmd-click — Ctrl
+   *  off a Mac — on the
    *  chip still opens the system browser). */
   onPreviewUrl?: (url: string) => void;
   /** Focus the tab a running session is in. Separate from onJumpToTerminal:
@@ -728,7 +732,19 @@ export function AgentsPanel({
         <div className="agent-main">
           {/* Lifecycle at a glance: green pulse = working, amber = waiting on
               you, grey = idle, faded = ended. */}
-          {st && <span className={`agent-state-dot ${st.cls}`} title={stTitle} />}
+          {st &&
+            (() => {
+              const look = ashFor(shown);
+              return (
+                <Mascot
+                  state={look.state}
+                  tone={look.tone}
+                  size={16}
+                  className="agent-state-ash"
+                  title={stTitle}
+                />
+              );
+            })()}
           {/* The CLI's own mark, not its name in bold — the panel is a column
               of near-identical rows and a glyph reads faster than a word. */}
           {/* No id means we can see the program but cannot name whose it
@@ -813,12 +829,14 @@ export function AgentsPanel({
               className="agent-port"
               title={
                 onPreviewUrl
-                  ? `Preview http://localhost:${p} in Canopy — ⌘-click for your browser`
+                  ? `Preview http://localhost:${p} in Canopy — ${format(
+                      "open-external",
+                    )}-click for your browser`
                   : `Open http://localhost:${p} in your browser`
               }
               onClick={(e) => {
                 e.stopPropagation();
-                if (onPreviewUrl && !e.metaKey && !e.ctrlKey) {
+                if (onPreviewUrl && !matchesModifierClick(e, "open-external")) {
                   onPreviewUrl(`http://localhost:${p}`);
                 } else {
                   void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
@@ -980,7 +998,10 @@ export function AgentsPanel({
                 </>
               ) : (
                 <>
-                  <div className="pending-q-text">🔔 {item.message}</div>
+                  <div className="pending-q-text">
+                    <Mascot state="needs" size={16} className="pending-ash" />
+                    {item.message}
+                  </div>
                   {/* Respond without leaving the panel: Allow types the accept
                       key, Deny sends Escape. Only for CLIs whose prompt we can
                       drive by keystroke — the rest fall back to the terminal. */}
@@ -1032,7 +1053,10 @@ export function AgentsPanel({
               onClick={() => onJumpToTerminal?.(item)}
               title="Open the terminal running this agent"
             >
-              <div className="pending-q-text">✓ {item.message}</div>
+              <div className="pending-q-text">
+                <Mascot state="done" size={16} className="pending-ash" />
+                {item.message}
+              </div>
               <div className="pending-footer">
                 <span className="event-time">{new Date(item.ts).toLocaleTimeString()}</span>
                 <span className="pending-jump">open terminal ➜</span>
@@ -1228,9 +1252,12 @@ export function AgentsPanel({
       )}
 
       {agentSessions.length === 0 ? (
-        <div className="tree-empty">
-          No agents running. Launch <code>claude</code>, <code>codex</code>, etc. from the ＋
-          menu or by right-clicking a component.
+        <div className="tree-empty ash-scene">
+          <Mascot state="sleeping" size={64} />
+          <div>
+            No agents running. Launch <code>claude</code>, <code>codex</code>, etc. from the ＋
+            menu or by right-clicking a component.
+          </div>
         </div>
       ) : (
         agentSessions.map(sessionRow)

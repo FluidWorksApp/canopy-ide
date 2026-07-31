@@ -4,6 +4,7 @@
 // layers by z-index. Dismiss via the button, Esc, or clicking the dimmed area.
 import { useCallback, useLayoutEffect, useState } from "react";
 import { useEscape } from "../useEscape";
+import { Mascot } from "./Mascot";
 import { Button } from "./ui";
 
 interface CoachmarkProps {
@@ -71,7 +72,10 @@ export function Coachmark({ targetSelector, title, body, onDismiss }: CoachmarkP
         aria-label={title}
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <div className="coach-title">{title}</div>
+        <div className="coach-title">
+          <Mascot state="explaining" size={26} className="coach-ash" />
+          {title}
+        </div>
         <p className="coach-body">{body}</p>
         <div className="coach-actions">
           <Button variant="accent" onClick={onDismiss} autoFocus>

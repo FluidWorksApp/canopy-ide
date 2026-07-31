@@ -112,13 +112,27 @@ describe("overlaps", () => {
 });
 
 describe("chooseEngine", () => {
+  const all = { webview: true, chromium: true };
+  const none = { webview: false, chromium: false };
+
   it("honours the setting where the platform can", () => {
-    expect(chooseEngine("webview", true)).toBe("webview");
-    expect(chooseEngine("proxy", true)).toBe("proxy");
+    expect(chooseEngine("webview", all)).toBe("webview");
+    expect(chooseEngine("proxy", all)).toBe("proxy");
+    expect(chooseEngine("chromium", all)).toBe("chromium");
   });
 
   it("falls back to the proxy rather than showing an empty pane", () => {
-    expect(chooseEngine("webview", false)).toBe("proxy");
-    expect(chooseEngine("proxy", false)).toBe("proxy");
+    expect(chooseEngine("webview", none)).toBe("proxy");
+    expect(chooseEngine("proxy", none)).toBe("proxy");
+    expect(chooseEngine("chromium", none)).toBe("proxy");
+  });
+
+  // The two capabilities are independent: a Linux box can have Chrome and no
+  // child webview, and a Mac can have the webview and no Chrome installed.
+  it("vetoes each engine on its own capability", () => {
+    expect(chooseEngine("chromium", { webview: true, chromium: false })).toBe("proxy");
+    expect(chooseEngine("chromium", { webview: false, chromium: true })).toBe("chromium");
+    expect(chooseEngine("webview", { webview: false, chromium: true })).toBe("proxy");
+    expect(chooseEngine("webview", { webview: true, chromium: false })).toBe("webview");
   });
 });
