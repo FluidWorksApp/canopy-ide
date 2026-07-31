@@ -51,7 +51,10 @@ import {
 } from "./attention";
 import { useAttention } from "./useAttention";
 import { NotificationCenter } from "./components/NotificationCenter";
-import { runUiOp } from "./agentOps";
+import { runUiOp, type CompanionOps, type WorkspaceProject } from "./agentOps";
+import { workspaceAgents, workspaceGit, workspaceSearch } from "./companionWorkspace";
+import { companionName } from "./companion";
+import type { CompanionProposal } from "./companionSession";
 import { getSettings, subscribeSettings, THEME_CHANGE_EVENT } from "./settings";
 import { useTabDrag } from "./tabDrag";
 import * as prWatch from "./prWatchStore";
@@ -1766,6 +1769,13 @@ export default function App() {
                 });
                 setAsk({ id: op.id, attentionId, question, options, resolve });
               }),
+            // The companion's cross-project handlers, read through a ref so
+            // this long-lived listener always calls the current ones without
+            // re-subscribing on every workspace change. Absent when the
+            // companion is off, which is what makes the workspace ops fail
+            // honestly for a coding agent instead of answering for one project
+            // as though it were all of them.
+            ...(companionOpsRef.current ?? {}),
             // The page an agent's browser ops are driving, for the vault ops.
             // The tab id comes from the view snapshots; the URL comes from the
             // page itself, because a redirect (every login flow has one) moves
@@ -2017,6 +2027,54 @@ export default function App() {
     subscribeSettings,
     () => getSettings().companionEnabled,
     () => false,
+  );
+  /** A proposal waiting on the user, rendered as a chip in the companion's
+   *  chat. One at a time: the agent is blocked on the answer, so it cannot be
+   *  asking two things at once. */
+  const [proposal, setProposal] = useState<CompanionProposal | null>(null);
+  const companionOpsRef = useRef<CompanionOps | null>(null);
+  companionOpsRef.current = useMemo(
+    () =>
+      companionOn
+        ? {
+            workspace: (): WorkspaceProject[] => companionProjects,
+            confirm: (p: Parameters<CompanionOps["confirm"]>[0]) =>
+              new Promise<{ accepted: boolean; note?: string }>((resolve) => {
+                // Posted to the attention channel as well as shown, for the
+                // same reason an agent's question is: the companion may be
+                // asking about a project the user cannot see, and a chip that
+                // exists only while they are looking at Canopy is not a
+                // question that was actually asked.
+                const attentionId = postAttention({
+                  kind: "question",
+                  tone: "info",
+                  title: p.action,
+                  body: p.project
+                    ? `${companionName()} wants to act in ${p.project}`
+                    : `${companionName()} is asking`,
+                  source: "agent",
+                });
+                setProposal({ ...p, attentionId, resolve });
+              }),
+            openProject: async (name: string, why?: string | null) => {
+              const target = wsRef.current.projects.find(
+                (p) => p.name.toLowerCase() === name.trim().toLowerCase(),
+              );
+              if (!target) throw new Error(`no project called "${name}"`);
+              await openProjectRef.current?.(target.id);
+              if (why) notify(`${companionName()}: ${why}`, "info");
+              return target.name;
+            },
+            workspaceGit: (project: string | null | undefined) =>
+              workspaceGit(companionProjects, project),
+            agents: (project: string | null | undefined) =>
+              workspaceAgents(companionProjects, project),
+            search: (query: string, limit: number) => workspaceSearch(query, limit),
+          }
+        : null,
+    // `companionProjects` is the only live input; everything else is a ref or
+    // a module function.
+    [companionOn, companionProjects, notify],
   );
   // Start and stop with the setting, and restart when the workspace changes
   // shape — the brief names every project and the session is given every root,
@@ -2350,6 +2408,18 @@ export default function App() {
           notices={toasts}
           onDismissNotice={dismissToast}
           onFollowNotice={(item) => void followAttention(item)}
+          proposal={proposal}
+          onAnswerProposal={(accepted) => {
+            if (!proposal) return;
+            // Answering retires the attention item too. Dismissing the *card*
+            // never did — the question was outstanding until answered, which
+            // is exactly the distinction attention.ts draws.
+            if (proposal.attentionId) {
+              resolveAttention(proposal.attentionId, accepted ? "answered" : "dismissed");
+            }
+            proposal.resolve({ accepted });
+            setProposal(null);
+          }}
         />
       )}
 

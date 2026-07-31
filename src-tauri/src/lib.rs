@@ -474,6 +474,8 @@ pub fn run() {
             companion::companion_write,
             companion::companion_kill,
             companion::companion_status,
+            companion::companion_store_read,
+            companion::companion_store_write,
             pty::pty_spawn,
             pty::pty_spawn_detached,
             pty::pty_output,

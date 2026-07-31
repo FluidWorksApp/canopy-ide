@@ -127,13 +127,11 @@ export const MUTATING_TOOLS: string[] = [
  *  the agent can reason its way past, and this is the wrong agent to discover
  *  that on. So:
  *
- *    read     — no mutating tool at all.
- *    confirm  — no mutating tool either, *for now*: the confirm chip that would
- *               put each call to the user (`canopy_confirm`) is not built yet,
- *               and shipping the tools without the gate would mean the setting
- *               said "ask first" while the companion acted freely. Withholding
- *               under-delivers; acting silently would be a lie. When the gate
- *               lands this becomes the set minus nothing, routed through it.
+ *    read     — no mutating tool at all. Absent beats instructed.
+ *    confirm  — the tools stay, and are gated on the way through instead
+ *               (`companion_gate` in canopy_hook.rs). The confirmation happens
+ *               whether or not the agent thought to ask, so withholding them
+ *               would only mean the companion could not act at all.
  *    auto     — everything, which is what the user asked for.
  */
 export function companionToolNames(
@@ -141,7 +139,7 @@ export function companionToolNames(
   authority: "read" | "confirm" | "auto",
 ): string[] {
   const off = new Set(disabled);
-  const mutatingAllowed = authority === "auto";
+  const mutatingAllowed = authority !== "read";
   return [...AGENT_TOOL_GROUPS.flatMap((g) => g.tools.map((t) => t.name)), ...COMPANION_TOOLS]
     // The companion's own tools are not in Settings → Agents (that screen is
     // about what coding agents may do), so only the shared ones can be off.

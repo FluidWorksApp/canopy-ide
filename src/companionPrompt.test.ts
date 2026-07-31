@@ -64,10 +64,20 @@ describe("the brief", () => {
   });
 
   it("tells ask-first mode to call the tool rather than ask in prose", () => {
-    // Otherwise every action costs two turns: the agent asks, the user says
-    // yes, and only then does the confirm chip appear.
+    // Otherwise every action costs two turns: the agent asks in prose, the
+    // user says yes, and only then does the confirm chip appear — asking the
+    // same question twice.
     const p = buildCompanionPrompt({ ...base, authority: "confirm" });
-    expect(p).toContain("call it, and Canopy will do the asking");
+    expect(p).toContain("do NOT ask permission in prose first");
+    expect(p).toContain("call the tool; the user will be asked");
+  });
+
+  it("says the gate is automatic, not something the agent must remember", () => {
+    // The brief has to match how it actually works (`companion_gate` sits in
+    // the call path), or an agent that forgets to ask will believe it acted
+    // without permission — and one that does ask will double-prompt.
+    const p = buildCompanionPrompt({ ...base, authority: "confirm" });
+    expect(p).toContain("not because you remembered");
   });
 
   it("forbids claiming an action it has not seen land", () => {

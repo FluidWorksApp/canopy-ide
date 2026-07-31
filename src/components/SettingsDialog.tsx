@@ -30,6 +30,7 @@ import {
   tierNote,
 } from "../companion";
 import { clearCompanionView, clearRun } from "../companionSession";
+import { forgetAllMemories } from "../companionMemory";
 import { MODEL_SWITCH } from "../agentModels";
 import { Mascot } from "./Mascot";
 import { Button, Checkbox, Field, Radio, Row, Segmented, Select, Stepper, Switch, TextInput } from "./ui";
@@ -301,7 +302,7 @@ function CompanionSettings({
 
           <Item
             name="Memory"
-            desc="Its conversation carries across restarts — that is how it knows you. Starting over is not undoable."
+            desc="Its conversation and what it has learned about you both carry across restarts — that is how it knows you. Starting over forgets both, and is not undoable."
           >
             <Button
               onClick={() => {
@@ -309,6 +310,10 @@ function CompanionSettings({
                 forgetCompanionSession(chosen.id);
                 clearRun(chosen.id);
                 clearCompanionView();
+                // Its memory goes too. Clearing only the conversation would
+                // leave a "new" companion that still knows you, which is not
+                // what starting over means.
+                void forgetAllMemories();
               }}
               disabled={!chosen}
             >

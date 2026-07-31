@@ -25,6 +25,7 @@ import {
   companionState,
   sendToCompanion,
   subscribeCompanion,
+  type CompanionProposal,
   type CompanionState,
 } from "../companionSession";
 import { ashStateFor, toastMs, type AttentionItem } from "../attention";
@@ -50,6 +51,9 @@ interface CompanionProps {
   notices: AttentionItem[];
   onDismissNotice: (id: string) => void;
   onFollowNotice: (item: AttentionItem) => void;
+  /** An action the companion is blocked on. */
+  proposal: CompanionProposal | null;
+  onAnswerProposal: (accepted: boolean) => void;
 }
 
 function useViewport() {
@@ -85,7 +89,15 @@ function useSpot(): [CompanionSpot, (next: CompanionSpot) => void] {
 /** The face. The companion wears what it is doing, and — when something is
  *  waiting — what the notice needs, because the notice is being delivered *by*
  *  it and a cheerful idle face over a failure reads as a bug. */
-function faceFor(state: CompanionState, notice: AttentionItem | undefined): AshState {
+function faceFor(
+  state: CompanionState,
+  notice: AttentionItem | undefined,
+  waiting: boolean,
+): AshState {
+  // Waiting on an answer outranks everything: the agent is blocked, and a
+  // thinking face over a question that needs answering is the one state that
+  // actively misleads.
+  if (waiting) return "needs";
   if (notice) return ashStateFor(notice);
   switch (state.status) {
     case "working":
@@ -99,7 +111,13 @@ function faceFor(state: CompanionState, notice: AttentionItem | undefined): AshS
   }
 }
 
-export function Companion({ notices, onDismissNotice, onFollowNotice }: CompanionProps) {
+export function Companion({
+  notices,
+  onDismissNotice,
+  onFollowNotice,
+  proposal,
+  onAnswerProposal,
+}: CompanionProps) {
   const state = useSyncExternalStore(subscribeCompanion, companionState, () => companionState());
   const view = useViewport();
   const [spot, saveSpot] = useSpot();
@@ -108,6 +126,10 @@ export function Companion({ notices, onDismissNotice, onFollowNotice }: Companio
   // drag does not put a localStorage write on every pointermove.
   const [dragSpot, setDragSpot] = useState<CompanionSpot | null>(null);
   const drag = useRef<{ dx: number; dy: number; moved: boolean } | null>(null);
+  // Read in the pointer handler, which is memoised on inputs that must not
+  // include a proposal arriving mid-drag.
+  const proposalRef = useRef<CompanionProposal | null>(null);
+  proposalRef.current = proposal;
   const name = companionName();
 
   const at = spotToPixels(dragSpot ?? spot, view, MASCOT);
@@ -176,22 +198,33 @@ export function Companion({ notices, onDismissNotice, onFollowNotice }: Companio
       }
       // A click with a notice showing follows the notice rather than opening
       // the chat: the companion just told them something, and the obvious
-      // meaning of clicking it is "take me there".
-      if (notice) onFollowNotice(notice);
+      // meaning of clicking it is "take me there". A pending proposal beats
+      // that — the panel holding the question is where the click should land.
+      if (proposalRef.current) setOpen(true);
+      else if (notice) onFollowNotice(notice);
       else setOpen((v) => !v);
     },
     [saveSpot, view, notice, onFollowNotice],
   );
 
-  // Esc closes the panel, matching every other overlay in the app.
+  // A proposal opens the panel on its own. The companion is blocked on the
+  // answer, and a question asked into a closed panel is a companion that
+  // appears to have silently stopped working.
   useEffect(() => {
-    if (!open) return;
+    if (proposal) setOpen(true);
+  }, [proposal]);
+
+  // Esc closes the panel, matching every other overlay in the app. Never while
+  // a proposal is up: dismissing the surface is not answering the question, and
+  // the agent would still be waiting.
+  useEffect(() => {
+    if (!open || proposal) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setOpen(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open]);
+  }, [open, proposal]);
 
   const dragging = Boolean(dragSpot);
 
@@ -216,7 +249,7 @@ export function Companion({ notices, onDismissNotice, onFollowNotice }: Companio
         aria-expanded={open}
         title={dragging ? undefined : `Ask ${name}`}
       >
-        <Mascot state={faceFor(state, notice)} size={MASCOT} />
+        <Mascot state={faceFor(state, notice, Boolean(proposal))} size={MASCOT} />
       </div>
 
       {/* The notice, delivered from wherever the companion is standing. Same
@@ -239,6 +272,8 @@ export function Companion({ notices, onDismissNotice, onFollowNotice }: Companio
           at={panel}
           width={PANEL_WIDTH}
           height={PANEL_HEIGHT}
+          proposal={proposal}
+          onAnswer={onAnswerProposal}
           onSend={(text) => void sendToCompanion(text)}
           onClose={() => setOpen(false)}
         />

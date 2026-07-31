@@ -30,7 +30,13 @@ const noop = () => {};
 
 function mount() {
   return render(
-    <Companion notices={[]} onDismissNotice={noop} onFollowNotice={noop} />,
+    <Companion
+      notices={[]}
+      onDismissNotice={noop}
+      onFollowNotice={noop}
+      proposal={null}
+      onAnswerProposal={noop}
+    />,
   );
 }
 

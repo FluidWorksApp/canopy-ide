@@ -55,6 +55,21 @@ export interface CompanionMessage {
   failed?: boolean;
 }
 
+/** Something the companion proposes to do, waiting on the user.
+ *
+ *  Held here rather than in the chat component because the agent is *blocked*
+ *  on it: closing the panel must not lose the question, and the mascot has to
+ *  be able to show that something is waiting even when nothing is open. */
+export interface CompanionProposal {
+  action: string;
+  project?: string | null;
+  detail?: string | null;
+  timeoutMs?: number | null;
+  /** The attention item raised alongside it, so answering can retire it. */
+  attentionId?: string;
+  resolve: (answer: { accepted: boolean; note?: string }) => void;
+}
+
 export interface CompanionState {
   status: CompanionStatus;
   messages: CompanionMessage[];

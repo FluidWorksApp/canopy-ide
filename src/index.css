@@ -19942,3 +19942,70 @@ a.btn-sm {
     animation: none;
   }
 }
+
+/* The confirm chip: the companion asking before it acts.
+   Inline in the chat, not a modal — this is asked several times an hour, and a
+   dialog over the whole window for "shall I start the dev server" is ceremony
+   the answer does not deserve. */
+
+.companion-ask {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 11px;
+  border: 1px solid var(--accent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.companion-ask-what {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.companion-ask-where {
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.companion-ask-where strong {
+  color: var(--text);
+}
+
+.companion-ask-detail {
+  margin-top: 2px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  word-break: break-all;
+}
+
+.companion-ask-buttons {
+  display: flex;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.companion-ask-yes,
+.companion-ask-no {
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.companion-ask-yes {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.companion-ask-no {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+}

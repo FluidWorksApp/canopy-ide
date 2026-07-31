@@ -10,11 +10,17 @@
 // companion is an answer, so tool calls are chips and prose is prose.
 
 import { useEffect, useRef, useState } from "react";
-import type { CompanionState } from "../companionSession";
+import type { CompanionProposal, CompanionState } from "../companionSession";
 import { Markdown } from "./Markdown";
 
 interface Props {
   state: CompanionState;
+  /** An action the companion is waiting on an answer for. Rendered inline
+   *  rather than as a dialog: it is part of the conversation, and a modal over
+   *  the whole window for "shall I start the dev server" is too much ceremony
+   *  for something asked several times an hour. */
+  proposal: CompanionProposal | null;
+  onAnswer: (accepted: boolean) => void;
   name: string;
   at: { left: number; top: number; side: "left" | "right" };
   width: number;
@@ -23,7 +29,17 @@ interface Props {
   onClose: () => void;
 }
 
-export function CompanionChat({ state, name, at, width, height, onSend, onClose }: Props) {
+export function CompanionChat({
+  state,
+  name,
+  at,
+  width,
+  height,
+  proposal,
+  onAnswer,
+  onSend,
+  onClose,
+}: Props) {
   const [draft, setDraft] = useState("");
   const log = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
@@ -41,7 +57,7 @@ export function CompanionChat({ state, name, at, width, height, onSend, onClose 
     if (!el) return;
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
     if (nearBottom) el.scrollTop = el.scrollHeight;
-  }, [state.messages]);
+  }, [state.messages, proposal]);
 
   const busy = state.status === "working";
   const canSend = draft.trim().length > 0 && !busy && state.status !== "failed";
@@ -110,6 +126,38 @@ export function CompanionChat({ state, name, at, width, height, onSend, onClose 
           </div>
         ))}
       </div>
+
+      {proposal && (
+        <div className="companion-ask" role="group" aria-label="Confirm an action">
+          <div className="companion-ask-what">{proposal.action}</div>
+          {/* The project is named every time. The companion acts across the
+              whole workspace, so "start the dev server" without saying where
+              is not a question the user can actually answer. */}
+          {proposal.project && (
+            <div className="companion-ask-where">
+              in <strong>{proposal.project}</strong>
+            </div>
+          )}
+          {proposal.detail && <div className="companion-ask-detail">{proposal.detail}</div>}
+          <div className="companion-ask-buttons">
+            <button
+              className="companion-ask-yes"
+              onClick={() => onAnswer(true)}
+              type="button"
+              autoFocus
+            >
+              Do it
+            </button>
+            <button
+              className="companion-ask-no"
+              onClick={() => onAnswer(false)}
+              type="button"
+            >
+              Not now
+            </button>
+          </div>
+        </div>
+      )}
 
       {state.error && <div className="companion-error">{state.error}</div>}
 

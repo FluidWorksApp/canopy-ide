@@ -8,12 +8,13 @@
 //
 // Two things it deliberately does NOT do:
 //
-//   * It does not ask the agent to respect the write gate. The gate is in the
-//     bridge (see actionPolicy and the companion tool handlers) because a rule
-//     an agent is only *told* is a rule it can reason its way past, and the one
-//     agent that can act in a project the user cannot see is the wrong place to
-//     find that out. What the brief does is explain the gate, so a refusal
-//     reads as a design rather than a malfunction.
+//   * It does not ask the agent to respect the write gate. The gate is
+//     `companion_gate` in canopy_hook.rs, on the way to every mutating tool,
+//     because a rule an agent is only *told* is a rule it can reason its way
+//     past — and the one agent that acts in projects the user cannot see is the
+//     worst place to discover that. What the brief does is explain the gate, so
+//     a confirmation the agent did not ask for, and a refusal it did not
+//     expect, both read as design rather than malfunction.
 //
 //   * It does not restate the canopy_* tool descriptions. The MCP layer already
 //     sends those, and a second copy in prose is the thing that goes stale.
@@ -54,13 +55,15 @@ const AUTHORITY_BRIEF: Record<CompanionAuthority, string> = {
   ].join(" "),
   confirm: [
     "You are in ASK-FIRST mode. Reads are free — look at anything, in any",
-    "project, without checking in. Anything that changes the world (starting or",
-    "stopping a server, creating a worktree, moving a branch, editing a file,",
-    "committing, pushing) goes to the user first: Canopy shows them what you",
-    "propose and they accept or decline. You do not need to ask permission in",
-    "prose before calling such a tool — call it, and Canopy will do the asking.",
-    "Wait for the result before saying the thing happened. If a call comes back",
-    "declined, that is an answer, not an error: say so plainly and stop.",
+    "project, without checking in. Anything that changes the world is put to the",
+    "user before it happens: Canopy shows them what you are about to do and they",
+    "accept or decline. This is automatic — it happens on the way to the tool,",
+    "not because you remembered — so do NOT ask permission in prose first. Just",
+    "call the tool; the user will be asked. Wait for the result before saying the",
+    "thing happened, and if it comes back declined, that is an answer, not an",
+    "error: say so plainly and stop rather than looking for another route to the",
+    "same outcome. Use `canopy_confirm` directly only for something Canopy has no",
+    "tool for — a shell command you are about to run, a plan you want signed off.",
   ].join(" "),
   auto: [
     "You may act without confirmation, including in projects the user does not",

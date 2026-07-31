@@ -43,14 +43,54 @@ describe("authority withholds rather than asks", () => {
     for (const name of MUTATING_TOOLS) expect(tools).not.toContain(name);
   });
 
-  it("withholds under ask-first too, while the confirm gate is unbuilt", () => {
-    // Deliberate and temporary: shipping the tools before `canopy_confirm`
-    // exists would make the setting say "ask first" while the companion acted
-    // freely. When the gate lands, this expectation flips — and it should only
-    // flip together with the gate.
+  it("keeps the tools under ask-first, because the gate is in the call path", () => {
+    // Withholding them here would only mean the companion could not act at
+    // all: `companion_gate` confirms on the way through, whether or not the
+    // agent thought to ask.
     const tools = companionToolNames([], "confirm");
-    for (const name of MUTATING_TOOLS) expect(tools).not.toContain(name);
+    for (const name of MUTATING_TOOLS) expect(tools).toContain(name);
     expect(COMPANION_TOOLS).toContain("canopy_confirm");
+  });
+
+  it("gates every mutating tool in the call path, not in the prompt", () => {
+    // The keystone. If this goes red, "ask first" has quietly become an
+    // instruction the agent may ignore rather than a gate it cannot pass.
+    expect(hook).toContain("fn companion_gate(");
+    // At the very top of dispatch, so no tool handler has to remember it and
+    // a tool added later is covered by being on the mutating list.
+    const dispatch = hook.slice(hook.indexOf("fn call_tool("));
+    const gate = dispatch.indexOf("companion_gate(name, args)");
+    const firstArm = dispatch.indexOf('"canopy_project"');
+    expect(gate).toBeGreaterThan(-1);
+    expect(gate).toBeLessThan(firstArm);
+  });
+
+  it("treats a missing or malformed answer as refusal, never as consent", () => {
+    // The one place failing closed matters more than failing usefully.
+    const gate = hook.slice(hook.indexOf("fn companion_gate("), hook.indexOf("fn call_tool("));
+    expect(gate).toContain(".unwrap_or(false)");
+    expect(gate).toContain("so it was not done");
+  });
+
+  it("describes the action from the arguments, not from the agent's words", () => {
+    // The value of the chip is showing what will happen, not what the agent
+    // says will happen — an agent that misunderstood its own task is exactly
+    // what this catches.
+    expect(hook).toContain("fn describe_action(");
+    const describe = hook.slice(
+      hook.indexOf("fn describe_action("),
+      hook.indexOf("fn companion_gate("),
+    );
+    expect(describe).toContain('"canopy_start_server"');
+    expect(describe).toContain('"canopy_browser_eval"');
+  });
+
+  it("still removes them entirely under answer-only", () => {
+    // Absent beats instructed: there is no gate to pass because there is no
+    // tool to call.
+    const rust = hook.slice(hook.indexOf("fn apply_companion_authority("));
+    expect(rust).toContain('!= "deny"');
+    expect(companionToolNames([], "read")).not.toContain("canopy_start_server");
   });
 
   it("gives an autonomous companion the lot", () => {

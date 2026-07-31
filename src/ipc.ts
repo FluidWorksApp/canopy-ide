@@ -244,7 +244,17 @@ export interface AgentUiOp {
     | "tickets"
     | "reviews"
     | "ask"
-    | "vault";
+    | "vault"
+    // The companion's cross-project ops. No coding agent can reach these —
+    // the sidecar refuses them outside a companion session (canopy_hook.rs).
+    | "workspace"
+    | "workspace_git"
+    | "workspace_agents"
+    | "workspace_search"
+    | "open_project"
+    | "confirm"
+    | "recall"
+    | "remember";
   route: string;
   path?: string | null;
   line?: number | null;
@@ -261,6 +271,20 @@ export interface AgentUiOp {
   /** diagnostics: how long the caller will hold. A hook firing after every
    *  edit can't sit through a cold server's first index. */
   waitMs?: number | null;
+  /** The companion's ops: which project, when scoped to one. */
+  project?: string | null;
+  /** confirm / ask: what it proposes, the specifics needed to judge it, and
+   *  how long the agent will hold its socket open waiting for a person. */
+  action?: string | null;
+  detail?: string | null;
+  timeoutMs?: number | null;
+  /** open_project: why the user's window just moved. */
+  why?: string | null;
+  limit?: number | null;
+  /** remember: the fact, what it concerns, and whether this retracts one. */
+  fact?: string | null;
+  about?: string | null;
+  forget?: boolean | null;
 }
 export const onAgentUi = (cb: (op: AgentUiOp) => void): Promise<UnlistenFn> =>
   listen<AgentUiOp>("agent:ui", (event) => cb(event.payload));
@@ -2979,6 +3003,15 @@ export const companionWrite = (line: string) =>
   invoke<void>("companion_write", { line });
 
 export const companionKill = () => invoke<void>("companion_kill");
+
+/** The companion's own corner of `~/.canopy`. Scoped to one directory on the
+ *  Rust side — deliberately not a general file read/write, which would hand the
+ *  webview an arbitrary-write primitive for the sake of one JSON file. */
+export const canopyStoreRead = (name: string) =>
+  invoke<string | null>("companion_store_read", { name });
+
+export const canopyStoreWrite = (name: string, body: string) =>
+  invoke<void>("companion_store_write", { name, body });
 
 export const companionStatus = () =>
   invoke<CompanionStatus>("companion_status").catch(

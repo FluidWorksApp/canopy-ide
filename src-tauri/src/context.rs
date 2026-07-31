@@ -1612,6 +1612,23 @@ struct UiOp {
     /// vault: a specific entry, when the agent has already listed them.
     #[serde(rename = "entryId")]
     entry_id: Option<String>,
+    /// The companion's cross-project ops. Scoped to one project by name when
+    /// given; every one of them answers for the whole workspace otherwise,
+    /// which is the point of the companion having them at all.
+    project: Option<String>,
+    /// confirm: what the agent proposes to do, and the specifics the user needs
+    /// in order to judge it.
+    action: Option<String>,
+    detail: Option<String>,
+    /// open_project: one line the user sees explaining why their window moved.
+    why: Option<String>,
+    /// workspace_search: how many rows to return.
+    limit: Option<u32>,
+    /// remember: the fact, what it concerns, and whether this retracts one.
+    fact: Option<String>,
+    about: Option<String>,
+    #[serde(default)]
+    forget: bool,
 }
 
 const UI_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
@@ -1673,6 +1690,31 @@ async fn ui_op(
             // this waits on a person exactly like `ask` does.
             MAX_ASK_TIMEOUT
         }
+        // Reads over the whole workspace. They talk to state the app already
+        // holds, so they answer as fast as the language-server ops do.
+        "workspace" | "workspace_git" | "workspace_agents" | "open_project" | "recall"
+        | "remember" => UI_OP_TIMEOUT,
+        "workspace_search" => {
+            if op.query.as_deref().map_or(true, |q| q.trim().is_empty()) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "workspace_search needs a query".into(),
+                );
+            }
+            UI_OP_TIMEOUT
+        }
+        // The companion asking permission. Waits on a person, exactly like
+        // `ask` — and for the same reason it must not time out early: an agent
+        // that stops waiting does not know whether it may proceed.
+        "confirm" => {
+            if op.action.as_deref().map_or(true, |a| a.trim().is_empty()) {
+                return (StatusCode::BAD_REQUEST, "confirm needs an action".into());
+            }
+            op.timeout_ms
+                .map(std::time::Duration::from_millis)
+                .unwrap_or(std::time::Duration::from_secs(120))
+                .min(MAX_ASK_TIMEOUT)
+        }
         other => return (StatusCode::BAD_REQUEST, format!("unknown ui op: {other}")),
     };
 
@@ -1697,6 +1739,14 @@ async fn ui_op(
             "options": op.options,
             "vaultOp": op.vault_op,
             "entryId": op.entry_id,
+            "project": op.project,
+            "action": op.action,
+            "detail": op.detail,
+            "why": op.why,
+            "limit": op.limit,
+            "fact": op.fact,
+            "about": op.about,
+            "forget": op.forget,
         }),
     );
 
@@ -1713,7 +1763,7 @@ async fn ui_op(
                 .lock()
                 .unwrap()
                 .remove(&id);
-            let why = if op.op == "ask" || op.op == "vault" {
+            let why = if op.op == "ask" || op.op == "vault" || op.op == "confirm" {
                 "The user didn't answer in time — carry on without them, or ask again."
             } else {
                 "Canopy didn't answer in time. The window may be busy, or the language server \
