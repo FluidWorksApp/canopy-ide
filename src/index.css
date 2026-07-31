@@ -4546,30 +4546,35 @@ body.dragging-tab * {
 .tab-stack-deep::after {
   content: "";
   position: absolute;
-  /* Wide enough that most of the card is hidden behind the pill and only its
-     edge shows: a card peeking out from behind the stack, not a shape parked
-     next to it. The pill segments sit at z-index 1, so these pass underneath. */
-  top: 9px;
-  bottom: 9px;
-  width: 22px;
-  right: 8px;
+  /* A sheet edge, not a second pill. Nearly all of the card is hidden behind
+     the pill (which sits at z-index 1) and what shows is a 3px sliver, each
+     one a little shorter than the last — the way a stack of paper fans. Wider
+     slivers read as a shape parked beside the chip, which is what these were.
+     */
+  top: 8px;
+  bottom: 8px;
+  width: 20px;
+  right: 5px;
   background: var(--bg-raised-opaque, var(--bg-raised));
   border: 1px solid color-mix(in srgb, var(--text-dim) 45%, transparent);
-  border-radius: 4px;
+  /* Square on the hidden side, barely rounded on the shown one. A 4px radius
+     on a 3px sliver is all cap and no edge — it renders as a bump growing out
+     of the pill rather than the edge of a sheet behind it. */
+  border-radius: 0 1px 1px 0;
 }
 
 .tab-stack-deep::after {
-  top: 11px;
-  bottom: 11px;
-  right: 3px;
+  top: 10px;
+  bottom: 10px;
+  right: 2px;
   opacity: 0.55;
 }
 
-/* Room reserved for the cards to peek out of, so they land in the chip's own
+/* Room reserved for the sheets to peek out of, so they land in the chip's own
    footprint. They used to hang off the face itself and were drawn over the
    overflow caret beside it and over the group's first tab. */
 .tab-stack-away {
-  padding-right: 17px;
+  padding-right: 8px;
 }
 
 .tab-stack-dot {
