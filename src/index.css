@@ -5504,6 +5504,137 @@ body.dragging-tab * {
   padding: 5px 10px;
 }
 
+/* ---------- shared markdown chrome ----------
+ *
+ * Everything here applies to every markdown surface at once — a note, a
+ * research write-up, a PR body, a committed .md — because they all render
+ * through <Markdown>. That is the point: a markdown feature should not be a
+ * property of which tab you are in.
+ */
+
+/* Callouts, as GitHub and Obsidian both write them. The hue carries the
+   meaning, so the same block reads the same whether it came from a PR
+   description or a note the user typed.
+   Scoped under .markdown-body deliberately: the plain `.markdown-body
+   blockquote` rule above is (0,1,1) and would otherwise win the border and the
+   dimmed text, which is what made every callout render identically grey. */
+.markdown-body blockquote.md-callout {
+  margin: 12px 0;
+  padding: 10px 14px;
+  border-left: 3px solid var(--cal);
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--cal) 8%, transparent);
+  /* The blockquote rule dims its text; a callout is not an aside. */
+  color: var(--text);
+}
+
+.markdown-body .md-callout-title {
+  margin-bottom: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--cal);
+}
+
+.markdown-body .md-callout > :last-child { margin-bottom: 0; }
+.markdown-body .md-callout-folded > :not(.md-callout-title) { display: none; }
+
+.markdown-body .md-callout-note      { --cal: var(--accent); }
+.markdown-body .md-callout-tip       { --cal: var(--ok); }
+.markdown-body .md-callout-success   { --cal: var(--ok); }
+.markdown-body .md-callout-important { --cal: var(--accent); }
+.markdown-body .md-callout-warning   { --cal: var(--warn); }
+.markdown-body .md-callout-danger    { --cal: var(--danger); }
+.markdown-body .md-callout-question  { --cal: var(--warn); }
+.markdown-body .md-callout-example   { --cal: var(--text-dim); }
+.markdown-body .md-callout-quote     { --cal: var(--text-dim); }
+
+/* Wikilinks. Distinct from an external link on purpose — one leaves the app
+   and one does not, and that is worth being able to tell before clicking. */
+.markdown-body a.wikilink {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px dashed color-mix(in srgb, var(--accent) 50%, transparent);
+  cursor: pointer;
+}
+
+.markdown-body a.wikilink:hover {
+  border-bottom-style: solid;
+}
+
+/* Task lists. A live checkbox gets a pointer; a rendered-but-inert one (any
+   external body) keeps full contrast rather than being greyed into looking
+   broken — it is not disabled *for you*, it just isn't yours to tick. */
+.markdown-body .md-task {
+  margin-right: 6px;
+  accent-color: var(--accent);
+}
+
+.markdown-body .md-task:not(:disabled) {
+  cursor: pointer;
+}
+
+.markdown-body .md-task:disabled {
+  opacity: 1;
+}
+
+.markdown-body .md-task-item {
+  list-style: none;
+  margin-left: -1.2em;
+}
+
+/* Heading anchors: the id is what an outline and a #deep-link resolve against.
+   No hover-¶ affordance — these documents are read far more than they are
+   linked to, and the mark would be permanent visual noise for a rare act. */
+.markdown-body .md-heading {
+  scroll-margin-top: 12px;
+}
+
+/* Full-size image view. The reason it exists: a pasted screenshot rendered
+   into a thumbnail strip is exactly the case where the detail was the point. */
+.md-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: grid;
+  place-items: center;
+  gap: 10px;
+  padding: 32px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(6px);
+  cursor: zoom-out;
+}
+
+.md-lightbox img {
+  max-width: 100%;
+  max-height: calc(100vh - 96px);
+  object-fit: contain;
+  border-radius: var(--r-sm);
+  box-shadow: 0 12px 40px rgb(0 0 0 / 45%);
+  cursor: default;
+}
+
+.md-lightbox figcaption {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.md-lightbox-close {
+  position: absolute;
+  top: 16px;
+  right: 20px;
+  padding: 2px 10px;
+  font-size: 22px;
+  line-height: 1.2;
+  color: var(--text-dim);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.md-lightbox-close:hover { color: var(--text); }
+
 .mermaid-diagram {
   background: var(--bg-alt);
   border-radius: var(--r-sm);

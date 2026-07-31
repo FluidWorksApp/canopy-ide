@@ -11,8 +11,7 @@
 // agent appends to it while it is on screen, and the PR watcher can move its
 // status from under you; a copy on the tab would be a second truth going stale
 // in front of the user.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { renderMarkdown } from "../markdown";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import * as ipc from "../ipc";
 import {
@@ -27,6 +26,7 @@ import {
 } from "../research";
 import { ago } from "./ProjectView/helpers";
 import { AgentLaunchButton } from "./AgentLaunchButton";
+import { Markdown } from "./Markdown";
 import type { AgentTarget } from "./TicketsPanel";
 import {
   ArchiveIcon,
@@ -57,6 +57,9 @@ interface ResearchViewProps {
   /** Follow a link out to the thing it points at, natively. */
   onOpenPr?: (pr: ipc.ResearchPrLink) => void;
   onOpenFile?: (path: string) => void;
+  /** Follow a [[wikilink]] in the write-up. Resolved centrally (wikilinks.ts)
+   *  so a link means the same thing here as it does in a note. */
+  onWikilink?: (target: string) => void;
   onClosed?: () => void;
   /** The title changed — the tab strip holds its own copy of it. */
   onRenamed?: (title: string) => void;
@@ -73,6 +76,7 @@ export function ResearchView({
   onContinue,
   onOpenPr,
   onOpenFile,
+  onWikilink,
   onClosed,
   onRenamed,
   onNotice,
@@ -188,13 +192,6 @@ export function ResearchView({
     };
   }, [live, projectId, researchId]);
 
-  const html = useMemo(
-    () =>
-      entry?.body.trim()
-        ? renderMarkdown(entry.body)
-        : "<p class='research-empty'>Nothing written up yet.</p>",
-    [entry?.body],
-  );
 
   if (error) {
     return (
@@ -439,9 +436,12 @@ export function ResearchView({
               them.
             </p>
           ) : (
-            <div
-              className="research-md markdown-body"
-              dangerouslySetInnerHTML={{ __html: html }}
+            // `owned`: the store wrote this, so its wikilinks resolve.
+            <Markdown
+              className="research-md"
+              text={entry.body}
+              origin="owned"
+              onWikilink={onWikilink}
             />
           )}
         </section>

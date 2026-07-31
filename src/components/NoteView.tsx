@@ -9,7 +9,6 @@
 // not in it.
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as ipc from "../ipc";
-import { renderMarkdown } from "../markdown";
 import {
   NEXT_STATUSES,
   NOTES_EVENT,
@@ -24,6 +23,7 @@ import {
 import type { Notify } from "../types";
 import { ago } from "./ProjectView/helpers";
 import { AgentLaunchButton } from "./AgentLaunchButton";
+import { Markdown } from "./Markdown";
 import {
   ArchiveIcon,
   BlockedIcon,
@@ -46,6 +46,9 @@ interface NoteViewProps {
   onSendToAgent: (note: ipc.NoteDetail, target: AgentTarget) => void;
   /** Open a research entry this note produced. */
   onOpenResearch?: (id: string) => void;
+  /** Follow a [[wikilink]] in the body. Resolved centrally (wikilinks.ts) so a
+   *  link means the same thing here as it does in a research write-up. */
+  onWikilink?: (target: string) => void;
   onNotice?: Notify;
   /** The tab should close — the note was deleted. */
   onClosed?: () => void;
@@ -59,6 +62,7 @@ export function NoteView({
   onStartNew,
   onSendToAgent,
   onOpenResearch,
+  onWikilink,
   onNotice,
   onClosed,
 }: NoteViewProps) {
@@ -277,20 +281,34 @@ export function NoteView({
         />
       ) : (
         <div
-          className="note-body markdown-body"
+          className="note-body"
           role="button"
           tabIndex={0}
           title="Click to edit"
-          onClick={() => setBodyDraft(note.body)}
+          // A click that lands on something interactive inside the note — a
+          // checkbox, a wikilink, an image — is that thing's click, not a
+          // request to start editing over the top of it.
+          onClick={(e) => {
+            if ((e.target as HTMLElement).closest("input, a, img")) return;
+            setBodyDraft(note.body);
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter") setBodyDraft(note.body);
           }}
-          dangerouslySetInnerHTML={{
-            __html: note.body.trim()
-              ? renderMarkdown(note.body)
-              : "<p class='note-body-empty'>Nothing written yet — click to add.</p>",
-          }}
-        />
+        >
+          {note.body.trim() ? (
+            <Markdown
+              text={note.body}
+              origin="owned"
+              onWikilink={onWikilink}
+              onToggleTask={(next) =>
+                void update({ projectId, id: note.id, body: next }).catch(fail)
+              }
+            />
+          ) : (
+            <p className="note-body-empty">Nothing written yet — click to add.</p>
+          )}
+        </div>
       )}
 
       {note.attachments.length > 0 && (

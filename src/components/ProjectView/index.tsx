@@ -101,6 +101,7 @@ import {
   settleIfRunning as researchSettleIfRunning,
   start as researchStart,
 } from "../../research";
+import { resolveWikilink } from "../../wikilinks";
 import {
   NEXT_STATUSES as NEXT_NOTE_STATUSES,
   cached as notesCached,
@@ -3302,6 +3303,50 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
   openFileRef.current = openFile;
 
+  /** Follow a `[[wikilink]]` from any surface that owns its text.
+   *
+   *  One handler for all of them, so a link resolves identically in a note and
+   *  in a research write-up. An unresolved target becomes a new note — that is
+   *  Obsidian's behaviour and the reason the syntax earns its place: linking to
+   *  a thought is how you record it before you have written it. */
+  const followWikilink = useCallback(
+    async (target: string) => {
+      // The file list is fetched per click rather than held: following a
+      // wikilink is a rare, deliberate act, and a corpus kept warm for it would
+      // be a tree walk's worth of strings resident for the life of the tab.
+      const files = await ipc.fsListFiles(roots).catch(() => [] as string[]);
+      const hit = resolveWikilink(target, {
+        notes: notesCached(project.id),
+        research: researchCached(project.id),
+        files,
+      });
+      switch (hit.kind) {
+        case "note":
+          openNote(hit.id, hit.title);
+          return;
+        case "research":
+          openResearch(hit.id, hit.title);
+          return;
+        case "file":
+          void openFile(hit.path);
+          return;
+        case "new":
+          if (!hit.title) return;
+          void createNote({
+            projectId: project.id,
+            projectName: project.name,
+            roots,
+            title: hit.title,
+            origin: "wikilink",
+            cwd: roots[0],
+          })
+            .then((n) => openNote(n.id, n.title))
+            .catch((e) => onNotice(String(e), "error"));
+      }
+    },
+    [project.id, project.name, roots, openNote, openResearch, openFile, onNotice],
+  );
+
   const saveFile = useCallback(
     async (path: string) => {
       const model = monaco.editor.getModel(monaco.Uri.file(path));
@@ -5745,6 +5790,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               if (entry) openResearch(entry.id, entry.id);
               else void openFile(path);
             }}
+            onWikilink={(t) => void followWikilink(t)}
             onClosed={() => closeTab(tab.id)}
             // The tab strip keeps its own copy of the title so it has a label
             // before the first read; a rename has to reach it or the tab keeps
@@ -5765,6 +5811,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               sendTicketToAgent(target, noteContext(note, note.dir))
             }
             onOpenResearch={(rid) => openResearch(rid, rid)}
+            onWikilink={(t) => void followWikilink(t)}
             onClosed={() => closeTab(tab.id)}
             onNotice={onNotice}
           />
