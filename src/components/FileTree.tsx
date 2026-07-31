@@ -4,10 +4,12 @@
 // render the same one over its WebSocket RPC. All this does is say what "the
 // filesystem" means here — the Rust core over Tauri IPC — and hand it the
 // Material Icon Theme resolver, which is 1250 bundled SVGs and therefore a
-// desktop-only luxury.
+// desktop-only luxury — and the folder glyph, which is the rail's own icon so
+// the folder in the tree and the folder on the rail beside it are one shape.
 import * as ipc from "../ipc";
 import { FileTree as SharedFileTree, type FileTreeFs } from "../../shared/FileTree";
 import { fileIconUrl } from "./fileIcons";
+import { FilesIcon } from "./icons";
 
 export type { FileTreeFs } from "../../shared/FileTree";
 
@@ -31,8 +33,23 @@ const localFs: FileTreeFs = {
   reveal: (path) => ipc.fsReveal(path),
 };
 
-type Props = Omit<Parameters<typeof SharedFileTree>[0], "fs" | "iconUrl">;
+/** The rail's folder, at the tree's icon size. Sizing is the only thing that
+ *  changes: same component, same 24-unit frame, same stroke, same
+ *  `currentColor`, so the row's colour is the icon's colour. */
+const folderIcon = () => <FilesIcon size={15} />;
+
+type Props = Omit<
+  Parameters<typeof SharedFileTree>[0],
+  "fs" | "iconUrl" | "folderIcon"
+>;
 
 export function FileTree(props: Props) {
-  return <SharedFileTree {...props} fs={localFs} iconUrl={fileIconUrl} />;
+  return (
+    <SharedFileTree
+      {...props}
+      fs={localFs}
+      iconUrl={fileIconUrl}
+      folderIcon={folderIcon}
+    />
+  );
 }
