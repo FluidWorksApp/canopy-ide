@@ -67,6 +67,12 @@ interface StatusBarProps {
    *  plan's headroom the chip shows. Separate from agentLabel because that one
    *  is absent for CLIs Canopy can't switch models on. */
   agentId?: string | null;
+  /** Which account profile the session in front is running under. The chip
+   *  reports headroom for a subscription, so it must follow the tab's own
+   *  login rather than whichever profile is currently selected for new
+   *  launches — those differ the moment the user switches accounts with an
+   *  older session still open. */
+  agentProfile?: string | null;
   /** The pty of the active terminal tab — the model/token tray follows THIS
    *  tab's session, not whichever session in the project spoke last. */
   activePtyId?: number | null;
@@ -91,6 +97,7 @@ export const StatusBar = memo(function StatusBar({
   modelSwitch,
   agentLabel,
   agentId,
+  agentProfile,
   activePtyId,
 }: StatusBarProps) {
   const [branch, setBranch] = useState<string | null>(null);
@@ -263,7 +270,10 @@ export const StatusBar = memo(function StatusBar({
       clearInterval(timer);
     };
   }, [visible]);
-  const plan = useMemo(() => planFor(plans, agentId), [plans, agentId]);
+  const plan = useMemo(
+    () => planFor(plans, agentId, agentProfile || "default"),
+    [plans, agentId, agentProfile],
+  );
 
   // The transcript whose model/tokens the tray shows. Per-TAB first: prefer
   // the latest event stamped with the active terminal's pty, so switching

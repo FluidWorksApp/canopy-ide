@@ -35,6 +35,39 @@ describe("restorableFrom", () => {
     expect(restorableFrom([old], [], [])).toHaveLength(1);
   });
 
+  /** `--resume <id>` is resolved inside the CLI's own config dir, so the row
+   *  has to carry the account that owns the conversation. Restoring it under
+   *  another login doesn't reopen something else — it reports a session that
+   *  plainly exists as missing. */
+  it("carries the account a session belongs to", () => {
+    const [row] = restorableFrom([digest({ profile: "work" })], [], []);
+    expect(row.profile).toBe("work");
+  });
+
+  it("treats a digest from before profiles as the default account", () => {
+    const [row] = restorableFrom([digest()], [], []);
+    expect(row.profile).toBe("default");
+  });
+
+  it("keeps each account's newest session in a shared directory", () => {
+    // The per-directory collapse must not bury the second login: two accounts
+    // working the same checkout are the point of profiles, and neither resumes
+    // under the other's config dir.
+    const rows = restorableFrom(
+      [
+        digest({ session_id: "work-new", profile: "work", updated: 300 }),
+        digest({ session_id: "work-old", profile: "work", updated: 200 }),
+        digest({ session_id: "personal", profile: "personal", updated: 100 }),
+      ],
+      [],
+      [],
+    );
+    expect(rows.map((r) => r.digest.session_id).sort()).toEqual(["personal", "work-new"]);
+    expect(rows.find((r) => r.profile === "work")?.superseded.map((d) => d.session_id)).toEqual(
+      ["work-old"],
+    );
+  });
+
   it("keeps a session out while its terminal is still alive", () => {
     const stats = [
       { id: 7, title: "claude", cwd: "/repo", total_cpu: 0, total_mem_bytes: 0, procs: [], ports: [], agent_hint: null },
