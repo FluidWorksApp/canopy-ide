@@ -708,7 +708,10 @@ fn create_impl(
                 .filter_map(|e| {
                     let name = e.file_name().to_string_lossy().to_string();
                     valid_id(&name)
-                        .then(|| name.split_once('-').and_then(|(n, _)| n.parse::<u32>().ok()))
+                        .then(|| {
+                            name.split_once('-')
+                                .and_then(|(n, _)| n.parse::<u32>().ok())
+                        })
                         .flatten()
                 })
                 .max()
@@ -998,7 +1001,10 @@ pub fn notes_attach_file(
     // The kind decides how the detail tab renders it, and the extension is the
     // only honest signal available for a file nobody labelled.
     let kind = kind.unwrap_or_else(|| {
-        if matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp") {
+        if matches!(
+            ext.as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
+        ) {
             "image".into()
         } else {
             "artifact".into()
@@ -1022,9 +1028,19 @@ pub fn notes_attach_file(
                 .map(|s| s.to_string_lossy().to_string())
                 .filter(|s| !s.is_empty())
         })
-        .unwrap_or_else(|| if is_image { "image".into() } else { "capture".into() });
+        .unwrap_or_else(|| {
+            if is_image {
+                "image".into()
+            } else {
+                "capture".into()
+            }
+        });
     let ext = if ext.is_empty() {
-        if is_image { "png".to_string() } else { "txt".to_string() }
+        if is_image {
+            "png".to_string()
+        } else {
+            "txt".to_string()
+        }
     } else {
         ext.chars()
             .filter(|c| c.is_ascii_alphanumeric())
@@ -1266,7 +1282,10 @@ pub fn index_docs() -> Vec<IndexDoc> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    for p in projects.filter_map(Result::ok).filter(|p| p.path().is_dir()) {
+    for p in projects
+        .filter_map(Result::ok)
+        .filter(|p| p.path().is_dir())
+    {
         let project_id = p.file_name().to_string_lossy().to_string();
         // The project's own roots are the honest cwd for a note whose capture
         // never recorded one.
@@ -1398,7 +1417,12 @@ mod tests {
 
     #[test]
     fn re_entering_a_state_is_a_no_op_not_an_error() {
-        for s in [Status::Ideation, Status::Doing, Status::Done, Status::Archived] {
+        for s in [
+            Status::Ideation,
+            Status::Doing,
+            Status::Done,
+            Status::Archived,
+        ] {
             assert!(s.can_move_to(s));
         }
     }
@@ -1436,10 +1460,8 @@ mod tests {
 
     impl Home {
         fn new(name: &str) -> Home {
-            let dir = std::env::temp_dir().join(format!(
-                "canopy-notes-test-{name}-{}",
-                std::process::id()
-            ));
+            let dir = std::env::temp_dir()
+                .join(format!("canopy-notes-test-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             std::env::set_var("CANOPY_NOTES_HOME", &dir);
@@ -1482,11 +1504,22 @@ mod tests {
         assert_eq!(note.id, "0001-tier-donations-by-amount");
 
         // Triage, then hand it off.
-        set_status_impl(p.into(), note.id.clone(), "ready".into(), Some("you".into()), None)
-            .unwrap();
-        let doing =
-            set_status_impl(p.into(), note.id.clone(), "doing".into(), Some("you".into()), None)
-                .unwrap();
+        set_status_impl(
+            p.into(),
+            note.id.clone(),
+            "ready".into(),
+            Some("you".into()),
+            None,
+        )
+        .unwrap();
+        let doing = set_status_impl(
+            p.into(),
+            note.id.clone(),
+            "doing".into(),
+            Some("you".into()),
+            None,
+        )
+        .unwrap();
         assert_eq!(doing.status, "doing");
 
         // The agent raises a PR and links it back.
