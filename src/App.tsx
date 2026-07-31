@@ -1,6 +1,13 @@
 // Shell: project tabs on top; each open project is a fully mounted (hidden
 // when inactive) ProjectView so its terminals keep running across switches.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import * as ipc from "./ipc";
 import {
   adoptLegacyCustomTasks,
@@ -45,7 +52,7 @@ import {
 import { useAttention } from "./useAttention";
 import { NotificationCenter } from "./components/NotificationCenter";
 import { runUiOp } from "./agentOps";
-import { getSettings, THEME_CHANGE_EVENT } from "./settings";
+import { getSettings, subscribeSettings, THEME_CHANGE_EVENT } from "./settings";
 import { useTabDrag } from "./tabDrag";
 import * as prWatch from "./prWatchStore";
 import * as clipboardStore from "./clipboardStore";
@@ -76,6 +83,10 @@ import { HelpDialog } from "./components/HelpDialog";
 import { AskDialog } from "./components/AskDialog";
 import { AboutDialog } from "./components/AboutDialog";
 import { Dictation } from "./components/Dictation";
+import { Companion } from "./components/Companion";
+import { startCompanion, stopCompanion } from "./companionSession";
+import { companionToolNames } from "./companionTools";
+import { checkInstalledClis } from "./projects";
 import { TooltipLayer } from "./components/TooltipLayer";
 import { Onboarding } from "./components/Onboarding";
 import { Welcome } from "./components/Welcome";
@@ -1988,6 +1999,53 @@ export default function App() {
         .filter((p): p is Project => Boolean(p)),
     [ws.openIds, ws.projects],
   );
+  // The companion's reach: EVERY project, not just the open ones. That is the
+  // whole point of it — "which repos have unpushed work" is a question about
+  // the workspace, and answering only for the tabs that happen to be open
+  // would make it quietly wrong rather than usefully scoped.
+  const companionProjects = useMemo(
+    () =>
+      ws.projects.map((p) => ({
+        name: p.name,
+        roots: p.components.map((c) => c.path),
+        open: ws.openIds.includes(p.id),
+        hibernated: Boolean(hibernated[p.id]),
+      })),
+    [ws.projects, ws.openIds, hibernated],
+  );
+  const companionOn = useSyncExternalStore(
+    subscribeSettings,
+    () => getSettings().companionEnabled,
+    () => false,
+  );
+  // Start and stop with the setting, and restart when the workspace changes
+  // shape — the brief names every project and the session is given every root,
+  // so a project added after launch would otherwise be invisible to it until
+  // the app restarted.
+  useEffect(() => {
+    if (!companionOn) {
+      void stopCompanion();
+      return;
+    }
+    let cancelled = false;
+    void checkInstalledClis().then((installed) => {
+      if (cancelled) return;
+      void startCompanion({
+        projects: companionProjects,
+        installed: (bin) => Boolean(installed[bin]),
+        tools: companionToolNames(
+          getSettings().disabledTools,
+          getSettings().companionAuthority,
+        ),
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [companionOn, companionProjects]);
+  // Quitting must not leave an agent running and billing.
+  useEffect(() => () => void stopCompanion(), []);
+
   const allProjectRoots = useMemo(
     () =>
       openProjects.map((x) => ({
@@ -2266,8 +2324,15 @@ export default function App() {
 
       {/* A stack, not a slot. Two things reporting at once used to mean the
           first was destroyed before it could be read. Newest at the bottom,
-          nearest the corner the eye is already in. */}
-      {toasts.length > 0 && (
+          nearest the corner the eye is already in.
+
+          Suppressed while the companion is up: the same items are delivered by
+          it instead, from wherever it is standing. This is a second *renderer*
+          on the one attention queue, never a second queue — urgency, fading and
+          whether something reaches the OS are still decided in attention.ts,
+          and a question is still outstanding until it is answered rather than
+          until its card is closed. */}
+      {toasts.length > 0 && !companionOn && (
         <div className="notice-stack">
           {toasts.map((t) => (
             <NoticeToast
@@ -2278,6 +2343,14 @@ export default function App() {
             />
           ))}
         </div>
+      )}
+
+      {companionOn && (
+        <Companion
+          notices={toasts}
+          onDismissNotice={dismissToast}
+          onFollowNotice={(item) => void followAttention(item)}
+        />
       )}
 
       {notifOpen && (

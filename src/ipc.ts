@@ -2940,3 +2940,47 @@ export interface DiskUsage {
  *  the usage panel can poll it like it polls plan limits. */
 export const cleanupDisk = (roots: string[]) =>
   invoke<DiskUsage[]>("cleanup_disk", { roots });
+
+// ---------------------------------------------------------------- companion
+
+/** One thing the companion's CLI said. `line` is a raw stdout line — expected
+ *  to be JSON, deliberately unparsed in Rust so the protocol stays owned by
+ *  companionTransport.ts (see companion.rs). */
+export type CompanionOut =
+  | { kind: "line"; text: string }
+  | { kind: "stderr"; text: string }
+  | { kind: "exit"; code: number | null };
+
+export interface CompanionStatus {
+  running: boolean;
+  generation: number;
+}
+
+/** Start the companion's CLI on plain pipes, replacing any already running.
+ *  Not a PTY: the structured tier speaks JSON lines, and a terminal's line
+ *  discipline would echo them back and truncate the long ones. */
+export async function companionSpawn(
+  opts: {
+    command: string;
+    args: string[];
+    cwd?: string;
+    env?: [string, string][];
+  },
+  onData: (out: CompanionOut) => void,
+): Promise<void> {
+  const channel = new Channel<CompanionOut>();
+  channel.onmessage = onData;
+  return invoke("companion_spawn", { ...opts, onData: channel });
+}
+
+/** Send one JSON message. The newline is added on the Rust side so no caller
+ *  can forget it — an unterminated line reads as the companion never replying. */
+export const companionWrite = (line: string) =>
+  invoke<void>("companion_write", { line });
+
+export const companionKill = () => invoke<void>("companion_kill");
+
+export const companionStatus = () =>
+  invoke<CompanionStatus>("companion_status").catch(
+    (): CompanionStatus => ({ running: false, generation: 0 }),
+  );

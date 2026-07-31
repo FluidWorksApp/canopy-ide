@@ -637,12 +637,35 @@ impl WorkClock {
 
 /// One file per session; this process is the only writer for its own session,
 /// and hook invocations within a session are serial.
+/// The companion (Ash) is one session that must appear in no list of sessions.
+///
+/// It is the user's assistant, not one of their coding agents: it has no tab,
+/// it is not something they started on a branch, and a row for it in the Agents
+/// panel — or in `canopy_agents`, where another agent could then read its
+/// conversation or type into it — would be a leak, not a feature.
+///
+/// The enforcement is *not writing the digest*, rather than writing one and
+/// asking every surface to filter it. Every listing Canopy has is built from
+/// these files, so a session with no digest is invisible everywhere at once,
+/// including in surfaces written later that would never have known to filter.
+/// That is the same reasoning as `micro` below, taken one step further: a
+/// micro-task still needs a row in Tasks, and the companion needs nothing.
+///
+/// Set on the child by the app at spawn (companionSession.ts) and inherited by
+/// the CLI, so it holds however the session is resumed.
+fn is_companion_session() -> bool {
+    std::env::var("CANOPY_COMPANION").is_ok_and(|v| !v.is_empty())
+}
+
 fn update_digest(
     session_id: &str,
     cwd: &str,
     event: &serde_json::Value,
     hook_event: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if is_companion_session() {
+        return Ok(());
+    }
     let dir = format!("{}/.canopy/sessions", home());
     std::fs::create_dir_all(&dir)?;
     let path = format!("{dir}/{session_id}.json");
@@ -1882,6 +1905,56 @@ const STRUCTURED_TOOLS: &[&str] = &[
     "canopy_research",
 ];
 
+/// Shared tools that change something the user would have to undo.
+///
+/// Duplicated from `MUTATING_TOOLS` in companionTools.ts on the same terms as
+/// the rest of this file's descriptors: the name is the contract, and
+/// companionToolsGuard.test.ts asserts the two lists stay identical.
+const COMPANION_MUTATING_TOOLS: &[&str] = &[
+    "canopy_start_server",
+    "canopy_stop_server",
+    "canopy_restart_server",
+    "canopy_message_agent",
+    "canopy_claim",
+    "canopy_notes_write",
+    "canopy_research_write",
+    "canopy_vault_fill",
+    "canopy_vault_read",
+    "canopy_browser_click",
+    "canopy_browser_type",
+    "canopy_browser_eval",
+    "canopy_browser_navigate",
+];
+
+/// The companion's authority, applied by withholding rather than by asking.
+///
+/// A tool that is absent cannot be called. A rule in a system prompt is one the
+/// agent can reason its way past — and the companion is the one agent that acts
+/// in projects the user is not looking at, which is the worst possible place to
+/// discover that. So "answer only" and "ask first" both mean the mutating tools
+/// are not in the list at all.
+///
+/// "Ask first" withholds only until `canopy_confirm` exists to put each call to
+/// the user. Shipping the tools before the gate would make the setting say one
+/// thing while the companion did another; withholding merely does less than it
+/// promises, which is the honest half of that trade.
+///
+/// Anything that is not a companion session is untouched — a coding agent's
+/// tools are governed by Settings → Agents and nothing here.
+fn apply_companion_authority(tools: &mut Vec<serde_json::Value>) {
+    if !is_companion_session() {
+        return;
+    }
+    if std::env::var("CANOPY_COMPANION_POLICY").unwrap_or_default() == "allow" {
+        return;
+    }
+    tools.retain(|t| {
+        t.get("name")
+            .and_then(|n| n.as_str())
+            .is_some_and(|n| !COMPANION_MUTATING_TOOLS.contains(&n))
+    });
+}
+
 /// The tools this session gets: everything below, minus whatever the user
 /// switched off in Settings → Agents. A disabled tool is filtered here rather
 /// than refused on call, so it costs the agent no context at all. The bridge
@@ -1912,6 +1985,7 @@ fn tools_list() -> serde_json::Value {
     // names a tool the session doesn't have is a brief that lies.
     // See the matching note in agentTools.ts.
     let micro = std::env::var("CANOPY_MICRO_TASK").is_ok();
+    apply_companion_authority(&mut tools);
     tools.retain(|t| {
         t.get("name").and_then(|n| n.as_str()).is_some_and(|n| {
             !disabled.iter().any(|d| d == n) || (micro && MICRO_ALWAYS_TOOLS.contains(&n))
