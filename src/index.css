@@ -12172,7 +12172,12 @@ a.btn-sm {
    fade on the leading edge — otherwise the labels land on top of the text
    underneath and both become unreadable. */
 .ap-body .agent-row:hover,
-.ap-body .restore-row:hover {
+.ap-body .restore-row:hover,
+/* Keyboard focus reveals the band too (see the :focus-within rules below), so
+   the row has to be raised for it as well — the band is painted to match a
+   raised row, and on an unraised one it reads as a chip floating in mid-air. */
+.ap-body .agent-row:focus-within,
+.ap-body .restore-row:focus-within {
   background: var(--bg-raised);
 }
 
@@ -12184,47 +12189,63 @@ a.btn-sm {
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
-.ap-body .restore-actions {
-  position: absolute;
-  top: 3px;
-  right: 4px;
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  margin: 0;
-  visibility: hidden;
-  padding: 2px 2px 2px 34px;
-  border-radius: var(--r-sm);
-  corner-shape: squircle;
-  background: linear-gradient(
-    to right,
-    transparent 0,
-    var(--bg-raised) 30px,
-    var(--bg-raised) 100%
-  );
-}
-
+/* What both bands are: pinned to the row's right edge, covering the row's own
+   text from the leading fade rightwards. */
+.ap-body .restore-actions,
 .ap-body .agent-stats {
   position: absolute;
   top: 3px;
   right: 4px;
+  /* The row's full height, not just its first line. Sized to its contents the
+     band ended part-way down the second line, and the halves of the letters it
+     covered went on showing under its edge. */
+  bottom: 3px;
   display: flex;
   align-items: center;
-  gap: 7px;
   margin: 0;
-  font-size: 10px;
   /* visibility, not opacity: an opacity:0 box still reserves its line, which
      is why every row carried an empty fourth line. */
   visibility: hidden;
-  padding: 2px 4px 2px 34px;
   border-radius: var(--r-sm);
   corner-shape: squircle;
-  background: linear-gradient(
-    to right,
-    transparent 0,
-    var(--bg-raised) 30px,
-    var(--bg-raised) 100%
-  );
+  /* --bg-raised is the hovered row's own surface, so on the opaque skins the
+     band disappears into the row it sits on. It cannot hide ink by itself
+     though — Vitrine's surfaces are alpha (this one is a 5% white wash), and
+     there the stats landed straight on top of the title with both left
+     readable. So the wash goes over a base that is solid on every skin: the
+     opaque mirror a glass skin declares for the consumers that can't
+     composite (see :root[data-theme="vitrine"]), and on the three opaque
+     skins the wash is already opaque and the base never shows. Not a tint and
+     a blur: this engine drops backdrop-filter in snapshots and under an
+     ancestor that has one, and a band that hides the row's text only
+     sometimes is the bug itself. */
+  background:
+    linear-gradient(var(--bg-raised), var(--bg-raised)),
+    var(--bg-raised-opaque, var(--bg-overlay));
+  /* The fade on the leading edge, so the text the band covers dissolves under
+     it rather than being cut off mid-word. Masking the element fades the whole
+     background stack at once; the contents start past 30px and stay solid. */
+  mask-image: linear-gradient(to right, transparent 0, #000 30px);
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 30px);
+}
+
+.ap-body .restore-actions {
+  gap: 2px;
+  padding: 2px 2px 2px 34px;
+}
+
+.ap-body .agent-stats {
+  gap: 7px;
+  font-size: 10px;
+  padding: 2px 4px 2px 34px;
+}
+
+/* Corner controls, not standalone buttons: at their default 26px they stand
+   taller than the band on a row with no task line, so they hang over its edge
+   with nothing behind them. */
+.ap-body .agent-stats .btn-icon {
+  min-width: 20px;
+  height: 20px;
 }
 
 .ap-body .agent-row:hover .agent-stats,
