@@ -5442,7 +5442,24 @@ body.dragging-tab * {
 }
 /* The branch chip sits between the name and the location — give it consistent
    vertical rhythm with the row. */
-.aw-banner .agent-branch {
+.aw-banner /* Which account an agent row is spending. Same weight as the branch chip: it
+   is the other thing that separates two otherwise identical rows. */
+.agent-account {
+  flex: none;
+  max-width: 9ch;
+  overflow: hidden;
+  padding: 0 4px;
+  color: var(--text-dim);
+  font-size: 9.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+}
+
+.agent-branch {
   flex: 0 0 auto;
 }
 /* Stats strip: what the agent is costing and doing — model, tokens, cost,

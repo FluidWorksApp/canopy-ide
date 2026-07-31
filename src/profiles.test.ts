@@ -3,6 +3,9 @@ import {
   DEFAULT_PROFILE,
   activeProfile,
   launchEnv,
+  launchEnvSync,
+  launchProfile,
+  primeLaunchEnv,
   profileLabel,
   setActiveProfile,
   supportsProfiles,
@@ -11,11 +14,12 @@ import { getSettings } from "./settings";
 import type { AgentProfile } from "./ipc";
 import * as ipc from "./ipc";
 
-vi.mock("./ipc", () => ({ profileEnv: vi.fn() }));
+vi.mock("./ipc", () => ({ profileEnv: vi.fn(), profileActivate: vi.fn() }));
 
 beforeEach(() => {
   localStorage.clear();
   vi.mocked(ipc.profileEnv).mockReset();
+  vi.mocked(ipc.profileActivate).mockResolvedValue(undefined);
 });
 
 const profiles: AgentProfile[] = [
@@ -107,6 +111,55 @@ describe("launchEnv", () => {
     setActiveProfile("work");
     expect(await launchEnv("agy")).toEqual([]);
     expect(ipc.profileEnv).not.toHaveBeenCalled();
+  });
+});
+
+describe("the synchronous launch path", () => {
+  /** Agents are launched from a couple of dozen places. Each one asking Rust,
+   *  and remembering to, is how half end up on the wrong login — the miss is
+   *  invisible, because the CLI starts fine under the default account. So the
+   *  env is primed once per switch and looked up without awaiting. */
+  it("serves the primed account env without awaiting", async () => {
+    vi.mocked(ipc.profileEnv).mockImplementation(async (agent: string) =>
+      agent === "claude"
+        ? ([["CLAUDE_CONFIG_DIR", "/p/vj/.claude"]] as [string, string][])
+        : [],
+    );
+    setActiveProfile("vj");
+    await primeLaunchEnv();
+    expect(launchEnvSync("claude")).toEqual([
+      ["CLAUDE_CONFIG_DIR", "/p/vj/.claude"],
+    ]);
+    expect(launchProfile("claude")).toBe("vj");
+  });
+
+  it("is empty on the default account, primed or not", async () => {
+    await primeLaunchEnv();
+    expect(launchEnvSync("claude")).toEqual([]);
+    // Null, not "default": a tab badge must only ever claim an account that is
+    // genuinely isolating the session.
+    expect(launchProfile("claude")).toBeNull();
+  });
+
+  /** Switching accounts must not serve the previous one's directory for even a
+   *  moment — that would launch an agent on the wrong login, silently. */
+  it("refuses to serve a stale account after a switch", async () => {
+    vi.mocked(ipc.profileEnv).mockResolvedValue([
+      ["CLAUDE_CONFIG_DIR", "/p/vj/.claude"],
+    ]);
+    setActiveProfile("vj");
+    await primeLaunchEnv();
+    setActiveProfile("personal"); // primed cache now belongs to the old account
+    expect(launchEnvSync("claude")).toEqual([]);
+    expect(launchProfile("claude")).toBeNull();
+  });
+
+  it("never claims an account for a CLI that cannot hold one", async () => {
+    vi.mocked(ipc.profileEnv).mockResolvedValue([]);
+    setActiveProfile("vj");
+    await primeLaunchEnv();
+    expect(launchEnvSync("agy")).toEqual([]);
+    expect(launchProfile("agy")).toBeNull();
   });
 });
 

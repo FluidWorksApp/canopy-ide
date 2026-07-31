@@ -40,6 +40,9 @@ import type { AgentCli } from "../../projects";
 import {
   activeProfile,
   launchEnv,
+  launchEnvSync,
+  launchProfile,
+  primeLaunchEnv,
   supportsProfiles,
   PROFILE_CHANGE_EVENT,
 } from "../../profiles";
@@ -566,6 +569,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const pull = () => {
       const id = activeProfile();
       setActiveProfileId(id);
+      // Priming is what makes the launcher's lookup synchronous. It runs here,
+      // on the same signals that change the answer, so a launch never has to
+      // wait on IPC — and never has to remember to ask.
+      void primeLaunchEnv();
       void ipc.profilesList().then(setProfiles).catch(() => {});
       void ipc.profileAccounts(id).then(setActiveAccounts).catch(() => {});
     };
@@ -916,7 +923,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // "run the dev server and check it" is the case that matters most, and it
       // types the command itself. Derived from the path alone (see
       // workspaces.portForPath) so this stays a synchronous, IPC-free lookup.
-      const env = [...portEnv(portForPath(cwd)), ...(extraEnv ?? [])];
+      // Which account this terminal's agent runs under, derived from the
+      // command rather than passed in. Every launcher in the app funnels
+      // through here — the ＋ menu, the palette, a ticket, a PR, a resume, a
+      // woken project — and asking each of them to remember is how half end up
+      // on the default login: the miss is invisible, because the CLI starts
+      // perfectly well either way. An explicit `profile` (a resume, a wake)
+      // still wins: those reopen a conversation that belongs to a specific
+      // account, which is not necessarily the one selected now.
+      const launchedCli = agentIdForCommand(command);
+      const accountEnv =
+        extraEnv ?? (launchedCli ? launchEnvSync(launchedCli) : []);
+      const accountProfile =
+        profile ??
+        (launchedCli && accountEnv.length ? launchProfile(launchedCli) : undefined) ??
+        undefined;
+      const env = [...portEnv(portForPath(cwd)), ...accountEnv];
       setTabs((prev) => [
         ...prev,
         {
@@ -928,7 +950,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           command,
           icon,
           env: env.length ? env : undefined,
-          profile,
+          profile: accountProfile,
           run: run !== false,
           chore: run === "chore" || undefined,
         },
@@ -2305,7 +2327,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
         setTimeout(() => void ipc.ptyWrite(pty, "\r"), 250);
       };
 
-      const extraEnv: [string, string][] = def.env?.(payload) ?? [];
+      // A micro-task is an agent like any other and spends the same quota, so
+      // it runs under the account you are working as. It spawns detached,
+      // bypassing addTerminal, which is why the account env is added by hand
+      // here rather than inherited.
+      const extraEnv: [string, string][] = [
+        ...launchEnvSync(agent),
+        ...(def.env?.(payload) ?? []),
+      ];
       // Which research entry this run is for, taken from the env the task
       // already declares rather than from a second channel — so the launcher
       // stays generic and any future task that binds an entry gets this free.

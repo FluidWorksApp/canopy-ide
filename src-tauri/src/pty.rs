@@ -502,7 +502,15 @@ impl PtyManager {
         cwd: Option<String>,
         command: Option<String>,
     ) -> Result<u32, String> {
-        let res = self.spawn(app.clone(), 120, 32, cwd, None, None, None, None, None)?;
+        // A remote launch runs under the same account as a desktop one. The
+        // choice lives in the frontend, which this path has no way to ask, so
+        // it is read from the registry Rust also writes (see profiles::active).
+        let account = std::env::var("HOME")
+            .ok()
+            .zip(command.as_deref())
+            .map(|(home, cmd)| crate::profiles::env_for_command(&home, cmd))
+            .filter(|e| !e.is_empty());
+        let res = self.spawn(app.clone(), 120, 32, cwd, None, None, None, None, account)?;
         if let Some(cmd) = command {
             let cmd = cmd.trim();
             if !cmd.is_empty() {

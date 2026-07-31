@@ -1351,6 +1351,11 @@ export interface AccountStatus {
 }
 export const profileAccounts = (id: string) =>
   invoke<AccountStatus[]>("profile_accounts", { id });
+/** Record which account new agents launch under, for the launchers that have
+ *  no webview to ask — an agent started from the phone goes through the portal
+ *  and would otherwise always use the default login. */
+export const profileActivate = (id: string) =>
+  invoke<void>("profile_activate", { id });
 /** Creates the directory layout and installs hooks + MCP into it. Does not log
  *  anyone in; the caller opens a terminal for that. */
 export const profileCreate = (label: string) =>

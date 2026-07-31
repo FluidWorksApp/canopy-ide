@@ -125,10 +125,43 @@ fn read_registry(home: &str) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// The account new agents launch under, as last set from the UI.
+///
+/// Stored rather than held in the frontend alone because Rust launches agents
+/// too: a session started from the phone goes through the portal, which has no
+/// webview to ask. Without this, remote launches silently used the default
+/// login while the desktop was switched to another account.
+pub fn active(home: &str) -> String {
+    std::fs::read_to_string(registry_path(home))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v["active"].as_str().map(|s| s.to_string()))
+        .filter(|id| id == DEFAULT_ID || read_registry(home).iter().any(|(x, _)| x == id))
+        .unwrap_or_else(|| DEFAULT_ID.to_string())
+}
+
+pub fn set_active(home: &str, id: &str) -> Result<(), String> {
+    if id != DEFAULT_ID && !read_registry(home).iter().any(|(x, _)| x == id) {
+        return Err(format!("no profile named '{id}'"));
+    }
+    let entries = read_registry(home);
+    write_registry_with(home, &entries, id)
+}
+
 fn write_registry(home: &str, entries: &[(String, String)]) -> Result<(), String> {
+    let active = active(home);
+    write_registry_with(home, entries, &active)
+}
+
+fn write_registry_with(
+    home: &str,
+    entries: &[(String, String)],
+    active: &str,
+) -> Result<(), String> {
     let path = registry_path(home);
     std::fs::create_dir_all(path.parent().ok_or("no .canopy dir")?).map_err(|e| e.to_string())?;
     let body = serde_json::json!({
+        "active": active,
         "profiles": entries
             .iter()
             .map(|(id, label)| serde_json::json!({ "id": id, "label": label }))
@@ -255,6 +288,25 @@ pub fn env_for(home: &str, agent: &str, id: &str) -> Vec<(String, String)> {
         _ => {}
     }
     env
+}
+
+/// The account environment for whatever CLI a command line starts, resolved
+/// against the account currently in use. For launchers with no webview to ask —
+/// the remote portal — where the alternative is silently running on the default
+/// login while the desktop is switched to another account.
+///
+/// Matches on the command's first token only, by basename, so `claude`,
+/// `/opt/homebrew/bin/claude` and `claude --resume x` all resolve, and a
+/// sentence that merely mentions a CLI does not.
+pub fn env_for_command(home: &str, command: &str) -> Vec<(String, String)> {
+    let Some(first) = command.split_whitespace().next() else {
+        return Vec::new();
+    };
+    let bin = first.rsplit('/').next().unwrap_or(first);
+    if !supports_profiles(bin) {
+        return Vec::new();
+    }
+    env_for(home, bin, &active(home))
 }
 
 /// Which profile a path belongs to, for attributing a transcript found under a
@@ -428,6 +480,14 @@ pub async fn profile_create(label: String) -> Result<Profile, String> {
 #[tauri::command]
 pub async fn profile_accounts(id: String) -> Result<Vec<AccountStatus>, String> {
     Ok(account_status(&home()?, &id))
+}
+
+/// Record which account new agents launch under. The frontend owns the choice;
+/// this is how the parts of the app that have no webview — the remote portal —
+/// find out about it.
+#[tauri::command]
+pub async fn profile_activate(id: String) -> Result<(), String> {
+    set_active(&home()?, &id)
 }
 
 #[tauri::command]
@@ -696,6 +756,55 @@ mod tests {
                 .unwrap();
             assert_eq!(s.state, "unknown", "{agent} claimed a state it can't read");
         }
+    }
+
+    /// Rust launches agents too — the remote portal has no webview to ask —
+    /// so the active account is written where both halves can read it.
+    #[test]
+    fn the_active_account_survives_a_restart_and_a_deleted_profile() {
+        let home = scratch("active");
+        let h = home.to_string_lossy().to_string();
+        assert_eq!(active(&h), DEFAULT_ID);
+
+        create(&h, "work").unwrap();
+        set_active(&h, "work").unwrap();
+        assert_eq!(active(&h), "work");
+
+        // Creating another profile must not disturb the choice — write_registry
+        // rewrites the same file.
+        create(&h, "personal").unwrap();
+        assert_eq!(active(&h), "work");
+
+        // An account that no longer exists is not a launch target: falling back
+        // to the default beats pointing agents at a directory we forgot.
+        delete(&h, "work").unwrap();
+        assert_eq!(active(&h), DEFAULT_ID);
+        assert!(set_active(&h, "nope").is_err());
+    }
+
+    /// The portal is handed a command line, not a registry id.
+    #[test]
+    fn a_command_line_resolves_to_its_clis_account() {
+        let home = scratch("by-command");
+        let h = home.to_string_lossy().to_string();
+        create(&h, "work").unwrap();
+        set_active(&h, "work").unwrap();
+
+        let has_cfg = |cmd: &str| {
+            env_for_command(&h, cmd)
+                .iter()
+                .any(|(k, _)| k == "CLAUDE_CONFIG_DIR")
+        };
+        assert!(has_cfg("claude"));
+        assert!(has_cfg("claude --resume abc"));
+        // An absolute path is the same CLI.
+        assert!(has_cfg("/opt/homebrew/bin/claude"));
+        // Only the first token counts: a prompt that merely mentions a CLI is
+        // not a launch of it.
+        assert!(!has_cfg("echo claude"));
+        // And a CLI that cannot hold a second login gets nothing.
+        assert!(env_for_command(&h, "agy").is_empty());
+        assert!(env_for_command(&h, "").is_empty());
     }
 
     #[test]

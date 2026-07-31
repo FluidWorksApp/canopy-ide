@@ -716,6 +716,22 @@ fn read_registry(
     status_for: &dyn Fn(&str, bool) -> &'static str,
     cwd: &Path,
 ) {
+    read_registry_labelled(collector, path, registry, scope, status_for, cwd, "");
+}
+
+/// The same read, with an account suffix on the source label. A row sourced
+/// from a second login has to say so, or two accounts' servers look like one
+/// list with duplicates in it.
+#[allow(clippy::too_many_arguments)]
+fn read_registry_labelled(
+    collector: &mut Collector,
+    path: &Path,
+    registry: &Registry,
+    scope: &str,
+    status_for: &dyn Fn(&str, bool) -> &'static str,
+    cwd: &Path,
+    account: &str,
+) {
     if !path.exists() {
         return;
     }
@@ -737,7 +753,7 @@ fn read_registry(
             endpoint,
             McpSource {
                 agent: registry.agent.into(),
-                label: format!("{} ({scope})", registry.label),
+                label: format!("{} ({scope}){account}", registry.label),
                 name: name.clone(),
                 config_path: path.display().to_string(),
                 scope: scope.into(),
@@ -773,35 +789,64 @@ pub fn discover(
 ) -> (Vec<McpServer>, BTreeMap<String, LaunchSpec>) {
     let mut collector = Collector::default();
 
-    for registry in GLOBAL_REGISTRIES {
-        read_registry(
-            &mut collector,
-            &home.join(registry.rel),
-            registry,
-            "global",
-            &plain_status,
-            home,
-        );
-    }
-
-    // Codex is TOML, so it gets read directly rather than through `Registry`.
-    let codex_path = home.join(".codex/config.toml");
-    if let Ok(raw) = std::fs::read_to_string(&codex_path) {
-        for (name, endpoint) in parse_codex_toml(&raw) {
-            let status = plain_status(&name, endpoint.enabled);
-            collector.add(
-                &name,
-                endpoint,
-                McpSource {
-                    agent: "codex".into(),
-                    label: "Codex (global)".into(),
-                    name: name.clone(),
-                    config_path: codex_path.display().to_string(),
-                    scope: "global".into(),
-                    status: status.into(),
-                },
-                Some(home.to_path_buf()),
+    // Every account profile is scanned, not just `$HOME`. A profile's agents
+    // read that profile's registries, so a panel built from the default one
+    // would list servers the running agent does not have — and omit the ones it
+    // does. Rows fold onto identity, so a server configured in both accounts
+    // stays one row carrying two sources.
+    for (profile, root) in crate::profiles::roots(&home.to_string_lossy()) {
+        let is_default = profile == crate::profiles::DEFAULT_ID;
+        let suffix = if is_default {
+            String::new()
+        } else {
+            format!(" · {profile}")
+        };
+        for registry in GLOBAL_REGISTRIES {
+            // Verified against the CLI: with CLAUDE_CONFIG_DIR set, Claude puts
+            // `.claude.json` *inside* the config dir rather than beside it, so
+            // a profile's path is not simply the same relative path under a
+            // different root. Everything else is XDG-shaped and is.
+            let rel = if !is_default && registry.rel == ".claude.json" {
+                ".claude/.claude.json".to_string()
+            } else {
+                registry.rel.to_string()
+            };
+            // Only the CLIs a profile can actually hold are worth reading
+            // there: the rest keep one account's config in `$HOME` whatever we
+            // do, and reading an empty profile path would add nothing.
+            if !is_default && !crate::profiles::supports_profiles(registry.agent) {
+                continue;
+            }
+            read_registry_labelled(
+                &mut collector,
+                &root.join(&rel),
+                registry,
+                "global",
+                &plain_status,
+                &root,
+                &suffix,
             );
+        }
+
+        // Codex is TOML, so it gets read directly rather than through `Registry`.
+        let codex_path = root.join(".codex/config.toml");
+        if let Ok(raw) = std::fs::read_to_string(&codex_path) {
+            for (name, endpoint) in parse_codex_toml(&raw) {
+                let status = plain_status(&name, endpoint.enabled);
+                collector.add(
+                    &name,
+                    endpoint,
+                    McpSource {
+                        agent: "codex".into(),
+                        label: format!("Codex (global){suffix}"),
+                        name: name.clone(),
+                        config_path: codex_path.display().to_string(),
+                        scope: "global".into(),
+                        status: status.into(),
+                    },
+                    Some(root.clone()),
+                );
+            }
         }
     }
 

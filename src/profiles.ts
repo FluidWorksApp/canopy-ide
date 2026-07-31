@@ -34,9 +34,15 @@ export function activeProfile(): string {
  *  whole life. That is the honest behaviour, and the tab badge is what makes
  *  it legible when two accounts are open at once. */
 export function setActiveProfile(profileId: string): void {
-  updateSettings({ activeProfile: profileId || DEFAULT_PROFILE });
+  const id = profileId || DEFAULT_PROFILE;
+  updateSettings({ activeProfile: id });
+  // Rust launches agents too — the remote portal has no webview to ask — so
+  // the choice is mirrored into the registry it can read. Fire-and-forget:
+  // failing to record it must not block the switch, and the desktop's own
+  // launches read the setting directly either way.
+  void ipc.profileActivate(id).catch(() => {});
   window.dispatchEvent(
-    new CustomEvent(PROFILE_CHANGE_EVENT, { detail: { profileId } }),
+    new CustomEvent(PROFILE_CHANGE_EVENT, { detail: { profileId: id } }),
   );
 }
 
@@ -64,6 +70,62 @@ export async function launchEnv(cliId: string): Promise<[string, string][]> {
     // tab badge, and recoverable — rather than not starting at all.
     return [];
   }
+}
+
+// ---------- the synchronous path ----------
+//
+// Agents are launched from a couple of dozen places — the ＋ menu, the launch
+// palette, a ticket, a PR review, a resume, a micro-task, a woken project. Each
+// one asking Rust for the account's environment, and remembering to, is how
+// half of them end up on the wrong login: the miss is invisible, because the
+// CLI starts perfectly well under the default account.
+//
+// So the environment is resolved once per account switch and cached, and the
+// launcher looks it up synchronously from the command it is about to run. A
+// call site that knows nothing about accounts gets this for free, and so does
+// the next one somebody adds.
+
+let envCache: { profile: string; byCli: Record<string, [string, string][]> } = {
+  profile: DEFAULT_PROFILE,
+  byCli: {},
+};
+
+/** Load the active account's environment for every CLI that can hold one.
+ *  Called at startup and on every account change. */
+export async function primeLaunchEnv(): Promise<void> {
+  const profile = activeProfile();
+  if (profile === DEFAULT_PROFILE) {
+    envCache = { profile, byCli: {} };
+    return;
+  }
+  const byCli: Record<string, [string, string][]> = {};
+  await Promise.all(
+    PROFILE_CAPABLE.map(async (id) => {
+      try {
+        byCli[id] = await ipc.profileEnv(id, profile);
+      } catch {
+        // Leave it absent: an unresolvable account launches on the default
+        // login, which the tab badge then (correctly) does not claim.
+      }
+    }),
+  );
+  envCache = { profile, byCli };
+}
+
+/** The account environment for a CLI, without awaiting. Empty on the default
+ *  account, for a CLI that can't hold a second login, and — deliberately — if
+ *  the cache has not been primed yet: a launch is never worth blocking, and
+ *  starting on the default account is visible and recoverable. */
+export function launchEnvSync(cliId: string): [string, string][] {
+  if (envCache.profile !== activeProfile()) return [];
+  return envCache.byCli[cliId] ?? [];
+}
+
+/** The account a launch of `cliId` would run under, for stamping on the tab.
+ *  Null when that launch carries no account environment, so a tab only ever
+ *  claims an account that is genuinely isolating it. */
+export function launchProfile(cliId: string): string | null {
+  return launchEnvSync(cliId).length ? activeProfile() : null;
 }
 
 /** Whether a CLI can hold more than one login. Mirrors PROFILE_AGENTS in

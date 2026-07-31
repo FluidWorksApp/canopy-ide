@@ -665,6 +665,7 @@ pub fn run() {
             profiles::profile_create,
             profiles::profile_delete,
             profiles::profile_accounts,
+            profiles::profile_activate,
             profiles::profile_env,
             profiles::profile_setup,
             relay::relay_host_start,

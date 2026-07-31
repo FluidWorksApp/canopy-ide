@@ -18,6 +18,7 @@ vi.mock("../ipc", () => ({
   agentUsage: vi.fn(),
   planUsage: vi.fn(),
   profilesList: vi.fn(),
+  profileActivate: vi.fn(),
   profileAccounts: vi.fn(),
   gitSyncProbe: vi.fn(),
   gitSyncApply: vi.fn(),
@@ -72,6 +73,7 @@ beforeEach(() => {
     { id: "default", label: "Default", root: "/Users/dev", removable: false },
   ]);
   vi.mocked(ipc.profileAccounts).mockResolvedValue([]);
+  vi.mocked(ipc.profileActivate).mockResolvedValue(undefined);
   vi.mocked(ipc.claudeSessionStats).mockResolvedValue({
     model: "claude-opus-5",
     input_tokens: 10,
