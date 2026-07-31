@@ -4,7 +4,7 @@
   "workspaces": [
     "packages/*"
   ],
-  "version": "0.2.18",
+  "version": "0.2.19",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -16,7 +16,7 @@
     "test:coverage": "vitest run --coverage",
     "preview": "vite preview",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev --config '{\"productName\":\"Canopy \u2014 DEV\"}'",
+    "tauri:dev": "tauri dev --config '{\"productName\":\"Canopy — DEV\"}'",
     "build:hook": "node scripts/prepare-sidecar.mjs",
     "build:hook:release": "node scripts/prepare-sidecar.mjs --release",
     "build:portal": "vite build --config portal/vite.config.ts",
