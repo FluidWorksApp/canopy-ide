@@ -22,12 +22,13 @@ import {
 } from "./companion";
 import { buildCompanionPrompt, type PromptProject } from "./companionPrompt";
 import {
+  startOneshot,
   startStructured,
   startTerminal,
   type CompanionEvent,
   type CompanionTransport,
 } from "./companionTransport";
-import { getSettings } from "./settings";
+import { getSettings, updateSettings } from "./settings";
 import { AGENT_CLIS, shellBin, shellQuote } from "./projects";
 
 export type CompanionStatus =
@@ -38,7 +39,14 @@ export type CompanionStatus =
   /** Mid-turn: a reply is being written. */
   | "working"
   /** It could not start, or it died. `error` says why. */
-  | "failed";
+  | "failed"
+  /** There is no agent CLI on this machine to run it on.
+   *
+   *  Distinct from `failed` because it is not a fault and there is nothing to
+   *  report: the companion is on by default, so on a machine with no CLI yet
+   *  this is simply the ordinary state. Surfaces render nothing for it rather
+   *  than a mascot wearing a permanent error face. */
+  | "unavailable";
 
 export interface CompanionTool {
   name: string;
@@ -255,9 +263,10 @@ export async function startCompanion(opts: StartOptions): Promise<void> {
       AGENT_CLIS.find((c) => c.id === s.defaultAgent && opts.installed(c.bin)) ??
       AGENT_CLIS.find((c) => opts.installed(c.bin));
     if (!cli) {
+      // Not an error, and deliberately not shown as one — see "unavailable".
       set({
-        status: "failed",
-        error: "No agent CLI is installed — add one in Settings → Agents.",
+        status: "unavailable",
+        error: null,
       });
       return;
     }
@@ -304,7 +313,24 @@ export async function startCompanion(opts: StartOptions): Promise<void> {
     });
 
     try {
-      if (tierFor(cli.id) === "structured") {
+      const tier = tierFor(cli.id);
+      if (tier === "oneshot") {
+        // The thread id is reported by the CLI on its first turn rather than
+        // chosen up front, so an id we already hold is a conversation to
+        // resume and its absence is a first meeting.
+        const known = s.companionSessions[cli.id] || null;
+        attempt = { cliId: cli.id, resumed: Boolean(known), ready: false };
+        transport = startOneshot(cli.id, launch, { emit: onEvent }, {
+          sessionId: known,
+          onSession: (id) =>
+            updateSettings({
+              companionSessions: { ...getSettings().companionSessions, [cli.id]: id },
+            }),
+          cwd,
+          env,
+        });
+        markRun(cli.id);
+      } else if (tier === "structured") {
         // Resume when there is a conversation to resume — which there is on
         // every launch after the first, and is the whole of "remembers who it
         // is". A first run has the id but no transcript behind it yet.

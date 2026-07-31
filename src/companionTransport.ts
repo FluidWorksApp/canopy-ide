@@ -210,6 +210,150 @@ export async function startStructured(
   return transport;
 }
 
+// ---------------------------------------------------------------- oneshot
+
+/**
+ * A CLI whose non-interactive mode ends with its turn.
+ *
+ * `codex exec` has no long-lived stdin to write the next message to, so this
+ * runs one process per turn and stitches the conversation together with the
+ * thread id the CLI reports. Not a workaround — it is the shape of the CLI, and
+ * it still gives structured events and a real memory, which is everything the
+ * chat needs and everything the terminal tier cannot manage.
+ *
+ * The thread id arrives on the FIRST turn rather than being chosen up front, so
+ * `onSession` hands it back for storing; every later turn resumes it.
+ */
+export class OneshotTransport implements CompanionTransport {
+  private host: TransportHost;
+  private launch: (message: string, sessionId: string | null) => Promise<void>;
+  private sessionId: string | null;
+  private onSession: (id: string) => void;
+
+  constructor(opts: {
+    host: TransportHost;
+    sessionId: string | null;
+    onSession: (id: string) => void;
+    launch: (message: string, sessionId: string | null) => Promise<void>;
+  }) {
+    this.host = opts.host;
+    this.sessionId = opts.sessionId;
+    this.onSession = opts.onSession;
+    this.launch = opts.launch;
+  }
+
+  /** One JSONL line from `codex exec --json`. */
+  handleLine(raw: string): void {
+    let msg: {
+      type?: string;
+      thread_id?: string;
+      item?: { type?: string; text?: string; name?: string; command?: string };
+      error?: { message?: string };
+    };
+    try {
+      msg = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    switch (msg.type) {
+      case "thread.started":
+        // First turn: this is the id that makes the next one a continuation.
+        if (msg.thread_id && msg.thread_id !== this.sessionId) {
+          this.sessionId = msg.thread_id;
+          this.onSession(msg.thread_id);
+        }
+        this.host.emit({ kind: "ready" });
+        return;
+      case "item.completed": {
+        const item = msg.item;
+        if (!item) return;
+        if (item.type === "agent_message" && item.text) {
+          this.host.emit({ kind: "reply", text: item.text });
+        } else if (item.type === "command_execution" && item.command) {
+          this.host.emit({ kind: "tool", name: "Shell", detail: item.command.slice(0, 60) });
+        } else if (item.type === "mcp_tool_call" && item.name) {
+          this.host.emit({ kind: "tool", name: item.name });
+        }
+        return;
+      }
+      case "turn.failed":
+        this.host.emit({
+          kind: "error",
+          message: msg.error?.message || "The agent ended the turn with an error.",
+        });
+        this.host.emit({ kind: "turnEnd" });
+        return;
+      case "turn.completed":
+        this.host.emit({ kind: "turnEnd" });
+        return;
+      default:
+        return;
+    }
+  }
+
+  async send(text: string): Promise<void> {
+    await this.launch(text, this.sessionId);
+  }
+
+  async stop(): Promise<void> {
+    await ipc.companionKill();
+  }
+}
+
+/** Start a oneshot-tier CLI. Nothing is spawned until the first message: the
+ *  process IS the turn, so there is nothing to keep warm. `ready` is emitted so
+ *  the panel is usable immediately rather than looking dead until first use. */
+export function startOneshot(
+  cliId: string,
+  launch: CompanionLaunch,
+  host: TransportHost,
+  opts: {
+    sessionId: string | null;
+    onSession: (id: string) => void;
+    cwd?: string;
+    env?: [string, string][];
+  },
+): CompanionTransport {
+  const runner = COMPANION_RUNNERS[cliId];
+  if (!runner) throw new Error(`${cliId} has no verified runner`);
+  let transport: OneshotTransport;
+  const spawn = async (message: string, sessionId: string | null) => {
+    const args = sessionId
+      ? runner.resumeArgs({ ...launch, sessionId })
+      : runner.args(launch);
+    await ipc.companionSpawn(
+      {
+        command: launch.bin,
+        // The brief rides on every turn: a fresh process has no memory of it,
+        // and a resumed one was never told it in a way that survives.
+        args: [...args, `${launch.systemPrompt}\n\n---\n\n${message}`],
+        cwd: opts.cwd,
+        env: opts.env,
+      },
+      (out) => {
+        if (out.kind === "line") transport.handleLine(out.text);
+        else if (out.kind === "stderr") {
+          if (/error|fatal|not found|denied|invalid/i.test(out.text)) {
+            host.emit({ kind: "error", message: out.text });
+          }
+        } else if (out.kind === "exit") {
+          // A turn ending is the process ending, so this is normal — never the
+          // "the agent stopped" that a streaming tier's exit means.
+          host.emit({ kind: "turnEnd" });
+        }
+      },
+    );
+  };
+  transport = new OneshotTransport({
+    host,
+    sessionId: opts.sessionId,
+    onSession: opts.onSession,
+    launch: spawn,
+  });
+  host.emit({ kind: "ready" });
+  return transport;
+}
+
 // --------------------------------------------------------------- terminal
 
 /** How long the screen has to stop changing before the reply is taken as

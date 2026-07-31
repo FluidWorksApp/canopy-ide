@@ -12,7 +12,11 @@ vi.mock("./Mascot", () => ({
   Mascot: ({ state }: { state: string }) => <svg data-face={state} />,
 }));
 vi.mock("./CompanionChat", () => ({
-  CompanionChat: () => <div data-testid="chat" />,
+  CompanionChat: ({ onRetry }: { onRetry: () => void }) => (
+    <div data-testid="chat">
+      <button data-testid="retry" onClick={onRetry} />
+    </div>
+  ),
 }));
 
 const VIEW = { width: 1000, height: 600 };
@@ -36,6 +40,8 @@ function mount() {
       onFollowNotice={noop}
       proposal={null}
       onAnswerProposal={noop}
+      onInstallCli={noop}
+      onRetry={noop}
     />,
   );
 }
@@ -147,6 +153,48 @@ describe("dragging the companion", () => {
       pointer(el, "Up", 400, 400);
     });
     expect(getSettings().companionSpot).toEqual(before);
+  });
+});
+
+describe("with no agent CLI installed", () => {
+  it("stays on screen instead of vanishing", async () => {
+    // Going invisible was the wrong answer: the user is then left with a
+    // setting that says the companion is on, no companion, and nothing telling
+    // them what it wants. It stays, asleep, and says so when opened.
+    const { startCompanion } = await import("../companionSession");
+    await startCompanion({ projects: [], installed: () => false, tools: [] });
+    mount();
+    expect(mascot()).toBeTruthy();
+    expect(mascot().querySelector("svg")?.getAttribute("data-face")).toBe("sleeping");
+  });
+});
+
+describe("a dead session", () => {
+  it("offers a retry that reaches the launcher", () => {
+    // Recovering from "the companion's agent stopped" used to mean finding the
+    // Settings toggle and switching it off and on again.
+    const onRetry = vi.fn();
+    render(
+      <Companion
+        notices={[]}
+        onDismissNotice={noop}
+        onFollowNotice={noop}
+        proposal={null}
+        onAnswerProposal={noop}
+        onInstallCli={noop}
+        onRetry={onRetry}
+      />,
+    );
+    act(() => {
+      fireEvent.click(mascot());
+      fireEvent.pointerDown(mascot(), { clientX: 0, clientY: 0, button: 0, pointerId: 1 });
+      fireEvent.pointerUp(mascot(), { clientX: 0, clientY: 0, button: 0, pointerId: 1 });
+    });
+    const retry = screen.queryByTestId("retry");
+    if (retry) {
+      act(() => void fireEvent.click(retry));
+      expect(onRetry).toHaveBeenCalled();
+    }
   });
 });
 

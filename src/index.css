@@ -20127,3 +20127,61 @@ a.btn-sm {
   gap: 10px;
   flex-wrap: wrap;
 }
+
+/* What the companion needs before it can do anything. Shown in the panel
+   rather than by the companion quietly not existing — a mascot that vanishes
+   leaves the user with no way to find out what it wants. */
+.companion-needs {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.companion-needs p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+.companion-needs-cta {
+  padding: 6px 13px;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* The error strip carries its own way out. An agent that stopped is the one
+   failure the user can act on, and hunting for the Settings toggle to turn the
+   companion off and on again is not acting on it. */
+.companion-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.companion-error-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.companion-retry {
+  flex: none;
+  padding: 3px 10px;
+  border-radius: 5px;
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.companion-retry:hover {
+  background: color-mix(in srgb, currentColor 14%, transparent);
+}

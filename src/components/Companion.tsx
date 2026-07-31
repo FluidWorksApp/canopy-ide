@@ -55,6 +55,10 @@ interface CompanionProps {
   /** An action the companion is blocked on. */
   proposal: CompanionProposal | null;
   onAnswerProposal: (accepted: boolean) => void;
+  /** Open Settings where an agent CLI can be installed. */
+  onInstallCli: () => void;
+  /** Start the session again after it died. */
+  onRetry: () => void;
 }
 
 /** Whether a native browser view is on screen right now.
@@ -133,6 +137,10 @@ function faceFor(
       return "thinking";
     case "failed":
       return "blocked";
+    // Asleep rather than blocked: with no agent CLI installed there is nothing
+    // wrong, it simply has nothing to think with yet. Still on screen — going
+    // invisible would leave the user with no way to find out what it needs.
+    case "unavailable":
     case "starting":
       return "sleeping";
     default:
@@ -146,6 +154,8 @@ export function Companion({
   onFollowNotice,
   proposal,
   onAnswerProposal,
+  onInstallCli,
+  onRetry,
 }: CompanionProps) {
   const state = useSyncExternalStore(subscribeCompanion, companionState, () => companionState());
   const browserShowing = useBrowserShowing();
@@ -309,6 +319,8 @@ export function Companion({
           height={PANEL_HEIGHT}
           proposal={proposal}
           onAnswer={onAnswerProposal}
+          onInstall={onInstallCli}
+          onRetry={onRetry}
           onSend={(text) => void sendToCompanion(text)}
           onClose={() => setOpen(false)}
         />

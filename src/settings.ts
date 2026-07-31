@@ -214,9 +214,16 @@ export interface Settings {
   /** Whether the mascot is a *companion* — floating over every project, with a
    *  session of its own — rather than only the face other surfaces wear.
    *
-   *  Off by default, and this one has to be: it starts a real agent CLI that
-   *  stays running, spends tokens, and can be given authority to act. That
-   *  follows a decision the user made, never an upgrade. */
+   *  On by default: the companion is the point of the mascot, and a feature
+   *  nobody finds is a feature nobody has. It does start a real agent CLI that
+   *  stays running and spends tokens, so two things keep that honest — it only
+   *  starts once a CLI is actually installed, and its default authority asks
+   *  before it changes anything (see CompanionAuthority).
+   *
+   *  Note this reaches new installs only. Stored settings win over defaults
+   *  (see getSettings), so anyone who has already switched it off stays off,
+   *  which is the correct outcome — a preference somebody set is not a
+   *  question to re-ask on upgrade. */
   companionEnabled: boolean;
   /** What the user calls it. Empty means the mascot's own name (see
    *  companionName), which is what keeps a second mascot from arriving
@@ -541,7 +548,7 @@ export const DEFAULTS: Settings = {
   trackerKeys: {},
   theme: "default",
   customAccent: "",
-  companionEnabled: false,
+  companionEnabled: true,
   companionName: "",
   companionCli: "",
   companionModel: "",

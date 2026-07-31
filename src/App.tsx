@@ -89,7 +89,11 @@ import { Dictation } from "./components/Dictation";
 import { Companion } from "./components/Companion";
 import { startCompanion, stopCompanion } from "./companionSession";
 import { companionToolNames } from "./companionTools";
-import { checkInstalledClis } from "./projects";
+import {
+  AGENT_CLIS_CHANGED_EVENT,
+  CLI_INSTALLS_CHANGED_EVENT,
+  checkInstalledClis,
+} from "./projects";
 import { TooltipLayer } from "./components/TooltipLayer";
 import { Onboarding } from "./components/Onboarding";
 import { Welcome } from "./components/Welcome";
@@ -2085,11 +2089,33 @@ export default function App() {
       })),
     [ws.projects, ws.openIds, hibernated],
   );
+  // One launcher, called by the mount effect, by the install-finished events,
+  // and by the Retry button. A second copy would drift from this one the first
+  // time a launch argument changed.
+  const launchCompanion = useCallback(
+    () =>
+      checkInstalledClis().then((installed) =>
+        startCompanion({
+          projects: companionProjectsRef.current,
+          installed: (bin) => Boolean(installed[bin]),
+          tools: companionToolNames(
+            getSettings().disabledTools,
+            getSettings().companionAuthority,
+          ),
+        }),
+      ),
+    [],
+  );
+  const startCompanionRef = useRef(launchCompanion);
+  startCompanionRef.current = launchCompanion;
+
   const companionOn = useSyncExternalStore(
     subscribeSettings,
     () => getSettings().companionEnabled,
     () => false,
   );
+  const companionProjectsRef = useRef(companionProjects);
+  companionProjectsRef.current = companionProjects;
   /** A proposal waiting on the user, rendered as a chip in the companion's
    *  chat. One at a time: the agent is blocked on the answer, so it cannot be
    *  asking two things at once. */
@@ -2148,19 +2174,24 @@ export default function App() {
       return;
     }
     let cancelled = false;
-    void checkInstalledClis().then((installed) => {
+    const attempt = () => {
       if (cancelled) return;
-      void startCompanion({
-        projects: companionProjects,
-        installed: (bin) => Boolean(installed[bin]),
-        tools: companionToolNames(
-          getSettings().disabledTools,
-          getSettings().companionAuthority,
-        ),
-      });
-    });
+      void startCompanionRef.current();
+    };
+    attempt();
+    // Try again when an install finishes. The companion ships on, so a machine
+    // with no agent CLI is an ordinary starting state rather than an error —
+    // and installing one from Settings has to bring the companion to life
+    // there and then. Without this, `unavailable` is a dead end until the app
+    // is restarted, which is not something anyone would think to do.
+    // `startCompanion` no-ops while one is already running, so a stray event
+    // costs a `which` probe and nothing else.
+    window.addEventListener(CLI_INSTALLS_CHANGED_EVENT, attempt);
+    window.addEventListener(AGENT_CLIS_CHANGED_EVENT, attempt);
     return () => {
       cancelled = true;
+      window.removeEventListener(CLI_INSTALLS_CHANGED_EVENT, attempt);
+      window.removeEventListener(AGENT_CLIS_CHANGED_EVENT, attempt);
     };
   }, [companionOn, companionProjects]);
   // Quitting must not leave an agent running and billing.
@@ -2470,6 +2501,8 @@ export default function App() {
           notices={toasts}
           onDismissNotice={dismissToast}
           onFollowNotice={(item) => void followAttention(item)}
+          onInstallCli={() => setSettingsOpen({ tab: "agents" })}
+          onRetry={() => void launchCompanion()}
           proposal={proposal}
           onAnswerProposal={(accepted) => {
             if (!proposal) return;
