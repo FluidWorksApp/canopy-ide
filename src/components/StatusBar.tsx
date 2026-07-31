@@ -1165,6 +1165,41 @@ function AccountSwitcher() {
   );
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(activeProfile());
+  const anchorRef = useRef<HTMLSpanElement>(null);
+  // The status bar clips its one-line row, so a menu popping above it as an
+  // absolutely positioned child shows nothing but a sliver of its own shadow —
+  // which is exactly what this did on the first cut. Fixed coordinates,
+  // measured from the chip at click time, ignore ancestor clipping entirely.
+  // Same pattern as the model and stats popups above.
+  const [pos, setPos] = useState<{ right: number; bottom: number } | null>(
+    null,
+  );
+  const place = () => {
+    const r = anchorRef.current?.getBoundingClientRect();
+    if (!r) return;
+    setPos({
+      right: Math.max(8, window.innerWidth - r.right),
+      bottom: window.innerHeight - r.top + 6,
+    });
+  };
+
+  // Dismissal that matches the neighbouring popups: an outside click or
+  // Escape. Mouse-leave is flimsy on a menu you have to travel to.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (!anchorRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
 
   const refresh = useCallback(() => {
     setActive(activeProfile());
@@ -1202,18 +1237,29 @@ function AccountSwitcher() {
     (accounts[id] ?? []).filter((a) => a.state === "in");
 
   return (
-    <span className="status-account-anchor">
+    <span className="status-account-anchor" ref={anchorRef}>
       <button
         className="status-item status-account"
         title={`New agents launch as ${current.label} — click to switch`}
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          place();
+          setOpen((v) => !v);
+        }}
       >
         ◐ {current.label}
       </button>
       {open && (
         <div
-          className="status-account-menu"
-          onMouseLeave={() => setOpen(false)}
+          className="status-menu status-account-menu"
+          style={
+            pos
+              ? ({
+                  position: "fixed",
+                  right: pos.right,
+                  bottom: pos.bottom,
+                } as const)
+              : undefined
+          }
         >
           {profiles.map((p) => {
             const held = heldBy(p.id);

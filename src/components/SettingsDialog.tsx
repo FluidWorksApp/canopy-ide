@@ -465,6 +465,9 @@ function AgentAccounts({
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  /** Which account rows are unfolded. Folded is the default and nothing is
+   *  persisted: this is a reading position, not a preference. */
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   const refresh = useCallback(() => {
     void ipc
@@ -501,6 +504,9 @@ function AgentAccounts({
       .then((p) => {
         setDraft("");
         refresh();
+        // Open the one just created: the next thing to do is sign it in, and
+        // the buttons for that are inside the fold.
+        setExpanded((prev) => ({ ...prev, [p.id]: true }));
         // Announced so open launchers pick the new account up without the user
         // having to reopen anything.
         window.dispatchEvent(new CustomEvent(PROFILE_CHANGE_EVENT));
@@ -561,15 +567,51 @@ function AgentAccounts({
       </div>
       {note && <p className="cli-account-note">{note}</p>}
 
-      {profiles.map((p) => (
-        <div key={p.id} className="cli-account-row">
-          <div className="cli-account-head">
+      {profiles.map((p) => {
+        // Folded by default. Four CLI rows per account is a page of settings
+        // once you have two or three of them, and the question you open this
+        // screen with — "which accounts do I have, and who is in them" — is
+        // answered by the summary line alone.
+        const isOpen = expanded[p.id] ?? false;
+        const signedIn = (accounts[p.id] ?? []).filter((a) => a.state === "in");
+        return (
+        <div key={p.id} className={`cli-account-row ${isOpen ? "is-open" : ""}`}>
+          <div
+            className="cli-account-head"
+            onClick={() =>
+              setExpanded((prev) => ({ ...prev, [p.id]: !isOpen }))
+            }
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                setExpanded((prev) => ({ ...prev, [p.id]: !isOpen }));
+              }
+            }}
+            title={isOpen ? "Collapse" : "Show which CLIs this account is signed into"}
+          >
+            <span className="cli-account-caret">{isOpen ? "▾" : "▸"}</span>
             <span className="cli-account-name">{p.label}</span>
+            {/* The whole point of the row, said without expanding it: who is
+                actually in this account. */}
+            <span className="cli-account-summary">
+              {signedIn.length
+                ? signedIn
+                    .map((a) => a.account ?? a.agent)
+                    .join(" · ")
+                : "no logins yet"}
+            </span>
             {!p.removable && <span className="cli-account-tag">in use everywhere</span>}
             {p.removable && (
               <Button
                 size="sm"
-                onClick={() => remove(p)}
+                onClick={(e) => {
+                  // The head is a fold toggle; removing an account must not
+                  // also fold the row it just deleted.
+                  e.stopPropagation();
+                  remove(p);
+                }}
                 disabled={busy}
                 title="Forget this account. Its files, including the login, stay on disk."
               >
@@ -577,6 +619,8 @@ function AgentAccounts({
               </Button>
             )}
           </div>
+          {isOpen && (
+          <>
           <div className="cli-account-path" title={p.root}>
             {p.root}
           </div>
@@ -619,8 +663,11 @@ function AgentAccounts({
               );
             })}
           </div>
+          </>
+          )}
         </div>
-      ))}
+        );
+      })}
 
       <p className="cli-account-note">
         Claude Code, Codex, OpenCode and Amp can hold a second login. Antigravity,
