@@ -17,6 +17,12 @@ import { fmtTokens } from "../format";
 import * as ipc from "../ipc";
 import { estimateCost, sessionCost } from "../pricing";
 import { chipText, planFor, planTone, tooltip } from "../planUsage";
+import {
+  loadFlags,
+  loadNote,
+  withLoadNote,
+  type LoadScope,
+} from "../resourceLoad";
 import { StatsPanel } from "./StatsPanel";
 import { CleanupDialog } from "./CleanupDialog";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
@@ -36,11 +42,33 @@ const fmtMem = (bytes: number) =>
     ? `${(bytes / 1024 ** 3).toFixed(1)} GB`
     : `${Math.round(bytes / 1024 ** 2)} MB`;
 
+/** The "12% · 480 MB" on the right of a breakdown row. Whichever half is
+ *  abnormal for this kind of row goes red on its own — a session pinning a
+ *  core while holding 200 MB should redden the CPU and nothing else. */
+function Nums({
+  scope,
+  cpu,
+  mem,
+}: {
+  scope: LoadScope;
+  cpu: number;
+  mem: number;
+}) {
+  const hot = loadFlags(scope, cpu, mem);
+  return (
+    <span className="bd-nums">
+      {/* Colour is backed up by weight: red alone is a poor signal for anyone
+          who can't separate it from the dim grey these numbers normally are. */}
+      <span className={hot.cpu ? "bd-hot" : undefined}>{cpu.toFixed(0)}%</span>{" "}
+      · <span className={hot.mem ? "bd-hot" : undefined}>{fmtMem(mem)}</span>
+    </span>
+  );
+}
+
 /** Last stats seen per transcript, module-wide — switching tabs (or
  *  projects) shows the right model/tokens instantly from cache while the
  *  fresh poll runs, instead of carrying the previous tab's numbers. */
 const TRANSCRIPT_STATS = new Map<string, ipc.ClaudeSessionStats>();
-
 
 interface StatusBarProps {
   roots: string[];
@@ -126,7 +154,10 @@ export const StatusBar = memo(function StatusBar({
    *  positioned child — the same reason the model and resource menus are fixed.
    *  Anchored by its LEFT edge: this chip sits at the far left, and a
    *  right-anchored panel this wide would hang off the side of the window. */
-  const [syncPos, setSyncPos] = useState<{ left: number; bottom: number } | null>(null);
+  const [syncPos, setSyncPos] = useState<{
+    left: number;
+    bottom: number;
+  } | null>(null);
   const placeSync = () => {
     const r = syncAnchorRef.current?.getBoundingClientRect();
     if (!r) return;
@@ -489,6 +520,11 @@ export const StatusBar = memo(function StatusBar({
 
   const cost = stats ? estimateCost(stats) : null;
 
+  // The tray chip reddens on the whole app's own footprint, not on anything
+  // inside the popup: the per-session numbers only stream while the popup is
+  // open, so a chip that watched them would go quiet the moment you closed it.
+  const appLoad = app ? loadFlags("app", app.cpu, app.mem_bytes) : null;
+
   // `rev-parse --abbrev-ref HEAD` answers a literal "HEAD" off a branch, which
   // the tray used to print as if it were one. It is the snapshot state the Git
   // panel already names, and the one place a person most needs the way back.
@@ -563,7 +599,8 @@ export const StatusBar = memo(function StatusBar({
               setSyncOpen(true);
             }}
           >
-            {sync.state === "conflict" ? "⚠" : "⤓"} {baseLabel(sync.base)} +{sync.behind}
+            {sync.state === "conflict" ? "⚠" : "⤓"} {baseLabel(sync.base)} +
+            {sync.behind}
           </button>
           {syncOpen &&
             (() => {
@@ -592,7 +629,9 @@ export const StatusBar = memo(function StatusBar({
                         </li>
                       ))}
                       {d.files.length > 8 && (
-                        <li className="sync-more">+{d.files.length - 8} more</li>
+                        <li className="sync-more">
+                          +{d.files.length - 8} more
+                        </li>
                       )}
                     </ul>
                   )}
@@ -604,21 +643,28 @@ export const StatusBar = memo(function StatusBar({
                           {s}
                         </li>
                       ))}
-                      {sync.behind > 5 && <li className="sync-more">+{sync.behind - 5} more</li>}
+                      {sync.behind > 5 && (
+                        <li className="sync-more">+{sync.behind - 5} more</li>
+                      )}
                     </ul>
                   )}
                   {sync.fetch_error && (
                     <div className="sync-stale">
-                      Couldn't reach the remote just now — this is the last state fetched.
+                      Couldn't reach the remote just now — this is the last
+                      state fetched.
                     </div>
                   )}
                   {syncResult && (
-                    <div className={`sync-result ${syncResult.ok ? "is-ok" : "is-warn"}`}>
+                    <div
+                      className={`sync-result ${syncResult.ok ? "is-ok" : "is-warn"}`}
+                    >
                       {syncResult.text}
                     </div>
                   )}
                   <div className="sync-actions">
-                    {syncResult && !syncResult.ok && syncResult.conflicts.length > 0 ? (
+                    {syncResult &&
+                    !syncResult.ok &&
+                    syncResult.conflicts.length > 0 ? (
                       // The merge stopped in the worktree. Backing out is one
                       // click, so "resolve now" was never a one-way door.
                       <>
@@ -640,7 +686,9 @@ export const StatusBar = memo(function StatusBar({
                         </button>
                         <button
                           className="btn btn-accent"
-                          disabled={!d.canMerge || syncBusy || (syncResult?.ok ?? false)}
+                          disabled={
+                            !d.canMerge || syncBusy || (syncResult?.ok ?? false)
+                          }
                           title={d.blockedReason ?? `git merge ${sync.base}`}
                           onClick={() => void runMerge()}
                         >
@@ -667,7 +715,9 @@ export const StatusBar = memo(function StatusBar({
             .map((a) => a.name)
             .join(", ")}
           {agents.length > AGENTS_LISTED && (
-            <span className="status-agent-more">+{agents.length - AGENTS_LISTED}</span>
+            <span className="status-agent-more">
+              +{agents.length - AGENTS_LISTED}
+            </span>
           )}
         </span>
       )}
@@ -676,19 +726,26 @@ export const StatusBar = memo(function StatusBar({
         <span className="status-item status-res status-model-anchor">
           <button
             className="status-model-btn"
-            title={
+            title={withLoadNote(
               `canopy: ${app.procs} process${app.procs === 1 ? "" : "es"} — ` +
-              `Rust core, language servers, terminals and everything they spawned. ` +
-              `Click for the per-project breakdown.\n\n` +
-              `Does not include the WebView: macOS runs it in system-owned WebKit ` +
-              `processes parented to launchd, which can't be attributed back to us.`
-            }
+                `Rust core, language servers, terminals and everything they spawned. ` +
+                `Click for the per-project breakdown.\n\n` +
+                `Does not include the WebView: macOS runs it in system-owned WebKit ` +
+                `processes parented to launchd, which can't be attributed back to us.`,
+              appLoad ? loadNote("app", appLoad) : "",
+            )}
             onClick={(e) => {
               anchorMenu(e);
               setBreakdown((v) => !v);
             }}
           >
-            {app.cpu.toFixed(0)}% cpu · {fmtMem(app.mem_bytes)}
+            <span className={appLoad?.cpu ? "bd-hot" : undefined}>
+              {app.cpu.toFixed(0)}% cpu
+            </span>{" "}
+            ·{" "}
+            <span className={appLoad?.mem ? "bd-hot" : undefined}>
+              {fmtMem(app.mem_bytes)}
+            </span>
           </button>
           {breakdown && (
             <div
@@ -788,11 +845,15 @@ export const StatusBar = memo(function StatusBar({
                       );
                       return (
                         <div key={g.name} className="bd-group">
-                          <div className="bd-head">
+                          <div
+                            className="bd-head"
+                            title={
+                              loadNote("group", loadFlags("group", cpu, mem)) ||
+                              undefined
+                            }
+                          >
                             <span>{g.name}</span>
-                            <span className="bd-nums">
-                              {cpu.toFixed(0)}% · {fmtMem(mem)}
-                            </span>
+                            <Nums scope="group" cpu={cpu} mem={mem} />
                           </div>
                           {g.sessions.map((s) => {
                             const sOpen = openSessions[s.id] ?? false;
@@ -800,7 +861,17 @@ export const StatusBar = memo(function StatusBar({
                               <div key={s.id}>
                                 <div
                                   className="bd-row bd-session"
-                                  title={s.cwd}
+                                  title={withLoadNote(
+                                    s.cwd,
+                                    loadNote(
+                                      "session",
+                                      loadFlags(
+                                        "session",
+                                        s.total_cpu,
+                                        s.total_mem_bytes,
+                                      ),
+                                    ),
+                                  )}
                                   onClick={() =>
                                     setOpenSessions((prev) => ({
                                       ...prev,
@@ -820,10 +891,11 @@ export const StatusBar = memo(function StatusBar({
                                       </span>
                                     )}
                                   </span>
-                                  <span className="bd-nums">
-                                    {s.total_cpu.toFixed(0)}% ·{" "}
-                                    {fmtMem(s.total_mem_bytes)}
-                                  </span>
+                                  <Nums
+                                    scope="session"
+                                    cpu={s.total_cpu}
+                                    mem={s.total_mem_bytes}
+                                  />
                                 </div>
                                 {sOpen &&
                                   [...s.procs]
@@ -833,13 +905,24 @@ export const StatusBar = memo(function StatusBar({
                                       <div
                                         key={p.pid}
                                         className="bd-row bd-proc"
-                                        title={p.cmd}
+                                        title={withLoadNote(
+                                          p.cmd,
+                                          loadNote(
+                                            "proc",
+                                            loadFlags(
+                                              "proc",
+                                              p.cpu,
+                                              p.mem_bytes,
+                                            ),
+                                          ),
+                                        )}
                                       >
                                         <span>{p.name}</span>
-                                        <span className="bd-nums">
-                                          {p.cpu.toFixed(0)}% ·{" "}
-                                          {fmtMem(p.mem_bytes)}
-                                        </span>
+                                        <Nums
+                                          scope="proc"
+                                          cpu={p.cpu}
+                                          mem={p.mem_bytes}
+                                        />
                                       </div>
                                     ))}
                               </div>
@@ -848,16 +931,25 @@ export const StatusBar = memo(function StatusBar({
                         </div>
                       );
                     })}
-                    <div
-                      className="bd-head"
-                      title="Canopy's own engine, language servers and the agent hook bridge — everything not running inside a terminal"
-                    >
-                      <span>Core services</span>
-                      <span className="bd-nums">
-                        {Math.max(0, app.cpu - termCpu).toFixed(0)}% ·{" "}
-                        {fmtMem(Math.max(0, app.mem_bytes - termMem))}
-                      </span>
-                    </div>
+                    {(() => {
+                      const coreCpu = Math.max(0, app.cpu - termCpu);
+                      const coreMem = Math.max(0, app.mem_bytes - termMem);
+                      return (
+                        <div
+                          className="bd-head"
+                          title={withLoadNote(
+                            "Canopy's own engine, language servers and the agent hook bridge — everything not running inside a terminal",
+                            loadNote(
+                              "group",
+                              loadFlags("group", coreCpu, coreMem),
+                            ),
+                          )}
+                        >
+                          <span>Core services</span>
+                          <Nums scope="group" cpu={coreCpu} mem={coreMem} />
+                        </div>
+                      );
+                    })()}
                     <div className="bd-row bd-proc">
                       Canopy engine · language servers · hook bridge
                     </div>
@@ -900,7 +992,9 @@ export const StatusBar = memo(function StatusBar({
               {/* Only Claude's transcript tells us the model in play. For the
                   rest the button names the action instead of pretending to
                   know — the tab strip already says which CLI it is. */}
-              {stats?.model ? `${stats.model.replace(/^claude-/, "")} ▾` : "model ▾"}
+              {stats?.model
+                ? `${stats.model.replace(/^claude-/, "")} ▾`
+                : "model ▾"}
             </button>
           ) : (
             <span title="model (from Claude session transcript)">
