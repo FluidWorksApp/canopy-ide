@@ -44,17 +44,17 @@ export const COMPANION_AUTHORITIES: {
   {
     id: "read",
     label: "Answer only",
-    note: "Reads across every project. Changes nothing, ever.",
+    note: "Reads everything, changes nothing.",
   },
   {
     id: "confirm",
     label: "Ask before acting",
-    note: "Reads freely; anything that changes the world asks first.",
+    note: "Asks before it changes anything.",
   },
   {
     id: "auto",
     label: "Act on its own",
-    note: "No confirmation, including in projects you aren't looking at.",
+    note: "Acts without asking, anywhere.",
   },
 ];
 
@@ -147,6 +147,8 @@ export interface CompanionLaunch {
  *   -p --input-format stream-json --output-format stream-json
  *                                  JSONL both ways, which is the whole tier
  *   --include-partial-messages     token deltas rather than whole turns
+ *   --verbose                      REQUIRED with `-p --output-format stream-json`;
+ *                                  without it the CLI refuses to start at all
  *   --permission-mode <mode>       the CLI's own gate on its own tools
  *
  * `--append-system-prompt` rather than `--system-prompt` on purpose: replacing
@@ -162,6 +164,10 @@ const CLAUDE_RUNNER: CompanionRunner = {
     "--output-format",
     "stream-json",
     "--include-partial-messages",
+    // Not optional and not cosmetic: `-p --output-format stream-json` without
+    // it exits immediately with "requires --verbose", so the companion never
+    // starts. It costs a few extra `type: "system"` lines the parser ignores.
+    "--verbose",
     "--session-id",
     o.sessionId,
     "--append-system-prompt",
@@ -186,6 +192,7 @@ const CLAUDE_RUNNER: CompanionRunner = {
     "--output-format",
     "stream-json",
     "--include-partial-messages",
+    "--verbose",
     "--resume",
     o.sessionId,
     "--append-system-prompt",
@@ -212,8 +219,8 @@ export function tierFor(cliId: string): CompanionTier {
  *  visible rather than discovered afterwards. */
 export function tierNote(cliId: string): string {
   return tierFor(cliId) === "structured"
-    ? "Streams replies and shows each tool as it runs."
-    : "Runs in a terminal behind the scenes — replies arrive whole, not streamed.";
+    ? "Streams replies."
+    : "Replies arrive whole, not streamed.";
 }
 
 /** Which CLI the companion runs on.

@@ -169,15 +169,17 @@ const SKIN_PREVIEWS: Record<
 /**
  * Turning the mascot into a companion.
  *
- * Lives under the mascot picker rather than in Agents, because the question it
- * answers is "what is that face doing on my screen" — and because the CLI it
- * runs on is a detail of *this* choice, not another entry in the list of agents
- * that write code.
+ * ONE section, not one per control. Every field here is part of a single
+ * decision — "should that face be an assistant, and on what terms" — and split
+ * across five stacked sections it read as five unrelated settings and pushed
+ * everything below it off the screen. Related controls that each need a few
+ * characters belong on a row (see Field/Row); the authority choice is a
+ * segmented control rather than three labelled radios for the same reason.
  *
- * The controls are ordered by how much they matter: whether it exists at all,
- * what it may do, then who is carrying it. The tier note is shown next to the
- * CLI rather than buried, because it is the one consequence of that choice the
- * user cannot see until they have already lived with it.
+ * Lives under the mascot picker rather than in Agents, because the question it
+ * answers is "what is that face doing on my screen" — and the CLI it runs on is
+ * a detail of *this* choice, not another entry in the list of agents that write
+ * code.
  */
 function CompanionSettings({
   s,
@@ -197,132 +199,107 @@ function CompanionSettings({
     usable[0];
   const models = chosen ? MODEL_SWITCH[chosen.id] : undefined;
   const name = s.companionName.trim() || mascotDef(s.mascot).label;
+  const authority = COMPANION_AUTHORITIES.find((a) => a.id === s.companionAuthority);
 
   return (
-    <>
-      <Item
-        name={`${name} as a companion`}
-        tag="Starts an agent"
-        desc={
-          `Float ${name} over every project, with a chat and a session of its own. ` +
-          "It can see all of your projects at once — including the ones that are " +
-          "closed — and its session is listed nowhere among your coding agents. " +
-          "Drag it anywhere; it stays where you leave it."
-        }
-      >
-        <Row>
-          <Switch
-            checked={s.companionEnabled}
-            onChange={(v) => patch({ companionEnabled: v })}
-            aria-label={`Enable ${name} as a companion`}
-          />
-          <span className="set-hint">
-            {s.companionEnabled
-              ? "Notices arrive from the companion instead of the corner."
-              : "Off — nothing is running."}
-          </span>
-        </Row>
-      </Item>
+    <Item
+      name={`${name} as a companion`}
+      tag="Starts an agent"
+      desc={`A floating assistant across every project, with its own chat and session.`}
+    >
+      <Row>
+        <Switch
+          checked={s.companionEnabled}
+          onChange={(v) => patch({ companionEnabled: v })}
+          aria-label={`Enable ${name} as a companion`}
+        />
+        <span className="set-hint">
+          {s.companionEnabled
+            ? `Notices arrive from ${name}.${chosen ? ` ${tierNote(chosen.id)}` : ""}`
+            : "Off."}
+        </span>
+      </Row>
 
       {s.companionEnabled && (
         <>
-          <Item
-            name="What it may do"
-            desc="It can act in projects you are not looking at, which is why this is a choice."
-          >
-            <div className="set-checks">
-              {COMPANION_AUTHORITIES.map((a) => (
-                <Radio
-                  key={a.id}
-                  name="companion-authority"
-                  checked={s.companionAuthority === a.id}
-                  onChange={() => patch({ companionAuthority: a.id })}
-                  label={a.label}
-                  hint={a.note}
-                />
-              ))}
-            </div>
-          </Item>
-
-          <Item name="Name" desc="What you call it. Blank uses the mascot’s own name.">
-            <TextInput
-              value={s.companionName}
-              placeholder={mascotDef(s.mascot).label}
-              aria-label="Companion name"
-              onChange={(e) => patch({ companionName: e.target.value })}
-            />
-          </Item>
-
-          <Item
-            name="Agent"
-            tag="Restarts the companion"
-            desc="Which CLI carries the conversation. Each keeps its own; switching back returns to the one you had."
-          >
-            <Row>
+          <Row className="set-gap">
+            <Field label="Name">
+              <TextInput
+                width="sm"
+                value={s.companionName}
+                placeholder={mascotDef(s.mascot).label}
+                aria-label="Companion name"
+                onChange={(e) => patch({ companionName: e.target.value })}
+              />
+            </Field>
+            <Field label="Agent">
               <Select
+                width="sm"
                 value={chosen?.id ?? ""}
                 aria-label="Companion agent"
                 onChange={(e) => patch({ companionCli: e.target.value, companionModel: "" })}
               >
-                {usable.length === 0 && <option value="">No agent CLI installed</option>}
+                {usable.length === 0 && <option value="">None installed</option>}
                 {usable.map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.name}
                   </option>
                 ))}
               </Select>
-              {chosen && <span className="set-hint">{tierNote(chosen.id)}</span>}
-            </Row>
-          </Item>
-
-          <Item name="Model" desc="Leave on the agent’s own default unless you want a specific one.">
-            {models?.kind === "inline" ? (
-              <Select
-                value={s.companionModel}
-                aria-label="Companion model"
-                onChange={(e) => patch({ companionModel: e.target.value })}
-              >
-                <option value="">{chosen?.name ?? "Agent"} default</option>
-                {models.choices.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.label} — {m.hint}
-                  </option>
-                ))}
-              </Select>
-            ) : (
-              // A CLI whose catalogue is per-account has no list Canopy can be
-              // right about (see agentModels.ts), so it is not offered one.
-              <span className="set-hint">
-                {chosen
-                  ? `${chosen.name} picks its own model — Canopy has no list it could be right about.`
-                  : "Choose an agent first."}
+            </Field>
+            <Field label="Model">
+              {models?.kind === "inline" ? (
+                <Select
+                  width="md"
+                  value={s.companionModel}
+                  aria-label="Companion model"
+                  onChange={(e) => patch({ companionModel: e.target.value })}
+                >
+                  <option value="">{chosen?.name ?? "Agent"} default</option>
+                  {models.choices.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.label} — {m.hint}
+                    </option>
+                  ))}
+                </Select>
+              ) : (
+                // A CLI whose catalogue is per-account has no list Canopy can
+                // be right about (see agentModels.ts), so it is not offered one.
+                <span className="set-hint">{chosen ? "Chosen by the agent" : "—"}</span>
+              )}
+            </Field>
+            <Field label="It may">
+              <span className="set-inline">
+                <Segmented
+                  options={COMPANION_AUTHORITIES.map((a) => ({ id: a.id, label: a.label }))}
+                  value={s.companionAuthority}
+                  onChange={(id) => patch({ companionAuthority: id })}
+                  aria-label="What the companion may do"
+                />
+                <span className="set-hint">{authority?.note}</span>
               </span>
-            )}
-          </Item>
-
-          <Item
-            name="Memory"
-            desc="Its conversation and what it has learned about you both carry across restarts — that is how it knows you. Starting over forgets both, and is not undoable."
-          >
-            <Button
-              onClick={() => {
-                if (!chosen) return;
-                forgetCompanionSession(chosen.id);
-                clearRun(chosen.id);
-                clearCompanionView();
-                // Its memory goes too. Clearing only the conversation would
-                // leave a "new" companion that still knows you, which is not
-                // what starting over means.
-                void forgetAllMemories();
-              }}
-              disabled={!chosen}
-            >
-              Start over with {name}
-            </Button>
-          </Item>
+            </Field>
+            <Field label=" ">
+              <Button
+                onClick={() => {
+                  if (!chosen) return;
+                  forgetCompanionSession(chosen.id);
+                  clearRun(chosen.id);
+                  clearCompanionView();
+                  // Clearing only the conversation would leave a "new"
+                  // companion that still knows you.
+                  void forgetAllMemories();
+                }}
+                disabled={!chosen}
+                title={`Forget everything ${name} knows. Not undoable.`}
+              >
+                Start over
+              </Button>
+            </Field>
+          </Row>
         </>
       )}
-    </>
+    </Item>
   );
 }
 

@@ -111,6 +111,31 @@ describe("tiers", () => {
     expect(modeOf("auto")).toBe("acceptEdits");
   });
 
+  it("passes --verbose wherever it streams JSON — the CLI refuses without it", () => {
+    // Found the hard way: `claude -p --output-format stream-json` exits with
+    // "requires --verbose" before producing a single line, so the companion
+    // never starts. This encodes the CLI's own constraint rather than trusting
+    // anyone to remember it on the next flag change.
+    const launch = {
+      bin: "claude",
+      sessionId: "id",
+      systemPrompt: "p",
+      roots: [],
+      model: "",
+      authority: "confirm" as const,
+    };
+    for (const args of [
+      COMPANION_RUNNERS.claude.args(launch),
+      COMPANION_RUNNERS.claude.resumeArgs(launch),
+    ]) {
+      const streams =
+        args.includes("--output-format") &&
+        args[args.indexOf("--output-format") + 1] === "stream-json";
+      expect(streams).toBe(true);
+      expect(args).toContain("--verbose");
+    }
+  });
+
   it("omits the model flag when the CLI should pick", () => {
     const args = COMPANION_RUNNERS.claude.args({
       bin: "claude",
