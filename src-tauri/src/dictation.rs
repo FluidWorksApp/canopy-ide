@@ -10,13 +10,14 @@
 // who never press the shortcut pay nothing.
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 use transcribe_rs::onnx::moonshine::{MoonshineModel, MoonshineVariant};
 use transcribe_rs::onnx::parakeet::ParakeetModel;
 use transcribe_rs::onnx::sense_voice::SenseVoiceModel;
 use transcribe_rs::onnx::Quantization;
+use transcribe_rs::transcriber::{EnergyAdaptiveChunked, EnergyAdaptiveConfig, Transcriber};
 use transcribe_rs::{SpeechModel, TranscribeOptions};
 
 #[derive(Clone, Copy)]
@@ -40,6 +41,13 @@ struct ModelDef {
     size_mb: u64,
     languages: &'static [&'static str],
     multilingual: bool,
+    /// Longest audio this engine gets in a single inference pass. Every model
+    /// has a ceiling — Moonshine refuses anything past 64s outright, SenseVoice
+    /// was trained on 30s windows, and Parakeet's encoder memory grows with
+    /// length — so anything longer is split into chunks of about this size.
+    /// Leave headroom: an actual chunk can run to `chunk_secs + CHUNK_SEARCH_SECS
+    /// + 2 * CHUNK_PADDING_SECS`.
+    chunk_secs: f32,
 }
 
 // First entry is the default. Sizes are approximate (for the UI + download
@@ -58,6 +66,7 @@ const MODELS: &[ModelDef] = &[
             "bg", "hu", "fi", "da", "sv", "el", "et", "lv", "lt", "sl", "mt",
         ],
         multilingual: true,
+        chunk_secs: 45.0,
     },
     ModelDef {
         id: "sensevoice",
@@ -68,6 +77,9 @@ const MODELS: &[ModelDef] = &[
         size_mb: 250,
         languages: &["zh", "yue", "ja", "ko", "en"],
         multilingual: true,
+        // SenseVoice was trained on 30s windows; accuracy falls off past that
+        // even though nothing errors.
+        chunk_secs: 25.0,
     },
     ModelDef {
         id: "moonshine-base",
@@ -78,6 +90,8 @@ const MODELS: &[ModelDef] = &[
         size_mb: 200,
         languages: &["en"],
         multilingual: false,
+        // Hard 64s ceiling in the engine itself, padding included.
+        chunk_secs: 45.0,
     },
 ];
 
@@ -85,6 +99,18 @@ const TARGET_RATE: u32 = 16_000;
 // Bound the capture buffer: 10 minutes of speech at 48 kHz mono f32 is
 // ~115 MB. Past the cap the stream keeps running but stops accumulating.
 const MAX_SECONDS: u32 = 600;
+
+// How far either side of a chunk boundary to hunt for the quietest frame, so
+// splits land in a pause rather than mid-word.
+const CHUNK_SEARCH_SECS: f32 = 3.0;
+// Silence wrapped around every chunk. 250ms matches what Parakeet prepends on
+// its own — its mel preprocessor attenuates the very start of the audio — and
+// costs the other two engines nothing.
+const CHUNK_PADDING_SECS: f32 = 0.25;
+// Remainders below this are dropped rather than transcribed: a fifth of a
+// second is a fragment of one phoneme, and Moonshine rejects anything under
+// 0.1s outright.
+const CHUNK_MIN_SECS: f32 = 0.2;
 
 fn find_def(id: &str) -> Result<&'static ModelDef, String> {
     // Settings store a blank id to mean "the default model" (so a stored id can
@@ -101,12 +127,20 @@ fn find_def(id: &str) -> Result<&'static ModelDef, String> {
 #[derive(Default)]
 pub struct DictationManager(Mutex<Inner>);
 
+/// The loaded model, shared rather than owned, because the streaming preview
+/// decodes on its own thread while the manager lock has to stay free for
+/// status polls and — the one that matters — the stop that ends the recording.
+/// Holding the manager lock across a half-second inference would make stop
+/// wait for it.
+type SharedEngine = Arc<Mutex<Option<Box<dyn SpeechModel>>>>;
+
 #[derive(Default)]
 struct Inner {
-    engine: Option<Box<dyn SpeechModel>>,
+    engine: SharedEngine,
     loaded_model: Option<String>,
     recording: Option<Recording>,
     downloading: Option<String>,
+    streaming: Option<StreamHandle>,
 }
 
 struct Recording {
@@ -114,6 +148,26 @@ struct Recording {
     samples: Arc<Mutex<Vec<f32>>>,
     sample_rate: u32,
     join: std::thread::JoinHandle<()>,
+}
+
+struct StreamHandle {
+    stop: Arc<AtomicBool>,
+    join: std::thread::JoinHandle<()>,
+}
+
+/// Latest input loudness, as f32 bits — written by the audio callback, read by
+/// the capture thread that emits it. An atomic rather than a lock because the
+/// writer is CoreAudio's realtime thread, which must never block.
+#[derive(Default)]
+struct LevelMeter(AtomicU32);
+
+impl LevelMeter {
+    fn set(&self, v: f32) {
+        self.0.store(v.to_bits(), Ordering::Relaxed);
+    }
+    fn get(&self) -> f32 {
+        f32::from_bits(self.0.load(Ordering::Relaxed))
+    }
 }
 
 fn models_root() -> Result<PathBuf, String> {
@@ -255,12 +309,13 @@ fn load_engine(def: &ModelDef) -> Result<Box<dyn SpeechModel>, String> {
 /// Send) and accumulate mono samples at the device's native rate until told
 /// to stop. Returns once the stream is actually capturing, so "Listening"
 /// in the UI never lies about a mic that failed to open.
-fn start_capture() -> Result<Recording, String> {
+fn start_capture(app: tauri::AppHandle) -> Result<Recording, String> {
     let stop = Arc::new(AtomicBool::new(false));
     let samples = Arc::new(Mutex::new(Vec::<f32>::new()));
     let (tx, rx) = std::sync::mpsc::channel::<Result<u32, String>>();
     let thread_stop = stop.clone();
     let thread_samples = samples.clone();
+    let thread_meter = Arc::new(LevelMeter::default());
 
     let join = std::thread::spawn(move || {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -278,20 +333,22 @@ fn start_capture() -> Result<Recording, String> {
             let stream = match config.sample_format() {
                 cpal::SampleFormat::F32 => {
                     let sink = thread_samples.clone();
+                    let m = thread_meter.clone();
                     device.build_input_stream(
                         &config.into(),
-                        move |data: &[f32], _: &_| push_mono(&sink, data, channels, cap),
+                        move |data: &[f32], _: &_| push_mono(&sink, data, channels, cap, &m),
                         err_fn,
                         None,
                     )
                 }
                 cpal::SampleFormat::I16 => {
                     let sink = thread_samples.clone();
+                    let m = thread_meter.clone();
                     device.build_input_stream(
                         &config.into(),
                         move |data: &[i16], _: &_| {
                             let f: Vec<f32> = data.iter().map(|s| *s as f32 / 32768.0).collect();
-                            push_mono(&sink, &f, channels, cap);
+                            push_mono(&sink, &f, channels, cap, &m);
                         },
                         err_fn,
                         None,
@@ -299,12 +356,13 @@ fn start_capture() -> Result<Recording, String> {
                 }
                 cpal::SampleFormat::U16 => {
                     let sink = thread_samples.clone();
+                    let m = thread_meter.clone();
                     device.build_input_stream(
                         &config.into(),
                         move |data: &[u16], _: &_| {
                             let f: Vec<f32> =
                                 data.iter().map(|s| *s as f32 / 32768.0 - 1.0).collect();
-                            push_mono(&sink, &f, channels, cap);
+                            push_mono(&sink, &f, channels, cap, &m);
                         },
                         err_fn,
                         None,
@@ -324,8 +382,13 @@ fn start_capture() -> Result<Recording, String> {
             }
             Ok((stream, rate)) => {
                 let _ = tx.send(Ok(rate));
+                // This thread exists only to own the (non-Send) cpal stream and
+                // notice the stop flag, so it is also the right place to publish
+                // the meter: it already ticks at 30ms, and unlike the audio
+                // callback it is allowed to allocate and cross into Tauri's IPC.
                 while !thread_stop.load(Ordering::Relaxed) {
-                    std::thread::sleep(std::time::Duration::from_millis(30));
+                    std::thread::sleep(std::time::Duration::from_millis(33));
+                    let _ = app.emit("dictation:level", thread_meter.get());
                 }
                 drop(stream);
             }
@@ -353,7 +416,19 @@ fn start_capture() -> Result<Recording, String> {
     })
 }
 
-fn push_mono(sink: &Arc<Mutex<Vec<f32>>>, data: &[f32], channels: usize, cap: usize) {
+fn push_mono(
+    sink: &Arc<Mutex<Vec<f32>>>,
+    data: &[f32],
+    channels: usize,
+    cap: usize,
+    meter: &LevelMeter,
+) {
+    // Metered before the cap check, so the visualiser keeps responding even
+    // once a very long recording has stopped accumulating.
+    if !data.is_empty() {
+        let sum_sq: f32 = data.iter().map(|s| s * s).sum();
+        meter.set((sum_sq / data.len() as f32).sqrt());
+    }
     let mut buf = sink.lock().unwrap();
     if buf.len() >= cap {
         return;
@@ -409,6 +484,139 @@ fn resample(input: Vec<f32>, from: u32) -> Result<Vec<f32>, String> {
         .map_err(|e| format!("resample: {e}"))?;
     out.extend_from_slice(&res[0]);
     Ok(out)
+}
+
+// ---- Streaming preview ----
+//
+// A second decode loop that runs while you speak, purely so the pill can show
+// words appearing. It is NOT the path the final text comes from: dictation_stop
+// still decodes the whole recording once, cleanly, and that is what gets
+// inserted. Keeping the preview off the critical path is what lets it take the
+// cheap shortcuts below without costing any accuracy.
+//
+// The shortcut that matters: each pass re-decodes only the last
+// STREAM_WINDOW_SECS of audio, so cost is flat no matter how long you talk.
+// Text that scrolls out of that window is gone from the preview — which is
+// fine, because the preview is a marquee of what you just said, and the full
+// text arrives at the end regardless.
+
+/// How much trailing audio each preview pass decodes. Long enough for the
+/// model to have real context, short enough that a pass stays well under a
+/// second on CPU.
+const STREAM_WINDOW_SECS: f32 = 12.0;
+/// Below this there is not enough audio for a useful hypothesis.
+const STREAM_MIN_SECS: f32 = 0.8;
+/// Floor on the gap between passes. The real gap is whichever is longer, this
+/// or the time the last decode took, so a slow machine backs itself off
+/// instead of queueing work it cannot keep up with.
+const STREAM_MIN_INTERVAL_MS: u64 = 400;
+
+/// How many leading words two hypotheses agree on.
+fn common_prefix_len(a: &[String], b: &[String]) -> usize {
+    a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
+}
+
+/// Re-decode the trailing window until told to stop, emitting `dictation:partial`.
+///
+/// Successive passes disagree about the last few words — the model revises its
+/// guess as more audio arrives — and rendering that raw makes the text flicker
+/// and rewrite itself. So each hypothesis is split at the point where it stops
+/// agreeing with the previous one: the agreed prefix is "confirmed" and stays
+/// put, the tail is "unconfirmed" and is drawn dimmed. This is the
+/// LocalAgreement rule from the whisper-streaming literature, and it is the
+/// difference between a preview that reads and one that twitches.
+fn spawn_streaming(
+    app: tauri::AppHandle,
+    engine: SharedEngine,
+    samples: Arc<Mutex<Vec<f32>>>,
+    sample_rate: u32,
+    language: Option<String>,
+) -> StreamHandle {
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = stop.clone();
+    let join = std::thread::spawn(move || {
+        let window = (STREAM_WINDOW_SECS * sample_rate as f32) as usize;
+        let min_samples = (STREAM_MIN_SECS * sample_rate as f32) as usize;
+        let mut prev: Vec<String> = Vec::new();
+        let mut interval = STREAM_MIN_INTERVAL_MS;
+
+        loop {
+            // Sleep in short slices so stop is noticed promptly rather than
+            // after a whole interval.
+            let mut slept = 0;
+            while slept < interval {
+                if thread_stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                slept += 25;
+            }
+
+            // Copy the tail and get out of the lock immediately — the audio
+            // callback contends for this same mutex and must never wait.
+            let tail: Vec<f32> = {
+                let buf = samples.lock().unwrap();
+                if buf.len() < min_samples {
+                    continue;
+                }
+                buf[buf.len().saturating_sub(window)..].to_vec()
+            };
+
+            let started = std::time::Instant::now();
+            let resampled = match resample(tail, sample_rate) {
+                Ok(v) => v,
+                Err(e) => {
+                    log::warn!("dictation: streaming resample failed: {e}");
+                    continue;
+                }
+            };
+            let options = TranscribeOptions {
+                language: language.clone().filter(|l| !l.is_empty()),
+                ..Default::default()
+            };
+            let text = {
+                let mut guard = engine.lock().unwrap();
+                let Some(model) = guard.as_mut() else {
+                    return;
+                };
+                match model.transcribe(&resampled, &options) {
+                    Ok(r) => r.text,
+                    Err(e) => {
+                        log::warn!("dictation: streaming pass failed: {e}");
+                        continue;
+                    }
+                }
+            };
+            if thread_stop.load(Ordering::Relaxed) {
+                return;
+            }
+
+            let words: Vec<String> = text.split_whitespace().map(|s| s.to_string()).collect();
+            let agreed = common_prefix_len(&prev, &words);
+            let _ = app.emit(
+                "dictation:partial",
+                serde_json::json!({
+                    "confirmed": words[..agreed].join(" "),
+                    "unconfirmed": words[agreed..].join(" "),
+                }),
+            );
+            prev = words;
+
+            let elapsed = started.elapsed().as_millis() as u64;
+            interval = elapsed.max(STREAM_MIN_INTERVAL_MS);
+        }
+    });
+    StreamHandle { stop, join }
+}
+
+/// Stop the preview loop and wait for its in-flight decode to finish, so the
+/// engine lock is free before the caller reaches for it. Must be called with
+/// no manager lock held — the worker can be mid-inference for a few hundred ms.
+fn halt_streaming(handle: Option<StreamHandle>) {
+    if let Some(h) = handle {
+        h.stop.store(true, Ordering::Relaxed);
+        let _ = h.join.join();
+    }
 }
 
 // ---- Tauri commands ----
@@ -515,7 +723,7 @@ pub fn dictation_delete_model(
             return Err("Download in progress".into());
         }
         if inner.loaded_model.as_deref() == Some(def.id) {
-            inner.engine = None;
+            *inner.engine.lock().unwrap() = None;
             inner.loaded_model = None;
         }
     }
@@ -533,6 +741,9 @@ pub async fn dictation_start(
     app: tauri::AppHandle,
     state: tauri::State<'_, DictationManager>,
     model_id: String,
+    streaming: Option<bool>,
+    language: Option<String>,
+    mute_output: Option<bool>,
 ) -> Result<String, String> {
     let def = find_def(&model_id)?;
     {
@@ -576,21 +787,112 @@ pub async fn dictation_start(
             }
         };
         let mut inner = state.0.lock().unwrap();
-        inner.engine = Some(engine);
+        *inner.engine.lock().unwrap() = Some(engine);
         inner.loaded_model = Some(def.id.to_string());
     }
-    let rec = start_capture()?;
-    state.0.lock().unwrap().recording = Some(rec);
+    // Only after the model is resident: muting during a 30s first-use download
+    // would leave the speakers off for the whole wait.
+    if mute_output.unwrap_or(false) {
+        crate::sysaudio::mute();
+    }
+    let rec = match start_capture(app.clone()) {
+        Ok(rec) => rec,
+        Err(e) => {
+            // A mic that never opened must not leave the speakers muted.
+            crate::sysaudio::restore();
+            return Err(e);
+        }
+    };
+    let (engine, samples, rate) = {
+        let mut inner = state.0.lock().unwrap();
+        let shared = (inner.engine.clone(), rec.samples.clone(), rec.sample_rate);
+        inner.recording = Some(rec);
+        shared
+    };
+    if streaming.unwrap_or(false) {
+        let handle = spawn_streaming(app, engine, samples, rate, language);
+        state.0.lock().unwrap().streaming = Some(handle);
+    }
     Ok("recording".into())
+}
+
+/// Feed the audio through the model in bounded chunks, split at the quietest
+/// frame near each boundary so a cut lands in a pause rather than mid-word.
+/// Every engine has a length ceiling — Moonshine rejects anything past 64s
+/// outright, the others silently get worse — so long dictation is transcribed
+/// piecewise and the texts merged.
+///
+/// Audio short enough for a single pass goes through the same path as one
+/// chunk, so there is only one route to keep working.
+fn transcribe_chunked(
+    engine: &mut dyn SpeechModel,
+    chunk_secs: f32,
+    config: EnergyAdaptiveConfig,
+    options: TranscribeOptions,
+    samples: &[f32],
+    on_progress: &dyn Fn(f64),
+) -> Result<String, String> {
+    let fail = |e| format!("Transcription failed: {e}");
+    let total = samples.len();
+    let step = ((chunk_secs * TARGET_RATE as f32) as usize).max(1);
+    let mut chunker = EnergyAdaptiveChunked::new(config, options);
+    // Minutes of CPU inference behind a motionless "Transcribing…" reads as a
+    // hang, so hand over one chunk's worth at a time and report the chunks that
+    // come back. Short dictation completes in one pass and stays silent.
+    let expected = total.div_ceil(step).max(1);
+    let mut done = 0usize;
+    let mut fed = 0usize;
+    while fed < total {
+        let end = (fed + step).min(total);
+        done += chunker
+            .feed(engine, &samples[fed..end])
+            .map_err(fail)?
+            .len();
+        fed = end;
+        if expected > 1 {
+            // Never 100%: finish() still has the tail of the buffer to run.
+            on_progress((done as f64 / expected as f64 * 100.0).min(99.0));
+        }
+    }
+    chunker.finish(engine).map(|r| r.text).map_err(fail)
+}
+
+/// The chunking setup for a model: how long a piece it can take, and how the
+/// pieces are joined back together.
+fn chunk_config(def: &ModelDef, language: Option<&str>) -> EnergyAdaptiveConfig {
+    // Chunk texts are joined with a space — except for CJK, which is written
+    // without word separators. Take the cue from the language hint, falling
+    // back to the model's primary language (SenseVoice is the CJK one).
+    let lang = language.unwrap_or(def.languages[0]);
+    let cjk = matches!(
+        lang.split(['-', '_']).next().unwrap_or(lang),
+        "zh" | "yue" | "ja" | "ko" | "th"
+    );
+    EnergyAdaptiveConfig {
+        target_chunk_secs: def.chunk_secs,
+        search_window_secs: CHUNK_SEARCH_SECS,
+        padding_secs: CHUNK_PADDING_SECS,
+        min_chunk_secs: CHUNK_MIN_SECS,
+        merge_separator: if cjk { "" } else { " " }.to_string(),
+        ..Default::default()
+    }
 }
 
 /// Stop recording and return the transcription. `language` is an optional
 /// BCP-47 hint; multilingual models auto-detect and use it only as a nudge.
 #[tauri::command]
 pub async fn dictation_stop(
+    app: tauri::AppHandle,
     state: tauri::State<'_, DictationManager>,
     language: Option<String>,
 ) -> Result<String, String> {
+    // Speakers come back the moment the mic closes, not after transcription —
+    // the decode can take seconds and there is nothing to protect by then.
+    crate::sysaudio::restore();
+    // End the preview loop before touching the engine: it can be mid-decode,
+    // and the final pass needs the same lock.
+    let streaming = state.0.lock().unwrap().streaming.take();
+    halt_streaming(streaming);
     let rec = state
         .0
         .lock()
@@ -653,31 +955,34 @@ pub async fn dictation_stop(
         samples
     };
 
+    // The authoritative decode: the whole recording, with full context, in
+    // pieces no longer than the engine can take in one pass. Whatever the
+    // streaming preview showed has no bearing on it.
     let (engine, loaded) = {
-        let mut inner = state.0.lock().unwrap();
-        (inner.engine.take(), inner.loaded_model.clone())
+        let inner = state.0.lock().unwrap();
+        (inner.engine.clone(), inner.loaded_model.clone())
     };
-    let mut engine = engine.ok_or("Voice model not loaded")?;
+    let def = find_def(loaded.as_deref().unwrap_or(""))?;
+    let language = language.filter(|l| !l.is_empty());
+    let config = chunk_config(def, language.as_deref());
     let options = TranscribeOptions {
-        language: language.filter(|l| !l.is_empty()),
+        language,
         ..Default::default()
     };
-    let (engine, result) = tauri::async_runtime::spawn_blocking(move || {
-        let result = engine
-            .transcribe(&samples, &options)
-            .map(|r| r.text)
-            .map_err(|e| format!("Transcription failed: {e}"));
-        (engine, result)
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = engine.lock().unwrap();
+        let model = guard.as_mut().ok_or("Voice model not loaded")?;
+        transcribe_chunked(
+            &mut **model,
+            def.chunk_secs,
+            config,
+            options,
+            &samples,
+            &|pct| emit_progress(&app, def.id, "transcribe", pct, None),
+        )
     })
     .await
     .map_err(|e| e.to_string())?;
-    {
-        let mut inner = state.0.lock().unwrap();
-        // Only restore if nothing else swapped the model while we were busy.
-        if inner.loaded_model == loaded {
-            inner.engine = Some(engine);
-        }
-    }
     let text = result?.trim().to_string();
     if text.is_empty() {
         return Err("No speech detected".into());
@@ -688,6 +993,9 @@ pub async fn dictation_stop(
 /// Abandon the current recording without transcribing.
 #[tauri::command]
 pub fn dictation_cancel(state: tauri::State<'_, DictationManager>) {
+    crate::sysaudio::restore();
+    let streaming = state.0.lock().unwrap().streaming.take();
+    halt_streaming(streaming);
     if let Some(rec) = state.0.lock().unwrap().recording.take() {
         rec.stop.store(true, Ordering::Relaxed);
         // The capture thread notices within one 30ms tick and exits; nothing
@@ -701,4 +1009,96 @@ pub fn dictation_cancel(state: tauri::State<'_, DictationManager>) {
 #[tauri::command]
 pub fn dictation_supported() -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A chunk runs to its target plus the split-search window plus padding on
+    /// both sides, and that worst case is what the engine actually sees.
+    /// Moonshine hard-errors past 64s ("Audio duration must be between 0.1s and
+    /// 64s"), which is how long dictation used to fail outright — so every
+    /// model's worst case has to stay well under it.
+    #[test]
+    fn worst_case_chunk_stays_under_the_engine_ceiling() {
+        for m in MODELS {
+            let worst = m.chunk_secs + CHUNK_SEARCH_SECS + 2.0 * CHUNK_PADDING_SECS;
+            assert!(worst <= 60.0, "{}: worst-case chunk is {worst}s", m.id);
+        }
+    }
+
+    /// The streaming preview decodes a rolling window rather than the whole
+    /// recording, which is why it never hit the ceiling the final pass did.
+    /// It only stays that way while the window is the shorter of the two.
+    #[test]
+    fn streaming_window_needs_no_chunking() {
+        for m in MODELS {
+            assert!(
+                STREAM_WINDOW_SECS <= m.chunk_secs,
+                "{}: preview window {STREAM_WINDOW_SECS}s exceeds one pass",
+                m.id
+            );
+        }
+    }
+
+    /// CJK is written without spaces between words, so chunk texts must not be
+    /// rejoined with one.
+    #[test]
+    fn chunk_texts_join_without_a_space_for_cjk() {
+        let sensevoice = find_def("sensevoice").unwrap();
+        let parakeet = find_def("parakeet-v3").unwrap();
+        // No hint: the model's own primary language decides.
+        assert_eq!(chunk_config(sensevoice, None).merge_separator, "");
+        assert_eq!(chunk_config(parakeet, None).merge_separator, " ");
+        // An explicit hint wins, region subtag and all.
+        assert_eq!(chunk_config(sensevoice, Some("en")).merge_separator, " ");
+        assert_eq!(chunk_config(parakeet, Some("ja-JP")).merge_separator, "");
+    }
+
+    /// The reported failure, end to end: 74s of audio through Moonshine, which
+    /// refuses anything past 64s in a single pass. Needs the model on disk, so
+    /// it is ignored by default — run with
+    /// `cargo test --features dictation -- --ignored long_audio`.
+    #[test]
+    #[ignore = "requires a downloaded model"]
+    fn long_audio_transcribes_instead_of_erroring() {
+        for def in MODELS {
+            if !model_ready(def.id) {
+                eprintln!("skipping {} — not downloaded", def.id);
+                continue;
+            }
+            let mut engine = load_engine(def).expect("load model");
+            // 74.07s, the length from the bug report. Content doesn't matter —
+            // the length check fires before any inference — so this is a tone
+            // with pauses punched in, which also gives the splitter somewhere
+            // sensible to cut.
+            let n = (74.07 * TARGET_RATE as f32) as usize;
+            let samples: Vec<f32> = (0..n)
+                .map(|i| {
+                    let t = i as f32 / TARGET_RATE as f32;
+                    if t % 5.0 < 0.4 {
+                        0.0
+                    } else {
+                        0.2 * (t * 220.0 * std::f32::consts::TAU).sin()
+                    }
+                })
+                .collect();
+            let reported = std::cell::RefCell::new(Vec::new());
+            let result = transcribe_chunked(
+                &mut *engine,
+                def.chunk_secs,
+                chunk_config(def, None),
+                TranscribeOptions::default(),
+                &samples,
+                &|pct| reported.borrow_mut().push(pct),
+            );
+            assert!(result.is_ok(), "{}: {:?}", def.id, result.err());
+            assert!(
+                !reported.borrow().is_empty(),
+                "{}: no progress reported",
+                def.id
+            );
+        }
+    }
 }

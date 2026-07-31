@@ -18,12 +18,24 @@ use tauri::{AppHandle, Emitter, Manager};
 /// Directory from the first launch's argv, held until the frontend is ready.
 pub struct PendingOpen(pub Mutex<Option<String>>);
 
+/// First `canopy://…` argument. The same targets a notification click carries
+/// (see `src/deepLinks.ts`), reachable from a terminal: `canopy
+/// 'canopy://panel?name=tasks'` raises the running app and lands there. Not a
+/// registered URL scheme — macOS won't hand us `open canopy://…` without one —
+/// but the routing is scheme-shaped from end to end, so registering it later
+/// changes only where the string comes in.
+pub fn link_from_args<I: IntoIterator<Item = String>>(args: I) -> Option<String> {
+    args.into_iter()
+        .skip(1)
+        .find(|a| a.starts_with("canopy://"))
+}
+
 /// First non-flag argument that resolves to an existing directory.
 /// Flags are skipped rather than rejected: macOS LaunchServices appends
 /// `-psn_…`, and future flags shouldn't break path detection.
 pub fn dir_from_args<I: IntoIterator<Item = String>>(args: I, cwd: &Path) -> Option<String> {
     for a in args.into_iter().skip(1) {
-        if a.starts_with('-') {
+        if a.starts_with('-') || a.starts_with("canopy://") {
             continue;
         }
         let p = PathBuf::from(&a);
@@ -42,11 +54,21 @@ pub fn pending_from_env() -> PendingOpen {
 }
 
 /// Second-instance argv, forwarded by the single-instance plugin.
+#[cfg_attr(debug_assertions, allow(dead_code))]
 pub fn open_forwarded(app: &AppHandle, argv: Vec<String>, cwd: String) {
+    if let Some(link) = link_from_args(argv.clone()) {
+        // Raises the window itself, so return before the focus block below
+        // does it a second time.
+        crate::notify::open_link(app, &link);
+        return;
+    }
     if let Some(dir) = dir_from_args(argv, Path::new(&cwd)) {
         let _ = app.emit("cli-open", dir);
     }
-    if let Some(w) = app.get_webview_window("main") {
+    // The window, not the webview window: once a preview tab adds a child
+    // webview the latter stops resolving, and `canopy .` would silently fail to
+    // raise the app.
+    if let Some(w) = app.get_window("main") {
         let _ = w.unminimize();
         let _ = w.set_focus();
     }
@@ -174,5 +196,20 @@ mod tests {
     #[test]
     fn none_when_no_path_args() {
         assert_eq!(dir_from_args(vec!["canopy".into()], Path::new("/")), None);
+    }
+
+    #[test]
+    fn picks_deep_link_and_keeps_it_out_of_dir_detection() {
+        let args = vec![
+            "canopy".to_string(),
+            "canopy://panel?name=tasks".to_string(),
+        ];
+        assert_eq!(
+            link_from_args(args.clone()),
+            Some("canopy://panel?name=tasks".to_string())
+        );
+        // A link is not a relative directory name — it must never be joined to
+        // the caller's cwd and probed as one.
+        assert_eq!(dir_from_args(args, Path::new("/")), None);
     }
 }

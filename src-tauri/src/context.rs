@@ -44,10 +44,29 @@ pub struct ContextBridge {
     snapshots: Mutex<HashMap<String, serde_json::Value>>,
     port: OnceLock<u16>,
     token: String,
-    /// Browser-control ops in flight: the HTTP handler parks a sender here and
-    /// waits; the frontend answers through the `browser_result` command.
+    /// Browser-control and UI ops in flight: the HTTP handler parks a sender
+    /// here and waits; the frontend answers through the `browser_result`
+    /// command (one ticket space for every request/response op, browser or not).
     pending: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<(bool, serde_json::Value)>>>,
     next_op: AtomicU64,
+    /// Advisory file claims, newest last. Several agents routinely share one
+    /// checkout; a claim is how one says "I'm editing these" loudly enough for
+    /// the others (and the Agents panel) to see it. Advisory on purpose —
+    /// nothing here blocks a write, it just stops the collision being invisible.
+    claims: Mutex<Vec<Claim>>,
+    /// Tools the user switched off in Settings → Agents. `None` until the
+    /// frontend publishes, which is the same as "everything is on".
+    disabled_tools: Mutex<Option<Vec<String>>>,
+}
+
+/// One agent's advisory claim over a set of paths.
+#[derive(Clone, serde::Serialize)]
+pub struct Claim {
+    pub paths: Vec<String>,
+    /// Who holds it — the agent's cwd plus whatever name it gave itself.
+    pub owner: String,
+    pub note: Option<String>,
+    pub at_ms: u64,
 }
 
 impl Default for ContextBridge {
@@ -60,6 +79,8 @@ impl Default for ContextBridge {
             token: hex::encode(bytes),
             pending: Mutex::new(HashMap::new()),
             next_op: AtomicU64::new(1),
+            claims: Mutex::new(Vec::new()),
+            disabled_tools: Mutex::new(None),
         }
     }
 }
@@ -99,7 +120,15 @@ pub fn start(app: tauri::AppHandle) {
             .route("/ctx/resources", get(resources))
             .route("/ctx/action", post(action))
             .route("/ctx/browser", post(browser))
+            .route("/ctx/device", post(device))
             .route("/ctx/network", get(network))
+            .route("/ctx/editor", get(editor))
+            .route("/ctx/ui", post(ui_op))
+            .route("/ctx/wait", get(wait))
+            .route("/ctx/claims", get(claims_list).post(claims_post))
+            .route("/ctx/research", post(research_op))
+            .route("/ctx/notes", post(notes_op))
+            .route("/ctx/tools", get(tools))
             .with_state(app.clone());
         let _ = axum::serve(listener, router).await;
     });
@@ -122,6 +151,29 @@ pub fn context_publish(
 #[tauri::command]
 pub fn context_remove(state: tauri::State<'_, ContextBridge>, project_id: String) {
     state.snapshots.lock().unwrap().remove(&project_id);
+}
+
+/// Which canopy_* tools the user switched off (Settings → Agents). Published on
+/// change and at startup; the sidecar filters its `tools/list` against this, so
+/// a disabled tool never even reaches the agent's context window.
+#[tauri::command]
+pub fn context_tools(state: tauri::State<'_, ContextBridge>, disabled: Vec<String>) {
+    *state.disabled_tools.lock().unwrap() = Some(disabled);
+}
+
+/// Every advisory claim currently held, for the Agents panel.
+#[tauri::command]
+pub fn context_claims(state: tauri::State<'_, ContextBridge>) -> Vec<Claim> {
+    state.claims.lock().unwrap().clone()
+}
+
+/// Drop a claim from the UI — the escape hatch for an agent that died holding
+/// one, so a stale claim is never permanent.
+#[tauri::command]
+pub fn context_release_claim(app: tauri::AppHandle, owner: String) {
+    let bridge = app.state::<ContextBridge>();
+    bridge.claims.lock().unwrap().retain(|c| c.owner != owner);
+    let _ = app.emit("agent:claims", ());
 }
 
 /// The frontend's answer to a browser-control op: `data` is a JSON document
@@ -189,6 +241,620 @@ async fn annotations(
     )
 }
 
+/// What the user is looking at right now: the focused project, its open tabs,
+/// the file in front of them, and where the caret sits. The context an agent is
+/// otherwise missing when the ask is "fix this" or "make it match the other
+/// one" — the IDE is the only thing that knows what "this" is.
+async fn editor(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let states: Vec<serde_json::Value> = app
+        .state::<ContextBridge>()
+        .snapshots
+        .lock()
+        .unwrap()
+        .values()
+        .filter_map(|p| {
+            let e = p.get("editor")?.clone();
+            let mut obj = e.as_object()?.clone();
+            obj.insert("project".into(), p.get("name").cloned().unwrap_or_default());
+            Some(serde_json::Value::Object(obj))
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        serde_json::json!({ "projects": states }).to_string(),
+    )
+}
+
+// ---- research -------------------------------------------------------------
+//
+// Research is scoped to one project, and this handler is the only door an agent
+// has to it. That scoping is not a filter applied to a global result — it is
+// the first thing that happens: the caller's cwd resolves to exactly one open
+// project, every action runs against that project's directory, and there is no
+// argument an agent can pass to reach another one. A cwd inside no open project
+// is an error, never a machine-wide list.
+
+/// Which open project owns this directory. The longest matching component path
+/// wins, so a component nested inside another (a sub-package registered in its
+/// own right) resolves to the nearer one rather than to whichever was published
+/// first.
+fn project_for_cwd(app: &tauri::AppHandle, cwd: &str) -> Option<ProjectCandidate> {
+    let bridge = app.state::<ContextBridge>();
+    let snapshots = bridge.snapshots.lock().unwrap();
+    let candidates: Vec<ProjectCandidate> = snapshots
+        .values()
+        .filter_map(|snap| {
+            let id = snap.get("id").and_then(|v| v.as_str())?;
+            if id.is_empty() {
+                return None;
+            }
+            let name = snap
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let roots: Vec<String> = snap
+                .get("components")
+                .and_then(|v| v.as_array())
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|c| c.get("path").and_then(|p| p.as_str()))
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some((id.to_string(), name, roots))
+        })
+        .collect();
+    resolve_project(&candidates, cwd, main_worktree)
+}
+
+/// A project a directory can resolve to: its id, its display name, and the
+/// component paths that decide whether a directory belongs to it.
+type ProjectCandidate = (String, String, Vec<String>);
+
+/// The scoping rule itself, separated from where the snapshots came from so it
+/// can be tested: longest containing component path wins.
+/// The main checkout behind a directory, when that directory is a linked
+/// worktree. `--git-common-dir` is the shared `.git` every worktree of a repo
+/// points at, so its parent is the original checkout — which is the thing
+/// actually registered as a project component.
+///
+/// A subprocess, on a path that only runs when the direct match already
+/// failed. Research calls are a handful per session, not per tool call, so the
+/// few milliseconds buy correctness cheaply.
+fn main_worktree(cwd: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args([
+            "-C",
+            cwd,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let git_dir = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    if git_dir.is_empty() {
+        return None;
+    }
+    let root = std::path::Path::new(&git_dir).parent()?;
+    Some(root.to_string_lossy().to_string())
+}
+
+/// Which project owns this directory, falling back to the repo it is a
+/// worktree of.
+///
+/// Agents work in worktrees constantly — it is how every isolated micro-task
+/// runs, including the one that implements research — and a worktree created
+/// as `<repo>-wt-<branch>` is a *sibling* of the checkout, so no component path
+/// contains it. Research therefore refused exactly the sessions most likely to
+/// produce any, and an agent with no legitimate place to write improvised one
+/// by hand-writing the store. Resolving through git is what removes the reason
+/// to improvise.
+///
+/// `main_of` is injected so the rule can be tested without a repo on disk.
+fn resolve_project(
+    candidates: &[ProjectCandidate],
+    cwd: &str,
+    main_of: impl Fn(&str) -> Option<String>,
+) -> Option<ProjectCandidate> {
+    if let Some(hit) = pick_project(candidates, cwd) {
+        return Some(hit);
+    }
+    let root = main_of(cwd)?;
+    // Only worth a second look if git actually moved us somewhere else.
+    if root == cwd {
+        return None;
+    }
+    pick_project(candidates, &root)
+}
+
+fn pick_project(candidates: &[ProjectCandidate], cwd: &str) -> Option<ProjectCandidate> {
+    let mut best: Option<(usize, &ProjectCandidate)> = None;
+    for cand in candidates {
+        for root in &cand.2 {
+            let r = root.trim_end_matches('/');
+            // Directory containment, not string prefix: /repo-old must not
+            // resolve to /repo.
+            if r.is_empty() || !(cwd == r || cwd.starts_with(&format!("{r}/"))) {
+                continue;
+            }
+            // Spelled out rather than `is_none_or`, which is stable only since
+            // 1.82 and this crate's MSRV is 1.77.2.
+            let better = match best {
+                Some((n, _)) => r.len() > n,
+                None => true,
+            };
+            if better {
+                best = Some((r.len(), cand));
+            }
+        }
+    }
+    best.map(|(_, c)| c.clone())
+}
+
+#[derive(serde::Deserialize)]
+struct ResearchReq {
+    action: String,
+    cwd: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    question: Option<String>,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    statuses: Option<Vec<String>>,
+    #[serde(default)]
+    digest: Option<String>,
+    #[serde(default)]
+    recommendation: Option<String>,
+    #[serde(default)]
+    open_questions: Option<Vec<String>>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    origin: Option<String>,
+    #[serde(default)]
+    note: Option<String>,
+    #[serde(default)]
+    by: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    pty_id: Option<u64>,
+    /// Which app launch the calling terminal belongs to — pty ids restart with
+    /// the app, so the session binding is keyed by both.
+    #[serde(default)]
+    instance: Option<String>,
+    #[serde(default)]
+    pr: Option<crate::research::PrLink>,
+    #[serde(default)]
+    ticket: Option<crate::research::TicketLink>,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    files: Option<Vec<String>>,
+    #[serde(default)]
+    supersedes: Option<String>,
+    /// import: the markdown file to adopt.
+    #[serde(default)]
+    path: Option<String>,
+}
+
+async fn research_op(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+    Json(req): Json<ResearchReq>,
+) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let Some((project_id, project_name, roots)) = project_for_cwd(&app, &req.cwd) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "{} is not inside any project open in Canopy, and research is scoped to a \
+                 project. A worktree resolves to the checkout it came from, so this means \
+                 neither is open here — open the project and try again. Do not write to the \
+                 research store by hand: an entry made that way skips the status rules, the \
+                 size limits and the history.",
+                req.cwd
+            ),
+        );
+    };
+    let store = app.state::<crate::research::ResearchStore>();
+    let need_id = |r: &ResearchReq| -> Result<String, String> {
+        r.id.clone()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "this action needs an id — call list to see them".to_string())
+    };
+
+    let out: Result<serde_json::Value, String> = (|| match req.action.as_str() {
+        "list" => {
+            crate::research::research_list(project_id.clone(), req.statuses.clone(), req.limit)
+                .map(|rows| serde_json::json!({ "research": rows }))
+        }
+        "search" => crate::research::research_search(
+            project_id.clone(),
+            req.query.clone().unwrap_or_default(),
+            req.limit,
+        )
+        .map(|rows| serde_json::json!({ "research": rows })),
+        "get" => crate::research::research_get(project_id.clone(), need_id(&req)?)
+            .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
+        "start" => crate::research::research_start(
+            store.clone(),
+            project_id.clone(),
+            Some(project_name.clone()),
+            Some(roots.clone()),
+            req.title.clone().unwrap_or_default(),
+            req.question.clone(),
+            req.agent.clone(),
+            Some(req.cwd.clone()),
+            req.pty_id,
+            req.tags.clone(),
+            req.instance.clone(),
+        )
+        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        // digest and append are the same command; naming them separately at the
+        // tool boundary is what stops an agent treating the digest as somewhere
+        // to put the whole finding.
+        "digest" | "update" | "append" => crate::research::research_update(
+            store.clone(),
+            project_id.clone(),
+            need_id(&req)?,
+            req.title.clone(),
+            req.digest.clone(),
+            req.recommendation.clone(),
+            req.open_questions.clone(),
+            req.tags.clone(),
+            (req.action == "append").then(|| req.text.clone().unwrap_or_default()),
+            None,
+        )
+        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        "source" => crate::research::research_add_source(
+            store.clone(),
+            project_id.clone(),
+            need_id(&req)?,
+            req.title.clone().unwrap_or_default(),
+            req.text.clone().unwrap_or_default(),
+            req.origin.clone(),
+        )
+        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        "status" => crate::research::research_set_status(
+            store.clone(),
+            project_id.clone(),
+            need_id(&req)?,
+            req.status.clone().unwrap_or_default(),
+            req.by.clone(),
+            req.note.clone(),
+        )
+        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        // The same adoption the file tab's button performs, reachable by an
+        // agent that finds loose research while doing something else.
+        "import" => crate::research::research_import(
+            store.clone(),
+            project_id.clone(),
+            Some(project_name.clone()),
+            Some(roots.clone()),
+            req.path.clone().unwrap_or_default(),
+            req.instance.clone(),
+        )
+        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        "link" | "supersede" => crate::research::research_link(
+            store.clone(),
+            project_id.clone(),
+            need_id(&req)?,
+            req.pr.clone(),
+            req.ticket.clone(),
+            req.branch.clone(),
+            req.files.clone(),
+            req.supersedes.clone(),
+        )
+        .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
+        other => Err(format!(
+            "unknown research action: {other} — one of list, search, get, start, digest, \
+             append, source, status, link, import"
+        )),
+    })();
+
+    match out {
+        Ok(value) => (StatusCode::OK, value.to_string()),
+        // A tool failure, not a protocol failure: the agent reads the text and
+        // corrects itself (a cap it exceeded, a transition it may not make).
+        Err(text) => (StatusCode::BAD_REQUEST, text),
+    }
+}
+
+// ---- the scratchpad ------------------------------------------------------
+//
+// The half of notes that agents get. The panel and ⌘K are how a human parks a
+// thought; this is how an agent does — "I noticed three unrelated things while
+// fixing this" is the case, and before this the only options were to derail
+// onto them or to lose them.
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NotesReq {
+    action: String,
+    cwd: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    statuses: Option<Vec<String>>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    note: Option<String>,
+    #[serde(default)]
+    by: Option<String>,
+    #[serde(default)]
+    pr: Option<crate::notes::PrLink>,
+    #[serde(default)]
+    research: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    file: Option<crate::notes::FileRef>,
+    /// attach: an absolute path already on disk, inside a workspace root.
+    #[serde(default)]
+    path: Option<String>,
+}
+
+async fn notes_op(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+    Json(req): Json<NotesReq>,
+) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let Some((project_id, project_name, roots)) = project_for_cwd(&app, &req.cwd) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "{} is not inside any project open in Canopy, and a note belongs to the \
+                 project it was written in. A worktree resolves to the checkout it came \
+                 from, so this means neither is open here — open the project and try again.",
+                req.cwd
+            ),
+        );
+    };
+    let store = app.state::<crate::notes::NotesStore>();
+    let ws = app.state::<crate::fsx::WorkspaceManager>();
+    let need_id = |r: &NotesReq| -> Result<String, String> {
+        r.id.clone()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "this action needs an id — call list to see them".to_string())
+    };
+
+    let out: Result<serde_json::Value, String> = (|| match req.action.as_str() {
+        "list" => crate::notes::notes_list(project_id.clone(), req.statuses.clone(), req.limit)
+            .map(|rows| serde_json::json!({ "notes": rows })),
+        "search" => crate::notes::notes_search(
+            project_id.clone(),
+            req.query.clone().unwrap_or_default(),
+            req.limit,
+        )
+        .map(|rows| serde_json::json!({ "notes": rows })),
+        "get" => crate::notes::notes_get(project_id.clone(), need_id(&req)?)
+            .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
+        "create" => crate::notes::notes_create(
+            store.clone(),
+            project_id.clone(),
+            Some(project_name.clone()),
+            Some(roots.clone()),
+            req.title.clone().unwrap_or_default(),
+            req.text.clone(),
+            req.tags.clone(),
+            // No page context: an agent has no page. The `origin` is what
+            // answers "where do my notes come from" later.
+            None,
+            Some("agent".into()),
+            Some(req.cwd.clone()),
+        )
+        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        "append" => crate::notes::notes_update(
+            store.clone(),
+            project_id.clone(),
+            need_id(&req)?,
+            req.title.clone(),
+            None,
+            req.text.clone(),
+            req.tags.clone(),
+        )
+        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        "status" => crate::notes::notes_set_status(
+            store.clone(),
+            project_id.clone(),
+            need_id(&req)?,
+            req.status.clone().unwrap_or_default(),
+            // Credited to the agent, not to the user: the history is the one
+            // record of who moved a note, and it has to stay honest.
+            req.by.clone().or_else(|| Some("an agent".into())),
+            req.note.clone(),
+        )
+        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        "link" => crate::notes::notes_link(
+            store.clone(),
+            project_id.clone(),
+            need_id(&req)?,
+            req.pr.clone(),
+            req.research.clone(),
+            None,
+            req.branch.clone(),
+            req.file.clone(),
+        )
+        .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
+        "attach" => crate::notes::notes_attach_file(
+            store.clone(),
+            ws.clone(),
+            project_id.clone(),
+            need_id(&req)?,
+            req.path.clone().unwrap_or_default(),
+            req.title.clone(),
+            None,
+        )
+        .and_then(|a| serde_json::to_value(a).map_err(|e| e.to_string())),
+        other => Err(format!(
+            "unknown notes action: {other} — one of list, search, get, create, append, \
+             status, link, attach"
+        )),
+    })();
+
+    match out {
+        Ok(value) => (StatusCode::OK, value.to_string()),
+        Err(text) => (StatusCode::BAD_REQUEST, text),
+    }
+}
+
+/// The tool switches from Settings → Agents. Answered even when nothing has
+/// been published (nothing disabled), so the sidecar can treat any error as
+/// "everything is on" rather than hiding tools on a hiccup.
+async fn tools(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let disabled = app
+        .state::<ContextBridge>()
+        .disabled_tools
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_default();
+    (
+        StatusCode::OK,
+        serde_json::json!({ "disabled": disabled }).to_string(),
+    )
+}
+
+async fn claims_list(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let claims = app.state::<ContextBridge>().claims.lock().unwrap().clone();
+    (
+        StatusCode::OK,
+        serde_json::json!({ "claims": claims }).to_string(),
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct ClaimReq {
+    /// claim | release
+    action: String,
+    #[serde(default)]
+    paths: Vec<String>,
+    owner: String,
+    note: Option<String>,
+}
+
+/// Take or drop an advisory claim. A claim that overlaps someone else's is
+/// refused with the holder's name: the point is to surface the collision at the
+/// moment it would happen, while the agent can still pick different work.
+async fn claims_post(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+    Json(req): Json<ClaimReq>,
+) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let bridge = app.state::<ContextBridge>();
+    let msg = {
+        let mut claims = bridge.claims.lock().unwrap();
+        match req.action.as_str() {
+            "release" => {
+                let before = claims.len();
+                claims.retain(|c| c.owner != req.owner);
+                format!("Released {} claim(s).", before - claims.len())
+            }
+            "claim" => {
+                if req.paths.is_empty() {
+                    return (StatusCode::BAD_REQUEST, "claim needs paths".into());
+                }
+                let conflict = claims.iter().find(|c| {
+                    c.owner != req.owner
+                        && c.paths
+                            .iter()
+                            .any(|held| req.paths.iter().any(|want| paths_overlap(held, want)))
+                });
+                if let Some(c) = conflict {
+                    return (
+                        StatusCode::CONFLICT,
+                        format!(
+                            "{} already claimed {} ({}). Pick different files, or ask that agent \
+                             to release them.",
+                            c.owner,
+                            c.paths.join(", "),
+                            c.note.clone().unwrap_or_else(|| "no note".into())
+                        ),
+                    );
+                }
+                claims.retain(|c| c.owner != req.owner);
+                claims.push(Claim {
+                    paths: req.paths.clone(),
+                    owner: req.owner.clone(),
+                    note: req.note.clone(),
+                    at_ms: now_ms(),
+                });
+                format!("Claimed {} path(s).", req.paths.len())
+            }
+            other => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("unknown claim action: {other}"),
+                )
+            }
+        }
+    };
+    let _ = app.emit("agent:claims", ());
+    (StatusCode::OK, msg)
+}
+
+/// Same file, or one inside the other's directory — a claim on a directory
+/// covers what's under it.
+fn paths_overlap(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim_end_matches('/'), b.trim_end_matches('/'));
+    a == b || a.starts_with(&format!("{b}/")) || b.starts_with(&format!("{a}/"))
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Live CPU/memory for every Canopy terminal, with a per-process breakdown —
 /// the same reading the status tray shows, served so an agent can see what a
 /// build or dev server is costing (and which child process is the hog) without
@@ -249,6 +915,12 @@ fn human_bytes(n: u64) -> String {
     }
 }
 
+/// How long to wait between typing a message into another agent's terminal and
+/// sending the return that submits it. Matches the delay the desktop uses for
+/// every seeded prompt: long enough that the TUI has settled the text as input
+/// rather than folding the CR into a paste, short enough not to feel deferred.
+const SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// A write the frontend has to perform (start a run command, open a preview
 /// tab, restart a server): validated here against the published snapshots, then
 /// handed to the UI over the app event bus. Kept an event (not a direct call)
@@ -268,9 +940,27 @@ struct Action {
     command: Option<String>,
     /// open_preview: the localhost URL to open in the embedded browser.
     url: Option<String>,
-    /// stop_server / restart_server: the terminal id to act on.
+    /// stop_server / restart_server / message_agent / job_done / close_session:
+    /// the terminal id to act on. For close_session it is the caller's own
+    /// CANOPY_PTY — the tool takes no id, so it can name no other terminal.
     #[serde(rename = "ptyId")]
     pty_id: Option<u32>,
+    /// open_file / show_diff: the file to put in front of the user, and where
+    /// in it to land.
+    path: Option<String>,
+    line: Option<u32>,
+    /// notify / message_agent: what to say.
+    text: Option<String>,
+    /// notify: info | success | warn | error.
+    level: Option<String>,
+    /// job_done: how the micro-task ended (done | blocked) and its one-line
+    /// summary. The artifact URL, if any, rides in `url` above.
+    status: Option<String>,
+    summary: Option<String>,
+    /// job_done / close_session: the launching app instance (env
+    /// CANOPY_INSTANCE), so a pty id recycled across an app restart can't
+    /// close an unrelated tab.
+    instance: Option<String>,
 }
 
 async fn action(
@@ -315,10 +1005,10 @@ async fn action(
             let Some(url) = act.url.as_deref() else {
                 return (StatusCode::BAD_REQUEST, "open_preview needs a url".into());
             };
-            if !is_local_http(url) {
+            if !is_previewable_http(url) {
                 return (
                     StatusCode::BAD_REQUEST,
-                    format!("{url} isn't a local http:// URL — the preview only opens servers running on this machine"),
+                    format!("{url} isn't an http:// or https:// URL — the preview opens web pages"),
                 );
             }
             let route = act.cwd.clone().unwrap_or_default();
@@ -364,6 +1054,170 @@ async fn action(
             );
             format!("Restarting terminal {id}. Call canopy_server_output shortly to watch it come back up.")
         }
+        "job_done" => {
+            let status = match act.status.as_deref() {
+                Some(s @ ("done" | "blocked")) => s,
+                _ => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "job_done needs status: \"done\" (job complete) or \"blocked\" (you need the user)".into(),
+                    )
+                }
+            };
+            let Some(summary) = act.summary.as_deref().filter(|s| !s.trim().is_empty()) else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "job_done needs a summary — one sentence on what happened or what you need"
+                        .into(),
+                );
+            };
+            // A sidecar left over from a previous app launch can hold a pty id
+            // that now names someone else's terminal: ack it, act on nothing.
+            let stale = act
+                .instance
+                .as_deref()
+                .is_some_and(|i| i != crate::pty::instance_token());
+            if !stale {
+                // Keyed by terminal like restart_server: route is empty, App
+                // broadcasts, and the ProjectView owning the pty acts.
+                let _ = app.emit(
+                    "agent:action",
+                    serde_json::json!({
+                        "kind": "job_done",
+                        "route": "",
+                        "ptyId": act.pty_id,
+                        "status": status,
+                        "summary": summary,
+                        "url": act.url,
+                        "cwd": act.cwd,
+                    }),
+                );
+            }
+            match status {
+                "done" => "Acknowledged — the user has been told. If this terminal is a Canopy micro-task it now closes: say goodbye in one sentence and start nothing new.".to_string(),
+                _ => "Noted — Canopy told the user what you need. This session stays open; wait for their reply here.".to_string(),
+            }
+        }
+        "close_session" => {
+            // The id is the sidecar's own CANOPY_PTY, never an argument — an
+            // agent has no way to name someone else's terminal here. It still
+            // has to be a live Canopy pty of *this* app run: an id from a
+            // previous launch names a different terminal now.
+            let Some(id) = act.pty_id else {
+                return (StatusCode::BAD_REQUEST, "close_session needs ptyId".into());
+            };
+            let stale = act
+                .instance
+                .as_deref()
+                .is_some_and(|i| i != crate::pty::instance_token());
+            if stale || app.state::<crate::pty::PtyManager>().get(id).is_none() {
+                return (
+                    StatusCode::NOT_FOUND,
+                    format!("Terminal {id} isn't a live Canopy terminal in this window — nothing to close"),
+                );
+            }
+            // Keyed by terminal like restart_server: route is empty, App
+            // broadcasts, and the ProjectView owning the pty closes the tab
+            // once this turn ends.
+            let _ = app.emit(
+                "agent:action",
+                serde_json::json!({
+                    "kind": "close_session",
+                    "route": "",
+                    "ptyId": id,
+                    "cwd": act.cwd,
+                }),
+            );
+            "Closing this terminal — Canopy waits for your turn to end first. Say goodbye in one sentence, start nothing new, and call no more tools.".to_string()
+        }
+        "open_file" | "show_diff" => {
+            let Some(path) = act.path.as_deref() else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("{} needs a path", act.kind),
+                );
+            };
+            if !std::path::Path::new(path).is_file() {
+                return (
+                    StatusCode::NOT_FOUND,
+                    format!("{path} isn't a file on this machine"),
+                );
+            }
+            // The file's own directory routes it: an agent naming a path in a
+            // project other than its cwd's still lands in the right window.
+            let route = std::path::Path::new(path)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| act.cwd.clone().unwrap_or_default());
+            let _ = app.emit(
+                "agent:action",
+                serde_json::json!({
+                    "kind": act.kind,
+                    "route": route,
+                    "path": path,
+                    "line": act.line,
+                }),
+            );
+            match (act.kind.as_str(), act.line) {
+                ("show_diff", _) => format!("Showing {path} as a diff against git HEAD in Canopy."),
+                (_, Some(l)) => format!("Opened {path} at line {l} in Canopy."),
+                _ => format!("Opened {path} in Canopy."),
+            }
+        }
+        "notify" => {
+            let Some(text) = act.text.as_deref() else {
+                return (StatusCode::BAD_REQUEST, "notify needs text".into());
+            };
+            let _ = app.emit(
+                "agent:action",
+                serde_json::json!({
+                    "kind": "notify",
+                    "route": act.cwd.clone().unwrap_or_default(),
+                    // Absent for an agent running outside a Canopy terminal;
+                    // the frontend then falls back to routing by cwd.
+                    "ptyId": act.pty_id,
+                    "text": text,
+                    "level": act.level.as_deref().unwrap_or("info"),
+                }),
+            );
+            "Told the user.".to_string()
+        }
+        "message_agent" => {
+            let (Some(id), Some(text)) = (act.pty_id, act.text.as_deref()) else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "message_agent needs ptyId and text".into(),
+                );
+            };
+            // Straight into the other agent's stdin, exactly as if the user had
+            // typed it — that IS the interface every agent CLI exposes.
+            let manager = app.state::<crate::pty::PtyManager>();
+            if manager.get(id).is_none() {
+                return (
+                    StatusCode::NOT_FOUND,
+                    format!("No running Canopy terminal with id {id} (see canopy_agents)"),
+                );
+            }
+            let body = text.replace(['\r', '\n'], " ");
+            if let Err(e) = manager.write(id, &body) {
+                return (StatusCode::BAD_REQUEST, e);
+            }
+            // The return has to arrive as its own write, a beat later. An agent
+            // TUI reads a burst that ends in CR as a paste and keeps the whole
+            // thing in its composer — which is exactly what this did: the
+            // message appeared in the other agent's prompt box and sat there
+            // unsent until the user pressed enter. Every send from the desktop
+            // has always split the two; only this one didn't.
+            let send = app.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(SUBMIT_DELAY).await;
+                let _ = send.state::<crate::pty::PtyManager>().write(id, "\r");
+            });
+            format!(
+                "Sent to terminal {id}. It answers in its own session — read its reply with \
+                 canopy_server_output({id})."
+            )
+        }
         other => return (StatusCode::BAD_REQUEST, format!("unknown action: {other}")),
     };
     (StatusCode::OK, msg)
@@ -374,8 +1228,6 @@ async fn action(
 /// /ctx/action these are request/response: the op is handed to the UI with a
 /// ticket id, the handler parks on a oneshot, and the frontend (ultimately the
 /// script injected into the previewed page) answers through `browser_result`.
-/// The network op short-circuits: the preview proxy already logs every request
-/// it forwards, so it's answered here without a page round-trip.
 #[derive(serde::Deserialize)]
 struct BrowserOp {
     op: String,
@@ -405,6 +1257,171 @@ struct BrowserOp {
 /// mounting and its page loading; the sidecar's own read timeout is longer.
 const BROWSER_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// An Android device op (canopy_device_* tools).
+///
+/// Unlike the browser ops, these never round-trip through the frontend: a
+/// device is reachable from the backend directly, so an agent can drive one
+/// with no device tab open and without depending on a window being on screen.
+/// The tab, when there is one, is just another viewer of the same device.
+#[derive(serde::Deserialize)]
+struct DeviceOp {
+    op: String,
+    serial: Option<String>,
+    #[serde(rename = "projectDir")]
+    project_dir: Option<String>,
+    x: Option<i32>,
+    y: Option<i32>,
+    x2: Option<i32>,
+    y2: Option<i32>,
+    ms: Option<u32>,
+    text: Option<String>,
+    key: Option<String>,
+    package: Option<String>,
+    lines: Option<u32>,
+    name: Option<String>,
+    apk: Option<String>,
+}
+
+async fn device(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+    Json(op): Json<DeviceOp>,
+) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let dir = op.project_dir.clone();
+    let bad = |e: String| (StatusCode::BAD_REQUEST, e);
+
+    // Ops that address the SDK rather than one device resolve no serial.
+    if op.op == "list" {
+        let status = crate::android::resolve(dir.as_deref());
+        let sdk = match &status.sdk {
+            Some(s) => s.clone(),
+            None => return bad(status.missing.join("; ")),
+        };
+        let devices = match crate::android::devices(&sdk) {
+            Ok(d) => d,
+            Err(e) => return bad(e),
+        };
+        // Absent cmdline-tools this simply has no emulators to report, which is
+        // already said in `missing` — no reason to fail the whole listing.
+        let avds = crate::android::android_avds(dir.clone()).unwrap_or_default();
+        return (
+            StatusCode::OK,
+            serde_json::json!({
+                "devices": devices,
+                "emulators": avds,
+                "missing": status.missing,
+            })
+            .to_string(),
+        );
+    }
+    if op.op == "emulator_start" {
+        let Some(name) = op.name.clone() else {
+            return bad("emulator_start needs a name (from canopy_device_list)".into());
+        };
+        return match crate::android::android_emulator_start(dir, name).await {
+            Ok(serial) => (
+                StatusCode::OK,
+                serde_json::json!({ "serial": serial }).to_string(),
+            ),
+            Err(e) => bad(e),
+        };
+    }
+    if op.op == "describe" {
+        let Some(project) = dir else {
+            return bad("describe needs a projectDir".into());
+        };
+        return match crate::android::android_describe(project).await {
+            Ok(out) => (
+                StatusCode::OK,
+                serde_json::json!({ "describe": out }).to_string(),
+            ),
+            Err(e) => bad(e),
+        };
+    }
+
+    // Everything below acts on one device. Naming it is optional while exactly
+    // one is attached, which is the common case and saves a round trip.
+    let serial = match op.serial.clone() {
+        Some(s) if !s.is_empty() => s,
+        _ => match crate::android::only_device(dir.as_deref()) {
+            Ok(s) => s,
+            Err(e) => return bad(e),
+        },
+    };
+
+    let result: Result<serde_json::Value, String> = match op.op.as_str() {
+        "screenshot" => crate::android::screencap_bytes(dir, serial.clone())
+            .await
+            .map(|bytes| {
+                use base64::Engine;
+                serde_json::json!({
+                    "image": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                    "mimeType": "image/png",
+                    "serial": serial,
+                })
+            }),
+        "snapshot" => crate::android::android_layout(dir, serial)
+            .await
+            .map(|json| serde_json::json!({ "layout": json })),
+        "foreground" => crate::android::android_foreground(dir, serial)
+            .await
+            .map(|c| serde_json::json!({ "component": c })),
+        "tap" => match (op.x, op.y) {
+            (Some(x), Some(y)) => crate::android::android_tap(dir, serial, x, y)
+                .await
+                .map(|_| serde_json::json!({ "tapped": [x, y] })),
+            _ => Err(
+                "tap needs x and y in device pixels (canopy_device_snapshot reports the \
+                      centre of every node)"
+                    .into(),
+            ),
+        },
+        "type" => match op.text.clone() {
+            Some(t) => crate::android::android_text(dir, serial, t)
+                .await
+                .map(|_| serde_json::json!({ "typed": true })),
+            None => Err("type needs text".into()),
+        },
+        "key" => match op.key.clone() {
+            Some(k) => crate::android::android_key(dir, serial, k)
+                .await
+                .map(|_| serde_json::json!({ "pressed": true })),
+            None => Err("key needs a keyevent name, e.g. BACK or ENTER".into()),
+        },
+        "swipe" => match (op.x, op.y, op.x2, op.y2) {
+            (Some(x), Some(y), Some(x2), Some(y2)) => {
+                crate::android::android_swipe(dir, serial, x, y, x2, y2, op.ms)
+                    .await
+                    .map(|_| serde_json::json!({ "swiped": true }))
+            }
+            _ => Err("swipe needs x, y, x2 and y2".into()),
+        },
+        "logcat" => crate::android::android_logcat(dir, serial, op.package.clone(), op.lines)
+            .await
+            .map(|log| serde_json::json!({ "logcat": log })),
+        "emulator_stop" => crate::android::android_emulator_stop(dir, serial)
+            .await
+            .map(|_| serde_json::json!({ "stopped": true })),
+        "run" => match (op.project_dir.clone(), op.apk.clone()) {
+            (Some(project), Some(apk)) => crate::android::android_run(project, apk, serial)
+                .await
+                .map(|out| serde_json::json!({ "run": out })),
+            _ => Err(
+                "run needs projectDir and apk (canopy_device_describe reports APK paths)".into(),
+            ),
+        },
+        other => Err(format!("unknown device op: {other}")),
+    };
+
+    match result {
+        Ok(v) => (StatusCode::OK, v.to_string()),
+        Err(e) => bad(e),
+    }
+}
+
 async fn browser(
     State(app): State<tauri::AppHandle>,
     headers: HeaderMap,
@@ -417,11 +1434,11 @@ async fn browser(
     // an immediate 4xx to correct against instead of a UI round-trip.
     match op.op.as_str() {
         "navigate" => match (&op.url, op.action.as_deref()) {
-            (Some(u), _) if !is_local_http(u) => {
+            (Some(u), _) if !is_previewable_http(u) => {
                 return (
-                        StatusCode::BAD_REQUEST,
-                        format!("{u} isn't a local http:// URL — the preview only opens servers running on this machine"),
-                    );
+                    StatusCode::BAD_REQUEST,
+                    format!("{u} isn't an http:// or https:// URL — the preview opens web pages"),
+                );
             }
             (Some(_), _) | (None, Some("back" | "forward" | "reload")) => {}
             _ => {
@@ -450,8 +1467,12 @@ async fn browser(
                 return (StatusCode::BAD_REQUEST, "eval needs code".into());
             }
         }
-        "snapshot" | "console" => {}
-        "network" => return network_response(&app, op.url.as_deref()),
+        // `network` used to be answered here, from the preview proxy's own
+        // request log. The webview engine has no proxy to log anything, so the
+        // page collects its own traffic (see preview_picker.js) and this became
+        // an ordinary page round-trip like the rest. `/ctx/network` below still
+        // reads the proxy log directly, for a preview running that engine.
+        "snapshot" | "console" | "network" | "screenshot" => {}
         other => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -509,6 +1530,330 @@ async fn browser(
             )
         }
     }
+}
+
+/// The request/response ops that need something only the running UI can answer:
+/// the language server it keeps warm (diagnostics, references, definition), the
+/// trackers it holds keys for (tickets, reviews), a question put to the user, a
+/// picture of the previewed page. Same ticket/oneshot machinery as the browser
+/// ops — the frontend answers through `browser_result` — but with a per-op
+/// deadline, because "ask the user" and "read a marker" are not the same wait.
+#[derive(serde::Deserialize)]
+struct UiOp {
+    op: String,
+    cwd: Option<String>,
+    /// diagnostics / references / definition / hover / symbols: where to look.
+    path: Option<String>,
+    line: Option<u32>,
+    column: Option<u32>,
+    symbol: Option<String>,
+    /// symbols: a name to search the workspace for, instead of a file to outline.
+    query: Option<String>,
+    /// diagnostics: how long the caller is prepared to wait. The edit hook asks
+    /// for a couple of seconds; without it a cold server would stall the agent's
+    /// loop behind an index it never asked for.
+    #[serde(rename = "waitMs")]
+    wait_ms: Option<u64>,
+    /// ask: the question, its options, and how long the agent will hold.
+    question: Option<String>,
+    #[serde(default)]
+    options: Vec<String>,
+    #[serde(rename = "timeoutMs")]
+    timeout_ms: Option<u64>,
+    /// vault: list | fill | read.
+    #[serde(rename = "vaultOp")]
+    vault_op: Option<String>,
+    /// vault: a specific entry, when the agent has already listed them.
+    #[serde(rename = "entryId")]
+    entry_id: Option<String>,
+}
+
+const UI_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// A question waits on a human, so it gets minutes — bounded so a forgotten
+/// dialog can't pin an agent forever.
+const MAX_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+async fn ui_op(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+    Json(op): Json<UiOp>,
+) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let deadline = match op.op.as_str() {
+        "diagnostics" | "tickets" | "reviews" => UI_OP_TIMEOUT,
+        "references" | "definition" | "hover" => {
+            if op.path.is_none() {
+                return (StatusCode::BAD_REQUEST, format!("{} needs a path", op.op));
+            }
+            if op.symbol.is_none() && op.line.is_none() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("{} needs a symbol, or a line and column", op.op),
+                );
+            }
+            UI_OP_TIMEOUT
+        }
+        "symbols" => {
+            if op.query.as_deref().map_or(true, |q| q.trim().is_empty()) && op.path.is_none() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "symbols needs a query to search for, or a path to outline".into(),
+                );
+            }
+            UI_OP_TIMEOUT
+        }
+        "ask" => {
+            if op.question.as_deref().map_or(true, |q| q.trim().is_empty()) {
+                return (StatusCode::BAD_REQUEST, "ask needs a question".into());
+            }
+            op.timeout_ms
+                .map(std::time::Duration::from_millis)
+                .unwrap_or(std::time::Duration::from_secs(120))
+                .min(MAX_ASK_TIMEOUT)
+        }
+        "vault" => {
+            match op.vault_op.as_deref().unwrap_or("list") {
+                "list" | "fill" | "read" => {}
+                other => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!("unknown vault op: {other} (list, fill or read)"),
+                    )
+                }
+            }
+            // A fill the user has not approved yet puts a prompt on screen, so
+            // this waits on a person exactly like `ask` does.
+            MAX_ASK_TIMEOUT
+        }
+        other => return (StatusCode::BAD_REQUEST, format!("unknown ui op: {other}")),
+    };
+
+    let bridge = app.state::<ContextBridge>();
+    let id = bridge.next_op.fetch_add(1, Ordering::Relaxed);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    bridge.pending.lock().unwrap().insert(id, tx);
+
+    let _ = app.emit(
+        "agent:ui",
+        serde_json::json!({
+            "id": id,
+            "op": op.op,
+            "route": op.cwd.clone().unwrap_or_default(),
+            "path": op.path,
+            "line": op.line,
+            "column": op.column,
+            "symbol": op.symbol,
+            "query": op.query,
+            "waitMs": op.wait_ms,
+            "question": op.question,
+            "options": op.options,
+            "vaultOp": op.vault_op,
+            "entryId": op.entry_id,
+        }),
+    );
+
+    match tokio::time::timeout(deadline, rx).await {
+        Ok(Ok((true, data))) => (StatusCode::OK, body_text(data)),
+        Ok(Ok((false, data))) => (StatusCode::BAD_REQUEST, body_text(data)),
+        Ok(Err(_)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Canopy dropped this request".into(),
+        ),
+        Err(_) => {
+            app.state::<ContextBridge>()
+                .pending
+                .lock()
+                .unwrap()
+                .remove(&id);
+            let why = if op.op == "ask" || op.op == "vault" {
+                "The user didn't answer in time — carry on without them, or ask again."
+            } else {
+                "Canopy didn't answer in time. The window may be busy, or the language server \
+                 may still be warming up — try again."
+            };
+            (StatusCode::GATEWAY_TIMEOUT, why.into())
+        }
+    }
+}
+
+/// Block until a terminal does something worth waking up for: prints a matching
+/// line, starts listening on a port, or goes quiet. The alternative is the agent
+/// polling canopy_server_output in a loop, which costs a turn and a few hundred
+/// tokens per look — the supervisor can just wait.
+#[derive(serde::Deserialize)]
+struct WaitParams {
+    server: u32,
+    /// Substring to wait for in new output (case-insensitive).
+    pattern: Option<String>,
+    /// listening | idle | output (default: pattern when given, else listening).
+    until: Option<String>,
+    #[serde(rename = "timeoutMs")]
+    timeout_ms: Option<u64>,
+    /// idle: how long the output must stay quiet to count.
+    #[serde(rename = "idleMs")]
+    idle_ms: Option<u64>,
+}
+
+const WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+async fn wait(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+    Query(p): Query<WaitParams>,
+) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let ptys = app.state::<crate::pty::PtyManager>();
+    let read = |id: u32| {
+        ptys.scrollback_tail(id, MAX_OUTPUT_BYTES)
+            .map(|b| strip_ansi(&b))
+    };
+    let Some(initial) = read(p.server) else {
+        return (
+            StatusCode::NOT_FOUND,
+            format!(
+                "no running terminal with id {} — it may have exited",
+                p.server
+            ),
+        );
+    };
+    let until = p.until.clone().unwrap_or_else(|| {
+        if p.pattern.is_some() {
+            "output".into()
+        } else {
+            "listening".into()
+        }
+    });
+    let timeout =
+        std::time::Duration::from_millis(p.timeout_ms.unwrap_or(60_000).clamp(1_000, 600_000));
+    let idle_for = std::time::Duration::from_millis(p.idle_ms.unwrap_or(2_000).clamp(200, 60_000));
+    let needle = p.pattern.as_deref().map(str::to_lowercase);
+
+    // Everything is measured against what was already on screen when the call
+    // arrived, so a pattern that matched an hour ago doesn't return instantly.
+    let mut base = initial.chars().count();
+    let mut last_len = base;
+    let mut last_change = std::time::Instant::now();
+    let started = std::time::Instant::now();
+
+    loop {
+        let Some(text) = read(p.server) else {
+            return (
+                StatusCode::OK,
+                format!("Terminal {} exited while waiting.", p.server),
+            );
+        };
+        let len = text.chars().count();
+        // Scrollback rolls; when it does, the old offset points past the start.
+        if len < base {
+            base = 0;
+        }
+        if len != last_len {
+            last_len = len;
+            last_change = std::time::Instant::now();
+        }
+        let fresh: String = text.chars().skip(base).collect();
+
+        match until.as_str() {
+            "output" => {
+                if let Some(n) = &needle {
+                    if let Some(line) = fresh
+                        .lines()
+                        .find(|l| l.to_lowercase().contains(n.as_str()))
+                    {
+                        return (
+                            StatusCode::OK,
+                            format!(
+                                "Matched after {:.1}s:\n{line}\n\n--- new output ---\n{}",
+                                started.elapsed().as_secs_f32(),
+                                tail_lines(&fresh, 40)
+                            ),
+                        );
+                    }
+                } else if !fresh.trim().is_empty() {
+                    return (
+                        StatusCode::OK,
+                        format!(
+                            "New output after {:.1}s:\n{}",
+                            started.elapsed().as_secs_f32(),
+                            tail_lines(&fresh, 40)
+                        ),
+                    );
+                }
+            }
+            "listening" => {
+                let ports: Vec<u16> = app
+                    .state::<crate::agents::StatsCache>()
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|s| s.id == p.server)
+                    .map(|s| s.ports.clone())
+                    .unwrap_or_default();
+                if !ports.is_empty() {
+                    return (
+                        StatusCode::OK,
+                        format!(
+                            "Terminal {} is listening on {} after {:.1}s. Open it with \
+                             canopy_browser_navigate (http://localhost:{}).",
+                            p.server,
+                            ports
+                                .iter()
+                                .map(|x| x.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            started.elapsed().as_secs_f32(),
+                            ports[0]
+                        ),
+                    );
+                }
+            }
+            "idle" => {
+                if last_change.elapsed() >= idle_for {
+                    return (
+                        StatusCode::OK,
+                        format!(
+                            "Quiet for {:.1}s (waited {:.1}s). Last output:\n{}",
+                            last_change.elapsed().as_secs_f32(),
+                            started.elapsed().as_secs_f32(),
+                            tail_lines(&text, 40)
+                        ),
+                    );
+                }
+            }
+            other => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("unknown wait target: {other} (use output | listening | idle)"),
+                )
+            }
+        }
+
+        if started.elapsed() >= timeout {
+            return (
+                StatusCode::OK,
+                format!(
+                    "Gave up after {:.0}s waiting for {until}{}. Last output:\n{}",
+                    timeout.as_secs_f32(),
+                    needle
+                        .as_ref()
+                        .map(|n| format!(" matching \"{n}\""))
+                        .unwrap_or_default(),
+                    tail_lines(&text, 40)
+                ),
+            );
+        }
+        tokio::time::sleep(WAIT_POLL).await;
+    }
+}
+
+fn tail_lines(text: &str, n: usize) -> String {
+    let all: Vec<&str> = text.lines().collect();
+    all[all.len().saturating_sub(n)..].join("\n")
 }
 
 /// A result payload as an HTTP body: strings verbatim, JSON otherwise.
@@ -619,8 +1964,14 @@ fn resolve_command(bridge: &ContextBridge, dir: &str, name: &str) -> Result<Stri
     ))
 }
 
-/// A URL the embedded preview will accept: http(s) on a loopback host.
-fn is_local_http(url: &str) -> bool {
+/// A URL the embedded preview will accept: any http(s) page with a host.
+///
+/// It used to be loopback-only, on the theory that a preview is a dev server.
+/// It isn't only that — a staging deployment, a hosted docs page, an API
+/// console are all things an agent is asked to open and look at — and the proxy
+/// serves a remote origin the same way it serves localhost. What stays out is
+/// the schemes that aren't a page: file://, data:, javascript:.
+fn is_previewable_http(url: &str) -> bool {
     let rest = match url
         .strip_prefix("http://")
         .or_else(|| url.strip_prefix("https://"))
@@ -628,11 +1979,8 @@ fn is_local_http(url: &str) -> bool {
         Some(r) => r,
         None => return false,
     };
-    let host = rest.split(['/', ':', '?', '#']).next().unwrap_or("");
-    matches!(
-        host,
-        "localhost" | "127.0.0.1" | "0.0.0.0" | "[::1]" | "::1"
-    )
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !host.is_empty() && !host.starts_with(':')
 }
 
 #[derive(serde::Deserialize)]
@@ -829,5 +2177,116 @@ mod tests {
         assert!(truncated);
         assert_eq!(files.len(), 1);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn claims_collide_on_containment_not_just_equality() {
+        assert!(paths_overlap("/w/src/auth.ts", "/w/src/auth.ts"));
+        // A directory claim covers what's under it, in both directions —
+        // otherwise claiming a folder would silently permit claiming its files.
+        assert!(paths_overlap("/w/src", "/w/src/auth.ts"));
+        assert!(paths_overlap("/w/src/auth.ts", "/w/src"));
+        assert!(paths_overlap("/w/src/", "/w/src"));
+        // Neighbours with a shared prefix are not the same directory.
+        assert!(!paths_overlap("/w/src", "/w/srcs/a.ts"));
+        assert!(!paths_overlap("/w/src/a.ts", "/w/src/b.ts"));
+    }
+
+    #[test]
+    fn tail_lines_returns_the_end_and_survives_short_input() {
+        let text = (1..=10)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(tail_lines(&text, 3), "8\n9\n10");
+        assert_eq!(tail_lines("only", 5), "only");
+        assert_eq!(tail_lines("", 5), "");
+    }
+
+    fn proj(id: &str, roots: &[&str]) -> (String, String, Vec<String>) {
+        (
+            id.into(),
+            id.to_uppercase(),
+            roots.iter().map(|r| r.to_string()).collect(),
+        )
+    }
+
+    #[test]
+    fn research_resolves_to_exactly_one_project() {
+        let projects = vec![
+            proj("app", &["/Users/dev/app"]),
+            proj("other", &["/Users/dev/other"]),
+            // A sub-package registered as a component in its own right.
+            proj("pkg", &["/Users/dev/app/packages/ui"]),
+        ];
+
+        let id = |cwd: &str| pick_project(&projects, cwd).map(|(id, ..)| id);
+        assert_eq!(id("/Users/dev/app"), Some("app".into()));
+        assert_eq!(id("/Users/dev/app/src/components"), Some("app".into()));
+        // The nearer component wins, so a nested package's research does not
+        // land in its parent's list.
+        assert_eq!(id("/Users/dev/app/packages/ui/src"), Some("pkg".into()));
+        // A sibling sharing a textual prefix is a different project.
+        assert_eq!(id("/Users/dev/app-old"), None);
+        // Outside every project there is no answer — the handler turns this
+        // into an error rather than a machine-wide list, which is the whole
+        // scoping rule.
+        assert_eq!(id("/tmp/somewhere"), None);
+    }
+
+    #[test]
+    fn a_worktree_resolves_to_the_checkout_it_came_from() {
+        // The bug this fixes: agents work in worktrees constantly — it is how
+        // every isolated micro-task runs, including the one that implements
+        // research — and `<repo>-wt-<branch>` is a *sibling* of the checkout,
+        // so no component path contains it. Research refused exactly the
+        // sessions most likely to produce any, and an agent with nowhere legal
+        // to write hand-wrote the store instead.
+        let projects = vec![proj("app", &["/Users/dev/app"])];
+        let wt = "/Users/dev/app-wt-feat-x";
+        // Unresolvable on its own — this is the refusal that was happening.
+        assert!(pick_project(&projects, wt).is_none());
+        // Resolved through git, it lands on the project that owns it.
+        let id =
+            resolve_project(&projects, wt, |_| Some("/Users/dev/app".into())).map(|(id, ..)| id);
+        assert_eq!(id, Some("app".into()));
+    }
+
+    #[test]
+    fn resolving_through_git_never_invents_a_project() {
+        let projects = vec![proj("app", &["/Users/dev/app"])];
+        // Not a repo at all: git answers nothing and so do we.
+        assert!(resolve_project(&projects, "/tmp/elsewhere", |_| None).is_none());
+        // A repo, but not one that is open here — the checkout it resolves to
+        // still has to be a project, or this would attach research to whatever
+        // happened to be first in the list.
+        assert!(
+            resolve_project(&projects, "/Users/dev/other-wt-x", |_| Some(
+                "/Users/dev/other".into()
+            ))
+            .is_none()
+        );
+        // git pointing back at the same directory is not a second chance.
+        assert!(resolve_project(&projects, "/tmp/elsewhere", |c| Some(c.to_string())).is_none());
+    }
+
+    #[test]
+    fn a_direct_hit_never_pays_for_the_git_call() {
+        // The fallback is a subprocess; it must not run when the cwd already
+        // answers, which is the overwhelming majority of calls.
+        let projects = vec![proj("app", &["/Users/dev/app"])];
+        let id = resolve_project(&projects, "/Users/dev/app/src", |_| {
+            panic!("git was consulted for a directory that already resolved")
+        })
+        .map(|(id, ..)| id);
+        assert_eq!(id, Some("app".into()));
+    }
+
+    #[test]
+    fn a_project_with_no_components_claims_nothing() {
+        let projects = vec![proj("empty", &[]), proj("blank", &[""])];
+        assert!(pick_project(&projects, "/Users/dev/app").is_none());
+        // An empty root must not match every directory on the machine.
+        assert!(pick_project(&projects, "/").is_none());
     }
 }

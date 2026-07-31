@@ -14,11 +14,13 @@ import {
   basename,
   fmtTokens,
 } from './model'
+import { formatDuration, formatDurationWords, hasWorkingTime, workingTime } from './agentDuration'
 import {
   IconBranch,
   IconChevron,
   IconCpu,
   IconFolder,
+  IconStopwatch,
   IconToken,
 } from './icons'
 import { AgentGlyph } from './agentGlyphs'
@@ -53,10 +55,19 @@ export function AgentBadge({ agent, sz = 34 }: { agent: string; sz?: number }) {
   )
 }
 
-/** A small icon + value telemetry cell (folder, cpu, tokens). */
-function Telem({ icon, children }: { icon: ReactNode; children: ReactNode }) {
+/** A small icon + value telemetry cell (folder, cpu, tokens). `title` is for a
+ *  cell whose number needs spelling out — "12:07" is compact, not obvious. */
+function Telem({
+  icon,
+  title,
+  children,
+}: {
+  icon: ReactNode
+  title?: string
+  children: ReactNode
+}) {
   return (
-    <span className="telem">
+    <span className="telem" title={title}>
       {icon}
       <span className="mono">{children}</span>
     </span>
@@ -79,12 +90,26 @@ export function AgentCard({
 }) {
   const clickable = !!onOpen
   const m = agentMeta(row.agent)
-  const stateLabel = row.live ? STATE_LABEL[row.state] ?? row.state : 'idle'
+  // A terminal has no hook behind it, so "idle"/"working" would be a guess.
+  // Say what it is instead, and show its title where a prompt would go.
+  const stateLabel = row.terminal
+    ? 'terminal'
+    : row.live
+      ? STATE_LABEL[row.state] ?? row.state
+      : 'idle'
+  // Working time: this stretch, and what the session has done in total. Only a
+  // live, working row keeps counting past its last hook event — see
+  // agentDuration.ts for why a stopped agent must freeze instead.
+  const work = workingTime(
+    { active_secs: row.activeSecs, run_secs: row.runSecs, updated: row.updated },
+    Date.now() / 1000,
+    row.live && row.state === 'working',
+  )
   return (
     <button
       className={`card agent state-${row.state} ${row.live ? 'on' : 'off'} ${
         row.needsYou ? 'attn' : ''
-      }`}
+      } ${row.terminal ? 'term-row' : ''}`}
       style={{ ['--i' as string]: index, ['--hue' as string]: m.hue }}
       onClick={onOpen}
       disabled={!clickable}
@@ -96,17 +121,21 @@ export function AgentCard({
           <span className="agent-name">{m.label}</span>
           {row.branch && (
             <span className="chip mono branch">
-              <IconBranch s={12} /> {row.branch}
+              <IconBranch s={12} /> <span className="chip-t">{row.branch}</span>
             </span>
           )}
           <span className={`annun ${row.needsYou ? 'warn' : `s-${row.live ? row.state : 'idle'}`}`}>
-            <StatusDot state={row.live ? row.state : 'idle'} />
+            {!row.terminal && <StatusDot state={row.live ? row.state : 'idle'} />}
             {stateLabel}
           </span>
           {trailing}
           {clickable && <IconChevron s={17} className="chev" />}
         </div>
-        {row.lastPrompt && <div className="agent-prompt">{row.lastPrompt}</div>}
+        {row.lastPrompt ? (
+          <div className="agent-prompt">{row.lastPrompt}</div>
+        ) : row.title ? (
+          <div className="agent-prompt mono">{row.title}</div>
+        ) : null}
         <div className="agent-meta">
           {row.cwd && (
             <Telem icon={<IconFolder s={13} />}>{basename(row.cwd)}</Telem>
@@ -117,6 +146,24 @@ export function AgentCard({
           {row.tokens ? (
             <Telem icon={<IconToken s={13} />}>{fmtTokens(row.tokens)}</Telem>
           ) : null}
+          {hasWorkingTime(work) && (
+            <Telem
+              icon={<IconStopwatch s={13} />}
+              title={[
+                work.run > 0 && work.run !== work.total
+                  ? `Working for ${formatDurationWords(work.run)} without a break`
+                  : '',
+                `${formatDurationWords(work.total)} of work in this session`,
+                'Time spent idle or waiting on you is not counted',
+              ]
+                .filter(Boolean)
+                .join('\n')}
+            >
+              {work.run > 0 && work.run !== work.total
+                ? `${formatDuration(work.run)} · ${formatDuration(work.total)}`
+                : formatDuration(work.total)}
+            </Telem>
+          )}
         </div>
       </div>
     </button>

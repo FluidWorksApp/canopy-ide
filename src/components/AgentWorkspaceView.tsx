@@ -7,18 +7,33 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { DiffView, DiffModeEnum, SplitSide } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import { createTwoFilesPatch } from "diff";
+import { fmtTokens } from "../format";
 import * as ipc from "../ipc";
 import type { Notify } from "../types";
+import { useBranchSwitch } from "../useBranchSwitch";
 import { splitPatch } from "./PrView";
 import { STATE_META, lastHumanPrompt } from "./AgentsPanel";
+import { AgentRuntime } from "./AgentRuntime";
+import { effectiveState } from "../agentState";
 import { AgentIcon, GitBranchIcon, RestartIcon } from "./icons";
 import { sessionCost } from "../pricing";
+import {
+  addressPrCommentsTask,
+  raisePrTask,
+  reviewPrTask,
+  type CustomMicroTask,
+} from "../microTasks";
+import {
+  BUILT_IN_HEADING,
+  CUSTOM_HEADING,
+  ONE_OFF_HEADING,
+  type TaskChoice,
+} from "../taskMenu";
+import { Button } from "./ui";
+import { format, matches } from "../shortcuts";
 
-// Compact number formats for the header stats strip — matched to the status
-// tray so the same session reads the same everywhere.
-const fmtTokens = (n: number) =>
-  n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
-const fmtCost = (n: number) => (n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`);
+const fmtCost = (n: number) =>
+  n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`;
 /** Tokens Canopy sent the model — fresh input plus both cache legs. */
 const sentTokens = (u: ipc.AgentSessionUsage) =>
   u.input_tokens + u.cache_read_tokens + u.cache_creation_tokens;
@@ -47,10 +62,28 @@ interface AgentWorkspaceViewProps {
    *  live PTY, or resumed first if the session has ended. Absent (or a resolved
    *  `delivered:false`) means the review comments can't be sent, so the compose
    *  UI stays but "Send" reports why. */
-  onMessageAgent?: (text: string) => Promise<{ delivered: boolean; note: string }>;
+  onMessageAgent?: (
+    text: string,
+  ) => Promise<{ delivered: boolean; note: string; ptyId?: number | null }>;
+  /** Bring the agent's terminal to the front. Called after comments land, so
+   *  the review ends where the answer will appear rather than on the diff the
+   *  agent is about to change. */
+  onFocusAgent?: (ptyId: number) => void;
   /** When set, the header shows a close button — the overlay is the single
    *  banner. The standalone agent tab omits it (the tab closes itself). */
   onClose?: () => void;
+  /** Run a one-shot task on what this agent produced: push its branch and open
+   *  the PR, review the PR that came out of it, address the comments that PR
+   *  came back with, or any task the user saved. Separate from onMessageAgent —
+   *  a task is a fresh ephemeral agent, not a message to this one. */
+  onRaisePrTask?: (branch: string, worktree: string | null) => void;
+  onReviewPrTask?: (pr: ipc.PrInfo) => void;
+  onAddressPrCommentsTask?: (pr: ipc.PrInfo) => void;
+  onRunSavedTask?: (task: CustomMicroTask, dir: string) => void;
+  /** The project's own custom tasks, for the Run task menu. */
+  savedTasks?: CustomMicroTask[];
+  /** Run a brief typed right here, once, saving nothing. */
+  onRunOneOff?: (brief: string, dir: string) => void;
 }
 
 /** A review comment the user attached to a diff line, held as a draft until
@@ -92,12 +125,21 @@ type DiffViewData = {
 // diff header) and folds everything past this many into a dropdown.
 const TOUCHED_LIMIT = 6;
 const basename = (p: string) => p.split("/").filter(Boolean).pop() ?? p;
-const parentDir = (p: string) => p.split("/").filter(Boolean).slice(-2, -1)[0] ?? "";
+const parentDir = (p: string) =>
+  p.split("/").filter(Boolean).slice(-2, -1)[0] ?? "";
 
 /** A file-card header: the directory dimmed, the filename emphasized, and an
  *  optional count badge — so a wall of full paths reads as filenames first,
  *  the folder as context. Shared by the edits pane and the diff panes. */
-function FileName({ path, count, countTitle }: { path: string; count?: number; countTitle?: string }) {
+function FileName({
+  path,
+  count,
+  countTitle,
+}: {
+  path: string;
+  count?: number;
+  countTitle?: string;
+}) {
   const slash = path.lastIndexOf("/");
   const dir = slash >= 0 ? path.slice(0, slash + 1) : "";
   const base = slash >= 0 ? path.slice(slash + 1) : path;
@@ -124,11 +166,20 @@ function FileName({ path, count, countTitle }: { path: string; count?: number; c
 // header parses to nothing (empty tbody, blank card). Handing it the raw
 // old/new as file *content* with empty hunks does NOT work — the core can
 // diff content but the React component does not — so we author the hunk.
-function editToHunk(path: string, old: string | null, next: string | null): string {
+function editToHunk(
+  path: string,
+  old: string | null,
+  next: string | null,
+): string {
   const oldLines = old != null ? old.split("\n") : [];
   const newLines = next != null ? next.split("\n") : [];
   let p = 0;
-  while (p < oldLines.length && p < newLines.length && oldLines[p] === newLines[p]) p++;
+  while (
+    p < oldLines.length &&
+    p < newLines.length &&
+    oldLines[p] === newLines[p]
+  )
+    p++;
   let s = 0;
   while (
     s < oldLines.length - p &&
@@ -139,7 +190,9 @@ function editToHunk(path: string, old: string | null, next: string | null): stri
   const ctxPre = oldLines.slice(Math.max(0, p - 2), p).map((l) => ` ${l}`);
   const removed = oldLines.slice(p, oldLines.length - s).map((l) => `-${l}`);
   const added = newLines.slice(p, newLines.length - s).map((l) => `+${l}`);
-  const ctxPost = oldLines.slice(oldLines.length - s, oldLines.length - s + 2).map((l) => ` ${l}`);
+  const ctxPost = oldLines
+    .slice(oldLines.length - s, oldLines.length - s + 2)
+    .map((l) => ` ${l}`);
   const body = [...ctxPre, ...removed, ...added, ...ctxPost].join("\n");
   const oldCount = ctxPre.length + removed.length + ctxPost.length;
   const newCount = ctxPre.length + added.length + ctxPost.length;
@@ -195,7 +248,11 @@ function buildFileEdit(
     const at = locateBlock(fileLines, newLines);
     if (at < 0) continue;
     const ot = untrunc(e.old);
-    placed.push({ at, oldLines: ot === "" ? [] : ot.split("\n"), newLen: newLines.length });
+    placed.push({
+      at,
+      oldLines: ot === "" ? [] : ot.split("\n"),
+      newLen: newLines.length,
+    });
   }
   if (!placed.length) return null;
   placed.sort((a, b) => a.at - b.at);
@@ -220,19 +277,40 @@ function buildFileEdit(
 
 const sideName = (s: number) => (s === SplitSide.old ? "old" : "new");
 
+// Cheap deep-equality for polled payloads. The point isn't the comparison, it's
+// keeping the old object when nothing changed: a new identity re-renders the
+// diff below, and a rebuilt diff drops whatever comment was being written into
+// it. Both are small — a session's journal and the files it touched.
+export const sameJson = (a: unknown, b: unknown) =>
+  JSON.stringify(a) === JSON.stringify(b);
+export const sameMap = (a: Map<string, string>, b: Map<string, string>) =>
+  a.size === b.size && [...b].every(([k, v]) => a.get(k) === v);
+
 // The inline composer the diff viewer drops on a line when you click the "+".
-// Deliberately tiny: a textarea, add/cancel, ⌘/Ctrl+Enter to add. It owns only
-// its own draft text; the saved comment lives in the workspace's state.
-function CommentComposer({
+// Deliberately tiny: a textarea, add/cancel, and the submit chord. The saved
+// comment lives in the workspace's state — and so does the half-typed one:
+// holding the draft here would lose it every time the agent under review
+// touched a file and the diff below rebuilt.
+export function CommentComposer({
+  text,
+  onText,
   onAdd,
   onCancel,
 }: {
+  text: string;
+  onText: (v: string) => void;
   onAdd: (body: string) => void;
   onCancel: () => void;
 }) {
-  const [text, setText] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => ref.current?.focus(), []);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.focus();
+    // Reopened on a restored draft: put the caret where they left off, not
+    // in front of their own sentence.
+    el.setSelectionRange(el.value.length, el.value.length);
+  }, []);
   const commit = () => {
     const b = text.trim();
     if (b) onAdd(b);
@@ -243,11 +321,11 @@ function CommentComposer({
       <textarea
         ref={ref}
         className="aw-cc-input"
-        placeholder="Comment for the agent — ⌘⏎ to add"
+        placeholder={`Comment for the agent — ${format("submit")} to add`}
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => onText(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+          if (matches(e, "submit")) {
             e.preventDefault();
             commit();
           } else if (e.key === "Escape") {
@@ -257,12 +335,12 @@ function CommentComposer({
         }}
       />
       <div className="aw-cc-actions">
-        <button className="btn-mini btn-accent" onClick={commit}>
+        <Button size="sm" variant="accent" onClick={commit}>
           Add comment
-        </button>
-        <button className="btn-mini" onClick={onCancel}>
+        </Button>
+        <Button size="sm" onClick={onCancel}>
           Cancel
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -289,9 +367,11 @@ function CommentCard({
         title="Include when sending to the agent"
       />
       <div className="aw-comment-body">{c.body}</div>
-      <button className="btn-icon aw-comment-x" title="Remove comment" onClick={onRemove}>
+      <Button icon className="aw-comment-x"
+        title="Remove comment"
+        onClick={onRemove}>
         ✕
-      </button>
+      </Button>
     </div>
   );
 }
@@ -307,8 +387,22 @@ export function AgentWorkspaceView({
   onOpenTerminal,
   onNotice,
   onMessageAgent,
+  onFocusAgent,
   onClose,
+  onRaisePrTask,
+  onReviewPrTask,
+  onAddressPrCommentsTask,
+  onRunSavedTask,
+  // The project's list, handed down: saving one in the Tasks panel updates the
+  // project, which re-renders this, so the menu can't go stale.
+  savedTasks = [],
+  onRunOneOff,
 }: AgentWorkspaceViewProps) {
+  const { switchTo, openThere } = useBranchSwitch();
+  const [taskMenu, setTaskMenu] = useState(false);
+  /** The one-off brief being typed in the Run task menu, or null when that row
+   *  is still just a row. */
+  const [oneOff, setOneOff] = useState<string | null>(null);
   const [ws, setWs] = useState<ipc.AgentWorkspace | null>(null);
   const [wsErr, setWsErr] = useState<string | null>(null);
   const [pane, setPane] = useState<Pane | null>(null);
@@ -340,20 +434,41 @@ export function AgentWorkspaceView({
   }, [commentsKey]);
   useEffect(() => {
     try {
-      if (comments.length) localStorage.setItem(commentsKey, JSON.stringify(comments));
+      if (comments.length)
+        localStorage.setItem(commentsKey, JSON.stringify(comments));
       else localStorage.removeItem(commentsKey);
     } catch {
       // storage full/blocked — the in-memory drafts still work this session.
     }
   }, [comments, commentsKey]);
+  // Half-typed comments, by line, held above the diff so a rebuild underneath
+  // can't take them. Cleared when the comment is added or the composer
+  // cancelled — a draft only outlives the widget, not the decision.
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const setDraft = (key: string, v: string) =>
+    setDrafts((prev) => ({ ...prev, [key]: v }));
+  const dropDraft = (key: string) =>
+    setDrafts((prev) => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
   const addComment = (c: Omit<DraftComment, "id" | "selected">) =>
     setComments((prev) => [
       ...prev,
-      { ...c, id: `${c.diffKey}:${c.side}:${c.line}:${prev.length}:${c.body.length}`, selected: true },
+      {
+        ...c,
+        id: `${c.diffKey}:${c.side}:${c.line}:${prev.length}:${c.body.length}`,
+        selected: true,
+      },
     ]);
   const toggleComment = (id: string) =>
-    setComments((prev) => prev.map((c) => (c.id === id ? { ...c, selected: !c.selected } : c)));
-  const removeComment = (id: string) => setComments((prev) => prev.filter((c) => c.id !== id));
+    setComments((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, selected: !c.selected } : c)),
+    );
+  const removeComment = (id: string) =>
+    setComments((prev) => prev.filter((c) => c.id !== id));
   const setAllSelected = (v: boolean) =>
     setComments((prev) => prev.map((c) => ({ ...c, selected: v })));
   // This agent's token/cost usage, read from its own CLI store (Claude, Codex
@@ -368,9 +483,15 @@ export function AgentWorkspaceView({
       .then((rows) => {
         if (!live) return;
         const mine = rows.filter((u) => u.agent === agent && u.supported);
-        const byId = sessionId ? mine.find((u) => u.session_id === sessionId) : undefined;
+        const byId = sessionId
+          ? mine.find((u) => u.session_id === sessionId)
+          : undefined;
         const inCwd = mine
-          .filter((u) => u.cwd && (u.cwd === cwd || cwd.startsWith(u.cwd) || u.cwd.startsWith(cwd)))
+          .filter(
+            (u) =>
+              u.cwd &&
+              (u.cwd === cwd || cwd.startsWith(u.cwd) || u.cwd.startsWith(cwd)),
+          )
           .sort((a, b) => b.updated - a.updated);
         setUsage(byId ?? inCwd[0] ?? null);
       })
@@ -380,13 +501,21 @@ export function AgentWorkspaceView({
     };
   }, [agent, cwd, sessionId, digest?.updated, tick]);
 
+  // Whose journal this is. Changing session is the one time the old edits must
+  // go immediately — a poll for the same session must not, or the diff below
+  // unmounts and takes any open comment composer with it.
+  useEffect(() => {
+    setEdits([]);
+  }, [repo, sessionId]);
   useEffect(() => {
     let live = true;
-    setEdits([]);
     if (!sessionId) return;
     void ipc
       .agentEdits(repo, sessionId)
-      .then((e) => live && setEdits(e))
+      // Replace on arrival, and only when it actually differs: the agent under
+      // review writes a file every few seconds, and a fresh array each poll
+      // would rebuild every DiffView beneath the review being written.
+      .then((e) => live && setEdits((prev) => (sameJson(prev, e) ? prev : e)))
       .catch(() => {});
     return () => {
       live = false;
@@ -397,15 +526,20 @@ export function AgentWorkspaceView({
   // one real diff per file (real line numbers) instead of numbered-from-1
   // fragments. Read straight off disk — repo-relative journal paths are joined to
   // the repo, absolute ones (scratchpad, memory) used as-is.
-  const [fileContents, setFileContents] = useState<Map<string, string>>(new Map());
+  const [fileContents, setFileContents] = useState<Map<string, string>>(
+    new Map(),
+  );
   useEffect(() => {
     let live = true;
-    const paths = [...new Set(edits.filter((e) => e.present).map((e) => e.path))];
+    const paths = [
+      ...new Set(edits.filter((e) => e.present).map((e) => e.path)),
+    ];
     if (!paths.length) {
-      setFileContents(new Map());
+      setFileContents((prev) => (prev.size ? new Map() : prev));
       return;
     }
-    const abs = (p: string) => (p.startsWith("/") ? p : repo ? `${repo}/${p}` : p);
+    const abs = (p: string) =>
+      p.startsWith("/") ? p : repo ? `${repo}/${p}` : p;
     void Promise.all(
       paths.map(async (p) => {
         try {
@@ -418,7 +552,7 @@ export function AgentWorkspaceView({
       if (!live) return;
       const m = new Map<string, string>();
       for (const [p, c] of pairs) if (c != null) m.set(p, c);
-      setFileContents(m);
+      setFileContents((prev) => (sameMap(prev, m) ? prev : m));
     });
     return () => {
       live = false;
@@ -449,7 +583,10 @@ export function AgentWorkspaceView({
   useEffect(() => {
     if (pane) return;
     if (edits.length > 0) setPane("edits");
-    else if (ws) setPane(ws.dirty > 0 || ws.on_base || ws.detached ? "uncommitted" : "diff");
+    else if (ws)
+      setPane(
+        ws.dirty > 0 || ws.on_base || ws.detached ? "uncommitted" : "diff",
+      );
   }, [edits, ws, pane]);
 
   useEffect(() => {
@@ -474,7 +611,9 @@ export function AgentWorkspaceView({
     void ipc
       .ghAvailable()
       .then((ok) => (ok && repo ? ipc.ghPrList(repo) : []))
-      .then((prs) => live && setPr(prs.find((p) => p.branch === branch) ?? null))
+      .then(
+        (prs) => live && setPr(prs.find((p) => p.branch === branch) ?? null),
+      )
       .catch(() => live && setPr(null));
     return () => {
       live = false;
@@ -483,9 +622,13 @@ export function AgentWorkspaceView({
 
   // The heavy half, per pane, exactly like BranchView: uncommitted diffs run
   // in the agent's own worktree, the cumulative diff against base.
+  // Clearing belongs to the view changing, not to re-reading it: switching pane
+  // or branch shows something else, a poll shows the same thing again.
+  useEffect(() => {
+    setPatch(null);
+  }, [pane, ws?.branch, ws?.workdir, ws?.isolated]);
   useEffect(() => {
     let live = true;
-    setPatch(null);
     if (!repo || !ws?.branch || !pane) return;
     // The edits pane is journal-only — no git patch to fetch.
     if (pane === "edits") return;
@@ -497,22 +640,68 @@ export function AgentWorkspaceView({
         ws.isolated ? ws.workdir : null,
         pane === "uncommitted",
       )
-      .then((p) => live && setPatch(p))
+      .then(
+        (p) => live && setPatch((prev) => (prev?.patch === p.patch ? prev : p)),
+      )
       .catch((e) => live && onNotice(String(e), "error"));
     return () => {
       live = false;
     };
-  }, [repo, ws?.branch, ws?.workdir, ws?.isolated, ws?.detached, ws?.on_base, pane, tick, onNotice]);
+  }, [
+    repo,
+    ws?.branch,
+    ws?.workdir,
+    ws?.isolated,
+    ws?.detached,
+    ws?.on_base,
+    pane,
+    tick,
+    onNotice,
+  ]);
 
-  const st = ws?.state ? STATE_META[ws.state] : digest?.state ? STATE_META[digest.state] : undefined;
+  const st = ws?.state
+    ? STATE_META[ws.state]
+    : digest?.state
+      ? STATE_META[digest.state]
+      : undefined;
   const task = lastHumanPrompt(digest?.prompts);
+  // The working-time clock, preferring the freshly-joined workspace (re-read on
+  // every poll) over the digest the panel handed us when the tab opened.
+  const timing = {
+    active_secs: ws?.active_secs ?? digest?.active_secs,
+    run_secs: ws?.run_secs ?? digest?.run_secs,
+    updated: ws?.updated ?? digest?.updated,
+  };
+  // No CPU reading is available here, so `working` decays to stale on silence
+  // alone — the conservative half of the rule the Agents panel applies with the
+  // process tree to hand. A frozen timer is the right failure: it under-reports
+  // a genuinely busy agent rather than counting up for one that died.
+  const working =
+    effectiveState({
+      state: ws?.state ?? digest?.state,
+      updated: timing.updated ?? undefined,
+      cpu: 0,
+      now: Date.now() / 1000,
+    }) === "working";
   const cost = usage ? sessionCost(usage) : null;
   const touched = ws?.touched?.length ? ws.touched : (digest?.files ?? []);
   const branchable = !!ws?.branch && !ws.detached && !ws.on_base;
+  /** Hand the typed brief to a fresh one-shot agent and put the menu away.
+   *  Shared by the Run button and the Enter key so the two can't drift. */
+  const runOneOff = () => {
+    const brief = oneOff?.trim();
+    if (!brief || !onRunOneOff) return;
+    setTaskMenu(false);
+    setOneOff(null);
+    onRunOneOff(brief, ws?.workdir ?? cwd);
+  };
   // Split once per patch, not per render: a fresh array each render would give
   // every DiffView a new `data` identity, which rebuilds its diff and resets any
   // open comment composer on the next digest poll.
-  const files = useMemo(() => (patch?.patch ? splitPatch(patch.patch) : []), [patch?.patch]);
+  const files = useMemo(
+    () => (patch?.patch ? splitPatch(patch.patch) : []),
+    [patch?.patch],
+  );
 
   // The set of paths this agent is known to have touched — from its own edit
   // journal and its reported-editing list. Matched by basename too, since a
@@ -520,7 +709,8 @@ export function AgentWorkspaceView({
   // prefix.
   const agentPaths = new Set<string>([...edits.map((e) => e.path), ...touched]);
   const agentBasenames = new Set<string>([...agentPaths].map(basename));
-  const isAgentFile = (p: string) => agentPaths.has(p) || agentBasenames.has(basename(p));
+  const isAgentFile = (p: string) =>
+    agentPaths.has(p) || agentBasenames.has(basename(p));
   // This workspace shows ONLY this agent's work, never the rest of the tree.
   // On an isolated worktree every change in the diff is this agent's by
   // construction; on a shared checkout we can claim only the files it actually
@@ -534,12 +724,27 @@ export function AgentWorkspaceView({
   const canAttribute = isolated || agentPaths.size > 0;
 
   // Journal edits grouped by file, newest file last, preserving edit order.
-  const editsByFile: { path: string; items: ipc.AgentEdit[] }[] = [];
-  for (const e of edits) {
-    const g = editsByFile.find((x) => x.path === e.path);
-    if (g) g.items.push(e);
-    else editsByFile.push({ path: e.path, items: [e] });
-  }
+  const editsByFile = useMemo(() => {
+    const groups: { path: string; items: ipc.AgentEdit[] }[] = [];
+    for (const e of edits) {
+      const g = groups.find((x) => x.path === e.path);
+      if (g) g.items.push(e);
+      else groups.push({ path: e.path, items: [e] });
+    }
+    return groups;
+  }, [edits]);
+
+  // The merged whole-file diffs, built once per (edits, contents) change —
+  // buildFileEdit splits the entire file per call, too heavy for a render body.
+  const mergedEdits = useMemo(() => {
+    const m = new Map<string, { patch: string; before: string } | null>();
+    for (const g of editsByFile) {
+      const content = fileContents.get(g.path);
+      if (content != null)
+        m.set(g.path, buildFileEdit(g.path, content, g.items));
+    }
+    return m;
+  }, [editsByFile, fileContents]);
 
   // Jump from a reported-editing chip to that file's diff section below. A
   // reported path (relative to the hook's cwd) and a diff path (relative to the
@@ -566,7 +771,12 @@ export function AgentWorkspaceView({
   // `diffKey` scopes comments to this exact view — for the journal pane that
   // includes the edit index, since each edit is its own view with line numbers
   // that restart at 1. Commenting is offered only when we can actually deliver.
-  const commentProps = (diffKey: string, file: string, forPane: Pane, realLine: boolean) => {
+  const commentProps = (
+    diffKey: string,
+    file: string,
+    forPane: Pane,
+    realLine: boolean,
+  ) => {
     const oldFile: Record<number, { data: DraftComment[] }> = {};
     const newFile: Record<number, { data: DraftComment[] }> = {};
     for (const c of comments) {
@@ -596,8 +806,11 @@ export function AgentWorkspaceView({
             ? diffFile.getOldPlainLine(lineNumber)
             : diffFile.getNewPlainLine(lineNumber);
         const code = (lo?.value ?? "").toString();
+        const draftKey = `${diffKey}:${sideName(side)}:${lineNumber}`;
         return (
           <CommentComposer
+            text={drafts[draftKey] ?? ""}
+            onText={(v) => setDraft(draftKey, v)}
             onAdd={(body) => {
               addComment({
                 diffKey,
@@ -609,9 +822,13 @@ export function AgentWorkspaceView({
                 realLine,
                 body,
               });
+              dropDraft(draftKey);
               onClose();
             }}
-            onCancel={onClose}
+            onCancel={() => {
+              dropDraft(draftKey);
+              onClose();
+            }}
           />
         );
       },
@@ -639,7 +856,10 @@ export function AgentWorkspaceView({
   // the line so the agent needn't reopen the diff to know what's meant.
   const formatReview = (list: DraftComment[]) => {
     const where = ws?.branch ? ` on ${ws.branch}` : "";
-    const out = [`Review comments${where} (${list.length}) from the Canopy workspace:`, ""];
+    const out = [
+      `Review comments${where} (${list.length}) from the Canopy workspace:`,
+      "",
+    ];
     list.forEach((c, i) => {
       out.push(`${i + 1}. ${c.realLine ? `${c.file}:${c.line}` : c.file}`);
       if (c.code.trim()) out.push(`   \`${c.code.trim()}\``);
@@ -649,7 +869,8 @@ export function AgentWorkspaceView({
   };
 
   const sendComments = async (which: "selected" | "all") => {
-    const list = which === "all" ? comments : comments.filter((c) => c.selected);
+    const list =
+      which === "all" ? comments : comments.filter((c) => c.selected);
     if (!list.length || !onMessageAgent || sending) return;
     setSending(true);
     try {
@@ -658,9 +879,15 @@ export function AgentWorkspaceView({
         const ids = new Set(list.map((c) => c.id));
         setComments((prev) => prev.filter((c) => !ids.has(c.id)));
         onNotice(
-          res.note || `Sent ${list.length} comment${list.length === 1 ? "" : "s"} to ${agent}.`,
+          res.note ||
+            `Sent ${list.length} comment${list.length === 1 ? "" : "s"} to ${agent}.`,
           "success",
         );
+        // The review is over the moment it's delivered: get out of the way and
+        // put the agent that's now acting on it in front. Only on success —
+        // a failed send leaves the comments and the workspace where they were.
+        onClose?.();
+        if (res.ptyId != null) onFocusAgent?.(res.ptyId);
       } else {
         onNotice(res.note || "Couldn't reach the agent.", "warn");
       }
@@ -676,7 +903,9 @@ export function AgentWorkspaceView({
   // A stable `data` object per (view, content): DiffView rebuilds its diff — and
   // drops any open composer — whenever `data` changes identity, so we hand back
   // the same object until the hunk actually changes.
-  const dataCache = useRef(new Map<string, { sig: string; data: DiffViewData }>());
+  const dataCache = useRef(
+    new Map<string, { sig: string; data: DiffViewData }>(),
+  );
   const dataFor = (
     key: string,
     path: string,
@@ -684,7 +913,7 @@ export function AgentWorkspaceView({
     before?: string,
     after?: string,
   ): DiffViewData => {
-    const sig = `${hunk} ${before?.length ?? -1} ${after?.length ?? -1}`;
+    const sig = `${hunk}\0${before?.length ?? -1}\0${after?.length ?? -1}`;
     const hit = dataCache.current.get(key);
     if (hit && hit.sig === sig) return hit.data;
     const data: DiffViewData = {
@@ -718,6 +947,57 @@ export function AgentWorkspaceView({
     </div>
   );
 
+  // The built-in half of the Run task menu. Every task is listed whether or not
+  // this workspace can run it — one that vanishes when it doesn't apply reads
+  // as a missing feature — so an unrunnable one carries the reason instead of a
+  // handler. Which is also the answer to "why is Review PR greyed out": the
+  // branch hasn't got a PR yet.
+  const raiseWhy = pr
+    ? `PR #${pr.number} is already open`
+    : !ws?.branch
+      ? "this workspace has no branch"
+      : ws.on_base
+        ? `on ${ws.branch}, the base branch`
+        : "no repo here";
+  const builtInChoices: TaskChoice[] = [
+    {
+      id: raisePrTask.id,
+      label:
+        ws?.branch && !ws.on_base && !pr
+          ? `Raise PR for ${ws.branch}`
+          : raisePrTask.label,
+      icon: raisePrTask.icon,
+      note: raiseWhy,
+      run:
+        onRaisePrTask && ws?.branch && !ws.on_base && !pr
+          ? () =>
+              onRaisePrTask(
+                ws.branch as string,
+                ws.isolated ? ws.workdir : null,
+              )
+          : undefined,
+    },
+    {
+      id: reviewPrTask.id,
+      label: pr ? `Review PR #${pr.number}` : reviewPrTask.label,
+      icon: reviewPrTask.icon,
+      note: "no PR from this branch yet",
+      run: onReviewPrTask && pr ? () => onReviewPrTask(pr) : undefined,
+    },
+    {
+      id: addressPrCommentsTask.id,
+      label: pr
+        ? `Address comments on #${pr.number}`
+        : addressPrCommentsTask.label,
+      icon: addressPrCommentsTask.icon,
+      note: "no PR from this branch yet",
+      run:
+        onAddressPrCommentsTask && pr
+          ? () => onAddressPrCommentsTask(pr)
+          : undefined,
+    },
+  ];
+
   return (
     <div className="ticket-view">
       {/* One banner for the whole workspace: identity, branch, where it's
@@ -727,56 +1007,218 @@ export function AgentWorkspaceView({
           and the scoped diff below carry the real numbers. */}
       <div className="ticket-view-head aw-banner">
         <div className="ticket-view-title">
-          {st && <span className={`agent-state-dot ${st.cls}`} title={st.label} />}
+          {st && (
+            <span className={`agent-state-dot ${st.cls}`} title={st.label} />
+          )}
           <AgentIcon id={agent} size={16} className="ticket-view-mark" />
           <span className="aw-agent">{agent}</span>
           {ws?.branch && (
-            <span className="agent-branch" title={ws.detached ? "detached HEAD" : `On branch ${ws.branch}`}>
+            <span
+              className="agent-branch"
+              title={
+                ws.detached
+                  ? `${ws.branch} — the agent is looking at a snapshot of the code, not working on the branch itself.`
+                  : `The agent works on ${ws.branch}.`
+              }
+            >
               <GitBranchIcon size={12} /> {ws.branch}
-              {ws.detached ? " (detached)" : ""}
+              {ws.detached ? " · snapshot" : ""}
             </span>
           )}
           {ws?.merged && <span className="loose-chip">merged</span>}
           {ws?.workdir && (
             <span
               className="ticket-view-chip"
-              title={ws.isolated ? `Isolated worktree: ${ws.workdir}` : `Shared checkout: ${ws.workdir}`}
+              title={
+                ws.isolated
+                  ? `Isolated worktree: ${ws.workdir}`
+                  : `Shared checkout: ${ws.workdir}`
+              }
             >
               {ws.isolated ? "isolated worktree" : "shared checkout"} ·{" "}
               {ws.workdir.split("/").pop()}
             </span>
           )}
           <span className="status-spacer" />
+          {/* Go where this agent worked. The pair the switch dialog talks about
+              is right there in the banner — the branch and the directory — and
+              until now neither could be acted on: you could read what an agent
+              did and still have to go to the Git panel to stand where it did.
+              Both routes are the one funnel, so a branch another workspace is
+              holding asks its question here too. */}
+          {repo && ws?.isolated && ws.workdir && (
+            <Button
+              title={`Point this project's files, search and new terminals at ${ws.workdir}. Nothing moves, nothing is lost.`}
+              onClick={() =>
+                void openThere(repo, ws.workdir as string, ws.branch)
+              }>
+              Open it there
+            </Button>
+          )}
+          {/* On a shared checkout there is no other folder to point at — the
+              agent worked here — so the way back to its work is the branch. */}
+          {repo && ws?.branch && !ws.isolated && !ws.detached && !ws.on_base && (
+            <Button
+              title={`Open ${ws.branch} in this project's own checkout`}
+              onClick={() =>
+                void switchTo(repo, {
+                  kind: "branch",
+                  branch: ws.branch as string,
+                })
+              }>
+              Switch to this branch
+            </Button>
+          )}
           {/* Only for an isolated worktree: that directory isn't a tab anywhere
               else, so a scratch shell pointed at it is the one thing closing
               this overlay can't give you. On a shared checkout it's the repo
               dir you already have shells in — no value, so it's omitted. */}
           {ws?.isolated && ws.workdir && (
-            <button
-              className="btn"
+            <Button
               title={`Open a shell in the worktree: ${ws.workdir}`}
-              onClick={() => onOpenTerminal(ws.workdir as string, ws.branch ?? agent)}
-            >
+              onClick={() =>
+                onOpenTerminal(ws.workdir as string, ws.branch ?? agent)
+              }>
               New shell in worktree
-            </button>
+            </Button>
           )}
-          <button
-            className="btn-icon aw-refresh"
+          {/* Hand this agent's output to a fresh one-shot agent: a one-off you
+              type here, any task you've saved, or a built-in — raise the PR for
+              the branch it built, review the PR that came out of it, address the
+              comments that came back. All in this workspace's directory. Both
+              groups are always listed, unavailable built-ins included with the
+              reason: a menu that hides them just looks empty. */}
+          {(onRaisePrTask ||
+            onReviewPrTask ||
+            onAddressPrCommentsTask ||
+            onRunSavedTask ||
+            onRunOneOff) && (
+            <div className="review-send">
+              <Button
+                title="Run a one-shot task on this work"
+                onClick={() => setTaskMenu((v) => !v)}>
+                Run task ▾
+              </Button>
+              {taskMenu && (
+                <div
+                  className="cli-menu review-menu"
+                  // Don't pull the menu away from someone typing a brief in it.
+                  onMouseLeave={() => oneOff == null && setTaskMenu(false)}
+                >
+                  {onRunOneOff &&
+                    (oneOff == null ? (
+                      <button
+                        className="cli-menu-item"
+                        onClick={() => setOneOff("")}
+                      >
+                        ⚡ One-off task…
+                      </button>
+                    ) : (
+                      /* A brief is a sentence or three, not a search term. The
+                         single-line input this replaces was sized for a toolbar
+                         flex row, so in the menu it collapsed to its intrinsic
+                         width — narrower than its own placeholder, and it
+                         scrolled away everything you'd typed the moment the
+                         brief got long enough to be worth writing. */
+                      <div className="oneoff">
+                        <div className="cli-menu-label">{ONE_OFF_HEADING}</div>
+                        <textarea
+                          autoFocus
+                          className="oneoff-input"
+                          rows={3}
+                          placeholder={`What should this agent do?\nIt runs once in ${
+                            ws?.isolated && ws.branch
+                              ? ws.branch
+                              : "this workspace"
+                          }, then closes — nothing is saved.`}
+                          value={oneOff}
+                          onChange={(e) => setOneOff(e.target.value)}
+                          onKeyDown={(e) => {
+                            // Enter runs; Shift+Enter is the newline, now that
+                            // there are lines to break.
+                            if (e.key === "Enter" && !e.shiftKey) {
+                              e.preventDefault();
+                              if (oneOff.trim()) runOneOff();
+                            }
+                            if (e.key === "Escape") {
+                              e.stopPropagation();
+                              setOneOff(null);
+                            }
+                          }}
+                        />
+                        <div className="oneoff-actions">
+                          <span className="oneoff-hint">
+                            <kbd>↵</kbd> run · <kbd>{format("newline")}</kbd> new line ·{" "}
+                            <kbd>esc</kbd> cancel
+                          </span>
+                          <Button variant="accent"
+                            disabled={!oneOff.trim()}
+                            onClick={runOneOff}>
+                            Run
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  <div className="cli-menu-label">{CUSTOM_HEADING}</div>
+                  {savedTasks.length === 0 ? (
+                    <button
+                      className="cli-menu-item"
+                      disabled
+                      title="Write one in the Tasks panel"
+                    >
+                      None saved yet
+                    </button>
+                  ) : (
+                    savedTasks.map((t) => (
+                      <button
+                        key={t.id}
+                        className="cli-menu-item"
+                        title={t.brief}
+                        disabled={!onRunSavedTask}
+                        onClick={() => {
+                          setTaskMenu(false);
+                          onRunSavedTask?.(t, ws?.workdir ?? cwd);
+                        }}
+                      >
+                        {t.icon || "◆"} {t.label}
+                      </button>
+                    ))
+                  )}
+                  <div className="cli-menu-label">{BUILT_IN_HEADING}</div>
+                  {builtInChoices.map((c) => (
+                    <button
+                      key={c.id}
+                      className="cli-menu-item"
+                      title={c.note}
+                      disabled={!c.run}
+                      onClick={() => {
+                        setTaskMenu(false);
+                        c.run?.();
+                      }}
+                    >
+                      {c.icon} {c.label}
+                      {!c.run && c.note && (
+                        <span className="cli-menu-why">{c.note}</span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          <Button icon className="aw-refresh"
             title="Refresh — re-read this agent's changes"
             aria-label="Refresh"
-            onClick={() => setTick((t) => t + 1)}
-          >
+            onClick={() => setTick((t) => t + 1)}>
             <RestartIcon size={14} />
-          </button>
+          </Button>
           {onClose && (
-            <button
-              className="btn-icon workspace-overlay-close"
+            <Button icon className="workspace-overlay-close"
               title="Close (Esc)"
               aria-label="Close agent workspace"
-              onClick={onClose}
-            >
+              onClick={onClose}>
               ✕
-            </button>
+            </Button>
           )}
         </div>
         {task && <div className="agent-task">{task}</div>}
@@ -786,10 +1228,16 @@ export function AgentWorkspaceView({
         {(usage || st) && (
           <div className="aw-stats">
             {st && (
-              <span className={`aw-stat-state ${st.cls}`} title={`Session state: ${st.label}`}>
+              <span
+                className={`aw-stat-state ${st.cls}`}
+                title={`Session state: ${st.label}`}
+              >
                 {st.label}
               </span>
             )}
+            {/* Working time, next to what that work cost: how long this run has
+                been going and how much the session has done in total. */}
+            <AgentRuntime timing={timing} live={working} variant="stat" />
             {usage?.model && (
               <span className="aw-stat aw-stat-model" title="Model">
                 {usage.model}
@@ -806,7 +1254,10 @@ export function AgentWorkspaceView({
               </>
             )}
             {cost != null && (
-              <span className="aw-stat" title="Cost — estimated unless the CLI reports its own">
+              <span
+                className="aw-stat"
+                title="Cost — estimated unless the CLI reports its own"
+              >
                 {fmtCost(cost)}
               </span>
             )}
@@ -830,12 +1281,14 @@ export function AgentWorkspaceView({
       )}
       {ws?.cwd_missing && (
         <div className="tree-empty">
-          The agent's directory ({ws.cwd}) no longer exists — showing what git still knows.
+          The agent's directory ({ws.cwd}) no longer exists — showing what git
+          still knows.
         </div>
       )}
       {ws?.on_base && (
         <div className="tree-empty">
-          Working directly on {ws.base} — no branch of its own, showing uncommitted changes only.
+          Working directly on {ws.base} — no branch of its own, showing
+          uncommitted changes only.
         </div>
       )}
 
@@ -909,7 +1362,8 @@ export function AgentWorkspaceView({
                   className="aw-touched-file aw-touched-more-btn"
                   onClick={() => setShowMoreTouched((v) => !v)}
                 >
-                  +{touched.length - TOUCHED_LIMIT} more {showMoreTouched ? "▴" : "▾"}
+                  +{touched.length - TOUCHED_LIMIT} more{" "}
+                  {showMoreTouched ? "▴" : "▾"}
                 </button>
                 {showMoreTouched && (
                   <div
@@ -931,7 +1385,9 @@ export function AgentWorkspaceView({
                           }}
                         >
                           <span className="aw-more-name">{basename(f)}</span>
-                          <span className="aw-more-dir">{parentDir(f) || "·"}</span>
+                          <span className="aw-more-dir">
+                            {parentDir(f) || "·"}
+                          </span>
                         </button>
                       );
                     })}
@@ -946,38 +1402,41 @@ export function AgentWorkspaceView({
       {(ws || edits.length > 0) && (
         <div className="branch-panes">
           {edits.length > 0 && (
-            <button
-              className={`btn-mini ${pane === "edits" ? "btn-accent" : ""}`}
+            <Button
+              size="sm"
+              variant={pane === "edits" ? "accent" : "default"}
               title="Only the changes this agent made, attributed per hunk — accurate even on a shared checkout"
               onClick={() => setPane("edits")}
             >
               This agent ({edits.length})
-            </button>
+            </Button>
           )}
           {ws && (
-            <button
-              className={`btn-mini ${pane === "uncommitted" ? "btn-accent" : ""}`}
+            <Button
+              size="sm"
+              variant={pane === "uncommitted" ? "accent" : "default"}
               onClick={() => setPane("uncommitted")}
             >
               Uncommitted{ws.dirty > 0 ? ` (${ws.dirty})` : ""}
-            </button>
+            </Button>
           )}
           {ws && branchable && (
-            <button
-              className={`btn-mini ${pane === "diff" ? "btn-accent" : ""}`}
+            <Button
+              size="sm"
+              variant={pane === "diff" ? "accent" : "default"}
               onClick={() => setPane("diff")}
             >
               All changes vs base
-            </button>
+            </Button>
           )}
           {pane !== "edits" && patch && files.length > 0 && (
             <>
               <span className="loose-ahead">+{patch.insertions}</span>
               <span className="loose-dirty">−{patch.deletions}</span>
               <span className="git-spacer" />
-              <button className="btn-mini" onClick={() => setSplit((v) => !v)}>
+              <Button size="sm" onClick={() => setSplit((v) => !v)}>
                 {split ? "Unified" : "Split"}
-              </button>
+              </Button>
             </>
           )}
         </div>
@@ -990,43 +1449,41 @@ export function AgentWorkspaceView({
         <div className="aw-review-bar">
           <span className="aw-review-count">
             {comments.length} comment{comments.length === 1 ? "" : "s"}
-            {selectedCount !== comments.length ? ` · ${selectedCount} selected` : ""}
+            {selectedCount !== comments.length
+              ? ` · ${selectedCount} selected`
+              : ""}
           </span>
           <label className="aw-review-all">
             <input
               type="checkbox"
               checked={selectedCount === comments.length}
               ref={(el) => {
-                if (el) el.indeterminate = selectedCount > 0 && selectedCount < comments.length;
+                if (el)
+                  el.indeterminate =
+                    selectedCount > 0 && selectedCount < comments.length;
               }}
               onChange={(e) => setAllSelected(e.target.checked)}
             />
             All
           </label>
           <span className="git-spacer" />
-          <button
-            className="btn-mini btn-accent"
+          <Button size="sm" variant="accent"
             disabled={sending || selectedCount === 0}
-            onClick={() => sendComments("selected")}
-          >
+            onClick={() => sendComments("selected")}>
             {sending ? "Sending…" : `Send selected (${selectedCount})`}
-          </button>
-          <button
-            className="btn-mini"
+          </Button>
+          <Button size="sm"
             disabled={sending}
             onClick={() => sendComments("all")}
-            title="Send every comment, regardless of selection"
-          >
+            title="Send every comment, regardless of selection">
             Send all
-          </button>
-          <button
-            className="btn-mini"
+          </Button>
+          <Button size="sm"
             disabled={sending}
             onClick={() => setComments([])}
-            title="Discard all draft comments"
-          >
+            title="Discard all draft comments">
             Clear
-          </button>
+          </Button>
         </div>
       )}
 
@@ -1045,7 +1502,11 @@ export function AgentWorkspaceView({
                 title={`${c.hash}\n${c.author} · ${c.date}\n\nClick to open this commit`}
                 onClick={() =>
                   repo &&
-                  onOpenCommit(repo, { hash: c.hash, short: c.short, subject: c.subject })
+                  onOpenCommit(repo, {
+                    hash: c.hash,
+                    short: c.short,
+                    subject: c.subject,
+                  })
                 }
               >
                 <span className="git-commit-hash">{c.short}</span>
@@ -1062,7 +1523,9 @@ export function AgentWorkspaceView({
             greyed, because it's still a true record of what the agent did. */}
         {pane === "edits" &&
           (editsByFile.length === 0 ? (
-            <div className="tree-empty">No edits recorded for this agent yet.</div>
+            <div className="tree-empty">
+              No edits recorded for this agent yet.
+            </div>
           ) : (
             editsByFile.map((g) => {
               // One real diff for the whole file when every edit can be placed in
@@ -1070,7 +1533,7 @@ export function AgentWorkspaceView({
               // like a normal file diff. Otherwise fall back to per-edit fragments
               // (a superseded or moved edit can't be placed, but is still true).
               const content = fileContents.get(g.path);
-              const merged = content != null ? buildFileEdit(g.path, content, g.items) : null;
+              const merged = mergedEdits.get(g.path) ?? null;
               return (
                 <div key={g.path} className="pr-file">
                   <FileName
@@ -1080,13 +1543,26 @@ export function AgentWorkspaceView({
                   />
                   {merged && content != null ? (
                     <DiffView
-                      data={dataFor(`edits:${g.path}`, g.path, merged.patch, merged.before, content)}
-                      diffViewMode={split ? DiffModeEnum.Split : DiffModeEnum.Unified}
+                      data={dataFor(
+                        `edits:${g.path}`,
+                        g.path,
+                        merged.patch,
+                        merged.before,
+                        content,
+                      )}
+                      diffViewMode={
+                        split ? DiffModeEnum.Split : DiffModeEnum.Unified
+                      }
                       diffViewHighlight
                       diffViewTheme="dark"
                       diffViewWrap
                       diffViewFontSize={12}
-                      {...commentProps(`edits:${g.path}`, g.path, "edits", true)}
+                      {...commentProps(
+                        `edits:${g.path}`,
+                        g.path,
+                        "edits",
+                        true,
+                      )}
                     />
                   ) : (
                     g.items.map((e, i) => (
@@ -1099,7 +1575,9 @@ export function AgentWorkspaceView({
                             : `${e.tool} · superseded by a later change`
                         }
                       >
-                        {!e.present && <span className="aw-edit-tag">superseded</span>}
+                        {!e.present && (
+                          <span className="aw-edit-tag">superseded</span>
+                        )}
                         {/* A fragment: the edit's own old→new, numbered from 1 —
                             used only when the edit can't be placed in the file. */}
                         <DiffView
@@ -1108,12 +1586,19 @@ export function AgentWorkspaceView({
                             g.path,
                             editToHunk(g.path, e.old, e.new),
                           )}
-                          diffViewMode={split ? DiffModeEnum.Split : DiffModeEnum.Unified}
+                          diffViewMode={
+                            split ? DiffModeEnum.Split : DiffModeEnum.Unified
+                          }
                           diffViewHighlight
                           diffViewTheme="dark"
                           diffViewWrap
                           diffViewFontSize={12}
-                          {...commentProps(`edits:${g.path}:${i}`, g.path, "edits", false)}
+                          {...commentProps(
+                            `edits:${g.path}:${i}`,
+                            g.path,
+                            "edits",
+                            false,
+                          )}
                         />
                       </div>
                     ))
@@ -1127,19 +1612,23 @@ export function AgentWorkspaceView({
             When none can be attributed, we say so plainly rather than pass the
             whole tree off as this agent's work. */}
         {pane !== "edits" &&
-          (!ws ? (
-            !wsErr && repo && <div className="tree-empty">Loading workspace…</div>
-          ) : !patch ? (
-            pane && <div className="tree-empty">Loading diff…</div>
-          ) : mine.length === 0 ? (
+          // One loading state, not two. This was "Loading workspace…" and then
+          // "Loading diff…" — two one-line messages of different widths
+          // replacing each other and then being replaced by the diff, so the
+          // pane visibly stepped through three layouts on the way in. It holds
+          // a fixed block of space now, so what arrives fills it instead of
+          // shoving it around.
+          ((!ws && !wsErr && repo) || (ws && !patch && pane) ? (
+            <div className="tree-empty aw-loading">Reading this agent's changes…</div>
+          ) : !ws || !patch ? null : mine.length === 0 ? (
             <div className="tree-empty">
               No changes by this agent{pane === "uncommitted" ? " yet" : ""}.
               {!canAttribute && (
                 <div className="aw-note">
-                  It ran on a shared checkout without reporting its edits, so its
-                  changes can't be told apart from the rest of the tree. Run it
-                  in an isolated worktree, or with a CLI that reports edits, to
-                  see them here.
+                  It ran on a shared checkout without reporting its edits, so
+                  its changes can't be told apart from the rest of the tree. Run
+                  it in an isolated worktree, or with a CLI that reports edits,
+                  to see them here.
                 </div>
               )}
             </div>
@@ -1148,7 +1637,8 @@ export function AgentWorkspaceView({
           ))}
         {patch?.truncated && pane !== "edits" && (
           <div className="tree-empty">
-            Diff truncated at 2 MB — use <code>git diff</code> for the whole thing.
+            Diff truncated at 2 MB — use <code>git diff</code> for the whole
+            thing.
           </div>
         )}
       </div>

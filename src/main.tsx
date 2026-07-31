@@ -1,8 +1,17 @@
 import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
+// Bundled, not fetched: this is a desktop app that has to look the same on a
+// machine with no network and no fonts installed. Variable weight axis only —
+// one file per subset covers 100–900, so the four weights the Vitrine skin
+// uses cost no more than one would. Each @font-face carries a unicode-range,
+// so a session that never types Cyrillic never loads the Cyrillic file.
+// Referenced by --font-ui/--font-mono; see the Vitrine block in index.css.
+import "@fontsource-variable/archivo/wght.css";
+import "@fontsource-variable/jetbrains-mono/index.css";
 import "./index.css";
 import { monacoReady } from "./monaco-setup";
 import { applyTheme, getSettings, watchSystemTheme } from "./settings";
+import { openLink } from "./links";
 import App from "./App.tsx";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 
@@ -31,12 +40,12 @@ window.addEventListener(
 );
 
 
-// Every http(s) link in the app opens in the real browser, wherever it lives:
-// issue bodies, commit messages, PR descriptions, rendered markdown, anything
-// added later. Delegated once here rather than per-view — a webview has
-// nowhere to navigate back from, so a link that "works" by replacing the app
-// is worse than one that does nothing, and solving it per view is how some
-// get forgotten (commit messages had).
+// Every http(s) link in the app is followed through links.ts, wherever it
+// lives: issue bodies, commit messages, PR descriptions, rendered markdown,
+// anything added later. Delegated once here rather than per-view — a webview has
+// nowhere to navigate back from, so a link that "works" by replacing the app is
+// worse than one that does nothing, and solving it per view is how some get
+// forgotten (commit messages had).
 window.addEventListener("click", (e) => {
   const anchor = (e.target as HTMLElement | null)?.closest?.("a");
   const href = anchor?.getAttribute("href");
@@ -44,10 +53,9 @@ window.addEventListener("click", (e) => {
   // Cancel FIRST, for every scheme. Returning early on a non-http href left
   // the webview to navigate it itself — and `javascript:` or `file:` in an
   // issue body or a converted document is then a free script execution or a
-  // local read. Only http(s) goes on to the OS browser.
+  // local read. openLink refuses everything but http(s).
   e.preventDefault();
-  if (!/^https?:\/\//i.test(href)) return;
-  void import("@tauri-apps/plugin-opener").then(({ openUrl }) => openUrl(href));
+  openLink(href);
 });
 
 window.addEventListener("error", (e) =>

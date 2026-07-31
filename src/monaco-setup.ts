@@ -11,6 +11,12 @@ import { configureDefaultWorkerFactory } from "monaco-languageclient/workerFacto
 // Registers the monarch grammars (typescript, rust, python, ...) used by classic mode.
 import "@codingame/monaco-vscode-standalone-languages";
 import { registerTauriFileSystem } from "./lsp/fsProvider";
+import {
+  customLanguageFor,
+  extraLanguageFor,
+  sanitizeAssociations,
+} from "./fileAssociations";
+import { getSettings } from "./settings";
 
 export const monacoReady: Promise<void> = (async () => {
   registerTauriFileSystem();
@@ -37,15 +43,32 @@ export const monacoReady: Promise<void> = (async () => {
       "editor.background": "#f2f3f7",
     },
   });
-  // Monaco doesn't read CSS variables, so it follows the skin by hand: the
-  // Daylight skin maps to canopy-light, everything else to canopy-dark —
-  // once at service startup (editors mount with whatever is then active) and
-  // again on every live skin switch (settings.ts dispatches canopy:theme).
+  // Vitrine is glass all the way down: the editor paints no surface of its
+  // own and the app's ambient field shows through, tinted by
+  // `.project-content` in index.css. A slab here would be the one opaque
+  // rectangle in the skin, and it covers most of the window.
+  monaco.editor.defineTheme("canopy-vitrine", {
+    base: "vs-dark",
+    inherit: true,
+    rules: [],
+    colors: {
+      "editor.background": "#00000000",
+      "editorGutter.background": "#00000000",
+      "minimap.background": "#00000000",
+      "editorOverviewRuler.background": "#00000000",
+    },
+  });
+  // Monaco doesn't read CSS variables, so it follows the skin by hand:
+  // Daylight maps to canopy-light, Vitrine to canopy-vitrine, everything else
+  // to canopy-dark — once at service startup (editors mount with whatever is
+  // then active) and again on every live skin switch (settings.ts dispatches
+  // canopy:theme).
   const monacoThemeForSkin = () => {
     try {
       const stored = JSON.parse(localStorage.getItem("canopy.settings") ?? "{}") as {
         theme?: string;
       };
+      if (stored.theme === "vitrine") return "canopy-vitrine";
       const light =
         stored.theme === "daylight" ||
         (stored.theme === "auto" &&
@@ -56,12 +79,28 @@ export const monacoReady: Promise<void> = (async () => {
     }
   };
   monaco.editor.setTheme(monacoThemeForSkin());
-  window.addEventListener("canopy:theme", () =>
-    monaco.editor.setTheme(monacoThemeForSkin()),
-  );
+  // Same pulse every settings write fires: re-read the skin, and re-language
+  // open models in case the file associations changed.
+  window.addEventListener("canopy:theme", () => {
+    monaco.editor.setTheme(monacoThemeForSkin());
+    refreshModelLanguages();
+  });
 })();
 
-export function languageForPath(path: string): string | undefined {
+/**
+ * Language id for a file, resolved in precedence order:
+ *
+ *   1. the user's own associations (Settings → Editor) — an explicit choice
+ *      outranks everything, including a grammar Monaco ships;
+ *   2. Monaco's registry — the real grammars, matched on extension or name;
+ *   3. Canopy's gap-filling table (fileAssociations.ts) — the closest grammar
+ *      for file types Monaco has none for at all (.astro, .cpp, .toml, …).
+ *
+ * Undefined means "no idea", which Monaco renders as plain text.
+ */
+function resolveLanguage(path: string, custom: Record<string, string>): string | undefined {
+  const own = customLanguageFor(path, custom);
+  if (own) return own;
   const name = path.split("/").pop() ?? path;
   const ext = "." + (name.split(".").pop() ?? "");
   for (const lang of monaco.languages.getLanguages()) {
@@ -69,7 +108,25 @@ export function languageForPath(path: string): string | undefined {
       return lang.id;
     }
   }
-  return undefined;
+  return extraLanguageFor(path);
+}
+
+const userAssociations = () => sanitizeAssociations(getSettings().fileAssociations);
+
+export function languageForPath(path: string): string | undefined {
+  return resolveLanguage(path, userAssociations());
+}
+
+/** Re-language every open model. Associations are resolved at lookup time, so
+ *  a model created before the mapping changed is the only thing that would
+ *  otherwise keep the old highlighting until the tab is reopened. */
+export function refreshModelLanguages(): void {
+  // One settings read for the whole sweep, not one per open file.
+  const custom = userAssociations();
+  for (const model of monaco.editor.getModels()) {
+    const next = resolveLanguage(model.uri.path, custom) ?? "plaintext";
+    if (model.getLanguageId() !== next) monaco.editor.setModelLanguage(model, next);
+  }
 }
 
 /** Get or create the shared text model for a file. */

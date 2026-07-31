@@ -1,5 +1,21 @@
 // Small persistent settings, stored in localStorage. Keep this flat and cheap.
-export type Theme = "auto" | "default" | "gotham" | "daylight" | "custom";
+import type { CustomMicroTask } from "./microTasks";
+// Type-only, so the projects.ts ↔ settings.ts pair stays a compile-time cycle
+// and never a runtime one.
+import type { CustomAgentCli } from "./projects";
+import type { BrowserEngine } from "./browserBounds";
+import type { CaptureMode } from "./pageCapture";
+import { IS_MAC } from "./platform";
+import {
+  formatChord,
+  keyLabel as chordKeyLabel,
+  matchesChord,
+  modifierLabel,
+  requireKeyChord,
+} from "./shortcuts";
+
+export type Theme =
+  "auto" | "default" | "gotham" | "daylight" | "vitrine" | "custom";
 
 /** What "auto" means right now: Default when macOS is in dark mode, Daylight
  *  in light mode. Every consumer of the skin (CSS data-theme, terminal
@@ -29,6 +45,7 @@ export const THEMES: { id: Theme; label: string }[] = [
   { id: "default", label: "Default" },
   { id: "gotham", label: "Gotham" },
   { id: "daylight", label: "Daylight" },
+  { id: "vitrine", label: "Vitrine" },
   { id: "custom", label: "Custom" },
 ];
 
@@ -37,6 +54,12 @@ export const THEMES: { id: Theme; label: string }[] = [
  *  line-thin/block-outline variants. Personalize.tsx maps to whichever each
  *  engine actually wants. */
 export type CursorStyle = "block" | "underline" | "bar";
+
+/** What it takes to follow a link in the terminal. "click" — a bare left click
+ *  opens it, the way a link behaves everywhere else. "modifier" — ⌘ (Ctrl off
+ *  macOS) must be held, the chord VS Code and iTerm2 use, which keeps a click
+ *  on a URL somebody else printed from navigating. See terminalLinks.ts. */
+export type LinkClickMode = "click" | "modifier";
 
 /** A dictation hotkey as captured from a keydown: the modifier flags plus the
  *  physical `KeyboardEvent.code` (layout-independent, so it survives non-US
@@ -49,49 +72,110 @@ export interface Hotkey {
   code: string;
 }
 
-const IS_MAC =
-  typeof navigator !== "undefined" && navigator.platform.toUpperCase().includes("MAC");
+/** Default dictation hotkey — ⌘D on Mac, Alt+D elsewhere, per the manifest
+ *  (plain Ctrl+D is shell EOF, so it's deliberately avoided off Mac). */
+export const DEFAULT_DICTATION_HOTKEY: Hotkey = requireKeyChord("dictation");
 
-/** Default dictation hotkey: ⌘D on Mac, Alt+D elsewhere (plain Ctrl+D is shell
- *  EOF, so it's deliberately avoided). */
-export const DEFAULT_DICTATION_HOTKEY: Hotkey = IS_MAC
-  ? { meta: true, ctrl: false, alt: false, shift: false, code: "KeyD" }
-  : { meta: false, ctrl: false, alt: true, shift: false, code: "KeyD" };
+/** Default hotkey for the recent-dictation picker: ⌃⌘V on Mac (SuprFlow's
+ *  binding, and free of any system paste), ⌃⌥V elsewhere — Ctrl+Shift+V is
+ *  terminal paste on Windows and Linux, so it is deliberately avoided. */
+export const DEFAULT_DICTATION_HISTORY_HOTKEY: Hotkey = IS_MAC
+  ? { meta: true, ctrl: true, alt: false, shift: false, code: "KeyV" }
+  : { meta: false, ctrl: true, alt: true, shift: false, code: "KeyV" };
 
-/** Render a hotkey for display, e.g. "⌘D" or "Alt+Shift+D". */
+/** How dictation is triggered.
+ *
+ *  "combo" — the original two-key chord (⌘D), pressed to start and again to
+ *  insert. Still the default: it is what every existing install has bound, and
+ *  it is the only mode that cannot possibly collide with ordinary typing.
+ *
+ *  "hold" — push-to-talk on ONE bare modifier: hold it, speak, release and the
+ *  text lands. Double-tapping the same key instead latches recording on so you
+ *  can let go (SuprFlow's "hands-free"); the next tap ends it.
+ *
+ *  "doubleTap" — two quick taps of one bare modifier starts a latched
+ *  recording, a single tap ends it. Nothing is held while you speak.
+ *
+ *  The bare-modifier modes exist because a modifier is the only key you can
+ *  press on its own without also typing something. They are safe to bind
+ *  because of the pollution rule in dictationTrigger.ts: a modifier that had
+ *  any other key pressed while it was down was being used as a modifier, and
+ *  never triggers. That is what keeps ⇧A from starting a recording. */
+export type DictationTriggerMode = "combo" | "hold" | "doubleTap";
+
+/** A single modifier that can carry a bare-key trigger. The bare names match
+ *  either side of the keyboard; the sided ones (…Left/…Right) match exactly,
+ *  which is how you bind a key you never otherwise touch. CapsLock is offered
+ *  because it is dead weight for most people — but note it is a LATCHING key,
+ *  so "hold CapsLock" means "caps on for as long as you speak". */
+export type DictationModKey =
+  | "Shift"
+  | "ShiftLeft"
+  | "ShiftRight"
+  | "Control"
+  | "ControlLeft"
+  | "ControlRight"
+  | "Alt"
+  | "AltLeft"
+  | "AltRight"
+  | "Meta"
+  | "MetaLeft"
+  | "MetaRight"
+  | "CapsLock";
+
+/** Right ⌘ on macOS, right Ctrl elsewhere — the modifier a touch typist is
+ *  least likely to press on its own, so the pollution guard has the least work
+ *  to do. Only consulted once someone leaves "combo" mode. */
+export const DEFAULT_DICTATION_MOD_KEY: DictationModKey = IS_MAC
+  ? "MetaRight"
+  : "ControlRight";
+
+/** Display label for a bare-modifier trigger key. */
+export function modKeyLabel(k: DictationModKey): string {
+  const side = k.endsWith("Left")
+    ? "Left "
+    : k.endsWith("Right")
+      ? "Right "
+      : "";
+  const base = k.replace(/(Left|Right)$/, "");
+  if (base === "CapsLock") return "Caps Lock";
+  return side + modifierLabel(base as "Shift" | "Control" | "Alt" | "Meta");
+}
+
+/** The visualiser drawn in the recording pill while the mic is live. Ported
+ *  from SuprFlow's wave styles; each is a canvas renderer in waveStyles.ts. */
+export type DictationWaveStyle =
+  "classic" | "equalizer" | "particle" | "ribbon" | "pulse" | "neon";
+
+export const DICTATION_WAVE_STYLES: {
+  id: DictationWaveStyle;
+  label: string;
+  hint: string;
+}[] = [
+  { id: "classic", label: "Classic", hint: "Simple animated bars" },
+  { id: "equalizer", label: "Equalizer", hint: "Audio bars with reflection" },
+  { id: "particle", label: "Particle", hint: "Flowing wave with particles" },
+  { id: "ribbon", label: "Ribbon", hint: "Filled gradient ribbon" },
+  { id: "pulse", label: "Pulse", hint: "Concentric pulsing rings" },
+  { id: "neon", label: "Neon", hint: "Glowing double sine" },
+];
+
+/** Render a hotkey for display, e.g. "⌘D" or "Alt+Shift+D". A Hotkey is
+ *  structurally a resolved Chord, so display and comparison come from the
+ *  registry — this is the one shortcut the user can rebind, which is why it is
+ *  stored rather than looked up by id. */
 export function formatHotkey(h: Hotkey): string {
-  const parts: string[] = [];
-  if (IS_MAC) {
-    if (h.ctrl) parts.push("⌃");
-    if (h.alt) parts.push("⌥");
-    if (h.shift) parts.push("⇧");
-    if (h.meta) parts.push("⌘");
-  } else {
-    if (h.ctrl) parts.push("Ctrl");
-    if (h.alt) parts.push("Alt");
-    if (h.shift) parts.push("Shift");
-    if (h.meta) parts.push("Win");
-  }
-  parts.push(keyLabel(h.code));
-  return IS_MAC ? parts.join("") : parts.join("+");
+  return formatChord(h);
 }
 
 /** Human label for a KeyboardEvent.code (KeyD → "D", Digit1 → "1"). */
 export function keyLabel(code: string): string {
-  if (code.startsWith("Key")) return code.slice(3);
-  if (code.startsWith("Digit")) return code.slice(5);
-  return code;
+  return chordKeyLabel(code);
 }
 
 /** Does this keydown match the configured hotkey? */
 export function matchesHotkey(e: KeyboardEvent, h: Hotkey): boolean {
-  return (
-    e.code === h.code &&
-    e.metaKey === h.meta &&
-    e.ctrlKey === h.ctrl &&
-    e.altKey === h.alt &&
-    e.shiftKey === h.shift
-  );
+  return matchesChord(e, h);
 }
 
 export const TERMINAL_FONT_DEFAULT =
@@ -121,6 +205,24 @@ export interface Settings {
    *  the user having to pick a second colour. */
   customAccent: string;
 
+  // ---- Side panel behaviour (Appearance). Three independent choices about
+  // one panel: how it opens, how it closes, and whether it covers the work or
+  // moves it aside.
+  /** Settle the pointer on a rail icon and the panel comes out on its own. Off
+   *  by default: a panel that appears because you passed over an icon on the
+   *  way somewhere else is a panel you didn't ask for. */
+  sidebarHover: boolean;
+  /** A click in the content area puts the panel away. On by default — while
+   *  the panel overlays the editor, a click past it is someone reaching for
+   *  what's underneath, and having to click twice is the one thing an overlay
+   *  must not do. */
+  sidebarClickOutsideCloses: boolean;
+  /** The panel floats over the content instead of taking a column from it. On
+   *  by default: docking it reflows the main area every time it opens, which
+   *  re-wraps every terminal in it. Turn it off to have the panel push the
+   *  editor aside and stay out of its way. */
+  sidebarOverlay: boolean;
+
   // ---- Personalize: font + cursor, Editor (Monaco) and Terminal (xterm)
   // independently — different rendering engines, so neither shares the
   // other's font metrics or cursor vocabulary. Applied to newly opened
@@ -131,14 +233,50 @@ export interface Settings {
   terminalFontFamily: string;
   terminalCursorStyle: CursorStyle;
   terminalCursorBlink: boolean;
+  /** Whether following a terminal link takes the modifier. Defaults to "click":
+   *  a hovered, underlined link that ignores a click reads as a broken one, and
+   *  it is a new key, so the default reaches existing installs too. Read live at
+   *  click time — no terminal remount. */
+  terminalLinkClick: LinkClickMode;
   editorFontFamily: string;
   editorFontSize: number;
   editorCursorStyle: CursorStyle;
   editorCursorBlink: boolean;
+  /** File pattern -> Monaco language id, the user's own overrides only
+   *  (Settings → Editor → File associations). Canopy's shipped table lives in
+   *  fileAssociations.ts and is deliberately NOT copied in here: storing it
+   *  would freeze today's list into every existing install, so a mapping added
+   *  in a later version would never reach anyone who has opened this screen.
+   *  Re-pointing a shipped pattern writes an entry under the same key. */
+  fileAssociations: Record<string, string>;
   /** Which agent CLI starts work on a ticket (registry id in projects.ts).
    *  Was hardcoded to claude, which quietly made every other agent a
    *  second-class citizen in a product built to run all of them. */
   defaultAgent: string;
+  /** Registry id -> the executable this machine actually has, for CLIs whose
+   *  binary isn't the name the vendor ships: an enterprise build of Claude Code
+   *  installed as `acme-claude`, or a wrapper at an absolute path. Without it
+   *  the launcher probes the stock name, finds nothing, and offers to install a
+   *  second copy the user often isn't allowed to authenticate.
+   *
+   *  Machine-wide rather than per-project: an enterprise wrapper is a property
+   *  of the workstation. A single executable or path only — arguments belong in
+   *  a launch command, and a multi-token value would break both `command -v`
+   *  and the basename match that recognises the CLI once it is running. */
+  cliBins: Record<string, string>;
+  /** Registry id -> which account profile that CLI launches under (see
+   *  profiles.ts). Absent means the default login, which is why this stores
+   *  only the exceptions: a user who never opens the feature has an empty map
+   *  and every launch behaves exactly as it did before profiles existed.
+   *
+   *  Machine-wide rather than per-project, for the same reason as `cliBins`: a
+   *  login is a property of the person at the workstation. */
+  cliProfiles: Record<string, string>;
+  /** Agent CLIs Canopy ships no entry for, described by the user (Settings →
+   *  Agents). Machine-wide for the same reason as `cliBins`: an in-house agent
+   *  is a property of the workstation, not of one repo. See CustomAgentCli for
+   *  what an entry can and deliberately cannot say. */
+  customClis: CustomAgentCli[];
   /** Display name on the team relay, remembered from the last host/join. */
   relayName: string;
   /** Last relay address joined, prefilled on the next join. */
@@ -162,16 +300,71 @@ export interface Settings {
    *  fall is delayed, so an agent pausing between tool calls doesn't shuffle
    *  the strip under your pointer. */
   idleGroupDelaySeconds: number;
+  /** Where the user's own micro-tasks used to live, back when they were
+   *  app-wide. They belong to a project now (`Project.customTasks`), and
+   *  adoptLegacyCustomTasks() empties this on first launch. Kept so that
+   *  migration has something to read; nothing writes tasks here any more. */
+  customMicroTasks: CustomMicroTask[];
+  /** canopy_* MCP tools the user switched off (Settings → Agents). Stored as
+   *  the exceptions, not the whole set, so a tool added in a later version is
+   *  on by default rather than invisible to everyone who ever opened this
+   *  screen. Published to the bridge, where the sidecar filters its tool list —
+   *  a disabled tool costs the agent no context at all. */
+  disabledTools: string[];
+
+  // ---- SpotSearch (⌘K) ----
+  /** Sources the omnibox must not ask (ids from spotSources.ts). Stored as the
+   *  exceptions, like `disabledTools`, so a source added in a later version is
+   *  searched by default rather than invisible to everyone who has ever opened
+   *  this screen. */
+  spotDisabledSources: string[];
+  /** Agent CLIs whose conversations must not be indexed, by registry id. Also
+   *  exceptions-only, so an agent Canopy learns to read later is covered
+   *  without anyone revisiting this screen. Switching one off purges what is
+   *  already indexed on the next ingest — "don't index my conversations with X"
+   *  has to mean the ones already in there too. */
+  spotDisabledAgents: string[];
+  /** Index live terminal scrollback. Same purge-on-off rule. */
+  spotIndexTerminals: boolean;
+  /** Search every project's history, not just the one you have open. Off by
+   *  default: a palette floating over one project that answers from another is
+   *  surprising, and the rows open a directory you weren't in. */
+  spotSearchAllProjects: boolean;
+  /** Drop indexed messages older than this many days. 0 keeps everything,
+   *  which is the default — this is a search index over your own work, not a
+   *  log to be rotated. */
+  spotRetentionDays: number;
 
   // ---- Voice dictation ----
-  /** Hotkey that toggles dictation (start/insert). */
+  /** Hotkey that toggles dictation (start/insert). Used by "combo" mode. */
   dictationHotkey: Hotkey;
+  /** How the mic is armed — see DictationTriggerMode. Defaults to "combo" so
+   *  an upgrade never silently rebinds a modifier someone types with. */
+  dictationTriggerMode: DictationTriggerMode;
+  /** Which bare modifier carries the trigger in "hold"/"doubleTap" mode. */
+  dictationModKey: DictationModKey;
+  /** Hotkey that opens the recent-dictation picker. Hold its modifiers and tap
+   *  its key to walk back through what you said; release to paste. */
+  dictationHistoryHotkey: Hotkey;
   /** Registry id of the ASR model to use (see dictation.rs MODELS). Empty
    *  means "the default model" so a stored blank never pins a missing id. */
   dictationModel: string;
   /** Optional BCP-47 language hint passed at transcription time. Empty =
    *  auto-detect (what multilingual models do anyway). */
   dictationLanguage: string;
+  /** Re-decode a rolling tail of the audio while you speak and show it in the
+   *  pill. Off by default: it is a second inference loop running the whole
+   *  time you talk, which costs a core. It changes nothing about the text that
+   *  finally lands — that always comes from one clean decode of the whole
+   *  recording. This is a preview, not a faster path. */
+  dictationStreaming: boolean;
+  /** Which visualiser the recording pill draws. */
+  dictationWaveStyle: DictationWaveStyle;
+  /** Silence the speakers while the mic is open, so whatever is playing does
+   *  not end up in the transcript. Mutes the default output device — it cannot
+   *  pause a player, and it is system-wide, not just Canopy. Restored the
+   *  moment recording ends. */
+  dictationMuteOutput: boolean;
 
   // ---- Remote access ----
   /** Reach for the remote control panel: "local" (this network only) or
@@ -183,6 +376,70 @@ export interface Settings {
    *  in SettingsDialog.tsx). Persisted alongside remoteReach so reopening
    *  Settings restores the whole choice, not just the running link. */
   remoteTunnelProvider: string;
+
+  // ---- Embedded browser ----
+  /** Which engine preview tabs run on.
+   *
+   *  "proxy" is an iframe on a loopback reverse proxy: ordinary DOM, so
+   *  panels and menus paint over it, screenshots see it, and nothing has to
+   *  be hidden for anything. The cost is that every site is served from one
+   *  origin, so sessions are shared and do not survive a restart.
+   *
+   *  "webview" is a real child webview at the page's real origin with a
+   *  persistent profile — log into a site once and stay logged in. It buys
+   *  that with two limits neither this app nor Tauri can lift:
+   *
+   *    * a child webview is composited ABOVE the whole window and there is no
+   *      z-order API for it (tauri-apps/tauri#9798; Electron's BrowserView is
+   *      the same), so anything drawn over it forces the page off screen;
+   *    * a hidden WKWebView does not render and cannot be made to — Apple
+   *      exposes no API for offscreen rendering — so a page that loads behind
+   *      a panel comes back blank until something forces a repaint.
+   *
+   *  Everything in browserHost.ts, browserFrame.ts and the freeze-frame
+   *  machinery exists to soften those two facts. The proxy needs none of it —
+   *  VS Code's Simple Browser is an iframe for exactly that reason — which is
+   *  what makes it the right fallback when a session does not matter.
+   *
+   *  The default, because a preview of your own app is usually a preview of
+   *  it logged in, and that is the only engine that can hold a session. The
+   *  compensation above is the price; opening a preview closes the panel that
+   *  would cover it, which is the case that actually bit. */
+  browserEngine: BrowserEngine;
+
+  /** What the preview's Screenshot button grabs when clicked without opening
+   *  its menu. Remembered rather than fixed: whichever mode you picked last is
+   *  almost always the one you want next, and a mode chooser you have to
+   *  re-answer every time is a mode chooser nobody uses. */
+  previewCaptureMode: CaptureMode;
+
+  /** Where an ordinary link goes when you click it: a preview tab in the
+   *  project you are in, or the OS browser.
+   *
+   *  On by default. Canopy has a real browser in it — one that holds logins
+   *  across restarts — and a link that leaves the app takes you out of the thing
+   *  you were doing to a window you then have to find your way back from. This
+   *  covers links, not buttons: a control whose label says it goes somewhere
+   *  else (Support, Open on GitHub, a file-an-issue flow) still goes there,
+   *  because that is what it promised.
+   *
+   *  Falls back to the OS browser whenever nothing internal can take the URL —
+   *  no project open, no view in front — since a click that does nothing at all
+   *  is the one outcome worse than either destination. */
+  openLinksInApp: boolean;
+
+  // ---- Workspaces ----
+  /** The number the repo's own checkout serves on. Workspaces lease offsets
+   *  from it, so a second checkout of the same repo can run its dev server
+   *  alongside the first instead of losing the port race. */
+  workspaceBasePort: number;
+  /** Leased offsets, `repo path -> workspace path -> offset`. Persisted because
+   *  a port that moves between restarts is a bookmark that stops working. */
+  workspacePorts: Record<string, Record<string, number>>;
+  /** Carry the gitignored config and clone the dependencies into a new
+   *  workspace, so it can build the moment it exists. Off means a bare
+   *  `git worktree add`, which is what this used to do. */
+  workspaceBootstrap: boolean;
 
   // ---- Crash reporting ----
   /** Opt-in, default off: when a panel crashes (or a native panic is found on
@@ -203,44 +460,89 @@ const DEFAULTS: Settings = {
   runawayMemBytes: 4 * 1024 * 1024 * 1024,
   ptyHighWater: 2 * 1024 * 1024,
   defaultAgent: "claude",
+  cliBins: {},
+  cliProfiles: {},
+  customClis: [],
   relayName: "",
   relayAddr: "",
   autoHibernate: false,
   maxLiveAgents: 8,
   groupTabsByStatus: true,
   idleGroupDelaySeconds: 60,
+  customMicroTasks: [],
+  disabledTools: [],
   trackerKeys: {},
   theme: "default",
   customAccent: "",
+  sidebarHover: false,
+  sidebarClickOutsideCloses: true,
+  sidebarOverlay: true,
   terminalFontFamily: TERMINAL_FONT_DEFAULT,
   terminalCursorStyle: "block",
   terminalCursorBlink: true,
+  terminalLinkClick: "click",
   editorFontFamily: EDITOR_FONT_DEFAULT,
   editorFontSize: 13,
   editorCursorStyle: "bar",
   editorCursorBlink: true,
+  fileAssociations: {},
+  spotDisabledSources: [],
+  spotDisabledAgents: [],
+  spotIndexTerminals: true,
+  spotSearchAllProjects: false,
+  spotRetentionDays: 0,
   dictationHotkey: DEFAULT_DICTATION_HOTKEY,
+  dictationTriggerMode: "combo",
+  dictationModKey: DEFAULT_DICTATION_MOD_KEY,
+  dictationHistoryHotkey: DEFAULT_DICTATION_HISTORY_HOTKEY,
   dictationModel: "",
   dictationLanguage: "",
+  dictationStreaming: false,
+  dictationWaveStyle: "classic",
+  dictationMuteOutput: true,
   remoteReach: "local",
   remoteTunnelProvider: "cloudflare",
+  browserEngine: "webview",
+  previewCaptureMode: "visible",
+  openLinksInApp: true,
+  workspaceBasePort: 5173,
+  workspacePorts: {},
+  workspaceBootstrap: true,
   crashReporting: false,
 };
 
 const KEY = "canopy.settings";
 
+/** Parsed-settings cache, keyed on the raw stored string: getSettings is
+ *  called from render paths, and re-parsing per call added up. Keying on the
+ *  raw string (rather than invalidating on our own writes) stays correct when
+ *  something else touches the key — tests do. Also makes the returned object
+ *  identity-stable between writes. */
+let settingsCache: { raw: string | null; value: Settings } | null = null;
+
 export function getSettings(): Settings {
+  const raw = localStorage.getItem(KEY);
+  if (settingsCache && settingsCache.raw === raw) return settingsCache.value;
+  let value: Settings;
   try {
-    const stored = JSON.parse(localStorage.getItem(KEY) ?? "{}") as Partial<Settings>;
-    return { ...DEFAULTS, ...stored };
+    value = { ...DEFAULTS, ...(JSON.parse(raw ?? "{}") as Partial<Settings>) };
   } catch {
-    return { ...DEFAULTS };
+    value = { ...DEFAULTS };
   }
+  settingsCache = { raw, value };
+  return value;
 }
+
+/** Fired after any settings write. Most settings are read where they're used
+ *  and need nothing; the ones that change how a live surface behaves (the side
+ *  panel's three) are held in component state, and this is how they hear. */
+export const SETTINGS_CHANGE_EVENT = "canopy:settings-changed";
 
 export function updateSettings(patch: Partial<Settings>): Settings {
   const next = { ...getSettings(), ...patch };
   localStorage.setItem(KEY, JSON.stringify(next));
+  if (typeof window !== "undefined")
+    window.dispatchEvent(new Event(SETTINGS_CHANGE_EVENT));
   return next;
 }
 
@@ -251,7 +553,8 @@ function luminance(hex: string): number {
   const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex.trim());
   if (!m) return 0.5;
   const [r, g, b] = m.slice(1, 4).map((h) => parseInt(h, 16) / 255);
-  const lin = (c: number) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  const lin = (c: number) =>
+    c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
   return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
 }
 
@@ -276,7 +579,10 @@ export function applyTheme(theme: Theme, customAccent?: string): void {
     // thing to want, and forcing a skin change to get one was the wrong
     // model.
     root.setProperty("--accent", accent);
-    root.setProperty("--on-accent", luminance(accent) > 0.5 ? "#12131c" : "#ffffff");
+    root.setProperty(
+      "--on-accent",
+      luminance(accent) > 0.5 ? "#12131c" : "#ffffff",
+    );
   } else {
     // No override — fall back to whatever the skin's stylesheet block says.
     root.removeProperty("--accent");

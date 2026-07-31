@@ -1,21 +1,79 @@
-// Canopy preview picker — injected into every HTML page the preview proxy
-// serves. Runs inside the previewed page, so it can see and describe real DOM;
-// talks to the Canopy app (the iframe's parent) via postMessage, which is the
-// one channel that crosses the origin boundary on purpose.
+// Canopy preview picker — injected into every page the in-app browser shows,
+// under either engine. Runs inside the page, so it can see and describe real
+// DOM, and it is the whole of what an agent's browser ops actually do.
+//
+// Two transports, one script:
+//
+//   "frame"  — the proxy engine (preview.rs). The page is an iframe inside the
+//              Canopy window, served from a loopback origin, and postMessage is
+//              the one channel that crosses the origin boundary on purpose.
+//   "native" — the webview engine (browser.rs). The page is a real child
+//              webview at its real origin, so there is no parent to talk to.
+//              The host drives us by evaluating window.__canopyBrowser.*, and
+//              we answer into an outbox it drains. A tiny cancelled navigation
+//              to the canopy-drain: scheme is the doorbell — see signal().
 //
 // Protocol (all messages tagged { canopy: <type> }):
-//   parent -> page: mode {on}, navigate {delta|url}, sync {marks: [{n, selector}]},
-//                   agent {id, op, ...} (browser-control ops from MCP agents)
-//   page -> parent: ready {url, title}, nav {url, title}, annotation {payload},
-//                   agent-result {id, ok, data}
+//   host -> page: mode {on}, region {on}, navigate {delta|url},
+//                 sync {marks: [{n, selector}]},
+//                 agent {id, op, ...} (browser-control ops from MCP agents)
+//   page -> host: ready {url, title}, nav {url, title}, annotation {payload},
+//                 region-done {rect} / region-cancel, agent-result {id, ok, data}
 (function () {
   "use strict";
-  if (window.__canopyPicker || window.top === window) return;
+  var NATIVE = !!window.__canopyNativeBrowser;
+  // Under the proxy the picker belongs to the framed page only; the app's own
+  // window loads it too and must skip. A native child webview IS the top
+  // window, so that test has to stand down there.
+  if (window.__canopyPicker || (!NATIVE && window.top === window)) return;
   window.__canopyPicker = true;
+
+  // Did this document ever actually render? requestAnimationFrame only runs
+  // when the view is being drawn, so the first callback landing is proof that
+  // a frame was produced — and asking for it later costs nothing and, unlike
+  // a snapshot, does not itself force a render (which would answer its own
+  // question). This is how the host tells "loaded" from "painted": a page
+  // that loads while its view is hidden does neither, and comes back blank.
+  window.__canopyPainted = 0;
+  try {
+    requestAnimationFrame(function () {
+      window.__canopyPainted = Date.now();
+    });
+  } catch (_) {}
 
   var picking = false;
   var marks = []; // {n, selector, el|null, badge}
   var Z = 2147483000;
+
+  // ---------- transport ----------
+
+  var outbox = []; // native only: messages waiting for the host to drain
+  var drainSeq = 0;
+  var signalPending = false;
+
+  /** Ring the host's doorbell. Assigning an unhandled scheme fires the
+   *  webview's navigation policy hook, which reads the counter and cancels —
+   *  the page is untouched, and the host knows to drain without polling. The
+   *  counter matters: re-assigning the same URL is a no-op. */
+  function signal() {
+    if (signalPending) return;
+    signalPending = true;
+    setTimeout(function () {
+      signalPending = false;
+      try {
+        location.href = "canopy-drain:" + ++drainSeq;
+      } catch (_) {}
+    }, 0);
+  }
+
+  function send(msg) {
+    if (NATIVE) {
+      outbox.push(msg);
+      signal();
+    } else {
+      parent.postMessage(msg, "*");
+    }
+  }
 
   // ---------- console capture ----------
   // Installed immediately — the proxy injects this script at the top of <head>,
@@ -55,6 +113,109 @@
   addEventListener("unhandledrejection", function (e) {
     record("error", ["Unhandled promise rejection: " + logArg(e.reason)]);
   });
+
+  // ---------- network capture ----------
+  // Under the proxy every request passed through Rust and was logged there.
+  // A native webview talks to the internet directly, so the log has to be kept
+  // in the page: fetch and XHR are wrapped for status and timing, and a
+  // PerformanceObserver picks up everything the page requests declaratively
+  // (scripts, images, stylesheets, beacons). The one thing neither can see is
+  // the document request itself — by the time this script runs, it is done.
+
+  var net = []; // {method, url, status, ms, from, ts}
+  var NET_CAP = 300;
+
+  function netPush(entry) {
+    net.push(entry);
+    if (net.length > NET_CAP) net.splice(0, net.length - NET_CAP);
+  }
+
+  function absolute(u) {
+    try {
+      return new URL(String(u), location.href).href;
+    } catch (_) {
+      return String(u);
+    }
+  }
+
+  var origFetch = window.fetch;
+  if (typeof origFetch === "function") {
+    window.fetch = function (input, init) {
+      var started = Date.now();
+      var url = absolute(input && input.url ? input.url : input);
+      var method = ((init && init.method) || (input && input.method) || "GET").toUpperCase();
+      return origFetch.apply(this, arguments).then(
+        function (res) {
+          netPush({
+            method: method,
+            url: url,
+            status: res.status,
+            ms: Date.now() - started,
+            from: "fetch",
+            ts: started,
+          });
+          return res;
+        },
+        function (err) {
+          netPush({
+            method: method,
+            url: url,
+            status: 0,
+            error: String((err && err.message) || err),
+            ms: Date.now() - started,
+            from: "fetch",
+            ts: started,
+          });
+          throw err;
+        },
+      );
+    };
+  }
+
+  var XHR = window.XMLHttpRequest;
+  if (XHR && XHR.prototype) {
+    var origOpen = XHR.prototype.open;
+    var origSend = XHR.prototype.send;
+    XHR.prototype.open = function (method, url) {
+      this.__canopyNet = { method: String(method || "GET").toUpperCase(), url: absolute(url) };
+      return origOpen.apply(this, arguments);
+    };
+    XHR.prototype.send = function () {
+      var meta = this.__canopyNet;
+      if (meta) {
+        var started = Date.now();
+        var xhr = this;
+        this.addEventListener("loadend", function () {
+          netPush({
+            method: meta.method,
+            url: meta.url,
+            status: xhr.status,
+            ms: Date.now() - started,
+            from: "xhr",
+            ts: started,
+          });
+        });
+      }
+      return origSend.apply(this, arguments);
+    };
+  }
+
+  try {
+    new PerformanceObserver(function (list) {
+      list.getEntries().forEach(function (e) {
+        // fetch/XHR arrive here too, with worse detail than the wrappers above.
+        if (e.initiatorType === "fetch" || e.initiatorType === "xmlhttprequest") return;
+        netPush({
+          method: "GET",
+          url: e.name,
+          status: e.responseStatus || null,
+          ms: Math.round(e.duration),
+          from: e.initiatorType || "resource",
+          ts: Math.round(performance.timeOrigin + e.startTime),
+        });
+      });
+    }).observe({ type: "resource", buffered: true });
+  } catch (_) {}
 
   // ---------- overlay chrome ----------
 
@@ -208,7 +369,7 @@
     var n = marks.length + 1;
     marks.push({ n: n, selector: payload.selector, el: el, badge: badgeFor(n) });
     layoutBadges();
-    parent.postMessage({ canopy: "annotation", n: n, payload: payload }, "*");
+    send({ canopy: "annotation", n: n, payload: payload });
   }
 
   function swallow(e) {
@@ -234,6 +395,113 @@
     marks = [];
   }
 
+  // ---------- region select ----------
+  // Drawn in the page, not in the app window, for the same reason the hover box
+  // is: under the webview engine this document is a native view composited over
+  // Canopy, so an overlay in Canopy's DOM would be behind the thing it is
+  // asking the user to point at. The backdrop swallows the drag, so the page
+  // itself never sees it.
+
+  var regionOn = false;
+  var regionFrom = null;
+  var backdrop = null;
+  var marquee = null;
+
+  function ensureRegionChrome() {
+    if (!backdrop) {
+      backdrop = document.createElement("div");
+      backdrop.style.cssText =
+        "position:fixed;inset:0;z-index:" + (Z + 3) + ";cursor:crosshair;" +
+        "background:rgba(10,12,16,.30);";
+      marquee = document.createElement("div");
+      marquee.style.cssText =
+        "position:fixed;display:none;pointer-events:none;z-index:" + (Z + 4) + ";" +
+        "border:1px solid #4f8ef7;background:rgba(79,142,247,.14);" +
+        "box-shadow:0 0 0 9999px rgba(10,12,16,.18);";
+    }
+    if (!backdrop.isConnected) document.documentElement.appendChild(backdrop);
+    if (!marquee.isConnected) document.documentElement.appendChild(marquee);
+  }
+
+  /** The drag so far, clamped to the viewport, in CSS pixels. */
+  function regionRect(e) {
+    var x1 = Math.max(0, Math.min(regionFrom.x, window.innerWidth));
+    var y1 = Math.max(0, Math.min(regionFrom.y, window.innerHeight));
+    var x2 = Math.max(0, Math.min(e.clientX, window.innerWidth));
+    var y2 = Math.max(0, Math.min(e.clientY, window.innerHeight));
+    return {
+      x: Math.min(x1, x2),
+      y: Math.min(y1, y2),
+      w: Math.abs(x2 - x1),
+      h: Math.abs(y2 - y1),
+    };
+  }
+
+  function onRegionDown(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    regionFrom = { x: e.clientX, y: e.clientY };
+    marquee.style.display = "block";
+    onRegionMove(e);
+  }
+
+  function onRegionMove(e) {
+    if (!regionFrom) return;
+    e.preventDefault();
+    var r = regionRect(e);
+    marquee.style.left = r.x + "px";
+    marquee.style.top = r.y + "px";
+    marquee.style.width = r.w + "px";
+    marquee.style.height = r.h + "px";
+  }
+
+  function onRegionUp(e) {
+    if (!regionFrom) return;
+    e.preventDefault();
+    e.stopPropagation();
+    var r = regionRect(e);
+    // Torn down BEFORE the answer goes out: the host takes its snapshot as soon
+    // as it hears, and a picture of the dimming overlay is not a screenshot.
+    setRegion(false);
+    if (r.w < 4 || r.h < 4) send({ canopy: "region-cancel" });
+    else send({ canopy: "region-done", rect: r });
+  }
+
+  function onRegionKey(e) {
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    e.stopPropagation();
+    setRegion(false);
+    send({ canopy: "region-cancel" });
+  }
+
+  function setRegion(on) {
+    if (regionOn === on) return;
+    regionOn = on;
+    if (on) {
+      ensureRegionChrome();
+      // One pointing mode at a time — a crosshair that means two things is a
+      // crosshair that means neither. The host turns its own Annotate toggle
+      // off to match; it is not restored afterwards, because the user asked
+      // for the other tool.
+      setPicking(false);
+      regionFrom = null;
+      marquee.style.display = "none";
+      backdrop.addEventListener("mousedown", onRegionDown, true);
+      document.addEventListener("mousemove", onRegionMove, true);
+      document.addEventListener("mouseup", onRegionUp, true);
+      document.addEventListener("keydown", onRegionKey, true);
+    } else {
+      backdrop.removeEventListener("mousedown", onRegionDown, true);
+      document.removeEventListener("mousemove", onRegionMove, true);
+      document.removeEventListener("mouseup", onRegionUp, true);
+      document.removeEventListener("keydown", onRegionKey, true);
+      regionFrom = null;
+      if (backdrop) backdrop.remove();
+      if (marquee) marquee.remove();
+    }
+  }
+
   // Restore badges the app still holds (after a reload / tab revisit).
   function syncMarks(list) {
     clearMarks();
@@ -248,7 +516,7 @@
   // ---------- navigation reporting ----------
 
   function announce(type) {
-    parent.postMessage({ canopy: type, url: location.href, title: document.title }, "*");
+    send({ canopy: type, url: location.href, title: document.title });
   }
   var pushState = history.pushState.bind(history);
   history.pushState = function () { pushState.apply(null, arguments); announce("nav"); };
@@ -256,6 +524,27 @@
   history.replaceState = function () { replaceState.apply(null, arguments); announce("nav"); };
   addEventListener("popstate", function () { announce("nav"); });
   addEventListener("hashchange", function () { announce("nav"); });
+
+  // ---------- user input reporting ----------
+  // A press that lands in here is invisible to the app. Under the webview
+  // engine this page is a native view composited over the whole window, so its
+  // events are delivered by the platform and never touch the app's DOM; under
+  // the proxy it is a cross-origin frame, which swallows them just as
+  // completely. Anything the app dismisses on "a click went somewhere else"
+  // therefore stays up forever while you click the page underneath it — the
+  // sliding side panel most of all, because the page is exactly what it is
+  // covering. One bit, on press, is all the host needs to treat it like any
+  // other click in the window.
+  //
+  // Trusted events only: agent ops synthesise clicks on this same document,
+  // and an agent driving the page is not the user reaching past a panel.
+  addEventListener(
+    "pointerdown",
+    function (e) {
+      if (e.isTrusted) send({ canopy: "input" });
+    },
+    true,
+  );
 
   // ---------- agent browser control ----------
   // Ops arrive from MCP tools (canopy_browser_*) relayed by the app. Every op
@@ -276,9 +565,14 @@
   var cursorEl = null;
   var cursorLabelEl = null;
   var cursorHideTimer = 0;
+  // Set per op by the parent: true when the preview tab is open but not the one
+  // in front, so nobody is watching this page. The choreography is for the
+  // user's benefit — with no user it's just a second of latency per op — so a
+  // background op behaves like reduced motion and fires immediately.
+  var unwatched = false;
 
   function reducedMotion() {
-    return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    return unwatched || !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
   }
 
   function ensureCursor() {
@@ -370,6 +664,17 @@
     return r.width > 0 || r.height > 0;
   }
 
+  /** A field whose contents must never leave the page.
+   *
+   *  The vault's promise to the user is that filling a login does not show the
+   *  agent the password ("Canopy types it into the page's own fields; you never
+   *  see it"). A snapshot taken after a fill walks straight around that promise
+   *  unless the value is masked here — the agent asked for the page, not for
+   *  the secret, and a transcript keeps whatever it is handed. */
+  function isSecret(el) {
+    return el.localName === "input" && el.type === "password";
+  }
+
   function labelFor(el) {
     var t =
       el.getAttribute("aria-label") ||
@@ -377,7 +682,9 @@
       el.getAttribute("placeholder") ||
       el.getAttribute("title") ||
       el.getAttribute("alt") ||
-      (el.localName === "input" ? el.value : "") ||
+      // Never the value of a password field: an unlabelled one would otherwise
+      // arrive as its own label.
+      (el.localName === "input" && !isSecret(el) ? el.value : "") ||
       "";
     return t.replace(/\s+/g, " ").slice(0, 80);
   }
@@ -405,7 +712,14 @@
       if (role) entry.role = role;
       if (el.localName === "a") entry.href = el.getAttribute("href");
       if (el.localName === "input" || el.localName === "textarea" || el.localName === "select") {
-        entry.value = String(el.value == null ? "" : el.value).slice(0, 120);
+        // Whether the field has been filled is the useful part and is safe to
+        // say; the characters are not. A fixed-width mask so the length does
+        // not leak either.
+        entry.value = isSecret(el)
+          ? el.value
+            ? "••••••••"
+            : ""
+          : String(el.value == null ? "" : el.value).slice(0, 120);
         if (el.type) entry.type = el.type;
         if (el.checked != null && (el.type === "checkbox" || el.type === "radio"))
           entry.checked = el.checked;
@@ -513,8 +827,19 @@
     return out;
   }
 
+  // Set for the duration of one native run(), so a reply that lands before the
+  // call returns can be handed straight back instead of via the outbox — the
+  // read-only ops (snapshot, console, network) all answer that way, and a
+  // direct return is one round trip where the doorbell would be three.
+  var inlineReply = null;
+
   function agentReply(id, ok, data) {
-    parent.postMessage({ canopy: "agent-result", id: id, ok: ok, data: data }, "*");
+    var msg = { canopy: "agent-result", id: id, ok: ok, data: data };
+    if (inlineReply && inlineReply.id === id) {
+      inlineReply.msg = msg;
+      return;
+    }
+    send(msg);
   }
 
   function runAgentOp(d) {
@@ -575,12 +900,21 @@
         if (d.clear) logs.length = 0;
         return agentReply(d.id, true, { messages: out, total: logs.length });
       }
+      case "network": {
+        var m = Math.min(Number(d.lines) || 100, NET_CAP);
+        return agentReply(d.id, true, {
+          requests: net.slice(-m),
+          total: net.length,
+          note: "Captured in the page (fetch, XHR and subresources). The document request itself happened before this script ran, so it isn't listed.",
+        });
+      }
       default:
         return agentReply(d.id, false, "unknown browser op: " + d.op);
     }
   }
 
   function onAgentMessage(d) {
+    unwatched = !!d.bg;
     var fail = function (err) {
       agentReply(d.id, false, String((err && err.message) || err));
     };
@@ -599,12 +933,12 @@
     else exec();
   }
 
-  // ---------- parent commands ----------
+  // ---------- host commands ----------
 
-  addEventListener("message", function (e) {
-    var d = e.data;
+  function onHostMessage(d) {
     if (!d || typeof d !== "object") return;
     if (d.canopy === "mode") setPicking(!!d.on);
+    else if (d.canopy === "region") setRegion(!!d.on);
     else if (d.canopy === "sync") syncMarks(d.marks);
     else if (d.canopy === "agent") onAgentMessage(d);
     else if (d.canopy === "navigate") {
@@ -612,7 +946,54 @@
       else if (d.delta === 0) location.reload();
       else if (typeof d.delta === "number") history.go(d.delta);
     }
-  });
+  }
+
+  if (NATIVE) {
+    // The host reaches these by evaluating JavaScript in this webview and
+    // reading the returned value, so everything here must be JSON-serialisable
+    // and must not throw across the boundary — an exception there comes back
+    // indistinguishable from `undefined`.
+    window.__canopyBrowser = {
+      cmd: function (d) {
+        try {
+          onHostMessage(d);
+          return true;
+        } catch (err) {
+          return String((err && err.message) || err);
+        }
+      },
+      /** Start an op. Read-only ops finish inside this call and their result
+       *  comes straight back; anything cursor-led or async answers later
+       *  through the outbox. */
+      run: function (d) {
+        d = d || {};
+        d.canopy = "agent";
+        inlineReply = { id: d.id, msg: null };
+        var done;
+        try {
+          onHostMessage(d);
+        } finally {
+          done = inlineReply.msg;
+          inlineReply = null;
+        }
+        return done ? { done: true, ok: done.ok, data: done.data } : { done: false };
+      },
+      drain: function () {
+        var out = outbox;
+        outbox = [];
+        return out;
+      },
+      /** Where the page thinks it is — the URL bar's source of truth for
+       *  in-page (pushState) navigations the host's page-load hook can't see. */
+      here: function () {
+        return { url: location.href, title: document.title };
+      },
+    };
+  } else {
+    addEventListener("message", function (e) {
+      onHostMessage(e.data);
+    });
+  }
 
   announce("ready");
 })();

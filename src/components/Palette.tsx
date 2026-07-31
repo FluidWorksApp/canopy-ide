@@ -4,6 +4,8 @@
 // read files.
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
+import { fuzzy } from "../fuzzy";
+import { useEscapeLayer } from "../useEscape";
 
 export type PaletteMode = "files" | "search";
 
@@ -24,26 +26,9 @@ interface Row {
 
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1);
 
-/** Subsequence match with a light score: earlier and tighter runs rank higher.
- *  Enough for quick-open; deliberately not a full fuzzy-finder. */
-function fuzzy(needle: string, hay: string): number | null {
-  if (!needle) return 0;
-  const n = needle.toLowerCase();
-  const h = hay.toLowerCase();
-  let score = 0;
-  let hi = 0;
-  let last = -1;
-  for (const ch of n) {
-    const found = h.indexOf(ch, hi);
-    if (found === -1) return null;
-    score += found === last + 1 ? 0 : found - hi + 1;
-    last = found;
-    hi = found + 1;
-  }
-  return score;
-}
-
 export function Palette({ mode, components, onOpen, onClose }: PaletteProps) {
+  // Escape is the palette's own, all the way down to the panel behind it.
+  useEscapeLayer();
   const [query, setQuery] = useState("");
   // null = every component (the default)
   const [scope, setScope] = useState<string | null>(null);

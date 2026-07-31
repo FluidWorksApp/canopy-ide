@@ -86,7 +86,7 @@ select {
 /* ---- PIN gate ---- */
 .gate {
   position: relative;
-  min-height: 100%;
+  min-height: var(--vh, 100dvh);
   display: grid;
   place-items: center;
   padding: 24px;
@@ -188,7 +188,9 @@ select {
 /* ---- app shell ---- */
 .app {
   position: relative;
-  padding: 0 16px 100px;
+  padding: 0 16px calc(104px + env(safe-area-inset-bottom));
+  padding-left: max(16px, env(safe-area-inset-left));
+  padding-right: max(16px, env(safe-area-inset-right));
   max-width: 720px;
   margin: 0 auto;
 }
@@ -198,7 +200,7 @@ select {
   position: sticky;
   top: 0;
   z-index: 5;
-  padding: 15px 0 13px;
+  padding: max(15px, env(safe-area-inset-top)) 0 13px;
   background: var(--bg);
   border-bottom: 1px solid var(--border);
 }
@@ -289,7 +291,7 @@ select {
   display: flex;
   align-items: center;
   gap: 11px;
-  padding: 14px 0 13px;
+  padding: max(14px, env(safe-area-inset-top)) 0 13px;
   background: var(--bg);
   border-bottom: 1px solid var(--border);
 }
@@ -345,6 +347,10 @@ select {
 }
 .list {
   display: grid;
+  /* minmax(0, …), not the default auto track: an auto track grows to its
+   * widest item, so one long branch name pushed the list — and the page —
+   * wider than the phone. The cards fit the column and truncate instead. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
 }
 .chips.indent {
@@ -369,17 +375,26 @@ select {
 }
 
 /* ---- detail / terminal ---- */
+/* Pinned to the *visible* viewport (--vh / --vv-top from useViewportFit), not
+ * the layout one: when the keyboard opens, the terminal gives up the height and
+ * the composer stays right above the keys instead of sliding under them. */
 .detail {
-  position: relative;
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: var(--vv-top, 0px);
+  height: var(--vh, 100dvh);
   display: flex;
   flex-direction: column;
-  height: 100dvh;
   max-width: 720px;
   margin: 0 auto;
   padding: 0 12px;
+  padding-left: max(12px, env(safe-area-inset-left));
+  padding-right: max(12px, env(safe-area-inset-right));
 }
 .detail-bar {
   gap: 10px;
+  flex: none;
 }
 .detail-title {
   display: flex;
@@ -405,6 +420,12 @@ select {
   align-items: center;
   gap: 4px;
 }
+.detail-sub .ell {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 .danger {
   display: inline-flex;
   align-items: center;
@@ -428,14 +449,22 @@ select {
   border-radius: 12px;
   /* A wide desktop grid renders at a legible font (AgentTerminal.tsx) rather
    * than shrinking to fit, so it may be wider than the phone — let it pan
-   * horizontally instead of clipping. xterm owns its own vertical scroll. */
-  overflow-x: auto;
-  overflow-y: hidden;
+   * horizontally instead of clipping. Vertically it scrolls too: with the
+   * keyboard up this pane is short, and clipping it hid the prompt with no way
+   * to reach it. Panning never touches the PTY's grid — the terminal keeps
+   * rendering at the size the desktop gave it. */
+  overflow: auto;
+  /* Reserve the scrollbar gutter: on a desktop browser an appearing scrollbar
+   * would shrink clientWidth, which AgentTerminal's ResizeObserver reads to pick
+   * the font size — a feedback loop. Overlay scrollbars (mobile) are unaffected. */
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
   padding: 10px;
 }
 .keys {
   display: flex;
+  flex: none;
   gap: 7px;
   overflow-x: auto;
   padding: 9px 0;
@@ -460,11 +489,13 @@ select {
 }
 .composer {
   display: flex;
+  flex: none;
   gap: 9px;
   padding: 6px 0 max(11px, env(safe-area-inset-bottom));
 }
 .composer input {
   flex: 1;
+  min-width: 0;
   background: var(--bg-raised);
   border: 1px solid var(--border);
   border-radius: 11px;
@@ -555,7 +586,10 @@ select {
 }
 .sheet-backdrop {
   position: fixed;
-  inset: 0;
+  left: 0;
+  right: 0;
+  top: var(--vv-top, 0px);
+  height: var(--vh, 100dvh);
   z-index: 30;
   background: rgba(0, 0, 0, 0.5);
   display: flex;
@@ -569,6 +603,11 @@ select {
   border-top: 1px solid var(--border);
   border-radius: 18px 18px 0 0;
   padding: 8px 18px max(22px, env(safe-area-inset-bottom));
+  /* On a short screen (or a landscape phone) the CLI grid used to push Launch
+   * off the bottom with no way to reach it. */
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .sheet-grip {
   width: 40px;
@@ -650,4 +689,84 @@ select {
 }
 .sheet-actions .primary {
   flex: 1;
+}
+
+/* ---- tablets and up ------------------------------------------------------
+ * The portal is phone-first, but an iPad (768–1366 CSS px) opening it got one
+ * narrow column adrift in a sea of background. From 700px the shell widens,
+ * the card lists flow into however many columns fit, and the bottom sheet
+ * becomes a centred dialog — the same components, given the room. */
+@media (min-width: 700px) {
+  .app {
+    max-width: 1040px;
+    padding-left: max(28px, env(safe-area-inset-left));
+    padding-right: max(28px, env(safe-area-inset-right));
+  }
+  .list {
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  }
+  .gauges {
+    gap: 40px;
+  }
+  .segmented {
+    max-width: 420px;
+  }
+  /* Prose keeps a readable measure even though its shell got wider. */
+  .history,
+  .hfiles {
+    max-width: 78ch;
+  }
+
+  .detail {
+    max-width: 1180px;
+    padding-left: max(20px, env(safe-area-inset-left));
+    padding-right: max(20px, env(safe-area-inset-right));
+  }
+
+  /* Track the content column, not the window edge, so the button doesn't
+   * drift into the empty margin on a wide screen. */
+  .fab {
+    right: max(28px, calc(50% - 520px + 28px));
+  }
+  .notice {
+    max-width: 1040px;
+    margin: 0 auto;
+  }
+
+  /* A sheet stuck to the bottom edge of a 1024px-tall iPad is a long reach
+   * from anywhere; centre it as a dialog instead. */
+  .sheet-backdrop {
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  .sheet {
+    max-width: 520px;
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: 8px 22px 22px;
+  }
+  .sheet-grip {
+    display: none;
+  }
+}
+
+/* A pointer (iPad trackpad, a desktop browser) gets hover feedback; touch
+ * devices keep the :active-only behaviour so nothing sticks lit after a tap. */
+@media (hover: hover) {
+  button.card.on:hover {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  }
+  .iconbtn:hover,
+  .segmented button:hover {
+    color: var(--text);
+  }
+  .keys button:hover,
+  .cli:hover {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  }
+  .fab:hover,
+  .primary:hover:not(:disabled) {
+    filter: brightness(1.06);
+  }
 }

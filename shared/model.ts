@@ -34,6 +34,11 @@ export interface Digest {
   updated?: number
   resumable?: boolean
   resume_cwd?: string
+  /** The session's working-time clock, kept by canopy_hook.rs — see
+   *  agentDuration.ts. Absent on digests written before it existed. */
+  active_secs?: number
+  run_secs?: number
+  run_started?: number
 }
 
 /** Live process-tree stats for one PTY this run (pty:stats event). */
@@ -73,6 +78,10 @@ export interface AgentRow {
   branch?: string
   cwd?: string
   lastPrompt?: string
+  /** A live PTY with no agent behind it — a plain terminal you can drive. */
+  terminal?: boolean
+  /** What the PTY is running (its tab title), shown in place of a prompt. */
+  title?: string
   ptyId?: number
   live: boolean
   cpu?: number
@@ -81,6 +90,11 @@ export interface AgentRow {
   tokens?: number
   needsYou: boolean
   updated?: number
+  /** The session's working-time clock, straight off the digest. Left raw here
+   *  rather than resolved to a duration because resolving needs `now`, and
+   *  buildRows is a pure fusion of its inputs — the card calls workingTime(). */
+  activeSecs?: number
+  runSecs?: number
   // For offline agents: history + one-tap resume.
   prompts?: string[]
   files?: string[]
@@ -153,7 +167,7 @@ export function buildRows(
   const ordered = sessions.filter((d) => d.agent).sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0))
   const claimed = new Set<number>()
 
-  return ordered
+  const agents: AgentRow[] = ordered
     .map((d, i) => {
       const surfaceId = d.surface !== undefined ? Number(d.surface) : NaN
       // Live/attachable iff a currently-running PTY matches BOTH the digest's
@@ -184,13 +198,48 @@ export function buildRows(
         tokens: u ? u.input_tokens + u.output_tokens : undefined,
         needsYou: live && d.state === 'waiting',
         updated: d.updated,
+        activeSecs: d.active_secs,
+        runSecs: d.run_secs,
         prompts: d.prompts,
         files: d.files,
         resumeCwd: d.resume_cwd ?? d.cwd,
         sessionId: d.session_id,
       }
     })
-    .sort(sortRows)
+
+  // Plain terminals: every live PTY that no digest claimed. They carry no hook
+  // session — no prompts, no usage, nothing to resume — but they are running
+  // and attachable, which is the whole point of reaching them from a phone. A
+  // just-started agent CLI also lands here for the second before its first
+  // digest is written; naming it from the PTY title keeps it from flickering
+  // in as "shell" and out as "Claude".
+  const terminals: AgentRow[] = livePtys
+    .filter((p) => !claimed.has(p.id))
+    .map((p) => {
+      const stat = stats.get(p.id)
+      return {
+        key: `pty:${p.id}`,
+        agent: agentFromTitle(p.title) ?? 'shell',
+        state: 'idle',
+        cwd: p.cwd,
+        title: p.title?.trim() || undefined,
+        terminal: true,
+        ptyId: p.id,
+        live: true,
+        cpu: stat?.total_cpu,
+        memBytes: stat?.total_mem_bytes,
+        needsYou: false,
+      }
+    })
+
+  return [...agents, ...terminals].sort(sortRows)
+}
+
+/** The agent CLI a terminal is running, read off its title ("claude",
+ *  "codex — canopy"). Undefined for an ordinary shell. */
+export function agentFromTitle(title?: string): string | undefined {
+  const word = title?.trim().toLowerCase().split(/[\s—:/\\]+/)[0]
+  return word && word !== 'shell' && word in AGENT_META ? word : undefined
 }
 
 /** The single project an agent belongs to: the one with the deepest (most
@@ -242,7 +291,7 @@ export const AGENT_META: Record<string, AgentMeta> = {
   opencode: { glyph: '⬣', hue: '#a855f7', label: 'opencode' },
   amp: { glyph: '✺', hue: '#f97316', label: 'Amp' },
   omp: { glyph: '⬟', hue: '#ec4899', label: 'omp' },
-  shell: { glyph: '❯', hue: '#8894a8', label: 'shell' },
+  shell: { glyph: '❯', hue: '#8894a8', label: 'Terminal' },
 }
 export function agentMeta(agent: string): AgentMeta {
   return (

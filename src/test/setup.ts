@@ -12,6 +12,31 @@ import { afterEach, beforeEach } from "vitest";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { cleanup } from "@testing-library/react";
 
+// jsdom 29 no longer provides localStorage (node's own is behind
+// --localstorage-file), and the app stores its small persistent state there:
+// settings, remembered terminals, learned agent binaries. Without this every
+// test touching those throws on the first `localStorage.clear()`.
+if (typeof globalThis.localStorage === "undefined") {
+  const store = new Map<string, string>();
+  globalThis.localStorage = {
+    get length() {
+      return store.size;
+    },
+    key: (i: number) => [...store.keys()][i] ?? null,
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => void store.set(k, String(v)),
+    removeItem: (k: string) => void store.delete(k),
+    clear: () => store.clear(),
+  } as Storage;
+}
+
+// jsdom has no layout, so it ships no scrollIntoView. Any list that keeps its
+// selection in view (the palettes, the tab strip) would throw on the first
+// arrow key — a no-op stands in, since there is nothing to scroll here.
+if (!Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = () => {};
+}
+
 beforeEach(() => {
   mockIPC((cmd) => {
     throw new Error(

@@ -8,6 +8,8 @@
 // prefers-reduced-motion stops the motion and shows the resting state.
 import { useState } from "react";
 import { useEscape } from "../useEscape";
+import { Button } from "./ui";
+import { formatHotkey, getSettings } from "../settings";
 
 interface OnboardingProps {
   /** Called when the walkthrough is dismissed any way (Skip, Esc, Done). */
@@ -294,7 +296,11 @@ const SLIDES: Slide[] = [
         </div>
         <div className="ob-dictpill">
           <span className="ob-recdot" />
-          <span>Listening — <span className="ob-mono">⌘D</span> inserts, Esc cancels</span>
+          <span>
+            Listening —{" "}
+            <span className="ob-mono">{formatHotkey(getSettings().dictationHotkey)}</span> inserts,
+            Esc cancels
+          </span>
         </div>
         <div className="ob-chip muted" style={{ position: "absolute", right: 9, bottom: 8 }}>Parakeet v3 · on-device</div>
       </Scene>
@@ -398,25 +404,21 @@ export function Onboarding({ onClose, onCreateProject }: OnboardingProps) {
         </div>
 
         <div className="onboarding-actions">
-          <button
-            className="btn"
+          <Button
             disabled={step === 0}
-            onClick={() => setStep((s) => Math.max(0, s - 1))}
-          >
+            onClick={() => setStep((s) => Math.max(0, s - 1))}>
             Back
-          </button>
+          </Button>
           {last ? (
-            <button
-              className="btn btn-accent"
+            <Button variant="accent"
               onClick={onCreateProject}
-              title="Close the intro and create your first project"
-            >
+              title="Close the intro and create your first project">
               Create a project
-            </button>
+            </Button>
           ) : (
-            <button className="btn btn-accent" onClick={() => setStep((s) => s + 1)}>
+            <Button variant="accent" onClick={() => setStep((s) => s + 1)}>
               Next
-            </button>
+            </Button>
           )}
         </div>
       </div>

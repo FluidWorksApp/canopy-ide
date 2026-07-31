@@ -10,7 +10,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, State};
 
 #[derive(Default)]
@@ -31,6 +31,94 @@ pub struct FsChange {
     pub root: String,
     pub paths: Vec<String>,
     pub kind: String,
+}
+
+/// "Whatever git would say about this root just changed." One event, one
+/// debounce, one place — rather than a `setInterval` per panel.
+#[derive(Serialize, Clone)]
+pub struct GitChange {
+    pub root: String,
+}
+
+// ---------- git state: watched, not polled ----------
+
+/// How long the watcher waits for the writes to stop before saying so.
+///
+/// A single `git commit` is a burst: index.lock, index, COMMIT_EDITMSG, the
+/// ref, the reflog. Emitting per event would run `git status` five times
+/// against a repo that is still mid-write; the debounce turns the burst into
+/// one refresh, after it settles. (Zed uses 100ms for the same job in
+/// `git_store.rs`; 150 buys a little more room for a rebase's ref churn.)
+const GIT_SETTLE_MS: u64 = 150;
+
+/// Root -> how many bursts we have seen. The delayed emit compares the
+/// generation it captured against this; a later event supersedes it, so a long
+/// operation emits once at the end instead of once per file it touched.
+fn git_pulse() -> &'static Mutex<HashMap<String, u64>> {
+    static PULSE: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    PULSE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Does this path mean git's own state moved?
+///
+/// A commit, a stage, a branch switch or a fetch lands as writes inside `.git`
+/// — which is exactly what the file-change feed filters out, so this is the
+/// only place they can be noticed. Three kinds of churn are skipped: object
+/// writes (an agent's blob is not a state change any panel can see), reflogs
+/// (they follow the ref that already fired), and `.lock` files — git writes
+/// `index.lock` before `index`, and reacting to the lock means asking a repo
+/// that is mid-write, and racing the very write we are watching.
+pub(crate) fn touches_git_state(path: &str) -> bool {
+    let Some((_, rest)) = path.rsplit_once("/.git/") else {
+        return false;
+    };
+    // A linked worktree's HEAD and index live at
+    // `<main>/.git/worktrees/<name>/HEAD`; strip that middle so the same match
+    // covers worktrees, which is most of Canopy's usage.
+    let rest = rest
+        .strip_prefix("worktrees/")
+        .and_then(|r| r.split_once('/'))
+        .map(|(_, r)| r)
+        .unwrap_or(rest);
+    if rest.ends_with(".lock") || rest.starts_with("objects/") || rest.starts_with("logs/") {
+        return false;
+    }
+    rest.starts_with("refs/")
+        || rest.starts_with("rebase-merge/")
+        || rest.starts_with("rebase-apply/")
+        || matches!(
+            rest,
+            "HEAD"
+                | "index"
+                | "packed-refs"
+                | "FETCH_HEAD"
+                | "ORIG_HEAD"
+                | "MERGE_HEAD"
+                | "REBASE_HEAD"
+                | "CHERRY_PICK_HEAD"
+                | "REVERT_HEAD"
+                | "BISECT_LOG"
+        )
+}
+
+/// Note that this root's git state moved, and say so once the writes stop.
+fn pulse_git<R: tauri::Runtime>(app: &AppHandle<R>, root: &str) {
+    let generation = {
+        let mut pulse = git_pulse().lock().unwrap();
+        let counter = pulse.entry(root.to_string()).or_insert(0);
+        *counter = counter.wrapping_add(1);
+        *counter
+    };
+    let app = app.clone();
+    let root = root.to_string();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(GIT_SETTLE_MS)).await;
+        // Something newer is already waiting its turn — let that one speak.
+        if git_pulse().lock().unwrap().get(&root) != Some(&generation) {
+            return;
+        }
+        let _ = app.emit("git:change", GitChange { root });
+    });
 }
 
 pub(crate) fn check_scope(
@@ -103,13 +191,24 @@ pub async fn workspace_add(
                 notify::EventKind::Remove(_) => "remove",
                 _ => "other",
             };
-            let paths: Vec<String> = event
+            let touched: Vec<String> = event
                 .paths
                 .iter()
                 .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            let paths: Vec<String> = touched
+                .iter()
                 // node_modules / .git churn would flood the UI
                 .filter(|p| !p.contains("/node_modules/") && !p.contains("/.git/"))
+                .cloned()
                 .collect();
+            // The panels that used to poll git want both halves: a write to a
+            // tracked file changes what `status` says, and a write inside .git
+            // is a commit, a stage or a branch switch — the half that never
+            // reaches fs:change at all.
+            if !paths.is_empty() || touched.iter().any(|p| touches_git_state(p)) {
+                pulse_git(&app, &emit_root);
+            }
             if !paths.is_empty() {
                 let _ = app.emit(
                     "fs:change",
@@ -126,6 +225,18 @@ pub async fn workspace_add(
     watcher
         .watch(&canonical, RecursiveMode::Recursive)
         .map_err(|e| e.to_string())?;
+    // A linked worktree keeps no state of its own: its `.git` is a file, and
+    // HEAD, the index and every ref live in the main checkout's `.git`, outside
+    // this root. Without a second watch there, a branch switch or a commit made
+    // in a worktree — which is how Canopy is normally used — would be invisible
+    // to the watcher, and the panels would be back to polling for it.
+    if let Some(git_dir) = crate::git::common_dir(&canonical) {
+        if !git_dir.starts_with(&canonical) {
+            // Best-effort: a repo we can't watch just means git state settles a
+            // beat later, when a worktree file next changes.
+            let _ = watcher.watch(&git_dir, RecursiveMode::Recursive);
+        }
+    }
     state.watchers.lock().unwrap().insert(canonical, watcher);
     Ok(root_str)
 }
@@ -158,6 +269,12 @@ pub fn workspace_list(state: State<'_, WorkspaceManager>) -> Vec<String> {
         .collect()
 }
 
+/// The registered roots as paths, for the callers that need to re-check a path
+/// against them away from `State` (cleanup.rs validates on a worker thread).
+pub(crate) fn roots_of(state: &State<'_, WorkspaceManager>) -> Vec<PathBuf> {
+    state.roots.lock().unwrap().clone()
+}
+
 #[tauri::command]
 pub async fn fs_read_dir(
     state: State<'_, WorkspaceManager>,
@@ -185,6 +302,13 @@ pub async fn fs_read_dir(
     Ok(entries)
 }
 
+/// Nothing the WebView can do with a file this size is worth the copy: the
+/// bytes are serialized across IPC and then held in the renderer's heap. The
+/// frontend applies far tighter, per-viewer limits before it ever asks (see
+/// fileOpen.ts); this is the backstop that keeps *any* caller — the LSP file
+/// provider, an agent tool — from moving a DVD image into the WebView.
+const MAX_READ_BYTES: u64 = 512 * 1024 * 1024;
+
 /// Returns raw file bytes (no base64) via tauri::ipc::Response.
 #[tauri::command]
 pub async fn fs_read_file(
@@ -192,6 +316,14 @@ pub async fn fs_read_file(
     path: String,
 ) -> Result<tauri::ipc::Response, String> {
     let file = check_scope(&state, Path::new(&path))?;
+    // Checked before the read, not after: the point is to never allocate it.
+    let len = std::fs::metadata(&file).map_err(|e| e.to_string())?.len();
+    if len > MAX_READ_BYTES {
+        return Err(format!(
+            "file is too large to load ({:.1} GB)",
+            len as f64 / (1024.0 * 1024.0 * 1024.0)
+        ));
+    }
     let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
     Ok(tauri::ipc::Response::new(bytes))
 }
@@ -318,6 +450,11 @@ pub async fn git_head_content(
 }
 
 fn store_path() -> Result<std::path::PathBuf, String> {
+    // A selftest run gets a disposable workspace: it must not open the user's
+    // projects to test itself, nor leave its scratch one behind. See selftest.rs.
+    if let Some(dir) = crate::selftest::store_dir() {
+        return Ok(dir.join("projects.json"));
+    }
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .map_err(|_| "no home dir".to_string())?;
@@ -429,8 +566,76 @@ const SKIP_DIRS: &[&str] = &[
     ".idea",
 ];
 
-fn walk(dir: &Path, out: &mut Vec<PathBuf>, limit: usize, depth: usize) {
-    if out.len() >= limit || depth > 12 {
+/// Canopy's own directory inside a project — screenshots a micro-task was
+/// briefed with, the briefs themselves. Projects gitignore it, and they are
+/// right to: it is generated. But it is generated *by the user's own actions in
+/// this app*, so it is the one ignored tree that has to stay findable, and it
+/// is walked separately below for exactly that reason.
+const CANOPY_DIR: &str = ".canopy";
+
+/// Deepest directory worth descending into. Not a correctness bound — the
+/// ignore rules do that work — but a floor under pathological trees.
+const MAX_DEPTH: usize = 12;
+
+/// Files under `dir`, honouring .gitignore.
+///
+/// Ignored means ignored: a build output, a vendored dependency, a downloaded
+/// model, another checkout parked under .claude/worktrees. Quick-open and
+/// find-in-files used to walk all of it, filtered only by a hardcoded list of
+/// directory names, which caught node_modules and target and nothing a project
+/// ignored for its own reasons. The list stays as the fallback for a tree with
+/// no ignore file at all.
+///
+/// The cost, stated plainly: a gitignored file is now unfindable here even when
+/// it is the one you want — `.env` being the case that comes up. That is the
+/// same trade every editor's quick-open makes, and the escape hatch is the same
+/// one: open it by path.
+fn walk(dir: &Path, out: &mut Vec<PathBuf>, limit: usize) {
+    if out.len() >= limit {
+        return;
+    }
+    let mut builder = ignore::WalkBuilder::new(dir);
+    builder
+        // Dotfiles are files. Skipping every name starting with '.' meant
+        // .env, .gitignore, .prettierrc and every CI config were invisible to
+        // quick-open AND to find-in-files — searchable content the editor
+        // could open perfectly well once you got to it another way.
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        // A component can be a subdirectory of the repo that ignores it, so the
+        // ignore files above the walk root count too.
+        .parents(true)
+        // ...and a directory with a .gitignore but no .git yet — a fresh
+        // project, a template — means it just as much as a repo does.
+        .require_git(false)
+        .follow_links(false)
+        .max_depth(Some(MAX_DEPTH))
+        .filter_entry(|e| {
+            if !e.file_type().is_some_and(|t| t.is_dir()) {
+                return true;
+            }
+            let name = e.file_name().to_string_lossy().to_string();
+            // .canopy is dropped here and walked whole afterwards, so that it
+            // arrives exactly once whether or not the project ignores it.
+            name != CANOPY_DIR && !SKIP_DIRS.contains(&name.as_str())
+        });
+    for entry in builder.build().flatten() {
+        if out.len() >= limit {
+            return;
+        }
+        if entry.file_type().is_some_and(|t| t.is_file()) {
+            out.push(entry.into_path());
+        }
+    }
+    walk_plain(&dir.join(CANOPY_DIR), out, limit, 0);
+}
+
+/// Everything under `dir`, ignore files disregarded. Only Canopy's own
+/// directory is walked this way.
+fn walk_plain(dir: &Path, out: &mut Vec<PathBuf>, limit: usize, depth: usize) {
+    if out.len() >= limit || depth > MAX_DEPTH {
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -440,21 +645,10 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>, limit: usize, depth: usize) {
         if out.len() >= limit {
             return;
         }
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
         let path = entry.path();
         if path.is_dir() {
-            // Directories are filtered by name (SKIP_DIRS), never by a leading
-            // dot: .github and .claude hold real work.
-            if SKIP_DIRS.contains(&name.as_ref()) {
-                continue;
-            }
-            walk(&path, out, limit, depth + 1);
+            walk_plain(&path, out, limit, depth + 1);
         } else {
-            // Dotfiles are files. Skipping every name starting with '.' meant
-            // .env, .gitignore, .prettierrc and every CI config were invisible
-            // to quick-open AND to find-in-files — searchable content the
-            // editor could open perfectly well once you got to it another way.
             out.push(path);
         }
     }
@@ -472,7 +666,7 @@ pub async fn fs_list_files(
     let mut out: Vec<PathBuf> = Vec::new();
     for root in roots {
         let dir = check_scope(&state, Path::new(&root))?;
-        walk(&dir, &mut out, limit, 0);
+        walk(&dir, &mut out, limit);
     }
     Ok(out
         .iter()
@@ -504,7 +698,7 @@ pub async fn fs_search(
     let mut files: Vec<PathBuf> = Vec::new();
     for root in roots {
         let dir = check_scope(&state, Path::new(&root))?;
-        walk(&dir, &mut files, 20_000, 0);
+        walk(&dir, &mut files, 20_000);
     }
 
     let mut hits = Vec::new();
@@ -689,4 +883,155 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(path: &Path, text: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    /// The other half of replacing the polls: a burst has to arrive as one
+    /// event. A commit writes five files inside `.git` in a few milliseconds,
+    /// and one refresh per write would be worse than the 5s poll it replaced —
+    /// several `git status` runs against a repo that is still mid-commit.
+    #[test]
+    fn a_burst_of_writes_is_one_event_once_it_settles() {
+        use tauri::Listener;
+        let app = tauri::test::mock_app();
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = seen.clone();
+        app.handle().listen("git:change", move |_| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        let root = "/w/repo";
+        for _ in 0..5 {
+            pulse_git(app.handle(), root);
+        }
+        // Long enough for every one of the five to have fired had they not
+        // superseded each other.
+        std::thread::sleep(std::time::Duration::from_millis(GIT_SETTLE_MS * 5));
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // And the next burst is still heard: the generation supersedes, it
+        // doesn't latch.
+        pulse_git(app.handle(), root);
+        std::thread::sleep(std::time::Duration::from_millis(GIT_SETTLE_MS * 5));
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// What the panels stopped polling for. Everything a commit, a stage, a
+    /// switch or a fetch writes has to be in the first list, or the git panel
+    /// goes stale until someone touches a file; everything git writes *in
+    /// passing* has to be in the second, or a single `git gc` re-runs status a
+    /// thousand times.
+    #[test]
+    fn git_state_is_noticed_and_gits_own_churn_is_not() {
+        for p in [
+            "/w/repo/.git/HEAD",
+            "/w/repo/.git/index",
+            "/w/repo/.git/refs/heads/main",
+            "/w/repo/.git/packed-refs",
+            "/w/repo/.git/MERGE_HEAD",
+            "/w/repo/.git/FETCH_HEAD",
+            "/w/repo/.git/rebase-merge/done",
+            // A linked worktree's own HEAD, in the main checkout's .git.
+            "/w/repo/.git/worktrees/feature/HEAD",
+            "/w/repo/.git/worktrees/feature/index",
+        ] {
+            assert!(touches_git_state(p), "should have noticed {p}");
+        }
+
+        for p in [
+            // The lock is written *before* the file it guards: reacting to it
+            // means asking a repo that is still mid-write.
+            "/w/repo/.git/index.lock",
+            "/w/repo/.git/refs/heads/main.lock",
+            "/w/repo/.git/objects/ab/cdef0123",
+            "/w/repo/.git/objects/pack/pack-1.idx",
+            "/w/repo/.git/logs/HEAD",
+            "/w/repo/.git/worktrees/feature/index.lock",
+            // Ordinary files are the *other* signal (fs:change), not this one.
+            "/w/repo/src/main.rs",
+            "/w/repo/.gitignore",
+        ] {
+            assert!(!touches_git_state(p), "should have ignored {p}");
+        }
+    }
+
+    /// The corpus behind quick-open, find-in-files and SpotSearch's file and
+    /// content sources. What it holds is what those three can find.
+    #[test]
+    fn the_corpus_is_what_git_tracks_plus_canopys_own_directory() {
+        let root = std::env::temp_dir().join(format!("canopy-walk-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        write(
+            &root.join(".gitignore"),
+            "dist/\nsecret.txt\n.canopy/\nnode_modules/\n",
+        );
+        write(&root.join("src/main.rs"), "fn main() {}");
+        write(&root.join(".env"), "KEY=1");
+        write(&root.join("dist/app.js"), "built");
+        write(&root.join("secret.txt"), "shhh");
+        write(&root.join("node_modules/pkg/index.js"), "dep");
+        write(&root.join(".git/config"), "[core]");
+        // Canopy's own: a screenshot a micro-task was briefed with. Ignored by
+        // the project, and findable anyway — the user made it from in here.
+        write(&root.join(".canopy/spot/brief-1700.md"), "the brief");
+
+        let mut out = Vec::new();
+        walk(&root, &mut out, 1000);
+        let names: Vec<String> = out
+            .iter()
+            .map(|p| {
+                p.strip_prefix(&root)
+                    .unwrap_or(p)
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        let has = |s: &str| names.iter().any(|n| n == s);
+
+        assert!(has("src/main.rs"));
+        // Dotfiles are files: a tracked .env, .gitignore, CI config stay
+        // findable. Only *ignored* content goes.
+        assert!(has(".env"));
+        assert!(has(".gitignore"));
+        assert!(has(".canopy/spot/brief-1700.md"));
+
+        assert!(!has("dist/app.js"), "gitignored build output");
+        assert!(!has("secret.txt"), "gitignored file");
+        assert!(!has("node_modules/pkg/index.js"), "gitignored dependency");
+        assert!(!has(".git/config"), "git's own directory");
+        // And exactly once, whether or not .canopy is ignored.
+        assert_eq!(
+            names.iter().filter(|n| n.starts_with(".canopy/")).count(),
+            1
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_tree_with_no_ignore_file_still_stops_at_the_generated_directories() {
+        let root = std::env::temp_dir().join(format!("canopy-walk-plain-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        write(&root.join("index.js"), "app");
+        write(&root.join("node_modules/pkg/index.js"), "dep");
+        write(&root.join("target/debug/thing"), "built");
+
+        let mut out = Vec::new();
+        walk(&root, &mut out, 1000);
+        let names: Vec<String> = out
+            .iter()
+            .map(|p| p.strip_prefix(&root).unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["index.js".to_string()]);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 }

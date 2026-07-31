@@ -1,12 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "enables the default permissions",
-  "windows": [
+  "description": "The default permissions, scoped by WEBVIEW rather than by window. A window-scoped capability covers every webview inside that window, and the main window now hosts the embedded browser's child webviews — which load arbitrary web pages. Tauri already refuses custom commands from a remote origin; there is no reason to hand a random site the core window API on top of that.",
+  "webviews": [
     "main"
   ],
   "permissions": [
     "core:default",
+    "core:window:allow-start-dragging",
+    "core:webview:allow-set-webview-zoom",
     "dialog:default",
     "updater:default",
     "process:allow-restart",

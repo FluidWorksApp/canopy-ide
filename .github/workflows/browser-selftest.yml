@@ -1,0 +1,107 @@
+# The embedded browser, tested by launching the app.
+#
+# Separate from ci.yml because it is the one job that needs a screen. The
+# preview is a native child webview composited above the window, so every rule
+# about it — hide before an overlay paints, hold a frame to stand in for the
+# page, sit exactly where the placeholder is — is invisible to vitest (no
+# compositor) and to cargo test (no window). WebDriver is not an option either:
+# tauri-driver has no macOS support. So the app runs the scenario itself and
+# exits 0 or 1 (see src-tauri/src/selftest.rs).
+#
+# macOS runners have a WindowServer and run GUI apps, which is why this is a
+# macos job and why it cannot be folded into the ubuntu matrix.
+name: browser selftest
+
+on:
+  pull_request:
+    paths:
+      - "src/browser*"
+      - "src/overlaySurfaces.ts"
+      - "src/selftest/**"
+      - "src/components/PreviewView.tsx"
+      - "src/index.css"
+      - "src-tauri/src/browser.rs"
+      - "src-tauri/src/preview*"
+      - "src-tauri/src/snapshot.rs"
+      - "src-tauri/src/selftest*"
+      - ".github/workflows/browser-selftest.yml"
+  # Always runnable by hand, for a change this filter didn't predict.
+  workflow_dispatch:
+
+concurrency:
+  group: browser-selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    name: Browser selftest (macOS)
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The dependency graph is the expensive part by far; the crate itself
+      # rebuilds in well under a minute on a warm cache.
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          key: selftest
+
+      - run: npm ci
+
+      # tauri-build checks that externalBin paths exist before it emits
+      # metadata, even though nothing here runs the sidecar. Same placeholder
+      # ci.yml uses.
+      - name: Stub hook sidecar
+        run: |
+          mkdir -p src-tauri/binaries
+          triple=$(rustc -vV | grep '^host:' | awk '{print $2}')
+          touch "src-tauri/binaries/canopy-hook-${triple}"
+
+      # The binary loads whatever is in dist/, so dist has to be current.
+      - name: Build the frontend
+        run: |
+          npm run build:portal
+          npm run build
+
+      # Debug, unsigned, unbundled: nothing here needs a signed .app, and a
+      # release build would put this job well past its budget.
+      #
+      # --features custom-protocol is what makes the binary serve the frontend
+      # it was built with. Without it a debug build points at the dev server on
+      # localhost:5173 and would test whatever happened to be listening there —
+      # or nothing at all.
+      #
+      # Dictation is compiled out (--no-default-features): it pulls the whole
+      # ONNX stack, and no part of the browser layer is behind it.
+      - name: Build the app (debug, no signing)
+        working-directory: src-tauri
+        run: cargo build --no-default-features --features custom-protocol
+
+      # The app opens a window, drives the scenario against a page it serves
+      # itself, writes the report and exits. It never touches ~/.canopy: a
+      # selftest run gets a disposable workspace (see selftest.rs).
+      - name: Run the browser selftest
+        run: |
+          CANOPY_SELFTEST_REPORT="$RUNNER_TEMP/selftest.json" \
+            ./src-tauri/target/debug/canopy --selftest=browser
+
+      # Uploaded on failure as well — the report is the whole point, and a red
+      # run is when somebody actually wants to read it.
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-selftest-report
+          path: ${{ runner.temp }}/selftest.json
+          if-no-files-found: warn

@@ -30,6 +30,40 @@ export function PlayIcon({ size = 14, className }: IconProps) {
   );
 }
 
+/** Snowflake: a project that is hibernating. An SVG rather than the ❄ glyph
+ *  because the glyph renders as a colour emoji on macOS at tab size, which
+ *  can't take the row's colour and reads as a sticker on a 34px bar. */
+export function FrostIcon({ size = 12, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.7}>
+      <path d="M12 2v20M4.2 6.5l15.6 9M19.8 6.5l-15.6 9" />
+      <path d="M9.6 4.4 12 6.8l2.4-2.4M14.4 19.6 12 17.2l-2.4 2.4" />
+      <path d="M4.6 10.2 5.5 7l3.2.6M19.4 13.8l-.9 3.2-3.2-.6" />
+      <path d="M15.3 7.6 18.5 7l.9 3.2M8.7 16.4 5.5 17l-.9-3.2" />
+    </svg>
+  );
+}
+
+// Disclosure caret — a hairline stroked "›". Rotate it 90° (via a class on the
+// wrapping element) to point down when the section/folder is open. Shared by
+// the file tree rows and the component-section headers so they read the same.
+export function ChevronIcon({ size = 10, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={2.2}>
+      <path d="M9 5l7 7-7 7" />
+    </svg>
+  );
+}
+
+// Close cross for tab/pill dismiss slots — replaces the bare ✕ glyph.
+export function CloseIcon({ size = 12, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M6.5 6.5l11 11M17.5 6.5l-11 11" />
+    </svg>
+  );
+}
+
 export function StopIcon({ size = 14, className }: IconProps) {
   return (
     <svg {...svgProps(size, className)} fill="currentColor" stroke="none">
@@ -67,6 +101,33 @@ export function FailIcon({ size = 14, className }: IconProps) {
   return (
     <svg {...svgProps(size, className)}>
       <path d="M6 6l12 12M18 6 6 18" />
+    </svg>
+  );
+}
+
+/** Server rack + play: the rail's execution tab. Two stacked rack units with a
+ *  status LED each say "the things this project runs"; the play mark says they
+ *  are yours to start. A wrench used to stand in for the rack and kept reading
+ *  as settings.
+ *
+ *  The rack is kept left of x=15 so the play mark has the bottom-right corner
+ *  to itself. Not the top right: the rail's running-count badge lands there and
+ *  would eat the play mark exactly when servers are up. The play is --ok green
+ *  rather than currentColor — it is the one part of the glyph that means "run",
+ *  and it stays legible while the rest of the icon dims with the rail. */
+export function ServersIcon({ size = 18, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.8}>
+      <rect x="2.3" y="3.6" width="11.9" height="6.5" rx="1.7" />
+      <rect x="2.3" y="13.1" width="11.9" height="6.5" rx="1.7" />
+      <path d="M10.2 6.85h1.4M10.2 16.35h1.4" />
+      <circle cx="5.5" cy="6.85" r="0.95" fill="currentColor" stroke="none" />
+      <circle cx="5.5" cy="16.35" r="0.95" fill="currentColor" stroke="none" />
+      <path
+        d="M15.9 13.5v7.6a.6.6 0 0 0 .92.5l6.1-3.8a.6.6 0 0 0 0-1l-6.1-3.8a.6.6 0 0 0-.92.5Z"
+        fill="var(--ok, #9ece6a)"
+        stroke="none"
+      />
     </svg>
   );
 }
@@ -259,6 +320,59 @@ export function IssueIcon({ size = 18, className }: IconProps) {
   );
 }
 
+/** Research: a magnifier over a page. The page is what distinguishes it from a
+ *  plain search glass — this is a *written* finding, not a query — and at rail
+ *  size the two strokes of the document edge are enough to read as one. */
+export function ResearchIcon({ size = 18, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M13.5 20.5H6.5a1.5 1.5 0 0 1-1.5-1.5V5a1.5 1.5 0 0 1 1.5-1.5h7L19 9v3" />
+      <path d="M13 3.6V9.5h5.6" />
+      <circle cx="15.2" cy="16.2" r="3.1" />
+      <path d="M17.5 18.5L20 21" />
+    </svg>
+  );
+}
+
+/** Scratchpad: a lightbulb.
+ *
+ *  It has to survive sitting one row above Research (a page with a magnifier)
+ *  and Tasks (a checklist) at 14px, where interior detail turns to mush and
+ *  only the silhouette reads. Nothing else in the set is a round top on a short
+ *  stem, so this one stays legible when the strokes blur together — and "idea"
+ *  is the right word for what the list mostly holds. */
+export function NoteIcon({ size = 18, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M9 17.5a5.8 5.8 0 1 1 6 0v1.2a1.3 1.3 0 0 1-1.3 1.3h-3.4A1.3 1.3 0 0 1 9 18.7z" />
+      <path d="M9.6 17.4h4.8" />
+    </svg>
+  );
+}
+
+/** Archive: a lidded box. The lid is what separates it from a plain rectangle
+ *  at 14px, and from the document mark it sits beside. */
+export function ArchiveIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <rect x="3" y="4" width="18" height="4.5" rx="1" />
+      <path d="M4.8 8.5v10a1.5 1.5 0 0 0 1.5 1.5h11.4a1.5 1.5 0 0 0 1.5-1.5v-10" />
+      <path d="M10 12.5h4" />
+    </svg>
+  );
+}
+
+/** Blocked: a hand, palm out. Not a pause bar — pause reads as "I stopped
+ *  this", and blocked means the run is waiting on the person looking at it. */
+export function BlockedIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M6.2 6.2l11.6 11.6" />
+    </svg>
+  );
+}
+
 /** Agents: a bot head. Distinct from every CLI brand mark on purpose. */
 export function AgentsIcon({ size = 18, className }: IconProps) {
   return (
@@ -273,6 +387,34 @@ export function AgentsIcon({ size = 18, className }: IconProps) {
 }
 
 
+/** Tasks: a checklist — a ticked row over plain rows. Distinct from Issues
+ *  (a circle) and Agents (a bot) at rail size. */
+export function TasksIcon({ size = 18, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M4 6.5l1.8 1.8L9 5" />
+      <path d="M12 6.5h8" />
+      <path d="M4 12.5h16" />
+      <path d="M4 18.5h16" />
+    </svg>
+  );
+}
+
+/** MCP tools: a plug going into a socket. The rail already has a wrench
+ *  (Servers) and a bot (Agents), so the shape has to say "something external
+ *  connected to the agents" rather than "a tool" in the generic sense — which
+ *  at 22px is the difference between this and a second wrench. */
+export function PlugIcon({ size = 18, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M9 3v5" />
+      <path d="M15 3v5" />
+      <path d="M6 8h12v3a6 6 0 0 1-6 6 6 6 0 0 1-6-6z" />
+      <path d="M12 17v4" />
+    </svg>
+  );
+}
+
 /** Statistics: a bar chart. Reads as "totals & breakdowns" at rail size. */
 export function StatsIcon({ size = 18, className }: IconProps) {
   return (
@@ -281,6 +423,29 @@ export function StatsIcon({ size = 18, className }: IconProps) {
       <rect x="5.5" y="12" width="3.4" height="6" rx="0.8" />
       <rect x="10.3" y="8" width="3.4" height="10" rx="0.8" />
       <rect x="15.1" y="4.5" width="3.4" height="13.5" rx="0.8" />
+    </svg>
+  );
+}
+
+/** Reclaiming disk: a broom. Distinct from the trash can on purpose — this one
+ *  sweeps up what a build can make again, it doesn't delete your work. */
+export function BroomIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M19.5 4.5 12 12" />
+      <path d="M13.2 9.4 6 16.6l3.2 3.2 7.2-7.2z" />
+      <path d="M6.6 17.2 4 19.8M9 19.6l-2.6 2.6" strokeWidth={1.4} />
+    </svg>
+  );
+}
+
+/** Storage: a stack of platters. */
+export function DiskIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <ellipse cx="12" cy="6.5" rx="7.5" ry="3" />
+      <path d="M4.5 6.5v11c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-11" />
+      <path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3" />
     </svg>
   );
 }
@@ -308,6 +473,16 @@ export function MoonIcon({ size = 14, className }: IconProps) {
 }
 
 /** A commit: a node on a line, the way every git UI draws one. */
+/** Support the project. Stroked like the rest so it sits in the status bar as
+ *  one of the row rather than as decoration; filled on hover via CSS. */
+export function HeartIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M12 20.5s-7.5-4.7-7.5-9.8a4.2 4.2 0 0 1 7.5-2.6 4.2 4.2 0 0 1 7.5 2.6c0 5.1-7.5 9.8-7.5 9.8z" />
+    </svg>
+  );
+}
+
 export function CommitIcon({ size = 14, className }: IconProps) {
   return (
     <svg {...svgProps(size, className)}>
@@ -434,6 +609,144 @@ export function TeamIcon({ size = 14, className }: IconProps) {
   );
 }
 
+// ---------- instruction kinds ----------
+// What a file *is*, where the brand mark says who reads it. One silhouette per
+// kind, distinct at 14px, because these sit in a list where every row is a
+// filename and the shape is the only thing that separates a skill from a rule.
+
+/** A plain instructions file — CLAUDE.md, AGENTS.md. */
+export function DocumentIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.7}>
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z" />
+      <path d="M14 3v5h5" />
+      <path d="M8.5 13h7M8.5 16.5h4.5" />
+    </svg>
+  );
+}
+
+/** A rule: a constraint that holds, so a shield with a check. */
+export function RuleIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.7}>
+      <path d="M12 3 5 6v5.4c0 4.2 2.9 7.9 7 9.6 4.1-1.7 7-5.4 7-9.6V6Z" />
+      <path d="m9 12 2.2 2.2L15 10.4" />
+    </svg>
+  );
+}
+
+/** A skill: the sparkle every tool uses for "loaded when the work calls for it". */
+export function SkillIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.6}>
+      <path d="M10 3.5 11.6 8 16 9.6 11.6 11.2 10 15.7 8.4 11.2 4 9.6 8.4 8Z" />
+      <path d="M17.5 14.2 18.3 16.4 20.5 17.2 18.3 18 17.5 20.2 16.7 18 14.5 17.2 16.7 16.4Z" />
+    </svg>
+  );
+}
+
+/** A subagent: something delegated to, so a small machine. */
+export function SubagentIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.7}>
+      <rect x="4" y="8" width="16" height="11" rx="3" />
+      <path d="M12 4.8V8" />
+      <circle cx="12" cy="3.6" r="1.1" fill="currentColor" stroke="none" />
+      <circle cx="9.2" cy="13.2" r="1" fill="currentColor" stroke="none" />
+      <circle cx="14.8" cy="13.2" r="1" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+/** A slash command: the slash you type to reach it. */
+export function SlashCommandIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.7}>
+      <rect x="3.5" y="4.5" width="17" height="15" rx="3" />
+      <path d="M14 8.5 10 15.5" />
+    </svg>
+  );
+}
+
+/** An output style: a painter's palette. */
+export function StyleIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.7}>
+      <path d="M12 3.2a8.8 8.8 0 1 0 0 17.6 2.3 2.3 0 0 0 1.8-3.8 2.3 2.3 0 0 1 1.8-3.8h1.9a3.3 3.3 0 0 0 3.3-3.3c0-3.7-3.9-6.7-8.8-6.7Z" />
+      <circle cx="7.6" cy="12.4" r="1" fill="currentColor" stroke="none" />
+      <circle cx="9.4" cy="8.4" r="1" fill="currentColor" stroke="none" />
+      <circle cx="14" cy="7.6" r="1" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+const KIND_ICONS: Record<string, (p: IconProps) => ReactElement> = {
+  instructions: DocumentIcon,
+  rule: RuleIcon,
+  skill: SkillIcon,
+  subagent: SubagentIcon,
+  command: SlashCommandIcon,
+  style: StyleIcon,
+};
+
+/** An instruction file's kind mark, falling back to a plain document for a kind
+ *  the backend grows before this map does. */
+export function InstructionKindIcon({ kind, size = 14, className }: IconProps & { kind: string }) {
+  const Kind = KIND_ICONS[kind] ?? DocumentIcon;
+  return <Kind size={size} className={className} />;
+}
+
+/** Two arrows passing each other: work traded between sessions on this machine.
+ *  Deliberately not LiveShareIcon's broadcast arcs — those mean sharing with
+ *  other people, and shared context never leaves this project. */
+export function ExchangeIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.8}>
+      <path d="M4 9h13" />
+      <path d="m14 6 3 3-3 3" />
+      <path d="M20 15H7" />
+      <path d="m10 12-3 3 3 3" />
+    </svg>
+  );
+}
+
+/** Stopwatch: how long an agent has actually been working. A stopwatch rather
+ *  than a wall clock on purpose — the number beside it is elapsed work, not a
+ *  time of day. */
+export function StopwatchIcon({ size = 12, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={2.1}>
+      <circle cx="12" cy="13.5" r="7.5" />
+      <path d="M12 10v3.5l2.2 1.6" />
+      <path d="M9.5 2.5h5" />
+      <path d="M18.6 6.4 20 5" />
+    </svg>
+  );
+}
+
+/** Magnifier: a hit found by searching inside something, as opposed to the
+ *  thing itself. SpotSearch leans on the pair — DocumentIcon is the file,
+ *  this is a line inside it. */
+export function SearchIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.9}>
+      <circle cx="10.5" cy="10.5" r="6.5" />
+      <path d="m15.4 15.4 4.6 4.6" />
+    </svg>
+  );
+}
+
+/** Angle brackets around a stem: a code symbol from the language server. */
+export function SymbolIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.9}>
+      <path d="m7.5 8-3.5 4 3.5 4" />
+      <path d="m16.5 8 3.5 4-3.5 4" />
+      <path d="M13.5 6.5 10.5 17.5" />
+    </svg>
+  );
+}
+
 // Broadcast/live: a solid core with signal arcs, for sharing a file or project
 // live with the team.
 export function LiveShareIcon({ size = 14, className }: IconProps) {
@@ -444,16 +757,6 @@ export function LiveShareIcon({ size = 14, className }: IconProps) {
       <path d="M16.6 16.6a6.5 6.5 0 0 0 0-9.2" />
       <path d="M4.6 4.6a10.4 10.4 0 0 0 0 14.8" />
       <path d="M19.4 19.4a10.4 10.4 0 0 0 0-14.8" />
-    </svg>
-  );
-}
-
-// A chevron, for anything that folds: rotated by CSS at the call site rather
-// than mirrored here, so open and closed are one element that turns.
-export function ChevronIcon({ size = 14, className }: IconProps) {
-  return (
-    <svg {...svgProps(size, className)}>
-      <path d="M6 9l6 6 6-6" />
     </svg>
   );
 }

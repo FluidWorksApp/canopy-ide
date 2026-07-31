@@ -63,11 +63,18 @@ function detect(): string[] {
   );
 }
 
+// Shipped with the app (see the @fontsource imports in main.tsx) rather than
+// found on the machine, so it is always offered and never measured: a bundled
+// webfont isn't downloaded until something on the page asks for it, and on a
+// skin whose chrome doesn't, the probe below would report it missing.
+const BUNDLED = ["JetBrains Mono Variable"];
+
 let cached: string[] | null = null;
 
-/** Installed monospace fonts, measured once per run. */
+/** Monospace fonts this machine can render: the ones we ship, then the ones
+ *  measured as installed. */
 export function availableMonoFonts(): string[] {
-  cached ??= detect();
+  cached ??= [...BUNDLED, ...detect().filter((f) => !BUNDLED.includes(f))];
   return cached;
 }
 

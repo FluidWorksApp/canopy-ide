@@ -5,7 +5,7 @@
 //! It reuses the *local* command surface, not the team relay's wire protocol:
 //! - snapshots come straight from `store_load` / `session_digests` /
 //!   `agent_usage` (all machine-global, no project scoping);
-//! - live status deltas are the app's own `pty:stats` / `agent:event` /
+//! - live status deltas are the app's own `pty:stats` / `agent:events` /
 //!   `pty:exit` events, tapped with `listen_any` and forwarded verbatim;
 //! - agent output streams from the `PtyManager` scrollback + broadcast fan-out
 //!   (see pty.rs), and input / approve / deny / kill go back through
@@ -41,6 +41,8 @@ use tauri::{AppHandle, EventId, Listener, Manager};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::pty::{PtyEvent, PtyManager};
+use crate::remote::verbs::{Answer, Begin, VerbRouter};
+use crate::remote::Scope;
 
 /// The built portal SPA, baked into the binary so it ships offline. Populated by
 /// the portal's own Vite build (`npm run build:portal`); a placeholder index is
@@ -52,7 +54,7 @@ const DEFAULT_PORT: u16 = 6680;
 /// 6-digit PIN over a throttled endpoint is not brute-forceable in practice.
 const AUTH_TARPIT: Duration = Duration::from_secs(2);
 /// App events we mirror to every connected portal client.
-const FORWARDED_EVENTS: [&str; 3] = ["pty:stats", "agent:event", "pty:exit"];
+const FORWARDED_EVENTS: [&str; 3] = ["pty:stats", "agent:events", "pty:exit"];
 
 /// Live bearer tokens for the *current* enable session. The set is created fresh
 /// in `remote_enable` and dropped on disable/rotate, so a token is valid for
@@ -101,7 +103,17 @@ struct Portal {
     events: broadcast::Sender<String>,
     /// Shared handle to the desktop-pushed theme tokens (see RemoteManager).
     theme: Arc<Mutex<Option<Value>>>,
+    /// Replay and single-flight bookkeeping for desktop-executed verbs. Shared
+    /// across sockets on purpose: a phone that reconnects mid-action gets the
+    /// first answer back rather than starting a second run.
+    verbs: Arc<VerbRouter>,
 }
+
+/// What a PIN-minted token may do. Drive, not admin: it matches the surface
+/// this server already had (attach, write, spawn, kill) and grants nothing
+/// beyond it. A finer split — a view-only share link — is an auth change, not a
+/// dispatch change, and belongs with the token model rather than here.
+const TOKEN_SCOPE: Scope = Scope::Drive;
 
 /// What the desktop UI shows for the Remote-access panel.
 #[derive(Serialize, Clone)]
@@ -194,6 +206,7 @@ pub async fn remote_enable(
         tokens,
         events: events_tx,
         theme: mgr.theme.clone(),
+        verbs: Arc::new(VerbRouter::default()),
     };
     let router = Router::new()
         .route("/remote/auth", post(auth_handler))
@@ -540,6 +553,14 @@ fn handle_client_msg(
                 let _ = out.send(msg.to_string()).await;
             });
         }
+        Some("act") => act(&v, p, out),
+        Some("caps") => {
+            let out = out.clone();
+            let msg = json!({ "t": "caps", "caps": crate::remote::capabilities() }).to_string();
+            tokio::spawn(async move {
+                let _ = out.send(msg).await;
+            });
+        }
         Some("refresh") => {
             let out = out.clone();
             let app = p.app.clone();
@@ -552,18 +573,100 @@ fn handle_client_msg(
     }
 }
 
+/// The one action entry point, and the reason a new remote module needs no new
+/// message: the client sends `act` and does not know whether the work is a Rust
+/// command or something only the desktop can do.
+///
+/// Every action goes through the router first, commands included. A phone
+/// retries on reconnect, and `pty_spawn_detached` replayed is a second agent
+/// nobody asked for.
+fn act(v: &Value, p: &Portal, out: &mpsc::Sender<String>) {
+    let (Some(id), Some(action)) = (
+        v.get("id").and_then(|x| x.as_str()),
+        v.get("action").and_then(|x| x.as_str()),
+    ) else {
+        return;
+    };
+    let (id, action) = (id.to_string(), action.to_string());
+    let args = v.get("args").cloned().unwrap_or(Value::Null);
+    let app = p.app.clone();
+    let router = p.verbs.clone();
+    let out = out.clone();
+
+    tokio::spawn(async move {
+        // A dotted name is a desktop-executed verb. None are registered yet —
+        // every module shipped so far is backed by state Rust already holds —
+        // so today this can only be an unknown action, and the hop to the
+        // desktop lands with the first verb that needs it.
+        let guard = if action.contains('.') {
+            match crate::remote::verbs::lookup(&action) {
+                Some(verb) => verb.guard,
+                None => {
+                    let _ = out
+                        .send(ack_err(&id, format!("no such action: {action}")))
+                        .await;
+                    return;
+                }
+            }
+        } else {
+            crate::remote::guard_of(&action)
+        };
+
+        match router.begin(&action, guard, &id) {
+            Begin::Replay(Answer::Ok) => {
+                let _ = out.send(ack_ok(&id)).await;
+                return;
+            }
+            Begin::Replay(Answer::Err(why)) | Begin::Refused(why) => {
+                let _ = out.send(ack_err(&id, why)).await;
+                return;
+            }
+            Begin::Run => {}
+        }
+
+        let result = crate::remote::dispatch(&app, &action, &args, TOKEN_SCOPE).await;
+        let msg = match &result {
+            Ok(value) => {
+                router.finish(&id, Answer::Ok);
+                json!({ "t": "act-ack", "id": id, "ok": true, "result": value }).to_string()
+            }
+            Err(why) => {
+                router.finish(&id, Answer::Err(why.clone()));
+                ack_err(&id, why.clone())
+            }
+        };
+        let _ = out.send(msg).await;
+    });
+}
+
+fn ack_ok(id: &str) -> String {
+    json!({ "t": "act-ack", "id": id, "ok": true }).to_string()
+}
+
+fn ack_err(id: &str, error: String) -> String {
+    json!({ "t": "act-ack", "id": id, "ok": false, "error": error }).to_string()
+}
+
 /// Stream one PTY's output to the socket: a catch-up snapshot, then the live
 /// tail. On broadcast lag we re-attach for a fresh snapshot rather than let the
 /// terminal render torn output.
 async fn stream_pty(app: AppHandle, id: u32, out: mpsc::Sender<String>) {
     loop {
-        let attached = app.state::<PtyManager>().attach(id);
-        let Some((cols, rows, snapshot, mut rx)) = attached else {
+        // Through the stream registry rather than PtyManager directly, so `pty`
+        // is one provider among the kinds a future module can add rather than a
+        // special case the socket knows about.
+        let Ok(attached) = crate::remote::streams::attach(&app, "pty", &id.to_string()) else {
             let _ = out
                 .send(json!({ "t": "pty-gone", "pty": id }).to_string())
                 .await;
             return;
         };
+        let crate::remote::streams::Attached {
+            cols,
+            rows,
+            snapshot,
+            mut rx,
+        } = attached;
         // Tell the client to clear, size to the PTY's grid, then re-seed.
         if out
             .send(json!({ "t": "pty-reset", "pty": id }).to_string())
@@ -622,7 +725,11 @@ async fn snapshot_msg(app: &AppHandle, theme: Option<Value>) -> String {
         .await
         .unwrap_or_else(|_| "null".into());
     let projects: Value = serde_json::from_str(&projects).unwrap_or(Value::Null);
-    let sessions = crate::agents::session_digests().await.unwrap_or_default();
+    // No roots: the portal snapshot describes every project this instance has
+    // open, and filtering is the client's job.
+    let sessions = crate::agents::session_digests(None)
+        .await
+        .unwrap_or_default();
     let usage = crate::agents::agent_usage().await.unwrap_or_default();
     let ptys = app.state::<PtyManager>().summaries();
     json!({

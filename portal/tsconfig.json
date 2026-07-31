@@ -13,12 +13,9 @@
     "strict": true,
     "noUnusedLocals": false,
     "noFallthroughCasesInSwitch": true,
-    "baseUrl": ".",
     "paths": {
-      "*": ["../node_modules/*"],
       "@shared/*": ["../shared/*"]
-    },
-    "typeRoots": ["../node_modules/@types"]
+    }
   },
   "include": ["src", "vite-env.d.ts", "../shared"]
 }

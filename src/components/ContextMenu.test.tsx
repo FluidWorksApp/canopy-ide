@@ -57,17 +57,103 @@ describe("ContextMenu", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
-  it("expands a submenu on hover and runs a nested item", async () => {
+  it("opens a submenu on click and runs a nested item", async () => {
     const nested = vi.fn();
     const onClose = at([
       { label: "New agent", submenu: [{ label: "Claude", onClick: nested }] },
     ]);
-    // The submenu is hover-driven (onMouseEnter on the anchor); hovering the
-    // anchor reveals the nested list.
-    await userEvent.hover(screen.getByRole("button", { name: /New agent/ }));
+    await userEvent.click(screen.getByRole("button", { name: /New agent/ }));
     const claude = await screen.findByRole("button", { name: "Claude" });
     await userEvent.click(claude);
     expect(nested).toHaveBeenCalledOnce();
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("does not open a submenu on hover alone", async () => {
+    // Hover-to-open is what made a submenu impossible to shut: clicking the row
+    // closed it and the pointer, still sitting on that row, opened it again.
+    at([{ label: "New agent", submenu: [{ label: "Claude" }] }]);
+    await userEvent.hover(screen.getByRole("button", { name: /New agent/ }));
+    expect(screen.queryByRole("button", { name: "Claude" })).toBeNull();
+  });
+
+  it("closes an open submenu when its row is clicked again", async () => {
+    at([{ label: "New agent", submenu: [{ label: "Claude" }] }]);
+    const row = screen.getByRole("button", { name: /New agent/ });
+    await userEvent.click(row);
+    expect(await screen.findByRole("button", { name: "Claude" })).toBeTruthy();
+    await userEvent.click(row);
+    expect(screen.queryByRole("button", { name: "Claude" })).toBeNull();
+  });
+
+  it("switches between submenus on hover once one is already open", async () => {
+    // The half of hover that was worth keeping: sliding down a list of nested
+    // rows should follow the pointer, it just must not be what opens the first.
+    at([
+      { label: "New agent", submenu: [{ label: "Claude" }] },
+      { label: "Request review", submenu: [{ label: "VijayMatt" }] },
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: /New agent/ }));
+    await userEvent.hover(screen.getByRole("button", { name: /Request review/ }));
+    expect(await screen.findByRole("button", { name: "VijayMatt" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Claude" })).toBeNull();
+  });
+
+  // The preview's "Send screenshot" menu composes two menus that each worked
+  // on their own: an Agent row holding agentMenuItems, which itself ends in a
+  // "New agent in <component> ▸" row listing the CLIs. That put a submenu two
+  // levels down, where rows used to be drawn as plain buttons that ignored
+  // their own `submenu` — so the row highlighted on hover, closed the menu on
+  // click, and started nothing.
+  it("opens a submenu nested inside a submenu", async () => {
+    const started = vi.fn();
+    const onClose = at([
+      {
+        label: "Agent",
+        submenu: [
+          { label: "canopy · claude", onClick: () => {} },
+          { label: "New agent in canopy-website", submenu: [{ label: "Claude", onClick: started }] },
+        ],
+      },
+      { label: "One-off task", onClick: () => {} },
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: /Agent/ }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /New agent in canopy-website/ }),
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "Claude" }));
+    expect(started).toHaveBeenCalledOnce();
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the parent panel open while a nested one is open", async () => {
+    // Each level owns its own open-panel state, so opening a child must not
+    // collapse the branch the user walked down to reach it.
+    at([
+      {
+        label: "Agent",
+        submenu: [{ label: "New agent", submenu: [{ label: "Claude" }] }],
+      },
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: /Agent/ }));
+    await userEvent.click(await screen.findByRole("button", { name: /New agent/ }));
+    expect(await screen.findByRole("button", { name: "Claude" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /New agent/ })).toBeTruthy();
+  });
+
+  it("runs a leaf three levels down and closes the whole menu", async () => {
+    const deep = vi.fn();
+    const onClose = at([
+      {
+        label: "A",
+        submenu: [{ label: "B", submenu: [{ label: "C", submenu: [{ label: "D", onClick: deep }] }] }],
+      },
+    ]);
+    for (const label of ["A", "B", "C"]) {
+      await userEvent.click(await screen.findByRole("button", { name: new RegExp(label) }));
+    }
+    await userEvent.click(await screen.findByRole("button", { name: "D" }));
+    expect(deep).toHaveBeenCalledOnce();
     expect(onClose).toHaveBeenCalledOnce();
   });
 });

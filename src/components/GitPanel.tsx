@@ -2,30 +2,29 @@
 // commit, sync with the remote, and pull requests. Everything runs through the
 // system `git`/`gh` in the Rust core — the same tools the user's terminal uses,
 // so hooks, credential helpers and SSH config all behave identically.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { askDialog } from "../branchSwitch";
 import * as ipc from "../ipc";
+import { getSettings } from "../settings";
 import type { Notify } from "../types";
-import { useEscape } from "../useEscape";
+import { useBranchSwitch } from "../useBranchSwitch";
+import {
+  ensureLeases,
+  releaseLease,
+  workspaceRows,
+  type WorkspaceRow,
+} from "../workspaces";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
-import { CheckIcon, FailIcon, RestartIcon } from "./icons";
+import { RestartIcon } from "./icons";
 import { LooseEnds } from "./LooseEnds";
+import { Button } from "./ui";
 
-/** Open a URL in the user's real browser (PR pages, GitHub links). */
-const openExternal = (url: string) =>
-  void import("@tauri-apps/plugin-opener").then(({ openUrl }) => openUrl(url));
-
-/** The integration branches a right-click must never offer to delete. The Rust
- *  core is the real guard (it also knows this repo's actual base); this is only
- *  so the menu doesn't dangle a delete that would always fail. */
-const PROTECTED = new Set([
-  "main",
-  "master",
-  "develop",
-  "development",
-  "trunk",
-  "staging",
-  "production",
-]);
+/** `askDialog` speaks the switch dialog's vocabulary of actions, which has no
+ *  generic "yes" — it never needed one. These two stand in for it. The ids are
+ *  internal (only labels are ever seen) and every question below offers each at
+ *  most once, so the answer still comes back unambiguous. */
+const YES = "cleanup" as const;
+const YES_ANYWAY = "force-cleanup" as const;
 
 interface GitPanelProps {
   /** False while another side tab is in front. The panel stays mounted (so
@@ -34,9 +33,7 @@ interface GitPanelProps {
   visible: boolean;
   components: { label: string; path: string }[];
   /** Open a file's diff in the main area. */
-  onOpenDiff: (repo: string, file: ipc.FileChange) => void;
   /** Open a pull request in the main area. */
-  onOpenPr: (repo: string, pr: ipc.PrInfo) => void;
   /** Open a branch's work in the main area. */
   onOpenBranch: (repo: string, branch: ipc.BranchWork) => void;
   /** Open a commit in the main area. */
@@ -48,61 +45,60 @@ interface GitPanelProps {
   onOpenTerminal: (cwd: string, label: string) => void;
   /** Worktree currently backing the project's files, if any. */
   activeWorktree: string | null;
-  /** Make a worktree the project's working environment. */
-  onUseWorktree: (repo: string, path: string, branch: string) => void;
+  /** Working directory of every live run, anywhere in the project — how a row
+   *  knows a server is up in its folder without asking git anything. */
+  serverCwds: string[];
+  /** Working directory of every live agent terminal, same idea. */
+  agentCwds: string[];
+  /** Open a URL in the preview tab — the port chip's click. */
+  onOpenPreview: (url: string) => void;
   onNotice: Notify;
+  /** One-shot agent jobs off the context menus: push a branch and open its PR;
+   *  review a PR and post the findings. The agent reports and its terminal
+   *  closes itself. */
+  /** The "Tasks ▸" submenu for a right-clicked branch or PR, built by the
+   *  owner (it knows the task registry). Omitted where tasks don't apply. */
+  branchTaskMenu?: (
+    repo: string,
+    branch: string,
+    worktree: string | null,
+    merged: boolean,
+  ) => MenuItem;
 }
 
-type Section = "changes" | "branches" | "worktrees" | "loose" | "history" | "prs";
+type Section = "branches" | "loose" | "history";
 
-/** Compact relative age for an ISO 8601 timestamp (e.g. gh's createdAt). */
-const ago = (iso?: string) => {
-  if (!iso) return "";
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return "";
-  const d = Math.max(0, Math.floor((Date.now() - t) / 1000));
-  if (d < 60) return "just now";
-  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
-  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
-  return `${Math.floor(d / 86400)}d ago`;
-};
 
-/** Full local date & time for an ISO 8601 timestamp — the exact moment raised. */
-const absTime = (iso?: string) => {
-  if (!iso) return "";
-  const t = Date.parse(iso);
-  return Number.isNaN(t) ? "" : new Date(t).toLocaleString();
-};
 
 export function GitPanel({
   visible,
   components,
-  onOpenDiff,
-  onOpenPr,
   onOpenCommit,
   onOpenBranch,
   onOpenTerminal,
   activeWorktree,
-  onUseWorktree,
+  serverCwds,
+  agentCwds,
+  onOpenPreview,
   onNotice,
+  branchTaskMenu,
 }: GitPanelProps) {
   const [repos, setRepos] = useState<ipc.RepoInfo[]>([]);
   const [repo, setRepo] = useState<string | null>(null);
   const [status, setStatus] = useState<ipc.RepoStatus | null>(null);
   const [branches, setBranches] = useState<ipc.BranchInfo[]>([]);
   const [log, setLog] = useState<ipc.CommitInfo[]>([]);
-  const [prs, setPrs] = useState<ipc.PrInfo[]>([]);
   const [worktrees, setWorktrees] = useState<ipc.WorktreeInfo[]>([]);
-  const [wtBranch, setWtBranch] = useState("");
-  const [hasGh, setHasGh] = useState(false);
-  const [section, setSection] = useState<Section>("changes");
-  const [message, setMessage] = useState("");
+  /** Workspace folder -> the port its runs are given. Allocated when the list
+   *  loads, never during a render: taking a lease writes to settings. */
+  const [ports, setPorts] = useState<Record<string, number>>({});
+  const [section, setSection] = useState<Section>("branches");
   const [busy, setBusy] = useState<string | null>(null);
   const [branchFilter, setBranchFilter] = useState("");
-  const [confirm, setConfirm] = useState<
-    { text: string; run: () => void; okLabel?: string } | null
-  >(null);
-  useEscape(() => setConfirm(null), confirm != null);
+  // Every switch, and every question that isn't one, goes through the one
+  // funnel mounted above this panel — so a refusal is answerable from here
+  // whether or not this panel is the surface still on screen.
+  const { switchTo, openThere, cleanupWorkspaces, ask, version } = useBranchSwitch();
   const ctx = useContextMenu();
 
   const key = components.map((c) => c.path).join("\n");
@@ -117,7 +113,6 @@ export function GitPanel({
         setRepo((cur) => (cur && r.some((x) => x.path === cur) ? cur : (r[0]?.path ?? null)));
       })
       .catch(() => setRepos([]));
-    void ipc.ghAvailable().then(setHasGh);
   }, [key]);
 
   const refresh = useCallback(async () => {
@@ -131,59 +126,91 @@ export function GitPanel({
 
   // Keep status live against edits made by agents in the terminals — while the
   // panel is actually in front. Coming back re-runs this, so what you see is
-  // never the state from whenever you last looked.
+  // never the state from whenever you last looked. `version` is the funnel
+  // saying something moved: a switch answered in its dialog lands here without
+  // the funnel having to know this panel exists.
+  //
+  // Watched, not polled. This ran three git subprocesses every five seconds for
+  // as long as the panel was open, whether or not anything had happened; the
+  // fs:change subscription beside it couldn't replace them, because a commit or
+  // a branch switch writes only inside .git, which that event filters out.
+  // `git:change` is the signal that covers both, already debounced in Rust.
   useEffect(() => {
     if (!repo || !visible) return;
     void refresh();
-    const sub = ipc.onFsChange(() => void refresh());
-    const poll = setInterval(() => void refresh(), 5000);
+    const sub = ipc.onGitChange(() => void refresh());
     return () => {
-      clearInterval(poll);
       void sub.then((fn) => fn());
     };
-  }, [repo, refresh, visible]);
+  }, [repo, refresh, visible, version]);
 
-  const loadPrs = useCallback(async () => {
-    if (!repo || !hasGh) return;
-    setBusy("prs");
-    try {
-      setPrs(await ipc.ghPrList(repo));
-    } catch (err) {
-      onNotice(String(err), "error");
-    } finally {
-      setBusy(null);
-    }
-  }, [repo, hasGh, onNotice]);
-
-  useEffect(() => {
-    if (section === "prs") void loadPrs();
-  }, [section, loadPrs]);
+  /** Something that wasn't a switch wouldn't run — a fetch, a delete, a prune.
+   *  It still ends in the same dialog rather than a toast of raw stderr: git's
+   *  own words folded away, one thing to click. `what` completes "Couldn't …". */
+  const failed = useCallback(
+    async (what: string, err: unknown) => {
+      await ask(
+        askDialog({
+          title: `Couldn't ${what}`,
+          body: "Git wouldn't do that just now. The details below are its own.",
+          detail: String(err),
+          choices: [{ action: "cancel", label: "Close" }],
+        }),
+      );
+    },
+    [ask],
+  );
 
   // Worktrees are loaded on demand, never polled: listing them costs one
   // `git status` per worktree to get dirty counts, and a repo can easily have
   // 20+ agent worktrees — polling that every few seconds would spawn a storm
   // of git processes for a panel nobody is looking at.
-  const loadWorktrees = useCallback(async () => {
-    if (!repo) return;
-    setBusy("worktrees");
-    try {
-      setWorktrees(await ipc.gitWorktrees(repo));
-    } catch (err) {
-      onNotice(String(err), "error");
-    } finally {
-      setBusy(null);
-    }
-  }, [repo, onNotice]);
+  const loadWorktrees = useCallback(
+    async (quiet = false) => {
+      if (!repo) return;
+      if (!quiet) setBusy("workspaces");
+      try {
+        const list = await ipc.gitWorktrees(repo);
+        setWorktrees(list);
+        setPorts(ensureLeases(repo, list));
+      } catch (err) {
+        if (!quiet) void failed("list the workspaces", err);
+      } finally {
+        if (!quiet) setBusy(null);
+      }
+    },
+    [repo, failed],
+  );
 
+  // The one list is a join of branches and workspaces, so the workspaces are
+  // no longer a section you have to go to — they load whenever it is on screen.
   useEffect(() => {
-    if (section === "worktrees") void loadWorktrees();
-  }, [section, loadWorktrees]);
+    if (section === "branches") void loadWorktrees(true);
+  }, [section, loadWorktrees, version]);
+
+  /** The list itself: every branch, wherever it lives, with what is happening
+   *  in its folder. `workspaces.ts` owns the join and the ordering. */
+  const rows = useMemo(
+    () =>
+      repo
+        ? workspaceRows(branches, worktrees, {
+            repo,
+            activePath: activeWorktree,
+            serverCwds,
+            agentCwds,
+            ports,
+          })
+        : [],
+    [branches, worktrees, repo, activeWorktree, serverCwds, agentCwds, ports],
+  );
 
   /** Run a git action, surface its real output, and refresh. Used for the
-   *  heavier, less frequent operations (commit, sync, checkout) where the user
-   *  is waiting on the result anyway. */
+   *  heavier, less frequent operations (sync, delete, prune) where the user is
+   *  waiting on the result anyway. Switches don't come through here — they have
+   *  the funnel, which can ask about a refusal rather than only report it. */
   const act = async (label: string, fn: () => Promise<unknown>) => {
     setBusy(label);
+    let failure: unknown = null;
     try {
       const out = await fn();
       // git's own first line of output — a result, not a fault.
@@ -191,10 +218,211 @@ export function GitPanel({
         onNotice(out.trim().split("\n")[0], "success");
       await refresh();
     } catch (err) {
-      onNotice(String(err), "error");
+      failure = err;
+    }
+    // Let go of the spinner before the question: nothing is running while the
+    // user reads it.
+    setBusy(null);
+    if (failure) await failed(label, failure);
+  };
+
+  /** Removing a workspace, asked once for the two places that offer it. The
+   *  folder goes; nothing that was committed in it does. */
+  const askRemoveWorktree = async (w: ipc.WorktreeInfo) => {
+    if (!repo) return;
+    const dirty =
+      w.dirty > 0
+        ? ` It has ${w.dirty} uncommitted change${
+            w.dirty === 1 ? "" : "s"
+          } that exist nowhere else.`
+        : "";
+    const go = await ask(
+      askDialog({
+        title: "Remove this workspace?",
+        body: w.prunable
+          ? // Its folder is already gone; only the claim on the branch is left.
+            `${w.path} is already gone from disk — this drops what still claims it.`
+          : `The folder ${w.path} is deleted.${dirty}`,
+        // `force` counts rather than toggles, and a claimed workspace is the
+        // one case git insists on being told twice.
+        detail: `git worktree remove${w.locked ? " --force --force" : w.dirty > 0 ? " --force" : ""} ${w.path}${
+          w.locked ? `\nlocked: ${w.locked}` : ""
+        }`,
+        choices: [
+          {
+            action: YES,
+            label: "Remove it",
+            sub:
+              w.dirty > 0
+                ? "Those changes go with it. This cannot be undone."
+                : "Branches and commits stay; only the folder goes.",
+          },
+          { action: "cancel", label: "Keep it", recommended: true },
+        ],
+      }),
+    );
+    if (go !== YES) return;
+    const force: 0 | 1 | 2 = w.locked ? 2 : w.dirty > 0 ? 1 : 0;
+    await act("remove workspace", async () => {
+      const r = await ipc.gitWorktreeRemove(repo, w.path, force);
+      await ipc.workspaceRemove(w.path).catch(() => {});
+      // Hand its port back, so a repo worked on for a year doesn't drift its
+      // workspaces into numbers nobody recognises.
+      releaseLease(repo, w.path);
+      await loadWorktrees();
+      return r;
+    });
+  };
+
+  /** The heavier of the two branch deletes, offered from two places: chosen
+   *  outright, or as the way through when the safe one is refused. */
+  const forceDeleteDialog = (name: string, detail?: string) =>
+    askDialog({
+      title: `${name} has work of its own`,
+      body: "Deleting it drops commits that are on no other branch. Nothing here can bring them back.",
+      detail,
+      choices: [
+        {
+          action: YES_ANYWAY,
+          label: "Delete it anyway",
+          sub: "Those commits are lost. This cannot be undone.",
+        },
+        { action: "cancel", label: "Keep it", recommended: true },
+      ],
+    });
+
+  /** Deleting a branch. Git holding it back because the commits live nowhere
+   *  else is not an error to report — it's the next question, with the answer
+   *  the old copy only named. */
+  const askDeleteBranch = async (name: string) => {
+    if (!repo) return;
+    const go = await ask(
+      askDialog({
+        title: `Delete the branch ${name}?`,
+        body: "The name goes from this project. Commits it shares with another branch are untouched.",
+        detail: `git branch -d ${name}`,
+        choices: [
+          {
+            action: YES,
+            label: "Delete it",
+            sub: "If it holds work that's nowhere else, you'll be asked again before anything goes.",
+          },
+          { action: "cancel", label: "Keep it", recommended: true },
+        ],
+      }),
+    );
+    if (go !== YES) return;
+    setBusy("delete branch");
+    let refusal: unknown = null;
+    try {
+      const out = await ipc.gitBranchDelete(repo, name, false);
+      if (out.trim()) onNotice(out.trim().split("\n")[0], "success");
+    } catch (err) {
+      refusal = err;
+    }
+    setBusy(null);
+    await refresh();
+    if (!refusal) return;
+    if ((await ask(forceDeleteDialog(name, String(refusal)))) === YES_ANYWAY)
+      await act("force delete branch", () => ipc.gitBranchDelete(repo, name, true));
+  };
+
+  /** "Use" on a workspace whose folder is gone would point the project at
+   *  nothing. Ask through the flow instead — the branch that workspace still
+   *  claims is exactly what the cleanup question is about. */
+  const adoptWorkspace = (w: ipc.WorktreeInfo) => {
+    if (!repo) return;
+    if (w.prunable && w.branch) void switchTo(repo, { kind: "branch", branch: w.branch });
+    else void openThere(repo, w.path, w.branch ?? w.name);
+  };
+
+  /** One click on a row. Which git command that turns out to be is the panel's
+   *  problem, not yours: a branch with a folder of its own is opened there, one
+   *  without is switched to here, and one whose folder is gone goes through the
+   *  question that clears the record first. */
+  const openRow = async (r: WorkspaceRow) => {
+    if (!repo || r.active) return;
+    if (r.missing) {
+      await switchTo(repo, { kind: "branch", branch: r.branch });
+      await loadWorktrees(true);
+      return;
+    }
+    if (r.path && !r.main) {
+      await openThere(repo, r.path, r.branch);
+      return;
+    }
+    await switchTo(repo, { kind: "branch", branch: r.branch });
+  };
+
+  /**
+   * Start a feature: a branch, a folder of its own, and everything that folder
+   * needs to actually run.
+   *
+   * The setup is the part that used to be missing. `git worktree add` hands you
+   * tracked files and nothing else, so the first `npm run dev` in a new
+   * workspace died on a missing `node_modules` — which read as "worktrees are
+   * broken" rather than "nobody installed anything". Now the dependencies are
+   * cloned (copy-on-write, so it costs about a second) and the gitignored
+   * config is carried over, and when neither is possible the install runs in
+   * the RUNS rail where you can watch it.
+   */
+  const startFeature = async (name: string) => {
+    if (!repo) return;
+    const r = await switchTo(repo, { kind: "workspace", branch: name, create: true });
+    if (r.kind !== "settled") return;
+    setBranchFilter("");
+    await loadWorktrees(true);
+    if (!r.path || !getSettings().workspaceBootstrap) return;
+
+    setBusy("setting up");
+    let report: ipc.BootstrapReport | null = null;
+    try {
+      report = await ipc.gitWorktreeBootstrap(repo, r.path);
+    } catch (err) {
+      // A workspace that exists but isn't set up is still a workspace. Say what
+      // didn't happen and leave it standing rather than tearing it down.
+      onNotice(`${name} is ready, but setting it up failed: ${String(err)}`, "error");
     } finally {
       setBusy(null);
     }
+    if (!report) return;
+
+    if (report.install) {
+      // Deliberately a run tab, not a silent background command: an install is
+      // minutes long and fails in ways only its own output explains.
+      onOpenTerminal(r.path, name);
+      onNotice(
+        `${name} is ready. ${report.note ?? ""} Run \`${report.install}\` in it before starting a server.`.trim(),
+        "info",
+      );
+      return;
+    }
+    const parts: string[] = [];
+    if (report.cloned.length)
+      parts.push(
+        `${report.cloned.length} dependency folder${report.cloned.length === 1 ? "" : "s"} cloned`,
+      );
+    if (report.carried.length) parts.push(`${report.carried.join(", ")} carried over`);
+    onNotice(
+      parts.length ? `${name} is set up — ${parts.join(", ")}.` : `${name} is ready.`,
+      "success",
+    );
+  };
+
+  /** The row's tooltip: the git-level facts, where they teach rather than
+   *  block. The row itself says none of this. */
+  const workspaceTitle = (r: WorkspaceRow) => {
+    const lines = [r.branch];
+    if (r.missing) lines.push(`${r.path} — this folder is gone; the branch is stuck until it's cleared`);
+    else if (r.path && !r.main) lines.push(r.path);
+    else if (r.remoteOnly) lines.push("On GitHub. Click to check it out here.");
+    else if (r.path) lines.push("This project's own checkout");
+    else lines.push("No folder yet. Click to switch to it here.");
+    if (r.port != null)
+      lines.push(r.running > 0 ? `Serving on port ${r.port}` : `Port ${r.port} held for it`);
+    if (r.locked) lines.push("locked");
+    if (r.subject) lines.push(r.subject);
+    return lines.join("\n");
   };
 
   /** Optimistic file action: move the row to where it will land *now*, run the
@@ -203,83 +431,59 @@ export function GitPanel({
    *  reappears where it was, with the error surfaced. No busy spinner: the
    *  point is that the click feels instant. `to` is the bucket the file moves
    *  to, or null when it leaves the working tree entirely (discard/untracked). */
-  const optimisticFile = (
-    path: string,
-    to: "staged" | "unstaged" | null,
-    fn: () => Promise<unknown>,
-  ) => {
-    setStatus((prev) => {
-      if (!prev) return prev;
-      const source = [
-        ...prev.conflicted,
-        ...prev.staged,
-        ...prev.unstaged,
-        ...prev.untracked,
-      ].find((f) => f.path === path);
-      const without = (arr: ipc.FileChange[]) => arr.filter((f) => f.path !== path);
-      const next: ipc.RepoStatus = {
-        ...prev,
-        staged: without(prev.staged),
-        unstaged: without(prev.unstaged),
-        untracked: without(prev.untracked),
-        conflicted: without(prev.conflicted),
-      };
-      if (source && to === "staged") next.staged = [...next.staged, { ...source, staged: true }];
-      if (source && to === "unstaged")
-        next.unstaged = [...next.unstaged, { ...source, staged: false }];
-      return next;
-    });
-    void fn()
-      .then((out) => {
-        // git's own first line of output — a result, not a fault.
-      if (typeof out === "string" && out.trim())
-        onNotice(out.trim().split("\n")[0], "success");
-      })
-      .catch((err) => onNotice(String(err), "error"))
-      // Reconcile on success (confirm) and failure (revert) alike.
-      .finally(() => void refresh());
-  };
 
-  /** Close a PR (optionally deleting its branch) and drop it from the list. */
-  const closePr = async (pr: ipc.PrInfo, deleteBranch: boolean) => {
-    if (!repo) return;
-    setBusy("prs");
-    try {
-      const msg = await ipc.ghPrClose(repo, pr.number, deleteBranch);
-      onNotice(msg, "success");
-      setPrs((cur) => cur.filter((p) => p.number !== pr.number));
-      // Deleting the branch may have switched HEAD — refresh the branch view too.
-      if (deleteBranch) await refresh();
-    } catch (err) {
-      onNotice(String(err), "error");
-      await loadPrs();
-    } finally {
-      setBusy(null);
-    }
-  };
 
   // Right-click menus. Each is one plain-language label per real git/gh command,
   // with the command itself shown as a dimmed hint — the point is that a casual
   // coder can read what a row will run and learn the underlying operation.
 
   const branchMenu = (b: ipc.BranchInfo): MenuItem[] => {
+    if (!repo) return [];
     const items: MenuItem[] = [];
     if (!b.current) {
       items.push({
         label: b.remote_only ? "Check out from GitHub" : "Switch to this branch",
         hint: "git checkout",
-        onClick: () => repo && void act("checkout", () => ipc.gitCheckout(repo, b.name, false)),
+        onClick: () => void switchTo(repo, { kind: "branch", branch: b.name }),
+      });
+      items.push({
+        label: "Test a snapshot of it",
+        hint: "git checkout --detach",
+        onClick: () => void switchTo(repo, { kind: "ref", ref: b.name, label: b.name }),
       });
     }
+    if (branchTaskMenu) {
+      items.push(branchTaskMenu(repo, b.name, null, b.protected));
+    }
 
-    // The branch you're on and protected branches never offer a delete — say why
-    // rather than dangling a menu item that would always be refused.
+    // You're standing on it, so the only delete is one that moves you off
+    // first. The old copy named that remedy and then refused to perform it;
+    // this performs it — one branch away, then the same delete question as
+    // anywhere else.
     if (b.current) {
       items.push({ separator: true });
-      items.push({ label: "On this branch — switch away to delete", disabled: true });
+      const base = branches.find((x) => !x.current && x.protected && !x.remote_only);
+      if (base && !b.protected)
+        items.push({
+          label: `Go to ${base.name}, then delete this one`,
+          hint: "git checkout",
+          danger: true,
+          onClick: () =>
+            void (async () => {
+              const r = await switchTo(repo, { kind: "branch", branch: base.name });
+              // Only when we actually landed on the base *here*: "open it
+              // there" settles somewhere else, where this delete isn't ours
+              // to make.
+              if (r.kind === "settled" && r.path === repo && !r.detached)
+                await askDeleteBranch(b.name);
+            })(),
+        });
+      else items.push({ label: "You're on this branch", disabled: true });
       return items;
     }
-    if (PROTECTED.has(b.name)) {
+    // Protected branches never offer a delete — say why rather than dangling a
+    // menu item that would always be refused.
+    if (b.protected) {
       items.push({ separator: true });
       items.push({ label: "Protected branch — can't delete", disabled: true });
       return items;
@@ -288,34 +492,26 @@ export function GitPanel({
     items.push({ separator: true });
 
     if (!b.remote_only) {
-      // Safe delete: git refuses if the branch holds commits not merged into the
-      // base, so it can never silently drop work.
+      // Safe delete: git holds a branch back if it has commits that are on no
+      // other branch, so this one can never quietly drop work — and when it
+      // does hold back, the question comes round again with the heavier answer.
       items.push({
         label: "Delete branch",
         hint: "git branch -d",
         danger: true,
-        onClick: () =>
-          setConfirm({
-            text: `Delete local branch ${b.name}?\n\nGit refuses if it holds unmerged commits — use “Force delete” for those.`,
-            okLabel: "Delete",
-            run: () =>
-              repo && void act("delete branch", () => ipc.gitBranchDelete(repo, b.name, false)),
-          }),
+        onClick: () => void askDeleteBranch(b.name),
       });
-      // Force delete: drops the branch even with unmerged commits, so this one
-      // can lose work that lives nowhere else.
       items.push({
         label: "Force delete branch",
         hint: "git branch -D",
         danger: true,
         onClick: () =>
-          setConfirm({
-            text: `Force-delete local branch ${b.name}?\n\nCommits on it that aren't merged elsewhere will be lost. This cannot be undone.`,
-            okLabel: "Force delete",
-            run: () =>
-              repo &&
-              void act("force delete branch", () => ipc.gitBranchDelete(repo, b.name, true)),
-          }),
+          void (async () => {
+            if ((await ask(forceDeleteDialog(b.name))) === YES_ANYWAY)
+              await act("force delete branch", () =>
+                ipc.gitBranchDelete(repo, b.name, true),
+              );
+          })(),
       });
     }
 
@@ -325,97 +521,126 @@ export function GitPanel({
         hint: "git push origin --delete",
         danger: true,
         onClick: () =>
-          setConfirm({
-            text: `Delete branch ${b.name} on GitHub?\n\nIt's removed from the remote for everyone. Anyone who still has it locally can push it back.`,
-            okLabel: "Delete on GitHub",
-            run: () =>
-              repo &&
-              void act("delete remote branch", () => ipc.gitBranchDeleteRemote(repo, b.name)),
-          }),
+          void (async () => {
+            const go = await ask(
+              askDialog({
+                title: `Delete ${b.name} on GitHub?`,
+                body: "It goes from the remote for everyone. Anyone who still has it can push it back.",
+                detail: `git push origin --delete ${b.name}`,
+                choices: [
+                  {
+                    action: YES,
+                    label: "Delete it on GitHub",
+                    sub: b.remote_only
+                      ? "You don't have a copy here, so this is the last one."
+                      : "Your copy here stays exactly as it is.",
+                  },
+                  { action: "cancel", label: "Keep it", recommended: true },
+                ],
+              }),
+            );
+            if (go === YES)
+              await act("delete branch on GitHub", () =>
+                ipc.gitBranchDeleteRemote(repo, b.name),
+              );
+          })(),
       });
     }
     return items;
   };
 
-  const worktreeMenu = (w: ipc.WorktreeInfo): MenuItem[] => {
+  /**
+   * A row's right-click menu: what you can do with this feature, then what you
+   * can do with the branch under it.
+   *
+   * The two used to be separate menus on two separate lists, which meant "give
+   * this branch a workspace" and "remove this workspace" could never appear
+   * together even though they are the same decision seen from either end.
+   */
+  const rowMenu = (r: WorkspaceRow): MenuItem[] => {
+    if (!repo) return [];
     const items: MenuItem[] = [];
-    if (activeWorktree !== w.path && !w.prunable && !w.bare) {
+    const wt = worktrees.find((w) => w.path === r.path) ?? null;
+
+    if (r.missing && wt) {
       items.push({
-        label: "Use as project files",
-        onClick: () => repo && onUseWorktree(repo, w.path, w.branch ?? w.name),
+        label: "Clear the missing workspace",
+        hint: "git worktree prune",
+        onClick: () => void adoptWorkspace(wt),
+      });
+    } else if (r.path && !r.active) {
+      items.push({
+        label: r.main ? "Work in the main checkout" : "Work in this workspace",
+        onClick: () => void openRow(r),
       });
     }
-    items.push({
-      label: "Open terminal here",
-      onClick: () => onOpenTerminal(w.path, w.branch ?? w.name),
-    });
-    items.push({
-      label: "Reveal in Finder",
-      onClick: () => void ipc.fsReveal(w.path).catch(() => {}),
-    });
-    if (!w.is_main) {
+
+    // The one route that makes a workspace out of a branch that hasn't got one.
+    // Offered from the same menu as everything else it competes with.
+    if (!r.path && !r.remoteOnly) {
+      items.push({
+        label: "Give it a workspace of its own",
+        hint: "git worktree add",
+        onClick: () => void startFeature(r.branch),
+      });
+    }
+
+    if (r.path && !r.missing) {
+      items.push({
+        label: "Open terminal here",
+        onClick: () => onOpenTerminal(r.path!, r.branch),
+      });
+      if (r.port != null && r.running > 0) {
+        items.push({
+          label: `Open its preview (:${r.port})`,
+          onClick: () => onOpenPreview(`http://localhost:${r.port}`),
+        });
+      }
+      items.push({
+        label: "Reveal in Finder",
+        onClick: () => void ipc.fsReveal(r.path!).catch(() => {}),
+      });
+    }
+
+    // Everything about the branch itself — switch, snapshot, tasks, delete —
+    // is unchanged and still lives on the BranchInfo it was written against.
+    const b = branches.find((x) => x.name === r.branch);
+    if (b) {
+      items.push({ separator: true });
+      items.push(...branchMenu(b));
+    }
+
+    if (wt && !wt.is_main) {
       items.push({ separator: true });
       items.push({
-        label: "Remove worktree",
+        label: "Remove this workspace",
         hint: "git worktree remove",
         danger: true,
-        onClick: () =>
-          setConfirm({
-            text:
-              w.dirty > 0
-                ? `Remove worktree ${w.path}?\n\nIt has ${w.dirty} uncommitted change${
-                    w.dirty === 1 ? "" : "s"
-                  } that will be lost. This cannot be undone.`
-                : `Remove worktree ${w.path}?`,
-            okLabel: "Remove",
-            run: () =>
-              repo &&
-              void act("worktree remove", async () => {
-                const r = await ipc.gitWorktreeRemove(repo, w.path, w.dirty > 0);
-                await ipc.workspaceRemove(w.path).catch(() => {});
-                await loadWorktrees();
-                return r;
-              }),
-          }),
+        onClick: () => void askRemoveWorktree(wt),
       });
     }
     return items;
   };
 
-  const prMenu = (pr: ipc.PrInfo): MenuItem[] => [
-    { label: "Open pull request", onClick: () => repo && onOpenPr(repo, pr) },
-    { label: "View on GitHub", onClick: () => openExternal(pr.url) },
-    { label: "Copy link", onClick: () => void navigator.clipboard.writeText(pr.url) },
-    { separator: true },
-    {
-      label: "Check out this PR",
-      hint: "gh pr checkout",
-      onClick: () => repo && void act("pr checkout", () => ipc.ghPrCheckout(repo, pr.number)),
-    },
-    { separator: true },
-    {
-      label: "Close pull request",
-      hint: "gh pr close",
-      danger: true,
-      onClick: () =>
-        setConfirm({
-          text: `Close pull request #${pr.number}?\n\nIt won't be merged. The branch ${pr.branch} is kept, so you can reopen the PR later.`,
-          okLabel: "Close PR",
-          run: () => void closePr(pr, false),
-        }),
-    },
-    {
-      label: "Close and delete branch",
-      hint: "gh pr close --delete-branch",
-      danger: true,
-      onClick: () =>
-        setConfirm({
-          text: `Close #${pr.number} and delete its branch ${pr.branch}?\n\nThe PR closes without merging and the branch is deleted locally and on GitHub. This throws the work away and cannot be undone.`,
-          okLabel: "Close & delete",
-          run: () => void closePr(pr, true),
-        }),
-    },
-  ];
+  /** A commit in the history is a place you can stand, not only a tab you can
+   *  read — the same snapshot a branch row offers, from the other list. */
+  const commitMenu = (c: ipc.CommitInfo): MenuItem[] => {
+    if (!repo) return [];
+    return [
+      {
+        label: "Open this commit",
+        onClick: () =>
+          onOpenCommit(repo, { hash: c.hash, short: c.short, subject: c.subject }),
+      },
+      {
+        label: "Test a snapshot of it",
+        hint: "git checkout --detach",
+        onClick: () =>
+          void switchTo(repo, { kind: "ref", ref: c.hash, label: c.short }),
+      },
+    ];
+  };
+
 
   if (repos.length === 0) {
     return (
@@ -430,66 +655,14 @@ export function GitPanel({
     );
   }
 
-  const allChanged = status
-    ? [...status.conflicted, ...status.staged, ...status.unstaged, ...status.untracked]
-    : [];
-  const stagedCount = status?.staged.length ?? 0;
-
-  const fileRow = (f: ipc.FileChange, kind: "staged" | "unstaged" | "untracked" | "conflicted") => (
-    <div
-      key={`${kind}:${f.path}`}
-      className={`git-file git-file-${kind}`}
-      title={`${f.status.trim() || "??"} ${f.path}`}
-      onClick={() => repo && onOpenDiff(repo, f)}
-    >
-      <span className="git-file-status">{f.status.trim() || "??"}</span>
-      <span className="git-file-name">{f.path.split("/").pop()}</span>
-      <span className="git-file-dir">{f.path.split("/").slice(0, -1).join("/")}</span>
-      <span className="git-file-actions" onClick={(e) => e.stopPropagation()}>
-        {kind === "staged" ? (
-          <button
-            className="icon-btn"
-            title="Unstage"
-            onClick={() => repo && optimisticFile(f.path, "unstaged", () => ipc.gitUnstage(repo, [f.path]))}
-          >
-            −
-          </button>
-        ) : (
-          <>
-            {kind !== "untracked" && (
-              <button
-                className="icon-btn icon-btn-danger"
-                title="Discard changes (cannot be undone)"
-                onClick={() =>
-                  setConfirm({
-                    text: `Discard all changes to ${f.path}? This cannot be undone.`,
-                    run: () => repo && optimisticFile(f.path, null, () => ipc.gitDiscard(repo, [f.path])),
-                  })
-                }
-              >
-                ⨯
-              </button>
-            )}
-            <button
-              className="icon-btn"
-              title="Stage"
-              onClick={() => repo && optimisticFile(f.path, "staged", () => ipc.gitStage(repo, [f.path]))}
-            >
-              +
-            </button>
-          </>
-        )}
-      </span>
-    </div>
-  );
 
   return (
     <div className="side-panel git-panel">
       <div className="side-panel-head">
         <span>Git</span>
-        <button className="icon-btn" title="Refresh" onClick={() => void refresh()}>
+        <Button icon title="Refresh" onClick={() => void refresh()}>
           <RestartIcon size={13} />
-        </button>
+        </Button>
       </div>
 
       {/* Repo picker — only when the project actually spans several repos. */}
@@ -514,12 +687,12 @@ export function GitPanel({
           className="git-branch"
           title={
             status?.detached
-              ? "detached HEAD — checkout a branch to commit"
+              ? "You're looking at a snapshot, not a branch. Click here, then click any branch to go back — nothing was lost. (git: detached HEAD)"
               : `branch${status?.upstream ? ` · tracking ${status.upstream}` : " · no upstream"}`
           }
-          onClick={() => setSection(section === "branches" ? "changes" : "branches")}
+          onClick={() => setSection("branches")}
         >
-          {status?.detached ? "⚠ detached" : `⎇ ${status?.branch ?? "—"}`}
+          {status?.detached ? "⚠ snapshot" : `⎇ ${status?.branch ?? "—"}`}
         </button>
         {status && (status.ahead > 0 || status.behind > 0) && (
           <span className="git-counts" title={`${status.ahead} to push · ${status.behind} to pull`}>
@@ -528,358 +701,158 @@ export function GitPanel({
           </span>
         )}
         <span className="git-spacer" />
-        <button
-          className="btn-mini"
+        <Button size="sm"
           disabled={busy != null}
           title="git fetch --prune"
-          onClick={() => repo && void act("fetch", () => ipc.gitFetch(repo))}
-        >
+          onClick={() => repo && void act("fetch", () => ipc.gitFetch(repo))}>
           Fetch
-        </button>
-        <button
-          className="btn-mini"
+        </Button>
+        <Button size="sm"
           disabled={busy != null}
           title="git pull --ff-only"
-          onClick={() => repo && void act("pull", () => ipc.gitPull(repo))}
-        >
+          onClick={() => repo && void act("pull", () => ipc.gitPull(repo))}>
           Pull
-        </button>
-        <button
-          className="btn-mini"
+        </Button>
+        <Button size="sm"
           disabled={busy != null || status?.detached}
-          title={status?.upstream ? "git push" : "git push --set-upstream origin (no upstream yet)"}
-          onClick={() => repo && void act("push", () => ipc.gitPush(repo, !status?.upstream))}
-        >
+          title={
+            // Greyed out in a snapshot: say where the way back is, not what an
+            // upstream is.
+            status?.detached
+              ? "Nothing to push from a snapshot — click any branch to go back first."
+              : status?.upstream
+                ? "git push"
+                : "git push --set-upstream origin (no upstream yet)"
+          }
+          onClick={() => repo && void act("push", () => ipc.gitPush(repo, !status?.upstream))}>
           Push
-        </button>
+        </Button>
       </div>
 
       <div className="git-tabs">
-        {(["changes", "branches", "worktrees", "loose", "history", "prs"] as Section[]).map((s) => (
+        {(["branches", "loose", "history"] as Section[]).map((s) => (
           <button
             key={s}
             className={`git-tab ${section === s ? "git-tab-on" : ""}`}
             onClick={() => setSection(s)}
           >
-            {s === "changes" && allChanged.length > 0
-              ? `Changes (${allChanged.length})`
-              : s === "prs"
-                ? "PRs"
-                : s === "loose"
-                  ? "Loose ends"
-                  : s === "worktrees" && worktrees.length > 1
-                    ? `Worktrees (${worktrees.length})`
-                  : s[0].toUpperCase() + s.slice(1)}
+            {/* Names only. A count in a tab label is a number you can't act on,
+                and it shifts the tabs sideways as it changes. */}
+            {s === "loose" ? "Loose ends" : s[0].toUpperCase() + s.slice(1)}
           </button>
         ))}
       </div>
 
       {busy && <div className="git-busy">{busy}…</div>}
 
-      {section === "changes" && status && (
-        <div className="git-scroll">
-          {/* Commit box first: it's the thing you came here to do. */}
-          <div className="git-commit-box">
-            <textarea
-              className="git-commit-msg"
-              placeholder={stagedCount > 0 ? `Commit message (${stagedCount} staged)` : "Stage files to commit"}
-              value={message}
-              rows={3}
-              onChange={(e) => setMessage(e.target.value)}
-              onKeyDown={(e) => {
-                if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && stagedCount > 0) {
-                  e.preventDefault();
-                  void act("commit", async () => {
-                    const r = await ipc.gitCommit(repo!, message, false);
-                    setMessage("");
-                    return r;
-                  });
-                }
-              }}
-            />
-            <div className="git-commit-actions">
-              <button
-                className="btn btn-accent"
-                disabled={stagedCount === 0 || !message.trim() || busy != null}
-                title="Commit staged changes (Cmd+Enter)"
-                onClick={() =>
-                  void act("commit", async () => {
-                    const r = await ipc.gitCommit(repo!, message, false);
-                    setMessage("");
-                    return r;
-                  })
-                }
-              >
-                Commit {stagedCount > 0 ? stagedCount : ""}
-              </button>
-              {status.unstaged.length + status.untracked.length > 0 && (
-                <button
-                  className="btn-mini"
-                  onClick={() =>
-                    repo &&
-                    void act("stage all", () =>
-                      ipc.gitStage(repo, [
-                        ...status.unstaged.map((f) => f.path),
-                        ...status.untracked.map((f) => f.path),
-                      ]),
-                    )
-                  }
-                >
-                  Stage all
-                </button>
-              )}
-            </div>
-          </div>
-
-          {status.conflicted.length > 0 && (
-            <>
-              <div className="git-section-head git-section-conflict">
-                Conflicts ({status.conflicted.length}) — resolve before committing
-              </div>
-              {status.conflicted.map((f) => fileRow(f, "conflicted"))}
-            </>
-          )}
-          {status.staged.length > 0 && (
-            <>
-              <div className="git-section-head">
-                Staged ({status.staged.length})
-                <button
-                  className="btn-mini"
-                  onClick={() =>
-                    repo &&
-                    void act("unstage all", () =>
-                      ipc.gitUnstage(repo, status.staged.map((f) => f.path)),
-                    )
-                  }
-                >
-                  Unstage all
-                </button>
-              </div>
-              {status.staged.map((f) => fileRow(f, "staged"))}
-            </>
-          )}
-          {status.unstaged.length > 0 && (
-            <>
-              <div className="git-section-head">Changes ({status.unstaged.length})</div>
-              {status.unstaged.map((f) => fileRow(f, "unstaged"))}
-            </>
-          )}
-          {status.untracked.length > 0 && (
-            <>
-              <div className="git-section-head">Untracked ({status.untracked.length})</div>
-              {status.untracked.map((f) => fileRow(f, "untracked"))}
-            </>
-          )}
-          {allChanged.length === 0 && <div className="tree-empty">Working tree clean.</div>}
-        </div>
-      )}
-
       {section === "branches" && (
         <div className="git-scroll">
+          {/* Detached HEAD is the one state where the way out is not obvious.
+              Say what it is and how to leave it, right where the exit is. */}
+          {status?.detached && (
+            <div className="git-snapshot-note">
+              You're looking at a snapshot of the code. Click any branch below to go
+              back — nothing you had is lost.
+            </div>
+          )}
           <div className="git-branch-new">
             <input
               className="git-branch-input"
-              placeholder="Filter or new branch name…"
+              placeholder="Filter, or name a new feature…"
               value={branchFilter}
               onChange={(e) => setBranchFilter(e.target.value)}
             />
-            {branchFilter.trim() && !branches.some((b) => b.name === branchFilter.trim()) && (
-              <button
-                className="btn-mini"
-                onClick={() =>
-                  repo &&
-                  void act("create branch", async () => {
-                    const r = await ipc.gitCheckout(repo, branchFilter.trim(), true);
-                    setBranchFilter("");
-                    return r;
-                  })
-                }
-              >
-                Create
-              </button>
+            {branchFilter.trim() && !rows.some((r) => r.branch === branchFilter.trim()) && (
+              <Button size="sm" variant="accent"
+                disabled={busy != null}
+                title="Start a branch in a workspace of its own, set up and ready to run"
+                onClick={() => void startFeature(branchFilter.trim())}>
+                Start
+              </Button>
             )}
           </div>
-          {branches
-            .filter((b) => b.name.toLowerCase().includes(branchFilter.toLowerCase()))
-            // Current branch first, then your local ones (by recency), then the
-            // "on GitHub" branches you haven't pulled down — sort is stable, so
-            // the backend's recency order is preserved within each group.
-            .slice()
-            .sort(
-              (a, b) =>
-                (a.current === b.current ? 0 : a.current ? -1 : 1) ||
-                (a.remote_only === b.remote_only ? 0 : a.remote_only ? 1 : -1),
-            )
-            .map((b) => (
+
+          {rows
+            .filter((r) => r.branch.toLowerCase().includes(branchFilter.toLowerCase()))
+            .map((r) => (
               <div
-                key={b.name}
-                className={`git-branch-row ${b.current ? "git-branch-current" : ""} ${b.remote_only ? "git-branch-remote" : ""}`}
-                title={
-                  b.current
-                    ? `${b.name} — you're on this branch\n${b.subject}`
-                    : b.remote_only
-                      ? `${b.name} — on GitHub. Click to check it out here.\n${b.subject}`
-                      : b.synced
-                        ? `${b.name} — click to switch\n${b.subject}`
-                        : `${b.name} — local only, not pushed yet. Click to switch.\n${b.subject}`
-                }
-                onClick={() =>
-                  !b.current &&
-                  repo &&
-                  // A remote-only name (no origin/ prefix) checks out and starts
-                  // tracking it — the same DWIM git does for `git checkout x`.
-                  void act("checkout", () => ipc.gitCheckout(repo, b.name, false))
-                }
-                onContextMenu={(e) => ctx.open(e, branchMenu(b))}
+                key={r.path ?? r.branch}
+                className={`ws-row ${r.active ? "ws-row-active" : ""} ${
+                  r.missing ? "ws-row-gone" : ""
+                } ${r.remoteOnly ? "ws-row-remote" : ""}`}
+                title={workspaceTitle(r)}
+                onClick={() => void openRow(r)}
+                onContextMenu={(e) => repo && ctx.open(e, rowMenu(r))}
               >
-                <span className="git-branch-mark">{b.current ? "●" : b.remote_only ? "☁" : "○"}</span>
-                <span className="git-branch-name">{b.name}</span>
-                {b.remote_only ? (
-                  <span className="git-branch-tag git-branch-tag-remote">on GitHub</span>
+                {/* Five marks, all of them glyphs a system font actually has.
+                    "Has a workspace" is deliberately not one of them — the
+                    tag beside the name already says it, and the fork character
+                    that used to be here rendered as a box on some machines. */}
+                <span className="ws-mark">
+                  {r.active ? "◉" : r.current ? "●" : r.missing ? "⚠" : r.remoteOnly ? "☁" : "○"}
+                </span>
+                <span className="ws-name">{r.branch}</span>
+
+                {/* Where it lives and what state it is in. A row says at most
+                    two of these — past that it stops being readable at a
+                    glance, which is the only thing this list is for. */}
+                {r.missing ? (
+                  <span className="ws-tag ws-tag-warn">folder gone</span>
+                ) : r.remoteOnly ? (
+                  <span className="ws-tag ws-tag-remote">on GitHub</span>
+                ) : r.path && !r.main ? (
+                  <span className="ws-tag">own space</span>
                 ) : (
-                  !b.synced && <span className="git-branch-tag">not pushed</span>
+                  r.unpushed && <span className="ws-tag">not pushed</span>
                 )}
-                <span className="git-branch-subject">{b.subject}</span>
+
+                <span className="ws-state">
+                  {r.dirty > 0 && (
+                    <span className="ws-dirty" title={`${r.dirty} uncommitted changes`}>
+                      ±{r.dirty}
+                    </span>
+                  )}
+                  {r.agents > 0 && (
+                    <span className="ws-agents" title={`${r.agents} agent terminals here`}>
+                      ⌁{r.agents}
+                    </span>
+                  )}
+                  {/* The port is the whole point of parallel workspaces, so it
+                      is on the row rather than behind a menu — and it opens
+                      the preview, because a number you can't click is trivia. */}
+                  {r.port != null && !r.missing && r.running > 0 && (
+                    <button
+                      className="ws-port ws-port-live"
+                      title={`Serving on ${r.port} — open its preview`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenPreview(`http://localhost:${r.port}`);
+                      }}
+                    >
+                      :{r.port}
+                    </button>
+                  )}
+                  {r.port != null && !r.missing && r.running === 0 && (
+                    <span
+                      className="ws-port"
+                      title={`Port ${r.port} is held for this workspace — anything you run here serves on it.`}
+                    >
+                      :{r.port}
+                    </span>
+                  )}
+                </span>
+
+                <span className="ws-subject">{r.subject}</span>
               </div>
             ))}
-        </div>
-      )}
 
-      {/* Worktrees: one checkout per agent, so several can work the same repo
-          on different branches at once. */}
-      {section === "worktrees" && (
-        <div className="git-scroll">
-          <div className="git-branch-new">
-            <input
-              className="git-branch-input"
-              placeholder="New branch for a worktree…"
-              value={wtBranch}
-              onChange={(e) => setWtBranch(e.target.value)}
-            />
-            <button
-              className="btn-mini"
-              disabled={!wtBranch.trim() || busy != null}
-              title="Create a worktree alongside the repo, on a new branch"
-              onClick={() => {
-                if (!repo) return;
-                const slug = wtBranch.trim().replace(/[^a-zA-Z0-9._-]+/g, "-");
-                // Sibling of the repo, named after it — predictable, and never
-                // inside the repo itself (which would make it self-tracking).
-                const path = `${repo}-wt-${slug}`;
-                void act("worktree add", async () => {
-                  const r = await ipc.gitWorktreeAdd(repo, path, wtBranch.trim(), true);
-                  // Make it readable by the file tree / editor.
-                  await ipc.workspaceAdd(path).catch(() => {});
-                  setWtBranch("");
-                  await loadWorktrees();
-                  return r;
-                });
-              }}
-            >
-              Create
-            </button>
-          </div>
-
-          {worktrees.map((w) => (
-            <div
-              key={w.path}
-              className={`git-worktree ${w.prunable ? "git-worktree-gone" : ""} ${
-                activeWorktree === w.path ? "git-worktree-active" : ""
-              }`}
-              title={`${w.path}\n${w.head}${w.locked ? `\nlocked: ${w.locked}` : ""}${
-                w.prunable ? `\nprunable: ${w.prunable}` : ""
-              }`}
-              onContextMenu={(e) => ctx.open(e, worktreeMenu(w))}
-            >
-              <div className="git-worktree-top">
-                <span className="git-worktree-mark">{w.is_main ? "★" : w.prunable ? "⚠" : "⑂"}</span>
-                <span className="git-worktree-branch">
-                  {w.branch ?? (w.detached ? `detached @ ${w.head}` : w.head)}
-                </span>
-                {w.is_main && <span className="git-worktree-tag">main</span>}
-                {w.locked && <span className="git-worktree-tag">locked</span>}
-                {w.prunable && <span className="git-worktree-tag git-tag-warn">missing</span>}
-                {w.dirty > 0 && (
-                  <span className="git-worktree-dirty" title={`${w.dirty} uncommitted changes`}>
-                    ±{w.dirty}
-                  </span>
-                )}
-              </div>
-              <div className="git-worktree-path">{w.path}</div>
-              <div className="git-worktree-actions">
-                {activeWorktree === w.path ? (
-                  <span className="wt-inuse" title="Project files are using this worktree">
-                    in use
-                  </span>
-                ) : (
-                  !w.prunable &&
-                  !w.bare && (
-                    <button
-                      className="btn-mini"
-                      title="Point this project's files, search and new terminals at this worktree"
-                      onClick={() => repo && onUseWorktree(repo, w.path, w.branch ?? w.name)}
-                    >
-                      Use
-                    </button>
-                  )
-                )}
-                <button
-                  className="btn-mini"
-                  title="Open a terminal in this worktree — run an agent here"
-                  onClick={() => onOpenTerminal(w.path, w.branch ?? w.name)}
-                >
-                  Terminal
-                </button>
-                {!w.is_main && (
-                  <button
-                    className="btn-mini"
-                    title={
-                      w.dirty > 0
-                        ? `${w.dirty} uncommitted changes would be lost`
-                        : "Remove this worktree"
-                    }
-                    onClick={() =>
-                      setConfirm({
-                        text:
-                          w.dirty > 0
-                            ? `Remove worktree ${w.path}?\n\nIt has ${w.dirty} uncommitted change${
-                                w.dirty === 1 ? "" : "s"
-                              } that will be lost. This cannot be undone.`
-                            : `Remove worktree ${w.path}?`,
-                        run: () =>
-                          repo &&
-                          void act("worktree remove", async () => {
-                            const r = await ipc.gitWorktreeRemove(repo, w.path, w.dirty > 0);
-                            await ipc.workspaceRemove(w.path).catch(() => {});
-                            await loadWorktrees();
-                            return r;
-                          }),
-                      })
-                    }
-                  >
-                    Remove
-                  </button>
-                )}
-              </div>
-            </div>
-          ))}
-
-          {worktrees.some((w) => w.prunable) && (
+          {rows.some((r) => r.missing) && (
             <div className="git-branch-new">
-              <button
-                className="btn-mini"
-                title="Drop records for worktrees whose directories are gone"
-                onClick={() =>
-                  repo &&
-                  void act("prune", async () => {
-                    const r = await ipc.gitWorktreePrune(repo);
-                    await loadWorktrees();
-                    return r;
-                  })
-                }
-              >
-                Prune missing ({worktrees.filter((w) => w.prunable).length})
-              </button>
+              <Button size="sm"
+                title="Forget the workspaces whose folders are gone. Nothing on disk is touched."
+                onClick={() => repo && void cleanupWorkspaces(repo)}>
+                Clear {rows.filter((r) => r.missing).length} missing
+              </Button>
             </div>
           )}
         </div>
@@ -890,9 +863,12 @@ export function GitPanel({
           repo={repo}
           onOpenBranch={onOpenBranch}
           onOpenTerminal={onOpenTerminal}
-          onUseWorktree={onUseWorktree}
           onNotice={onNotice}
-          onConfirm={(text, run) => setConfirm({ text, run })}
+          taskMenuFor={
+            branchTaskMenu && repo
+              ? (b) => branchTaskMenu(repo, b.branch, b.worktree, b.merged)
+              : undefined
+          }
         />
       )}
 
@@ -902,11 +878,12 @@ export function GitPanel({
             <div
               key={c.hash}
               className="git-commit-row git-commit-row-click"
-              title={`${c.hash}\n${c.author} · ${c.date}\n\nClick to open this commit`}
+              title={`${c.hash}\n${c.author} · ${c.date}\n\nClick to open this commit · right-click to stand on it`}
               onClick={() =>
                 repo &&
                 onOpenCommit(repo, { hash: c.hash, short: c.short, subject: c.subject })
               }
+              onContextMenu={(e) => repo && ctx.open(e, commitMenu(c))}
             >
               <span className="git-commit-hash">{c.short}</span>
               <span className="git-commit-subject">{c.subject}</span>
@@ -917,99 +894,11 @@ export function GitPanel({
         </div>
       )}
 
-      {section === "prs" && (
-        <div className="git-scroll">
-          {!hasGh ? (
-            <div className="tree-empty">
-              Pull requests need the GitHub CLI. Install it with <code>brew install gh</code>, then
-              run <code>gh auth login</code> in a terminal.
-            </div>
-          ) : prs.length === 0 && busy !== "prs" ? (
-            <div className="tree-empty">No open pull requests.</div>
-          ) : (
-            prs.map((pr) => (
-              <div
-                key={pr.number}
-                className="git-pr-row"
-                title={`${pr.branch} → ${pr.base}\n${pr.url}`}
-                onClick={() => repo && onOpenPr(repo, pr)}
-                onContextMenu={(e) => ctx.open(e, prMenu(pr))}
-              >
-                <span className="git-pr-num">#{pr.number}</span>
-                <div className="git-pr-main">
-                  <span className="git-pr-title">
-                    {pr.draft && <span className="git-pr-draft">draft</span>}
-                    {pr.title}
-                  </span>
-                  <span className="git-pr-refs">
-                    <code>{pr.branch}</code> → <code>{pr.base}</code>
-                    {pr.created && (
-                      <span className="git-pr-age" title={absTime(pr.created)}>
-                        · opened {ago(pr.created)}
-                      </span>
-                    )}
-                    {pr.checks === "PASS" && (
-                      <span className="git-pr-checks git-pr-ok" title={pr.checks_summary}>
-                        · checks passed
-                      </span>
-                    )}
-                    {pr.checks === "FAIL" && (
-                      <span className="git-pr-checks git-pr-bad" title={pr.checks_summary}>
-                        · checks failed
-                      </span>
-                    )}
-                    {pr.checks === "PENDING" && (
-                      <span className="git-pr-checks git-pr-pending" title={pr.checks_summary}>
-                        · checks running
-                      </span>
-                    )}
-                    {pr.mergeable === "CONFLICTING" && (
-                      <span className="git-pr-checks git-pr-bad">· conflicts</span>
-                    )}
-                    {pr.review_decision === "APPROVED" &&
-                      pr.mergeable !== "CONFLICTING" &&
-                      pr.checks !== "FAIL" && (
-                        <span className="git-pr-mergeable">· approved, ready to merge</span>
-                      )}
-                  </span>
-                </div>
-                <span className="git-pr-meta">
-                  {pr.review_decision === "APPROVED" && (
-                    <CheckIcon size={11} className="git-pr-approved" />
-                  )}
-                  {pr.review_decision === "CHANGES_REQUESTED" && (
-                    <FailIcon size={11} className="git-pr-changes" />
-                  )}
-                  <span className="git-pr-author">{pr.mine ? "you" : pr.author}</span>
-                </span>
-              </div>
-            ))
-          )}
-        </div>
-      )}
 
-      {/* Discarding work is unrecoverable — never do it on a single click. */}
-      {confirm && (
-        <div className="confirm-backdrop" onClick={() => setConfirm(null)}>
-          <div className="confirm" onClick={(e) => e.stopPropagation()}>
-            <p>{confirm.text}</p>
-            <div className="confirm-actions">
-              <button className="btn" onClick={() => setConfirm(null)}>
-                Cancel
-              </button>
-              <button
-                className="btn btn-danger-solid"
-                onClick={() => {
-                  confirm.run();
-                  setConfirm(null);
-                }}
-              >
-                {confirm.okLabel ?? "Discard"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* No dialog is mounted here. Every question this panel asks — a switch
+          git refused, a workspace being removed, a branch being deleted — is
+          put on screen by the one dialog above us, so it stays answerable even
+          when another side tab takes this panel off screen. */}
 
       {ctx.menu && (
         <ContextMenu x={ctx.menu.x} y={ctx.menu.y} items={ctx.menu.items} onClose={ctx.close} />

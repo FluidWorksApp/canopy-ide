@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "./ipc";
 import {
+  adoptLegacyCustomTasks,
   emptyWorkspace,
   exportProject,
   exportWorkspace,
@@ -14,21 +15,72 @@ import {
   type WorkspaceState,
 } from "./projects";
 import type { AgentEventEntry, NoticeKind, RelayHandle } from "./types";
-import { derivePending, pendingForRoots } from "./notifications";
+import type { CustomMicroTask } from "./microTasks";
+import {
+  derivePending,
+  parseAgentEvent,
+  pendingForRoots,
+} from "./notifications";
+import {
+  formatDeepLink,
+  parseDeepLink,
+  projectForLink,
+  type DeepLink,
+} from "./deepLinks";
+import { runUiOp } from "./agentOps";
+import { getSettings, THEME_CHANGE_EVENT } from "./settings";
 import { useTabDrag } from "./tabDrag";
+import * as prWatch from "./prWatchStore";
 import { CollabManager, safeName } from "./collab";
 import { ProjectView } from "./components/ProjectView";
+import { TitleBar } from "./components/TitleBar";
+import {
+  FreezeOverlay,
+  HibernationView,
+  type WakeProgress,
+} from "./components/HibernationView";
+import {
+  clearHibernation,
+  hibernatedProjects,
+  hibernationOf,
+  isHibernating,
+  wakeSteps,
+  HIBERNATE_EVENT,
+  HIBERNATED_EVENT,
+  HIBERNATION_CHANGE_EVENT,
+  type ProjectSnapshot,
+} from "./hibernation";
+import { UpdateToast, NoticeToast } from "./components/Toast";
 import { ProjectDialog } from "./components/ProjectDialog";
 import { ProjectManager } from "./components/ProjectManager";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { HelpDialog } from "./components/HelpDialog";
+import { AskDialog } from "./components/AskDialog";
 import { AboutDialog } from "./components/AboutDialog";
 import { Dictation } from "./components/Dictation";
+import { TooltipLayer } from "./components/TooltipLayer";
 import { Onboarding } from "./components/Onboarding";
 import { Welcome } from "./components/Welcome";
+import { Dialog } from "./components/Dialog";
 import { shouldOnboard, markOnboarded } from "./onboarding";
+import { isSelftest, setSelftestMode } from "./selftest/mode";
+import { startBrowserWatchdog } from "./browserWatchdog";
+import { browserViewSnapshots } from "./browserSignals";
+import { startSpotIndexJob } from "./spotIndexJob";
+import { loadZoom, setZoom, applyZoom, STEP } from "./zoom";
 import { stopWorkspaceServers } from "./lsp/client";
-import { checkForUpdateAnyChannel, installUpdate, type UpdateAvailability } from "./updater";
+import { sweepStaleRuns } from "./taskHistory";
+import {
+  digitFromCode,
+  hintModifierOnly,
+  useHeldModifier,
+} from "./useHeldModifier";
+import { commandHeld, matches, terminalOwnsCtrl } from "./shortcuts";
+import {
+  checkForUpdateAnyChannel,
+  installUpdate,
+  type UpdateAvailability,
+} from "./updater";
 
 /** Tell the hook helper which projects share context between their sessions.
  *  Every project is listed with its opt-in state, so turning sharing off
@@ -48,7 +100,10 @@ function loadRelayChat(label: string): ipc.RelayChatMsg[] {
 }
 function saveRelayChat(label: string, msgs: ipc.RelayChatMsg[]) {
   try {
-    localStorage.setItem(RELAY_CHAT_PREFIX + label, JSON.stringify(msgs.slice(-500)));
+    localStorage.setItem(
+      RELAY_CHAT_PREFIX + label,
+      JSON.stringify(msgs.slice(-500)),
+    );
   } catch {
     // Storage full/blocked — history is a convenience, never fail over it.
   }
@@ -69,14 +124,20 @@ function publishScopes(state: WorkspaceState) {
 export default function App() {
   const [ws, setWs] = useState<WorkspaceState>(emptyWorkspace);
   const [loaded, setLoaded] = useState(false);
-  const [dialog, setDialog] = useState<{ mode: "new" } | { mode: "edit"; project: Project } | null>(null);
+  const [dialog, setDialog] = useState<
+    { mode: "new" } | { mode: "edit"; project: Project } | null
+  >(null);
   const [agentEvents, setAgentEvents] = useState<AgentEventEntry[]>([]);
   // Pending cards the user waved away. Session-scoped on purpose: a dismissed
   // card is "seen", not "never tell me again". Held here (not in the panel)
   // because the project-tab badges count from the same derived list.
-  const [dismissedPending, setDismissedPending] = useState<Set<string>>(new Set());
+  const [dismissedPending, setDismissedPending] = useState<Set<string>>(
+    new Set(),
+  );
   const [manager, setManager] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState<null | { tab?: import("./components/SettingsDialog").SettingsTab }>(null);
+  const [settingsOpen, setSettingsOpen] = useState<null | {
+    tab?: import("./components/SettingsDialog").SettingsTab;
+  }>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   // First-run walkthrough. Seeded once, after the workspace has loaded, so a
@@ -85,28 +146,49 @@ export default function App() {
   // One delete confirm for every entry point (manager, Welcome) — deleting a
   // project was a bare single click before, one misclick from losing a setup.
   const [confirmDelete, setConfirmDelete] = useState<Project | null>(null);
+  const [confirmClose, setConfirmClose] = useState<Project | null>(null);
   const [hookPath, setHookPath] = useState<string | null>(null);
   const [zen, setZen] = useState(false);
-  const [notice, setNotice] = useState<{ text: string; kind: NoticeKind } | null>(null);
+  // Transient "110%" chip shown for ~1s after a zoom change, then cleared.
+  const [zoomPct, setZoomPct] = useState<number | null>(null);
+  const zoomHideTimer = useRef<number | null>(null);
+  const [notice, setNotice] = useState<{
+    text: string;
+    kind: NoticeKind;
+  } | null>(null);
   const notify = useCallback(
     (text: string, kind: NoticeKind = "info") => setNotice({ text, kind }),
     [],
   );
-  // Native (macOS) notification for team activity landing while Canopy isn't
-  // the focused app — the in-app toast can't be seen from another Space.
-  // First call asks the OS for permission; a denial just means silence.
-  const nativeNotify = useCallback(async (title: string, body: string) => {
-    if (document.hasFocus()) return;
-    try {
-      const { isPermissionGranted, requestPermission, sendNotification } = await import(
-        "@tauri-apps/plugin-notification"
-      );
-      let granted = await isPermissionGranted();
-      if (!granted) granted = (await requestPermission()) === "granted";
-      if (granted) sendNotification({ title, body });
-    } catch {
-      // Notifications are a garnish — never fail anything over them.
-    }
+  // Native (macOS) notification for activity landing while Canopy isn't the
+  // focused app — the in-app toast can't be seen from another Space.
+  //
+  // `where` is where a click should land the user (deepLinks.ts). It is not
+  // optional in spirit: a notification about a thing, that doesn't take you to
+  // the thing, makes the user go find it themselves — which is what this whole
+  // path exists to stop. Pass the most specific target the caller honestly
+  // knows; the router degrades from there.
+  const nativeNotify = useCallback(
+    async (title: string, body: string, where?: DeepLink) => {
+      if (document.hasFocus()) return;
+      try {
+        await ipc.notifyNative(
+          title,
+          body,
+          formatDeepLink(where ?? { kind: "app" }),
+        );
+      } catch {
+        // Notifications are a garnish — never fail anything over them.
+      }
+    },
+    [],
+  );
+  // A micro-task in flight when Canopy last quit has no terminal to come back
+  // to — its tab is ephemeral and never restored — so it can never report.
+  // Settle those before anything new is recorded, or they stay "running"
+  // forever: hidden from the history tab, still holding one of its slots.
+  useEffect(() => {
+    sweepStaleRuns();
   }, []);
   // Successes and status lines are transient; a failure stays until it has
   // been read and dismissed.
@@ -119,12 +201,34 @@ export default function App() {
   // ProjectView renders the same picture. Chat keeps a rolling transcript
   // (received + our own sends); the inbox holds commands awaiting action.
   const [relayStatus, setRelayStatus] = useState<ipc.RelayStatus>({
-    role: "off", code: null, port: null, ips: [], addr: null, self_id: null, name: null,
-    visibility: null, public_ip: null, members: [],
+    role: "off",
+    code: null,
+    port: null,
+    ips: [],
+    addr: null,
+    self_id: null,
+    name: null,
+    visibility: null,
+    public_ip: null,
+    members: [],
   });
   const [relayChat, setRelayChat] = useState<ipc.RelayChatMsg[]>([]);
   const [relayInbox, setRelayInbox] = useState<ipc.RelayCommandMsg[]>([]);
-  const [relayTransfers, setRelayTransfers] = useState<import("./types").RelayTransfer[]>([]);
+  const [relayTransfers, setRelayTransfers] = useState<
+    import("./types").RelayTransfer[]
+  >([]);
+  // The agent-facing ops read the inbox from an event handler that outlives any
+  // one render, so they read it through a ref.
+  const relayInboxRef = useRef(relayInbox);
+  relayInboxRef.current = relayInbox;
+  /** A question an agent put to the user (canopy_ask_user), held until they
+   *  answer — the agent's tool call is parked on the other end of `resolve`. */
+  const [ask, setAsk] = useState<{
+    id: number;
+    question: string;
+    options: string[];
+    resolve: (answer: string) => void;
+  } | null>(null);
   const relayIntentional = useRef(false);
   const prevRelayRole = useRef(relayStatus.role);
   useEffect(() => {
@@ -136,7 +240,10 @@ export default function App() {
         relayIntentional.current = false;
       } else {
         notify("Disconnected from the team relay.", "error");
-        void nativeNotify("Canopy — Team", "Disconnected from the team relay.");
+        void nativeNotify("Canopy — Team", "Disconnected from the team relay.", {
+          kind: "panel",
+          panel: "team",
+        });
       }
     }
   }, [relayStatus.role, notify, nativeNotify]);
@@ -146,6 +253,8 @@ export default function App() {
   // reaches the render tree.
   const collab = useRef<CollabManager | null>(null);
   if (!collab.current) collab.current = new CollabManager();
+  // Narrowed once here: the useMemo below can't see the control-flow guard.
+  const collabMgr = collab.current;
   const [collabTick, setCollabTick] = useState(0);
   // The relay we're persisting chat under = the host's stable identity key.
   // Null when off, so the persist effect never writes an empty transcript.
@@ -192,14 +301,16 @@ export default function App() {
     mgr.onListProject = async (root) => {
       const prefix = root.endsWith("/") ? root : `${root}/`;
       const abs = await ipc.fsListFiles([root]);
-      return abs.filter((p) => p.startsWith(prefix)).map((p) => p.slice(prefix.length));
+      return abs
+        .filter((p) => p.startsWith(prefix))
+        .map((p) => p.slice(prefix.length));
     };
     mgr.onProjectOffer = (doc) => {
       const o = mgr.projectOffers.get(doc);
       if (!o) return;
       const what = `${o.fromName} wants to share their project "${o.name}" with you`;
       notify(`${what} — see the Team panel`);
-      void nativeNotify("Canopy — Team", what);
+      void nativeNotify("Canopy — Team", what, { kind: "panel", panel: "team" });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -282,7 +393,9 @@ export default function App() {
       filters: [{ name: "canopy workspace", extensions: ["json"] }],
     });
     if (!path) return;
-    await exportWorkspace(path, wsRef.current).catch((e) => notify(String(e), "error"));
+    await exportWorkspace(path, wsRef.current).catch((e) =>
+      notify(String(e), "error"),
+    );
   }, []);
 
   const openWorkspaceFile = useCallback(async () => {
@@ -330,13 +443,28 @@ export default function App() {
   // menu handler is registered before these are defined
   const closeProjectRef = useRef<(id: string) => Promise<void>>(async () => {});
   const openProjectRef = useRef<(id: string) => Promise<void>>(async () => {});
+  /** Open a project because something wants to happen *in* it — an agent
+   *  action, a PR handed over from the inbox, a PTY spawned from the phone.
+   *  Unlike a plain open, this wakes a hibernating project: there is no
+   *  ProjectView behind the frost to receive the event, and dropping it
+   *  silently is worse than deciding the project is needed now. */
+  const openForActionRef = useRef<(id: string) => Promise<void>>(
+    async () => {},
+  );
   const saveProjectRef = useRef<(p: Project) => Promise<void>>(async () => {});
   const updateRef = useRef<(patch: Partial<WorkspaceState>) => void>(() => {});
 
   // Load persisted workspace; re-register watchers/scopes for open projects.
+  // A tab that was asleep when the app last quit comes back asleep — and a
+  // sleeping project watches nothing, so it registers nothing until it wakes.
   useEffect(() => {
-    void loadWorkspace().then(async (state) => {
+    void loadWorkspace().then(async (loadedState) => {
+      // Custom tasks moved from settings onto the project; anything left in the
+      // old app-wide home is adopted here, once, before anything reads it.
+      const state = adoptLegacyCustomTasks(loadedState);
+      if (state !== loadedState) await saveWorkspace(state);
       for (const id of state.openIds) {
+        if (isHibernating(id)) continue;
         const project = state.projects.find((p) => p.id === id);
         for (const c of project?.components ?? []) {
           await ipc.workspaceAdd(c.path).catch(() => {});
@@ -347,9 +475,18 @@ export default function App() {
       setLoaded(true);
     });
     const subs = [
-      ipc.onAgentEvent((raw) =>
-        setAgentEvents((prev) => [...prev.slice(-199), { raw, ts: Date.now() }]),
-      ),
+      ipc.onAgentEvents((raws) => {
+        // Parsed once here; consumers read fields off `data`. Re-parsing the
+        // raw line at every consumer was a measurable main-thread cost, as was
+        // one setState per line — the bridge batches each 500ms window.
+        const ts = Date.now();
+        setAgentEvents((prev) =>
+          [
+            ...prev,
+            ...raws.map((raw) => ({ ts, data: parseAgentEvent(raw) })),
+          ].slice(-200),
+        );
+      }),
       ipc.onRelayState(setRelayStatus),
       ipc.onRelayChat((m) => {
         setRelayChat((prev) => [...prev.slice(-499), m]);
@@ -367,11 +504,18 @@ export default function App() {
         void nativeNotify(
           m.to === null ? `${m.from_name} (team chat)` : m.from_name,
           text,
+          // Straight into the conversation it came from — the one target where
+          // "take me there" is unambiguous.
+          { kind: "chat", peer: convo },
         );
       }),
       ipc.onRelayCommand((m) => {
-        setRelayInbox((prev) => (prev.some((x) => x.id === m.id) ? prev : [...prev, m]));
-        const pr = (m.payload as { pr?: { number?: number; title?: string } } | null)?.pr;
+        setRelayInbox((prev) =>
+          prev.some((x) => x.id === m.id) ? prev : [...prev, m],
+        );
+        const pr = (
+          m.payload as { pr?: { number?: number; title?: string } } | null
+        )?.pr;
         const file = (m.payload as { name?: string } | null)?.name;
         const text =
           m.kind === "open-pr" && pr
@@ -382,7 +526,10 @@ export default function App() {
                 ? `${m.from_name} wants to send you ${file}`
                 : `${m.from_name} sent a ${m.kind} command`;
         notify(`${text} — see the Team panel`);
-        void nativeNotify("Canopy — Team", text);
+        void nativeNotify("Canopy — Team", text, {
+          kind: "panel",
+          panel: "team",
+        });
       }),
       ipc.onRelayCollab((m) => {
         const mgr = collab.current!;
@@ -394,7 +541,10 @@ export default function App() {
         if (!known && m.body.kind === "offer") {
           const what = `${m.from_name} wants to edit ${safeName(m.body.name)} with you`;
           notify(`${what} — see the Team panel`);
-          void nativeNotify("Canopy — Team", what);
+          void nativeNotify("Canopy — Team", what, {
+            kind: "panel",
+            panel: "team",
+          });
         }
       }),
       ipc.onRelayTransferProgress((p) => {
@@ -423,7 +573,10 @@ export default function App() {
               ? `Sent ${t.name} to ${t.detail}`
               : `Sending ${t.name} failed: ${t.detail}`;
         notify(msg, t.ok ? "success" : "error");
-        void nativeNotify("Canopy — File transfer", msg);
+        void nativeNotify("Canopy — File transfer", msg, {
+          kind: "panel",
+          panel: "team",
+        });
         // A completed transfer is part of the conversation, not just a toast
         // that scrolls away: record it in the transcript with the peer it was
         // with (a DM, since files are always one-to-one), so history shows what
@@ -445,7 +598,9 @@ export default function App() {
             },
           };
           setRelayChat((prev) =>
-            prev.some((m) => m.id === fileMsg.id) ? prev : [...prev.slice(-499), fileMsg],
+            prev.some((m) => m.id === fileMsg.id)
+              ? prev
+              : [...prev.slice(-499), fileMsg],
           );
         }
         // Mark the row terminal, then retire it after a beat so the bar's
@@ -479,7 +634,10 @@ export default function App() {
           if (e.payload === "close-project") {
             const active = wsRef.current.activeId;
             if (active) void closeProjectRef.current(active);
-          } else if (e.payload === "next-project" || e.payload === "prev-project") {
+          } else if (
+            e.payload === "next-project" ||
+            e.payload === "prev-project"
+          ) {
             const dir = e.payload === "next-project" ? 1 : -1;
             const { openIds, activeId } = wsRef.current;
             if (openIds.length > 1) {
@@ -499,7 +657,10 @@ export default function App() {
                   return;
                 }
                 const { getVersion } = await import("@tauri-apps/api/app");
-                notify(`Canopy is up to date (${await getVersion()}).`, "success");
+                notify(
+                  `Canopy is up to date (${await getVersion()}).`,
+                  "success",
+                );
               })
               .catch((err) => notify(`Update check failed: ${err}`, "error"));
           } else if (e.payload === "install-cli") {
@@ -508,6 +669,13 @@ export default function App() {
                 .then((m) => notify(m, "success"))
                 .catch((err) => notify(String(err), "error")),
             );
+          } else if (e.payload === "new-launcher") {
+            // ⌘N asks the active project for a new tab (ProjectView answers on
+            // menu:new-launcher). With no project open there is no tab to make,
+            // so the only "new" left that means anything is a new project.
+            if (wsRef.current.activeId)
+              window.dispatchEvent(new CustomEvent("menu:new-launcher"));
+            else setDialog({ mode: "new" });
           } else if (e.payload === "new-project") {
             setDialog({ mode: "new" });
           } else if (e.payload === "open-project") {
@@ -536,30 +704,94 @@ export default function App() {
         }),
       ),
     ];
-    // Auto-inject agent hooks (idempotent) so tool events stream in without setup.
-    void import("@tauri-apps/api/core").then(({ invoke }) => {
-      // Every CLI with a setup arm (see setup_agent_hooks). Each is
-      // idempotent; ones whose CLI hasn't run yet fail quietly and succeed on
-      // a later launch.
-      for (const agent of ["claude", "codex", "agy", "aider", "opencode", "omp", "amp"]) {
-        void invoke("setup_agent_hooks", { agent }).catch(() => {});
-      }
-    });
+    // Agent integrations used to be re-injected from here — one fire-and-forget
+    // invoke per CLI, `.catch(() => {})` on each. That wrote into the config of
+    // CLIs the machine didn't have and, because every error was discarded, let
+    // a registration fail on every launch without a trace. The same work now
+    // runs in agents::heal_integrations at startup, where it can see what's
+    // installed and report what it did. Only failures are surfaced: a healthy
+    // launch has nothing to say, and a repair that worked is not news.
+    // The pass starts before this webview does, so the event can fire with
+    // nobody listening. Ask for the cached report too, and let whichever
+    // arrives first be the one that speaks — a report that exists to break a
+    // silence must not be lost to a race.
+    let reported = false;
+    const reportHealth = (report: ipc.HealthReport | null) => {
+      if (reported || !report || report.failed.length === 0) return;
+      reported = true;
+      notify(
+        `Agent integration needs attention — ${report.failed.join("; ")}`,
+        "warn",
+      );
+    };
+    subs.push(ipc.onIntegrationHealth(reportHealth));
+    void ipc
+      .agentHealthReport()
+      .then(reportHealth)
+      .catch(() => {});
     // Focus mode is reachable two ways: the native menu accelerator, and a
     // webview key handler. Belt and braces — the accelerator is what the menu
     // advertises, but a native Cmd+Shift+Enter can be swallowed before it
     // reaches the menu, which left users stuck inside focus mode with no way
     // back out. The dedupe below means whichever arrives first wins and a
     // second path firing for the same press can't toggle it straight back.
+    // Show the zoom chip and (re)arm its 1s auto-hide.
+    const flashZoom = (z: number) => {
+      setZoomPct(Math.round(z * 100));
+      if (zoomHideTimer.current !== null)
+        window.clearTimeout(zoomHideTimer.current);
+      zoomHideTimer.current = window.setTimeout(() => setZoomPct(null), 1000);
+    };
     const keys = (e: KeyboardEvent) => {
+      const mod = commandHeld(e);
+      // On Linux/Windows Ctrl is the modifier, but Ctrl+- and Ctrl+0 are also
+      // meaningful inside terminals (readline undo, NUL). macOS uses Cmd so
+      // there's no conflict there. Skip zoom if focus is inside an xterm canvas
+      // or textarea so the keypress reaches the shell rather than being consumed.
+      if (
+        terminalOwnsCtrl(e) &&
+        (e.target as HTMLElement | null)?.closest(
+          ".xterm-screen, .xterm-helper-textarea",
+        )
+      ) {
+        return;
+      }
       if (e.key === "Escape") {
         setZen(false);
-      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.code === "Enter") {
+      } else if (matches(e, "toggle-zen")) {
         e.preventDefault();
         toggleZen("keydown");
+      } else if (mod && !e.altKey) {
+        // Window zoom: Cmd/Ctrl with +, -, or 0. Match both the main-row and
+        // numpad keys; "=" is the unshifted "+" key on US layout; "+" always
+        // requires Shift, so zoom-in allows shiftKey. e.code covers layouts
+        // where the character is remapped (QWERTZ, AZERTY, etc.).
+        const inKey =
+          e.key === "+" ||
+          e.key === "=" ||
+          e.code === "Equal" ||
+          e.code === "NumpadAdd";
+        const outKey =
+          !e.shiftKey &&
+          (e.key === "-" || e.code === "Minus" || e.code === "NumpadSubtract");
+        const resetKey =
+          !e.shiftKey &&
+          (e.key === "0" || e.code === "Digit0" || e.code === "Numpad0");
+        if (inKey) {
+          e.preventDefault();
+          flashZoom(setZoom(loadZoom() + STEP));
+        } else if (outKey) {
+          e.preventDefault();
+          flashZoom(setZoom(loadZoom() - STEP));
+        } else if (resetKey) {
+          e.preventDefault();
+          flashZoom(setZoom(1));
+        }
       }
     };
     window.addEventListener("keydown", keys);
+    // Restore the persisted zoom level on launch.
+    void applyZoom(loadZoom());
     // The status bar's 🎨 button (and anything else outside App) opens
     // Settings at a specific tab through this event.
     const openSettings = (e: Event) =>
@@ -568,10 +800,15 @@ export default function App() {
     void ipc.hookBridgePath().then(setHookPath);
     // A relay may already be live (hot reload in dev, a future auto-start) —
     // ask rather than assume "off".
-    void ipc.relayStatus().then(setRelayStatus).catch(() => {});
+    void ipc
+      .relayStatus()
+      .then(setRelayStatus)
+      .catch(() => {});
     return () => {
       window.removeEventListener("keydown", keys);
       window.removeEventListener("canopy:open-settings", openSettings);
+      if (zoomHideTimer.current !== null)
+        window.clearTimeout(zoomHideTimer.current);
       subs.forEach((s) => void s.then((fn) => fn()));
     };
   }, []);
@@ -581,6 +818,16 @@ export default function App() {
   useEffect(() => {
     if (loaded && shouldOnboard()) setOnboarding(true);
   }, [loaded]);
+
+  // Keep the bridge's copy of the tool switches (Settings → Agents) current.
+  // Republished on every settings write, because the sidecar reads it when an
+  // agent asks for its tool list — which can be at any moment.
+  useEffect(() => {
+    const publish = () => void ipc.contextTools(getSettings().disabledTools);
+    publish();
+    window.addEventListener(THEME_CHANGE_EVENT, publish);
+    return () => window.removeEventListener(THEME_CHANGE_EVENT, publish);
+  }, []);
 
   // `canopy <dir>` delivery. Cold start: the arg waited in Rust state while
   // the webview booted — collect it once the workspace is loaded (opening a
@@ -596,11 +843,61 @@ export default function App() {
     );
     let unlisten: (() => void) | undefined;
     void import("@tauri-apps/api/event").then(({ listen }) =>
-      listen<string>("cli-open", (e) => void openDirAsProject(e.payload)).then((fn) => {
-        unlisten = fn;
-      }),
+      listen<string>("cli-open", (e) => void openDirAsProject(e.payload)).then(
+        (fn) => {
+          unlisten = fn;
+        },
+      ),
     );
     return () => unlisten?.();
+  }, [loaded, openDirAsProject]);
+
+  // The embedded browser's invariants, watched while the app runs (see
+  // browserWatchdog.ts). Dev builds always; a release build only when somebody
+  // has explicitly turned it on, so nothing about a shipped launch changes.
+  useEffect(() => startBrowserWatchdog(), []);
+
+  // A breach is reported to the console, to the app log under a stable
+  // `browser:INVARIANT` prefix, and to the selftest through watchdogViolations()
+  // — deliberately nowhere on screen.
+  //
+  // It used to raise a dev error notice here, to be impossible to miss. That
+  // notice is itself a surface over the pane, so reporting the breach hid the
+  // very view it was reporting on: the page froze into its last frame (nothing
+  // on the site responded to a click), and the invariant CLEARED some 50ms
+  // later because the view was no longer visible — the report destroying the
+  // state it existed to make visible. A measurement that changes what it
+  // measures is worse than a quiet one, and it made the app look broken in a
+  // way the bug never did.
+
+  // `canopy --selftest=browser`: the app drives a scripted browser scenario
+  // against a page it serves itself, then exits with a machine-readable report.
+  // An ordinary launch gets `null` back and loads none of it.
+  useEffect(() => {
+    if (!loaded) return;
+    let cancelled = false;
+    void ipc.selftestConfig().then((cfg) => {
+      if (!cfg || cancelled) return;
+      setSelftestMode(cfg.scenario);
+      void import("./selftest/browserSelftest")
+        .then((m) =>
+          m.runBrowserSelftest(cfg, {
+            openDirAsProject,
+            projectIdFor: (dir) =>
+              wsRef.current.projects.find((p) =>
+                p.components.some((c) => c.path === dir),
+              )?.id,
+          }),
+        )
+        // A scenario that cannot even start must still report, or the run ends
+        // as a timeout that says nothing about why.
+        .catch((err) =>
+          ipc.selftestFinish({ ok: false, error: String(err), scenario: cfg.scenario }),
+        );
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [loaded, openDirAsProject]);
 
   // Background update checks: shortly after launch (delayed so it never
@@ -609,6 +906,9 @@ export default function App() {
   // say nothing; only a real update surfaces the toast.
   useEffect(() => {
     const tick = () => {
+      // A toast arriving over the page mid-scenario would cover exactly what
+      // the scenario is watching, and it would be right to fail.
+      if (isSelftest()) return;
       void checkForUpdateAnyChannel()
         .then((u) => {
           if (!u || dismissedUpdate.current === u.info.version) return;
@@ -629,8 +929,12 @@ export default function App() {
   const update = useCallback((patch: Partial<WorkspaceState>) => {
     setWs((prev) => {
       const next = { ...prev, ...patch };
-      void saveWorkspace(next);
-      publishScopes(next);
+      // After the updater returns — a disk write and an IPC don't belong in
+      // the render phase.
+      queueMicrotask(() => {
+        void saveWorkspace(next);
+        publishScopes(next);
+      });
       return next;
     });
   }, []);
@@ -640,8 +944,14 @@ export default function App() {
       const project = wsRef.current.projects.find((p) => p.id === id);
       if (!project) return;
       if (!wsRef.current.openIds.includes(id)) {
-        for (const c of project.components) {
-          await ipc.workspaceAdd(c.path).catch((e) => console.warn("scope add failed", e));
+        // Nothing to watch while it sleeps: opening a hibernating project lands
+        // on the wake screen, and waking is what registers its paths.
+        if (!isHibernating(id)) {
+          for (const c of project.components) {
+            await ipc
+              .workspaceAdd(c.path)
+              .catch((e) => console.warn("scope add failed", e));
+          }
         }
         update({ openIds: [...wsRef.current.openIds, id], activeId: id });
       } else {
@@ -651,33 +961,282 @@ export default function App() {
     [update],
   );
 
+  /** Give back the OS-level resources one project holds — file watchers, scopes,
+   *  language servers — for every component path no *awake* project still needs.
+   *  Shared by closing a project and by putting one to sleep, which differ only
+   *  in whether the tab goes with it. A sleeping project is not counted as a
+   *  user of its paths: it registered none. */
+  const releaseProject = useCallback(async (id: string, keepIds: string[]) => {
+    const state = wsRef.current;
+    const project = state.projects.find((p) => p.id === id);
+    const stillUsed = new Set(
+      keepIds.flatMap(
+        (x) =>
+          state.projects
+            .find((p) => p.id === x)
+            ?.components.map((c) => c.path) ?? [],
+      ),
+    );
+    for (const c of project?.components ?? []) {
+      if (!stillUsed.has(c.path)) {
+        await ipc.workspaceRemove(c.path).catch(() => {});
+        await stopWorkspaceServers(c.path);
+      }
+    }
+  }, []);
+  const releaseProjectRef = useRef(releaseProject);
+  releaseProjectRef.current = releaseProject;
+
   const closeProject = useCallback(
     async (id: string) => {
       const state = wsRef.current;
-      const project = state.projects.find((p) => p.id === id);
       const openIds = state.openIds.filter((x) => x !== id);
-      // Drop watchers/scopes not used by any other open project.
-      const stillUsed = new Set(
-        openIds.flatMap(
-          (x) => state.projects.find((p) => p.id === x)?.components.map((c) => c.path) ?? [],
-        ),
+      await releaseProject(
+        id,
+        openIds.filter((x) => !isHibernating(x)),
       );
-      for (const c of project?.components ?? []) {
-        if (!stillUsed.has(c.path)) {
-          await ipc.workspaceRemove(c.path).catch(() => {});
-          await stopWorkspaceServers(c.path);
-        }
-      }
       update({
         openIds,
-        activeId: state.activeId === id ? (openIds[openIds.length - 1] ?? null) : state.activeId,
+        activeId:
+          state.activeId === id
+            ? (openIds[openIds.length - 1] ?? null)
+            : state.activeId,
       });
     },
-    [update],
+    [update, releaseProject],
   );
   closeProjectRef.current = closeProject;
   openProjectRef.current = openProject;
   updateRef.current = update;
+
+  // ---------- hibernation ----------
+  // Sleep is a third state between open and closed. The project's whole
+  // arrangement is written down and everything it was holding is given back —
+  // PTYs, agents, language servers, editor models, file watchers — but its tab
+  // stays exactly where it was, frosted over: hibernating is a state a project
+  // is *in*, not a way of closing it, and a tab that vanished would make it
+  // look like one. Clicking the tab lands on the wake screen. The snapshot
+  // store is the only marker; see hibernation.ts for why nothing else records
+  // "asleep".
+  const [hibernated, setHibernated] = useState<Record<string, ProjectSnapshot>>(
+    () => hibernatedProjects(),
+  );
+  useEffect(() => {
+    const sync = () => setHibernated(hibernatedProjects());
+    window.addEventListener(HIBERNATION_CHANGE_EVENT, sync);
+    return () => window.removeEventListener(HIBERNATION_CHANGE_EVENT, sync);
+  }, []);
+  // The project frosting over right now, and the snapshot it produced (shown
+  // as the frost forms, so you see what is being put away). `leaving` is the
+  // handover: the frost lifts while the wake screen takes its place underneath,
+  // so the two cards cross-fade instead of one popping in.
+  const [freezing, setFreezing] = useState<{
+    id: string;
+    snapshot: ProjectSnapshot | null;
+    leaving?: boolean;
+  } | null>(null);
+  // Projects being woken: the snapshot handed to their ProjectView, plus how
+  // far through rebuilding it is. The frost stays on top until it's done.
+  const [waking, setWaking] = useState<
+    Record<string, { snapshot: ProjectSnapshot; progress: WakeProgress }>
+  >({});
+
+  const hibernateProject = useCallback(
+    (id: string) => {
+      const state = wsRef.current;
+      const project = state.projects.find((p) => p.id === id);
+      if (!project || !state.openIds.includes(id)) return;
+      // Freeze what you're looking at: a background project asked to sleep
+      // comes to the front first, so the animation isn't happening off screen.
+      if (state.activeId !== id) update({ activeId: id });
+      setFreezing({ id, snapshot: null });
+      let settled = false;
+      let timer = 0;
+      const finish = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener(HIBERNATED_EVENT, onSnapshot);
+        window.clearTimeout(timer);
+        if (!ok) {
+          setFreezing(null);
+          notify(
+            `Couldn't snapshot ${project.name}, so it stays open.`,
+            "error",
+          );
+          return;
+        }
+        setFreezing({ id, snapshot: hibernationOf(id) });
+        // Let the frost finish forming first. Only then does the view behind it
+        // swap to the wake screen — keeping the ProjectView mounted until now is
+        // what lets its own teardown run (models disposed, shares ended, PTYs
+        // killed as each terminal unmounts) instead of being dropped mid-flight.
+        window.setTimeout(() => {
+          setFreezing((f) => (f?.id === id ? { ...f, leaving: true } : f));
+          void releaseProjectRef.current(
+            id,
+            wsRef.current.openIds.filter((x) => x !== id && !isHibernating(x)),
+          );
+          notify(
+            `${project.name} is hibernating — its tab is still there, wake it when you need it.`,
+            "success",
+          );
+          window.setTimeout(
+            () => setFreezing((f) => (f?.id === id ? null : f)),
+            420,
+          );
+        }, 1100);
+      };
+      const onSnapshot = (e: Event) => {
+        const d = (e as CustomEvent).detail as {
+          projectId?: string;
+          ok?: boolean;
+        } | null;
+        if (d?.projectId !== id) return;
+        finish(Boolean(d.ok));
+      };
+      window.addEventListener(HIBERNATED_EVENT, onSnapshot);
+      // The view answers synchronously; the timeout only covers a project whose
+      // view somehow isn't mounted, and it leaves the project open.
+      timer = window.setTimeout(() => finish(false), 2500);
+      window.dispatchEvent(
+        new CustomEvent(HIBERNATE_EVENT, { detail: { projectId: id } }),
+      );
+    },
+    [notify, update],
+  );
+
+  /** Hand the snapshot to a freshly mounted ProjectView and let it rebuild
+   *  underneath the wake screen. Clearing the store is what mounts the view —
+   *  the project stops being asleep the moment its restore begins. */
+  const wakeProject = useCallback((id: string) => {
+    const snapshot = hibernationOf(id);
+    if (!snapshot) return;
+    // Its paths went back when it fell asleep; the tree, the search and the
+    // change feed all need them again before the first tab reopens.
+    for (const c of wsRef.current.projects.find((p) => p.id === id)
+      ?.components ?? []) {
+      void ipc.workspaceAdd(c.path).catch(() => {});
+    }
+    const steps = wakeSteps(snapshot);
+    setWaking((prev) => ({
+      ...prev,
+      [id]: {
+        snapshot,
+        progress: {
+          done: 0,
+          total: steps.length,
+          label: steps[0]?.label ?? "Ready",
+          finished: false,
+        },
+      },
+    }));
+    clearHibernation(id);
+  }, []);
+
+  openForActionRef.current = useCallback(
+    async (id: string) => {
+      await openProjectRef.current(id);
+      if (isHibernating(id)) wakeProject(id);
+    },
+    [wakeProject],
+  );
+
+  const restoreStep = useCallback(
+    (id: string, done: number, total: number, label: string) =>
+      setWaking((prev) =>
+        prev[id]
+          ? {
+              ...prev,
+              [id]: {
+                ...prev[id],
+                progress: { done, total, label, finished: false },
+              },
+            }
+          : prev,
+      ),
+    [],
+  );
+
+  const restoreDone = useCallback((id: string) => {
+    setWaking((prev) =>
+      prev[id]
+        ? {
+            ...prev,
+            [id]: {
+              ...prev[id],
+              progress: {
+                ...prev[id].progress,
+                done: prev[id].progress.total,
+                finished: true,
+              },
+            },
+          }
+        : prev,
+    );
+    // The thaw: the frost dissolves off the finished workspace, then unmounts.
+    window.setTimeout(
+      () =>
+        setWaking((prev) => {
+          if (!prev[id]) return prev;
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        }),
+      900,
+    );
+  }, []);
+
+  // A project closed mid-wake never reports finishing (its view is gone), so
+  // drop it here rather than leaving a wake screen that can never end — it
+  // would come back the moment the project was reopened.
+  useEffect(() => {
+    setWaking((prev) => {
+      const live = Object.keys(prev).filter((id) => ws.openIds.includes(id));
+      if (live.length === Object.keys(prev).length) return prev;
+      return Object.fromEntries(live.map((id) => [id, prev[id]]));
+    });
+  }, [ws.openIds]);
+
+  /** Throw a snapshot away and open the project empty — the escape hatch for a
+   *  workspace you no longer want back. */
+  const discardHibernation = useCallback(
+    (id: string) => {
+      clearHibernation(id);
+      notify("Snapshot discarded — the project opens empty.");
+    },
+    [notify],
+  );
+
+  // Tell the PR watcher which repos matter: every component of every OPEN
+  // project. Closed projects are not polled — the point of one poller is that
+  // its budget goes on what the user is actually working on. The backend folds
+  // these paths onto their repo toplevels and de-duplicates, so passing raw
+  // component paths (and re-passing them on every workspace edit) is cheap; the
+  // store drops identical sets before they reach IPC.
+  // A hibernating project keeps its tab but is not "what the user is working
+  // on" by any measure that matters here: nothing in it is running, and its
+  // PRs can wait until it is woken.
+  const watchedPaths = useMemo(() => {
+    const open = new Set(ws.openIds ?? []);
+    return ws.projects
+      .filter((p) => open.has(p.id) && !hibernated[p.id])
+      .flatMap((p) => p.components.map((c) => c.path))
+      .sort();
+  }, [ws.projects, ws.openIds, hibernated]);
+  useEffect(() => {
+    prWatch.setPaths(watchedPaths);
+  }, [watchedPaths]);
+
+  // SpotSearch's index, kept up to date and pruned while the app runs rather
+  // than only when someone opens ⌘K (see spotIndexJob.ts). Every project the
+  // user has, not just the open ones: the index is machine-wide, and a store
+  // that files itself per project can only be found by handing over the path.
+  const spotRoots = useRef<string[]>([]);
+  spotRoots.current = useMemo(
+    () => ws.projects.flatMap((p) => p.components.map((c) => c.path)),
+    [ws.projects],
+  );
+  useEffect(() => startSpotIndexJob(() => spotRoots.current), []);
 
   // A PTY opened from the phone (spawn_headless emits pty:spawned). Route it to
   // the project whose component path most-specifically contains its cwd, open
@@ -707,10 +1266,13 @@ export default function App() {
       .onPtySpawned(async (e) => {
         const projectId = projectForCwd(e.cwd);
         if (!projectId) {
-          notify(`A remote agent started in ${e.cwd}, outside any project.`, "info");
+          notify(
+            `A remote agent started in ${e.cwd}, outside any project.`,
+            "info",
+          );
           return;
         }
-        await openProjectRef.current(projectId);
+        await openForActionRef.current(projectId);
         // A beat so a not-yet-open project's ProjectView mounts and registers
         // its listener before the event fires; attachTerminal is idempotent by
         // pty id, so a redundant dispatch just re-focuses the tab. A timer, not
@@ -732,6 +1294,71 @@ export default function App() {
       });
     return () => un?.();
   }, [notify]);
+
+  // A clicked notification, or a `canopy 'canopy://…'` from a terminal.
+  //
+  // The whole point is that the target was composed minutes ago, against a
+  // workspace that has since moved on — the terminal exited, the project was
+  // closed, the teammate left. So this never insists: it resolves the project,
+  // opens it (waking it if it was hibernating — there is no ProjectView behind
+  // the frost to receive anything), and hands the link down. The ProjectView
+  // takes it as far as it can and says so if the exact surface is gone. With
+  // no project to resolve at all, the window is already up, which is where
+  // this used to stop for every notification.
+  useEffect(() => {
+    if (!loaded) return;
+    let un: (() => void) | undefined;
+    void ipc
+      .onDeepLink(async (raw) => {
+        const link = parseDeepLink(raw);
+        if (!link || link.kind === "app") return;
+        const state = wsRef.current;
+        // Team surfaces (chat, transfers, the inbox) are global but rendered
+        // inside a project, so they carry no project hint and are perfectly
+        // happy in whichever one is in front. A link that *does* name a
+        // project and doesn't resolve is a different story — dropping the user
+        // into an unrelated project would be worse than saying so.
+        const hinted = Boolean(link.projectId || link.path);
+        const projectId =
+          projectForLink(link, state.projects) ??
+          // An agent running in a worktree has a cwd (`<repo>-wt-…`) under no
+          // component root, so a hinted link can still fail to resolve. With
+          // exactly one project open there is only one place it could mean —
+          // the same fallback agent actions already take.
+          (hinted
+            ? state.openIds.length === 1
+              ? state.openIds[0]
+              : undefined
+            : (state.activeId ?? state.openIds[0]));
+        if (!projectId) {
+          notify(
+            hinted
+              ? "That notification's project isn't in this workspace any more."
+              : "Nothing to open — no project is open.",
+            "info",
+          );
+          return;
+        }
+        await openForActionRef.current(projectId);
+        if (link.kind === "project") return;
+        // Timer, not rAF — a project that was hibernating has only just
+        // mounted its ProjectView, and a listener registered during that
+        // mount would miss an event dispatched in the same frame.
+        window.setTimeout(
+          () =>
+            window.dispatchEvent(
+              new CustomEvent("canopy:deep-link", {
+                detail: { projectId, link },
+              }),
+            ),
+          80,
+        );
+      })
+      .then((u) => {
+        un = u;
+      });
+    return () => un?.();
+  }, [loaded, notify]);
 
   // An action an agent requested via the MCP context bridge (canopy_start_server
   // / canopy_open_preview). Routed exactly like a phone-spawned PTY: find the
@@ -760,27 +1387,88 @@ export default function App() {
         // Keyed by terminal id, not a path: the project owning that pty is
         // already open (its server is running), so just broadcast — the owning
         // ProjectView matches by pty and acts, the rest ignore it.
-        if (a.kind === "restart_server") {
+        // Same routing for an agent closing itself: the tab lives in whichever
+        // ProjectView owns that pty, and the terminal is the only address the
+        // action has — canopy_close_session takes no arguments at all.
+        if (a.kind === "restart_server" || a.kind === "close_session") {
           window.dispatchEvent(
-            new CustomEvent("canopy:agent-action", { detail: { projectId: null, action: a } }),
+            new CustomEvent("canopy:agent-action", {
+              detail: { projectId: null, action: a },
+            }),
           );
+          return;
+        }
+        // A micro-task reporting in. Surface the outcome here — the user has
+        // likely tabbed away, which is the whole point of a fire-and-forget
+        // task — then broadcast by pty like restart_server so the owning
+        // ProjectView can close (done) or focus (blocked) the tab.
+        if (a.kind === "job_done") {
+          const ok = a.status === "done";
+          const summary = a.summary ?? "A micro-task finished.";
+          notify(
+            `${ok ? "Task done" : "Task blocked"}: ${summary}${a.url ? ` — ${a.url}` : ""}`,
+            ok ? "success" : "warn",
+          );
+          // Blocked means the agent is still there, waiting on an answer —
+          // send the click to its terminal. Done means the opposite: the
+          // ProjectView below is about to kill the pty and close the tab, so
+          // the only thing left to look at is the run's row in Tasks.
+          void nativeNotify(
+            "Canopy — Task",
+            summary,
+            !ok && a.ptyId != null
+              ? { kind: "terminal", ptyId: a.ptyId, path: a.route }
+              : { kind: "panel", panel: "tasks", path: a.route },
+          );
+          window.dispatchEvent(
+            new CustomEvent("canopy:agent-action", {
+              detail: { projectId: null, action: a },
+            }),
+          );
+          return;
+        }
+        // An agent reaching for the user (canopy_notify) — often one running in
+        // a terminal nobody is watching. It doesn't move the app on its own:
+        // an agent saying something is not grounds for yanking the user out of
+        // what they're doing, so it lands as a notice here. The native banner
+        // is the one that carries a target, because by the time it's read the
+        // user has already left, and "which terminal said that?" is the entire
+        // question. The sidecar stamps the terminal it ran in; without one
+        // (an agent outside a Canopy tab) the cwd still names the project.
+        if (a.kind === "notify") {
+          notify(a.text ?? "", (a.level ?? "info") as NoticeKind);
+          if (a.level === "error" || a.level === "warn")
+            void nativeNotify(
+              "Canopy — Agent",
+              a.text ?? "",
+              a.ptyId != null
+                ? { kind: "terminal", ptyId: a.ptyId, path: a.route }
+                : { kind: "project", path: a.route },
+            );
           return;
         }
         const projectId =
           projectForCwd(a.route) ??
           // A worktree the agent runs in follows `<repo>-wt-…`; fall back to the
           // single open project so an action still lands somewhere sensible.
-          (wsRef.current.openIds.length === 1 ? wsRef.current.openIds[0] : undefined);
+          (wsRef.current.openIds.length === 1
+            ? wsRef.current.openIds[0]
+            : undefined);
         if (!projectId) {
-          notify("An agent asked to act, but its directory isn't in any open project.", "info");
+          notify(
+            "An agent asked to act, but its directory isn't in any open project.",
+            "info",
+          );
           return;
         }
-        await openProjectRef.current(projectId);
+        await openForActionRef.current(projectId);
         // Timer, not rAF — see the attach-terminal dispatch above.
         window.setTimeout(
           () =>
             window.dispatchEvent(
-              new CustomEvent("canopy:agent-action", { detail: { projectId, action: a } }),
+              new CustomEvent("canopy:agent-action", {
+                detail: { projectId, action: a },
+              }),
             ),
           80,
         );
@@ -789,7 +1477,7 @@ export default function App() {
         un = u;
       });
     return () => un?.();
-  }, [notify]);
+  }, [notify, nativeNotify]);
 
   // A browser-control op (canopy_browser_*). Routed like agent:action, but
   // request/response: an op that can't reach a project must answer the bridge
@@ -816,7 +1504,9 @@ export default function App() {
       .onAgentBrowser(async (op) => {
         const projectId =
           projectForCwd(op.route) ??
-          (wsRef.current.openIds.length === 1 ? wsRef.current.openIds[0] : undefined);
+          (wsRef.current.openIds.length === 1
+            ? wsRef.current.openIds[0]
+            : undefined);
         if (!projectId) {
           void ipc.browserResult(
             op.id,
@@ -825,7 +1515,7 @@ export default function App() {
           );
           return;
         }
-        await openProjectRef.current(projectId);
+        await openForActionRef.current(projectId);
         // Timer, not rAF: rAF starves while the window is occluded, which held
         // the agent's request open until the bridge's timeout even though the
         // op would have run fine — the whole preview pipeline (React commits,
@@ -833,10 +1523,90 @@ export default function App() {
         window.setTimeout(
           () =>
             window.dispatchEvent(
-              new CustomEvent("canopy:agent-browser", { detail: { projectId, op } }),
+              new CustomEvent("canopy:agent-browser", {
+                detail: { projectId, op },
+              }),
             ),
           80,
         );
+      })
+      .then((u) => {
+        un = u;
+      });
+    return () => un?.();
+  }, []);
+
+  // The ops only this window can answer (canopy_diagnostics, canopy_references,
+  // canopy_definition, canopy_tickets, canopy_reviews, canopy_ask_user). Unlike
+  // the browser ops these need no tab, so they're answered here: find the
+  // project the agent is working in, hand it the roots and repos, answer.
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    void ipc
+      .onAgentUi(async (op) => {
+        const norm = (p: string) => p.replace(/\/+$/, "");
+        const project =
+          wsRef.current.projects.find((p) =>
+            p.components.some((c) => {
+              const r = norm(c.path);
+              const cwd = norm(op.route);
+              return r && (cwd === r || cwd.startsWith(r + "/"));
+            }),
+          ) ??
+          (wsRef.current.openIds.length === 1
+            ? wsRef.current.projects.find(
+                (p) => p.id === wsRef.current.openIds[0],
+              )
+            : undefined);
+        const roots = project?.components.map((c) => c.path) ?? [];
+        // An "ask" needs no project — a background agent with a question is
+        // exactly the case where its cwd may be a worktree we don't track.
+        if (!roots.length && op.op !== "ask") {
+          void ipc.browserResult(
+            op.id,
+            false,
+            "This session's directory isn't inside any open Canopy project, so the IDE has nothing to answer with.",
+          );
+          return;
+        }
+        try {
+          const repos = project
+            ? await ipc
+                .gitRepos(
+                  project.components.map(
+                    (c) => [c.label, c.path] as [string, string],
+                  ),
+                )
+                .then((rs) => [...new Set(rs.map((r) => r.path))])
+                .catch(() => [])
+            : [];
+          const data = await runUiOp(op, {
+            roots,
+            repos,
+            inbox: relayInboxRef.current,
+            ask: (question, options) =>
+              new Promise<string>((resolve) => {
+                setAsk({ id: op.id, question, options, resolve });
+              }),
+            // The page an agent's browser ops are driving, for the vault ops.
+            // The tab id comes from the view snapshots; the URL comes from the
+            // page itself, because a redirect (every login flow has one) moves
+            // it without anything on this side re-rendering.
+            preview: async () => {
+              const tabId = browserViewSnapshots().find((v) => v.wanted)?.tabId;
+              if (!tabId) return null;
+              const here = await ipc.browserHere(tabId).catch(() => null);
+              return here?.url ? { tabId, url: here.url } : null;
+            },
+          });
+          void ipc.browserResult(op.id, true, data);
+        } catch (err) {
+          void ipc.browserResult(
+            op.id,
+            false,
+            String(err instanceof Error ? err.message : err),
+          );
+        }
       })
       .then((u) => {
         un = u;
@@ -878,6 +1648,72 @@ export default function App() {
     [update, closeProject],
   );
 
+  // Stable titlebar handlers — kept out of render so the memoized TitleBar
+  // only re-renders when its data props change, not on every App state tick.
+  const selectProject = useCallback(
+    (id: string) => update({ activeId: id }),
+    [update],
+  );
+  /** ⌥/Alt held: the project pills wear the digit that jumps to them, the way
+   *  ⌘ numbers the tabs inside a project. Two layers, one gesture. */
+  const projectHints = useHeldModifier("projects");
+  useEffect(() => {
+    // Capture phase: a focused terminal or editor would otherwise swallow the
+    // digit (and on macOS ⌥3 would type "£" into the shell).
+    const onKeydown = (e: KeyboardEvent) => {
+      const digit = digitFromCode(e.code);
+      if (digit === null || !hintModifierOnly(e, "projects")) return;
+      const { openIds, projects } = wsRef.current;
+      // The same order the pills are drawn in: ids without a project are
+      // filtered out of the strip, so they must not be counted here either.
+      const id = openIds.filter((i) => projects.some((p) => p.id === i))[
+        digit - 1
+      ];
+      if (!id) return;
+      e.preventDefault();
+      updateRef.current({ activeId: id });
+    };
+    window.addEventListener("keydown", onKeydown, true);
+    return () => window.removeEventListener("keydown", onKeydown, true);
+  }, []);
+  const handleCloseProject = useCallback(
+    (id: string) => {
+      const project = wsRef.current.projects.find((p) => p.id === id);
+      if (project) setConfirmClose(project);
+    },
+    [],
+  );
+  const stopCollab = useCallback(() => {
+    collab.current?.stopAll();
+    notify("Collaboration ended.");
+  }, [notify]);
+  const newProject = useCallback(() => setDialog({ mode: "new" }), []);
+  const editProject = useCallback(
+    (p: Project) => setDialog({ mode: "edit", project: p }),
+    [],
+  );
+  const openManager = useCallback(() => setManager(true), []);
+
+  // Update-toast handlers.
+  const openDownloadsPage = useCallback(() => {
+    void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
+      openUrl("https://canopyide.dev/downloads"),
+    );
+  }, []);
+  const installAndRestart = useCallback(() => {
+    setUpdateProgress(0);
+    void installUpdate(setUpdateProgress).catch((err) => {
+      setUpdateProgress(null);
+      setUpdateAvail(null);
+      notify(`Update failed: ${err}`, "error");
+    });
+  }, [notify]);
+  const dismissUpdate = useCallback(() => {
+    if (updateAvail) dismissedUpdate.current = updateAvail.info.version;
+    setUpdateAvail(null);
+  }, [updateAvail]);
+  const dismissNotice = useCallback(() => setNotice(null), []);
+
   // The relay handle every ProjectView shares. Sends append the stamped
   // message locally — the relay never echoes a frame back to its author, so
   // this is the only way our own words reach our own transcript.
@@ -885,9 +1721,12 @@ export default function App() {
     const msg = await ipc.relaySendChat(to, text);
     setRelayChat((prev) => [...prev.slice(-499), msg]);
   }, []);
-  const relaySendCommand = useCallback(async (to: string | null, kind: string, payload: unknown) => {
-    await ipc.relaySendCommand(to, kind, payload);
-  }, []);
+  const relaySendCommand = useCallback(
+    async (to: string | null, kind: string, payload: unknown) => {
+      await ipc.relaySendCommand(to, kind, payload);
+    },
+    [],
+  );
   // Unread-per-conversation, derived: a message someone else sent, newer than
   // the last time that conversation was read. "" is the team channel; a member
   // id is a DM. Own messages never count.
@@ -902,131 +1741,205 @@ export default function App() {
     }
     return counts;
   }, [relayChat, chatSeen, relayStatus.self_id]);
-  const relay: RelayHandle = {
-    status: relayStatus,
-    chat: relayChat,
-    inbox: relayInbox,
-    transfers: relayTransfers,
-    collab: collab.current,
-    collabTick,
-    hostStart: async (name, visibility, port) => {
-      setRelayStatus(await ipc.relayHostStart(name, visibility, port));
-    },
-    hostStop: async () => {
-      relayIntentional.current = true;
-      setRelayStatus(await ipc.relayHostStop());
-      setRelayChat([]);
-    },
-    regenerateCode: async () => {
-      setRelayStatus(await ipc.relayRegenerateCode());
-    },
-    connect: async (addr, code, name) => {
-      setRelayStatus(await ipc.relayConnect(addr, code, name));
-    },
-    disconnect: async () => {
-      relayIntentional.current = true;
-      setRelayStatus(await ipc.relayDisconnect());
-      setRelayChat([]);
-    },
-    sendChat: relaySendChat,
-    sendCommand: relaySendCommand,
-    dismissInbox: (id) => setRelayInbox((prev) => prev.filter((m) => m.id !== id)),
-    reportActiveChat: (peer) => {
-      activeChatRef.current = peer;
-      // Opening (or having open) a conversation reads it.
-      if (peer !== undefined) markSeen(peer);
-    },
-    unread,
-  };
+  // Memoized: this handle is threaded through every ProjectView and beyond,
+  // and a fresh object per App render is what used to defeat memo barriers
+  // downstream (PaneBar, and now ProjectView itself).
+  const relay: RelayHandle = useMemo(
+    () => ({
+      status: relayStatus,
+      chat: relayChat,
+      inbox: relayInbox,
+      transfers: relayTransfers,
+      collab: collabMgr,
+      collabTick,
+      hostStart: async (name, visibility, port) => {
+        setRelayStatus(await ipc.relayHostStart(name, visibility, port));
+      },
+      hostStop: async () => {
+        relayIntentional.current = true;
+        setRelayStatus(await ipc.relayHostStop());
+        setRelayChat([]);
+      },
+      regenerateCode: async () => {
+        setRelayStatus(await ipc.relayRegenerateCode());
+      },
+      connect: async (addr, code, name) => {
+        setRelayStatus(await ipc.relayConnect(addr, code, name));
+      },
+      disconnect: async () => {
+        relayIntentional.current = true;
+        setRelayStatus(await ipc.relayDisconnect());
+        setRelayChat([]);
+      },
+      sendChat: relaySendChat,
+      sendCommand: relaySendCommand,
+      dismissInbox: (id) =>
+        setRelayInbox((prev) => prev.filter((m) => m.id !== id)),
+      reportActiveChat: (peer) => {
+        activeChatRef.current = peer;
+        // Opening (or having open) a conversation reads it.
+        if (peer !== undefined) markSeen(peer);
+      },
+      unread,
+    }),
+    [
+      relayStatus,
+      relayChat,
+      relayInbox,
+      relayTransfers,
+      collabMgr,
+      collabTick,
+      relaySendChat,
+      relaySendCommand,
+      markSeen,
+      unread,
+    ],
+  );
 
+  const openProjects = useMemo(
+    () =>
+      ws.openIds
+        .map((id) => ws.projects.find((p) => p.id === id))
+        .filter((p): p is Project => Boolean(p)),
+    [ws.openIds, ws.projects],
+  );
+  const allProjectRoots = useMemo(
+    () =>
+      openProjects.map((x) => ({
+        name: x.name,
+        roots: x.components.map((c) => c.path),
+        // Carried because the cleanup task must not offer to delete what a wake
+        // expects to find (installs, build output) — hibernating is "put away",
+        // not "finished with".
+        asleep: Boolean(hibernated[x.id]),
+      })),
+    [openProjects, hibernated],
+  );
+  const allPending = useMemo(
+    () =>
+      derivePending(agentEvents).filter((i) => !dismissedPending.has(i.key)),
+    [agentEvents, dismissedPending],
+  );
+  // Resolved rather than asserted: a project can be deleted from the manager
+  // while its frost is still forming.
+  const freezingProject = freezing
+    ? (ws.projects.find((p) => p.id === freezing.id) ?? null)
+    : null;
+  /** Whether a project's tab shows the wake screen instead of a workspace. It
+   *  is asleep and not being woken — except during the freeze itself, where the
+   *  ProjectView stays mounted behind the frost until it has finished putting
+   *  itself away. */
+  const showsWakeScreen = (id: string) =>
+    Boolean(hibernated[id]) &&
+    !waking[id] &&
+    !(freezing?.id === id && !freezing.leaving);
   // Project tabs are draggable; their order is the workspace's own, so it
   // persists with everything else in the workspace file.
   const tabDrag = useTabDrag(ws.openIds, (openIds) => update({ openIds }));
+  // Tab badges count only what's blocked on the user — an agent that finished
+  // and is idling is not urgent. Content-stable: most hook events move no
+  // badge, and only a count actually changing should break TitleBar's memo.
+  const pendingCountsSig = JSON.stringify(
+    Object.fromEntries(
+      openProjects.map((p) => [
+        p.id,
+        pendingForRoots(
+          allPending,
+          p.components.map((c) => c.path),
+        ).filter((i) => i.kind !== "idle").length,
+      ]),
+    ),
+  );
+  const pendingCounts = useMemo(
+    () => JSON.parse(pendingCountsSig) as Record<string, number>,
+    [pendingCountsSig],
+  );
+  const pendingCount = useCallback(
+    (p: Project) => pendingCounts[p.id] ?? 0,
+    [pendingCounts],
+  );
+
+  // Stable per-project handlers, so memo(ProjectView) isn't defeated by fresh
+  // closures. Each reads the current project through wsRef at call time.
+  const projectHandlers = useRef(
+    new Map<
+      string,
+      {
+        onRestoreStep: (done: number, total: number, label: string) => void;
+        onRestored: () => void;
+        onEdit: () => void;
+        onShareContext: (on: boolean) => void;
+        onSaveCustomTasks: (tasks: CustomMicroTask[]) => void;
+      }
+    >(),
+  );
+  const handlersFor = (id: string) => {
+    let h = projectHandlers.current.get(id);
+    if (!h) {
+      const find = () => wsRef.current.projects.find((x) => x.id === id);
+      h = {
+        onRestoreStep: (done, total, label) =>
+          restoreStep(id, done, total, label),
+        onRestored: () => restoreDone(id),
+        onEdit: () => {
+          const p = find();
+          if (p) setDialog({ mode: "edit", project: p });
+        },
+        onShareContext: (on) => {
+          const p = find();
+          if (p) void saveProject({ ...p, shareContext: on });
+        },
+        onSaveCustomTasks: (tasks) => {
+          const p = find();
+          if (p) void saveProject({ ...p, customTasks: tasks });
+        },
+      };
+      projectHandlers.current.set(id, h);
+    }
+    return h;
+  };
+  const dismissPending = useCallback((key: string) => {
+    // Bail unchanged when already dismissed: the auto-clear effect fires per
+    // render, and a fresh Set each time would loop it.
+    setDismissedPending((prev) =>
+      prev.has(key) ? prev : new Set(prev).add(key),
+    );
+  }, []);
 
   if (!loaded) return null;
-
-  const openProjects = ws.openIds
-    .map((id) => ws.projects.find((p) => p.id === id))
-    .filter((p): p is Project => Boolean(p));
-  const allPending = derivePending(agentEvents).filter((i) => !dismissedPending.has(i.key));
-  // Tab badges count only what's blocked on the user — an agent that finished
-  // and is idling is not urgent.
-  const pendingCount = (p: Project) =>
-    pendingForRoots(allPending, p.components.map((c) => c.path)).filter(
-      (i) => i.kind !== "idle",
-    ).length;
 
   return (
     <div className={`app ${zen ? "zen" : ""}`}>
       {/* Focus mode: chrome slides away but stays reachable — hovering the top
           edge brings the project tabs and the tab strip back. */}
       {zen && <div className="zen-hotzone" />}
-      <div className="titlebar">
-        <div className="project-tabs">
-          {openProjects.map((p) => (
-            <div
-              key={p.id}
-              className={`project-tab ${p.id === ws.activeId ? "project-tab-active" : ""} ${
-                p.id === tabDrag.dragId ? "tab-dragging" : ""
-              }`}
-              {...tabDrag.itemProps(p.id)}
-              onClick={() => update({ activeId: p.id })}
-              title={p.components.map((c) => c.path).join("\n")}
-            >
-              <span>{p.name}</span>
-              {pendingCount(p) > 0 && (
-                <span className="badge badge-urgent" title="agent needs your input">
-                  {pendingCount(p)}
-                </span>
-              )}
-              <span
-                className="tab-close"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void closeProject(p.id);
-                }}
-              >
-                ✕
-              </span>
-            </div>
-          ))}
-          <button className="btn-icon" title="New project" onClick={() => setDialog({ mode: "new" })}>
-            ＋
-          </button>
-        </div>
-        <div className="titlebar-spacer" />
-        {collabTick >= 0 && collab.current!.activeCount > 0 && (
-          <div
-            className="collab-live"
-            title="Live collaboration in progress — click ✕ to end every share and session"
-          >
-            <span className="collab-live-dot" />
-            Collaborating
-            <button
-              className="collab-live-stop"
-              title="Stop collaborating — end every share and live session"
-              onClick={() => {
-                collab.current!.stopAll();
-                notify("Collaboration ended.");
-              }}
-            >
-              ✕
-            </button>
-          </div>
-        )}
-        <button
-          className="btn project-manage-btn"
-          title="Manage projects — open, create, edit, delete"
-          onClick={() => setManager(true)}
-        >
-          Projects ▾
-        </button>
-      </div>
+      {/* Transient zoom level, shown ~1s after Cmd +/-/0. */}
+      {zoomPct !== null && <div className="zoom-indicator">{zoomPct}%</div>}
+      <TitleBar
+        openProjects={openProjects}
+        activeId={ws.activeId}
+        pendingCount={pendingCount}
+        collabActive={collabTick >= 0 && (collab.current?.activeCount ?? 0) > 0}
+        tabDragId={tabDrag.dragId}
+        tabDragOffsetX={tabDrag.dragOffsetX}
+        tabDragItemProps={tabDrag.itemProps}
+        hibernated={hibernated}
+        showHints={projectHints}
+        onSelectProject={selectProject}
+        onCloseProject={handleCloseProject}
+        onHibernateProject={hibernateProject}
+        onWakeProject={wakeProject}
+        onEditProject={editProject}
+        onStopCollab={stopCollab}
+        onNewProject={newProject}
+        onManageProjects={openManager}
+      />
 
       <div className="app-body">
         {openProjects.length === 0 && (
           <Welcome
             projects={ws.projects}
+            hibernated={hibernated}
             onOpen={(id) => void openProject(id)}
             onNew={() => setDialog({ mode: "new" })}
             onDelete={(id) => {
@@ -1035,123 +1948,101 @@ export default function App() {
             }}
           />
         )}
-        {openProjects.map((p) => (
-          <ProjectView
-            key={p.id}
-            project={p}
-            visible={p.id === ws.activeId}
-            zen={zen}
-            allProjects={openProjects.map((x) => ({
-              name: x.name,
-              roots: x.components.map((c) => c.path),
-            }))}
-            events={agentEvents}
-            hookPath={hookPath}
-            relay={relay}
-            dismissedPending={dismissedPending}
-            onDismissPending={(key) =>
-              // Bail unchanged when already dismissed: the auto-clear effect
-              // fires per render, and a fresh Set each time would loop it.
-              setDismissedPending((prev) =>
-                prev.has(key) ? prev : new Set(prev).add(key),
-              )
-            }
-            onEdit={() => setDialog({ mode: "edit", project: p })}
-            onNotice={notify}
-            onShareContext={(on) =>
-              void saveProject({ ...p, shareContext: on })
-            }
-          />
-        ))}
+        {/* A project that is asleep and not being woken has no ProjectView at
+            all — that is the saving. It's the frost, and a button. */}
+        {openProjects
+          .filter((p) => showsWakeScreen(p.id))
+          .map((p) => (
+            <div
+              key={p.id}
+              className="project-view"
+              style={{ display: p.id === ws.activeId ? "flex" : "none" }}
+            >
+              <HibernationView
+                project={p}
+                snapshot={hibernated[p.id]}
+                progress={null}
+                onWake={() => wakeProject(p.id)}
+                onDiscard={() => discardHibernation(p.id)}
+              />
+            </div>
+          ))}
+        {openProjects
+          .filter((p) => !showsWakeScreen(p.id))
+          .map((p) => (
+            <ProjectView
+              key={p.id}
+              project={p}
+              visible={p.id === ws.activeId}
+              restore={waking[p.id]?.snapshot ?? null}
+              onRestoreStep={handlersFor(p.id).onRestoreStep}
+              onRestored={handlersFor(p.id).onRestored}
+              zen={zen}
+              allProjects={allProjectRoots}
+              events={agentEvents}
+              hookPath={hookPath}
+              relay={relay}
+              dismissedPending={dismissedPending}
+              onDismissPending={dismissPending}
+              onEdit={handlersFor(p.id).onEdit}
+              onNotice={notify}
+              onShareContext={handlersFor(p.id).onShareContext}
+              onSaveCustomTasks={handlersFor(p.id).onSaveCustomTasks}
+            />
+          ))}
+
+        {/* The frost, layered over the project area. Going to sleep it forms
+            over the live workspace; waking, it stays put while the workspace
+            rebuilds underneath and only then dissolves. */}
+        {freezing && freezingProject && (
+          <div className="hib-layer">
+            <FreezeOverlay
+              project={freezingProject}
+              snapshot={freezing.snapshot}
+              leaving={Boolean(freezing.leaving)}
+            />
+          </div>
+        )}
+        {Object.entries(waking).map(([id, w]) => {
+          const project = ws.projects.find((p) => p.id === id);
+          if (!project || id !== ws.activeId) return null;
+          return (
+            <div key={id} className="hib-layer">
+              <HibernationView
+                project={project}
+                snapshot={w.snapshot}
+                progress={w.progress}
+              />
+            </div>
+          );
+        })}
       </div>
 
       {updateAvail && (
-        <div className="update-toast">
-          <div className="update-head">
-            <strong>Canopy {updateAvail.info.version}</strong> is available
-          </div>
-          {updateAvail.info.notes && <div className="update-notes">{updateAvail.info.notes}</div>}
-          {updateAvail.kind === "manual" ? (
-            <div className="update-actions">
-              {/* This install type can't self-update (.deb/.rpm — the package
-                  manager owns it, but there's no apt/dnf repo to serve it) —
-                  hand off to the downloads page rather than pretend. */}
-              <button
-                className="btn btn-accent"
-                onClick={() => {
-                  void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
-                    openUrl("https://canopyide.dev/downloads"),
-                  );
-                }}
-              >
-                Open downloads page
-              </button>
-              <button
-                className="btn"
-                onClick={() => {
-                  dismissedUpdate.current = updateAvail.info.version;
-                  setUpdateAvail(null);
-                }}
-              >
-                Later
-              </button>
-            </div>
-          ) : updateProgress === null ? (
-            <div className="update-actions">
-              {/* Never install without asking: the terminals hold live agent
-                  sessions whose scrollback exists nowhere else, and installing
-                  relaunches the app. */}
-              <button
-                className="btn btn-accent"
-                onClick={() => {
-                  setUpdateProgress(0);
-                  void installUpdate(setUpdateProgress).catch((err) => {
-                    setUpdateProgress(null);
-                    setUpdateAvail(null);
-                    notify(`Update failed: ${err}`, "error");
-                  });
-                }}
-              >
-                Install and restart
-              </button>
-              <button
-                className="btn"
-                onClick={() => {
-                  dismissedUpdate.current = updateAvail.info.version;
-                  setUpdateAvail(null);
-                }}
-              >
-                Later
-              </button>
-            </div>
-          ) : (
-            <div className="update-progress">
-              <div
-                className="update-bar"
-                style={{ width: `${Math.round(updateProgress * 100)}%` }}
-              />
-              <span className="update-pct">
-                {Math.round(updateProgress * 100)}% — Canopy will restart itself
-              </span>
-            </div>
-          )}
-        </div>
+        <UpdateToast
+          update={updateAvail}
+          progress={updateProgress}
+          onOpenDownloads={openDownloadsPage}
+          onInstall={installAndRestart}
+          onDismiss={dismissUpdate}
+        />
       )}
 
       {notice && (
-        <div
-          className={`notice notice-${notice.kind}`}
-          onClick={() => setNotice(null)}
-          title="dismiss"
-        >
-          {notice.text}
-        </div>
+        <NoticeToast
+          text={notice.text}
+          kind={notice.kind}
+          onDismiss={dismissNotice}
+        />
       )}
 
       {manager && (
         <ProjectManager
           projects={ws.projects}
           openIds={ws.openIds}
+          hibernated={hibernated}
+          onHibernate={hibernateProject}
+          onWake={wakeProject}
           onOpen={(id) => void openProject(id)}
           onNew={() => {
             setManager(false);
@@ -1166,33 +2057,80 @@ export default function App() {
         />
       )}
 
+      {confirmClose && (() => {
+        const roots = confirmClose.components.map((c) => c.path);
+        const activeAgents = pendingForRoots(allPending, roots).filter((i) => i.kind !== "idle");
+        const isAsleep = confirmClose.id in hibernated;
+        const metaLine = confirmClose.components
+          .map((c) => `${c.label}  ${c.path}`)
+          .join("\n");
+        const extraActions: import("./components/Dialog").DialogAction[] = [];
+        if (!isAsleep) {
+          extraActions.push({
+            label: "❄ Hibernate",
+            onClick: () => {
+              const id = confirmClose.id;
+              setConfirmClose(null);
+              hibernateProject(id);
+            },
+          });
+        }
+        extraActions.push({
+          label: "Close project",
+          primary: true,
+          onClick: () => {
+            const id = confirmClose.id;
+            setConfirmClose(null);
+            void closeProject(id);
+          },
+        });
+        return (
+          <Dialog
+            key={confirmClose.id}
+            variant="danger"
+            title={`Close ${confirmClose.name}?`}
+            body={
+              activeAgents.length > 0
+                ? `${activeAgents.length === 1 ? "1 agent is actively working" : `${activeAgents.length} agents are actively working`} — closing will interrupt ${activeAgents.length === 1 ? "it" : "them"}. All terminals and servers will be stopped.`
+                : "All terminals, agents, and servers in this project will be stopped."
+            }
+            meta={metaLine}
+            dismissLabel="Keep open"
+            onDismiss={() => setConfirmClose(null)}
+            actions={extraActions}
+          />
+        );
+      })()}
+
       {confirmDelete && (
-        <div className="confirm-backdrop" onMouseDown={() => setConfirmDelete(null)}>
-          <div className="confirm" onMouseDown={(e) => e.stopPropagation()}>
-            <p>
-              Delete project <strong>{confirmDelete.name}</strong>?
-            </p>
-            <p className="confirm-sub">
-              Removes it from Canopy only — the folders on disk are untouched.
-              If it is open, its terminals (and anything running in them) will
-              be closed.
-            </p>
-            <div className="confirm-actions">
-              <button className="btn" onClick={() => setConfirmDelete(null)}>
-                Cancel
-              </button>
-              <button
-                className="btn btn-danger-solid"
-                onClick={() => {
-                  deleteProject(confirmDelete.id);
-                  setConfirmDelete(null);
-                }}
-              >
-                Delete
-              </button>
-            </div>
-          </div>
-        </div>
+        <Dialog
+          variant="danger"
+          title={`Delete project ${confirmDelete.name}?`}
+          body="Removes it from Canopy only — the folders on disk are untouched. If it is open, its terminals (and anything running in them) will be closed."
+          dismissLabel="Cancel"
+          onDismiss={() => setConfirmDelete(null)}
+          actions={[
+            {
+              label: "Delete",
+              primary: true,
+              onClick: () => {
+                deleteProject(confirmDelete.id);
+                setConfirmDelete(null);
+              },
+            },
+          ]}
+        />
+      )}
+
+      {ask && (
+        <AskDialog
+          question={ask.question}
+          options={ask.options}
+          onAnswer={(answer) => {
+            ask.resolve(answer);
+            setAsk(null);
+          }}
+        />
       )}
 
       {dialog && (
@@ -1233,6 +2171,9 @@ export default function App() {
         />
       )}
       <Dictation />
+      {/* Last, and once: every `title` in the app is drawn by this one bubble
+          instead of the webview's native grey box. */}
+      <TooltipLayer />
     </div>
   );
 }

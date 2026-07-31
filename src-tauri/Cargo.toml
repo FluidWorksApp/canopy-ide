@@ -1,6 +1,6 @@
 [package]
 name = "canopy"
-version = "0.2.12"
+version = "0.2.18"
 description = "Local-first, memory-light, vibe-coding-first IDE"
 authors = ["Cause Connect Pte Ltd <sam@fluidwords.app>"]
 license = "MIT"
@@ -31,6 +31,12 @@ tauri-build = { version = "2.6.3", features = [] }
 # passes --no-default-features, ships the IDE without dictation, and pulls none
 # of the ASR deps. lib.rs swaps in dictation_stub.rs when this is off.
 default = ["dictation"]
+# Serve the frontend out of the binary instead of the dev server. `tauri build`
+# turns this on itself; a plain `cargo build` does not, and without it a debug
+# binary points at http://localhost:5173 and runs whatever happens to be there.
+# The selftest (and the CI job that runs it) builds with it for exactly that
+# reason: it must test the frontend it was built with.
+custom-protocol = ["tauri/custom-protocol"]
 dictation = [
     "dep:transcribe-rs",
     "dep:ort",
@@ -41,7 +47,12 @@ dictation = [
 ]
 
 [dependencies]
-tokio = { version = "1", features = ["rt", "sync", "time", "macros", "process", "net"] }
+# io-util: the MCP client reads its stdio servers a line at a time (AsyncBufReadExt).
+# rt-multi-thread: Tauri already builds its shared runtime multi-threaded, but
+# `blocking::io` names `tokio::task::block_in_place`, which only exists behind
+# this feature — relying on Tauri's own feature set to enable it would compile
+# today and break the day Tauri changes it.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "process", "net", "io-util"] }
 # Canopy Remote: an embedded HTTP + WebSocket server that serves the mobile
 # control portal and bridges it to the local command surface (projects, agent
 # status, PTY I/O). axum is the tokio-native choice and reuses the runtime Tauri
@@ -72,13 +83,19 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.11.3", features = [] }
+tauri = { version = "2.11.3", features = ["unstable"] }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
 # PTY: cross-platform pseudo-terminal, the core of the terminal feature
 portable-pty = "0.9"
 # File watching for external-change detection (diff-first workflow)
 notify = "8"
+# .gitignore semantics for the file walk behind quick-open, find-in-files and
+# SpotSearch (fsx.rs). ripgrep's own crate rather than a hand-rolled matcher:
+# negations, directory-only patterns, nested and global ignore files and
+# .git/info/exclude are all things a project's .gitignore actually uses, and
+# getting any of them wrong shows up as a file that cannot be found.
+ignore = "0.4"
 # Process-tree inspection for the runaway guard + agent detection
 sysinfo = "0.33"
 trash = "5.2.3"
@@ -93,6 +110,26 @@ hkdf = "0.12"
 chacha20poly1305 = "0.10"
 # Compact text encoding for binary file chunks tunnelled as JSON relay frames.
 base64 = "0.22"
+# The browser credential vault (vault.rs). Argon2id turns the user's passphrase
+# into a key — memory-hard, so a stolen vault file is not a wordlist away from
+# opening — and zeroize wipes that key and the secrets it protected when the
+# vault locks, rather than leaving them in a freed allocation. The AEAD itself
+# (XChaCha20-Poly1305) and the CSPRNG are already here for the relay.
+argon2 = "0.5"
+zeroize = "1"
+# Importing an existing password set. KDBX is the format every other manager
+# exports — KeePassXC, Bitwarden, 1Password, Strongbox — so reading it is the
+# difference between "start typing your logins in again" and "bring them over".
+# Read only: the crate's KDBX writing is marked experimental, and the file that
+# holds someone's passwords is not the place to find out what that means. The
+# writing feature is enabled for dev only, so the tests can build a real
+# database to parse instead of checking in an opaque binary fixture.
+keepass = { version = "0.13", default-features = false }
+# SpotSearch's persistent index (spot.rs): FTS5 over agent transcripts and
+# terminal scrollback. Bundled so the shipped app never depends on the OS
+# sqlite (macOS's system copy predates the FTS5 fixes we rely on) — it compiles
+# in statically, same notarisation story as any other Rust code.
+rusqlite = { version = "0.32", features = ["bundled"] }
 # OS CSPRNG for per-transfer key-derivation salts (nonce separation across
 # file-transfer retries). Already present transitively via spake2/rand_core.
 getrandom = "0.2"
@@ -137,8 +174,44 @@ tauri-plugin-notification = "2"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# canopy_screenshot: the webview's own snapshot API, so capturing our own window
+# needs no Screen Recording permission. Same objc2 generation wry already links,
+# so this adds bindings, not a second Objective-C runtime.
+[target.'cfg(windows)'.dependencies]
+# Reaching CoreWebView2's settings to switch Edge's own keyboard shortcuts off
+# (webview_keys.rs). Both versions are pinned to what webview2-com-sys already
+# resolves to, so this adds no new crate to the graph — it only names two that
+# Tauri already builds on Windows.
+webview2-com = "0.38"
+windows-core = "0.61"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSValue", "NSGeometry", "NSDictionary", "NSString", "NSError", "NSData"] }
+objc2-app-kit = { version = "0.3", features = ["NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphics", "NSColor", "NSResponder", "NSView"] }
+objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKSnapshotConfiguration", "block2"] }
+# Click-aware notifications (notify.rs). The same crate tauri-plugin-notification
+# already pulls in through notify-rust, so this unifies rather than adding a
+# second notification stack — but reaching it directly is the only way to learn
+# that a notification was clicked, which is what deep links are routed on.
+mac-notification-sys = "0.6"
+
+# Release builds took cargo's defaults until now: no LTO, 16 codegen units. The
+# app's own crate is ~33k lines against a very large dependency graph, so most
+# of what ships is cross-crate code that thin LTO can inline and dead-strip —
+# which is binary size and startup work, both of which SPEC's 60-150 MB idle
+# target cares about. `codegen-units = 1` is the same trade in the other
+# direction: a slower release build for a smaller, faster binary. Neither
+# changes behaviour, and debug/dev builds are untouched, so `tauri dev` is as
+# fast as it was.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
 [dev-dependencies]
+keepass = { version = "0.13", default-features = false, features = ["save_kdbx4"] }
 # `test` feature enables tauri::test::mock_app for exercising PTY spawn/attach
 # against a mock runtime. Dev-only, so the release build is unaffected.
-tauri = { version = "2.11.3", features = ["test"] }
+tauri = { version = "2.11.3", features = ["test", "unstable"] }
 tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }

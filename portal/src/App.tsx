@@ -12,6 +12,7 @@ import {
   buildRows,
   agentsForProject,
   agentMeta,
+  basename,
   applyTheme,
   resumeCommand,
 } from '@shared/model'
@@ -32,8 +33,35 @@ import {
 } from '@shared/icons'
 import type { Transport } from '@shared/transport'
 
+/** Publish the *visible* viewport as CSS vars. `100dvh` still counts the strip
+ *  behind the on-screen keyboard on Android Chrome and iOS Safari, so a shell
+ *  sized to it puts its composer under the keys. `--vh` is what the user can
+ *  actually see; `--vv-top` is how far the browser has pushed the visual
+ *  viewport down, which iOS does instead of resizing. */
+function useViewportFit() {
+  useEffect(() => {
+    const vv = window.visualViewport
+    if (!vv) return
+    const root = document.documentElement
+    const apply = () => {
+      root.style.setProperty('--vh', `${Math.round(vv.height)}px`)
+      root.style.setProperty('--vv-top', `${Math.round(vv.offsetTop)}px`)
+    }
+    apply()
+    vv.addEventListener('resize', apply)
+    vv.addEventListener('scroll', apply)
+    return () => {
+      vv.removeEventListener('resize', apply)
+      vv.removeEventListener('scroll', apply)
+      root.style.removeProperty('--vh')
+      root.style.removeProperty('--vv-top')
+    }
+  }, [])
+}
+
 export default function App() {
   const [token, setToken] = useState<string | null>(savedToken())
+  useViewportFit()
   if (!token) return <PinGate onToken={setToken} />
   return (
     <Console
@@ -72,12 +100,15 @@ function PinGate({ onToken }: { onToken: (t: string) => void }) {
           CANOPY<span className="mark-thin">·REMOTE</span>
         </div>
         <p className="gate-sub">Mission control for your agents.</p>
-        <form onSubmit={submit}>
+        <form onSubmit={submit} autoComplete="off">
           <div className="pin-wrap">
             <input
               className="pin"
+              name="canopy-pin"
               inputMode="numeric"
               pattern="[0-9]*"
+              autoComplete="off"
+              enterKeyHint="go"
               autoFocus
               placeholder="••••••"
               value={pin}
@@ -187,10 +218,15 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
     () => buildRows(sessions, usage, stats, instance, livePtys),
     [sessions, usage, stats, instance, livePtys],
   )
-  const live = rows.filter((r) => r.live)
-  const offline = rows.filter((r) => !r.live)
+  // Terminals are live PTYs with no agent behind them. They get their own
+  // section rather than mixing into "Active now", and they stay out of the
+  // gauges and the tab count so those keep meaning *agents*.
+  const terminals = rows.filter((r) => r.terminal)
+  const agents = rows.filter((r) => !r.terminal)
+  const live = agents.filter((r) => r.live)
+  const offline = agents.filter((r) => !r.live)
   const needs = live.filter((r) => r.needsYou).length
-  const idle = rows.length - live.length
+  const idle = agents.length - live.length
   const spawn = (cwd: string, command?: string) =>
     wireRef.current?.send({ t: 'spawn', cwd, command })
   // Live agent → its terminal; offline agent → its history (with one-tap resume).
@@ -260,7 +296,7 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
           className={tab === 'agents' ? 'on' : ''}
           onClick={() => setTab('agents')}
         >
-          <IconBolt s={14} /> Agents<span className="seg-n">{rows.length}</span>
+          <IconBolt s={14} /> Agents<span className="seg-n">{agents.length}</span>
         </button>
         <button
           role="tab"
@@ -291,12 +327,32 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
                 </div>
               </section>
             )}
+            {terminals.length > 0 && (
+              <section className="block">
+                <SubHead icon={<IconTerminal s={13} />} title="Terminals" n={terminals.length} />
+                <div className="list">
+                  {terminals.map((r, i) => (
+                    <AgentCard
+                      key={r.key}
+                      row={r}
+                      index={live.length + i}
+                      onOpen={() => openAgent(r)}
+                    />
+                  ))}
+                </div>
+              </section>
+            )}
             {offline.length > 0 && (
               <section className="block">
-                <SubHead icon={<IconTerminal s={13} />} title="Recent" n={offline.length} dim />
+                <SubHead icon={<IconResume s={13} />} title="Recent" n={offline.length} dim />
                 <div className="list">
                   {offline.map((r, i) => (
-                    <AgentCard key={r.key} row={r} index={live.length + i} onOpen={() => openAgent(r)} />
+                    <AgentCard
+                      key={r.key}
+                      row={r}
+                      index={live.length + terminals.length + i}
+                      onOpen={() => openAgent(r)}
+                    />
                   ))}
                 </div>
               </section>
@@ -493,8 +549,10 @@ function ProjectDetail({
   onOpen: (row: AgentRow) => void
   onNew: () => void
 }) {
-  const live = rows.filter((r) => r.live)
-  const offline = rows.filter((r) => !r.live)
+  const terminals = rows.filter((r) => r.terminal)
+  const agents = rows.filter((r) => !r.terminal)
+  const live = agents.filter((r) => r.live)
+  const offline = agents.filter((r) => !r.live)
   return (
     <div className="app">
       <CrumbBar
@@ -502,7 +560,8 @@ function ProjectDetail({
         name={project.name}
         sub={
           <>
-            {live.length} live · {rows.length} agent{rows.length === 1 ? '' : 's'}
+            {live.length} live · {agents.length} agent{agents.length === 1 ? '' : 's'}
+            {terminals.length > 0 && ` · ${terminals.length} terminal${terminals.length === 1 ? '' : 's'}`}
           </>
         }
       />
@@ -535,12 +594,28 @@ function ProjectDetail({
         </section>
       )}
 
+      {terminals.length > 0 && (
+        <section className="block">
+          <SubHead icon={<IconTerminal s={13} />} title="Terminals" n={terminals.length} />
+          <div className="list">
+            {terminals.map((r, i) => (
+              <AgentCard key={r.key} row={r} index={live.length + i} onOpen={() => onOpen(r)} />
+            ))}
+          </div>
+        </section>
+      )}
+
       {offline.length > 0 && (
         <section className="block">
-          <SubHead icon={<IconTerminal s={13} />} title="Recent" n={offline.length} dim />
+          <SubHead icon={<IconResume s={13} />} title="Recent" n={offline.length} dim />
           <div className="list">
             {offline.map((r, i) => (
-              <AgentCard key={r.key} row={r} index={live.length + i} onOpen={() => onOpen(r)} />
+              <AgentCard
+                key={r.key}
+                row={r}
+                index={live.length + terminals.length + i}
+                onOpen={() => onOpen(r)}
+              />
             ))}
           </div>
         </section>
@@ -645,7 +720,13 @@ function Detail({
   const m = agentMeta(row?.agent ?? 'shell')
   const send = () => {
     if (!text) return
-    transport.writePty(pty, text + '\r')
+    // Enter has to be its own write, a beat after the text: TUIs like Codex read
+    // a burst ending in \r as a paste and drop a literal newline in the composer
+    // instead of submitting, so "text\r" in one write left the message sitting
+    // there waiting on a second Enter. Same two-write pattern (and delay) the
+    // desktop uses to message an agent.
+    transport.writePty(pty, text)
+    setTimeout(() => transport.writePty(pty, '\r'), 350)
     setText('')
   }
   return (
@@ -656,11 +737,15 @@ function Detail({
         </button>
         <AgentBadge agent={row?.agent ?? 'shell'} sz={30} />
         <div className="detail-title">
-          <span className="detail-name">{m.label}</span>
+          <span className="detail-name">{row?.terminal ? 'Terminal' : m.label}</span>
           <span className="detail-sub">
-            <span className={`dot ${row?.state ?? 'idle'}`} />
-            {row?.branch ? (
-              <span className="mono">
+            {/* A terminal has no agent state to report — what it's running and
+             *  where is the useful line. */}
+            {!row?.terminal && <span className={`dot ${row?.state ?? 'idle'}`} />}
+            {row?.terminal ? (
+              <span className="mono ell">{row.title || basename(row.cwd) || 'shell'}</span>
+            ) : row?.branch ? (
+              <span className="mono ell">
                 <IconBranch s={11} /> {row.branch}
               </span>
             ) : (
@@ -694,17 +779,30 @@ function Detail({
 
       <form
         className="composer"
+        autoComplete="off"
         onSubmit={(e) => {
           e.preventDefault()
           send()
         }}
       >
+        {/* A bare text input in a form reads to Chrome as a fillable field, so
+         *  Android floated its passwords/cards/addresses strip over the
+         *  composer. Naming it, opting out of autofill and declaring it plain
+         *  text takes the field out of those heuristics. */}
         <input
+          type="text"
+          name="canopy-message"
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder="Message the agent…"
+          placeholder={row?.terminal ? 'Run a command…' : 'Message the agent…'}
+          autoComplete="off"
           autoCapitalize="off"
           autoCorrect="off"
+          spellCheck={false}
+          enterKeyHint="send"
+          data-form-type="other"
+          data-lpignore="true"
+          data-1p-ignore
         />
         <button className="primary send" type="submit" aria-label="Send">
           <IconSend s={18} />

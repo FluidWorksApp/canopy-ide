@@ -1,4 +1,9 @@
+mod agentid;
 mod agents;
+mod android;
+mod blocking;
+mod browser;
+mod cleanup;
 mod cli;
 mod context;
 mod crash;
@@ -11,18 +16,65 @@ mod dictation;
 mod dictation;
 mod fsx;
 mod git;
+mod instructions;
 mod lsp;
+mod mcp;
+mod mcp_client;
+mod notes;
+mod notify;
 mod portal;
 mod preview;
+mod profiles;
+mod prwatch;
 mod pty;
 mod punch;
 mod relay;
+mod remote;
+mod research;
+mod selftest;
+mod shortcuts;
+mod snapshot;
+mod spot;
+mod stores;
+mod sync;
+mod sysaudio;
 mod tunnel;
+mod vault;
+mod vault_kdbx;
+mod webview_keys;
 mod winproc;
 mod wsbridge;
 
+use shortcuts::accel;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager};
+
+/// Every shortcut id this menu binds. The list is what the parity test walks —
+/// it is how a chord added to a menu row here is proven to resolve on Windows
+/// and Linux too, not just on the Mac it was written on.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const MENU_SHORTCUT_IDS: &[&str] = &[
+    "settings",
+    "new-launcher",
+    "new-terminal",
+    "close-tab",
+    "next-tab",
+    "prev-tab",
+    "close-project",
+    "next-project",
+    "prev-project",
+    "toggle-sidebar",
+    "toggle-zen",
+    "new-project",
+    "open-project",
+    "manage-projects",
+    "open-workspace",
+    "save-workspace",
+    "quick-open",
+    "find-in-files",
+    "spot-search",
+    "help",
+];
 
 /// Custom menu: keeps Edit (clipboard in WKWebView needs it) but replaces the
 /// default Cmd+W "Close Window" with tab-scoped shortcuts the frontend handles.
@@ -51,7 +103,13 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 None::<&str>,
             )?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?,
+            &MenuItem::with_id(
+                app,
+                "settings",
+                "Settings…",
+                true,
+                accel("settings").as_deref(),
+            )?,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::hide(app, None)?,
             &PredefinedMenuItem::separator(app)?,
@@ -77,14 +135,30 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         "Tabs",
         true,
         &[
+            // The launcher (shell, preview, every agent CLI) as a typed list —
+            // the ＋ menu's keyboard twin. Cmd/Ctrl+T stays the straight-to-a-
+            // shell shortcut for when you already know what you want.
+            &MenuItem::with_id(
+                app,
+                "new-launcher",
+                "New…",
+                true,
+                accel("new-launcher").as_deref(),
+            )?,
             &MenuItem::with_id(
                 app,
                 "new-terminal",
                 "New Terminal",
                 true,
-                Some("CmdOrCtrl+T"),
+                accel("new-terminal").as_deref(),
             )?,
-            &MenuItem::with_id(app, "close-tab", "Close Tab", true, Some("CmdOrCtrl+W"))?,
+            &MenuItem::with_id(
+                app,
+                "close-tab",
+                "Close Tab",
+                true,
+                accel("close-tab").as_deref(),
+            )?,
             &PredefinedMenuItem::separator(app)?,
             // Tabs and projects share one mental model: Ctrl+Cmd moves between
             // tabs, Cmd+Alt between projects. Cmd+1..9 used to jump to a tab by
@@ -94,14 +168,14 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 "next-tab",
                 "Next Tab",
                 true,
-                Some("Control+CmdOrCtrl+Right"),
+                accel("next-tab").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "prev-tab",
                 "Previous Tab",
                 true,
-                Some("Control+CmdOrCtrl+Left"),
+                accel("prev-tab").as_deref(),
             )?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(
@@ -109,21 +183,21 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 "close-project",
                 "Close Project",
                 true,
-                Some("CmdOrCtrl+Shift+W"),
+                accel("close-project").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "next-project",
                 "Next Project",
                 true,
-                Some("CmdOrCtrl+Alt+Right"),
+                accel("next-project").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "prev-project",
                 "Previous Project",
                 true,
-                Some("CmdOrCtrl+Alt+Left"),
+                accel("prev-project").as_deref(),
             )?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(
@@ -131,14 +205,14 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 "toggle-sidebar",
                 "Toggle Sidebar",
                 true,
-                Some("CmdOrCtrl+B"),
+                accel("toggle-sidebar").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "toggle-zen",
                 "Focus Mode",
                 true,
-                Some("CmdOrCtrl+Shift+Enter"),
+                accel("toggle-zen").as_deref(),
             )?,
         ],
     )?;
@@ -155,21 +229,23 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 "new-project",
                 "New Project…",
                 true,
-                Some("CmdOrCtrl+N"),
+                // Cmd/Ctrl+N is the new-tab launcher (Tabs menu); a whole new
+                // project is the rarer, bigger thing, so it takes the Shift.
+                accel("new-project").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "open-project",
                 "Open Project…",
                 true,
-                Some("CmdOrCtrl+O"),
+                accel("open-project").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "manage-projects",
                 "Manage Projects…",
                 true,
-                Some("CmdOrCtrl+Shift+M"),
+                accel("manage-projects").as_deref(),
             )?,
             &MenuItem::with_id(app, "save-project", "Save Project As…", true, None::<&str>)?,
             &PredefinedMenuItem::separator(app)?,
@@ -178,14 +254,14 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 "open-workspace",
                 "Open Workspace…",
                 true,
-                Some("CmdOrCtrl+Shift+O"),
+                accel("open-workspace").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "save-workspace",
                 "Save Workspace As…",
                 true,
-                Some("CmdOrCtrl+Shift+S"),
+                accel("save-workspace").as_deref(),
             )?,
         ],
     )?;
@@ -201,14 +277,21 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 "quick-open",
                 "Quick Open File…",
                 true,
-                Some("CmdOrCtrl+P"),
+                accel("quick-open").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
                 "find-in-files",
                 "Find in Files…",
                 true,
-                Some("CmdOrCtrl+Shift+F"),
+                accel("find-in-files").as_deref(),
+            )?,
+            &MenuItem::with_id(
+                app,
+                "spot-search",
+                "SpotSearch Everything…",
+                true,
+                accel("spot-search").as_deref(),
             )?,
         ],
     )?;
@@ -227,7 +310,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         "Help",
         true,
         &[
-            &MenuItem::with_id(app, "help", "Canopy Help", true, Some("CmdOrCtrl+Shift+H"))?,
+            &MenuItem::with_id(app, "help", "Canopy Help", true, accel("help").as_deref())?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "support", "Support Us", true, None::<&str>)?,
         ],
@@ -293,10 +376,17 @@ pub fn run() {
         .manage(relay::RelayManager::default())
         .manage(portal::RemoteManager::default())
         .manage(preview::PreviewManager::default())
+        .manage(browser::BrowserManager::default())
         .manage(context::ContextBridge::default())
         .manage(agents::StatsCache::default())
         .manage(tunnel::TunnelManager::default())
+        .manage(prwatch::PrWatcher::default())
         .manage(dictation::DictationManager::default())
+        .manage(selftest::SelftestState::default())
+        .manage(spot::SpotIndex::default())
+        .manage(research::ResearchStore::default())
+        .manage(notes::NotesStore::default())
+        .manage(vault::Vault::default())
         .manage(cli::pending_from_env())
         .setup(|app| {
             // ONNX Runtime is loaded dynamically on every platform (Cargo.toml
@@ -329,14 +419,31 @@ pub fn run() {
                         .build(),
                 )?;
             }
+            // Edge's built-in shortcuts are not Canopy's to hand out — see
+            // webview_keys.rs. Done here rather than at window creation
+            // because the setting lives on CoreWebView2, which only exists
+            // once the webview has been created.
+            // Every window rather than a label: tauri.conf.json does not name
+            // this one, so "main" is a default we would be relying on.
+            for w in app.webview_windows().values() {
+                webview_keys::disable_browser_accelerators(w);
+            }
             // Install the hook helper before hooks are (re)written, so the
             // path they point at exists.
             if let Err(e) = agents::install_hook_helper() {
                 log::warn!("hook helper not installed: {e}");
             }
+            // Then re-apply the integrations this machine already opted into.
+            // Every launch is also every update, which is when a generated hook
+            // file goes stale or a newly shipped step (the MCP registration was
+            // one) is missing from a config set up by an older version. Off the
+            // main thread: it shells out to find the CLIs.
+            agents::heal_integrations(app.handle().clone());
             agents::start_monitor(app.handle().clone());
             agents::start_hook_bridge(app.handle().clone());
             context::start(app.handle().clone());
+            // Only does anything when this launch asked to test itself.
+            selftest::start(app.handle());
             let menu = build_menu(app.handle())?;
             app.set_menu(menu)?;
             app.on_menu_event(|app, event| {
@@ -349,9 +456,16 @@ pub fn run() {
             crash::report_crash,
             crash::send_crash,
             crash::take_pending_crash,
+            crash::crash_issue_draft,
+            crash::file_crash_issue,
             cli::cli_take_pending_open,
             cli::cli_install_shim,
+            notify::notify_native,
+            selftest::selftest_config,
+            selftest::selftest_finish,
             pty::pty_spawn,
+            pty::pty_spawn_detached,
+            pty::pty_output,
             pty::pty_attach,
             pty::pty_write,
             pty::pty_ack,
@@ -360,6 +474,70 @@ pub fn run() {
             pty::pty_kill_all,
             pty::pty_set_title,
             pty::instance_id,
+            android::android_sdk_status,
+            android::android_devices,
+            android::android_avds,
+            android::android_emulator_start,
+            android::android_emulator_stop,
+            android::android_screencap,
+            android::android_ui_dump,
+            android::android_layout,
+            android::android_foreground,
+            android::android_tap,
+            android::android_text,
+            android::android_swipe,
+            android::android_key,
+            android::android_logcat,
+            android::android_describe,
+            android::android_run,
+            spot::spot_ingest,
+            spot::spot_search,
+            spot::spot_index_stats,
+            spot::spot_index_clear,
+            spot::spot_save_context_image,
+            vault::vault_status,
+            vault::vault_create,
+            vault::vault_unlock,
+            vault::vault_lock,
+            vault::vault_change_passphrase,
+            vault::vault_list,
+            vault::vault_matches,
+            vault::vault_save,
+            vault::vault_delete,
+            vault::vault_reveal,
+            vault::vault_fill,
+            vault::vault_read,
+            vault::vault_approve,
+            vault::vault_import_kdbx,
+            vault::vault_approvals,
+            vault::vault_revoke,
+            research::research_list,
+            research::research_search,
+            research::research_get,
+            research::research_start,
+            research::research_update,
+            research::research_add_source,
+            research::research_set_status,
+            research::research_link,
+            research::research_read_file,
+            research::research_dir,
+            research::research_import,
+            research::research_for_file,
+            research::research_delete,
+            notes::notes_list,
+            notes::notes_get,
+            notes::notes_search,
+            notes::notes_create,
+            notes::notes_update,
+            notes::notes_add_attachment,
+            notes::notes_attach_file,
+            notes::notes_set_status,
+            notes::notes_link,
+            notes::notes_read_file,
+            notes::notes_read_image,
+            notes::notes_dir,
+            notes::notes_delete,
+            spot::spot_save_context_text,
             fsx::workspace_add,
             fsx::workspace_remove,
             fsx::workspace_list,
@@ -377,10 +555,18 @@ pub fn run() {
             fsx::fs_duplicate,
             fsx::workspace_export,
             fsx::workspace_import,
+            instructions::instructions_scan,
+            instructions::instructions_read,
+            instructions::instructions_write,
             git::git_repos,
             git::git_repo_status,
             git::git_branches,
             git::git_checkout,
+            git::git_checkout_detached,
+            git::git_checkout_carry,
+            git::git_branch_release,
+            git::git_operation_quit,
+            git::git_branch_at,
             git::git_stage,
             git::git_unstage,
             git::git_discard,
@@ -388,6 +574,9 @@ pub fn run() {
             git::git_fetch,
             git::git_pull,
             git::git_push,
+            sync::git_sync_probe,
+            sync::git_sync_apply,
+            sync::git_sync_abort,
             git::git_clone,
             git::git_diff,
             git::git_log,
@@ -405,6 +594,7 @@ pub fn run() {
             git::agent_edits,
             git::git_worktree_add,
             git::git_worktree_add_pr,
+            git::git_worktree_bootstrap,
             git::git_worktree_remove,
             git::git_worktree_prune,
             git::gh_available,
@@ -412,11 +602,25 @@ pub fn run() {
             git::gh_pr_list,
             git::gh_pr_diff,
             git::gh_pr_body,
+            git::gh_pr_state,
             git::gh_pr_review,
             git::gh_pr_checkout,
             git::gh_pr_merge,
             git::gh_pr_close,
             git::gh_pr_ready,
+            git::gh_pr_conversation,
+            git::gh_pr_thread_reply,
+            git::gh_pr_thread_resolved,
+            git::gh_pr_file_viewed,
+            git::gh_pr_review_batch,
+            git::gh_pr_update_branch,
+            git::gh_pr_request_review,
+            git::gh_pr_auto_merge,
+            git::gh_pr_failing_logs,
+            git::gh_pr_diff_since,
+            git::gh_pr_reviewer_candidates,
+            prwatch::pr_watch_set,
+            prwatch::pr_watch_now,
             git::gh_issue_list,
             git::linear_issues,
             fsx::git_status,
@@ -428,15 +632,29 @@ pub fn run() {
             lsp::lsp_stop,
             agents::kill_process,
             agents::which_check,
+            agents::model_catalog,
             agents::cli_versions,
             agents::setup_agent_hooks,
             agents::agent_hooks_installed,
+            agents::agent_integration_health,
+            agents::agent_health_report,
+            mcp::mcp_servers,
+            mcp_client::mcp_connect,
+            mcp_client::mcp_call_tool,
+            mcp_client::mcp_disconnect,
+            mcp_client::mcp_connected,
             agents::claude_session_stats,
             agents::agent_usage,
+            agents::plan_usage,
             agents::hook_bridge_path,
             agents::set_context_scopes,
             agents::session_digests,
             agents::session_forget,
+            profiles::profiles_list,
+            profiles::profile_create,
+            profiles::profile_delete,
+            profiles::profile_env,
+            profiles::profile_setup,
             relay::relay_host_start,
             relay::relay_host_stop,
             relay::relay_regenerate_code,
@@ -450,9 +668,29 @@ pub fn run() {
             relay::relay_accept_file,
             preview::preview_start,
             preview::preview_stop,
+            browser::browser_supported,
+            browser::browser_open,
+            browser::browser_navigate,
+            browser::browser_painted,
+            browser::browser_set_bounds,
+            browser::browser_set_visible,
+            browser::browser_close,
+            browser::browser_run_op,
+            browser::browser_command,
+            browser::browser_here,
+            browser::browser_clear_data,
+            cleanup::cleanup_scan,
+            cleanup::cleanup_run,
+            cleanup::cleanup_disk,
             context::context_publish,
             context::context_remove,
+            context::context_tools,
+            context::context_claims,
+            context::context_release_claim,
             context::browser_result,
+            snapshot::webview_snapshot,
+            snapshot::browser_snapshot,
+            snapshot::browser_frame,
             portal::remote_enable,
             portal::remote_disable,
             portal::remote_status,
@@ -475,6 +713,10 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
+                // Before anything else: never leave the speakers muted because
+                // the app quit mid-dictation. Cheap, and the one piece of state
+                // here that outlives the process.
+                sysaudio::restore();
                 // Guarantee no child processes outlive the app.
                 app.state::<pty::PtyManager>().kill_all();
                 app.state::<lsp::LspManager>().kill_all();
@@ -484,8 +726,12 @@ pub fn run() {
                 app.state::<portal::RemoteManager>().shutdown();
                 // ... and any preview proxies.
                 app.state::<preview::PreviewManager>().shutdown_all();
+                // ... and any embedded-browser views.
+                app.state::<browser::BrowserManager>().shutdown_all(app);
                 // ... and any public-link tunnel process.
                 app.state::<tunnel::TunnelManager>().kill_all();
+                // ... and stop polling GitHub for pull requests.
+                app.state::<prwatch::PrWatcher>().shutdown();
             }
         });
 }

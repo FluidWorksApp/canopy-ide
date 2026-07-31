@@ -2,25 +2,104 @@
    Every component in this package styles itself from these variables only, so
    a consumer can retheme by redefining them and nothing else. */
 :root {
-  /* surfaces, back to front */
-  --bg: #1a1b26;
-  --bg-alt: #16161e;
-  --bg-raised: #1f2335;
-  --border: #2a2e42;
+  /* ---- surfaces, back to front (shell → panel → editor → raised → overlay) ---- */
+  --bg-deep: #0f101a;    /* window shell: titlebar, activity rail, status bar */
+  --bg-alt: #13141f;     /* side panels, terminal */
+  --bg: #171826;         /* editor canvas */
+  --bg-raised: #1f2133;  /* cards, inputs, hover */
+  --bg-overlay: #242840; /* palette, menus, toasts */
 
-  /* text */
-  --text: #c9d1d9;
-  --text-dim: #787f97;
+  /* ---- borders ---- */
+  --border: #262a3f;
+  --border-strong: #363c5c; /* lifted elements: active tabs, project pills */
 
-  /* status — accent doubles as the primary action colour */
-  --accent: #7aa2f7;
+  /* ---- text ---- */
+  --text: #d7dcea;
+  --text-dim: #7d84a0;
+  --text-faint: #565d78;
+
+  /* ---- status — accent doubles as the primary action colour ---- */
+  --accent: #82aaff;
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
   --danger: #f7768e;
   --ok: #9ece6a;
   --warn: #e0af68;
+  --magenta: #bb9af7; /* agent identity, decorative chips */
+  --cyan: #7dcfff;    /* links, secondary info */
 
-  /* Ink for text sitting ON a filled accent/danger surface. Previously
-     hardcoded per-rule (#12131c, #1a1b26); named here so a retheme can't
-     leave unreadable text behind. */
-  --on-accent: #12131c;
-  --on-danger: #1a1b26;
+  /* ---- ink on filled surfaces ---- */
+  --on-accent: #0d0f1a;
+  --on-danger: #14101a;
+
+  /* ---- focus ring — one rule everywhere: box-shadow: var(--ring) ---- */
+  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+
+  /* ---- radius — squircle-flavored; pair with corner-shape: squircle ---- */
+  --r-xs: 5px;  /* chips, badges, status pills */
+  --r-sm: 8px;  /* buttons, inputs, tree-row hover */
+  --r-md: 12px; /* tabs, cards, panels */
+  --r-lg: 16px; /* palette, dialogs, toasts */
+
+  /* ---- elevation — layered, cool-black ---- */
+  --shadow-1: 0 1px 2px rgba(6, 8, 18, 0.28);
+  --shadow-2: 0 4px 14px rgba(6, 8, 18, 0.35), 0 1px 3px rgba(6, 8, 18, 0.3);
+  --shadow-3: 0 24px 64px rgba(4, 6, 16, 0.55), 0 6px 18px rgba(4, 6, 16, 0.35);
+
+  /* ---- motion ---- */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-fast: 120ms; /* hover, press */
+  --dur-med: 200ms;  /* panel reveal, sliding indicators */
+  --dur-pop: 260ms;  /* overlays: palette, toast (rise 6px + scale .98) */
+
+  /* ---- spacing — 4px grid ---- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 40px;
+  --sp-8: 48px;
+
+  /* ---- typography ---- */
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "SF Mono", Menlo, Monaco, "JetBrains Mono", "Fira Code", monospace;
+  --fs-xs: 11px;  /* badges, tab meta, status bar */
+  --fs-sm: 12px;  /* buttons, tree rows, tabs */
+  --fs-md: 13px;  /* base UI + editor default */
+  --fs-lg: 15px;  /* panel titles, palette input */
+  --fs-xl: 18px;  /* dialog titles */
+  --lh-tight: 1.25;
+  --lh-ui: 1.45;
+  --lh-code: 1.6;
+
+  color-scheme: dark;
+}
+
+/* ---- light theme — data-theme="daylight" only ---- */
+:root[data-theme="daylight"] {
+  --bg-deep: #e4e7ee;
+  --bg-alt: #edeff4;
+  --bg: #f7f8fa;
+  --bg-raised: #ffffff;
+  --bg-overlay: #ffffff;
+  --border: #d9dde5;
+  --border-strong: #b9c0cf;
+  --text: #1c1f26;
+  --text-dim: #626a7e;
+  --text-faint: #99a0b2;
+  --accent: #3b6fd6;
+  --accent-soft: color-mix(in srgb, var(--accent) 10%, transparent);
+  --danger: #c9414f;
+  --ok: #2f9e5c;
+  --warn: #a5690f;
+  --magenta: #8250df;
+  --cyan: #1b7c83;
+  --on-accent: #ffffff;
+  --on-danger: #ffffff;
+  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+  --shadow-1: 0 1px 2px rgba(28, 31, 38, 0.1);
+  --shadow-2: 0 4px 14px rgba(28, 31, 38, 0.12), 0 1px 3px rgba(28, 31, 38, 0.08);
+  --shadow-3: 0 24px 64px rgba(28, 31, 38, 0.22), 0 6px 18px rgba(28, 31, 38, 0.12);
+  color-scheme: light;
 }

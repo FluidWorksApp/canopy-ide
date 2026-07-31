@@ -4,17 +4,27 @@
 // listed as restorable in one place and missing in the other is worse than
 // either behaviour on its own.
 import * as ipc from "./ipc";
-import { AGENT_CLIS, restoreCommand } from "./projects";
+import { restoreCommand } from "./projects";
+import { identifyAgent } from "./agentIdentity";
 
 export interface Restorable {
   digest: ipc.SessionDigest;
   agentId: string;
   /** Directory the resume command must run in — see resume_cwd in agents.rs. */
   cwd: string;
-  /** The command that reopens it, or null when the CLI can't reopen by id. */
-  command: string | null;
+  /** The command that reopens it. Never null: a session with no way back is
+   *  filtered out rather than listed as an offer you can't take. */
+  command: string;
   /** Recognisable label: the last thing the human actually typed. */
   prompt: string;
+  /** The account it ran under, so the restore relaunches against the same
+   *  config dir. "default" for sessions from before profiles, and for CLIs
+   *  that can't hold a second login. */
+  profile: string;
+  /** Older sessions in this same directory, which this row stands in for. Not
+   *  offered — but "forget" has to tombstone them too, or dismissing the row
+   *  just promotes the next one and you dismiss the same directory 64 times. */
+  superseded: ipc.SessionDigest[];
 }
 
 /** The last human-authored prompt — tool output and injected context both
@@ -78,21 +88,13 @@ interface LiveAgent {
 }
 
 /** Agent CLIs running right now, by registry id and working directory.
- *  Derived from the process trees the monitor already reports, so both the
- *  panel and the launcher see the same thing without either having to
- *  assemble it. */
+ *  Reads the same identity the panel does (agentIdentity.ts), so the two
+ *  surfaces can never disagree about what is already running. */
 function liveAgentsFrom(stats: ipc.SessionStats[]): LiveAgent[] {
-  return stats.flatMap((s) =>
-    s.procs
-      .map((p) => {
-        const first = p.cmd.split(/\s+/)[0] ?? "";
-        return AGENT_CLIS.find(
-          (c) => p.name === c.bin || first === c.bin || first.endsWith(`/${c.bin}`),
-        );
-      })
-      .filter((c): c is (typeof AGENT_CLIS)[number] => !!c)
-      .map((c) => ({ agentId: c.id, cwd: s.cwd })),
-  );
+  return stats.flatMap((s) => {
+    const id = identifyAgent(s.agent_hint)?.id;
+    return id ? [{ agentId: id, cwd: s.cwd }] : [];
+  });
 }
 
 /**
@@ -121,10 +123,16 @@ export function restorableFrom(
     if (!dir) return false;
     return liveAgents.some((a) => a.cwd === dir && a.agentId === (d.agent ?? "claude"));
   };
-  return digests
+  const rows = digests
     .filter((d) => {
       const id = d.session_id;
       if (!id || /-pty\d*$/.test(id)) return false;
+
+      // A one-shot task, finished the moment it ended — restoring it would run
+      // it again. The app also deletes these digests when the task's terminal
+      // closes, but that is a timer racing the CLI's last write and neither
+      // survives a force quit; the marker is on the session itself.
+      if (d.micro) return false;
 
       // Forgotten by the user, and the transcript hasn't been written since —
       // stay gone. A newer mtime (real new activity) crosses the threshold and
@@ -164,6 +172,43 @@ export function restorableFrom(
         command:
           digest.resumable === false ? null : restoreCommand(agentId, digest.session_id),
         prompt: lastHumanPrompt(digest.prompts) ?? "",
+        profile: digest.profile || "default",
       };
-    });
+    })
+    // No command, no offer. Both surfaces that read this are lists of things
+    // you can pick back up — a row whose only working control is "forget" is
+    // asking to be dismissed, not resumed. The session isn't lost: it stays in
+    // the digests, and comes back here the moment it's resumable again (a
+    // transcript written under a directory we can reach, a CLI that learns to
+    // reopen by id).
+    .filter((r): r is Omit<Restorable, "superseded"> => r.command !== null);
+  return newestPerDirectory(rows);
+}
+
+/**
+ * One row per (agent, account, directory) — the newest, since the list arrives
+ * sorted. The rest of that directory's sessions ride along as `superseded`.
+ *
+ * A long-lived checkout accrues one digest per conversation and they all share
+ * a cwd: this repo had 64 claude sessions under a single directory. Offering
+ * every one made a list nobody reads and a "Restore all" that would start 64
+ * agents at once. The one you want in a directory is the last one you were in;
+ * the others stay on disk, this only stops offering them.
+ *
+ * The account is part of the key because two logins are meant to sit side by
+ * side: collapsing a work session and a personal one in the same checkout into
+ * a single row would offer one of them and quietly bury the other, and each
+ * only resumes under the config dir it was written in.
+ */
+function newestPerDirectory(rows: Omit<Restorable, "superseded">[]): Restorable[] {
+  const byDir = new Map<string, Restorable>();
+  for (const r of rows) {
+    // \0 as the separator: it cannot appear in a path, so no directory name
+    // can be built that collides with another agent's key.
+    const key = `${r.agentId}\0${r.profile}\0${r.cwd}`;
+    const held = byDir.get(key);
+    if (held) held.superseded.push(r.digest);
+    else byDir.set(key, { ...r, superseded: [] });
+  }
+  return [...byDir.values()];
 }

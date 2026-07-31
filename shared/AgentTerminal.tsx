@@ -46,6 +46,13 @@ export function AgentTerminal({ transport, pty }: { transport: Transport; pty: n
       } catch {
         /* transient */
       }
+      // The grid keeps the size the desktop gave it, so on a phone it can be
+      // taller than the pane holding it — and taller still once the keyboard
+      // steals half the screen. Keep the box scrolled to the newest rows: the
+      // prompt is what you need in view while typing, not the first screenful.
+      requestAnimationFrame(() => {
+        if (box.isConnected) box.scrollTop = box.scrollHeight
+      })
     }
 
     const detach = transport.attachPty(pty, {

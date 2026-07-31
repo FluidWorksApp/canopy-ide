@@ -1,35 +1,15 @@
 // Help: what Canopy is, how the agent features work, and every shortcut.
 // Static on purpose — this must render instantly and work offline.
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { format, helpRows } from "../shortcuts";
 import { useEscape } from "../useEscape";
+import { Button } from "./ui";
 
 interface HelpDialogProps {
   onClose: () => void;
   /** Re-open the first-run walkthrough on demand. */
   onReplayIntro?: () => void;
 }
-
-const SHORTCUTS: [string, string][] = [
-  ["⌘N", "New project"],
-  ["⌘O", "Open project folder"],
-  ["⌘⇧M", "Manage projects (create, edit, delete)"],
-  ["⌘⌥← / ⌘⌥→", "Previous / next project"],
-  ["⌘T", "New terminal in the active project"],
-  ["⌃⇥ / ⌃⇧⇥", "Next / previous tab"],
-  ["⌃⌘← / ⌃⌘→", "Previous / next tab"],
-  ["⌘W", "Close tab"],
-  ["⌘⇧W", "Close project"],
-  ["⌘P", "Quick-open a file"],
-  ["⌘⇧F", "Find in files"],
-  ["⌘B", "Toggle sidebar"],
-  ["⌘⇧Enter", "Focus mode (Esc leaves)"],
-  ["⌘D", "Voice dictation — speak, press again to insert (Esc cancels)"],
-  ["⌘, ", "Settings"],
-  ["⌥← / ⌥→", "Terminal: jump word left / right"],
-  ["⌘← / ⌘→", "Terminal: start / end of line"],
-  ["⌥⌫", "Terminal: delete word"],
-  ["⌘⌫", "Terminal: delete line"],
-];
 
 export function HelpDialog({ onClose, onReplayIntro }: HelpDialogProps) {
   useEscape(onClose, true);
@@ -54,7 +34,8 @@ export function HelpDialog({ onClose, onReplayIntro }: HelpDialogProps) {
           <div className="set-head">Getting started</div>
           <p>
             A <strong>project</strong> is one or more directories (frontend,
-            backend, …) opened together. Create one with ⌘N, then launch a
+            backend, …) opened together. Create one with{" "}
+            <code>{format("new-project")}</code>, then launch a
             shell or an agent CLI from the ＋ menu, the empty-state grid, or by
             right-clicking a directory in the sidebar. Terminals keep running
             when you switch projects.
@@ -95,12 +76,12 @@ export function HelpDialog({ onClose, onReplayIntro }: HelpDialogProps) {
           <div className="set-head">Keyboard shortcuts</div>
           <table className="help-keys">
             <tbody>
-              {SHORTCUTS.map(([keys, what]) => (
-                <tr key={keys}>
+              {helpRows().map((row) => (
+                <tr key={row.id}>
                   <td>
-                    <code>{keys}</code>
+                    <code>{row.keys}</code>
                   </td>
-                  <td>{what}</td>
+                  <td>{row.label}</td>
                 </tr>
               ))}
             </tbody>
@@ -108,12 +89,10 @@ export function HelpDialog({ onClose, onReplayIntro }: HelpDialogProps) {
 
           <div className="set-head">Support &amp; about</div>
           <p>
-            <button
-              className="btn btn-accent"
-              onClick={() => void openUrl("mailto:Sam@CauseConnect.ai")}
-            >
+            <Button variant="accent"
+              onClick={() => void openUrl("mailto:Sam@CauseConnect.ai")}>
               Contact support
-            </button>
+            </Button>
           </p>
           <p>
             {link("https://canopyide.dev", "canopyide.dev")} ·{" "}
@@ -128,9 +107,9 @@ export function HelpDialog({ onClose, onReplayIntro }: HelpDialogProps) {
           </p>
         </div>
         <div className="confirm-actions">
-          <button className="btn btn-accent" onClick={onClose}>
+          <Button variant="accent" onClick={onClose}>
             Done
-          </button>
+          </Button>
         </div>
       </div>
     </div>

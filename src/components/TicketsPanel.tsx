@@ -17,8 +17,11 @@ import {
   ticketWorktree,
   unifiedStatus,
 } from "../trackers";
+import { heldBadge } from "../branchSwitch";
+import { useBranchSwitch } from "../useBranchSwitch";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
 import { PlayIcon, TrackerIcon } from "./icons";
+import { Button } from "./ui";
 
 export interface AgentTarget {
   tabId: string;
@@ -83,6 +86,7 @@ export function TicketsPanel({
   const [busy, setBusy] = useState(false);
   const [starting, setStarting] = useState<string | null>(null);
   const menu = useContextMenu();
+  const { openThere, version } = useBranchSwitch();
 
   const key = components.map((c) => c.path).join("\n");
 
@@ -159,9 +163,11 @@ export function TicketsPanel({
     }
   }, [repo, repos]);
 
+  // `version` bumps after anything that moves a ref or a workspace, wherever it
+  // was started — so the per-ticket workspace chips don't go stale.
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, version]);
 
   useEffect(() => {
     const onChange = () => void load();
@@ -301,7 +307,7 @@ export function TicketsPanel({
                   key={`${t.source}-${t.id}`}
                   className="ticket-row"
                   title={`${t.id} — ${t.title}\n${sourceName(t.source)} · ${t.state}\n${t.url}${
-                    wt ? `\nworktree: ${wt.path}` : ""
+                    wt ? `\nworkspace: ${wt.path}` : ""
                   }`}
                   onClick={() => onOpenTicket(t, t.source)}
                 >
@@ -315,27 +321,45 @@ export function TicketsPanel({
                     <span className="ticket-title">{t.title}</span>
                   </div>
                   <div className="ticket-meta">
-                    {wt && (
-                      <span className="ticket-wt" title={`Worktree exists: ${wt.branch}`}>
-                        ⑂ {wt.dirty > 0 ? `±${wt.dirty}` : "clean"}
-                      </span>
-                    )}
+                    {/* Where this ticket's work already lives. The words come
+                        from the shared badge — this row used to write its own
+                        third version of them — and the chip goes there, because
+                        knowing which workspace has it and having no way to
+                        reach it is the whole gap. */}
+                    {wt &&
+                      (repo && !wt.is_main ? (
+                        <button
+                          className="ticket-wt"
+                          title={`${wt.branch} — ${heldBadge(wt).label}\n${wt.path}\n\nClick to open it there.`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void openThere(repo, wt.path, wt.branch);
+                          }}
+                        >
+                          ⑂ {wt.dirty > 0 ? `±${wt.dirty}` : "clean"}
+                        </button>
+                      ) : (
+                        <span
+                          className="ticket-wt"
+                          title={`${wt.branch} — ${heldBadge(wt).label}\n${wt.path}`}
+                        >
+                          ⑂ {wt.dirty > 0 ? `±${wt.dirty}` : "clean"}
+                        </span>
+                      ))}
                     {t.assignee && (
                       <span className={`ticket-assignee ${t.mine ? "ticket-mine" : ""}`}>
                         {t.mine ? "you" : t.assignee}
                       </span>
                     )}
-                    <button
-                      className="icon-btn ticket-start"
+                    <Button icon className="ticket-start"
                       title="Send to an agent — an open one, or a new one in a worktree"
                       disabled={starting != null}
                       onClick={(e) => {
                         e.stopPropagation();
                         openSendMenu(e, t);
-                      }}
-                    >
+                      }}>
                       <PlayIcon size={12} />
-                    </button>
+                    </Button>
                   </div>
                 </div>
               );

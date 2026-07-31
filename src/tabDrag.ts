@@ -8,12 +8,14 @@
 // Reordering is committed live — each time the dragged tab passes a
 // neighbour's midpoint — so the strip you see while dragging is the strip you
 // get when you let go, and no ghost element or drop indicator is needed.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 
 export interface TabDrag {
   /** The tab currently being dragged, for the translucent `tab-dragging` look. */
   dragId: string | null;
+  /** Current translateX offset of the dragged tab in px (0 when not dragging). */
+  dragOffsetX: number;
   /** Spread onto each draggable tab element. */
   itemProps: (id: string) => {
     "data-drag-id": string;
@@ -24,6 +26,38 @@ export interface TabDrag {
 /** `ids` is the strip's current left-to-right order; `reorder` is handed the
  *  new order. Ids outside `ids` (another strip, another group) are ignored, so
  *  a tab can only be dropped among its own kind. */
+
+/** Snapshot the left edge of the given tab elements, keyed by data-drag-id. */
+function snapPositions(stripIds: Set<string>): Map<string, number> {
+  const map = new Map<string, number>();
+  document.querySelectorAll<HTMLElement>("[data-drag-id]").forEach((el) => {
+    const id = el.dataset.dragId;
+    if (id && stripIds.has(id)) map.set(id, el.getBoundingClientRect().left);
+  });
+  return map;
+}
+
+/** After a reorder React flushes new positions synchronously. We call this
+ *  from useLayoutEffect to FLIP-animate all displaced tabs in this strip. */
+function flipAnimate(before: Map<string, number>, dragId: string, stripIds: Set<string>) {
+  document.querySelectorAll<HTMLElement>("[data-drag-id]").forEach((el) => {
+    const id = el.dataset.dragId;
+    // Only animate tabs in this strip; skip the dragged tab (it tracks the pointer).
+    if (!id || !stripIds.has(id) || id === dragId) return;
+    const prev = before.get(id);
+    if (prev == null) return;
+    const delta = prev - el.getBoundingClientRect().left;
+    if (Math.abs(delta) < 1) return;
+    // Teleport to old position (no transition), then animate to natural slot.
+    el.style.transition = "none";
+    el.style.transform = `translateX(${delta}px)`;
+    // Force a style recalc so the browser sees the "from" state before the transition.
+    el.getBoundingClientRect();
+    el.style.transition = "transform 160ms cubic-bezier(0.22, 1, 0.36, 1)";
+    el.style.transform = "translateX(0)";
+  });
+}
+
 export function useTabDrag(ids: string[], reorder: (ids: string[]) => void): TabDrag {
   return useTabDragGroups([ids], reorder);
 }
@@ -39,6 +73,7 @@ export function useTabDragGroups(
   reorder: (ids: string[]) => void,
 ): TabDrag {
   const [dragId, setDragId] = useState<string | null>(null);
+  const [dragOffsetX, setDragOffsetX] = useState(0);
   // The list the drag is confined to, resolved once at pointerdown: which
   // group a tab belongs to can change mid-drag (an agent finishing a turn
   // restacks it), and a tab that changed lists underneath the pointer would
@@ -49,6 +84,16 @@ export function useTabDragGroups(
   const reorderRef = useRef(reorder);
   reorderRef.current = reorder;
   const drag = useRef<{ id: string; startX: number; moved: boolean } | null>(null);
+  // Positions snapshot taken just before a reorder — consumed by the layout effect.
+  const flipBefore = useRef<Map<string, number> | null>(null);
+
+  // After React commits the reorder, run FLIP on all non-dragged tabs.
+  useLayoutEffect(() => {
+    const before = flipBefore.current;
+    flipBefore.current = null;
+    if (!before || !drag.current) return;
+    flipAnimate(before, drag.current.id, new Set(idsRef.current));
+  });
 
   useEffect(() => {
     const move = (e: PointerEvent) => {
@@ -61,6 +106,8 @@ export function useTabDragGroups(
         setDragId(st.id);
         document.body.classList.add("dragging-tab");
       }
+      // Track pixel offset so the tab translates with the pointer.
+      setDragOffsetX(e.clientX - st.startX);
       // The dragged tab is pointer-events:none while dragging, so this hits the
       // tab underneath rather than the one in hand.
       const over = (
@@ -77,6 +124,12 @@ export function useTabDragGroups(
       const r = over.getBoundingClientRect();
       const mid = r.left + r.width / 2;
       if (to > from ? e.clientX < mid : e.clientX > mid) return;
+      // Snapshot positions BEFORE the reorder so FLIP can animate from them.
+      flipBefore.current = snapPositions(new Set(idsRef.current));
+      // When the strip reorders, the tab snaps to its new slot — reset startX
+      // so the translate stays relative to the new position, not the origin.
+      st.startX = e.clientX;
+      setDragOffsetX(0);
       const next = [...list];
       next.splice(from, 1);
       next.splice(to, 0, st.id);
@@ -87,7 +140,14 @@ export function useTabDragGroups(
       drag.current = null;
       if (!st?.moved) return;
       setDragId(null);
+      setDragOffsetX(0);
+      flipBefore.current = null;
       document.body.classList.remove("dragging-tab");
+      // Clear any FLIP inline styles left on non-dragged tabs.
+      document.querySelectorAll<HTMLElement>("[data-drag-id]").forEach((el) => {
+        el.style.transition = "";
+        el.style.transform = "";
+      });
       // Releasing lands a click on whatever tab is now under the cursor —
       // swallow it so a drag never doubles as "switch to that tab".
       const swallow = (ev: MouseEvent) => {
@@ -124,7 +184,11 @@ export function useTabDragGroups(
     [],
   );
 
-  return { dragId, itemProps };
+  // Memoize the returned object so consumers that spread it as two props
+  // (tabDragId/tabDragItemProps) or wrap it in useMemo([agentDrag, docDrag])
+  // get a stable reference — memo(Component) won't re-render just because
+  // useTabDrag re-ran.
+  return useMemo(() => ({ dragId, dragOffsetX, itemProps }), [dragId, dragOffsetX, itemProps]);
 }
 
 /** Write `order` (a reordered subset of `all`) back into `all`, leaving every

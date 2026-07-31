@@ -11,11 +11,13 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { openLink } from "../links";
 import * as ipc from "../ipc";
 import { getSettings, THEME_CHANGE_EVENT, type Settings } from "../settings";
 import { terminalTheme } from "../terminalThemes";
+import { createLinkHint, opensLink } from "../terminalLinks";
+import { matchesChord, resolve } from "../shortcuts";
 
 /** Quote a dropped path for the shell, the way iTerm2/Terminal.app do. Paths
  *  that are pure safe chars pass through bare; anything else is single-quoted,
@@ -36,6 +38,12 @@ export interface TermHandle {
   clearScrollback: () => void;
   hardReset: () => void;
   focus: () => void;
+  /** The text currently selected in the terminal, "" when none. */
+  getSelection: () => string;
+  /** The scrollback as plain text, keeping the newest `maxChars`. Plain rather
+   *  than ANSI on purpose: this is read back in the task-history pane, not
+   *  replayed into a terminal, so escape sequences would only be noise. */
+  captureText: (maxChars?: number) => string;
 }
 
 interface TermProps {
@@ -47,6 +55,10 @@ interface TermProps {
    *  its status (native, per-shell), rather than typing it in. Mutually
    *  exclusive with initialCommand. */
   runCommand?: string;
+  /** Stamped onto the child at spawn. A run inside a workspace carries that
+   *  workspace's port lease here, which is what lets two checkouts of the same
+   *  repo serve at once instead of losing the race for one hard-coded port. */
+  env?: [string, string][];
   /** Attach to an already-running PTY (spawned headless from the remote portal)
    *  instead of spawning a fresh one. The tab mirrors that session's live
    *  output and drives its input; closing the tab detaches, it does not kill the
@@ -60,7 +72,7 @@ interface TermProps {
 }
 
 export const Term = forwardRef<TermHandle, TermProps>(function Term(
-  { cwd, active, initialCommand, runCommand, attachId, onSpawned, onExited, onTitle, onNotify },
+  { cwd, active, initialCommand, runCommand, env, attachId, onSpawned, onExited, onTitle, onNotify },
   ref,
 ) {
   // Frozen once: a Term never switches between spawn and attach mid-life, and
@@ -83,6 +95,36 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       if (ptyIdRef.current != null) void ipc.ptyWrite(ptyIdRef.current, "\x0c");
     },
     focus: () => termRef.current?.focus(),
+    getSelection: () => termRef.current?.getSelection() ?? "",
+    captureText: (maxChars = 8000) => {
+      const term = termRef.current;
+      if (!term) return "";
+      // Whichever screen the CLI is actually on. For an inline agent (claude,
+      // which micro-tasks prefer) that's the normal buffer and this really is
+      // the tail of the run. For a full-TUI agent on the alternate screen there
+      // is no scrollback to have: that buffer is one screenful, so what gets
+      // stored is the final frame. Deliberately not falling back to
+      // `buffer.normal` there — it holds what was on screen *before* the CLI
+      // took over, which is the shell prompt, and that is worse than the frame.
+      const buf = term.buffer.active;
+      const lines: string[] = [];
+      // Walk backwards and stop once we have enough: the scrollback is up to
+      // `scrollback` rows (10k by default) and a finished task only needs its
+      // ending, so reading the whole buffer to throw most of it away would be
+      // the expensive way round.
+      let chars = 0;
+      for (let i = buf.length - 1; i >= 0 && chars < maxChars; i--) {
+        // `true` trims trailing whitespace — xterm pads every row to the full
+        // terminal width, so without it each line arrives with ~80 spaces.
+        const line = buf.getLine(i)?.translateToString(true) ?? "";
+        lines.push(line);
+        chars += line.length + 1;
+      }
+      // The tail of an agent's run is typically preceded by a screenful of
+      // blank rows; dropping them keeps the stored transcript to what was said.
+      while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+      return lines.reverse().join("\n").trimStart().slice(-maxChars);
+    },
   }));
 
   useEffect(() => {
@@ -132,7 +174,27 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // support, so the addon's default handler gets null back from window.open()
     // and the click dies silently. The opener plugin's default scope already
     // allows http/https, which is all the addon's URL matcher produces.
-    term.loadAddon(new WebLinksAddon((_event, uri) => void openUrl(uri)));
+    //
+    // A bare click by default, ⌘-click if Settings → Terminal says so — see
+    // terminalLinks.ts, and for the hint that keeps a hovered link from looking
+    // like a dead one. A gesture that isn't a follow falls through untouched:
+    // xterm's link handling is additive, so selecting and focusing still behave
+    // as they always did. The mode is read here, per event, so changing it
+    // reaches terminals that are already open.
+    const linkMode = () => getSettings().terminalLinkClick;
+    const linkHint = createLinkHint(el, linkMode);
+    term.loadAddon(
+      new WebLinksAddon(
+        (event, uri) => {
+          if (!opensLink(event, linkMode(), term.hasSelection())) return;
+          linkHint.hide();
+          // Same route as every other link in the app — a dev server printing
+          // its address is the case the in-app browser was built for.
+          openLink(uri);
+        },
+        { hover: (event) => linkHint.show(event), leave: () => linkHint.hide() },
+      ),
+    );
     term.open(el);
 
     // No WebGL renderer. @xterm/addon-webgl 0.19.0 corrupts rendering on
@@ -148,7 +210,8 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // Deleted rather than made a setting: stored settings win over DEFAULTS, so
     // a `webgl: false` default would silently do nothing for existing users.
 
-    // macOS natural text editing — the same mapping iTerm2 ships under that name.
+    // Natural text editing — on a Mac, the same mapping iTerm2 ships under
+    // that name; off it, only the parts that make sense without a Cmd key.
     //
     // xterm.js's defaults are wrong for a Mac shell, and actively destructive.
     // From its own Keyboard.ts, with `modifiers = alt?2 | meta?8`:
@@ -181,15 +244,28 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // reads it as kill-whole-line (bash: to line start) — the accepted
     // terminal meaning of the chord. Option+Backspace needs no entry: xterm
     // itself sends ESC+DEL, which zsh binds to backward-kill-word.
-    const NATURAL_EDITING: Record<string, string> = {
-      "alt+ArrowLeft": "\x1bb", // backward-word
-      "alt+ArrowRight": "\x1bf", // forward-word
-      "meta+ArrowLeft": "\x01", // beginning-of-line (C-a)
-      "meta+ArrowRight": "\x05", // end-of-line       (C-e)
-      "meta+Backspace": "\x15", // kill line         (C-u)
-    };
+    //
+    // The chords come from the registry, which is what keeps this map from
+    // shipping macOS semantics to everyone. The three Cmd-based entries are
+    // unbound off a Mac (see shared/shortcuts.json): there is no Command key
+    // there — Mod resolves to Ctrl, where Ctrl+Left already means word-jump,
+    // and Super belongs to the window manager. Home/End cover line start/end
+    // on those platforms natively. The Option ones stay: ESC-b/ESC-f is what
+    // readline binds to word movement on every platform.
+    const NATURAL_EDITING = (
+      [
+        ["term-word-left", "\x1bb"], // backward-word
+        ["term-word-right", "\x1bf"], // forward-word
+        ["term-line-start", "\x01"], // beginning-of-line (C-a)
+        ["term-line-end", "\x05"], // end-of-line       (C-e)
+        ["term-kill-line", "\x15"], // kill line         (C-u)
+      ] as const
+    ).flatMap(([id, seq]) => {
+      const chord = resolve(id);
+      return chord && chord.code ? [{ chord, seq }] : [];
+    });
     term.attachCustomKeyEventHandler((ev) => {
-      if (ev.type !== "keydown" || ev.ctrlKey) return true;
+      if (ev.type !== "keydown") return true;
       // Never touch a key that is mid-composition. Option+letter starts a dead
       // key on a US layout (Option+e = acute), and WebKit then reports a
       // collapsed, length-2 ev.key and stops honouring preventDefault. Bailing
@@ -197,14 +273,12 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       // handler, so returning false here would skip it and strand the
       // composition, making the next keypress behave as if Option were held.
       if (ev.isComposing || ev.keyCode === 229) return true;
-      // Only named keys (arrows, Backspace), and only with exactly one of
-      // Cmd/Option. `ev.key` for those is always a multi-char name, so a
-      // composed character can never collide with these entries.
-      if (ev.altKey === ev.metaKey) return true;
-      const seq = NATURAL_EDITING[`${ev.metaKey ? "meta" : "alt"}+${ev.key}`];
-      if (!seq) return true;
+      // Every modifier flag must agree, so a composed character can never
+      // collide with these entries and Option+Cmd+Left matches nothing.
+      const hit = NATURAL_EDITING.find(({ chord }) => matchesChord(ev, chord));
+      if (!hit) return true;
       ev.preventDefault();
-      term.input(seq);
+      term.input(hit.seq);
       return false;
     });
 
@@ -357,6 +431,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
             cwd,
             highWater: settings.ptyHighWater,
             runCommand,
+            env,
           },
           (bytes) => {
             // Feed xterm's own write buffer and ack once it has consumed the
@@ -445,8 +520,17 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // term.paste(), which takes xterm's ordered input path (like the key
     // handler above) and wraps the text in bracketed-paste markers, so zsh and
     // TUIs treat it as pasted text rather than typed keystrokes.
+    //
+    // The WINDOW, not the webview. Tauri picks the target by how many webviews
+    // the window has: one, and the drop goes to `AnyLabel` (which every kind of
+    // listener matches); more than one, and it goes to the `Window` target,
+    // which a webview listener does not match at all. Opening a preview adds a
+    // second webview — so a webview listener here meant that dropping a file
+    // onto ANY terminal, in ANY project, silently did nothing for as long as a
+    // browser tab existed anywhere in the window. A window listener is correct
+    // in both states.
     let unlistenDrop: (() => void) | undefined;
-    void getCurrentWebview()
+    void getCurrentWindow()
       .onDragDropEvent((e) => {
         if (e.payload.type !== "drop" || !activeRef.current) return;
         const paths = e.payload.paths;
@@ -494,6 +578,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       window.removeEventListener(THEME_CHANGE_EVENT, onThemeChange);
       window.removeEventListener("focus", onFocus);
       window.removeEventListener("canopy:dictation-text", onDictationText);
+      linkHint.dispose();
       dataSub.dispose();
       titleSub.dispose();
       oscSubs.forEach((s) => s.dispose());

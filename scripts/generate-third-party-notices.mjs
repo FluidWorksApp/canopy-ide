@@ -96,6 +96,7 @@ const TEXT_FILES = {
   "CC0-1.0": "CC0-1.0.txt",
   "Unlicense": "Unlicense.txt",
   "CDLA-Permissive-2.0": "CDLA-Permissive-2.0.txt",
+  "OFL-1.1": "OFL-1.1.txt",
 };
 
 // Binaries redistributed inside the app bundle that no lockfile covers.
@@ -185,11 +186,19 @@ function copyrightsFor(dir) {
       // HOLDERS BE LIABLE...") also start with the word and must not be picked
       // up as if they attributed anyone.
       if (!/^copyright\s*(\(c\)|©|\d{4}|[A-Z][a-z])/i.test(line)) continue;
-      if (/^copyright\s+(notice|holders?|owner|and|license|in)\b/i.test(line)) continue;
+      // NB the /i above also makes `[A-Z][a-z]` match a lowercase word, so
+      // this list — not the capitalisation — is what actually rejects a
+      // wrapped fragment of the license's own prose. "copyright statement(s)"
+      // is the OFL's, from its definition of a Reserved Font Name.
+      if (/^copyright\s+(notice|holders?|owner|and|license|in|statements?)\b/i.test(line)) continue;
       // Boilerplate that belongs to the license text itself, not the component.
       if (/free software foundation|mozilla foundation|apache software foundation/i.test(line)) continue;
       if (/^copyright\s*\(c\)\s*<year>/i.test(line)) continue;
-      if (line.length > 200) continue;
+      // Long enough for a real two-holder attribution. Font licenses restate
+      // the holder once for the family and again per style file, which runs
+      // past 200 — JetBrains Mono's is 221, and dropping it would have lost
+      // the one notice the OFL actually obliges us to reproduce.
+      if (line.length > 400) continue;
       out.add(line.replace(/[.,;]\s*$/, ""));
     }
     if (out.size) break; // first file that yields attribution wins
@@ -208,6 +217,26 @@ function attributionFallback(authors) {
     .map((a) => a.replace(/\s*<[^>]*>/g, "").replace(/\s*\([^)]*\)/g, "").trim())
     .filter((a) => a && a !== "The Rust Project Developers");
   return names.length ? [`Copyright ${names.join(", ")} (per package manifest; the distributed license file carries no copyright line)`] : [];
+}
+
+/** The manifest's rights holder, from whichever copy of the package is on disk.
+ *  pnpm only links a transitive dependency into the store, so the path the
+ *  lockfile names often doesn't exist — the license *file* was already read
+ *  from the store, and the author has to be, or a package whose attribution
+ *  lives only in its manifest silently loses it depending on the installer. */
+function authorFrom(dirs) {
+  for (const dir of dirs) {
+    const file = join(dir, "package.json");
+    if (!existsSync(file)) continue;
+    try {
+      const manifest = JSON.parse(readFileSync(file, "utf8"));
+      const author = manifest.author ?? manifest.contributors;
+      if (author) return author;
+    } catch {
+      // A package.json we can't parse is not an attribution; keep looking.
+    }
+  }
+  return undefined;
 }
 
 function normaliseLicense(name, raw) {
@@ -342,9 +371,31 @@ function collectNpm() {
     else byIdentity.set(key, c);
   }
   return [...byIdentity.values()].map((c) => {
-    const copyrights = c.paths.map((p) => copyrightsFor(join(ROOT, p))).find((r) => r.length) ?? [];
-    return { ...c, copyrights: copyrights.length ? copyrights : attributionFallback(c.author) };
+    const dirs = [...c.paths.map((p) => join(ROOT, p)), pnpmDirFor(c.name, c.version)].filter(Boolean);
+    const copyrights = dirs.map(copyrightsFor).find((r) => r.length) ?? [];
+    const author = c.author ?? authorFrom(dirs);
+    return { ...c, author, copyrights: copyrights.length ? copyrights : attributionFallback(author) };
   });
+}
+
+// package-lock.json describes npm's nested layout; a pnpm install puts the same
+// package somewhere else entirely, so every nested path in the lockfile misses
+// on disk and the package silently loses its attribution. Look in the pnpm store
+// as a last resort — after the lockfile paths, so an npm tree renders identically
+// and `--check` in CI stays stable.
+function pnpmDirFor(name, version) {
+  const store = join(ROOT, "node_modules", ".pnpm");
+  if (!existsSync(store)) return null;
+  // Store dirs are "<name with / as +>@<version>", plus a "_<peer hash>" suffix
+  // when the same version is installed against different peers.
+  const prefix = `${name.replaceAll("/", "+")}@${version}`;
+  let match;
+  try {
+    match = readdirSync(store).find((e) => e === prefix || e.startsWith(`${prefix}_`));
+  } catch {
+    return null;
+  }
+  return match ? join(store, match, "node_modules", name) : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -473,6 +524,16 @@ the permissive option and only that option's terms bind this distribution —
 MPL-2.0), \`r-efi\` under MIT (not LGPL-2.1-or-later), and the large
 MIT-or-Apache-2.0 Rust ecosystem under MIT. Components are grouped below by the
 elected license, not the declared expression.
+
+**Bundled fonts — OFL-1.1.** Archivo and JetBrains Mono ship inside the app as
+\`.woff2\` files (the Vitrine skin sets them; every other skin uses the system
+UI font). The OFL exists to permit exactly this: it allows the fonts to be
+bundled and redistributed with software, including commercially, and it does
+not reach the software they ship with — Canopy stays MIT. What it does require
+is met here. The fonts are not sold on their own. Each holder's copyright
+notice is reproduced above and the license text in full below. Neither family
+declares a Reserved Font Name, so the subsetting the \`@fontsource-variable\`
+packages perform to produce the \`.woff2\` files does not oblige a rename.
 
 **MPL-2.0 components** are file-level copyleft: obligations attach only to
 modifications of those files, which Canopy does not make. Their sources are
