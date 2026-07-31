@@ -15,6 +15,7 @@ import * as ipc from "./ipc";
 import {
   actionPolicy,
   companionSessionId,
+  forgetCompanionSession,
   tierFor,
   type CompanionAuthority,
   type CompanionLaunch,
@@ -94,6 +95,13 @@ let transport: CompanionTransport | null = null;
 /** Guards against two launches racing — the setting can be toggled faster than
  *  a CLI starts, and two children would both hold the same session id. */
 let starting: Promise<void> | null = null;
+/** What the current launch attempted, so a death can be diagnosed rather than
+ *  just reported. A resume that dies before the session ever reports ready is
+ *  a *stale session id*, not a broken CLI — and those need opposite responses. */
+let attempt: { cliId: string; resumed: boolean; ready: boolean } | null = null;
+/** Set while a failed resume is being retried from scratch, so the retry
+ *  cannot itself trigger another retry. */
+let healing = false;
 
 export const COMPANION_EVENT = "canopy:companion";
 
@@ -136,6 +144,14 @@ function amendReply(fn: (m: CompanionMessage) => CompanionMessage): void {
 function onEvent(event: CompanionEvent): void {
   switch (event.kind) {
     case "ready":
+      // Marked here, and only here. Marking it at spawn time was the bug that
+      // made this necessary: a launch that died a millisecond later still
+      // counted as "this CLI has a conversation", so every later start resumed
+      // a session that had never existed and exited instantly.
+      if (attempt) {
+        attempt.ready = true;
+        markRun(attempt.cliId);
+      }
       set({ status: state.status === "working" ? "working" : "ready" });
       return;
     case "delta":
@@ -170,10 +186,30 @@ function onEvent(event: CompanionEvent): void {
       // through a good answer must not delete the part that was useful.
       set({ error: event.message });
       return;
-    case "exit":
+    case "exit": {
       transport = null;
+      // A resume that never got as far as `ready` means the id is stale — the
+      // conversation it names is gone, or never existed. Start a fresh one
+      // rather than showing "Not connected" forever: the user cannot be
+      // expected to know that a session id they have never seen is the reason
+      // their companion is dead.
+      const stale = isStaleResume(attempt, healing);
+      if (stale && attempt) {
+        const cliId = attempt.cliId;
+        attempt = null;
+        healing = true;
+        forgetCompanionSession(cliId);
+        clearRun(cliId);
+        set({ status: "starting", error: null });
+        void (lastStart ? startCompanion(lastStart) : Promise.resolve()).finally(() => {
+          healing = false;
+        });
+        return;
+      }
+      attempt = null;
       set({ status: "failed", error: state.error ?? "The companion's agent stopped." });
       return;
+    }
   }
 }
 
@@ -188,8 +224,30 @@ export interface StartOptions {
 
 /** Bring the companion up. Safe to call repeatedly — a session that is already
  *  running is left alone, which is what lets every mount call it. */
+/** Whether a death means "the session id is stale" rather than "the CLI is
+ *  broken".
+ *
+ *  A resume that never reached `ready` names a conversation the CLI does not
+ *  have — it prints "No conversation found" and exits at once. That is
+ *  recoverable (start a fresh one); a CLI that genuinely cannot run is not, and
+ *  retrying it forever would be a spawn loop. `healing` is what stops the retry
+ *  from retrying itself.
+ *
+ *  Exported for its test: this is the branch that decides between silently
+ *  fixing itself and giving up, and it is not reachable from a unit test
+ *  through the module's own state. */
+export function isStaleResume(
+  attempt: { resumed: boolean; ready: boolean } | null,
+  healing: boolean,
+): boolean {
+  return Boolean(attempt && attempt.resumed && !attempt.ready && !healing);
+}
+
+let lastStart: StartOptions | null = null;
+
 export async function startCompanion(opts: StartOptions): Promise<void> {
   if (transport || starting) return starting ?? undefined;
+  lastStart = opts;
   starting = (async () => {
     const s = getSettings();
     const cli =
@@ -232,10 +290,11 @@ export async function startCompanion(opts: StartOptions): Promise<void> {
       ["CANOPY_COMPANION_AUTHORITY", authority],
       ["CANOPY_COMPANION_POLICY", actionPolicy(authority)],
     ];
-    // The companion belongs to no project, so it starts in the first root it
-    // has — somewhere real, with the rest reachable, rather than wherever the
-    // app happened to be launched from.
-    const cwd = roots[0];
+    // No cwd: the Rust side puts it in ~/.canopy/companion. Starting it in a
+    // project root made it inherit that repo's CLAUDE.md — one project's
+    // coding-agent rules governing an assistant that answers about all of
+    // them. Every root still reaches it through --add-dir.
+    const cwd = undefined;
 
     set({
       status: "starting",
@@ -250,12 +309,12 @@ export async function startCompanion(opts: StartOptions): Promise<void> {
         // every launch after the first, and is the whole of "remembers who it
         // is". A first run has the id but no transcript behind it yet.
         const resume = Boolean(s.companionSessions[cli.id]) && hasRun(cli.id);
+        attempt = { cliId: cli.id, resumed: resume, ready: false };
         transport = await startStructured(cli.id, launch, { emit: onEvent }, {
           resume,
           cwd,
           env,
         });
-        markRun(cli.id);
       } else {
         // No flag carries a brief for these, so it is typed in as the opening
         // message — see the tier note in companion.ts.
@@ -265,6 +324,7 @@ export async function startCompanion(opts: StartOptions): Promise<void> {
         const command = cli.prompt
           ? cli.prompt(systemPrompt)
           : `${shellBin(cli.bin)} ${shellQuote(systemPrompt)}`;
+        attempt = { cliId: cli.id, resumed: false, ready: false };
         transport = await startTerminal({ emit: onEvent }, { command, cwd, env });
       }
     } catch (err) {

@@ -20112,3 +20112,18 @@ a.btn-sm {
   background: transparent;
   color: var(--text);
 }
+
+/* Space between two rows inside one settings item — the companion's controls
+   are one decision on two rows, not two sections. */
+.set-gap {
+  margin-top: 10px;
+}
+
+/* A control and its one-line consequence, side by side — keeps the note next
+   to the choice it describes without spending a row on it. */
+.set-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}

@@ -142,6 +142,23 @@ function saveRelayChat(label: string, msgs: ipc.RelayChatMsg[]) {
   }
 }
 
+/** Ops that answer without a project to answer about.
+ *
+ *  `ask` is a background agent's question, whose cwd may be a worktree Canopy
+ *  does not track. The rest are the companion's: it runs in no project by
+ *  design, and its whole job is the view across all of them. */
+const PROJECTLESS_OPS = new Set([
+  "ask",
+  "confirm",
+  "workspace",
+  "workspace_git",
+  "workspace_agents",
+  "workspace_search",
+  "open_project",
+  "recall",
+  "remember",
+]);
+
 function publishScopes(state: WorkspaceState) {
   void ipc
     .setContextScopes(
@@ -1638,6 +1655,13 @@ export default function App() {
           return;
         }
         const projectId =
+          // A path the action NAMES beats the directory its caller happens to
+          // sit in. This is what the companion needs and every agent benefits
+          // from: `canopy_start_server({ dir })` says which checkout it means,
+          // and honouring the caller's cwd instead sent it to whichever project
+          // that cwd fell in — for the companion, which deliberately runs
+          // inside no project, that was always the same wrong one.
+          (a.dir ? projectForCwd(a.dir) : undefined) ??
           projectForCwd(a.route) ??
           // A worktree the agent runs in follows `<repo>-wt-…`; fall back to the
           // single open project so an action still lands somewhere sensible.
@@ -1750,8 +1774,13 @@ export default function App() {
             : undefined);
         const roots = project?.components.map((c) => c.path) ?? [];
         // An "ask" needs no project — a background agent with a question is
-        // exactly the case where its cwd may be a worktree we don't track.
-        if (!roots.length && op.op !== "ask") {
+        // exactly the case where its cwd may be a worktree we don't track. The
+        // companion's ops are the same case taken further: it deliberately runs
+        // inside no project (so it inherits no repo's CLAUDE.md), and every one
+        // of them answers ACROSS projects rather than about the one its caller
+        // sits in. Requiring a project here rejected the only agent that was
+        // never meant to have one.
+        if (!roots.length && !PROJECTLESS_OPS.has(op.op)) {
           void ipc.browserResult(
             op.id,
             false,
@@ -2045,6 +2074,14 @@ export default function App() {
         roots: p.components.map((c) => c.path),
         open: ws.openIds.includes(p.id),
         hibernated: Boolean(hibernated[p.id]),
+        // The configured commands come along, or canopy_start_server is
+        // unusable: it takes a command by name, and nothing else tells the
+        // companion what those names are.
+        components: p.components.map((c) => ({
+          label: c.label,
+          path: c.path,
+          commands: (c.commands ?? []).map((cmd) => cmd.name),
+        })),
       })),
     [ws.projects, ws.openIds, hibernated],
   );

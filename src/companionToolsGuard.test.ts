@@ -16,7 +16,12 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { MUTATING_TOOLS, COMPANION_TOOLS, companionToolNames } from "./companionTools";
+import {
+  MUTATING_TOOLS,
+  COMPANION_TOOLS,
+  PER_PROJECT_TOOLS,
+  companionToolNames,
+} from "./companionTools";
 
 const hook = readFileSync(
   join(process.cwd(), "src-tauri/src/bin/canopy_hook.rs"),
@@ -101,7 +106,9 @@ describe("authority withholds rather than asks", () => {
   it("leaves reading alone at every authority", () => {
     for (const authority of ["read", "confirm", "auto"] as const) {
       const tools = companionToolNames([], authority);
-      expect(tools).toContain("canopy_project");
+      // canopy_project is deliberately NOT here — see the withheld group
+      // below. canopy_workspace is what answers that question for an agent
+      // that is in no project.
       expect(tools).toContain("canopy_diagnostics");
       expect(tools).toContain("canopy_workspace");
       expect(tools).toContain("canopy_workspace_git");
@@ -122,5 +129,40 @@ describe("authority withholds rather than asks", () => {
     expect(hook).toContain("fn apply_companion_authority(");
     expect(hook).toContain("apply_companion_authority(&mut tools)");
     expect(hook).toContain('std::env::var("CANOPY_COMPANION_POLICY")');
+  });
+});
+
+describe("tools that cannot answer for this agent are withheld", () => {
+  it("keeps the per-project tools out of the companion's list", () => {
+    // Asking it not to call canopy_project did not work: it called it, got
+    // whichever project the bridge routed it to, and told the user their other
+    // projects did not exist. A tool that cannot answer correctly for an agent
+    // in no project does not belong in that agent's list.
+    for (const authority of ["read", "confirm", "auto"] as const) {
+      const tools = companionToolNames([], authority);
+      for (const name of PER_PROJECT_TOOLS) expect(tools).not.toContain(name);
+    }
+  });
+
+  it("still gives it the cross-project tool that answers the same question", () => {
+    expect(companionToolNames([], "read")).toContain("canopy_workspace");
+  });
+
+  it("matches the Rust list, name for name", () => {
+    const start = hook.indexOf("const COMPANION_BLIND_TOOLS: &[&str] = &[");
+    expect(start).toBeGreaterThan(-1);
+    const body = hook.slice(start, hook.indexOf("];", start));
+    const rust = [...body.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
+    expect(rust.sort()).toEqual([...PER_PROJECT_TOOLS].sort());
+  });
+
+  it("withholds them at every authority, not only read-only", () => {
+    // They are wrong for this agent regardless of what it may do.
+    const rust = hook.slice(hook.indexOf("fn apply_companion_authority("));
+    const blind = rust.indexOf("COMPANION_BLIND_TOOLS");
+    const policyGate = rust.indexOf('CANOPY_COMPANION_POLICY');
+    expect(blind).toBeGreaterThan(-1);
+    // Filtered before the policy early-return, or "act freely" would keep them.
+    expect(blind).toBeLessThan(policyGate);
   });
 });

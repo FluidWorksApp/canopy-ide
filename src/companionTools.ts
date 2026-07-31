@@ -92,6 +92,19 @@ export const COMPANION_TOOLS: string[] = COMPANION_TOOL_GROUPS.flatMap((g) =>
   g.tools.map((t) => t.name),
 );
 
+/** Shared tools that answer "the project I am in" — and are therefore lies for
+ *  an agent that is in none.
+ *
+ *  Withheld rather than discouraged. The brief used to ask the companion not to
+ *  call `canopy_project`; it called it anyway, got whichever project the bridge
+ *  routed it to, and told the user their other seven projects did not exist.
+ *  A tool that cannot answer correctly for this agent should not be in its
+ *  list — `canopy_workspace` answers the same question across all of them. */
+export const PER_PROJECT_TOOLS: string[] = [
+  "canopy_project",
+  "canopy_component_files",
+];
+
 /** Shared tools that change something the user would have to undo.
  *
  *  Named here because the companion is the one agent that can reach a project
@@ -144,5 +157,6 @@ export function companionToolNames(
     // The companion's own tools are not in Settings → Agents (that screen is
     // about what coding agents may do), so only the shared ones can be off.
     .filter((name) => COMPANION_TOOLS.includes(name) || !off.has(name))
-    .filter((name) => mutatingAllowed || !MUTATING_TOOLS.includes(name));
+    .filter((name) => mutatingAllowed || !MUTATING_TOOLS.includes(name))
+    .filter((name) => !PER_PROJECT_TOOLS.includes(name));
 }
