@@ -725,7 +725,11 @@ async fn fill_once(app: &tauri::AppHandle, tab_id: &str, script: &str) -> Result
         report
             .get(key)
             .and_then(|f| f.as_array())
-            .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default()
     };
     let flag = |key: &str| report.get(key).and_then(|f| f.as_bool()).unwrap_or(false);
@@ -738,10 +742,7 @@ async fn fill_once(app: &tauri::AppHandle, tab_id: &str, script: &str) -> Result
         // The script's own account of why: it saw the page and this side did
         // not. A fill that did not take has to fail rather than report the
         // fields it aimed at — a caller told "filled" submits the form.
-        why: report
-            .get("why")
-            .and_then(|w| w.as_str())
-            .map(String::from),
+        why: report.get("why").and_then(|w| w.as_str()).map(String::from),
     })
 }
 
