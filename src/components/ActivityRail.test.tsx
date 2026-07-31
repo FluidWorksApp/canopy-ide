@@ -41,6 +41,7 @@ describe("ActivityRail", () => {
       "Source control & Review — Issues — GitHub, Linear, …",
       "Agents — Agents",
       "Agents — Tasks — one-shot agent jobs",
+      "Agents — Scratchpad — thoughts, ideas and to-dos you'll pick up later",
       "Agents — Research — what's been investigated, and what shipped from it",
       "Agents — Team — relay, chat, notifications",
       "Tools — MCP servers your agents can reach, from every CLI",
