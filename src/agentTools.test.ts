@@ -10,6 +10,8 @@ import { join } from "node:path";
 
 import { AGENT_TOOL_GROUPS, ALL_AGENT_TOOLS } from "./agentTools";
 
+// Vitest runs from the repo root; import.meta.url is not a file: URL here
+// (same note as branchSwitchGuard.test.ts).
 const HOOK = join(process.cwd(), "src-tauri/src/bin/canopy_hook.rs");
 
 /** Every `"name": "canopy_…"` in the sidecar's tool descriptors. */
@@ -25,11 +27,35 @@ describe("the agent tool list", () => {
     const known = sidecarTools();
     expect(known.size).toBeGreaterThan(20);
     const unknown = ALL_AGENT_TOOLS.filter((t) => !known.has(t));
-    expect(unknown).toEqual([]);
+    expect(unknown, "a switch naming no tool silently does nothing").toEqual([]);
+  });
+
+  // The reverse is deliberately not asserted. A dozen tools — the Android
+  // device set, and canopy_browser_point — are defined but intentionally have
+  // no switch, because the surface they belong to is not finished. Asserting
+  // both directions would mean listing those exceptions here and keeping the
+  // exception list current, which is a third thing to drift.
+
+  it("names and explains every switch it shows", () => {
+    for (const group of AGENT_TOOL_GROUPS) {
+      expect(group.label, group.id).toBeTruthy();
+      expect(group.blurb, group.id).toBeTruthy();
+      for (const tool of group.tools) {
+        expect(tool.label, tool.name).toBeTruthy();
+        expect(tool.note, tool.name).toBeTruthy();
+      }
+    }
   });
 
   it("names each tool once", () => {
     expect(new Set(ALL_AGENT_TOOLS).size).toBe(ALL_AGENT_TOOLS.length);
+  });
+
+  it("offers the scratchpad pair, split read from write", () => {
+    // The split is what lets the reader be auto-approved by a host; a single
+    // switch covering both would make that annotation meaningless.
+    expect(ALL_AGENT_TOOLS).toContain("canopy_notes");
+    expect(ALL_AGENT_TOOLS).toContain("canopy_notes_write");
   });
 
   it("lets the user take away an agent's ability to close itself", () => {

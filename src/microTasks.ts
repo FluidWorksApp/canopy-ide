@@ -884,10 +884,65 @@ export const implementResearchTask: MicroTaskDef<ImplementResearchPayload> = {
     ),
 };
 
+// ---------- the scratchpad ----------
+
+export interface NoteRunPayload {
+  /** Where to run — the project directory. */
+  dir: string;
+  projectId: string;
+  noteId: string;
+  title: string;
+  /** The whole note, rendered for an agent: the thought, its attachments as
+   *  absolute paths, and the captured context marked as historical. Built by
+   *  notes.noteContext, because only that module knows the record's shape. */
+  brief: string;
+}
+
+/** Pick a parked thought up and do it.
+ *
+ *  Deliberately not isolated into a worktree, and deliberately not told to
+ *  commit or push. A note is the least-specified thing in the app — it may be
+ *  "rename this variable" or "rethink how sessions are stored" — and a task
+ *  that opens a branch and starts pushing on the strength of one sentence
+ *  someone typed three weeks ago is how you get an afternoon of cleanup. So
+ *  this one lands the agent in the project with the full note in hand and stops
+ *  there; the human decides what it becomes.
+ *
+ *  It also has no `steps`. Every other rail here describes a job whose shape is
+ *  known before it starts — read the diff, fix the cause, push. A note's shape
+ *  is unknown by construction, and four invented milestones would be a rail
+ *  that lies. Those runs fall back to the live "last tool used" note in the
+ *  Tasks panel, which is the honest thing to show. */
+export const noteTask: MicroTaskDef<NoteRunPayload> = {
+  id: "note",
+  label: "Work on note",
+  icon: "◇",
+  runLabel: (p) => adhocLabel(p.title),
+  placeholder: "anything to add since you wrote it…",
+  blurb: "Pick up a note from the scratchpad, with everything attached to it.",
+  effect: "reads",
+  surfaceNote: "on a note, from the Scratchpad panel",
+  cwd: (p) => p.dir,
+  env: (p) => [["CANOPY_NOTE", p.noteId]],
+  buildContext: (p, query) =>
+    oneLine(
+      p.brief +
+        ` Start by getting your bearings: call canopy_project for the components and` +
+        ` what is already running. The note was written at some point in the past and` +
+        ` the code has moved since — check what it describes still holds before acting` +
+        ` on it, and say so if it does not.` +
+        ` Do the work in this checkout; do not create a branch, commit, or push —` +
+        ` this note is a starting point, not an approved change, and what it becomes` +
+        ` stays the user's call.` +
+        (query ? ` The user adds: "${query}".` : ""),
+    ),
+};
+
 /** Every built-in micro-task a CTA can launch. These are surface-bound: their
  *  payload comes from where the button lives (see each task's surfaceNote),
  *  which is why the Tasks panel lists them read-only — run them from there. */
 export const MICRO_TASKS: MicroTaskDef<never>[] = [
+  noteTask as MicroTaskDef<never>,
   researchTask as MicroTaskDef<never>,
   implementResearchTask as MicroTaskDef<never>,
   raisePrTask as MicroTaskDef<never>,

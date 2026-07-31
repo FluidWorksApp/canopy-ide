@@ -1,13 +1,14 @@
 // Native file renderers. Each viewer receives raw bytes from the Rust core and
 // renders fully offline (mermaid and SheetJS are lazy-loaded so they cost
 // nothing until a matching file is opened).
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   parse as parseJsonc,
   printParseErrorCode,
   type ParseError,
 } from "jsonc-parser";
-import { renderMarkdown, sanitizeHtml } from "../markdown";
+import { sanitizeHtml } from "../markdown";
+import { Markdown } from "./Markdown";
 import "highlight.js/styles/github-dark.css";
 
 const decoder = new TextDecoder();
@@ -42,75 +43,32 @@ export function hasSourceView(kind: ViewerKind): boolean {
   return ["markdown", "html", "notebook", "sheet", "json"].includes(kind);
 }
 
-// ---------- Markdown (with mermaid) ----------
+// ---------- Markdown ----------
 
-export function MarkdownView({ bytes }: { bytes: Uint8Array }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const html = useMemo(
-    () => renderMarkdown(decoder.decode(bytes)),
-    [bytes],
-  );
-
-  // Syntax-highlight fenced code blocks (lazy-loaded highlight.js).
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const codeBlocks = el.querySelectorAll<HTMLElement>(
-      'pre code[class*="language-"]:not(.language-mermaid)',
-    );
-    if (codeBlocks.length === 0) return;
-    let cancelled = false;
-    void import("highlight.js/lib/common").then(({ default: hljs }) => {
-      if (cancelled) return;
-      codeBlocks.forEach((block) => {
-        try {
-          hljs.highlightElement(block);
-        } catch {
-          // unknown language; leave plain
-        }
-      });
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [html]);
-
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const blocks = el.querySelectorAll("code.language-mermaid");
-    if (blocks.length === 0) return;
-    let cancelled = false;
-    void import("mermaid").then(({ default: mermaid }) => {
-      if (cancelled) return;
-      mermaid.initialize({ startOnLoad: false, theme: "dark" });
-      blocks.forEach((block, i) => {
-        const pre = block.parentElement;
-        if (!pre) return;
-        const container = document.createElement("div");
-        container.className = "mermaid-diagram";
-        pre.replaceWith(container);
-        mermaid
-          .render(`mmd-${Date.now()}-${i}`, block.textContent ?? "")
-          .then(({ svg }) => {
-            container.innerHTML = svg;
-          })
-          .catch((err) => {
-            container.innerHTML = `<pre class="mermaid-error">mermaid: ${String(err)}</pre>`;
-          });
-      });
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [html]);
-
+/** A .md file from the user's own workspace, so it renders at full strength:
+ *  wikilinks resolve and its checkboxes are live. Everything that used to be
+ *  implemented here — mermaid, fenced-code highlighting — now lives in
+ *  <Markdown>, which is what stopped those features being a property of *which
+ *  tab you were in* rather than of markdown. */
+export function MarkdownView({
+  bytes,
+  onWikilink,
+  onEdit,
+}: {
+  bytes: Uint8Array;
+  onWikilink?: (target: string) => void;
+  /** Persist the file after a checkbox was ticked. Absent for a read-only
+   *  surface, which leaves the boxes rendered but inert. */
+  onEdit?: (next: string) => void;
+}) {
+  const text = useMemo(() => decoder.decode(bytes), [bytes]);
   return (
     <div className="viewer-scroll">
-      <div
-        ref={ref}
-        className="markdown-body"
-        dangerouslySetInnerHTML={{ __html: html }}
+      <Markdown
+        text={text}
+        origin="owned"
+        onWikilink={onWikilink}
+        onToggleTask={onEdit}
       />
     </div>
   );
@@ -412,12 +370,14 @@ export function NotebookView({ bytes }: { bytes: Uint8Array }) {
     <div className="viewer-scroll notebook">
       {cells.map((cell, i) =>
         cell.cell_type === "markdown" ? (
-          <div
+          // A notebook cell is markdown in a file the user owns, so it gets
+          // the same treatment as any other .md — including the diagrams and
+          // highlighting it silently went without before.
+          <Markdown
             key={i}
-            className="markdown-body nb-md"
-            dangerouslySetInnerHTML={{
-              __html: renderMarkdown(joinSource(cell.source)),
-            }}
+            className="nb-md"
+            text={joinSource(cell.source)}
+            origin="owned"
           />
         ) : (
           <div key={i} className="nb-code">

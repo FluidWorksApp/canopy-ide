@@ -1437,6 +1437,12 @@ results stay inspectable:
   you go. Never leave research in a scratch markdown file — it is lost the \
   moment the session ends. Long raw material (file dumps, logs, fetched pages) \
   goes in `source`, not in the body: the body is what the next agent reads.
+- Noticing something real that is NOT the job you were given (a bug beside the \
+  one you were sent for, a refactor the code obviously wants, a missing test) \
+  -> canopy_notes_write create. Park it and carry on: writing it down is how it \
+  survives, and chasing it is how you deliver the wrong change. Search \
+  canopy_notes first so the same observation is not recorded twice. This is not \
+  a progress log — do not narrate the work you were asked to do into it.
 
 Call canopy_project first for component paths, configured run commands, \
 terminal ids, and the ports servers are listening on. Fall back to the shell \
@@ -1859,6 +1865,7 @@ fn tools_list() -> serde_json::Value {
         _ => Vec::new(),
     };
     tools.extend(research_tool_defs());
+    tools.extend(notes_tool_defs());
     tools.extend(session_tool_defs());
     // canopy_job_done is on by default everywhere (reporting an outcome is
     // core product), and inside a micro-task session (CANOPY_MICRO_TASK=1 on
@@ -1918,6 +1925,7 @@ const READ_ONLY_TOOLS: &[&str] = &[
     "canopy_reviews",
     "canopy_agents",
     "canopy_research",
+    "canopy_notes",
     "canopy_wait_for",
     "canopy_screenshot",
     "canopy_browser_snapshot",
@@ -2001,6 +2009,43 @@ fn output_schema(name: &str) -> Option<serde_json::Value> {
 /// `json!` expands recursively and the combined literal exceeds the default
 /// recursion limit. Splitting is the cheaper fix than raising it, and it leaves
 /// room for the next addition.
+/// The scratchpad pair. Split read from write for the same reason research is:
+/// the reader is annotated `readOnlyHint` so a host may auto-approve it, and an
+/// annotation that a write action can slip through is a bypass, not a hint.
+fn notes_tool_defs() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "name": "canopy_notes",
+            "description": "Read the user's scratchpad for this project: thoughts, ideas and to-dos they parked to pick up later. Call `search` before writing a note, so the same observation is not recorded twice. Scoped to the project you are working in.",
+            "inputSchema": { "type": "object", "properties": {
+                "action": { "type": "string", "enum": ["list", "search", "get"], "description": "list = current notes, newest first; search = match on title, tags, body and referenced files; get = one note in full, with its attachments and links" },
+                "id": { "type": "string", "description": "Note id for get, e.g. 0007-tier-donations" },
+                "query": { "type": "string", "description": "Search text" },
+                "statuses": { "type": "array", "items": { "type": "string" }, "description": "Filter list to these: ideation, ready, doing, done, parked, archived. Default hides archived." },
+                "limit": { "type": "integer", "description": "Max rows (default 200)" }
+            }, "required": ["action"], "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_notes_write",
+            "description": "Park a thought in the user's scratchpad. Use `create` for something you noticed that is real but is NOT part of the job you were given — a bug beside the one you were sent for, a refactor the code obviously wants, a missing test. Writing it down is how it survives; derailing onto it is not. Do not use this for the work you were asked to do, and do not use it as a progress log. `append` adds to a note, `status` moves it along, `link` ties it to a PR or a research entry, `attach` keeps a file with it.",
+            "inputSchema": { "type": "object", "properties": {
+                "action": { "type": "string", "enum": ["create", "append", "status", "link", "attach"], "description": "create | append | status | link | attach" },
+                "id": { "type": "string", "description": "Note id — required by everything except create" },
+                "title": { "type": "string", "description": "create: the thought, in one line. attach: what the file is." },
+                "text": { "type": "string", "description": "create: any detail beyond the title. append: markdown to add to the body." },
+                "tags": { "type": "array", "items": { "type": "string" } },
+                "status": { "type": "string", "description": "status: ideation | ready | doing | done | parked | archived" },
+                "note": { "type": "string", "description": "status: why it moved" },
+                "pr": { "type": "object", "description": "link: { repo, number, url, state } — a PR that came out of this note" },
+                "research": { "type": "string", "description": "link: id of a research entry started from this note" },
+                "branch": { "type": "string", "description": "link: branch carrying the work" },
+                "file": { "type": "object", "description": "link: { path, start_line, end_line, rev } — a file this note is about. Include `rev` (the commit you read it at) so the line numbers can be trusted later." },
+                "path": { "type": "string", "description": "attach: absolute path of a file to keep with the note (a log, a capture). Copied in, so it survives the worktree." }
+            }, "required": ["action"], "additionalProperties": false }
+        }),
+    ]
+}
+
 fn research_tool_defs() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
@@ -2642,6 +2687,49 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 return Err("import needs a path — the markdown file to adopt".into());
             }
             text(research_op(action, args))
+        }
+        "canopy_notes" | "canopy_notes_write" => {
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .ok_or("missing required argument: action")?;
+            // Same split, same reason as canopy_research: the reader is
+            // annotated read-only so a host can auto-approve it, and a write
+            // action reachable through it would make that a bypass.
+            let reads = ["list", "search", "get"];
+            let writes = ["create", "append", "status", "link", "attach"];
+            let allowed: &[&str] = if name == "canopy_notes" {
+                &reads
+            } else {
+                &writes
+            };
+            if !allowed.contains(&action) {
+                return Err(format!(
+                    "canopy_notes{} has no action \"{action}\" — use {}",
+                    if name == "canopy_notes" { "" } else { "_write" },
+                    allowed.join(", ")
+                ));
+            }
+            // Caught here rather than after a round trip, so the correction
+            // costs the agent nothing.
+            if name == "canopy_notes_write" && action == "create" {
+                let titled = args
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|t| !t.trim().is_empty());
+                if !titled {
+                    return Err("create needs a title — the thought, in one line".into());
+                }
+            }
+            if action == "attach"
+                && !args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|p| !p.trim().is_empty())
+            {
+                return Err("attach needs a path — the file to keep with the note".into());
+            }
+            text(notes_op(action, args))
         }
         "canopy_vault_list" => {
             let mut body = args.clone();
@@ -3554,6 +3642,31 @@ fn browser_op(op: &str, args: &serde_json::Value) -> Result<String, String> {
 /// project and runs there. There is deliberately no project argument — a tool
 /// that could name another project would be a tool that reads another project's
 /// research, and the agent has no business doing that.
+/// Same shape as `research_op`: the project is resolved from the cwd on the
+/// app's side, never taken from the caller.
+fn notes_op(action: &str, args: &serde_json::Value) -> Result<String, String> {
+    let mut body = args.clone();
+    if !body.is_object() {
+        body = serde_json::json!({});
+    }
+    // Never taken from the caller, whatever it passed.
+    body.as_object_mut().map(|o| o.remove("project_id"));
+    body["action"] = serde_json::json!(action);
+    body["cwd"] = serde_json::json!(cwd());
+    // Who moved a note is the one thing its history records, so it is filled in
+    // here rather than trusted from the arguments.
+    if body.get("by").is_none() {
+        body["by"] = serde_json::json!(claim_owner());
+    }
+    ctx_request_with_timeout(
+        "POST",
+        "/ctx/notes",
+        Some(body.to_string()),
+        std::time::Duration::from_secs(20),
+    )
+    .map(pretty)
+}
+
 fn research_op(action: &str, args: &serde_json::Value) -> Result<String, String> {
     let mut body = args.clone();
     if !body.is_object() {
@@ -4155,6 +4268,93 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("title"), "{err}");
+    }
+
+    #[test]
+    fn the_notes_reader_cannot_reach_a_write_action() {
+        // canopy_notes is annotated readOnlyHint so a host may auto-approve it.
+        // If naming a write action through it worked, that annotation would be
+        // a lie and the approval a bypass.
+        let err = call_tool(
+            "canopy_notes",
+            &serde_json::json!({ "action": "create", "title": "sneak" }),
+        )
+        .unwrap_err();
+        assert!(err.contains("no action"), "{err}");
+        assert!(
+            err.contains("list"),
+            "the error should name what is allowed"
+        );
+
+        // And the write tool is not a way to read.
+        let err = call_tool(
+            "canopy_notes_write",
+            &serde_json::json!({ "action": "get" }),
+        )
+        .unwrap_err();
+        assert!(err.contains("no action"), "{err}");
+    }
+
+    #[test]
+    fn notes_actions_are_required_and_checked_before_a_round_trip() {
+        let err = call_tool("canopy_notes", &serde_json::json!({})).unwrap_err();
+        assert!(err.contains("action"), "{err}");
+
+        // A note with nothing in it is the one thing the store must never hold,
+        // and catching it here costs the agent nothing.
+        for empty in ["", "   "] {
+            let err = call_tool(
+                "canopy_notes_write",
+                &serde_json::json!({ "action": "create", "title": empty }),
+            )
+            .unwrap_err();
+            assert!(err.contains("title"), "{err}");
+        }
+
+        let err = call_tool(
+            "canopy_notes_write",
+            &serde_json::json!({ "action": "attach", "id": "0001-x" }),
+        )
+        .unwrap_err();
+        assert!(err.contains("path"), "{err}");
+    }
+
+    #[test]
+    fn notes_tools_are_annotated_and_only_the_reader_is_read_only() {
+        let names: Vec<String> = notes_tool_defs()
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(str::to_string))
+            .collect();
+        assert_eq!(names, ["canopy_notes", "canopy_notes_write"]);
+        assert!(READ_ONLY_TOOLS.contains(&"canopy_notes"));
+        assert!(!READ_ONLY_TOOLS.contains(&"canopy_notes_write"));
+        // Parking a thought takes nothing away from anyone — it only ever adds.
+        assert!(!DESTRUCTIVE_TOOLS.contains(&"canopy_notes_write"));
+    }
+
+    #[test]
+    fn the_notes_tools_are_published_to_the_host() {
+        // A tool defined but never added to the *published* list is invisible,
+        // which is the failure this catches. `tool_defs()` is only the base
+        // array — notes and research are built in their own functions (to keep
+        // the json! macro under its recursion limit) and spliced in by
+        // `tools_list()`, so that is what has to be asserted against.
+        let published = tools_list();
+        let tools = published["tools"].as_array().unwrap().clone();
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(names.contains(&"canopy_notes"), "{names:?}");
+        assert!(names.contains(&"canopy_notes_write"), "{names:?}");
+
+        // The annotation a host reads to decide about auto-approval has to
+        // survive the trip through tools_list, not merely exist in the const.
+        let hint = |want: &str| {
+            tools.iter().find(|t| t["name"] == want).unwrap()["annotations"]["readOnlyHint"].clone()
+        };
+        assert_eq!(hint("canopy_notes"), true);
+        assert_eq!(hint("canopy_notes_write"), false);
     }
 
     #[test]

@@ -32,6 +32,7 @@ function tabTitle(tab: SubTab): string {
     case "pr": return `${tab.pr.title} — ${tab.pr.url}`;
     case "ticket": return `${tab.ticket.id} — ${tab.ticket.title}\n${tab.ticket.url}`;
     case "research": return `Research ${tab.researchId} — ${tab.title}`;
+    case "note": return `Note ${tab.noteId} — ${tab.title}`;
     case "commit": return `${tab.short} — ${tab.subject}`;
     case "branch": return `${tab.branch.branch}\n${tab.branch.worktree ?? "no worktree"}`;
     case "agent": return `${tab.agent} workspace\n${tab.cwd}`;
@@ -54,6 +55,7 @@ function tabText(tab: SubTab): string {
     case "pr": return `#${tab.pr.number} ${tab.pr.title}`;
     case "ticket": return `${tab.ticket.id} ${tab.ticket.title}`;
     case "research": return tabDisplayLabel(tab);
+    case "note": return tabDisplayLabel(tab);
     case "commit": return `${tab.short} ${tab.subject}`;
     case "branch": return tab.branch.branch;
     case "agent": return tabDisplayLabel(tab);

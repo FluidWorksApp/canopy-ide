@@ -127,6 +127,7 @@ pub fn start(app: tauri::AppHandle) {
             .route("/ctx/wait", get(wait))
             .route("/ctx/claims", get(claims_list).post(claims_post))
             .route("/ctx/research", post(research_op))
+            .route("/ctx/notes", post(notes_op))
             .route("/ctx/tools", get(tools))
             .with_state(app.clone());
         let _ = axum::serve(listener, router).await;
@@ -577,6 +578,158 @@ async fn research_op(
         Ok(value) => (StatusCode::OK, value.to_string()),
         // A tool failure, not a protocol failure: the agent reads the text and
         // corrects itself (a cap it exceeded, a transition it may not make).
+        Err(text) => (StatusCode::BAD_REQUEST, text),
+    }
+}
+
+// ---- the scratchpad ------------------------------------------------------
+//
+// The half of notes that agents get. The panel and ⌘K are how a human parks a
+// thought; this is how an agent does — "I noticed three unrelated things while
+// fixing this" is the case, and before this the only options were to derail
+// onto them or to lose them.
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NotesReq {
+    action: String,
+    cwd: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    statuses: Option<Vec<String>>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    note: Option<String>,
+    #[serde(default)]
+    by: Option<String>,
+    #[serde(default)]
+    pr: Option<crate::notes::PrLink>,
+    #[serde(default)]
+    research: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    file: Option<crate::notes::FileRef>,
+    /// attach: an absolute path already on disk, inside a workspace root.
+    #[serde(default)]
+    path: Option<String>,
+}
+
+async fn notes_op(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+    Json(req): Json<NotesReq>,
+) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let Some((project_id, project_name, roots)) = project_for_cwd(&app, &req.cwd) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "{} is not inside any project open in Canopy, and a note belongs to the \
+                 project it was written in. A worktree resolves to the checkout it came \
+                 from, so this means neither is open here — open the project and try again.",
+                req.cwd
+            ),
+        );
+    };
+    let store = app.state::<crate::notes::NotesStore>();
+    let ws = app.state::<crate::fsx::WorkspaceManager>();
+    let need_id = |r: &NotesReq| -> Result<String, String> {
+        r.id.clone()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "this action needs an id — call list to see them".to_string())
+    };
+
+    let out: Result<serde_json::Value, String> = (|| match req.action.as_str() {
+        "list" => crate::notes::notes_list(project_id.clone(), req.statuses.clone(), req.limit)
+            .map(|rows| serde_json::json!({ "notes": rows })),
+        "search" => crate::notes::notes_search(
+            project_id.clone(),
+            req.query.clone().unwrap_or_default(),
+            req.limit,
+        )
+        .map(|rows| serde_json::json!({ "notes": rows })),
+        "get" => crate::notes::notes_get(project_id.clone(), need_id(&req)?)
+            .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
+        "create" => crate::notes::notes_create(
+            store.clone(),
+            project_id.clone(),
+            Some(project_name.clone()),
+            Some(roots.clone()),
+            req.title.clone().unwrap_or_default(),
+            req.text.clone(),
+            req.tags.clone(),
+            // No page context: an agent has no page. The `origin` is what
+            // answers "where do my notes come from" later.
+            None,
+            Some("agent".into()),
+            Some(req.cwd.clone()),
+        )
+        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        "append" => crate::notes::notes_update(
+            store.clone(),
+            project_id.clone(),
+            need_id(&req)?,
+            req.title.clone(),
+            None,
+            req.text.clone(),
+            req.tags.clone(),
+        )
+        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        "status" => crate::notes::notes_set_status(
+            store.clone(),
+            project_id.clone(),
+            need_id(&req)?,
+            req.status.clone().unwrap_or_default(),
+            // Credited to the agent, not to the user: the history is the one
+            // record of who moved a note, and it has to stay honest.
+            req.by.clone().or_else(|| Some("an agent".into())),
+            req.note.clone(),
+        )
+        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
+        "link" => crate::notes::notes_link(
+            store.clone(),
+            project_id.clone(),
+            need_id(&req)?,
+            req.pr.clone(),
+            req.research.clone(),
+            None,
+            req.branch.clone(),
+            req.file.clone(),
+        )
+        .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
+        "attach" => crate::notes::notes_attach_file(
+            store.clone(),
+            ws.clone(),
+            project_id.clone(),
+            need_id(&req)?,
+            req.path.clone().unwrap_or_default(),
+            req.title.clone(),
+            None,
+        )
+        .and_then(|a| serde_json::to_value(a).map_err(|e| e.to_string())),
+        other => Err(format!(
+            "unknown notes action: {other} — one of list, search, get, create, append, \
+             status, link, attach"
+        )),
+    })();
+
+    match out {
+        Ok(value) => (StatusCode::OK, value.to_string()),
         Err(text) => (StatusCode::BAD_REQUEST, text),
     }
 }

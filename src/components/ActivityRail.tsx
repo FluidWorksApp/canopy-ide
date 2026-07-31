@@ -5,6 +5,7 @@ import {
   FilesIcon,
   GitBranchIcon,
   IssueIcon,
+  NoteIcon,
   PlugIcon,
   PullRequestIcon,
   ResearchIcon,
@@ -57,6 +58,15 @@ const RAIL_GROUPS: { name: string; tabs: RailTab[] }[] = [
     name: "Agents",
     tabs: [
       { key: "tasks", Icon: TasksIcon, title: "Tasks — one-shot agent jobs" },
+      // Beside Tasks and Research rather than up with Files, because those
+      // three are one progression: a thought, the thing you found out about
+      // it, the job that does it. A scratchpad filed under "Project" would
+      // read as documentation, which is the one thing it must not become.
+      {
+        key: "notes",
+        Icon: NoteIcon,
+        title: "Scratchpad — thoughts, ideas and to-dos you'll pick up later",
+      },
       // With the agents rather than with the issues: research is what agents
       // produce, and its list is a worklist of theirs, not a queue of yours.
       {
