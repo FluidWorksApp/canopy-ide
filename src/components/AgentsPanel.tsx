@@ -23,6 +23,7 @@ import {
 import { useEscape } from "../useEscape";
 import type { PendingItem } from "../notifications";
 import { Button } from "./ui";
+import { format, matchesModifierClick } from "../shortcuts";
 
 /** Colour + label for the lifecycle dot on a running-agent row. `working` is
  *  the only state that pulses — a moving dot in a column of still ones is
@@ -110,7 +111,8 @@ interface AgentsPanelProps {
    *  for numbered-prompt CLIs (claude/codex). */
   onRespond?: (item: PendingItem, decision: "approve" | "deny") => void;
   onJumpToTerminal?: (item: PendingItem) => void;
-  /** Open a detected server URL in the in-app preview tab (⌘-click on the
+  /** Open a detected server URL in the in-app preview tab (Cmd-click — Ctrl
+   *  off a Mac — on the
    *  chip still opens the system browser). */
   onPreviewUrl?: (url: string) => void;
   /** Focus the tab a running session is in. Separate from onJumpToTerminal:
@@ -813,12 +815,14 @@ export function AgentsPanel({
               className="agent-port"
               title={
                 onPreviewUrl
-                  ? `Preview http://localhost:${p} in Canopy — ⌘-click for your browser`
+                  ? `Preview http://localhost:${p} in Canopy — ${format(
+                      "open-external",
+                    )}-click for your browser`
                   : `Open http://localhost:${p} in your browser`
               }
               onClick={(e) => {
                 e.stopPropagation();
-                if (onPreviewUrl && !e.metaKey && !e.ctrlKey) {
+                if (onPreviewUrl && !matchesModifierClick(e, "open-external")) {
                   onPreviewUrl(`http://localhost:${p}`);
                 } else {
                   void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>

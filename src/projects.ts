@@ -5,6 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { CustomMicroTask } from "./microTasks";
 import { getSettings, updateSettings } from "./settings";
+import { currentPlatform, type Platform } from "./shortcuts";
 
 export interface RunCommand {
   name: string;
@@ -681,18 +682,11 @@ export async function checkInstalledClis(): Promise<Record<string, boolean>> {
 
 // ---------- prerequisites (Git, Node/npm) ----------
 
-export type Platform = "macos" | "windows" | "linux";
-
 /** Which OS the webview runs on, for picking a per-platform install command.
- *  Mirrors the navigator.platform check settings.ts already uses for ⌘D-vs-Alt+D
- *  (WebKit reports "MacIntel" even on Apple Silicon, "Win32" on all Windows). */
-export function currentPlatform(): Platform {
-  const p =
-    typeof navigator !== "undefined" ? navigator.platform.toUpperCase() : "";
-  if (p.includes("MAC")) return "macos";
-  if (p.includes("WIN")) return "windows";
-  return "linux";
-}
+ *  Re-exported from the shortcut registry rather than sniffed again here: two
+ *  copies of "am I on a Mac?" is how the keyboard map drifted from the install
+ *  commands in the first place. */
+export { currentPlatform, type Platform };
 
 /** A tool the agent CLIs (and Canopy's git features) depend on but that Canopy
  *  can't bundle — installed once via the platform's own package manager. */
