@@ -629,7 +629,10 @@ pub fn notes_search(
         } else if body.to_lowercase().contains(&needle) {
             2
         } else if m.context.to_lowercase().contains(&needle)
-            || m.links.files.iter().any(|f| f.path.to_lowercase().contains(&needle))
+            || m.links
+                .files
+                .iter()
+                .any(|f| f.path.to_lowercase().contains(&needle))
         {
             3
         } else {
@@ -1873,7 +1876,9 @@ mod tests {
         let _home = Home::new("search-empty");
         let p = "proj";
         create(p, "Anything");
-        assert!(notes_search(p.into(), "   ".into(), None).unwrap().is_empty());
+        assert!(notes_search(p.into(), "   ".into(), None)
+            .unwrap()
+            .is_empty());
         assert!(notes_search(p.into(), "nothing matches this".into(), None)
             .unwrap()
             .is_empty());

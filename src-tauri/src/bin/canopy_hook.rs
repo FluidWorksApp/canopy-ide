@@ -4242,11 +4242,17 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("no action"), "{err}");
-        assert!(err.contains("list"), "the error should name what is allowed");
+        assert!(
+            err.contains("list"),
+            "the error should name what is allowed"
+        );
 
         // And the write tool is not a way to read.
-        let err = call_tool("canopy_notes_write", &serde_json::json!({ "action": "get" }))
-            .unwrap_err();
+        let err = call_tool(
+            "canopy_notes_write",
+            &serde_json::json!({ "action": "get" }),
+        )
+        .unwrap_err();
         assert!(err.contains("no action"), "{err}");
     }
 
@@ -4306,11 +4312,7 @@ mod tests {
         // The annotation a host reads to decide about auto-approval has to
         // survive the trip through tools_list, not merely exist in the const.
         let hint = |want: &str| {
-            tools
-                .iter()
-                .find(|t| t["name"] == want)
-                .unwrap()["annotations"]["readOnlyHint"]
-                .clone()
+            tools.iter().find(|t| t["name"] == want).unwrap()["annotations"]["readOnlyHint"].clone()
         };
         assert_eq!(hint("canopy_notes"), true);
         assert_eq!(hint("canopy_notes_write"), false);
