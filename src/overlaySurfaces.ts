@@ -64,6 +64,39 @@ function click(selector: string): boolean {
 
 export const OVERLAY_SURFACES: OverlaySurface[] = [
   {
+    // The companion, and the two surfaces that hang off it. Registered rather
+    // than exempted, but note they are the one group that should never actually
+    // be found over a view: the companion unmounts itself while a native
+    // browser view is up (useBrowserShowing in Companion.tsx), because a child
+    // webview composites above the whole window and an overlay on top of one
+    // makes the host blank the page to keep the overlay readable.
+    //
+    // So these entries are the backstop for that unmounting failing, which is
+    // exactly what a backstop is for.
+    id: "companion",
+    label: "Companion (Ash)",
+    selector: ".companion",
+    kind: "persistent",
+    covers: "center",
+    why: "Only exists when the companion is enabled in Settings, and it hides itself whenever a browser view is showing.",
+  },
+  {
+    id: "companion-panel",
+    label: "Companion chat",
+    selector: ".companion-panel",
+    kind: "persistent",
+    covers: "center",
+    why: "Opens from the companion, which is absent while a browser view is showing.",
+  },
+  {
+    id: "companion-notice",
+    label: "Companion notice",
+    selector: ".companion-notice",
+    kind: "transient",
+    covers: "center",
+    why: "Posted by the attention channel through the companion; absent while a browser view is showing.",
+  },
+  {
     // The one that started all of this: not a dialog, not a menu, carrying none
     // of the classes the first detector looked for, and the app's most-used
     // floating surface. It slides in over 340ms, which is the other half of the

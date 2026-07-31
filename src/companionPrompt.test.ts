@@ -112,11 +112,13 @@ describe("the brief", () => {
     expect(p).toContain("No preamble");
   });
 
-  it("steers off canopy_project, which cannot see the workspace", () => {
-    // It reached for canopy_project, got the one project the bridge routed it
-    // to, and told the user their other seven did not exist.
+  it("points at the tool that carries dir + command, not at a prohibition", () => {
+    // The brief used to ask it not to call canopy_project. Asking did not
+    // work — the tool is now withheld outright (companionTools.ts), so the
+    // brief only has to say where a `dir` and a `command` come from.
     const p = buildCompanionPrompt(base);
-    expect(p).toContain("Do not use `canopy_project`");
+    expect(p).toContain("configured");
+    expect(p).toContain("canopy_start_server");
   });
 
   it("makes it say which project — it is in none of them", () => {

@@ -1905,6 +1905,15 @@ const STRUCTURED_TOOLS: &[&str] = &[
     "canopy_research",
 ];
 
+/// Tools that answer "the project I am in", which for the companion is a lie:
+/// it runs in no project, so the bridge routes them to whichever one is in
+/// front. Asking it not to call them did not work — it called them and reported
+/// the wrong project's contents as the whole truth. Withheld instead.
+///
+/// Duplicated from PER_PROJECT_TOOLS in companionTools.ts; the guard test holds
+/// the two identical.
+const COMPANION_BLIND_TOOLS: &[&str] = &["canopy_project", "canopy_component_files"];
+
 /// Shared tools that change something the user would have to undo.
 ///
 /// Duplicated from `MUTATING_TOOLS` in companionTools.ts on the same terms as
@@ -1947,6 +1956,13 @@ fn apply_companion_authority(tools: &mut Vec<serde_json::Value>) {
     if !is_companion_session() {
         return;
     }
+    // Always, at every authority: the per-project tools cannot answer for an
+    // agent that is in no project.
+    tools.retain(|t| {
+        t.get("name")
+            .and_then(|n| n.as_str())
+            .is_some_and(|n| !COMPANION_BLIND_TOOLS.contains(&n))
+    });
     if std::env::var("CANOPY_COMPANION_POLICY").unwrap_or_default() != "deny" {
         return;
     }

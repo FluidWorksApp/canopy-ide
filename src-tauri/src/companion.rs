@@ -25,6 +25,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::Mutex;
 
+use tauri::Manager;
+
 use crate::winproc::NoConsoleWindow;
 
 /// How much stderr to keep. A CLI that fails to start explains itself there and
@@ -73,6 +75,7 @@ pub struct CompanionManager {
 /// a change in `companion.ts` alone.
 #[tauri::command]
 pub async fn companion_spawn(
+    app: tauri::AppHandle,
     state: tauri::State<'_, CompanionManager>,
     command: String,
     args: Vec<String>,
@@ -100,6 +103,26 @@ pub async fn companion_spawn(
         // Quitting Canopy must not leave an agent running and billing.
         .kill_on_drop(true);
     cmd.no_console_window();
+
+    // Point the companion at THIS app's context bridge, exactly as pty.rs does
+    // for every terminal it spawns.
+    //
+    // Without it the child merely inherits whatever CANOPY_CTX_PORT happened to
+    // be in the app's own environment — and a dev build launched from a Canopy
+    // terminal inherits the *installed* app's port. The companion then held a
+    // perfectly good MCP connection to a different, older Canopy: its tools
+    // answered, its new ops came back "unknown ui op", and every project it
+    // asked about belonged to the other instance. Silent, and invisible from
+    // inside the session, because nothing about it looks like a wrong address.
+    cmd.env("CANOPY", "1");
+    if let Some(ctx) = app.try_state::<crate::context::ContextBridge>() {
+        if let Some((port, token)) = ctx.env() {
+            cmd.env("CANOPY_CTX_PORT", port.to_string());
+            cmd.env("CANOPY_CTX_TOKEN", token);
+        }
+    }
+
+    // Caller-supplied env last, so it always wins.
     for (k, v) in env.unwrap_or_default() {
         cmd.env(k, v);
     }
