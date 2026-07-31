@@ -5775,16 +5775,31 @@ const ProjectViewBody = memo(function ProjectViewBody({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [components, allWorktrees, repoPaths, wsDigests, thisInstance]);
 
-  // Keep the digest poll's filter in step with the workspaces we know about.
+  // Keep the digest poll's filter in step with the workspaces we know about —
+  // every worktree, not only the ones holding a component that has something to
+  // run. The Git panel names the agent on a branch, and a branch with a CLI in
+  // it but no dev server is exactly the case that was invisible when this list
+  // came from the Servers panel's components alone.
   digestRootsRef.current = useMemo(
     () => [
       ...new Set([
         ...roots,
         ...serverComponents.flatMap((c) => (c.workspaces ?? []).map((w) => w.path)),
+        ...allWorktrees.flatMap(({ trees }) =>
+          trees.filter((t) => !t.bare && !t.prunable).map((t) => t.path),
+        ),
       ]),
     ],
-    [rootsKey, serverComponents],
+    [rootsKey, serverComponents, allWorktrees],
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  );
+
+  /** The agents in a folder, for any surface that has a folder and wants to
+   *  name who is in it. One resolver over the one digest poll — no panel gets
+   *  its own idea of who is where. */
+  const agentsAt = useCallback(
+    (dir: string) => agentsIn(dir, wsDigests, thisInstance),
+    [wsDigests, thisInstance],
   );
 
   const serverGroups = useMemo(
@@ -7745,6 +7760,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
           activeWorktree={worktreeEnv?.path ?? null}
           serverCwds={serverCwds}
           agentCwds={agentCwds}
+          agentsAt={agentsAt}
+          onOpenAgent={jumpToPty}
           onOpenPreview={(url) => openPreview(url)}
           onOpenCommit={openCommit}
           onOpenBranch={openBranch}

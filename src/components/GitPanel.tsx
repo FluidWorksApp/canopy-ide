@@ -12,8 +12,10 @@ import {
   ensureLeases,
   releaseLease,
   workspaceRows,
+  type AgentRef,
   type WorkspaceRow,
 } from "../workspaces";
+import { AgentChip } from "./AgentChip";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { RestartIcon } from "./icons";
 import { LooseEnds } from "./LooseEnds";
@@ -50,6 +52,12 @@ interface GitPanelProps {
   serverCwds: string[];
   /** Working directory of every live agent terminal, same idea. */
   agentCwds: string[];
+  /** The agents in a folder, by name and state. The same answer the Servers
+   *  panel puts on a workspace's run line — a branch list that can't say who
+   *  is on a branch sends you to another panel to find out. */
+  agentsAt?: (dir: string) => AgentRef[];
+  /** Bring an agent's terminal to the front, from the chip that names it. */
+  onOpenAgent?: (ptyId: number) => void;
   /** Open a URL in the preview tab — the port chip's click. */
   onOpenPreview: (url: string) => void;
   onNotice: Notify;
@@ -79,6 +87,8 @@ export function GitPanel({
   activeWorktree,
   serverCwds,
   agentCwds,
+  agentsAt,
+  onOpenAgent,
   onOpenPreview,
   onNotice,
   branchTaskMenu,
@@ -198,10 +208,11 @@ export function GitPanel({
             activePath: activeWorktree,
             serverCwds,
             agentCwds,
+            agentsAt,
             ports,
           })
         : [],
-    [branches, worktrees, repo, activeWorktree, serverCwds, agentCwds, ports],
+    [branches, worktrees, repo, activeWorktree, serverCwds, agentCwds, agentsAt, ports],
   );
 
   /** Run a git action, surface its real output, and refresh. Used for the
@@ -812,10 +823,22 @@ export function GitPanel({
                       ±{r.dirty}
                     </span>
                   )}
-                  {r.agents > 0 && (
-                    <span className="ws-agents" title={`${r.agents} agent terminals here`}>
-                      ⌁{r.agents}
-                    </span>
+                  {/* Who is in there, named — the same chip the Servers panel
+                      puts on this workspace's run line, so "claude is on
+                      feat/x" reads identically wherever you meet it. The bare
+                      count is the fallback for an agent terminal no digest
+                      covers: something is in there either way. */}
+                  {r.agentList.length > 0 ? (
+                    <AgentChip agents={r.agentList} onOpen={onOpenAgent} />
+                  ) : (
+                    r.agents > 0 && (
+                      <span
+                        className="ws-agents"
+                        title={`${r.agents} agent terminals here`}
+                      >
+                        ⌁{r.agents}
+                      </span>
+                    )
                   )}
                   {/* The port is the whole point of parallel workspaces, so it
                       is on the row rather than behind a menu — and it opens

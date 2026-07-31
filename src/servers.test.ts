@@ -6,6 +6,7 @@ import {
   splitPorts,
   type ServerComponent,
 } from "./servers";
+import type { AgentRef } from "./workspaces";
 
 const term = (t: Partial<TermSubTab> & { id: string; cwd: string }): TermSubTab => ({
   type: "terminal",
@@ -207,6 +208,57 @@ describe("workspaces nest under their component", () => {
   it("leaves a project with no workspaces exactly as it was", () => {
     const [g] = groupServers([web], [], noPorts);
     expect(g.workspaces).toEqual([]);
+  });
+});
+
+describe("workspaces an agent is in lead the list", () => {
+  const ws = (label: string, agents: AgentRef[] = []) => ({
+    label,
+    path: `/w/site-wt-${label}`,
+    port: null,
+    agents,
+  });
+
+  it("puts the occupied ones above the empty ones", () => {
+    const c: ServerComponent = {
+      ...web,
+      workspaces: [ws("a"), ws("b", [claudeIn(7)]), ws("c"), ws("d", [claudeIn(8)])],
+    };
+    const [g] = groupServers([c], [], noPorts);
+    expect(g.workspaces.map((w) => w.label)).toEqual(["b", "d", "a", "c"]);
+  });
+
+  it("keeps git's order within each half — the sort is stable", () => {
+    const c: ServerComponent = {
+      ...web,
+      workspaces: [ws("a"), ws("b"), ws("c", [claudeIn(7)])],
+    };
+    const [g] = groupServers([c], [], noPorts);
+    expect(g.workspaces.map((w) => w.label)).toEqual(["c", "a", "b"]);
+  });
+
+  it("does not rank by what the agent is doing", () => {
+    // Working above idle would reorder the panel on every turn, which is the
+    // thing this list must never do.
+    const c: ServerComponent = {
+      ...web,
+      workspaces: [
+        ws("a", [{ ...claudeIn(7), state: "idle" as const }]),
+        ws("b", [claudeIn(8)]),
+      ],
+    };
+    const [g] = groupServers([c], [], noPorts);
+    expect(g.workspaces.map((w) => w.label)).toEqual(["a", "b"]);
+  });
+
+  it("does not rank by whether a server is up", () => {
+    const c: ServerComponent = { ...web, workspaces: [ws("a"), ws("b")] };
+    const [g] = groupServers(
+      [c],
+      [term({ id: "t1", cwd: "/w/site-wt-b", command: "npm run dev" })],
+      noPorts,
+    );
+    expect(g.workspaces.map((w) => w.label)).toEqual(["a", "b"]);
   });
 });
 

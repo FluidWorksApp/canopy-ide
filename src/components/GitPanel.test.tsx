@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { GitPanel } from "./GitPanel";
 import type * as ipcTypes from "../ipc";
+import type { AgentRef } from "../workspaces";
 
 const ipc = vi.hoisted(() => ({
   gitRepos: vi.fn(),
@@ -72,12 +73,18 @@ const worktree = (
 
 const onOpenPreview = vi.fn();
 const onOpenTerminal = vi.fn();
+const onOpenAgent = vi.fn();
 const onNotice = vi.fn();
 
 function panel(
   branches: ipcTypes.BranchInfo[],
   worktrees: ipcTypes.WorktreeInfo[],
-  props: { activeWorktree?: string | null; serverCwds?: string[] } = {},
+  props: {
+    activeWorktree?: string | null;
+    serverCwds?: string[];
+    agentCwds?: string[];
+    agentsAt?: (dir: string) => AgentRef[];
+  } = {},
 ) {
   ipc.gitRepos.mockResolvedValue([
     { path: REPO, name: "repo", components: ["app"], branch: "main", detached: false },
@@ -93,7 +100,9 @@ function panel(
       components={[{ label: "app", path: REPO }]}
       activeWorktree={props.activeWorktree ?? null}
       serverCwds={props.serverCwds ?? []}
-      agentCwds={[]}
+      agentCwds={props.agentCwds ?? []}
+      agentsAt={props.agentsAt}
+      onOpenAgent={onOpenAgent}
       onOpenPreview={onOpenPreview}
       onOpenCommit={vi.fn()}
       onOpenBranch={vi.fn()}
@@ -214,6 +223,66 @@ describe("parallel", () => {
       row(name).querySelector(".ws-port")?.textContent ?? "";
     expect(portOf("feat/a")).not.toBe(portOf("feat/b"));
     expect(portOf("feat/a")).not.toBe(portOf("main"));
+  });
+});
+
+describe("who is on a branch", () => {
+  const branches = [
+    branch({ name: "main", current: true }),
+    branch({ name: "feat/a" }),
+    branch({ name: "feat/b" }),
+  ];
+  const trees = [
+    worktree({ path: REPO, branch: "main", is_main: true }),
+    worktree({ path: "/w/repo-wt-feat-a", branch: "feat/a" }),
+    worktree({ path: "/w/repo-wt-feat-b", branch: "feat/b" }),
+  ];
+  const agent = (over: Partial<AgentRef> = {}): AgentRef => ({
+    sessionId: "s1",
+    ptyId: 7,
+    name: "claude",
+    state: "working",
+    ...over,
+  });
+
+  it("names the agent on the branch it is working in, and nowhere else", async () => {
+    panel(branches, trees, {
+      agentsAt: (dir) => (dir === "/w/repo-wt-feat-a" ? [agent()] : []),
+    });
+    await waitFor(() => expect(screen.getByText("feat/b")).toBeTruthy());
+    expect(row("feat/a").querySelector(".ws-run-agent")?.textContent).toContain(
+      "claude",
+    );
+    expect(row("feat/b").querySelector(".ws-run-agent")).toBeNull();
+  });
+
+  it("says how many more are in there without listing them", async () => {
+    panel(branches, trees, {
+      agentsAt: (dir) =>
+        dir === "/w/repo-wt-feat-a"
+          ? [agent(), agent({ sessionId: "s2", ptyId: 8, name: "codex" })]
+          : [],
+    });
+    await waitFor(() => expect(screen.getByText("feat/b")).toBeTruthy());
+    expect(row("feat/a").querySelector(".ws-run-agent")?.textContent).toContain(
+      "claude+1",
+    );
+  });
+
+  it("opens that agent's terminal, without opening the branch", async () => {
+    panel(branches, trees, {
+      agentsAt: (dir) => (dir === "/w/repo-wt-feat-a" ? [agent({ ptyId: 12 })] : []),
+    });
+    await waitFor(() => expect(screen.getByText("feat/a")).toBeTruthy());
+    fireEvent.click(row("feat/a").querySelector(".ws-run-agent") as HTMLElement);
+    expect(onOpenAgent).toHaveBeenCalledWith(12);
+    expect(openThere).not.toHaveBeenCalled();
+  });
+
+  it("still counts agent terminals no digest knows about", async () => {
+    panel(branches, trees, { agentCwds: ["/w/repo-wt-feat-b"] });
+    await waitFor(() => expect(screen.getByText("feat/b")).toBeTruthy());
+    expect(row("feat/b").textContent).toContain("⌁1");
   });
 });
 

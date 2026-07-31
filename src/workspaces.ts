@@ -36,6 +36,11 @@ export interface WorkspaceRow {
   running: number;
   /** Agent sessions with their cwd inside it. */
   agents: number;
+  /** Who those agents are, when the caller can say. Identities rather than the
+   *  count above: "claude, waiting on you" is the thing worth putting on a
+   *  branch, and it is clickable through to that terminal. Empty when no
+   *  resolver was given, and then the count is all the row has. */
+  agentList: AgentRef[];
   subject: string;
   /** Its folder is gone but git still claims it — the one broken state left
    *  visible, because it blocks the branch until it's cleared. */
@@ -54,6 +59,9 @@ export interface WorkspaceContext {
   serverCwds: string[];
   /** cwd of every live agent session. */
   agentCwds: string[];
+  /** The agents in a folder, by name and state — `agentsIn` over the digest
+   *  store, which the caller owns because it is the thing that polls it. */
+  agentsAt?: (dir: string) => AgentRef[];
   /** Workspace folder -> the port its runs are given. */
   ports: Record<string, number>;
 }
@@ -103,6 +111,7 @@ export function workspaceRows(
       port: path ? (ctx.ports[path] ?? null) : null,
       running: countUnder(ctx.serverCwds, path),
       agents: countUnder(ctx.agentCwds, path),
+      agentList: path ? (ctx.agentsAt?.(path) ?? []) : [],
       subject: b.subject,
       missing: wt?.prunable != null,
       locked: wt?.locked != null,
@@ -129,6 +138,7 @@ export function workspaceRows(
       port: ctx.ports[w.path] ?? null,
       running: countUnder(ctx.serverCwds, w.path),
       agents: countUnder(ctx.agentCwds, w.path),
+      agentList: ctx.agentsAt?.(w.path) ?? [],
       subject: "",
       missing: w.prunable != null,
       locked: w.locked != null,
