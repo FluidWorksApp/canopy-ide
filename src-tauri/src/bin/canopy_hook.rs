@@ -1859,6 +1859,7 @@ fn tools_list() -> serde_json::Value {
         _ => Vec::new(),
     };
     tools.extend(research_tool_defs());
+    tools.extend(session_tool_defs());
     // canopy_job_done is on by default everywhere (reporting an outcome is
     // core product), and inside a micro-task session (CANOPY_MICRO_TASK=1 on
     // the launch command) it survives even the Settings disable list — a
@@ -1935,6 +1936,7 @@ const DESTRUCTIVE_TOOLS: &[&str] = &[
     "canopy_stop_server",
     "canopy_restart_server",
     "canopy_message_agent",
+    "canopy_close_session",
 ];
 
 /// Loose but real: names the fields an agent should expect, without pinning a
@@ -2037,6 +2039,22 @@ fn research_tool_defs() -> Vec<serde_json::Value> {
             }, "required": ["action"], "additionalProperties": false }
         }),
     ]
+}
+
+/// Closing your own session. Split out for the same reason as the research
+/// pair: the array below is already at `json!`'s recursion limit.
+///
+/// It deliberately takes no arguments. A terminal id would make "close only
+/// your own" a rule the tool has to enforce; with no way to name a terminal,
+/// the identity is the sidecar's own environment (CANOPY_PTY, stamped by the
+/// PTY that launched this agent) and the restriction is a property of the
+/// surface instead of a check inside it.
+fn session_tool_defs() -> Vec<serde_json::Value> {
+    vec![serde_json::json!({
+        "name": "canopy_close_session",
+        "description": "Close the Canopy terminal you are running in — this ends your own session and kills this CLI. Call it ONLY when the user has told you to close this session (\"close yourself when you're done\", \"shut down after the PR is up\"); finishing a job is never on its own a reason to. It takes no arguments and can only ever close your own terminal — there is no way to name another agent's. Say your last words first: the tab goes when your turn ends.",
+        "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+    })]
 }
 
 fn tool_defs() -> serde_json::Value {
@@ -2772,6 +2790,27 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 "status": status,
                 "summary": summary,
                 "url": args.get("url").and_then(|v| v.as_str()),
+            })))
+        }
+        "canopy_close_session" => {
+            // Which terminal to close is not the agent's to say: it comes from
+            // the environment this sidecar was launched with, so the only tab
+            // this call can ever reach is the one the caller is sitting in.
+            // Outside a Canopy terminal there is nothing to close, and saying
+            // so beats a silent ack.
+            let Some(pty) = std::env::var("CANOPY_PTY")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+            else {
+                return Err(
+                    "you aren't running in a Canopy terminal, so there is no tab to close — tell the user you're done instead".into(),
+                );
+            };
+            text(ctx_post(serde_json::json!({
+                "kind": "close_session",
+                "cwd": cwd(),
+                "ptyId": pty,
+                "instance": std::env::var("CANOPY_INSTANCE").ok(),
             })))
         }
         "canopy_device_list" => text(device_op("list", args)),
@@ -4130,6 +4169,38 @@ mod tests {
         // Writing research changes nothing anyone else can lose, so it is not
         // destructive either — it only ever adds.
         assert!(!DESTRUCTIVE_TOOLS.contains(&"canopy_research_write"));
+    }
+
+    #[test]
+    fn closing_a_session_can_name_no_session_but_your_own() {
+        // The restriction is the schema, not a check: an empty property set
+        // with additionalProperties false leaves an agent no way to say *which*
+        // terminal, so the only one it can reach is the one it runs in. Anyone
+        // adding a ptyId argument here has to delete this test first.
+        let defs = session_tool_defs();
+        assert_eq!(defs.len(), 1);
+        let tool = &defs[0];
+        assert_eq!(tool["name"], "canopy_close_session");
+        let schema = &tool["inputSchema"];
+        assert_eq!(
+            schema["properties"].as_object().map(|p| p.len()),
+            Some(0),
+            "canopy_close_session must take no arguments"
+        );
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+        // Ending a session is not something a host should auto-approve.
+        assert!(DESTRUCTIVE_TOOLS.contains(&"canopy_close_session"));
+        assert!(!READ_ONLY_TOOLS.contains(&"canopy_close_session"));
+    }
+
+    #[test]
+    fn closing_outside_a_canopy_terminal_says_so_instead_of_acking() {
+        // No CANOPY_PTY means no tab — the sidecar is running under a bare
+        // shell. Refuse locally rather than posting an action the app would
+        // have to guess a target for.
+        std::env::remove_var("CANOPY_PTY");
+        let err = call_tool("canopy_close_session", &serde_json::json!({})).unwrap_err();
+        assert!(err.contains("Canopy terminal"), "{err}");
     }
 
     #[test]

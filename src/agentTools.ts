@@ -84,6 +84,11 @@ export const AGENT_TOOL_GROUPS: AgentToolGroup[] = [
       { name: "canopy_vault_fill", label: "Vault fill", note: "Sign in to a page; the agent never sees the password" },
       { name: "canopy_vault_read", label: "Vault read", note: "Plain-text password, for entries you mark readable" },
       { name: "canopy_ask_user", label: "Ask", note: "A question that blocks until you answer" },
+      {
+        name: "canopy_close_session",
+        label: "Close itself",
+        note: "Ends its own terminal when you tell it to — never another's",
+      },
     ],
   },
   {
