@@ -11,6 +11,7 @@ import { AgentBadge } from '@shared/components'
 import { IconBack, IconBranch, IconFile, IconSend, IconStop, IconTerminal } from '@shared/icons'
 import { agentMeta, basename, resumeCommand, type AgentRow } from '@shared/model'
 import { useAsync } from '../useAsync'
+import { useHardwareKeyboard } from '../useMedia'
 import { AsyncBody } from '../panels/ui'
 import type { PanelCtx, Target } from '../panels/types'
 import { DiffText } from './Diff'
@@ -370,7 +371,8 @@ function PrDetail({
   )
 }
 
-/** Control keys a phone keyboard has no room for, and an agent TUI needs. */
+/** Control keys a soft keyboard has no room for, and an agent TUI needs. Shown
+ *  only where there is no hardware keyboard — see `useHardwareKeyboard`. */
 const KEYS: [string, string][] = [
   ['esc', '\x1b'],
   ['tab', '\t'],
@@ -394,6 +396,11 @@ function TerminalDetail({
   const [text, setText] = useState('')
   const row = ctx.rows.find((r) => r.ptyId === pty)
   const m = agentMeta(row?.agent ?? 'shell')
+  // With a real keyboard the terminal itself is the input: xterm forwards every
+  // keystroke to the PTY already, so the composer and the control-key row are
+  // chrome between the user and the shell. They are also the *only* way to type
+  // without one, so this decides which — never both.
+  const keyboard = useHardwareKeyboard()
 
   const send = () => {
     if (!text) return
@@ -402,6 +409,9 @@ function TerminalDetail({
     // instead of submitting, so "text\r" in one write left the message sitting
     // there waiting on a second Enter. Same two-write pattern (and delay) the
     // desktop uses to message an agent.
+    //
+    // Typed keystrokes need none of this, which is the other reason the direct
+    // path is preferred wherever it exists: a real key press is unambiguous.
     ctx.transport.writePty(pty, text)
     setTimeout(() => ctx.transport.writePty(pty, '\r'), 350)
     setText('')
@@ -439,46 +449,50 @@ function TerminalDetail({
       flush
     >
       <div className="term-wrap">
-        <AgentTerminal transport={ctx.transport} pty={pty} />
+        <AgentTerminal transport={ctx.transport} pty={pty} autoFocus={keyboard} />
       </div>
-      <div className="keys">
-        {KEYS.map(([label, data]) => (
-          <button key={label} onClick={() => ctx.transport.writePty(pty, data)}>
-            {label}
-          </button>
-        ))}
-      </div>
-      <form
-        className="composer"
-        autoComplete="off"
-        onSubmit={(e) => {
-          e.preventDefault()
-          send()
-        }}
-      >
-        {/* A bare text input in a form reads to Chrome as a fillable field, so
-         *  Android floated its passwords/cards/addresses strip over the
-         *  composer. Naming it, opting out of autofill and declaring it plain
-         *  text takes the field out of those heuristics. */}
-        <input
-          type="text"
-          name="canopy-message"
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder={row?.terminal ? 'Run a command…' : 'Message the agent…'}
-          autoComplete="off"
-          autoCapitalize="off"
-          autoCorrect="off"
-          spellCheck={false}
-          enterKeyHint="send"
-          data-form-type="other"
-          data-lpignore="true"
-          data-1p-ignore
-        />
-        <button className="primary send" type="submit" aria-label="Send">
-          <IconSend s={18} />
-        </button>
-      </form>
+      {!keyboard && (
+        <>
+          <div className="keys">
+            {KEYS.map(([label, data]) => (
+              <button key={label} onClick={() => ctx.transport.writePty(pty, data)}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <form
+            className="composer"
+            autoComplete="off"
+            onSubmit={(e) => {
+              e.preventDefault()
+              send()
+            }}
+          >
+            {/* A bare text input in a form reads to Chrome as a fillable field,
+             *  so Android floated its passwords/cards/addresses strip over the
+             *  composer. Naming it, opting out of autofill and declaring it
+             *  plain text takes the field out of those heuristics. */}
+            <input
+              type="text"
+              name="canopy-message"
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              placeholder={row?.terminal ? 'Run a command…' : 'Message the agent…'}
+              autoComplete="off"
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+              enterKeyHint="send"
+              data-form-type="other"
+              data-lpignore="true"
+              data-1p-ignore
+            />
+            <button className="primary send" type="submit" aria-label="Send">
+              <IconSend s={18} />
+            </button>
+          </form>
+        </>
+      )}
     </Frame>
   )
 }

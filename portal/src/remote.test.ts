@@ -3,8 +3,11 @@
 // thin — a query and a projection — and their real failure mode is a Rust struct
 // changing shape, which the interfaces beside each query catch at compile time.
 
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { parseDiff } from './views/Diff'
+import { KEYBOARD_QUERY, WIDE_QUERY } from './useMedia'
 import { isStaged, rel, statusWord } from './panels/code'
 import { targetKey, type Target } from './panels/types'
 import { tabLabel } from './shells/WideShell'
@@ -196,5 +199,41 @@ describe('taps are acknowledged before the network answers', () => {
     const a: Target = { kind: 'research', projectId: 'p', id: 'a', title: 'A' }
     const b: Target = { kind: 'research', projectId: 'p', id: 'b', title: 'B' }
     expect(targetKey(a)).not.toBe(targetKey(b))
+  })
+})
+
+// The shells may differ by input device and viewport. They may never differ by
+// vocabulary — same icons, same order, same tokens, everywhere. This is the
+// first half of that rule, written down where it can fail.
+describe('the input aids follow the input device', () => {
+  it('asks whether there is a keyboard, not merely whether the screen is wide', () => {
+    // A landscape tablet is wide and has neither a keyboard nor a pointer. Gate
+    // the composer on width alone and it renders a terminal it cannot type into.
+    expect(KEYBOARD_QUERY).toContain('hover: hover')
+    expect(KEYBOARD_QUERY).toContain('pointer: fine')
+    expect(KEYBOARD_QUERY).toContain('min-width')
+  })
+
+  it('keeps the layout breakpoint a separate question from the input one', () => {
+    // Which shell to render is about how much fits on screen; whether to show a
+    // composer is about how the user types. Collapsing them is what put a phone
+    // keyboard row under a laptop terminal in the first place.
+    expect(WIDE_QUERY).not.toContain('pointer')
+    expect(KEYBOARD_QUERY).not.toBe(WIDE_QUERY)
+  })
+
+  it('shows the composer and the control keys only without a keyboard', () => {
+    // Asserted against the source because the alternative is mounting xterm in
+    // jsdom. What matters is that ONE condition governs both aids and that it
+    // is the keyboard one — two independent gates is how they drift apart.
+    const src = readFileSync(join(process.cwd(), 'portal/src/views/Detail.tsx'), 'utf8')
+    expect(src).toMatch(/const keyboard = useHardwareKeyboard\(\)/)
+    expect(src).toMatch(/\{!keyboard && \(/)
+    // Both aids sit inside that one gate, and the terminal takes the keyboard
+    // exactly when they are absent.
+    const gated = src.slice(src.indexOf('{!keyboard && ('))
+    expect(gated).toContain('className="keys"')
+    expect(gated).toContain('className="composer"')
+    expect(src).toMatch(/autoFocus=\{keyboard\}/)
   })
 })

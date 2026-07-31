@@ -15,18 +15,45 @@ import { useEffect, useState } from 'react'
 
 export const WIDE_QUERY = '(min-width: 900px)'
 
-export function useWide(): boolean {
-  const [wide, setWide] = useState(
-    () => typeof window !== 'undefined' && window.matchMedia(WIDE_QUERY).matches,
+/**
+ * Does this device have a keyboard the user can drive a TUI with?
+ *
+ * Width alone is the wrong question. The terminal already forwards every
+ * keystroke to the PTY, so where there is a real keyboard the composer and the
+ * control-key row are dead weight sitting between the user and the shell — but
+ * on a keyboardless screen they are the *only* way to type, and hiding them
+ * strands the session. A landscape tablet is wide and has neither, which is
+ * exactly the case a width breakpoint gets wrong.
+ *
+ * `hover: hover` plus `pointer: fine` is the honest proxy: a trackpad or mouse
+ * travels with a keyboard, and a bare touchscreen reports neither. An iPad
+ * reports both only once its keyboard case is attached, which is precisely when
+ * it should behave like a desk.
+ */
+export const KEYBOARD_QUERY = '(min-width: 900px) and (hover: hover) and (pointer: fine)'
+
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia(query).matches,
   )
   useEffect(() => {
-    const mq = window.matchMedia(WIDE_QUERY)
-    const on = (e: MediaQueryListEvent) => setWide(e.matches)
+    const mq = window.matchMedia(query)
+    const on = (e: MediaQueryListEvent) => setMatches(e.matches)
     mq.addEventListener('change', on)
-    setWide(mq.matches)
+    setMatches(mq.matches)
     return () => mq.removeEventListener('change', on)
-  }, [])
-  return wide
+  }, [query])
+  return matches
+}
+
+export function useWide(): boolean {
+  return useMediaQuery(WIDE_QUERY)
+}
+
+/** See KEYBOARD_QUERY. Gates the on-screen input aids, nothing else — the two
+ *  shells are still chosen by `useWide`, because that is a layout question. */
+export function useHardwareKeyboard(): boolean {
+  return useMediaQuery(KEYBOARD_QUERY)
 }
 
 /** Publish the *visible* viewport as CSS vars. `100dvh` still counts the strip

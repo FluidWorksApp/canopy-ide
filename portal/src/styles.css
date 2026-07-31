@@ -220,6 +220,14 @@ select {
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
   padding: 10px;
+  transition: border-color 120ms ease;
+}
+/* Where there is no composer the terminal IS the input, so it has to say when
+ * it holds the keyboard — otherwise a click that landed on the list instead
+ * leaves typing going nowhere, silently. AgentTerminal sets the class from
+ * xterm's focus events; see the note there for why this is not `:has()`. */
+.term-focused {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
 }
 .keys {
   display: flex;
