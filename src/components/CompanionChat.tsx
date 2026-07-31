@@ -21,6 +21,8 @@ interface Props {
    *  for something asked several times an hour. */
   proposal: CompanionProposal | null;
   onAnswer: (accepted: boolean) => void;
+  /** Take the user to where an agent CLI can be installed. */
+  onInstall: () => void;
   name: string;
   at: { left: number; top: number; side: "left" | "right" };
   width: number;
@@ -37,6 +39,7 @@ export function CompanionChat({
   height,
   proposal,
   onAnswer,
+  onInstall,
   onSend,
   onClose,
 }: Props) {
@@ -73,7 +76,8 @@ export function CompanionChat({
   });
 
   const busy = state.status === "working";
-  const canSend = draft.trim().length > 0 && !busy && state.status !== "failed";
+  const dead = state.status === "failed" || state.status === "unavailable";
+  const canSend = draft.trim().length > 0 && !busy && !dead;
 
   const submit = () => {
     if (!canSend) return;
@@ -103,7 +107,20 @@ export function CompanionChat({
       </div>
 
       <div className="companion-log" ref={log} onScroll={onScroll}>
-        {state.messages.length === 0 && (
+        {/* No agent CLI on this machine. Said here, with the fix attached,
+            rather than by the companion quietly not existing. */}
+        {state.status === "unavailable" && (
+          <div className="companion-needs">
+            <p>
+              I need an agent CLI to think with — Claude Code, Codex, or any other
+              Canopy knows about. None is installed yet.
+            </p>
+            <button className="companion-needs-cta" onClick={onInstall} type="button">
+              Install one
+            </button>
+          </div>
+        )}
+        {state.status !== "unavailable" && state.messages.length === 0 && (
           <p className="companion-empty">
             Ask about anything across your projects — what changed, what’s running,
             what a piece of code does.
@@ -184,10 +201,14 @@ export function CompanionChat({
           rows={1}
           value={draft}
           placeholder={
-            state.status === "failed" ? "Not connected" : `Message ${name}…`
+            state.status === "unavailable"
+              ? "No agent CLI installed"
+              : state.status === "failed"
+                ? "Not connected"
+                : `Message ${name}…`
           }
           aria-label={`Message ${name}`}
-          disabled={state.status === "failed"}
+          disabled={dead}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
             // Enter sends, Shift+Enter is a newline — the convention every

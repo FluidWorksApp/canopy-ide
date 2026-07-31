@@ -2462,6 +2462,7 @@ export default function App() {
           notices={toasts}
           onDismissNotice={dismissToast}
           onFollowNotice={(item) => void followAttention(item)}
+          onInstallCli={() => setSettingsOpen({ tab: "agents" })}
           proposal={proposal}
           onAnswerProposal={(accepted) => {
             if (!proposal) return;

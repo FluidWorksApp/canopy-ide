@@ -36,6 +36,7 @@ function mount() {
       onFollowNotice={noop}
       proposal={null}
       onAnswerProposal={noop}
+      onInstallCli={noop}
     />,
   );
 }
@@ -147,6 +148,19 @@ describe("dragging the companion", () => {
       pointer(el, "Up", 400, 400);
     });
     expect(getSettings().companionSpot).toEqual(before);
+  });
+});
+
+describe("with no agent CLI installed", () => {
+  it("stays on screen instead of vanishing", async () => {
+    // Going invisible was the wrong answer: the user is then left with a
+    // setting that says the companion is on, no companion, and nothing telling
+    // them what it wants. It stays, asleep, and says so when opened.
+    const { startCompanion } = await import("../companionSession");
+    await startCompanion({ projects: [], installed: () => false, tools: [] });
+    mount();
+    expect(mascot()).toBeTruthy();
+    expect(mascot().querySelector("svg")?.getAttribute("data-face")).toBe("sleeping");
   });
 });
 

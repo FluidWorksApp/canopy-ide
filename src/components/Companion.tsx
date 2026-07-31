@@ -55,6 +55,8 @@ interface CompanionProps {
   /** An action the companion is blocked on. */
   proposal: CompanionProposal | null;
   onAnswerProposal: (accepted: boolean) => void;
+  /** Open Settings where an agent CLI can be installed. */
+  onInstallCli: () => void;
 }
 
 /** Whether a native browser view is on screen right now.
@@ -133,6 +135,10 @@ function faceFor(
       return "thinking";
     case "failed":
       return "blocked";
+    // Asleep rather than blocked: with no agent CLI installed there is nothing
+    // wrong, it simply has nothing to think with yet. Still on screen — going
+    // invisible would leave the user with no way to find out what it needs.
+    case "unavailable":
     case "starting":
       return "sleeping";
     default:
@@ -146,6 +152,7 @@ export function Companion({
   onFollowNotice,
   proposal,
   onAnswerProposal,
+  onInstallCli,
 }: CompanionProps) {
   const state = useSyncExternalStore(subscribeCompanion, companionState, () => companionState());
   const browserShowing = useBrowserShowing();
@@ -258,11 +265,6 @@ export function Companion({
 
   const dragging = Boolean(dragSpot);
 
-  // Nothing to show when there is no CLI to run it on. The companion is on by
-  // default, so this is the ordinary state of a machine that has not installed
-  // an agent yet — not a failure worth a face.
-  if (state.status === "unavailable") return null;
-
   // Nothing at all while a native browser view is up — not hidden with CSS,
   // which would still leave a painted box for the host's occlusion walk to
   // find and answer by blanking the page.
@@ -314,6 +316,7 @@ export function Companion({
           height={PANEL_HEIGHT}
           proposal={proposal}
           onAnswer={onAnswerProposal}
+          onInstall={onInstallCli}
           onSend={(text) => void sendToCompanion(text)}
           onClose={() => setOpen(false)}
         />
