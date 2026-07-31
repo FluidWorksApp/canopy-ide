@@ -1435,7 +1435,11 @@ fn setup_claude_hooks(cfg: &str, home: &str, bridge: &str) -> Result<String, Str
         arr.extend(want);
         changed += 1;
     }
-    changed += install_claude_statusline(&mut settings, &command);
+    changed += install_claude_statusline(
+        &mut settings,
+        &command,
+        &crate::profiles::profile_of_path(home, std::path::Path::new(cfg)),
+    );
 
     if changed == 0 {
         return Ok("Claude Code hooks already set up".into());
@@ -1464,7 +1468,7 @@ fn setup_claude_hooks(cfg: &str, home: &str, bridge: &str) -> Result<String, Str
 /// wrapping, not from itself.
 ///
 /// Returns 1 if the settings object changed.
-fn install_claude_statusline(settings: &mut serde_json::Value, helper: &str) -> u32 {
+fn install_claude_statusline(settings: &mut serde_json::Value, helper: &str, profile: &str) -> u32 {
     let existing = settings.get("statusLine").cloned();
     // What was the user's own status line, before any Canopy wrapper?
     let inner = match &existing {
@@ -1475,6 +1479,20 @@ fn install_claude_statusline(settings: &mut serde_json::Value, helper: &str) -> 
         None => None,
     };
     let mut command = format!("{} --statusline", sh_quote(helper));
+    // Which account's limits this status line reports, written into the command
+    // rather than left to the environment.
+    //
+    // The statusLine path is deliberately not gated on $CANOPY — rate limits
+    // belong to the account, so a `claude` run in any terminal reports the same
+    // numbers. That is exactly why the environment cannot be trusted here: a
+    // session started outside Canopy against this config dir carries no
+    // CANOPY_PROFILE, and its reading would be filed under the default account
+    // — showing one account's usage as another's. This hook lives in one
+    // profile's settings.json and can only ever be invoked by a session using
+    // that profile, so the id is a property of the file, not of the launch.
+    if profile != crate::profiles::DEFAULT_ID {
+        command.push_str(&format!(" --profile {}", sh_quote(profile)));
+    }
     if let Some(prev) = inner.as_deref().filter(|s| !s.trim().is_empty()) {
         command.push_str(&format!(" --passthrough {}", sh_quote(prev)));
     }
@@ -4388,6 +4406,42 @@ mod integration_tests {
         assert_eq!(crate::profiles::profile_of_path(h, &found), "work");
     }
 
+    /// The statusLine path is deliberately not gated on $CANOPY — rate limits
+    /// belong to the account, so a `claude` in any terminal reports the same
+    /// numbers. That is exactly why the account cannot come from the
+    /// environment here: a session started outside Canopy against a profile's
+    /// config dir carries no CANOPY_PROFILE, and its reading would be filed
+    /// under the default account, showing one account's usage as another's.
+    /// The id belongs to the file the hook lives in.
+    #[test]
+    fn a_profiles_statusline_names_its_account_in_the_command() {
+        let home = scratch_home("statusline-account");
+        let h = home.to_str().unwrap();
+        let root = crate::profiles::root_for(h, "work");
+        std::fs::create_dir_all(root.join(".claude")).unwrap();
+        crate::profiles::create(h, "work").unwrap();
+
+        setup_agent_in("claude", root.to_str().unwrap(), h).unwrap();
+        let raw = std::fs::read_to_string(root.join(".claude/settings.json")).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let cmd = settings["statusLine"]["command"].as_str().unwrap();
+        assert!(
+            cmd.contains("--statusline") && cmd.contains("--profile 'work'"),
+            "{cmd}"
+        );
+
+        // The default account names nothing: its readings already land in the
+        // unsuffixed file, and a flag there would be a second way to say so.
+        setup_agent("claude", h).unwrap();
+        let raw = std::fs::read_to_string(home.join(".claude/settings.json")).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let cmd = settings["statusLine"]["command"].as_str().unwrap();
+        assert!(
+            cmd.contains("--statusline") && !cmd.contains("--profile"),
+            "{cmd}"
+        );
+    }
+
     /// The tray reads model, tokens and cost out of the transcript named by a
     /// hook event, behind a whitelist of directories we installed. That
     /// whitelist was `$HOME/.claude` alone, so every session run under a second
@@ -4480,7 +4534,10 @@ mod tests {
     #[test]
     fn claiming_an_empty_slot_installs_a_bare_wrapper() {
         let mut s = serde_json::json!({});
-        assert_eq!(super::install_claude_statusline(&mut s, HELPER), 1);
+        assert_eq!(
+            super::install_claude_statusline(&mut s, HELPER, "default"),
+            1
+        );
         let cmd = statusline_command(&s);
         assert!(cmd.contains("--statusline"), "{cmd}");
         assert!(
@@ -4494,7 +4551,7 @@ mod tests {
         let mut s = serde_json::json!({
             "statusLine": { "type": "command", "command": "~/.claude/mine.sh" }
         });
-        super::install_claude_statusline(&mut s, HELPER);
+        super::install_claude_statusline(&mut s, HELPER, "default");
         assert!(statusline_command(&s).contains("--passthrough '~/.claude/mine.sh'"));
     }
 
@@ -4503,12 +4560,12 @@ mod tests {
         let mut s = serde_json::json!({
             "statusLine": { "type": "command", "command": "~/.claude/mine.sh" }
         });
-        super::install_claude_statusline(&mut s, HELPER);
+        super::install_claude_statusline(&mut s, HELPER, "default");
         let once = statusline_command(&s);
 
         // The upgrade path: setup runs again over settings we already wrote.
         assert_eq!(
-            super::install_claude_statusline(&mut s, HELPER),
+            super::install_claude_statusline(&mut s, HELPER, "default"),
             0,
             "no change means no needless settings.json write"
         );
@@ -4528,14 +4585,14 @@ mod tests {
         let mut s = serde_json::json!({
             "statusLine": { "type": "command", "command": original }
         });
-        super::install_claude_statusline(&mut s, HELPER);
+        super::install_claude_statusline(&mut s, HELPER, "default");
         let wrapped = statusline_command(&s);
         assert_eq!(
             super::unwrap_passthrough(&wrapped).as_deref(),
             Some(original)
         );
 
-        super::install_claude_statusline(&mut s, HELPER);
+        super::install_claude_statusline(&mut s, HELPER, "default");
         assert_eq!(
             statusline_command(&s),
             wrapped,

@@ -114,10 +114,27 @@ fn main() {
 // for foreign sessions: the per-session cost below only updates a digest that
 // already exists, and only Canopy ever creates one.
 
-/// Which account profile this process is running under, stamped into the PTY by
-/// profiles.rs. Absent for the default profile — and absent for a `claude` run
-/// outside Canopy entirely, which is the same account, so the same answer.
+/// Which account profile this process is running under.
+///
+/// Two sources, argument first. `--profile` is written into the statusLine
+/// command inside one profile's own settings.json, so it is a property of the
+/// file being read and holds even for a `claude` started outside Canopy — which
+/// the statusLine path explicitly supports, since rate limits belong to the
+/// account rather than to a session. The environment is the fallback, stamped
+/// on the PTY by profiles.rs, and covers the hook events (which are gated on
+/// $CANOPY and therefore always ours).
+///
+/// Absent from both means the default account, which is also the right answer
+/// for a plain `claude` in any terminal.
 fn current_profile() -> String {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if a == "--profile" {
+            if let Some(id) = args.next().filter(|s| !s.is_empty()) {
+                return id;
+            }
+        }
+    }
     std::env::var("CANOPY_PROFILE")
         .ok()
         .filter(|s| !s.is_empty())
