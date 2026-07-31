@@ -20,6 +20,7 @@ mod instructions;
 mod lsp;
 mod mcp;
 mod mcp_client;
+mod notes;
 mod notify;
 mod portal;
 mod preview;
@@ -383,6 +384,7 @@ pub fn run() {
         .manage(selftest::SelftestState::default())
         .manage(spot::SpotIndex::default())
         .manage(research::ResearchStore::default())
+        .manage(notes::NotesStore::default())
         .manage(vault::Vault::default())
         .manage(cli::pending_from_env())
         .setup(|app| {
@@ -521,6 +523,19 @@ pub fn run() {
             research::research_import,
             research::research_for_file,
             research::research_delete,
+            notes::notes_list,
+            notes::notes_get,
+            notes::notes_search,
+            notes::notes_create,
+            notes::notes_update,
+            notes::notes_add_attachment,
+            notes::notes_attach_file,
+            notes::notes_set_status,
+            notes::notes_link,
+            notes::notes_read_file,
+            notes::notes_read_image,
+            notes::notes_dir,
+            notes::notes_delete,
             spot::spot_save_context_text,
             fsx::workspace_add,
             fsx::workspace_remove,

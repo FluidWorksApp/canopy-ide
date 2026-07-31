@@ -228,6 +228,7 @@ describe("addressPrCommentsTask", () => {
 describe("MICRO_TASKS", () => {
   it("registers every built-in with a unique id and a surface to run from", () => {
     expect(MICRO_TASKS.map((t) => t.id)).toEqual([
+      "note",
       "research",
       "implement-research",
       "raise-pr",

@@ -232,6 +232,18 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
       });
       return;
     }
+    // A note keeps its images as attachments rather than as paths inlined into
+    // the text: the note outlives this palette, this project's worktrees, and
+    // the `.canopy/spot/` directory these are staged in, so what it needs is
+    // the files themselves — which is what the paths let ProjectView copy.
+    if (shots.length > 0 && row.action.type === "save-note") {
+      onAction({
+        type: "save-note",
+        text: row.action.text,
+        attachments: shots.map((s) => s.path),
+      });
+      return;
+    }
     onAction(row.action);
   };
 
