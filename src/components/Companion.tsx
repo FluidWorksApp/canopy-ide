@@ -258,6 +258,11 @@ export function Companion({
 
   const dragging = Boolean(dragSpot);
 
+  // Nothing to show when there is no CLI to run it on. The companion is on by
+  // default, so this is the ordinary state of a machine that has not installed
+  // an agent yet — not a failure worth a face.
+  if (state.status === "unavailable") return null;
+
   // Nothing at all while a native browser view is up — not hidden with CSS,
   // which would still leave a painted box for the host's occlusion walk to
   // find and answer by blanking the page.

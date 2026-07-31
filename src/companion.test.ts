@@ -25,6 +25,15 @@ describe("authority", () => {
     expect(actionPolicy("auto")).toBe("allow");
   });
 
+  it("is on by default, and asks before acting", () => {
+    // The companion is the point of the mascot; a feature nobody finds is a
+    // feature nobody has. It is safe to default on because the authority
+    // default gates every change, and it renders nothing at all until an agent
+    // CLI exists to run it.
+    expect(getSettings().companionEnabled).toBe(true);
+    expect(getSettings().companionAuthority).toBe("confirm");
+  });
+
   it("defaults to asking first", () => {
     // The cross-project reach is what makes this the right default: an action
     // can land somewhere the user has no tab open.

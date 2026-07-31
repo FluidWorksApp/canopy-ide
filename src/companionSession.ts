@@ -38,7 +38,14 @@ export type CompanionStatus =
   /** Mid-turn: a reply is being written. */
   | "working"
   /** It could not start, or it died. `error` says why. */
-  | "failed";
+  | "failed"
+  /** There is no agent CLI on this machine to run it on.
+   *
+   *  Distinct from `failed` because it is not a fault and there is nothing to
+   *  report: the companion is on by default, so on a machine with no CLI yet
+   *  this is simply the ordinary state. Surfaces render nothing for it rather
+   *  than a mascot wearing a permanent error face. */
+  | "unavailable";
 
 export interface CompanionTool {
   name: string;
@@ -255,9 +262,10 @@ export async function startCompanion(opts: StartOptions): Promise<void> {
       AGENT_CLIS.find((c) => c.id === s.defaultAgent && opts.installed(c.bin)) ??
       AGENT_CLIS.find((c) => opts.installed(c.bin));
     if (!cli) {
+      // Not an error, and deliberately not shown as one — see "unavailable".
       set({
-        status: "failed",
-        error: "No agent CLI is installed — add one in Settings → Agents.",
+        status: "unavailable",
+        error: null,
       });
       return;
     }

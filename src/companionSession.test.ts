@@ -31,3 +31,16 @@ describe("telling a stale session id from a broken CLI", () => {
     expect(isStaleResume(null, false)).toBe(false);
   });
 });
+
+describe("no agent CLI installed", () => {
+  it("is a distinct state from a failure", async () => {
+    // The companion ships on. On a machine with no CLI yet that is the
+    // ordinary state, and the surfaces render nothing for it — a mascot
+    // wearing a permanent error face would be a worse first impression than
+    // no mascot.
+    const { startCompanion, companionState } = await import("./companionSession");
+    await startCompanion({ projects: [], installed: () => false, tools: [] });
+    expect(companionState().status).toBe("unavailable");
+    expect(companionState().error).toBeNull();
+  });
+});
