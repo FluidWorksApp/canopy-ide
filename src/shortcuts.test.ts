@@ -272,6 +272,55 @@ describe("main's own chords", () => {
     expect(matches(key("KeyK", { ctrl: true, shift: true }), "spot-search", "windows")).toBe(true);
   });
 
+  /** The second tab-cycle pair: the chord every IDE and browser trains, which
+   *  Help advertised for releases with nothing reading it. It is literal Ctrl
+   *  on all three platforms — Ctrl+Tab is one chord worldwide, and ⌘⇥ is the
+   *  macOS app switcher — and it is a "app" shortcut, not a menu one, because
+   *  muda hands macOS a glyph for Tab that renders and never fires. */
+  describe("Ctrl+Tab", () => {
+    it("cycles forward, and back with Shift, on every platform", () => {
+      for (const p of ALL_PLATFORMS) {
+        expect(matches(key("Tab", { ctrl: true }), "cycle-tab-next", p), p).toBe(true);
+        expect(
+          matches(key("Tab", { ctrl: true, shift: true }), "cycle-tab-prev", p),
+          p,
+        ).toBe(true);
+        // Never the mirror image: forward must not fire with Shift held.
+        expect(matches(key("Tab", { ctrl: true, shift: true }), "cycle-tab-next", p)).toBe(
+          false,
+        );
+      }
+    });
+
+    it("leaves plain Tab alone — it still indents and moves focus", () => {
+      expect(matches(key("Tab"), "cycle-tab-next", "macos")).toBe(false);
+      expect(matches(key("Tab", { shift: true }), "cycle-tab-prev", "macos")).toBe(false);
+    });
+
+    it("ignores Tab with Command or Option also held", () => {
+      // ⌘⇥ is the macOS app switcher; ⌃⌥⇥ is nobody's tab chord.
+      expect(matches(key("Tab", { ctrl: true, meta: true }), "cycle-tab-next", "macos")).toBe(
+        false,
+      );
+      expect(matches(key("Tab", { ctrl: true, alt: true }), "cycle-tab-next", "macos")).toBe(
+        false,
+      );
+      expect(matches(key("Tab", { meta: true }), "cycle-tab-next", "macos")).toBe(false);
+    });
+
+    it("is not a menu accelerator on any platform", () => {
+      expect(idsOnSurface("menu")).not.toContain("cycle-tab-next");
+      expect(idsOnSurface("menu")).not.toContain("cycle-tab-prev");
+    });
+
+    it("is spelled for the platform in the help table", () => {
+      expect(format("cycle-tab-next", "macos")).toBe("⌃⇥");
+      expect(format("cycle-tab-prev", "macos")).toBe("⌃⇧⇥");
+      expect(format("cycle-tab-next", "windows")).toBe("Ctrl+Tab");
+      expect(format("cycle-tab-prev", "linux")).toBe("Ctrl+Shift+Tab");
+    });
+  });
+
   it("renders a digit range with the platform's modifier", () => {
     const mac = helpRows("macos").find((r) => r.id === "tab-jump")!;
     const win = helpRows("windows").find((r) => r.id === "tab-jump")!;

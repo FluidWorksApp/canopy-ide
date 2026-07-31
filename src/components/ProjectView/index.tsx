@@ -2929,14 +2929,31 @@ const ProjectViewBody = memo(function ProjectViewBody({
         setSpotOpen(true);
         return;
       }
-      // The registry's chord, so this is by construction the same key the
-      // "Next/Previous Tab" accelerators advertise — on Windows and Linux too,
-      // where they are Ctrl+PageDown/PageUp rather than the Mac's ⌃⌘→/←. The
-      // hand-written test accepted Ctrl+Alt+Arrow off a Mac, answering a chord
-      // the menu never offered.
-      const dir = matches(e, "next-tab") ? 1 : matches(e, "prev-tab") ? -1 : 0;
+      // Both tab-cycle pairs, and both out of the registry — so this is by
+      // construction the same key the "Next/Previous Tab" accelerators
+      // advertise, on Windows and Linux too, where they are Ctrl+PageDown/PageUp
+      // rather than the Mac's ⌃⌘→/←. The hand-written test accepted
+      // Ctrl+Alt+Arrow off a Mac, answering a chord the menu never offered.
+      //
+      // Ctrl+Tab / Ctrl+Shift+Tab is the pair every IDE and browser trains, and
+      // Help advertised it for releases with nothing answering it. It is an
+      // "app" shortcut rather than a menu one on purpose: muda gives macOS the
+      // glyph "⇥" as Tab's key equivalent rather than the character the key
+      // produces, so such a menu item renders perfectly and never fires. Here
+      // is where it has to work anyway.
+      const dir =
+        matches(e, "next-tab") || matches(e, "cycle-tab-next")
+          ? 1
+          : matches(e, "prev-tab") || matches(e, "cycle-tab-prev")
+            ? -1
+            : 0;
       if (dir === 0) return;
       e.preventDefault();
+      // Tab is the one chord here that means something downstream — xterm
+      // would send it to the shell as a completion request, and it is the
+      // browser's own focus key — so it stops at the capture phase rather than
+      // merely losing its default action.
+      if (e.code === "Tab") e.stopPropagation();
       lastKeydownNav.t = Date.now();
       cycleTabs(dir);
     };
