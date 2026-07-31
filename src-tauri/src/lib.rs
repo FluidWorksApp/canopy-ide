@@ -4,6 +4,7 @@ mod android;
 mod blocking;
 mod browser;
 mod chromium;
+mod stagehand;
 mod cleanup;
 mod cli;
 mod context;
@@ -609,6 +610,8 @@ pub fn run() {
             chromium::chromium_close,
             chromium::chromium_start_cast,
             chromium::chromium_stop_cast,
+            stagehand::stagehand_node_available,
+            stagehand::stagehand_bridge,
             cleanup::cleanup_scan,
             cleanup::cleanup_run,
             cleanup::cleanup_disk,

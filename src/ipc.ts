@@ -435,6 +435,16 @@ export const chromiumStartCast = (tabId: string, width: number, height: number) 
 export const chromiumStopCast = (tabId: string) =>
   invoke<void>("chromium_stop_cast", { tabId }).catch(() => {});
 
+/** Whether a Node runtime exists to run Stagehand in. Canopy bundles none. */
+export const stagehandNodeAvailable = () =>
+  invoke<boolean>("stagehand_node_available").catch(() => false);
+
+/** Start the model bridge — a loopback OpenAI-shaped endpoint that is really
+ *  the user's own configured CLI. What comes back is what Stagehand takes as
+ *  its baseURL and apiKey, so it never needs a real API key. */
+export const stagehandBridge = (argv: string[]) =>
+  invoke<{ base_url: string; token: string }>("stagehand_bridge", { argv });
+
 /** A painted frame from a headless Chromium tab, as a data URL. */
 export const onChromiumFrame = (fn: (e: { tabId: string; frame: string }) => void) =>
   listen<{ tabId: string; frame: string }>("chromium:frame", (e) => fn(e.payload));
