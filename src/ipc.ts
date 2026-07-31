@@ -784,6 +784,13 @@ export const onClipboardChanged = (cb: () => void): Promise<UnlistenFn> =>
 export const onClipboardBlocked = (cb: () => void): Promise<UnlistenFn> =>
   listen("clipboard:blocked", () => cb());
 
+/** The research store changed, carrying the project id that moved. Raised by
+ *  the Rust commands themselves (RESEARCH_CHANGED in research.rs), so it fires
+ *  for an agent writing through MCP as well as for a button in the UI. */
+export const onResearchChanged = (
+  cb: (projectId: string) => void,
+): Promise<UnlistenFn> => listen<string>("research:changed", (e) => cb(e.payload));
+
 // ---------- Credential vault ----------
 //
 // The password never crosses this boundary in the fill direction: `vaultFill`

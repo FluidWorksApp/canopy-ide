@@ -499,6 +499,7 @@ async fn research_op(
         "get" => crate::research::research_get(project_id.clone(), need_id(&req)?)
             .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
         "start" => crate::research::research_start(
+            app.clone(),
             store.clone(),
             project_id.clone(),
             Some(project_name.clone()),
@@ -516,6 +517,7 @@ async fn research_op(
         // tool boundary is what stops an agent treating the digest as somewhere
         // to put the whole finding.
         "digest" | "update" | "append" => crate::research::research_update(
+            app.clone(),
             store.clone(),
             project_id.clone(),
             need_id(&req)?,
@@ -529,6 +531,7 @@ async fn research_op(
         )
         .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
         "source" => crate::research::research_add_source(
+            app.clone(),
             store.clone(),
             project_id.clone(),
             need_id(&req)?,
@@ -538,6 +541,7 @@ async fn research_op(
         )
         .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
         "status" => crate::research::research_set_status(
+            app.clone(),
             store.clone(),
             project_id.clone(),
             need_id(&req)?,
@@ -549,6 +553,7 @@ async fn research_op(
         // The same adoption the file tab's button performs, reachable by an
         // agent that finds loose research while doing something else.
         "import" => crate::research::research_import(
+            app.clone(),
             store.clone(),
             project_id.clone(),
             Some(project_name.clone()),
@@ -558,6 +563,7 @@ async fn research_op(
         )
         .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
         "link" | "supersede" => crate::research::research_link(
+            app.clone(),
             store.clone(),
             project_id.clone(),
             need_id(&req)?,

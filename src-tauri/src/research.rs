@@ -36,7 +36,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 /// Serializes every write. Several agents in one project routinely hold a
 /// research entry open at once — one advancing status, another linking a PR —
@@ -524,11 +524,36 @@ fn load_project(project_id: &str) -> Result<Vec<Meta>, String> {
 
 // ---- commands -------------------------------------------------------------
 //
-// Each write command is a thin wrapper that takes the serialising lock and
-// delegates to an `*_impl` below. The split is not ceremony: it is what lets
-// the tests at the bottom drive a whole lifecycle — start, cap rejection,
-// illegal transition, supersede — against a real directory, which is the only
-// way the state machine is actually checked rather than merely described.
+// Each write command is a thin wrapper that takes the serialising lock,
+// delegates to an `*_impl` below, and announces the change. The split is not
+// ceremony: it is what lets the tests at the bottom drive a whole lifecycle —
+// start, cap rejection, illegal transition, supersede — against a real
+// directory, which is the only way the state machine is actually checked
+// rather than merely described.
+
+/// The store moved. Carries the project id, so a listener refreshes the one
+/// project that changed rather than everything it has ever cached.
+///
+/// This has to originate here. The renderer has its own announcement
+/// (`RESEARCH_EVENT` in `src/research.ts`), but that is a window event raised
+/// by the TypeScript mutators, so it only ever covers writes that began in the
+/// UI. An agent reaches these commands through the MCP endpoint
+/// (`research_op` in context.rs), which never touches that module — so with no
+/// emit from this side the panel goes on rendering the list it loaded when it
+/// mounted, and research written by an agent stays invisible until the project
+/// is reopened. That is indistinguishable, from the user's side, from the
+/// write having silently failed.
+pub const RESEARCH_CHANGED: &str = "research:changed";
+
+/// Announce on success only. A rejected write — a cap, an illegal transition,
+/// a missing entry — has not moved the store, and refreshing on it would be
+/// noise. Wraps the result so each command stays one line.
+fn emit_changed<T>(app: &AppHandle, project_id: &str, out: Result<T, String>) -> Result<T, String> {
+    if out.is_ok() {
+        let _ = app.emit(RESEARCH_CHANGED, project_id);
+    }
+    out
+}
 
 /// Tier one. `status` filters to the states asked for; without it the archived
 /// and superseded are hidden, because a list is a worklist and those two are
@@ -629,6 +654,7 @@ pub fn research_get(project_id: String, id: String) -> Result<Detail, String> {
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn research_start(
+    app: AppHandle,
     store: State<'_, ResearchStore>,
     project_id: String,
     project_name: Option<String>,
@@ -642,17 +668,22 @@ pub fn research_start(
     instance: Option<String>,
 ) -> Result<Summary, String> {
     let _guard = store.0.lock().unwrap();
-    start_impl(
-        project_id,
-        project_name,
-        roots,
-        title,
-        question,
-        agent,
-        cwd,
-        pty_id,
-        tags,
-        instance,
+    let pid = project_id.clone();
+    emit_changed(
+        &app,
+        &pid,
+        start_impl(
+            project_id,
+            project_name,
+            roots,
+            title,
+            question,
+            agent,
+            cwd,
+            pty_id,
+            tags,
+            instance,
+        ),
     )
 }
 
@@ -766,6 +797,7 @@ fn start_impl(
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn research_update(
+    app: AppHandle,
     store: State<'_, ResearchStore>,
     project_id: String,
     id: String,
@@ -778,16 +810,21 @@ pub fn research_update(
     body: Option<String>,
 ) -> Result<Summary, String> {
     let _guard = store.0.lock().unwrap();
-    update_impl(
-        project_id,
-        id,
-        title,
-        digest,
-        recommendation,
-        open_questions,
-        tags,
-        append,
-        body,
+    let pid = project_id.clone();
+    emit_changed(
+        &app,
+        &pid,
+        update_impl(
+            project_id,
+            id,
+            title,
+            digest,
+            recommendation,
+            open_questions,
+            tags,
+            append,
+            body,
+        ),
     )
 }
 
@@ -876,6 +913,7 @@ fn update_impl(
 /// livable — anything long has somewhere to go, and it goes there named.
 #[tauri::command]
 pub fn research_add_source(
+    app: AppHandle,
     store: State<'_, ResearchStore>,
     project_id: String,
     id: String,
@@ -884,7 +922,12 @@ pub fn research_add_source(
     origin: Option<String>,
 ) -> Result<SourceRef, String> {
     let _guard = store.0.lock().unwrap();
-    add_source_impl(project_id, id, title, body, origin)
+    let pid = project_id.clone();
+    emit_changed(
+        &app,
+        &pid,
+        add_source_impl(project_id, id, title, body, origin),
+    )
 }
 
 fn add_source_impl(
@@ -937,6 +980,7 @@ fn add_source_impl(
 /// something implemented that was never researched.
 #[tauri::command]
 pub fn research_set_status(
+    app: AppHandle,
     store: State<'_, ResearchStore>,
     project_id: String,
     id: String,
@@ -945,7 +989,12 @@ pub fn research_set_status(
     note: Option<String>,
 ) -> Result<Summary, String> {
     let _guard = store.0.lock().unwrap();
-    set_status_impl(project_id, id, status, by, note)
+    let pid = project_id.clone();
+    emit_changed(
+        &app,
+        &pid,
+        set_status_impl(project_id, id, status, by, note),
+    )
 }
 
 fn set_status_impl(
@@ -992,6 +1041,7 @@ fn set_status_impl(
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn research_link(
+    app: AppHandle,
     store: State<'_, ResearchStore>,
     project_id: String,
     id: String,
@@ -1002,7 +1052,12 @@ pub fn research_link(
     supersedes: Option<String>,
 ) -> Result<Detail, String> {
     let _guard = store.0.lock().unwrap();
-    link_impl(project_id, id, pr, ticket, branch, files, supersedes)
+    let pid = project_id.clone();
+    emit_changed(
+        &app,
+        &pid,
+        link_impl(project_id, id, pr, ticket, branch, files, supersedes),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1197,6 +1252,7 @@ pub fn research_for_file(project_id: String, path: String) -> Result<Option<Stri
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn research_import(
+    app: AppHandle,
     store: State<'_, ResearchStore>,
     project_id: String,
     project_name: Option<String>,
@@ -1205,7 +1261,12 @@ pub fn research_import(
     instance: Option<String>,
 ) -> Result<Summary, String> {
     let _guard = store.0.lock().unwrap();
-    import_impl(project_id, project_name, roots, path, instance)
+    let pid = project_id.clone();
+    emit_changed(
+        &app,
+        &pid,
+        import_impl(project_id, project_name, roots, path, instance),
+    )
 }
 
 fn import_impl(
@@ -1377,6 +1438,7 @@ fn bind_session(instance: Option<&str>, pty: Option<&str>, dir: &Path) {
 /// of a research list is that the user can throw things out of it.
 #[tauri::command]
 pub fn research_delete(
+    app: AppHandle,
     store: State<'_, ResearchStore>,
     project_id: String,
     id: String,
@@ -1386,7 +1448,11 @@ pub fn research_delete(
     if !dir.join("meta.json").exists() {
         return Err("no research entry there".into());
     }
-    std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())
+    emit_changed(
+        &app,
+        &project_id,
+        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string()),
+    )
 }
 
 // ---- the harness's view ---------------------------------------------------

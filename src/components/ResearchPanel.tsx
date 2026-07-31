@@ -21,6 +21,7 @@ import {
   STATUS_ORDER,
   cached,
   refresh,
+  watchStore,
 } from "../research";
 import { ago } from "./ProjectView/helpers";
 import { ResearchIcon } from "./icons";
@@ -49,6 +50,9 @@ export function ResearchPanel({
   useEffect(() => {
     const sync = () => setRows(cached(projectId));
     window.addEventListener(RESEARCH_EVENT, sync);
+    // Agents write through MCP, which never reaches the store module — without
+    // this the panel would show whatever existed when it mounted.
+    watchStore();
     void refresh(projectId);
     return () => window.removeEventListener(RESEARCH_EVENT, sync);
   }, [projectId]);
