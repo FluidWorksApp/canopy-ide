@@ -47,17 +47,20 @@ describe("sticky stack chips", () => {
     expect(ruleBody(sel)).toMatch(new RegExp(`var\\(\\s*${token}\\s*,\\s*var\\(`));
   });
 
-  it("hangs the folded-stack card edges off the chip, not off the pill", () => {
-    // On the pill they were drawn over whatever came next — the overflow caret
-    // beside them, and the group's first tab. On the chip they land in padding
-    // reserved for them.
-    expect(CSS).toContain(".tab-stack-away::before");
-    expect(CSS).not.toContain(".tab-stack-away .tab-stack-face::before");
-    expect(ruleBody(".tab-stack-away")).toMatch(/padding-right:/);
-  });
-
-  it("keeps the pill above the card edges tucked behind it", () => {
-    expect(ruleBody(".tab-stack-face")).toMatch(/z-index:\s*1/);
-    expect(ruleBody(".tab-stack-more")).toMatch(/z-index:\s*1/);
+  it("draws nothing outside its own box", () => {
+    // The chip sits immediately before the group's first tab, so anything it
+    // paints past its own edge lands on a neighbour. The folded stack used to
+    // grow card edges out of the pill this way; they were drawn over the
+    // overflow caret and over the first tab, and at chip scale they never read
+    // as the stack of paper they were meant to be anyway.
+    //
+    // Negative insets are the shape of that mistake, so they are what is
+    // barred: a chip decoration has to fit in the chip.
+    const rules = [...CSS.matchAll(/\n(\.tab-stack[^{]*)\{([^}]*)\}/g)];
+    expect(rules.length).toBeGreaterThan(4);
+    const escaping = rules
+      .filter(([, , body]) => /(?:top|right|bottom|left|margin[a-z-]*):\s*-/.test(body))
+      .map(([, sel]) => sel.trim());
+    expect(escaping, "chip rules painting outside the chip").toEqual([]);
   });
 });
