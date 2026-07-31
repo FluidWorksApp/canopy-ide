@@ -211,9 +211,7 @@ export interface PaneBarProps {
   /** The non-default account new agents launch as, and the profile-capable
    *  CLIs it holds no login for yet. Null on the default account. */
   account?: { label: string; missing: string[] } | null;
-  /** Profile id -> display name, so a tab badge shows the account by the name
-   *  the user gave it rather than by its slug. One name per account, everywhere
-   *  it appears. */
+  /** Profile id -> display name, so a badge shows the name the user typed. */
   profileLabels?: Record<string, string>;
   onRunCliUpdate: (cli: AgentCli, e: React.MouseEvent) => void;
   onRefreshInstalled: () => void;
@@ -469,10 +467,8 @@ function PaneBarImpl({
                       {tabText(tab)}
                     </span>
                   )}
-                  {/* Which login this session is burning. Only ever rendered
-                      for a non-default account — every tab carrying one would
-                      be noise, and the point of the badge is that you can tell
-                      two sessions of the same CLI apart at a glance. */}
+                  {/* Non-default accounts only — the point is telling two
+                      sessions of the same CLI apart. */}
                   {tab.type === "terminal" && tab.profile && (
                     <span
                       className="tab-profile"
@@ -608,9 +604,7 @@ function PaneBarImpl({
                 <span><GlobeIcon size={15} className="cli-icon" /> Preview</span>
               </div>
               <div className="cli-sep" />
-              {/* Which account these launch as. Only when it isn't the default
-                  one — a banner on every launcher would be noise for anyone
-                  not using accounts. */}
+              {/* Non-default accounts only. */}
               {account && (
                 <div className="cli-account-banner" title="Change it from the account chip in the status bar">
                   launching as <strong>{account.label}</strong>
@@ -619,9 +613,8 @@ function PaneBarImpl({
               {AGENT_CLIS.map((cli) => (
                 <div key={cli.id} className="cli-item" onClick={() => { setCliMenuOpen(false); onLaunchCli(cli); }}>
                   <span><AgentIcon id={cli.id} size={15} className="cli-icon" /> {cli.name}</span>
-                  {/* Said here rather than discovered at a login prompt: this
-                      account holds no login for that CLI, so launching it will
-                      ask for one. Still launchable — that is how you sign in. */}
+                  {/* This account has no login for that CLI yet. Still
+                      launchable — that is how you sign in. */}
                   {installed[cli.bin] && account?.missing.includes(cli.id) && (
                     <span className="cli-signin" title={`${account.label} has no ${cli.name} login yet — launching will ask you to sign in`}>
                       sign in

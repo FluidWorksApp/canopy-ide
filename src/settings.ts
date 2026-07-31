@@ -273,16 +273,12 @@ export interface Settings {
    *  a launch command, and a multi-token value would break both `command -v`
    *  and the basename match that recognises the CLI once it is running. */
   cliBins: Record<string, string>;
-  /** The account profile every agent CLI launches under (see profiles.ts).
+  /** The account every agent CLI launches under (see profiles.ts).
    *
    *  One switch rather than one per CLI: "who am I working as" is a single
-   *  question, and answering it seven times — once per CLI, re-answered at
-   *  every launch — is how the state stops being legible. A CLI the active
-   *  account has no login for still launches; it simply asks you to sign in,
-   *  which the switcher and the ＋ menu both say up front.
-   *
-   *  "default" means the login the machine already had, and exports no
-   *  environment at all — a user who never opens this feature is unaffected. */
+   *  question. A CLI the account has no login for still launches and asks you
+   *  to sign in, which the switcher and ＋ menu say up front. "default" exports
+   *  no environment at all. */
   activeProfile: string;
   /** Agent CLIs Canopy ships no entry for, described by the user (Settings →
    *  Agents). Machine-wide for the same reason as `cliBins`: an in-house agent

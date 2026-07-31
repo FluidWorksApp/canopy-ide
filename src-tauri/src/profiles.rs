@@ -1,30 +1,21 @@
 //! Per-CLI account profiles: two Claude logins, two Codex logins, side by side.
 //!
-//! Every agent CLI we can isolate keys its whole identity — credentials, session
-//! history, settings — off one environment variable naming a config directory.
-//! So a profile is not a credential store: it is a *directory*, plus the env
-//! that points a CLI at it. Canopy never reads, writes, or transports a token;
-//! the user logs in once inside the profile's own terminal and the CLI owns the
-//! result exactly as it does today.
-//!
-//! The layout is deliberately a mirror of a home directory:
+//! A profile is a directory plus the env that points a CLI at it. Canopy never
+//! reads or transports a token — the user logs in inside the profile's own
+//! terminal and the CLI owns the result.
 //!
 //!   ~/.canopy/profiles/<id>/.claude          <- CLAUDE_CONFIG_DIR
 //!   ~/.canopy/profiles/<id>/.codex           <- CODEX_HOME
 //!   ~/.canopy/profiles/<id>/.config          <- XDG_CONFIG_HOME
 //!   ~/.canopy/profiles/<id>/.local/share     <- XDG_DATA_HOME
 //!
-//! because that makes the profile root substitutable for `$HOME` in every
-//! `hooks_config_path`/`setup_*` in agents.rs — hook installation into a profile
-//! is the same code path as into the default, handed a different root. What is
-//! *not* substitutable is `~/.canopy` itself (the event bus, the digests, the
-//! helper binary): those stay in the real home for every profile, which is why
-//! the setup functions take the config root and the helper home separately.
+//! The layout mirrors a home directory so a profile root is substitutable for
+//! `$HOME` in every `setup_*` in agents.rs. `~/.canopy` itself is not: the
+//! event bus, digests and helper binary stay in the real home, which is why
+//! those functions take the config root and the helper home separately.
 //!
-//! The default profile is not a directory we invent — it is `$HOME`, and it
-//! exports no environment at all. A user who never opens this feature must get
-//! byte-identical behaviour, so "default" is modelled as the absence of a
-//! profile rather than as profile number one.
+//! The default profile is `$HOME` and exports no environment at all — it is
+//! modelled as the absence of a profile, not as profile number one.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -69,6 +60,19 @@ pub fn root_for(home: &str, id: &str) -> PathBuf {
             .join(".canopy")
             .join("profiles")
             .join(id)
+    }
+}
+
+/// Where Claude Code keeps `.claude.json` inside a given config root.
+///
+/// The one path that does not follow the home-mirror layout: verified against
+/// the CLI, `CLAUDE_CONFIG_DIR` makes it a child of the config dir rather than
+/// a sibling. Every reader and writer of that file goes through here.
+pub fn claude_state_file(home: &str, root: &Path) -> PathBuf {
+    if root == Path::new(home) {
+        root.join(".claude.json")
+    } else {
+        root.join(".claude").join(".claude.json")
     }
 }
 
@@ -125,10 +129,40 @@ fn read_registry(home: &str) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// The account new agents launch under. Stored rather than held in the
+/// frontend alone because Rust launches agents too — the remote portal has no
+/// webview to ask.
+pub fn active(home: &str) -> String {
+    std::fs::read_to_string(registry_path(home))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v["active"].as_str().map(|s| s.to_string()))
+        .filter(|id| id == DEFAULT_ID || read_registry(home).iter().any(|(x, _)| x == id))
+        .unwrap_or_else(|| DEFAULT_ID.to_string())
+}
+
+pub fn set_active(home: &str, id: &str) -> Result<(), String> {
+    if id != DEFAULT_ID && !read_registry(home).iter().any(|(x, _)| x == id) {
+        return Err(format!("no profile named '{id}'"));
+    }
+    let entries = read_registry(home);
+    write_registry_with(home, &entries, id)
+}
+
 fn write_registry(home: &str, entries: &[(String, String)]) -> Result<(), String> {
+    let active = active(home);
+    write_registry_with(home, entries, &active)
+}
+
+fn write_registry_with(
+    home: &str,
+    entries: &[(String, String)],
+    active: &str,
+) -> Result<(), String> {
     let path = registry_path(home);
     std::fs::create_dir_all(path.parent().ok_or("no .canopy dir")?).map_err(|e| e.to_string())?;
     let body = serde_json::json!({
+        "active": active,
         "profiles": entries
             .iter()
             .map(|(id, label)| serde_json::json!({ "id": id, "label": label }))
@@ -173,9 +207,8 @@ pub fn roots(home: &str) -> Vec<(String, PathBuf)> {
         .collect()
 }
 
-/// Create a profile and lay out its directories. Creating is cheap and
-/// reversible; it does not log anyone in — that is the user's browser flow,
-/// inside a terminal we open for them afterwards.
+/// Create a profile and lay out its directories. It does not log anyone in —
+/// that is the user's browser flow, in a terminal we open afterwards.
 pub fn create(home: &str, label: &str) -> Result<Profile, String> {
     let slug = slugify(label);
     if slug.is_empty() {
@@ -189,9 +222,8 @@ pub fn create(home: &str, label: &str) -> Result<Profile, String> {
         return Err(format!("a profile named '{slug}' already exists"));
     }
     let root = root_for(home, &slug);
-    // The full mirror up front: a CLI that finds its config dir missing prints
-    // a first-run wizard, and one that finds it empty prints a login prompt.
-    // The second is the state we want the user dropped into.
+    // A CLI that finds its config dir missing runs a first-run wizard; one
+    // that finds it empty prompts to log in, which is where we want them.
     for sub in [".claude", ".codex", ".config", ".local/share"] {
         std::fs::create_dir_all(root.join(sub)).map_err(|e| e.to_string())?;
     }
@@ -205,10 +237,9 @@ pub fn create(home: &str, label: &str) -> Result<Profile, String> {
     })
 }
 
-/// Forget a profile. The directory is deliberately left on disk: it holds a
-/// live credential the user would have to re-authenticate to get back, and no
-/// amount of confirmation copy makes deleting someone's login from under a
-/// misclick acceptable. The caller is told where it stayed.
+/// Forget a profile. The directory stays on disk — it holds a live credential,
+/// and no confirmation copy makes deleting a login on a misclick acceptable.
+/// The caller is told where it stayed.
 pub fn delete(home: &str, id: &str) -> Result<String, String> {
     if id == DEFAULT_ID {
         return Err("the default profile is your main login and can't be removed".into());
@@ -225,28 +256,21 @@ pub fn delete(home: &str, id: &str) -> Result<String, String> {
 
 /// The environment that points one CLI at one profile.
 ///
-/// Empty for the default profile — not "the same variables pointing at $HOME".
-/// Exporting `CLAUDE_CONFIG_DIR=$HOME/.claude` would look equivalent and isn't:
-/// it changes which code path the CLI takes, and this feature must be invisible
-/// to anyone not using it.
-///
-/// Also empty for a CLI we cannot isolate, so a mislabelled profile can never
-/// imply an isolation that isn't happening.
+/// Empty for the default profile rather than the same variables aimed at
+/// `$HOME`: that would change which code path the CLI takes. Also empty for a
+/// CLI we cannot isolate, so nothing implies an isolation that isn't happening.
 pub fn env_for(home: &str, agent: &str, id: &str) -> Vec<(String, String)> {
     if id == DEFAULT_ID || !supports_profiles(agent) {
         return Vec::new();
     }
     let root = root_for(home, id);
     let at = |sub: &str| root.join(sub).to_string_lossy().to_string();
-    // Stamped for every profiled agent so canopy-hook can file the session's
-    // plan-usage snapshot under the account it belongs to. Absent means default,
-    // which is also what a `claude` run outside Canopy reports.
+    // canopy-hook files digests under this.
     let mut env = vec![("CANOPY_PROFILE".to_string(), id.to_string())];
     match agent {
         "claude" => env.push(("CLAUDE_CONFIG_DIR".into(), at(".claude"))),
         "codex" => env.push(("CODEX_HOME".into(), at(".codex"))),
-        // opencode splits config from credentials across the XDG pair, so both
-        // have to move or the profile shares one login with the default.
+        // opencode splits config from credentials across the XDG pair.
         "opencode" => {
             env.push(("XDG_CONFIG_HOME".into(), at(".config")));
             env.push(("XDG_DATA_HOME".into(), at(".local/share")));
@@ -257,10 +281,22 @@ pub fn env_for(home: &str, agent: &str, id: &str) -> Vec<(String, String)> {
     env
 }
 
-/// Which profile a path belongs to, for attributing a transcript found under a
-/// scanned root back to an account. Longest root wins: profile roots live
-/// *inside* `$HOME`, so a plain prefix test against the default matches
-/// everything.
+/// The account env for whatever CLI a command line starts. First token only,
+/// by basename, so `/opt/homebrew/bin/claude --resume x` resolves and a prompt
+/// that merely mentions a CLI does not.
+pub fn env_for_command(home: &str, command: &str) -> Vec<(String, String)> {
+    let Some(first) = command.split_whitespace().next() else {
+        return Vec::new();
+    };
+    let bin = first.rsplit('/').next().unwrap_or(first);
+    if !supports_profiles(bin) {
+        return Vec::new();
+    }
+    env_for(home, bin, &active(home))
+}
+
+/// Which profile a path belongs to. Longest root wins — profile roots live
+/// inside `$HOME`, so a plain prefix test would match everything.
 pub fn profile_of_path(home: &str, path: &Path) -> String {
     let mut best = (0usize, DEFAULT_ID.to_string());
     for (id, root) in roots(home) {
@@ -274,16 +310,10 @@ pub fn profile_of_path(home: &str, path: &Path) -> String {
 
 // ---------- who is signed in ----------
 //
-// "I signed this profile in and the panel still says Sign in" is the whole
-// reason this exists. A profile is only useful if you can see *which account*
-// it holds — otherwise two rows named Work and Personal are indistinguishable
-// from two empty directories.
-//
-// Read from what the CLI records about the account, never from the credential:
-// the token itself is none of our business, and both CLIs write a plain account
-// identity beside it. Where we have no verified way to tell, the answer is
-// `unknown` rather than a guess — a row claiming to be signed in when it is not
-// sends the user to debug the wrong thing.
+// Read from what the CLI records *about* the account, never from the
+// credential. Where we have no verified way to tell, the answer is `unknown`
+// rather than a guess: a row claiming to be signed in when it isn't sends the
+// user to debug the wrong thing.
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct AccountStatus {
@@ -296,9 +326,8 @@ pub struct AccountStatus {
     pub account: Option<String>,
 }
 
-/// The email inside a JWT's claims, without verifying it — this is a local file
-/// the CLI wrote for itself, and we are reading a label off it, not trusting it
-/// to authorize anything.
+/// The email in a JWT's claims. Read as a label off a local file the CLI wrote,
+/// never trusted to authorize anything.
 fn jwt_email(token: &str) -> Option<String> {
     use base64::Engine;
     let payload = token.split('.').nth(1)?;
@@ -310,18 +339,10 @@ fn jwt_email(token: &str) -> Option<String> {
 }
 
 /// Claude records the signed-in account in `.claude.json` under `oauthAccount`,
-/// beside (never inside) the credential — which lives in the Keychain on macOS
-/// and in `.credentials.json` elsewhere. That makes this the one signal that
-/// reads the same on every platform.
+/// beside the credential rather than inside it — the one signal that reads the
+/// same on macOS (Keychain) and elsewhere (`.credentials.json`).
 fn claude_account(cfg: &Path, home: &str) -> AccountStatus {
-    // Verified against the CLI: with CLAUDE_CONFIG_DIR set, `.claude.json` is
-    // created *inside* that directory rather than beside it.
-    let state_file = if cfg == Path::new(home) {
-        cfg.join(".claude.json")
-    } else {
-        cfg.join(".claude").join(".claude.json")
-    };
-    let account = std::fs::read_to_string(state_file)
+    let account = std::fs::read_to_string(claude_state_file(home, cfg))
         .ok()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
         .and_then(|v| {
@@ -380,11 +401,8 @@ pub fn account_status(home: &str, id: &str) -> Vec<AccountStatus> {
         .map(|agent| match *agent {
             "claude" => claude_account(&root, home),
             "codex" => codex_account(&root),
-            // opencode and amp both moved their credentials somewhere we have
-            // not verified (opencode.db; amp's settings.json holds no key on a
-            // signed-in machine). Until that is checked against the real CLIs,
-            // "unknown" is the honest answer and the row simply offers to sign
-            // in rather than asserting a state it cannot read.
+            // opencode (opencode.db) and amp keep credentials somewhere this
+            // has not been verified against the real CLIs.
             other => AccountStatus {
                 agent: other.into(),
                 state: "unknown",
@@ -405,29 +423,31 @@ pub async fn profiles_list() -> Result<Vec<Profile>, String> {
     Ok(list(&home()?))
 }
 
-/// Create the profile and immediately install our hooks and MCP registration
-/// into it, for every CLI that can hold one. Setup is folded into creation on
-/// purpose: a profile whose hooks were never installed launches agents that
-/// look like plain shells — no cards, no notifications, no resume — and "run
-/// setup for your new profile" is exactly the step a user would skip.
+/// Create the profile and install hooks + MCP into it. Folded into creation
+/// because a profile without hooks launches agents that look like plain shells,
+/// and "run setup for your new profile" is the step a user skips.
 #[tauri::command]
 pub async fn profile_create(label: String) -> Result<Profile, String> {
     let home = home()?;
     let profile = create(&home, &label)?;
     for agent in PROFILE_AGENTS {
-        // Best effort per CLI: a machine without codex installed must still get
-        // a working claude profile. The reports are surfaced by profile_setup
-        // when the user asks for a retry.
+        // Best effort: a machine without codex still gets a working claude
+        // profile. profile_setup is the retry.
         let _ = crate::agents::setup_agent_in(agent, &profile.root, &home);
     }
     Ok(profile)
 }
 
-/// Which account each CLI holds inside one profile — what the Accounts panel
-/// shows instead of an undifferentiated "Sign in".
+/// Which account each CLI holds inside one profile.
 #[tauri::command]
 pub async fn profile_accounts(id: String) -> Result<Vec<AccountStatus>, String> {
     Ok(account_status(&home()?, &id))
+}
+
+/// Record the choice for the parts of the app with no webview (the portal).
+#[tauri::command]
+pub async fn profile_activate(id: String) -> Result<(), String> {
+    set_active(&home()?, &id)
 }
 
 #[tauri::command]
@@ -435,9 +455,8 @@ pub async fn profile_delete(id: String) -> Result<String, String> {
     delete(&home()?, &id)
 }
 
-/// The env a launcher stamps onto a PTY. Resolved in Rust rather than rebuilt
-/// in the frontend so there is exactly one place that knows which variable
-/// isolates which CLI.
+/// Resolved in Rust so exactly one place knows which variable isolates which
+/// CLI.
 #[tauri::command]
 pub async fn profile_env(agent: String, id: String) -> Result<Vec<(String, String)>, String> {
     Ok(env_for(&home()?, &agent, &id))
@@ -478,8 +497,7 @@ mod tests {
         assert_eq!(root_for(&h, DEFAULT_ID), PathBuf::from(&h));
     }
 
-    /// The whole promise of the feature for existing users: turning it on for
-    /// one CLI changes nothing about how any other session launches.
+    /// Turning this on changes nothing about how other sessions launch.
     #[test]
     fn the_default_profile_exports_no_environment() {
         let home = scratch("default-env");
@@ -537,8 +555,7 @@ mod tests {
         assert!(vars("amp").contains_key("AMP_SETTINGS_FILE"));
     }
 
-    /// A CLI we can't isolate must not be handed a profile that only *looks*
-    /// like one — better no picker than two entries sharing one account.
+    /// Better no picker than two entries sharing one account.
     #[test]
     fn clis_without_a_config_home_variable_get_no_environment() {
         let home = scratch("unsupported");
@@ -588,8 +605,7 @@ mod tests {
         assert!(delete(&h, DEFAULT_ID).is_err());
     }
 
-    /// Profile roots live inside $HOME, so attribution has to be longest-match:
-    /// a plain prefix test would file every profile's transcript under default.
+    /// Longest-match: profile roots live inside $HOME.
     #[test]
     fn a_path_is_attributed_to_the_deepest_root_that_holds_it() {
         let home = scratch("attribute");
@@ -606,8 +622,7 @@ mod tests {
         );
     }
 
-    /// The bug this shipped with: a profile that was signed in still rendered
-    /// an undifferentiated "Sign in", because nothing ever read who was in it.
+    /// A signed-in profile must report the account it holds.
     #[test]
     fn a_signed_in_profile_reports_the_account_it_holds() {
         let home = scratch("account-claude");
@@ -629,8 +644,7 @@ mod tests {
         assert_eq!(claude.state, "in");
         assert_eq!(claude.account.as_deref(), Some("vj@example.com"));
 
-        // An empty profile is signed out, not "unknown" — we know exactly where
-        // Claude would have written the account and it isn't there.
+        // Signed out, not unknown: we know where it would have been.
         let codex = by_agent(account_status(&h, "work"), "codex");
         assert_eq!(codex.state, "out");
 
@@ -652,8 +666,7 @@ mod tests {
         let root = root_for(&h, "work");
         let auth = root.join(".codex/auth.json");
 
-        // A JWT we assemble here: the payload is the only part read, and it is
-        // read as a label, never trusted to authorize anything.
+        // Only the payload is read, as a label.
         use base64::Engine;
         let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(r#"{"email":"vj@example.com"}"#);
@@ -671,8 +684,7 @@ mod tests {
         assert_eq!(codex.state, "in");
         assert_eq!(codex.account.as_deref(), Some("vj@example.com"));
 
-        // An API key names no person, and a blank where every other row shows
-        // an email reads as a bug.
+        // An API key names no person; a blank would read as a bug.
         std::fs::write(&auth, r#"{"OPENAI_API_KEY":"sk-test"}"#).unwrap();
         let keyed = account_status(&h, "work")
             .into_iter()
@@ -682,8 +694,7 @@ mod tests {
         assert_eq!(keyed.account.as_deref(), Some("API key"));
     }
 
-    /// A CLI whose credential store we have not verified must say so. Claiming
-    /// "signed in" on a guess sends the user to debug the wrong thing.
+    /// An unverified credential store must say so rather than guess.
     #[test]
     fn unverified_clis_report_unknown_rather_than_guessing() {
         let home = scratch("account-unknown");
@@ -696,6 +707,52 @@ mod tests {
                 .unwrap();
             assert_eq!(s.state, "unknown", "{agent} claimed a state it can't read");
         }
+    }
+
+    /// Written where both halves can read it: Rust launches agents too.
+    #[test]
+    fn the_active_account_survives_a_restart_and_a_deleted_profile() {
+        let home = scratch("active");
+        let h = home.to_string_lossy().to_string();
+        assert_eq!(active(&h), DEFAULT_ID);
+
+        create(&h, "work").unwrap();
+        set_active(&h, "work").unwrap();
+        assert_eq!(active(&h), "work");
+
+        // Creating another profile must not disturb the choice.
+        create(&h, "personal").unwrap();
+        assert_eq!(active(&h), "work");
+
+        // A removed account is not a launch target.
+        delete(&h, "work").unwrap();
+        assert_eq!(active(&h), DEFAULT_ID);
+        assert!(set_active(&h, "nope").is_err());
+    }
+
+    /// The portal is handed a command line, not a registry id.
+    #[test]
+    fn a_command_line_resolves_to_its_clis_account() {
+        let home = scratch("by-command");
+        let h = home.to_string_lossy().to_string();
+        create(&h, "work").unwrap();
+        set_active(&h, "work").unwrap();
+
+        let has_cfg = |cmd: &str| {
+            env_for_command(&h, cmd)
+                .iter()
+                .any(|(k, _)| k == "CLAUDE_CONFIG_DIR")
+        };
+        assert!(has_cfg("claude"));
+        assert!(has_cfg("claude --resume abc"));
+        // An absolute path is the same CLI.
+        assert!(has_cfg("/opt/homebrew/bin/claude"));
+        // Only the first token counts: a prompt that merely mentions a CLI is
+        // not a launch of it.
+        assert!(!has_cfg("echo claude"));
+        // And a CLI that cannot hold a second login gets nothing.
+        assert!(env_for_command(&h, "agy").is_empty());
+        assert!(env_for_command(&h, "").is_empty());
     }
 
     #[test]

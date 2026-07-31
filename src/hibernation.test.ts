@@ -59,9 +59,7 @@ describe("snapshotTabs", () => {
     ]);
   });
 
-  /** The resume command names a session id that only exists inside one
-   *  account's store, so waking on the default login comes back to an agent
-   *  that has forgotten the conversation. The account has to sleep with it. */
+  /** The resume command's session id only exists in one account's store. */
   it("remembers which account the session was running under", () => {
     const [t] = snapshotTabs(
       [term({ command: "claude", ptyId: 7, profile: "work" })],

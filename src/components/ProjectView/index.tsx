@@ -40,6 +40,9 @@ import type { AgentCli } from "../../projects";
 import {
   activeProfile,
   launchEnv,
+  launchEnvSync,
+  launchProfile,
+  primeLaunchEnv,
   supportsProfiles,
   PROFILE_CHANGE_EVENT,
 } from "../../profiles";
@@ -566,14 +569,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const pull = () => {
       const id = activeProfile();
       setActiveProfileId(id);
+      // Primed on the signals that change it, so launches never await IPC.
+      void primeLaunchEnv();
       void ipc.profilesList().then(setProfiles).catch(() => {});
       void ipc.profileAccounts(id).then(setActiveAccounts).catch(() => {});
     };
     pull();
-    // Creating a profile, switching accounts and signing one in all happen
-    // elsewhere — Settings, the status bar, a terminal. The event covers the
-    // first two; focus covers the third, which finishes in a shell we can't
-    // observe.
+    // The event covers create/switch; focus covers a sign-in, which finishes
+    // in a shell we can't observe.
     window.addEventListener(PROFILE_CHANGE_EVENT, pull);
     window.addEventListener("focus", pull);
     return () => {
@@ -582,13 +585,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
     };
   }, []);
 
-  /** What the ＋ menu says about the account it is launching into. Null on the
-   *  default account: naming it there would put a banner on every launcher for
-   *  the people who never opened this feature.
-   *
-   *  `missing` is the footgun this exists to defuse — switching to an account
-   *  that holds a Claude login but no Codex one is legitimate, and finding out
-   *  by landing at a login prompt is not. */
+  /** What the ＋ menu says about the account it launches into. Null on the
+   *  default one. `missing` is the footgun: an account holding a Claude login
+   *  but no Codex one is legitimate, and a surprise login prompt isn't. */
   const accountBanner = useMemo(() => {
     if (activeProfileId === "default") return null;
     const label =
@@ -601,8 +600,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     return { label, missing };
   }, [activeProfileId, profiles, activeAccounts]);
 
-  /** One name per account, wherever it appears — the tab badge would otherwise
-   *  show the slug while the switcher shows the label the user typed. */
+  /** One name per account, wherever it appears. */
   const profileLabels = useMemo(
     () => Object.fromEntries(profiles.map((p) => [p.id, p.label])),
     [profiles],
@@ -904,9 +902,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // this argument rather than another positional flag: a chore is a kind of
       // run, and the two could never be set independently.
       run: boolean | "chore" = false,
-      // Stamped on top of the workspace port — an agent CLI launched under a
-      // non-default account profile carries the variable that points it at that
-      // login's config dir (see profiles.ts).
+      // Stamped on top of the workspace port. Usually derived below.
       extraEnv?: [string, string][],
       profile?: string,
     ) => {
@@ -916,7 +912,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // "run the dev server and check it" is the case that matters most, and it
       // types the command itself. Derived from the path alone (see
       // workspaces.portForPath) so this stays a synchronous, IPC-free lookup.
-      const env = [...portEnv(portForPath(cwd)), ...(extraEnv ?? [])];
+      // The account is derived from the command, not passed in: every
+      // launcher funnels through here, and asking each to remember is how half
+      // end up on the default login. An explicit `profile` still wins — a
+      // resume or a wake reopens a conversation owned by a specific account.
+      const launchedCli = agentIdForCommand(command);
+      const accountEnv =
+        extraEnv ?? (launchedCli ? launchEnvSync(launchedCli) : []);
+      const accountProfile =
+        profile ??
+        (launchedCli && accountEnv.length ? launchProfile(launchedCli) : undefined) ??
+        undefined;
+      const env = [...portEnv(portForPath(cwd)), ...accountEnv];
       setTabs((prev) => [
         ...prev,
         {
@@ -928,7 +935,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           command,
           icon,
           env: env.length ? env : undefined,
-          profile,
+          profile: accountProfile,
           run: run !== false,
           chore: run === "chore" || undefined,
         },
@@ -1591,10 +1598,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       setRestorable((prev) =>
         prev.filter((x) => x.digest.session_id !== r.digest.session_id),
       );
-      // Resume against the account that owns the conversation, not the one
-      // selected for new launches. `--resume <id>` is looked up inside the
-      // CLI's config dir, so the wrong login doesn't resume a different
-      // session — it reports this one as not existing.
+      // The account that owns the conversation, not the one selected now:
+      // `--resume <id>` resolves inside the CLI's own config dir.
       const env =
         r.profile && r.profile !== "default"
           ? await ipc.profileEnv(r.agentId, r.profile).catch(() => [])
@@ -2305,7 +2310,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
         setTimeout(() => void ipc.ptyWrite(pty, "\r"), 250);
       };
 
-      const extraEnv: [string, string][] = def.env?.(payload) ?? [];
+      // Spawns detached, bypassing addTerminal — so the account env is added
+      // here. A micro-task spends the same quota as any other agent.
+      const extraEnv: [string, string][] = [
+        ...launchEnvSync(agent),
+        ...(def.env?.(payload) ?? []),
+      ];
       // Which research entry this run is for, taken from the env the task
       // already declares rather than from a second channel — so the launcher
       // stays generic and any future task that binds an entry gets this free.
@@ -4160,9 +4170,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
             });
           }
           const { command } = terminalLaunch(t);
-          // Back on the account it slept on. Without this the resume command
-          // is right and the store it reads is wrong, which surfaces as a
-          // woken agent that has forgotten the conversation.
+          // Back on the account it slept on, or the resume command is right
+          // and the store it reads is wrong.
           const env =
             t.agentId && t.profile && t.profile !== "default"
               ? await ipc.profileEnv(t.agentId, t.profile).catch(() => [])
@@ -4974,10 +4983,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const cwd = at ?? componentsRef.current[0]?.path;
       if (!cwd) return;
       if (installed[cli.bin]) {
-        // Resolved before the terminal opens: the config-dir variable has to be
-        // in the child's environment from its first instruction, because the
-        // CLI reads it at startup. Exporting it afterwards would leave this
-        // session on the default login while the tab claimed otherwise.
+        // Before the terminal opens: the CLI reads the config-dir variable at
+        // startup, so exporting it afterwards is too late.
         const profile = activeProfile();
         const env = await launchEnv(cli.id);
         addTerminal(
@@ -5041,10 +5048,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
     ...AGENT_CLIS.map((cli) => ({
       label: cli.name,
       icon: <AgentIcon id={cli.id} size={15} />,
-      // A context-menu row has one click target, so the update hint here is
-      // informational — the ＋ menu and launch grid carry the clickable badge.
-      // Which account it launches as is the status bar's job, not a per-row
-      // choice repeated seven times.
+      // Informational: a context-menu row has one click target, and the ＋
+      // menu carries the clickable badge. The account is the status bar's job.
       hint: installed[cli.bin]
         ? cliUpdates[cli.bin]?.hasUpdate
           ? `⇡ ${cliUpdates[cli.bin]?.latest}`

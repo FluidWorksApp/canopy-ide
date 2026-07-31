@@ -3,6 +3,10 @@ import {
   DEFAULT_PROFILE,
   activeProfile,
   launchEnv,
+  launchEnvSync,
+  launchProfile,
+  primeLaunchEnv,
+  PROFILE_CAPABLE,
   profileLabel,
   setActiveProfile,
   supportsProfiles,
@@ -10,12 +14,14 @@ import {
 import { getSettings } from "./settings";
 import type { AgentProfile } from "./ipc";
 import * as ipc from "./ipc";
+import profilesRs from "../src-tauri/src/profiles.rs?raw";
 
-vi.mock("./ipc", () => ({ profileEnv: vi.fn() }));
+vi.mock("./ipc", () => ({ profileEnv: vi.fn(), profileActivate: vi.fn() }));
 
 beforeEach(() => {
   localStorage.clear();
   vi.mocked(ipc.profileEnv).mockReset();
+  vi.mocked(ipc.profileActivate).mockResolvedValue(undefined);
 });
 
 const profiles: AgentProfile[] = [
@@ -34,8 +40,6 @@ describe("the active account", () => {
     expect(getSettings().activeProfile).toBe(DEFAULT_PROFILE);
   });
 
-  /** One switch, not one per CLI: "who am I working as" is a single question,
-   *  and answering it seven times is how the state stops being legible. */
   it("moves every CLI at once", () => {
     setActiveProfile("work");
     expect(activeProfile()).toBe("work");
@@ -62,9 +66,7 @@ describe("labels", () => {
     expect(profileLabel(profiles, "work")).toBe("Work");
   });
 
-  /** A tab can outlive the account it names (removed in Settings while its
-   *  session is still open). Rendering the id keeps the badge meaningful
-   *  instead of showing blank space the user cannot reason about. */
+  /** A tab can outlive the account it names. */
   it("falls back to the id for an account that is gone", () => {
     expect(profileLabel(profiles, "vanished")).toBe("vanished");
   });
@@ -91,18 +93,12 @@ describe("launchEnv", () => {
     expect(ipc.profileEnv).toHaveBeenCalledWith("claude", "work");
   });
 
-  /** A profile lookup is not worth failing a launch over: starting on the
-   *  default login is visible in the tab badge and recoverable, whereas not
-   *  starting is neither. */
   it("still launches when the lookup fails", async () => {
     vi.mocked(ipc.profileEnv).mockRejectedValue(new Error("no home dir"));
     setActiveProfile("work");
     expect(await launchEnv("claude")).toEqual([]);
   });
 
-  /** A CLI that can't hold a second login keeps the one account it has, even
-   *  while the rest of the app is switched — anything else would imply an
-   *  isolation that isn't happening. */
   it("leaves CLIs with no config-home variable on their single account", async () => {
     setActiveProfile("work");
     expect(await launchEnv("agy")).toEqual([]);
@@ -110,13 +106,66 @@ describe("launchEnv", () => {
   });
 });
 
+describe("the synchronous launch path", () => {
+  it("serves the primed account env without awaiting", async () => {
+    vi.mocked(ipc.profileEnv).mockImplementation(async (agent: string) =>
+      agent === "claude"
+        ? ([["CLAUDE_CONFIG_DIR", "/p/vj/.claude"]] as [string, string][])
+        : [],
+    );
+    setActiveProfile("vj");
+    await primeLaunchEnv();
+    expect(launchEnvSync("claude")).toEqual([
+      ["CLAUDE_CONFIG_DIR", "/p/vj/.claude"],
+    ]);
+    expect(launchProfile("claude")).toBe("vj");
+  });
+
+  it("is empty on the default account, primed or not", async () => {
+    await primeLaunchEnv();
+    expect(launchEnvSync("claude")).toEqual([]);
+    // Null, not "default": a tab badge must only ever claim an account that is
+    // genuinely isolating the session.
+    expect(launchProfile("claude")).toBeNull();
+  });
+
+  /** Serving the previous account would launch on the wrong login. */
+  it("refuses to serve a stale account after a switch", async () => {
+    vi.mocked(ipc.profileEnv).mockResolvedValue([
+      ["CLAUDE_CONFIG_DIR", "/p/vj/.claude"],
+    ]);
+    setActiveProfile("vj");
+    await primeLaunchEnv();
+    setActiveProfile("personal"); // primed cache now belongs to the old account
+    expect(launchEnvSync("claude")).toEqual([]);
+    expect(launchProfile("claude")).toBeNull();
+  });
+
+  it("never claims an account for a CLI that cannot hold one", async () => {
+    vi.mocked(ipc.profileEnv).mockResolvedValue([]);
+    setActiveProfile("vj");
+    await primeLaunchEnv();
+    expect(launchEnvSync("agy")).toEqual([]);
+    expect(launchProfile("agy")).toBeNull();
+  });
+});
+
 describe("capability", () => {
-  /** Mirrors PROFILE_AGENTS in profiles.rs. A wrong "yes" here is the one
-   *  failure a user cannot see: two accounts quietly sharing one login. */
   it("claims only the CLIs with a config-home variable", () => {
     expect(["claude", "codex", "opencode", "amp"].every(supportsProfiles)).toBe(
       true,
     );
     expect(["agy", "omp", "aider", "gemini"].some(supportsProfiles)).toBe(false);
+  });
+
+  /** Rust owns the env mapping; this list only mirrors it so pickers can
+   *  render without awaiting. Drift either way is invisible to the user. */
+  it("matches PROFILE_AGENTS in profiles.rs", () => {
+    const rust = profilesRs.slice(profilesRs.indexOf("PROFILE_AGENTS"));
+    const listed = [
+      ...rust.slice(0, rust.indexOf(";")).matchAll(/"([a-z-]+)"/g),
+    ].map((m) => m[1]);
+    expect(listed.length).toBeGreaterThan(0);
+    expect([...PROFILE_CAPABLE].sort()).toEqual(listed.sort());
   });
 });

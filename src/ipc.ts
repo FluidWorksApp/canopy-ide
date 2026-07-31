@@ -1281,8 +1281,7 @@ export const claudeSessionStats = (transcriptPath: string) =>
 export interface AgentSessionUsage {
   session_id: string;
   agent: string;
-  /** Which account profile ran it (see profiles.ts). "default" for the main
-   *  login and for CLIs that have no profile support. */
+  /** The account that ran it. "default" for the main login. */
   profile: string;
   cwd: string;
   title: string | null;
@@ -1310,8 +1309,7 @@ export interface PlanWindow {
  *  spend side in AgentSessionUsage. Only CLIs that actually report appear. */
 export interface PlanUsage {
   agent: string;
-  /** The account these limits belong to. Limits are per subscription, so a
-   *  machine with two logins reports two rows for the same CLI. */
+  /** The account these limits belong to — they are per subscription. */
   profile: string;
   plan: string | null;
   windows: PlanWindow[];
@@ -1324,9 +1322,8 @@ export const planUsage = () => invoke<PlanUsage[]>("plan_usage");
 
 // ---------- account profiles ----------
 
-/** One CLI account: a config directory plus the environment that points a CLI
- *  at it. Canopy never holds the credential — the CLI logs in inside the
- *  profile and owns the result. See src-tauri/src/profiles.rs. */
+/** One CLI account: a config directory plus the env that points a CLI at it.
+ *  See src-tauri/src/profiles.rs. */
 export interface AgentProfile {
   id: string;
   label: string;
@@ -1337,9 +1334,8 @@ export interface AgentProfile {
 }
 export const profilesList = () => invoke<AgentProfile[]>("profiles_list");
 
-/** Which account one CLI holds inside one profile. Read from what the CLI
- *  records about the account (Claude's `oauthAccount`, Codex's id_token), never
- *  from the credential itself. */
+/** Which account one CLI holds. Read from what the CLI records about it —
+ *  Claude's `oauthAccount`, Codex's id_token — never the credential. */
 export interface AccountStatus {
   agent: string;
   /** "in" — an account is recorded; "out" — none is; "unknown" — this CLI
@@ -1351,15 +1347,15 @@ export interface AccountStatus {
 }
 export const profileAccounts = (id: string) =>
   invoke<AccountStatus[]>("profile_accounts", { id });
-/** Creates the directory layout and installs hooks + MCP into it. Does not log
- *  anyone in; the caller opens a terminal for that. */
+/** Record the account for launchers with no webview (the portal). */
+export const profileActivate = (id: string) =>
+  invoke<void>("profile_activate", { id });
+/** Lays out the directories and installs hooks + MCP. Does not log anyone in. */
 export const profileCreate = (label: string) =>
   invoke<AgentProfile>("profile_create", { label });
-/** Forgets the profile and answers where its files stayed — deleting a login
- *  from under a misclick is not something this offers. */
+/** Forgets the profile and answers where its files stayed. */
 export const profileDelete = (id: string) => invoke<string>("profile_delete", { id });
-/** The env that points one CLI at one profile, as spawn-ready pairs. Empty for
- *  the default profile and for CLIs with no config-home variable. */
+/** The env pointing one CLI at one profile. Empty for the default. */
 export const profileEnv = (agent: string, id: string) =>
   invoke<[string, string][]>("profile_env", { agent, id });
 /** Re-run hook + MCP setup for one CLI inside one profile. */
@@ -2375,10 +2371,8 @@ export interface SessionDigest {
   /** Where the session was launched. Pinned at first sighting and never
    *  updated, unlike `cwd`, which follows the agent as it cds. */
   launch_cwd?: string;
-  /** Which account profile this conversation belongs to. Resuming has to
-   *  relaunch against the same config dir — `--resume <id>` under the other
-   *  login looks in a store that has never heard of this session. Absent on
-   *  digests written before profiles existed, which means the default. */
+  /** The account this conversation belongs to — resuming must relaunch
+   *  against the same config dir. Absent means default. */
   profile?: string;
   /** The terminal that owns this session — our PTY id, inherited through the
    *  spawn env, as a string. Present only for sessions started under a Canopy

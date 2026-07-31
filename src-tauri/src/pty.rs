@@ -502,7 +502,14 @@ impl PtyManager {
         cwd: Option<String>,
         command: Option<String>,
     ) -> Result<u32, String> {
-        let res = self.spawn(app.clone(), 120, 32, cwd, None, None, None, None, None)?;
+        // A remote launch uses the same account as a desktop one; this path
+        // has no webview to ask, so it reads profiles::active.
+        let account = std::env::var("HOME")
+            .ok()
+            .zip(command.as_deref())
+            .map(|(home, cmd)| crate::profiles::env_for_command(&home, cmd))
+            .filter(|e| !e.is_empty());
+        let res = self.spawn(app.clone(), 120, 32, cwd, None, None, None, None, account)?;
         if let Some(cmd) = command {
             let cmd = cmd.trim();
             if !cmd.is_empty() {

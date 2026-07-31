@@ -783,6 +783,16 @@ export function AgentsPanel({
               {digest.branch}
             </span>
           )}
+          {/* Which account it is spending — two agents of the same CLI on one
+              branch are otherwise identical rows. */}
+          {digest?.profile && digest.profile !== "default" && (
+            <span
+              className="agent-account"
+              title={`Running under the "${digest.profile}" account`}
+            >
+              {digest.profile}
+            </span>
+          )}
           {/* Blocked on you, stated on the row itself so it survives whether
               or not the transient card is up and whichever tab is focused —
               the durable "needs input" signal, not a fleeting event. */}

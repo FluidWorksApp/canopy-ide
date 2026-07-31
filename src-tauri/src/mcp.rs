@@ -716,6 +716,20 @@ fn read_registry(
     status_for: &dyn Fn(&str, bool) -> &'static str,
     cwd: &Path,
 ) {
+    read_registry_labelled(collector, path, registry, scope, status_for, cwd, "");
+}
+
+/// The same read, with an account suffix on the source label.
+#[allow(clippy::too_many_arguments)]
+fn read_registry_labelled(
+    collector: &mut Collector,
+    path: &Path,
+    registry: &Registry,
+    scope: &str,
+    status_for: &dyn Fn(&str, bool) -> &'static str,
+    cwd: &Path,
+    account: &str,
+) {
     if !path.exists() {
         return;
     }
@@ -737,7 +751,7 @@ fn read_registry(
             endpoint,
             McpSource {
                 agent: registry.agent.into(),
-                label: format!("{} ({scope})", registry.label),
+                label: format!("{} ({scope}){account}", registry.label),
                 name: name.clone(),
                 config_path: path.display().to_string(),
                 scope: scope.into(),
@@ -773,35 +787,58 @@ pub fn discover(
 ) -> (Vec<McpServer>, BTreeMap<String, LaunchSpec>) {
     let mut collector = Collector::default();
 
-    for registry in GLOBAL_REGISTRIES {
-        read_registry(
-            &mut collector,
-            &home.join(registry.rel),
-            registry,
-            "global",
-            &plain_status,
-            home,
-        );
-    }
-
-    // Codex is TOML, so it gets read directly rather than through `Registry`.
-    let codex_path = home.join(".codex/config.toml");
-    if let Ok(raw) = std::fs::read_to_string(&codex_path) {
-        for (name, endpoint) in parse_codex_toml(&raw) {
-            let status = plain_status(&name, endpoint.enabled);
-            collector.add(
-                &name,
-                endpoint,
-                McpSource {
-                    agent: "codex".into(),
-                    label: "Codex (global)".into(),
-                    name: name.clone(),
-                    config_path: codex_path.display().to_string(),
-                    scope: "global".into(),
-                    status: status.into(),
-                },
-                Some(home.to_path_buf()),
+    // Every account, not just `$HOME`: a profile's agents read that profile's
+    // registries. Rows fold onto identity, so a server in both accounts stays
+    // one row with two sources.
+    for (profile, root) in crate::profiles::roots(&home.to_string_lossy()) {
+        let is_default = profile == crate::profiles::DEFAULT_ID;
+        let suffix = if is_default {
+            String::new()
+        } else {
+            format!(" · {profile}")
+        };
+        for registry in GLOBAL_REGISTRIES {
+            // A profile only holds the CLIs it can isolate; the rest keep one
+            // account's config in $HOME whatever we do.
+            if !is_default && !crate::profiles::supports_profiles(registry.agent) {
+                continue;
+            }
+            // Claude's state file is the one path that isn't home-mirrored.
+            let path = if registry.agent == "claude" && registry.rel == ".claude.json" {
+                crate::profiles::claude_state_file(&home.to_string_lossy(), &root)
+            } else {
+                root.join(registry.rel)
+            };
+            read_registry_labelled(
+                &mut collector,
+                &path,
+                registry,
+                "global",
+                &plain_status,
+                &root,
+                &suffix,
             );
+        }
+
+        // Codex is TOML, so it gets read directly rather than through `Registry`.
+        let codex_path = root.join(".codex/config.toml");
+        if let Ok(raw) = std::fs::read_to_string(&codex_path) {
+            for (name, endpoint) in parse_codex_toml(&raw) {
+                let status = plain_status(&name, endpoint.enabled);
+                collector.add(
+                    &name,
+                    endpoint,
+                    McpSource {
+                        agent: "codex".into(),
+                        label: format!("Codex (global){suffix}"),
+                        name: name.clone(),
+                        config_path: codex_path.display().to_string(),
+                        scope: "global".into(),
+                        status: status.into(),
+                    },
+                    Some(root.clone()),
+                );
+            }
         }
     }
 
