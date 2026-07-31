@@ -62,8 +62,6 @@ function paneBar(over: Partial<React.ComponentProps<typeof PaneBar>> = {}) {
       stripRef={createRef<HTMLDivElement>()}
       openStacks={{}}
       onToggleStack={noop}
-      stripOverflow={{}}
-      onStackOverflow={noop}
       showHints={false}
       shellChips={[]}
       runChips={[]}
@@ -190,22 +188,27 @@ describe("PaneBar stacks", () => {
     expect(document.querySelectorAll(".tab")).toHaveLength(1);
   });
 
-  it("offers what is out of sight, whether folded away or scrolled behind the pin", () => {
+  it("says one number with one caret, however much is out of sight", () => {
+    // The chip used to carry a fold chevron AND an overflow caret, each with a
+    // count of its own: "Idle 2 › 1 ⌄" left you working out which number meant
+    // what. Anything folded away or scrolled out of view is reachable from the
+    // bar's own all-tabs menu, which lists every tab in the strip.
     const tabs = [term("t1", "zsh"), term("t2", "server"), term("t3", "log")];
-    const onStackOverflow = vi.fn();
     render(
       paneBar({
         tabGroups: [stack({ tabs, shown: tabs.slice(0, 2) })],
-        // One folded + one behind the chip = two away, of three.
-        stripOverflow: { idle: { stuck: true, hidden: ["t1"] } },
-        onStackOverflow,
       }),
     );
-    const more = document.querySelector<HTMLButtonElement>(".tab-stack-more")!;
-    expect(more.title).toBe("2 out of sight — pick one");
-    expect(document.querySelector(".tab-stack")).toHaveClass("tab-stack-stuck");
-    more.click();
-    expect(onStackOverflow).toHaveBeenCalled();
+    const chip = document.querySelector(".tab-stack")!;
+    expect(chip.querySelectorAll("button")).toHaveLength(1);
+    expect(chip.querySelectorAll("svg")).toHaveLength(1);
+    expect(chip.querySelectorAll(".tab-stack-count")).toHaveLength(1);
+    // And the one number is the stack's size, not what happens to be on screen.
+    expect(chip.querySelector(".tab-stack-count")!.textContent).toBe("3");
+    // And it looks the same whether or not the strip has scrolled it against
+    // the edge: expanding a stack scrolls the strip, so a chip that restyled
+    // itself when pinned meant opening one stack made its neighbour flinch.
+    expect(chip.className.trim()).toBe("tab-stack");
   });
 
   it("marks a folded run, and never counts the active tab it is holding out", () => {

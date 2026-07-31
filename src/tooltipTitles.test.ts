@@ -126,6 +126,18 @@ describe("placeTip", () => {
     expect(p.arrow).toBe(15);
   });
 
+  it("opens away from the nearer edge, so a top-bar trigger points down", () => {
+    // A tab, a stack chip or a toolbar button sits ~100px from the top of the
+    // window. A bubble above it fits the viewport and lands squarely on the
+    // title bar and the project tabs, which is not "fits".
+    const view = { width: 1400, height: 900 };
+    const inTopBar = placeTip(box({ top: 96, bottom: 118, left: 300, right: 420 }), { width: 180, height: 44 }, view);
+    expect(inTopBar.side).toBe("bottom");
+    // Down the window, the same trigger points up.
+    const lowDown = placeTip(box({ top: 800, bottom: 822, left: 300, right: 420 }), { width: 180, height: 44 }, view);
+    expect(lowDown.side).toBe("top");
+  });
+
   it("takes the roomier side when the bubble fits on neither", () => {
     const short = { width: 1000, height: 200 };
     const low = placeTip(box({ top: 150, bottom: 170, left: 500, right: 540, width: 40, height: 20 }), { width: 100, height: 180 }, short);

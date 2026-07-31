@@ -297,10 +297,9 @@ export interface StripGroup {
   /** The kind icon a document run wears in place of a status dot. */
   icon: React.ReactNode;
   tabs: SubTab[];
-  /** What the strip actually renders. Everything while the stack is open; when
-   *  it's folded, only the tab you are on — folding away the tab whose pane is
-   *  in front would leave you looking at a view with nothing in the strip to
-   *  say what it is. */
+  /** What the strip actually renders: everything while the stack is open,
+   *  nothing while it is folded. A folded stack that kept one tab out read as a
+   *  chip whose count disagreed with what was beside it. */
   shown: SubTab[];
 }
 

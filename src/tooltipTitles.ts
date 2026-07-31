@@ -101,15 +101,23 @@ export function placeTip(
   const above = anchor.top - GAP - tip.height;
   const fitsAbove = above >= MARGIN;
   const fitsBelow = anchor.bottom + GAP + tip.height <= view.height - MARGIN;
-  // When neither side fits — a tall bubble in a short window — take the side
-  // with more room, so the clamp below eats as little of the trigger as it can.
-  const side: "top" | "bottom" = fitsAbove
-    ? "top"
-    : fitsBelow
+  // Open away from the nearer edge, then fall back to the other side if the
+  // preferred one cannot hold the bubble. Preferring "above whenever it fits"
+  // put the bubble over the window's own chrome for anything in the top bar —
+  // a tab, a stack chip, a toolbar button — which fits the viewport and still
+  // lands on top of the title bar and the project tabs.
+  const roomAbove = anchor.top - GAP - MARGIN;
+  const roomBelow = view.height - anchor.bottom - GAP - MARGIN;
+  // …and when the bubble fits on neither side, the roomier one still wins, so
+  // the clamp below eats as little of the trigger as it can.
+  const preferTop = roomAbove >= roomBelow;
+  const side: "top" | "bottom" = preferTop
+    ? fitsAbove || !fitsBelow
+      ? "top"
+      : "bottom"
+    : fitsBelow || !fitsAbove
       ? "bottom"
-      : anchor.top > view.height - anchor.bottom
-        ? "top"
-        : "bottom";
+      : "top";
   const rawTop = side === "top" ? above : anchor.bottom + GAP;
   // Math.max last: a bubble taller than the window is clamped to the top edge
   // rather than to a negative offset.
