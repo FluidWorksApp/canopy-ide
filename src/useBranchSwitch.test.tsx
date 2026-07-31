@@ -5,6 +5,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import * as ipc from "./ipc";
 import {
+  attentionItems,
+  clearAttentionHistory,
+  outstandingQuestions,
+} from "./attention";
+import {
   BranchSwitchProvider,
   useBranchSwitch,
   type BranchSwitch,
@@ -48,15 +53,29 @@ function Grab() {
   return null;
 }
 
-function mount() {
+function mount(opts: { projectId?: string; projectName?: string; visible?: boolean } = {}) {
   const onNotice = vi.fn();
   const onUseWorktree = vi.fn();
-  render(
-    <BranchSwitchProvider onNotice={onNotice} onUseWorktree={onUseWorktree}>
+  const tree = (o: typeof opts) => (
+    <BranchSwitchProvider
+      onNotice={onNotice}
+      onUseWorktree={onUseWorktree}
+      projectId={o.projectId}
+      projectName={o.projectName}
+      visible={o.visible}
+    >
       <Grab />
-    </BranchSwitchProvider>,
+    </BranchSwitchProvider>
   );
-  return { onNotice, onUseWorktree };
+  const r = render(tree(opts));
+  return {
+    onNotice,
+    onUseWorktree,
+    /** Change what the provider is told about its project — becoming the tab on
+     *  screen, or ceasing to be. */
+    show: (visible: boolean) => act(() => r.rerender(tree({ ...opts, visible }))),
+    unmount: () => act(() => r.unmount()),
+  };
 }
 
 /** Start a switch and let it get as far as its first question. It deliberately
@@ -79,6 +98,7 @@ const click = async (label: string) => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  clearAttentionHistory();
   vi.mocked(ipc.workspaceAdd).mockResolvedValue(undefined as never);
   vi.mocked(ipc.gitWorktrees).mockResolvedValue([]);
 });
@@ -423,5 +443,118 @@ describe("ask", () => {
     await click("Remove it");
     expect(box.action).toBe("cleanup");
     expect(screen.queryByText("Remove this workspace?")).toBeNull();
+  });
+});
+
+/** The case issue #212 opens with. The dialog stays scoped to its project on
+ *  purpose, so a project that is mounted but off screen asks into nothing —
+ *  and, because the funnel refuses to stack a second question over a pending
+ *  one, every later switch there returns `cancelled` with no symptom. What
+ *  moves is the question, not the dialog. */
+describe("a question raised in a project you are not looking at", () => {
+  const busy = () =>
+    vi.mocked(ipc.gitCheckout).mockResolvedValue({
+      kind: "branch_in_worktree",
+      holder: holder(),
+    });
+
+  const waiting = () => outstandingQuestions(attentionItems());
+
+  it("posts a question naming the project, linked back to it", async () => {
+    busy();
+    mount({ projectId: "p1", projectName: "canopy", visible: false });
+    await begin(() => api.switchTo("/repo", { kind: "branch", branch: "feat/x" }));
+
+    expect(waiting()).toHaveLength(1);
+    expect(waiting()[0]).toMatchObject({
+      kind: "question",
+      // The dialog's own words, so the notification says what is being asked
+      // rather than that something is.
+      title: "This branch is busy",
+      source: "project",
+      projectId: "p1",
+      projectName: "canopy",
+      where: { kind: "project", projectId: "p1" },
+    });
+    expect(waiting()[0].body).toContain("canopy");
+  });
+
+  it("says nothing while you are looking at the project", async () => {
+    busy();
+    mount({ projectId: "p1", projectName: "canopy", visible: true });
+    await begin(() => api.switchTo("/repo", { kind: "branch", branch: "feat/x" }));
+
+    expect(screen.getByText("This branch is busy")).toBeTruthy();
+    expect(waiting()).toHaveLength(0);
+  });
+
+  it("announces a question you left open and tabbed away from", async () => {
+    busy();
+    const p = mount({ projectId: "p1", projectName: "canopy", visible: true });
+    await begin(() => api.switchTo("/repo", { kind: "branch", branch: "feat/x" }));
+    expect(waiting()).toHaveLength(0);
+
+    await p.show(false);
+    expect(waiting()).toHaveLength(1);
+  });
+
+  it("keeps one question however often you come and go", async () => {
+    busy();
+    const p = mount({ projectId: "p1", projectName: "canopy", visible: false });
+    await begin(() => api.switchTo("/repo", { kind: "branch", branch: "feat/x" }));
+
+    // Returning does not retire it: something is still waiting on you until
+    // the dialog closes, and the count has to keep saying so.
+    await p.show(true);
+    expect(waiting()).toHaveLength(1);
+    await p.show(false);
+    expect(waiting()).toHaveLength(1);
+  });
+
+  it("stops waiting once the dialog is answered", async () => {
+    busy();
+    const p = mount({ projectId: "p1", projectName: "canopy", visible: false });
+    await begin(() => api.switchTo("/repo", { kind: "branch", branch: "feat/x" }));
+    expect(waiting()).toHaveLength(1);
+
+    await p.show(true);
+    await click("Open it there");
+
+    expect(waiting()).toHaveLength(0);
+    expect(attentionItems()[0].resolution).toBe("answered");
+  });
+
+  it("counts a cancel as answered — you did decide", async () => {
+    busy();
+    mount({ projectId: "p1", projectName: "canopy", visible: false });
+    await begin(() => api.switchTo("/repo", { kind: "branch", branch: "feat/x" }));
+
+    await click("Cancel");
+
+    expect(waiting()).toHaveLength(0);
+    expect(attentionItems()[0].resolution).toBe("answered");
+  });
+
+  it("withdraws when the project closes, rather than stranding it", async () => {
+    busy();
+    const p = mount({ projectId: "p1", projectName: "canopy", visible: false });
+    await begin(() => api.switchTo("/repo", { kind: "branch", branch: "feat/x" }));
+    expect(waiting()).toHaveLength(1);
+
+    // Nothing can answer it now — and an outstanding question nobody can
+    // resolve sits in the waiting count for good.
+    p.unmount();
+
+    expect(waiting()).toHaveLength(0);
+    expect(attentionItems()[0].resolution).toBe("withdrawn");
+  });
+
+  it("still works with no project — the dialog is the point, the notice is extra", async () => {
+    busy();
+    mount();
+    await begin(() => api.switchTo("/repo", { kind: "branch", branch: "feat/x" }));
+
+    expect(screen.getByText("This branch is busy")).toBeTruthy();
+    expect(waiting()).toHaveLength(0);
   });
 });

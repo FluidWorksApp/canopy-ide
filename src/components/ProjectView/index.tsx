@@ -7972,6 +7972,9 @@ export const ProjectView = memo(function ProjectView(props: ProjectViewProps) {
       <BranchSwitchProvider
         onNotice={props.onNotice}
         onUseWorktree={onUseWorktree}
+        projectId={props.project.id}
+        projectName={props.project.name}
+        visible={props.visible}
       >
         <ProjectViewBody {...props} useWorktreeRef={useWorktreeRef} />
       </BranchSwitchProvider>

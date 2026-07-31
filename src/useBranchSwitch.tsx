@@ -11,6 +11,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -29,6 +30,7 @@ import {
   type SwitchDialog,
 } from "./branchSwitch";
 import { BranchSwitchDialog } from "./components/BranchSwitchDialog";
+import { postAttention, resolveAttentionByKey } from "./attention";
 import { prWorktree } from "./prs";
 import { useEscape } from "./useEscape";
 import type { Notify } from "./types";
@@ -174,12 +176,27 @@ export function useBranchSwitch(): BranchSwitch {
 export function BranchSwitchProvider({
   onNotice,
   onUseWorktree,
+  projectId,
+  projectName,
+  visible = true,
   children,
 }: {
   onNotice: Notify;
   /** ProjectView's redirection of the project's files at a workspace. The
    *  provider owns the copy and the notice; this only performs it. */
   onUseWorktree: (repo: string, path: string, branch: string) => void;
+  /** The project this funnel belongs to, as two primitives rather than the
+   *  record: the withdraw below is an unmount cleanup, and a prop whose
+   *  identity changes every time the project is touched would fire it on a
+   *  rename. Absent when the provider is mounted outside a project (a panel on
+   *  its own in a test), which costs only the notification — the dialog still
+   *  works. */
+  projectId?: string;
+  projectName?: string;
+  /** Whether that project is the one on screen. The dialog is deliberately
+   *  scoped to its project and goes off screen with it, so this is what tells
+   *  the funnel its question has nobody looking at it. */
+  visible?: boolean;
   children: ReactNode;
 }): ReactElement {
   const [dialog, setDialog] = useState<SwitchDialog | null>(null);
@@ -208,6 +225,63 @@ export function BranchSwitchProvider({
     setDialog(null);
     setBusy(false);
   }, []);
+
+  /** The question, said somewhere it can be seen.
+   *
+   *  The dialog stays inside its project on purpose — a switch question is
+   *  about one repo, and answering it moves that checkout — so a project that
+   *  is mounted but `display: none` asks into nothing. That was a stall with no
+   *  symptom: the funnel refuses to stack a second question over a pending one,
+   *  so every later switch in that project returned `cancelled` and nothing
+   *  said why.
+   *
+   *  So the dialog does not move; the *question* is posted to the attention
+   *  channel, naming the project and carrying a link back to it. Clicking it
+   *  activates that tab, where the dialog has been waiting all along.
+   *
+   *  Posted on pending-and-hidden rather than at the moment it is raised, so
+   *  tabbing away from a question you left open announces it too. The
+   *  `dedupeKey` is the project's funnel, not this posting: coming back and
+   *  leaving again updates one item instead of queueing a second.
+   *
+   *  Deliberately *not* withdrawn when the project becomes visible. Something
+   *  is still waiting on you until the dialog closes, and the outstanding count
+   *  should say so — retiring it on a mere glance is how the stall became
+   *  invisible in the first place. */
+  useEffect(() => {
+    if (!projectId) return;
+    const key = `switch:${projectId}`;
+    if (dialog) {
+      if (!visible)
+        postAttention({
+          kind: "question",
+          // A git refusal is a question, not a fault. Urgency is `high` by
+          // construction anyway — every question is — so the tone only picks
+          // how it reads.
+          tone: "warn",
+          title: dialog.title,
+          body: `${projectName ?? "A project you aren't looking at"} is waiting on an answer before it can go any further.`,
+          source: "project",
+          projectId,
+          projectName,
+          where: { kind: "project", projectId },
+          dedupeKey: key,
+        });
+      return;
+    }
+    // The dialog is gone, so a choice was made — including "cancel", which is
+    // an answer. Nothing is waiting any more.
+    resolveAttentionByKey(key, "answered");
+  }, [dialog, visible, projectId, projectName]);
+
+  /** The project closed with a question still on screen. Nothing can answer it
+   *  now, and an outstanding question nobody can resolve sits in the waiting
+   *  count for good — worse than one that goes quiet. */
+  useEffect(() => {
+    if (!projectId) return;
+    const key = `switch:${projectId}`;
+    return () => resolveAttentionByKey(key, "withdrawn");
+  }, [projectId]);
 
   const choose = useCallback((action: SwitchAction) => {
     const resolve = answer.current;
