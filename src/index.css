@@ -4446,9 +4446,15 @@ body.dragging-tab * {
   display: inline-flex;
   align-items: center;
   align-self: stretch;
-  gap: 3px;
   padding: 0 5px;
-  background: var(--bg-alt);
+  /* Opaque on purpose, and the one place in the strip that has to be. A pinned
+     chip is painted over the tabs sliding beneath it, so its backdrop is doing
+     occlusion, not decoration — and in the glass skin every surface token is
+     alpha, which let the tab underneath read straight through the chip. The
+     `-opaque` mirrors exist for exactly this: consumers that cannot composite
+     over the ambient field. Skins without them fall back to the token they
+     mirror, which is already solid there. */
+  background: var(--bg-alt-opaque, var(--bg-alt));
   flex: 0 0 auto;
   user-select: none;
 }
@@ -4467,11 +4473,13 @@ body.dragging-tab * {
   letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--text-dim);
-  background: var(--bg-raised);
+  background: var(--bg-raised-opaque, var(--bg-raised));
   border: 1px solid var(--border);
   border-radius: 5px;
   white-space: nowrap;
   cursor: pointer;
+  /* Above the card edges tucked behind it (see below). */
+  z-index: 1;
   /* A stack only exists while it holds tabs, so this plays exactly when one
      appears — the chip arriving is itself the "something moved here" cue. It
      starts dimmed rather than invisible: a webview whose frame loop is asleep
@@ -4501,10 +4509,12 @@ body.dragging-tab * {
   font-size: 9px;
   font-weight: 600;
   color: var(--text-dim);
-  background: var(--bg-raised);
+  background: var(--bg-raised-opaque, var(--bg-raised));
   border: 1px solid var(--border);
   border-radius: 5px;
   cursor: pointer;
+  position: relative;
+  z-index: 1;
 }
 
 .tab-stack-more:hover {
@@ -4512,39 +4522,54 @@ body.dragging-tab * {
   border-color: var(--text-dim);
 }
 
+/* A stack is one object. When there is something out of sight the caret joins
+   the pill as a second segment behind a hairline, instead of floating beside
+   it as a second chip — three loose shapes in a row read as debris, which is
+   what the folded Idle stack had become. */
+.tab-stack-away .tab-stack-face {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  border-right: 0;
+}
+
+.tab-stack-away .tab-stack-more {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-left: 1px solid var(--border);
+}
+
 /* The tabs behind the chip — folded away, or scrolled in underneath it —
    drawn as the edges of the cards they are. One layer for a single hidden tab,
    a second once there are more, so the stack's depth is visible before you
    read the count. */
-.tab-stack-away .tab-stack-face::before,
-.tab-stack-deep .tab-stack-face::after {
+.tab-stack-away::before,
+.tab-stack-deep::after {
   content: "";
   position: absolute;
-  top: 2px;
-  bottom: 2px;
-  top: 3px;
-  bottom: 3px;
-  left: 10px;
-  right: -5px;
-  background: var(--bg-raised);
-  border: 1px solid color-mix(in srgb, var(--text-dim) 55%, transparent);
-  border-radius: 5px;
-  /* Behind the chip's own background but still in front of the strip: the
-     chip is positioned without a stacking context of its own. */
-  z-index: -1;
+  /* Wide enough that most of the card is hidden behind the pill and only its
+     edge shows: a card peeking out from behind the stack, not a shape parked
+     next to it. The pill segments sit at z-index 1, so these pass underneath. */
+  top: 9px;
+  bottom: 9px;
+  width: 22px;
+  right: 8px;
+  background: var(--bg-raised-opaque, var(--bg-raised));
+  border: 1px solid color-mix(in srgb, var(--text-dim) 45%, transparent);
+  border-radius: 4px;
 }
 
-.tab-stack-deep .tab-stack-face::after {
-  top: 6px;
-  bottom: 6px;
-  left: 20px;
-  right: -10px;
-  opacity: 0.5;
+.tab-stack-deep::after {
+  top: 11px;
+  bottom: 11px;
+  right: 3px;
+  opacity: 0.55;
 }
 
-/* Room for the cards to peek out on the right without touching the next tab. */
+/* Room reserved for the cards to peek out of, so they land in the chip's own
+   footprint. They used to hang off the face itself and were drawn over the
+   overflow caret beside it and over the group's first tab. */
 .tab-stack-away {
-  padding-right: 16px;
+  padding-right: 17px;
 }
 
 .tab-stack-dot {
