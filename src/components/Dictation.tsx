@@ -13,6 +13,7 @@ import * as ipc from "../ipc";
 import {
   formatHotkey,
   getSettings,
+  matchesHotkey,
   modKeyLabel,
   type DictationWaveStyle,
 } from "../settings";
@@ -26,14 +27,17 @@ import {
   planFinalEdit,
   planLiveEdit,
 } from "../dictationInsert";
+import {
+  HistoryCycle,
+  loadHistory,
+  pushTranscript,
+  removeTranscript,
+  timeAgo,
+  type TranscriptEntry,
+} from "../dictationHistory";
 
 type Phase =
-  | "idle"
-  | "downloading"
-  | "loading"
-  | "recording"
-  | "transcribing"
-  | "notice";
+  "idle" | "downloading" | "loading" | "recording" | "transcribing" | "notice";
 
 /** Route the text to wherever the cursor is. Ordinary fields (chat input,
  *  commit message, Monaco's hidden textarea) take execCommand — it fires the
@@ -46,11 +50,15 @@ function insertText(text: string) {
   const isField =
     el &&
     !el.classList.contains("xterm-helper-textarea") &&
-    (el.tagName === "TEXTAREA" || el.tagName === "INPUT" || el.isContentEditable);
+    (el.tagName === "TEXTAREA" ||
+      el.tagName === "INPUT" ||
+      el.isContentEditable);
   if (isField) {
     document.execCommand("insertText", false, text);
   } else {
-    window.dispatchEvent(new CustomEvent("canopy:dictation-text", { detail: text }));
+    window.dispatchEvent(
+      new CustomEvent("canopy:dictation-text", { detail: text }),
+    );
   }
 }
 
@@ -78,7 +86,10 @@ function WaveCanvas({
       const dpr = window.devicePixelRatio || 1;
       const w = canvas.clientWidth;
       const h = canvas.clientHeight;
-      if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+      if (
+        canvas.width !== Math.round(w * dpr) ||
+        canvas.height !== Math.round(h * dpr)
+      ) {
         canvas.width = Math.round(w * dpr);
         canvas.height = Math.round(h * dpr);
       }
@@ -93,6 +104,41 @@ function WaveCanvas({
     return () => cancelAnimationFrame(raf);
   }, [style, target]);
   return <canvas ref={ref} className="dictation-wave" />;
+}
+
+/** The recent-dictation list, shown while the cycle hotkey is held. Read-only
+ *  and pointer-free by design: the hand is on the keyboard, and a click target
+ *  that appears for half a second is a click target nobody hits. */
+function HistoryPicker({
+  entries,
+  index,
+}: {
+  entries: TranscriptEntry[];
+  index: number;
+}) {
+  const now = Date.now();
+  return (
+    <div
+      className="dictation-history"
+      role="listbox"
+      aria-label="Recent dictation"
+    >
+      {entries.map((e, i) => (
+        <div
+          key={e.id}
+          className={`dictation-history-row${i === index ? " dictation-history-on" : ""}`}
+          role="option"
+          aria-selected={i === index}
+        >
+          <span className="dictation-history-text">{e.text}</span>
+          <span className="dictation-history-age">{timeAgo(e.at, now)}</span>
+        </div>
+      ))}
+      <div className="dictation-history-hint">
+        tap to cycle · release to paste · backspace removes · Esc cancels
+      </div>
+    </div>
+  );
 }
 
 export function Dictation() {
@@ -119,6 +165,12 @@ export function Dictation() {
   // macOS) lack. Default true so the trigger works the instant the app mounts on
   // every supported platform; go quiet only once we confirm it's unavailable.
   const supported = useRef(true);
+  /** The recent-dictation picker, or null when it is closed. Held in state
+   *  rather than a ref because it is what gets drawn. */
+  const [picker, setPicker] = useState<{
+    entries: TranscriptEntry[];
+    index: number;
+  } | null>(null);
 
   useEffect(() => {
     const notice = (msg: string) => {
@@ -144,7 +196,12 @@ export function Dictation() {
       liveField.current = null;
       liveWritten.current = "";
       if (!field || !written || !hasCollapsedCaret(field)) return;
-      const edit = planFinalEdit(field.value, field.selectionStart ?? 0, written, "");
+      const edit = planFinalEdit(
+        field.value,
+        field.selectionStart ?? 0,
+        written,
+        "",
+      );
       if (edit) applyEdit(field, edit);
     };
 
@@ -155,6 +212,7 @@ export function Dictation() {
       }
       if (phaseRef.current !== "recording") return;
       setPhase("transcribing");
+      setDetail("");
       try {
         // Read the language hint fresh, so a Settings change applies to the
         // very next transcription without a reload.
@@ -169,10 +227,18 @@ export function Dictation() {
         // back to a plain insert rather than overwriting text we no longer own.
         const edit =
           field && document.activeElement === field && hasCollapsedCaret(field)
-            ? planFinalEdit(field.value, field.selectionStart ?? 0, written, text)
+            ? planFinalEdit(
+                field.value,
+                field.selectionStart ?? 0,
+                written,
+                text,
+              )
             : null;
         if (field && edit) applyEdit(field, edit);
         else insertText(text);
+        // One press of the trigger is one entry, however long it ran and
+        // however many passes the model needed to get through it.
+        pushTranscript(text);
         setPhase("idle");
       } catch (e) {
         rollbackLive();
@@ -246,12 +312,34 @@ export function Dictation() {
       },
     );
 
+    const history = new HistoryCycle(
+      {
+        show: (entries, index) => setPicker({ entries, index }),
+        commit: (entry) => {
+          setPicker(null);
+          insertText(entry.text);
+        },
+        dismiss: () => setPicker(null),
+      },
+      getSettings().dictationHistoryHotkey,
+      loadHistory,
+      removeTranscript,
+    );
+
     // Capture phase: the trigger must win over xterm/Monaco key handling, and
     // Esc-while-recording must not fall through to focus-mode exit. Settings
     // are re-read on every press so a rebind takes effect immediately.
     const onKey = (e: KeyboardEvent) => {
       if (!supported.current) return;
       const s = getSettings();
+      history.setHotkey(s.dictationHistoryHotkey);
+      // The picker owns the keyboard while it is open, and its hotkey has to
+      // beat the browser's own paste as well as the terminal's.
+      if (history.keydown(e, matchesHotkey)) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
       t.configure({
         mode: s.dictationTriggerMode,
         key: s.dictationModKey,
@@ -273,9 +361,16 @@ export function Dictation() {
       }
     };
     const onKeyUp = (e: KeyboardEvent) => {
-      if (supported.current) t.handleKeyUp(e);
+      if (!supported.current) return;
+      // Letting go of the modifiers is what pastes — checked here rather than
+      // on a timer so it lands the instant the hand lifts.
+      history.keyup(e);
+      t.handleKeyUp(e);
     };
-    const onBlur = () => t.handleBlur();
+    const onBlur = () => {
+      history.blur();
+      t.handleBlur();
+    };
 
     window.addEventListener("keydown", onKey, true);
     window.addEventListener("keyup", onKeyUp, true);
@@ -292,6 +387,12 @@ export function Dictation() {
         // First-use model load: reassure that a multi-second wait isn't a hang.
         setPhase("loading");
         setDetail("loading model — first use is slow…");
+      } else if (p.phase === "transcribe") {
+        // Only long recordings report here — they are split into chunks, and
+        // minutes of CPU inference behind a still pill reads as a hang. Ignore
+        // a late event that outlived the call that produced it.
+        if (phaseRef.current === "transcribing")
+          setDetail(`${Math.floor(p.pct)}%`);
       } else if (p.phase === "ready") {
         const s = getSettings();
         notice(
@@ -344,7 +445,6 @@ export function Dictation() {
     };
   }, []);
 
-  if (phase === "idle") return null;
   const s = getSettings();
   const how = describeTrigger(
     s.dictationTriggerMode,
@@ -355,43 +455,50 @@ export function Dictation() {
   const status: Record<Phase, string> = {
     downloading: `Downloading voice model… ${detail || ""}`,
     loading: detail || "Starting dictation…",
-    transcribing: "Transcribing…",
+    transcribing: detail ? `Transcribing… ${detail}` : "Transcribing…",
     notice: detail,
     recording: "",
     idle: "",
   };
 
   return (
-    <div
-      className={`dictation-pill dictation-${phase}${live ? " dictation-expanded" : ""}`}
-      role="status"
-    >
-      {phase === "recording" ? (
-        <>
-          <span className="dictation-row">
-            <WaveCanvas style={s.dictationWaveStyle} target={level} />
-            <span className="dictation-hint">
-              {s.dictationTriggerMode === "hold" ? "release" : how} inserts · Esc
-              cancels
-            </span>
-          </span>
-          {live && (
-            <span className="dictation-live">
-              <span className="dictation-live-text">
-                {partial.confirmed}
-                {partial.unconfirmed && (
-                  <span className="dictation-live-tentative">
-                    {partial.confirmed ? " " : ""}
-                    {partial.unconfirmed}
-                  </span>
-                )}
-              </span>
-            </span>
-          )}
-        </>
-      ) : (
-        <span>{status[phase]}</span>
+    <>
+      {picker && (
+        <HistoryPicker entries={picker.entries} index={picker.index} />
       )}
-    </div>
+      {phase !== "idle" && (
+        <div
+          className={`dictation-pill dictation-${phase}${live ? " dictation-expanded" : ""}`}
+          role="status"
+        >
+          {phase === "recording" ? (
+            <>
+              <span className="dictation-row">
+                <WaveCanvas style={s.dictationWaveStyle} target={level} />
+                <span className="dictation-hint">
+                  {s.dictationTriggerMode === "hold" ? "release" : how} inserts
+                  · Esc cancels
+                </span>
+              </span>
+              {live && (
+                <span className="dictation-live">
+                  <span className="dictation-live-text">
+                    {partial.confirmed}
+                    {partial.unconfirmed && (
+                      <span className="dictation-live-tentative">
+                        {partial.confirmed ? " " : ""}
+                        {partial.unconfirmed}
+                      </span>
+                    )}
+                  </span>
+                </span>
+              )}
+            </>
+          ) : (
+            <span>{status[phase]}</span>
+          )}
+        </div>
+      )}
+    </>
   );
 }

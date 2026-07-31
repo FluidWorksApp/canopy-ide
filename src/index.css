@@ -13079,6 +13079,62 @@ a.btn-sm {
 /* Floating status pill, bottom-center above the status bar. Above every
    dialog (z 500): dictation is push-to-talk global, so its state must stay
    visible whatever is open. */
+/* The recent-dictation picker. Sits where the pill does — the eye is already
+   there from dictating — but as a panel, because it is a list you read rather
+   than a status you glance at. Pointer-free: it lives for as long as a chord
+   is held, and a click target that appears for half a second is one nobody
+   hits. */
+.dictation-history {
+  position: fixed;
+  bottom: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 601;
+  width: 520px;
+  max-width: calc(100vw - 48px);
+  padding: 6px;
+  border-radius: 12px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+  font-size: 12px;
+}
+.dictation-history-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  color: var(--text-dim);
+}
+.dictation-history-on {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: var(--text);
+}
+/* One line each: the list is scanned while a key is held, and rows that reflow
+   to different heights as you cycle make the target move under you. */
+.dictation-history-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dictation-history-age {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-dim);
+  opacity: 0.75;
+}
+.dictation-history-hint {
+  padding: 5px 8px 2px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+  opacity: 0.8;
+}
+
 .dictation-pill {
   position: fixed;
   bottom: 40px;
