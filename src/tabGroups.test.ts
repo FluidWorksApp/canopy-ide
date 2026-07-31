@@ -143,16 +143,14 @@ describe("shownInStack", () => {
   const tabs = [{ id: "a" }, { id: "b" }, { id: "c" }];
 
   it("shows everything while the stack is open", () => {
-    expect(shownInStack(tabs, true, "b")).toEqual(tabs);
+    expect(shownInStack(tabs, true)).toEqual(tabs);
   });
 
-  it("keeps the active tab on screen when the stack folds around it", () => {
-    expect(shownInStack(tabs, false, "b")).toEqual([{ id: "b" }]);
-  });
-
-  it("folds away completely when the active tab is in another stack", () => {
-    expect(shownInStack(tabs, false, "zz")).toEqual([]);
-    expect(shownInStack(tabs, false, null)).toEqual([]);
+  it("shows nothing at all while it is folded", () => {
+    // Including the tab you are looking at. A folded stack that kept one tab
+    // out beside a count that did not account for it read as a bug; which
+    // stack holds the active tab is said by the chip instead.
+    expect(shownInStack(tabs, false)).toEqual([]);
   });
 });
 

@@ -31,7 +31,6 @@ describe("sticky stack chips", () => {
   const OPAQUE: [string, string][] = [
     [".tab-stack", "--bg-alt-opaque"],
     [".tab-stack-face", "--bg-raised-opaque"],
-    [".tab-stack-more", "--bg-raised-opaque"],
   ];
 
   it.each(OPAQUE)("%s paints on the opaque mirror of its surface token", (sel, token) => {
@@ -45,6 +44,24 @@ describe("sticky stack chips", () => {
     // var(--x-opaque, var(--x)): the opaque skins never define a mirror, and
     // they don't need one — the token they mirror is already solid there.
     expect(ruleBody(sel)).toMatch(new RegExp(`var\\(\\s*${token}\\s*,\\s*var\\(`));
+  });
+
+  it("looks the same pinned as unpinned", () => {
+    // Pinning is a scroll position, and expanding a stack scrolls the strip —
+    // so any styling keyed off "pinned" means opening one stack restyles a
+    // different one, which is exactly how this looked broken. The backdrop is
+    // unconditional instead, and invisible either way: it is the bar's colour.
+    expect(CSS).not.toContain("tab-stack-stuck");
+    expect(ruleBody(".tab-stack")).toMatch(/background:/);
+  });
+
+  it("gives the glass skin a blur where a flat colour cannot match", () => {
+    // That skin's bar is a wash over an ambient field that shifts across the
+    // window, so the solid mirror lands as a slab wherever the field is not
+    // its colour. Blur what is behind instead — over the bar, that is the bar.
+    const glass = ruleBody(':root[data-theme="vitrine"] .tab-stack');
+    expect(glass).toMatch(/backdrop-filter:\s*blur/);
+    expect(glass).toMatch(/background:\s*transparent/);
   });
 
   it("draws nothing outside its own box", () => {

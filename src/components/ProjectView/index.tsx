@@ -27,7 +27,7 @@ import {
   useSettledGroups,
   type TabStatus,
 } from "../../tabGroups";
-import { revealScroll, useStripOverflow } from "../../tabSticky";
+import { revealScroll } from "../../tabSticky";
 import { useFlipStrip } from "../../tabFlip";
 import { modelFor, monaco, languageForPath } from "../../monaco-setup";
 import { getCaret, subscribeCaret } from "../../editorState";
@@ -5384,11 +5384,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       status,
       icon,
       tabs: group,
-      shown: shownInStack(
-        group,
-        label == null || openStacks[key] !== false,
-        activeTabId,
-      ),
+      shown: shownInStack(group, label == null || openStacks[key] !== false),
     });
     return [
       ...(grouped
@@ -5495,22 +5491,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
   }, [activeTabId, activeGroupKey, visible, revealActiveTab]);
   // Which chips are pinned, and which tabs have scrolled in behind them. Keyed
   // off the rendered runs so it re-measures when a tab opens, closes or
-  // restacks — not just when you scroll.
-  const stripOverflow = useStripOverflow(
-    stripRef,
-    tabGroups.map((g) => `${g.key}:${g.shown.length}`).join("|"),
-  );
-  const onStackOverflow = useCallback(
-    (e: React.MouseEvent, group: StripGroup) =>
-      tabMenu.open(
-        e,
-        group.tabs.map((t) => ({
-          label: `${t.id === activeTabId ? "› " : ""}${tabDisplayLabel(t)}`,
-          onClick: () => setActiveTabId(t.id),
-        })),
-      ),
-    [tabMenu.open, activeTabId],
-  );
   // Shells and runs each get a compact rail; Rail collapses to a dropdown at 2+.
   const shellChips: RailChip[] = useMemo(
     () =>
@@ -6851,8 +6831,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
         stripRef={stripRef}
         openStacks={openStacks}
         onToggleStack={toggleStack}
-        stripOverflow={stripOverflow}
-        onStackOverflow={onStackOverflow}
         stripTabs={stripTabs}
         activeTabId={activeTabId}
         flashTabId={flashTabId}

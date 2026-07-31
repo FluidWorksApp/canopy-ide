@@ -40,6 +40,10 @@ export function TooltipLayer() {
   const anchor = useRef<Element | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const watch = useRef<MutationObserver | null>(null);
+  // Watches for the held element being swapped out from under the pointer, and
+  // where the pointer was when it landed — the only clue to what replaced it.
+  const swap = useRef<MutationObserver | null>(null);
+  const at = useRef<{ x: number; y: number } | null>(null);
   // -Infinity, not 0: performance.now() starts at 0 too, and "no click yet"
   // must not read as "clicked just now" for the first half-second of the app.
   const clickedAt = useRef(-Infinity);
@@ -50,6 +54,8 @@ export function TooltipLayer() {
       held.current = null;
       watch.current?.disconnect();
       watch.current = null;
+      swap.current?.disconnect();
+      swap.current = null;
       if (!h) return;
       h.el.removeAttribute(HELD_ATTR);
       // Only if the element hasn't grown a title of its own in the meantime —
@@ -87,6 +93,26 @@ export function TooltipLayer() {
         if (anchor.current === el) setTip(parseTitle(fresh));
       });
       watch.current.observe(el, { attributes: true, attributeFilter: ["title"] });
+      // The attribute watcher above covers React writing a new title onto the
+      // SAME node. It cannot cover React replacing the node: a tab moving
+      // between stacks is unmounted and remounted in its new group, and the
+      // fresh node arrives carrying the `title` straight from the JSX. The
+      // pointer never moved, so no pointerover fires, nothing re-arms, and the
+      // platform draws the grey box we exist to prevent.
+      //
+      // Alive only while a title is held — that is, only while the pointer is
+      // resting on something with a tooltip — so the subtree watch costs
+      // nothing for the rest of the app's life. The callback early-outs in one
+      // property read on every batch it does not care about.
+      swap.current = new MutationObserver(() => {
+        if (el.isConnected) return;
+        const pt = at.current;
+        const now = pt && document.elementFromPoint(pt.x, pt.y);
+        const next = now?.closest(`[title], [${HELD_ATTR}]`) ?? null;
+        hide();
+        if (next && next.hasAttribute("title") && upgradable(next)) arm(next);
+      });
+      swap.current.observe(document.body, { childList: true, subtree: true });
       timer.current = setTimeout(() => {
         timer.current = undefined;
         // The row scrolled away, the panel closed, the button re-rendered into
@@ -108,7 +134,10 @@ export function TooltipLayer() {
       if (el && el.hasAttribute("title") && upgradable(el)) arm(el);
     };
 
-    const over = (e: Event) => enter(e.target);
+    const over = (e: Event) => {
+      if (e instanceof PointerEvent) at.current = { x: e.clientX, y: e.clientY };
+      enter(e.target);
+    };
     const focus = (e: Event) => {
       if (performance.now() - clickedAt.current < CLICK_FOCUS_MS) return;
       enter(e.target);

@@ -112,21 +112,19 @@ export function docStackFor(type: string): string {
   return DOC_STACKS.find((g) => g.types.includes(type))?.key ?? FALLBACK_STACK;
 }
 
-/** What a stack actually puts on screen: everything while it is open, and when
- *  it is folded, only the tab you are on.
+/** What a stack actually puts on screen: everything while it is open, nothing
+ *  at all while it is folded.
  *
- *  The exception is the whole point. Folding is allowed to hide tabs, but never
- *  the one whose pane is in front — a view with nothing in the strip naming it
- *  is how you lose track of what you are looking at. So a tab going quiet under
- *  you moves into the Idle stack and stays visible beside it; the pane itself
- *  never moves, because nothing here touches which tab is active. */
-export function shownInStack<T extends { id: string }>(
-  tabs: T[],
-  open: boolean,
-  activeId: string | null,
-): T[] {
-  if (open) return tabs;
-  return activeId == null ? [] : tabs.filter((t) => t.id === activeId);
+ *  Folded used to hold one tab out — the one whose pane was in front — on the
+ *  grounds that a view with nothing in the strip naming it is how you lose
+ *  track of what you are looking at. In practice it read as a bug: a chip
+ *  saying "Idle 3", folded, with an unexplained tab sitting beside it that the
+ *  count did not account for. Folded means folded. Which stack you are inside
+ *  is said by the chip instead — see `holdsActive` at the call site — and the
+ *  pane itself never moves either way, because nothing here touches which tab
+ *  is active. */
+export function shownInStack<T extends { id: string }>(tabs: T[], open: boolean): T[] {
+  return open ? tabs : [];
 }
 
 /** Same ids in the same buckets, at the same point in their fall. */
