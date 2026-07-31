@@ -7,6 +7,7 @@ mod chromium;
 mod cleanup;
 mod cli;
 mod clipboard;
+mod companion;
 mod context;
 mod crash;
 #[cfg(feature = "dictation")]
@@ -392,6 +393,7 @@ pub fn run() {
         .manage(notes::NotesStore::default())
         .manage(vault::Vault::default())
         .manage(clipboard::Clipboard::default())
+        .manage(companion::CompanionManager::default())
         .manage(cli::pending_from_env())
         .setup(|app| {
             // ONNX Runtime is loaded dynamically on every platform (Cargo.toml
@@ -468,6 +470,12 @@ pub fn run() {
             notify::notify_native,
             selftest::selftest_config,
             selftest::selftest_finish,
+            companion::companion_spawn,
+            companion::companion_write,
+            companion::companion_kill,
+            companion::companion_status,
+            companion::companion_store_read,
+            companion::companion_store_write,
             pty::pty_spawn,
             pty::pty_spawn_detached,
             pty::pty_output,

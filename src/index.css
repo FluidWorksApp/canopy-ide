@@ -19506,3 +19506,479 @@ a.btn-sm {
   color: var(--fg-dim);
   font-size: 13px;
 }
+
+/* ---------------------------------------------------------------- companion
+
+   Ash with a session behind it: one draggable mark that floats over every
+   project, and the surfaces that hang off it. Positioned in JS (companion.ts
+   owns the geometry, so a resize keeps it where it was left) — the rules here
+   only ever style, never place. */
+
+.companion {
+  position: fixed;
+  z-index: 320; /* over the notice stack it replaces, under modal dialogs */
+  display: grid;
+  place-items: center;
+  cursor: grab;
+  border-radius: 50%;
+  /* The mark reads as an object on the page rather than a sticker on it. */
+  filter: drop-shadow(0 6px 16px rgba(6, 8, 18, 0.55));
+  /* Only the glide back into place after a drag; dragging itself is
+     frame-by-frame and must not be smoothed or it lags the pointer. */
+  transition:
+    left 0.32s cubic-bezier(0.2, 0.9, 0.2, 1),
+    top 0.32s cubic-bezier(0.2, 0.9, 0.2, 1);
+  touch-action: none;
+}
+
+.companion:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.companion-dragging {
+  cursor: grabbing;
+  transition: none;
+  filter: drop-shadow(0 12px 24px rgba(6, 8, 18, 0.65));
+}
+
+/* ---- the notice, delivered by the companion instead of the corner ---- */
+
+.companion-notice {
+  position: fixed;
+  z-index: 318;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: var(--shadow-2);
+  animation: companion-in 0.21s cubic-bezier(0.2, 0.9, 0.2, 1) both;
+}
+
+/* A question never fades, so it gets a standing accent edge — the card is a
+   view of something still outstanding, not an announcement that has been made. */
+.companion-notice-held {
+  border-left: 2px solid var(--accent);
+}
+
+.companion-notice-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0;
+  background: none;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+
+.companion-notice-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.companion-notice-text {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.companion-notice-where {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  opacity: 0.8;
+}
+
+.companion-notice-more,
+.companion-notice-x {
+  flex: none;
+  padding: 0 4px;
+  background: none;
+  border: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.companion-notice-x:hover {
+  color: var(--text);
+}
+
+/* ---- the chat ---- */
+
+.companion-panel {
+  position: fixed;
+  z-index: 319;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 12px 14px;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  box-shadow: var(--shadow-2);
+  animation: companion-in 0.21s cubic-bezier(0.2, 0.9, 0.2, 1) both;
+}
+
+@keyframes companion-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.companion-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.companion-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+
+.companion-dot-ready {
+  background: var(--accent);
+}
+
+.companion-dot-working {
+  background: var(--accent);
+  animation: companion-pulse 1.4s ease-in-out infinite;
+}
+
+.companion-dot-failed {
+  background: var(--danger, #f7768e);
+}
+
+@keyframes companion-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.companion-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.companion-cli {
+  font-weight: 400;
+  color: var(--text-dim);
+}
+
+.companion-esc {
+  flex: none;
+  padding: 0 2px;
+  background: none;
+  border: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.companion-esc:hover {
+  color: var(--text);
+}
+
+.companion-log {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 2px 0;
+}
+
+.companion-empty {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+.companion-msg {
+  display: flex;
+  gap: 9px;
+}
+
+.companion-who {
+  flex: none;
+  width: 26px;
+  padding-top: 2px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.companion-msg-ash .companion-who {
+  color: var(--accent);
+}
+
+.companion-body {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.62;
+  color: var(--text);
+}
+
+/* The answer has to be readable on its own, so the markdown here is turned
+   down rather than up: no oversized headings, no block margins that would
+   double the panel's height. */
+.companion-body :is(h1, h2, h3, h4) {
+  margin: 6px 0 2px;
+  font-size: 12.5px;
+}
+
+.companion-body p {
+  margin: 0 0 6px;
+}
+
+.companion-body :is(ul, ol) {
+  margin: 0 0 6px;
+  padding-left: 18px;
+}
+
+.companion-body pre {
+  max-width: 100%;
+  overflow-x: auto;
+  font-size: 11.5px;
+}
+
+.companion-said {
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.companion-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 5px;
+}
+
+.companion-tool {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  max-width: 100%;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.companion-tool-detail {
+  opacity: 0.7;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The block cursor from the mark's own tail, reused: what says "still being
+   written" everywhere else in Canopy. */
+.companion-caret {
+  display: inline-block;
+  width: 6px;
+  height: 12px;
+  background: var(--accent);
+  vertical-align: -1px;
+  animation: companion-caret 1.1s steps(1, end) infinite;
+}
+
+@keyframes companion-caret {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0.12;
+  }
+}
+
+.companion-failed {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--danger, #f7768e);
+}
+
+.companion-error {
+  flex: none;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger, #f7768e) 12%, transparent);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--danger, #f7768e);
+}
+
+.companion-compose {
+  flex: none;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding-top: 9px;
+  border-top: 1px solid var(--border);
+}
+
+.companion-input {
+  flex: 1;
+  min-width: 0;
+  max-height: 96px;
+  padding: 7px 10px;
+  background: var(--bg-elev, rgba(255, 255, 255, 0.05));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.45;
+  resize: none;
+  outline: none;
+}
+
+.companion-input:focus {
+  border-color: var(--accent);
+}
+
+.companion-send {
+  flex: none;
+  padding: 7px 13px;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.companion-send:disabled {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-dim);
+  cursor: default;
+}
+
+/* Motion is decoration here; the position and the face carry the meaning. */
+@media (prefers-reduced-motion: reduce) {
+  .companion,
+  .companion-panel,
+  .companion-notice {
+    transition: none;
+    animation: none;
+  }
+
+  .companion-dot-working,
+  .companion-caret {
+    animation: none;
+  }
+}
+
+/* The confirm chip: the companion asking before it acts.
+   Inline in the chat, not a modal — this is asked several times an hour, and a
+   dialog over the whole window for "shall I start the dev server" is ceremony
+   the answer does not deserve. */
+
+.companion-ask {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 11px;
+  border: 1px solid var(--accent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.companion-ask-what {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.companion-ask-where {
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.companion-ask-where strong {
+  color: var(--text);
+}
+
+.companion-ask-detail {
+  margin-top: 2px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  word-break: break-all;
+}
+
+.companion-ask-buttons {
+  display: flex;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.companion-ask-yes,
+.companion-ask-no {
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.companion-ask-yes {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.companion-ask-no {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+}

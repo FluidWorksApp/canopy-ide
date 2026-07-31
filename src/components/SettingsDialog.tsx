@@ -23,7 +23,15 @@ import {
   type Settings,
   type Theme,
 } from "../settings";
-import { MASCOTS } from "../mascots";
+import { MASCOTS, mascotDef } from "../mascots";
+import {
+  COMPANION_AUTHORITIES,
+  forgetCompanionSession,
+  tierNote,
+} from "../companion";
+import { clearCompanionView, clearRun } from "../companionSession";
+import { forgetAllMemories } from "../companionMemory";
+import { MODEL_SWITCH } from "../agentModels";
 import { Mascot } from "./Mascot";
 import { Button, Checkbox, Field, Radio, Row, Segmented, Select, Stepper, Switch, TextInput } from "./ui";
 import { drawWave } from "../waveStyles";
@@ -39,6 +47,7 @@ import {
   AGENT_CLIS,
   binName,
   BUILTIN_AGENT_CLIS,
+  checkInstalledClis,
   currentPlatform,
   customCliIssue,
   namesArguments,
@@ -156,6 +165,166 @@ const SKIN_PREVIEWS: Record<
   },
   custom: { bg: "#1a1b26", raised: "#1f2335", text: "#c9d1d9", note: "your accent" },
 };
+
+/**
+ * Turning the mascot into a companion.
+ *
+ * Lives under the mascot picker rather than in Agents, because the question it
+ * answers is "what is that face doing on my screen" — and because the CLI it
+ * runs on is a detail of *this* choice, not another entry in the list of agents
+ * that write code.
+ *
+ * The controls are ordered by how much they matter: whether it exists at all,
+ * what it may do, then who is carrying it. The tier note is shown next to the
+ * CLI rather than buried, because it is the one consequence of that choice the
+ * user cannot see until they have already lived with it.
+ */
+function CompanionSettings({
+  s,
+  patch,
+}: {
+  s: Settings;
+  patch: (p: Partial<Settings>) => void;
+}) {
+  const [installed, setInstalled] = useState<Record<string, boolean>>({});
+  useEffect(() => {
+    void checkInstalledClis().then(setInstalled);
+  }, []);
+  const usable = AGENT_CLIS.filter((c) => installed[c.bin]);
+  const chosen =
+    usable.find((c) => c.id === s.companionCli) ??
+    usable.find((c) => c.id === s.defaultAgent) ??
+    usable[0];
+  const models = chosen ? MODEL_SWITCH[chosen.id] : undefined;
+  const name = s.companionName.trim() || mascotDef(s.mascot).label;
+
+  return (
+    <>
+      <Item
+        name={`${name} as a companion`}
+        tag="Starts an agent"
+        desc={
+          `Float ${name} over every project, with a chat and a session of its own. ` +
+          "It can see all of your projects at once — including the ones that are " +
+          "closed — and its session is listed nowhere among your coding agents. " +
+          "Drag it anywhere; it stays where you leave it."
+        }
+      >
+        <Row>
+          <Switch
+            checked={s.companionEnabled}
+            onChange={(v) => patch({ companionEnabled: v })}
+            aria-label={`Enable ${name} as a companion`}
+          />
+          <span className="set-hint">
+            {s.companionEnabled
+              ? "Notices arrive from the companion instead of the corner."
+              : "Off — nothing is running."}
+          </span>
+        </Row>
+      </Item>
+
+      {s.companionEnabled && (
+        <>
+          <Item
+            name="What it may do"
+            desc="It can act in projects you are not looking at, which is why this is a choice."
+          >
+            <div className="set-checks">
+              {COMPANION_AUTHORITIES.map((a) => (
+                <Radio
+                  key={a.id}
+                  name="companion-authority"
+                  checked={s.companionAuthority === a.id}
+                  onChange={() => patch({ companionAuthority: a.id })}
+                  label={a.label}
+                  hint={a.note}
+                />
+              ))}
+            </div>
+          </Item>
+
+          <Item name="Name" desc="What you call it. Blank uses the mascot’s own name.">
+            <TextInput
+              value={s.companionName}
+              placeholder={mascotDef(s.mascot).label}
+              aria-label="Companion name"
+              onChange={(e) => patch({ companionName: e.target.value })}
+            />
+          </Item>
+
+          <Item
+            name="Agent"
+            tag="Restarts the companion"
+            desc="Which CLI carries the conversation. Each keeps its own; switching back returns to the one you had."
+          >
+            <Row>
+              <Select
+                value={chosen?.id ?? ""}
+                aria-label="Companion agent"
+                onChange={(e) => patch({ companionCli: e.target.value, companionModel: "" })}
+              >
+                {usable.length === 0 && <option value="">No agent CLI installed</option>}
+                {usable.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </Select>
+              {chosen && <span className="set-hint">{tierNote(chosen.id)}</span>}
+            </Row>
+          </Item>
+
+          <Item name="Model" desc="Leave on the agent’s own default unless you want a specific one.">
+            {models?.kind === "inline" ? (
+              <Select
+                value={s.companionModel}
+                aria-label="Companion model"
+                onChange={(e) => patch({ companionModel: e.target.value })}
+              >
+                <option value="">{chosen?.name ?? "Agent"} default</option>
+                {models.choices.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label} — {m.hint}
+                  </option>
+                ))}
+              </Select>
+            ) : (
+              // A CLI whose catalogue is per-account has no list Canopy can be
+              // right about (see agentModels.ts), so it is not offered one.
+              <span className="set-hint">
+                {chosen
+                  ? `${chosen.name} picks its own model — Canopy has no list it could be right about.`
+                  : "Choose an agent first."}
+              </span>
+            )}
+          </Item>
+
+          <Item
+            name="Memory"
+            desc="Its conversation and what it has learned about you both carry across restarts — that is how it knows you. Starting over forgets both, and is not undoable."
+          >
+            <Button
+              onClick={() => {
+                if (!chosen) return;
+                forgetCompanionSession(chosen.id);
+                clearRun(chosen.id);
+                clearCompanionView();
+                // Its memory goes too. Clearing only the conversation would
+                // leave a "new" companion that still knows you, which is not
+                // what starting over means.
+                void forgetAllMemories();
+              }}
+              disabled={!chosen}
+            >
+              Start over with {name}
+            </Button>
+          </Item>
+        </>
+      )}
+    </>
+  );
+}
 
 function Item({
   name,
@@ -1129,6 +1298,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     ))}
                   </div>
                 </Item>
+                <CompanionSettings s={s} patch={patch} />
                 <Item
                   name="Side panel"
                   desc="How the rail's panels open and close."

@@ -360,15 +360,67 @@ async function reviews(repos: string[], inbox: ipc.RelayCommandMsg[]) {
   return { relayRequests: relay, pullRequests: prs };
 }
 
+/** One project as the companion sees it. Assembled by App, which is the only
+ *  thing that knows about projects at all — every other consumer of this file
+ *  works in one checkout and has no notion of a workspace. */
+export interface WorkspaceProject {
+  name: string;
+  roots: string[];
+  open: boolean;
+  hibernated: boolean;
+}
+
 export interface UiOpContext {
   roots: string[];
   repos: string[];
   inbox: ipc.RelayCommandMsg[];
   /** Put the question in front of the user and resolve with their answer. */
   ask: (question: string, options: string[]) => Promise<string>;
+  /** Every project the user has — the companion's reach. Absent for an
+   *  ordinary coding session, which is what makes the workspace ops fail
+   *  honestly rather than answering for one project as if it were all of them. */
+  workspace?: () => WorkspaceProject[];
+  /** Put a proposed action to the user; resolves with what they chose. Only
+   *  the companion has a tool that reaches this. */
+  confirm?: (proposal: {
+    action: string;
+    project?: string | null;
+    detail?: string | null;
+    timeoutMs?: number | null;
+  }) => Promise<{ accepted: boolean; note?: string }>;
+  /** Bring a project to the front, opening or waking it if need be. */
+  openProject?: (name: string, why?: string | null) => Promise<string>;
+  /** Search Canopy's own cross-project index. */
+  search?: (query: string, limit: number) => Promise<unknown>;
+  /** What every coding session in every project is doing. */
+  agents?: (project?: string | null) => Promise<unknown>;
+  /** Branch/ahead/behind/dirty per repo, across the workspace. */
+  workspaceGit?: (project?: string | null) => Promise<unknown>;
   /** The preview tab an agent's browser ops are driving, for the vault ops:
    *  filling a credential needs to know which page is being logged in to. */
   preview: () => Promise<PreviewTarget | null>;
+}
+
+/** Just the companion's half of the context. App builds exactly this set when
+ *  the companion is on, and nothing when it is off — which is what makes the
+ *  workspace ops fail honestly for a coding session. */
+export type CompanionOps = Required<
+  Pick<
+    UiOpContext,
+    "workspace" | "confirm" | "openProject" | "search" | "agents" | "workspaceGit"
+  >
+>;
+
+/** The companion's handlers are optional on the context, because every other
+ *  caller of this file is a coding session that has no workspace to speak of.
+ *  A missing one is a real condition worth naming rather than a crash. */
+function needCompanion<T>(handler: T | undefined, tool: string): T {
+  if (!handler) {
+    throw new Error(
+      `${tool} is only available to Canopy's companion, and this session is not it`,
+    );
+  }
+  return handler;
 }
 
 /** Run one UI op and produce the tool's result. Throwing is how an op reports
@@ -393,6 +445,70 @@ export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unkn
       return { answer: await ctx.ask(op.question ?? "", op.options ?? []) };
     case "vault":
       return runVaultOp(op, { preview: ctx.preview, ask: ctx.ask });
+
+    // ---- the companion's cross-project ops ----
+    //
+    // The sidecar already refuses these outside a companion session, so
+    // reaching here without the handler means the app is running a build whose
+    // front end predates the tool. Saying so beats answering for one project as
+    // though it were the whole workspace.
+    case "workspace":
+      return { projects: needCompanion(ctx.workspace, "canopy_workspace")() };
+    case "workspace_git":
+      return needCompanion(ctx.workspaceGit, "canopy_workspace_git")(op.project);
+    case "workspace_agents":
+      return needCompanion(ctx.agents, "canopy_workspace_agents")(op.project);
+    case "workspace_search":
+      return needCompanion(ctx.search, "canopy_workspace_search")(
+        op.query ?? "",
+        Math.min(Math.max(op.limit ?? 20, 1), 100),
+      );
+    case "open_project": {
+      const opened = await needCompanion(ctx.openProject, "canopy_open_project")(
+        op.project ?? "",
+        op.why,
+      );
+      return { opened, note: "The user is now looking at this project." };
+    }
+    case "confirm": {
+      const answer = await needCompanion(ctx.confirm, "canopy_confirm")({
+        action: op.action ?? "",
+        project: op.project,
+        detail: op.detail,
+        timeoutMs: op.timeoutMs,
+      });
+      return {
+        accepted: answer.accepted,
+        note: answer.accepted
+          ? "Go ahead — do exactly what you described and nothing more."
+          : "The user declined. This is an answer, not an error: say so plainly and stop.",
+        ...(answer.note ? { theySaid: answer.note } : {}),
+      };
+    }
+    case "recall": {
+      const { loadMemories, recallFrom } = await import("./companionMemory");
+      const found = recallFrom(await loadMemories(), op.query);
+      return {
+        memories: found.map((m) => ({
+          about: m.about,
+          fact: m.fact,
+          when: new Date(m.ts).toISOString().slice(0, 10),
+        })),
+        note: found.length
+          ? undefined
+          : "Nothing recorded yet — this is a companion that has not learned anything about them so far.",
+      };
+    }
+    case "remember": {
+      const { remember } = await import("./companionMemory");
+      const result = await remember({
+        fact: op.fact ?? "",
+        about: op.about,
+        forget: op.forget,
+      });
+      return result;
+    }
+
     default:
       throw new Error(`unknown op: ${op.op}`);
   }

@@ -637,12 +637,35 @@ impl WorkClock {
 
 /// One file per session; this process is the only writer for its own session,
 /// and hook invocations within a session are serial.
+/// The companion (Ash) is one session that must appear in no list of sessions.
+///
+/// It is the user's assistant, not one of their coding agents: it has no tab,
+/// it is not something they started on a branch, and a row for it in the Agents
+/// panel — or in `canopy_agents`, where another agent could then read its
+/// conversation or type into it — would be a leak, not a feature.
+///
+/// The enforcement is *not writing the digest*, rather than writing one and
+/// asking every surface to filter it. Every listing Canopy has is built from
+/// these files, so a session with no digest is invisible everywhere at once,
+/// including in surfaces written later that would never have known to filter.
+/// That is the same reasoning as `micro` below, taken one step further: a
+/// micro-task still needs a row in Tasks, and the companion needs nothing.
+///
+/// Set on the child by the app at spawn (companionSession.ts) and inherited by
+/// the CLI, so it holds however the session is resumed.
+fn is_companion_session() -> bool {
+    std::env::var("CANOPY_COMPANION").is_ok_and(|v| !v.is_empty())
+}
+
 fn update_digest(
     session_id: &str,
     cwd: &str,
     event: &serde_json::Value,
     hook_event: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if is_companion_session() {
+        return Ok(());
+    }
     let dir = format!("{}/.canopy/sessions", home());
     std::fs::create_dir_all(&dir)?;
     let path = format!("{dir}/{session_id}.json");
@@ -1882,6 +1905,58 @@ const STRUCTURED_TOOLS: &[&str] = &[
     "canopy_research",
 ];
 
+/// Shared tools that change something the user would have to undo.
+///
+/// Duplicated from `MUTATING_TOOLS` in companionTools.ts on the same terms as
+/// the rest of this file's descriptors: the name is the contract, and
+/// companionToolsGuard.test.ts asserts the two lists stay identical.
+const COMPANION_MUTATING_TOOLS: &[&str] = &[
+    "canopy_start_server",
+    "canopy_stop_server",
+    "canopy_restart_server",
+    "canopy_message_agent",
+    "canopy_claim",
+    "canopy_notes_write",
+    "canopy_research_write",
+    "canopy_vault_fill",
+    "canopy_vault_read",
+    "canopy_browser_click",
+    "canopy_browser_type",
+    "canopy_browser_eval",
+    "canopy_browser_navigate",
+];
+
+/// The companion's authority, applied to the tool list.
+///
+/// Two of the three settings are enforced here, and the third is not — which is
+/// the distinction worth keeping straight:
+///
+///   answer only  the mutating tools are removed. A tool that is absent cannot
+///                be called, which is a stronger guarantee than any instruction
+///                in a prompt.
+///   ask first    the tools stay. They are gated on the way through instead, by
+///                `companion_gate` in the call path — the confirmation happens
+///                whether or not the agent thought to ask, so keeping the tools
+///                costs nothing and withholding them would only mean the
+///                companion could not act at all.
+///   act freely   untouched; the user granted this deliberately.
+///
+/// Anything that is not a companion session is untouched either way — a coding
+/// agent's tools are governed by Settings → Agents and nothing here.
+fn apply_companion_authority(tools: &mut Vec<serde_json::Value>) {
+    if !is_companion_session() {
+        return;
+    }
+    if std::env::var("CANOPY_COMPANION_POLICY").unwrap_or_default() != "deny" {
+        return;
+    }
+    tools.retain(|t| {
+        t.get("name")
+            .and_then(|n| n.as_str())
+            .is_some_and(|n| !COMPANION_MUTATING_TOOLS.contains(&n))
+    });
+}
+
 /// The tools this session gets: everything below, minus whatever the user
 /// switched off in Settings → Agents. A disabled tool is filtered here rather
 /// than refused on call, so it costs the agent no context at all. The bridge
@@ -1903,6 +1978,11 @@ fn tools_list() -> serde_json::Value {
     tools.extend(notes_tool_defs());
     tools.extend(session_tool_defs());
     tools.extend(task_tool_defs());
+    // The cross-project set, and only for the one session that is allowed to
+    // think across projects. An ordinary coding agent never sees these exist.
+    if is_companion_session() {
+        tools.extend(companion_tool_defs());
+    }
     // canopy_job_done is on by default everywhere (reporting an outcome is
     // core product), and inside a micro-task session (CANOPY_MICRO_TASK=1 on
     // the launch command) it survives even the Settings disable list — a
@@ -1912,6 +1992,7 @@ fn tools_list() -> serde_json::Value {
     // names a tool the session doesn't have is a brief that lies.
     // See the matching note in agentTools.ts.
     let micro = std::env::var("CANOPY_MICRO_TASK").is_ok();
+    apply_companion_authority(&mut tools);
     tools.retain(|t| {
         t.get("name").and_then(|n| n.as_str()).is_some_and(|n| {
             !disabled.iter().any(|d| d == n) || (micro && MICRO_ALWAYS_TOOLS.contains(&n))
@@ -2139,6 +2220,88 @@ fn research_tool_defs() -> Vec<serde_json::Value> {
 /// the identity is the sidecar's own environment (CANOPY_PTY, stamped by the
 /// PTY that launched this agent) and the restriction is a property of the
 /// surface instead of a check inside it.
+/// The tools only the companion gets (see companionTools.ts).
+///
+/// Every other agent's `canopy_*` tools are scoped to *a* project, because that
+/// is what a coding agent is — born in one checkout, working one job against
+/// it, with no question it could ask about another. The companion is the
+/// opposite shape: it is asked "which repos have unpushed work" and "start the
+/// banana server", neither of which names a project the way a coding agent's
+/// questions do.
+///
+/// Withheld from coding agents deliberately, not incidentally. A cross-project
+/// tool in an ordinary session is a way for an agent working on one repo to
+/// read and act on another, which is the opposite of the isolation the worktree
+/// discipline exists to provide.
+///
+/// In its own function for the same reason notes and research are: `json!` hits
+/// its macro recursion limit somewhere around this many entries.
+fn companion_tool_defs() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "name": "canopy_workspace",
+            "description": "Every project the user has, at once — name, paths, whether it is open, closed or asleep, its branch, how many files are uncommitted, and what is running in it. Start here for anything phrased across projects (\"what's the state of things\", \"anything need me\"), and for any request that does not name which project it means. Cheaper and more complete than calling canopy_project and shelling out per repo.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_workspace_git",
+            "description": "Branch, ahead/behind against upstream, uncommitted files and unpushed commits for every repo in every project. This IS the status report — do not rebuild it by running git in each checkout, which is slower and misses the projects that have no window open. Reads only; it never moves a ref.",
+            "inputSchema": { "type": "object", "properties": {
+                "project": { "type": "string", "description": "Just this project, by name. Omit for all of them" }
+            }, "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_workspace_agents",
+            "description": "What every coding session in every project is doing right now: what it was asked, its branch, the files it has touched, the last thing it said. Use it to answer \"what has been going on\" and to avoid setting work in motion that somebody else is already doing. You are deliberately absent from this list — your own session is listed nowhere.",
+            "inputSchema": { "type": "object", "properties": {
+                "project": { "type": "string", "description": "Just this project, by name" }
+            }, "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_workspace_search",
+            "description": "Search Canopy's own index across every project: past agent conversations, terminal scrollback, notes and research. Reaches things that are on no disk you could grep — what an agent said last Tuesday, what scrolled past in a terminal. Use it before concluding something was never discussed.",
+            "inputSchema": { "type": "object", "properties": {
+                "query": { "type": "string", "description": "What to look for" },
+                "limit": { "type": "integer", "description": "Rows to return (default 20, max 100)" }
+            }, "required": ["query"], "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_open_project",
+            "description": "Bring a project to the front of the user's window, opening it if it was closed and waking it if it was asleep. Use it when your answer is somewhere they should be looking. This moves what is on their screen, so do it because the answer is there — not to be helpful at the end of every turn.",
+            "inputSchema": { "type": "object", "properties": {
+                "project": { "type": "string", "description": "The project, by name, from canopy_workspace" },
+                "why": { "type": "string", "description": "One line the user sees explaining why you moved them" }
+            }, "required": ["project"], "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_confirm",
+            "description": "Put an action you are about to take to the user and block until they answer. Call it BEFORE doing the thing, then do the thing only if it comes back accepted — a declined answer is an answer, not an error: say so plainly and stop. Name the project every time; the user has several and is probably not looking at the one you mean. You do not need to also ask in prose first — that costs a turn and asks the same question twice.",
+            "inputSchema": { "type": "object", "properties": {
+                "action": { "type": "string", "description": "What you will do, in one line, in the imperative — \"Start the dev server\", \"Create a worktree for the review\"" },
+                "project": { "type": "string", "description": "Which project it lands in, by name" },
+                "detail": { "type": "string", "description": "The specifics they need to judge it: the command, the path, the branch" },
+                "timeoutMs": { "type": "integer", "description": "How long to wait (default 120000, max 600000)" }
+            }, "required": ["action"], "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_recall",
+            "description": "What you have already learned about this user and how they work — kept across every project and every restart, because it belongs to no repo. Check it before asking them something they have told you before.",
+            "inputSchema": { "type": "object", "properties": {
+                "query": { "type": "string", "description": "Narrow to what matters now; omit for everything" }
+            }, "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_remember",
+            "description": "Keep something that will still matter next week: how they like work delivered, a standing decision about a repo, the shape of a project that its files do not show. NOT a scratchpad for this turn, and never anything the code or the git history already records — your conversation already carries across restarts, so this is only for what outlives the conversation. One fact per call.",
+            "inputSchema": { "type": "object", "properties": {
+                "fact": { "type": "string", "description": "The thing worth keeping, in a sentence or two" },
+                "about": { "type": "string", "description": "What it concerns — a project name, or \"how they work\"" },
+                "forget": { "type": "boolean", "description": "Drop a fact that has turned out to be wrong, matched on `about`" }
+            }, "required": ["fact"], "additionalProperties": false }
+        }),
+    ]
+}
+
 fn session_tool_defs() -> Vec<serde_json::Value> {
     vec![serde_json::json!({
         "name": "canopy_close_session",
@@ -2585,7 +2748,118 @@ fn device_tool_defs() -> serde_json::Value {
     ])
 }
 
+/// A one-line description of what a mutating call is about to do, for the chip
+/// the user actually reads.
+///
+/// Built from the tool's own arguments rather than from anything the agent
+/// writes, deliberately: the whole value of the gate is that the user is shown
+/// what will *happen*, not what the agent says will happen. An agent that has
+/// misunderstood its own request is exactly the case this is meant to catch.
+fn describe_action(name: &str, args: &serde_json::Value) -> (String, Option<String>) {
+    let arg = |k: &str| args.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    match name {
+        "canopy_start_server" => (
+            "Start a server".into(),
+            arg("command").or_else(|| arg("dir")),
+        ),
+        "canopy_stop_server" => ("Stop a server".into(), arg("ptyId")),
+        "canopy_restart_server" => ("Restart a server".into(), arg("ptyId")),
+        "canopy_message_agent" => (
+            "Type into another agent's terminal".into(),
+            arg("text").map(|t| t.chars().take(160).collect()),
+        ),
+        "canopy_claim" => ("Claim files".into(), arg("note")),
+        "canopy_notes_write" => ("Write to your scratchpad".into(), arg("title")),
+        "canopy_research_write" => ("Record research".into(), arg("title")),
+        "canopy_vault_fill" => ("Sign in to a page".into(), arg("entryId")),
+        "canopy_vault_read" => ("Read a stored password".into(), arg("entryId")),
+        "canopy_browser_navigate" => ("Navigate the preview".into(), arg("url")),
+        "canopy_browser_click" => ("Click in the preview".into(), arg("ref")),
+        "canopy_browser_type" => ("Type into the preview".into(), arg("text")),
+        "canopy_browser_eval" => (
+            "Run JavaScript in the preview".into(),
+            arg("code").map(|c| c.chars().take(160).collect()),
+        ),
+        other => (format!("Run {other}"), None),
+    }
+}
+
+/// The companion's write gate, in the call path rather than in its brief.
+///
+/// This is the part that makes "ask first" mean something. The alternative —
+/// telling the agent in its system prompt to call `canopy_confirm` before
+/// acting — is a rule it can forget, misjudge, or reason its way past, and the
+/// companion is the one agent whose actions land in projects the user is not
+/// looking at. So the confirmation happens *here*, on the way to the tool, and
+/// an agent that never calls `canopy_confirm` is gated exactly as tightly as
+/// one that always does.
+///
+/// Returns `Some` when the call must not proceed.
+fn companion_gate(name: &str, args: &serde_json::Value) -> Option<Result<ToolOutput, String>> {
+    if !is_companion_session() || !COMPANION_MUTATING_TOOLS.contains(&name) {
+        return None;
+    }
+    match std::env::var("CANOPY_COMPANION_POLICY")
+        .unwrap_or_default()
+        .as_str()
+    {
+        // Granted deliberately by the user; nothing to ask.
+        "allow" => None,
+        // The tool is not in this session's list at all, so reaching here means
+        // a resumed conversation remembered it. Refuse rather than run.
+        "deny" => Some(Err(format!(
+            "{name} changes things, and the companion is set to answer only. Tell the user what \
+             you would do and let them run it."
+        ))),
+        _ => {
+            let (action, detail) = describe_action(name, args);
+            let mut body = serde_json::json!({ "action": action });
+            if let Some(detail) = detail {
+                body["detail"] = serde_json::json!(detail);
+            }
+            // The project, when the arguments carry one. Named on the chip
+            // because the user has several and is probably not looking at the
+            // one this lands in.
+            if let Some(dir) = args.get("dir").and_then(|v| v.as_str()) {
+                body["project"] = serde_json::json!(dir);
+            }
+            match ui_op("confirm", &body, 125) {
+                Ok(answer) => {
+                    let accepted = serde_json::from_str::<serde_json::Value>(&answer)
+                        .ok()
+                        .and_then(|v| v.get("accepted").and_then(serde_json::Value::as_bool))
+                        // A malformed answer is not consent. This is the one
+                        // place where failing closed matters more than failing
+                        // usefully.
+                        .unwrap_or(false);
+                    if accepted {
+                        None
+                    } else {
+                        Some(Ok(ToolOutput::Text(
+                            "The user declined this action. That is an answer, not an error: say \
+                             so plainly and stop — do not try another way to do the same thing."
+                                .into(),
+                        )))
+                    }
+                }
+                // No answer means no permission. An agent that proceeded here
+                // would be acting on a question nobody heard.
+                Err(e) => Some(Err(format!(
+                    "Could not ask the user about this action, so it was not done: {e}"
+                ))),
+            }
+        }
+    }
+}
+
 fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String> {
+    // Before anything else: the companion's write gate. Placed at the top of
+    // dispatch so no individual tool handler has to remember it, and so a tool
+    // added later is gated by being on the mutating list rather than by its
+    // author knowing this exists.
+    if let Some(gated) = companion_gate(name, args) {
+        return gated;
+    }
     let text = |r: Result<String, String>| r.map(ToolOutput::Text);
     match name {
         "canopy_project" => text(ctx_get("/ctx/snapshot".into())),
@@ -2822,6 +3096,83 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
             let mut body = args.clone();
             body["vaultOp"] = serde_json::json!("read");
             text(ui_op("vault", &body, 605))
+        }
+        // The companion's own tools. Every one is a question only the running
+        // app can answer — it holds the workspace, the digests and the index —
+        // so they all go through the same ui-op channel as `ask`, rather than
+        // growing a second bridge for the same job.
+        //
+        // Refused rather than merely absent when the session is not the
+        // companion: `tools_list` already hides them, but a resumed session
+        // could have been told about them by an earlier turn's context, and
+        // "no such tool" is a clearer answer than a cross-project read that
+        // quietly succeeds for an agent that should not have it.
+        "canopy_workspace"
+        | "canopy_workspace_git"
+        | "canopy_workspace_agents"
+        | "canopy_workspace_search"
+        | "canopy_open_project"
+        | "canopy_recall"
+        | "canopy_remember" => {
+            if !is_companion_session() {
+                return Err(format!(
+                    "{name} belongs to Canopy's companion and is not available to this session"
+                ));
+            }
+            if name == "canopy_workspace_search"
+                && args
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .map_or(true, |q| q.trim().is_empty())
+            {
+                return Err("missing required argument: query".into());
+            }
+            if name == "canopy_open_project"
+                && args
+                    .get("project")
+                    .and_then(|v| v.as_str())
+                    .map_or(true, str::is_empty)
+            {
+                return Err("missing required argument: project".into());
+            }
+            if name == "canopy_remember"
+                && args
+                    .get("fact")
+                    .and_then(|v| v.as_str())
+                    .map_or(true, |f| f.trim().is_empty())
+            {
+                return Err("missing required argument: fact".into());
+            }
+            let mut body = args.clone();
+            // The op name is the tool name without the prefix, so adding a
+            // companion tool is one descriptor and one case in agentOps.ts.
+            body["op"] = serde_json::json!(name.trim_start_matches("canopy_"));
+            text(ui_op(name.trim_start_matches("canopy_"), &body, 25))
+        }
+        "canopy_confirm" => {
+            if !is_companion_session() {
+                return Err(
+                    "canopy_confirm belongs to Canopy's companion and is not available to this \
+                     session"
+                        .into(),
+                );
+            }
+            if args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .map_or(true, |a| a.trim().is_empty())
+            {
+                return Err("missing required argument: action".into());
+            }
+            // A person is the slow part, same as canopy_ask_user: hold the
+            // socket open past their think time rather than timing out under
+            // them and leaving the agent unsure whether it may proceed.
+            let ms = args
+                .get("timeoutMs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(120_000)
+                .clamp(5_000, 600_000);
+            text(ui_op("confirm", args, ms / 1000 + 5))
         }
         "canopy_ask_user" => {
             if args

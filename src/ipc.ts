@@ -244,7 +244,17 @@ export interface AgentUiOp {
     | "tickets"
     | "reviews"
     | "ask"
-    | "vault";
+    | "vault"
+    // The companion's cross-project ops. No coding agent can reach these —
+    // the sidecar refuses them outside a companion session (canopy_hook.rs).
+    | "workspace"
+    | "workspace_git"
+    | "workspace_agents"
+    | "workspace_search"
+    | "open_project"
+    | "confirm"
+    | "recall"
+    | "remember";
   route: string;
   path?: string | null;
   line?: number | null;
@@ -261,6 +271,20 @@ export interface AgentUiOp {
   /** diagnostics: how long the caller will hold. A hook firing after every
    *  edit can't sit through a cold server's first index. */
   waitMs?: number | null;
+  /** The companion's ops: which project, when scoped to one. */
+  project?: string | null;
+  /** confirm / ask: what it proposes, the specifics needed to judge it, and
+   *  how long the agent will hold its socket open waiting for a person. */
+  action?: string | null;
+  detail?: string | null;
+  timeoutMs?: number | null;
+  /** open_project: why the user's window just moved. */
+  why?: string | null;
+  limit?: number | null;
+  /** remember: the fact, what it concerns, and whether this retracts one. */
+  fact?: string | null;
+  about?: string | null;
+  forget?: boolean | null;
 }
 export const onAgentUi = (cb: (op: AgentUiOp) => void): Promise<UnlistenFn> =>
   listen<AgentUiOp>("agent:ui", (event) => cb(event.payload));
@@ -2940,3 +2964,56 @@ export interface DiskUsage {
  *  the usage panel can poll it like it polls plan limits. */
 export const cleanupDisk = (roots: string[]) =>
   invoke<DiskUsage[]>("cleanup_disk", { roots });
+
+// ---------------------------------------------------------------- companion
+
+/** One thing the companion's CLI said. `line` is a raw stdout line — expected
+ *  to be JSON, deliberately unparsed in Rust so the protocol stays owned by
+ *  companionTransport.ts (see companion.rs). */
+export type CompanionOut =
+  | { kind: "line"; text: string }
+  | { kind: "stderr"; text: string }
+  | { kind: "exit"; code: number | null };
+
+export interface CompanionStatus {
+  running: boolean;
+  generation: number;
+}
+
+/** Start the companion's CLI on plain pipes, replacing any already running.
+ *  Not a PTY: the structured tier speaks JSON lines, and a terminal's line
+ *  discipline would echo them back and truncate the long ones. */
+export async function companionSpawn(
+  opts: {
+    command: string;
+    args: string[];
+    cwd?: string;
+    env?: [string, string][];
+  },
+  onData: (out: CompanionOut) => void,
+): Promise<void> {
+  const channel = new Channel<CompanionOut>();
+  channel.onmessage = onData;
+  return invoke("companion_spawn", { ...opts, onData: channel });
+}
+
+/** Send one JSON message. The newline is added on the Rust side so no caller
+ *  can forget it — an unterminated line reads as the companion never replying. */
+export const companionWrite = (line: string) =>
+  invoke<void>("companion_write", { line });
+
+export const companionKill = () => invoke<void>("companion_kill");
+
+/** The companion's own corner of `~/.canopy`. Scoped to one directory on the
+ *  Rust side — deliberately not a general file read/write, which would hand the
+ *  webview an arbitrary-write primitive for the sake of one JSON file. */
+export const canopyStoreRead = (name: string) =>
+  invoke<string | null>("companion_store_read", { name });
+
+export const canopyStoreWrite = (name: string, body: string) =>
+  invoke<void>("companion_store_write", { name, body });
+
+export const companionStatus = () =>
+  invoke<CompanionStatus>("companion_status").catch(
+    (): CompanionStatus => ({ running: false, generation: 0 }),
+  );

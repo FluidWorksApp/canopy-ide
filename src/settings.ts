@@ -3,6 +3,9 @@ import type { CustomMicroTask } from "./microTasks";
 // Type-only, so the projects.ts ↔ settings.ts pair stays a compile-time cycle
 // and never a runtime one.
 import type { CustomAgentCli } from "./projects";
+// Type-only for the same reason, and the cycle is the same shape: companion.ts
+// reads settings to resolve the name, the CLI and the authority.
+import type { CompanionAuthority, CompanionSpot } from "./companion";
 import type { BrowserEngine } from "./browserBounds";
 // Type-only for the same reason as projects.ts above: mascots.ts reads
 // getSettings(), so this pair must stay a compile-time cycle only.
@@ -207,6 +210,38 @@ export interface Settings {
    *  --on-accent rides along so accent-filled buttons stay legible without
    *  the user having to pick a second colour. */
   customAccent: string;
+  // ---- The companion (companion.ts) ----
+  /** Whether the mascot is a *companion* — floating over every project, with a
+   *  session of its own — rather than only the face other surfaces wear.
+   *
+   *  Off by default, and this one has to be: it starts a real agent CLI that
+   *  stays running, spends tokens, and can be given authority to act. That
+   *  follows a decision the user made, never an upgrade. */
+  companionEnabled: boolean;
+  /** What the user calls it. Empty means the mascot's own name (see
+   *  companionName), which is what keeps a second mascot from arriving
+   *  nameless. */
+  companionName: string;
+  /** Registry id of the CLI it runs on. Empty follows `defaultAgent`, so
+   *  someone who never opens this screen gets the agent they already use. */
+  companionCli: string;
+  /** Model for that CLI. Empty means the CLI's own default — the only honest
+   *  value for a CLI whose catalogue is per-account (see agentModels.ts). */
+  companionModel: string;
+  /** What it may do without asking. See CompanionAuthority: the default asks
+   *  before anything that changes the world, because this is the one agent
+   *  that can act in a project the user is not looking at. */
+  companionAuthority: CompanionAuthority;
+  /** Where it was left, as a fraction of the window (see CompanionSpot).
+   *  Fractions rather than pixels so the position survives a resize. */
+  companionSpot: CompanionSpot;
+  /** Its conversation, per CLI — the companion's memory of the user is that
+   *  transcript, so the id has to outlive the app. Keyed by registry id
+   *  because a session id belongs to the CLI that issued it: switching agent
+   *  and switching back returns to the right conversation rather than losing
+   *  both. */
+  companionSessions: Record<string, string>;
+
   /** Which mascot the app wears (mascots.ts). Stored as an id rather than
    *  anything drawable, so a build that adds or drops one reads an old
    *  settings file fine — `currentMascot` falls back when the id is unknown.
@@ -506,6 +541,17 @@ export const DEFAULTS: Settings = {
   trackerKeys: {},
   theme: "default",
   customAccent: "",
+  companionEnabled: false,
+  companionName: "",
+  companionCli: "",
+  companionModel: "",
+  companionAuthority: "confirm",
+  // The literal, not `DEFAULT_SPOT`, for the same reason as `mascot` below:
+  // companion.ts reads settings, so importing its value here at module scope
+  // would make the compile-time cycle a runtime one. companion.test.ts asserts
+  // the two stay in agreement.
+  companionSpot: { x: 0.97, y: 0.86 },
+  companionSessions: {},
   // The literal, not `DEFAULT_MASCOT`: mascots.ts reads settings, so importing
   // a *value* back from it would be a live cycle evaluated while this very
   // object is being built. The type import below is erased and safe, and
@@ -581,6 +627,13 @@ export function getSettings(): Settings {
  *  and need nothing; the ones that change how a live surface behaves (the side
  *  panel's three) are held in component state, and this is how they hear. */
 export const SETTINGS_CHANGE_EVENT = "canopy:settings-changed";
+
+/** Subscribe form of SETTINGS_CHANGE_EVENT, for `useSyncExternalStore`. Here
+ *  rather than in each component so the event name has one spelling. */
+export function subscribeSettings(cb: () => void): () => void {
+  window.addEventListener(SETTINGS_CHANGE_EVENT, cb);
+  return () => window.removeEventListener(SETTINGS_CHANGE_EVENT, cb);
+}
 
 export function updateSettings(patch: Partial<Settings>): Settings {
   const next = { ...getSettings(), ...patch };

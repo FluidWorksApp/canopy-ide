@@ -1,0 +1,365 @@
+// The companion: Ash with a session behind it.
+//
+// Ash already existed as a *face* — eight lifecycle states every surface renders
+// through <Mascot state=… /> (see ash.ts, mascots.ts). This is the other half:
+// one persistent agent that floats over the whole app, belongs to no project,
+// and answers about all of them.
+//
+// The distinction that shapes every decision here is that the companion is NOT
+// a coding agent that happens to be pinned. A coding agent is born in one
+// checkout, does one job against it, and dies. The companion outlives every
+// project, is asked "which repos have unpushed work" as often as "what does
+// this function do", and is the only agent that can act somewhere the user is
+// not looking. That last property is why authority is a first-class setting
+// rather than a permission flag, and why the write gate is enforced at the
+// bridge rather than requested in a prompt.
+//
+// Everything here is pure — vocabulary, geometry and resolution — so the
+// placement and authority rules can be tested without a CLI, a PTY or a DOM.
+// The live session lives in companionSession.ts, the drawing in
+// components/Companion.tsx.
+
+import { AGENT_CLIS, type AgentCli } from "./projects";
+import { mascotDef } from "./mascots";
+import { getSettings, updateSettings } from "./settings";
+
+/** What the companion may do on its own.
+ *
+ *  The default is `confirm`, and the reason is the cross-project reach rather
+ *  than any general caution about agents: an agent acting inside the checkout
+ *  you are staring at is visible and therefore correctable, whereas this one
+ *  can start a server or move a branch in a repo whose tab is not even open. A
+ *  confirmation is the only moment the user is told *where* the action lands.
+ *
+ *  `read` is not "safe mode" — it is a coherent product in its own right for
+ *  someone who wants a librarian and not a deputy — and `auto` exists because
+ *  a user who has watched it work for a week should be able to stop clicking. */
+export type CompanionAuthority = "read" | "confirm" | "auto";
+
+export const COMPANION_AUTHORITIES: {
+  id: CompanionAuthority;
+  label: string;
+  note: string;
+}[] = [
+  {
+    id: "read",
+    label: "Answer only",
+    note: "Reads across every project. Changes nothing, ever.",
+  },
+  {
+    id: "confirm",
+    label: "Ask before acting",
+    note: "Reads freely; anything that changes the world asks first.",
+  },
+  {
+    id: "auto",
+    label: "Act on its own",
+    note: "No confirmation, including in projects you aren't looking at.",
+  },
+];
+
+/** Whether an action that changes something may run at all, and whether it has
+ *  to be put to the user first. Read by the bridge, not by the prompt — a rule
+ *  an agent is merely *told* is a rule it can talk itself out of. */
+export function actionPolicy(a: CompanionAuthority): "deny" | "confirm" | "allow" {
+  return a === "read" ? "deny" : a === "confirm" ? "confirm" : "allow";
+}
+
+// ---------------------------------------------------------------- identity
+
+/** What the companion is called.
+ *
+ *  Defaults to the chosen mascot's own name rather than a hardcoded "Ash", so
+ *  a second mascot arrives already named and no call site has to learn about
+ *  the first one — the same rule mascots.ts sets for the face. A non-empty
+ *  setting is the user overriding that, which is the whole point of a
+ *  companion you address by name. */
+export function companionName(): string {
+  return getSettings().companionName.trim() || mascotDef().label;
+}
+
+/** The name as it appears where only ASCII survives — an env var the CLI reads,
+ *  a session title, a log line. */
+export function companionSlug(): string {
+  const slug = companionName()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+  return slug || "ash";
+}
+
+// ---------------------------------------------------------------- the CLI
+
+/** How well a given CLI can carry a chat.
+ *
+ *  `structured` — the CLI speaks a documented streaming JSON protocol on stdio,
+ *  so replies arrive as tokens, tool calls arrive as events, and the chat can
+ *  render thinking, tools and prose as the different things they are. This is
+ *  the experience the companion is designed around.
+ *
+ *  `terminal` — everything else. The CLI is driven the way a person drives it,
+ *  through a PTY, and its answer is recovered by replaying what it painted
+ *  (ptyText.ts). It works with any agent the user has, which is the point, but
+ *  a redrawing TUI cannot be separated cleanly into turns, so the chat shows
+ *  the reply whole rather than streaming and cannot label tool calls.
+ *
+ *  Declared per CLI rather than detected, under the same rule projects.ts sets
+ *  for `resume` and `prompt`: only syntax verified against the CLI's own help
+ *  is written down, because a wrong flag does not error — it silently produces
+ *  a session that ignores half of what it was told. */
+export type CompanionTier = "structured" | "terminal";
+
+/** The verified way to run one CLI as a companion.
+ *
+ *  Absent from the table entirely means `terminal`: the fallback needs no
+ *  knowledge beyond what projects.ts already has, which is what makes every
+ *  agent the user installs usable here on day one.
+ */
+export interface CompanionRunner {
+  tier: "structured";
+  /** Build the argv tail for a fresh session. `bin` is the *resolved* binary
+   *  (Settings → Agents can rebind it), never the vendor's name. */
+  args(o: CompanionLaunch): string[];
+  /** The same, resuming the session id the companion has been using. A CLI
+   *  that cannot resume by id has no business in this tier: the companion's
+   *  memory of the user *is* its conversation, and losing it on every restart
+   *  would make "remembers who it is" false. */
+  resumeArgs(o: CompanionLaunch & { sessionId: string }): string[];
+}
+
+export interface CompanionLaunch {
+  bin: string;
+  sessionId: string;
+  systemPrompt: string;
+  /** Every project root in the workspace — the companion's reach. */
+  roots: string[];
+  /** Empty means "the CLI's own default model". */
+  model: string;
+  authority: CompanionAuthority;
+}
+
+/**
+ * Verified against `claude --help` on the installed CLI:
+ *   --session-id <uuid>            fixed id, so the conversation is ours to resume
+ *   --append-system-prompt <text>  adds to the default prompt, does not replace it
+ *   --add-dir <dirs...>            the cross-project reach, in one session
+ *   --model <model>                alias or full id
+ *   -p --input-format stream-json --output-format stream-json
+ *                                  JSONL both ways, which is the whole tier
+ *   --include-partial-messages     token deltas rather than whole turns
+ *   --permission-mode <mode>       the CLI's own gate on its own tools
+ *
+ * `--append-system-prompt` rather than `--system-prompt` on purpose: replacing
+ * the prompt would also throw away the CLI's knowledge of its own tools, and
+ * the companion's brief is an addition to that, not a substitute for it.
+ */
+const CLAUDE_RUNNER: CompanionRunner = {
+  tier: "structured",
+  args: (o) => [
+    "-p",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--include-partial-messages",
+    "--session-id",
+    o.sessionId,
+    "--append-system-prompt",
+    o.systemPrompt,
+    ...o.roots.flatMap((r) => ["--add-dir", r]),
+    ...(o.model ? ["--model", o.model] : []),
+    // The companion's own gate is the bridge (see actionPolicy), but the CLI's
+    // built-in Edit/Write/Bash are outside the bridge's reach, so the CLI is
+    // told the same rule in the only language it has for it. `plan` is the
+    // read-only mode; `acceptEdits` still routes anything destructive through
+    // the CLI's own prompt, which the chat surfaces.
+    "--permission-mode",
+    o.authority === "read" ? "plan" : o.authority === "auto" ? "acceptEdits" : "default",
+  ],
+  // --resume takes the id and keeps the same conversation; the prompt and dirs
+  // are passed again because they describe *this* launch (the workspace may
+  // have gained a project since) and neither is stored in the transcript.
+  resumeArgs: (o) => [
+    "-p",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--include-partial-messages",
+    "--resume",
+    o.sessionId,
+    "--append-system-prompt",
+    o.systemPrompt,
+    ...o.roots.flatMap((r) => ["--add-dir", r]),
+    ...(o.model ? ["--model", o.model] : []),
+    "--permission-mode",
+    o.authority === "read" ? "plan" : o.authority === "auto" ? "acceptEdits" : "default",
+  ],
+};
+
+/** Keyed by the registry id in projects.ts. One entry today — and that is a
+ *  statement about what has been *verified*, not about what is supported:
+ *  every other CLI runs, in the terminal tier, with no entry at all. */
+export const COMPANION_RUNNERS: Record<string, CompanionRunner> = {
+  claude: CLAUDE_RUNNER,
+};
+
+export function tierFor(cliId: string): CompanionTier {
+  return COMPANION_RUNNERS[cliId]?.tier ?? "terminal";
+}
+
+/** One line for the settings row, so the choice is made with its consequence
+ *  visible rather than discovered afterwards. */
+export function tierNote(cliId: string): string {
+  return tierFor(cliId) === "structured"
+    ? "Streams replies and shows each tool as it runs."
+    : "Runs in a terminal behind the scenes — replies arrive whole, not streamed.";
+}
+
+/** Which CLI the companion runs on.
+ *
+ *  An explicit choice wins; otherwise it follows the default agent, so someone
+ *  who has never opened this screen still gets a companion on the CLI they
+ *  already use. Falls back to anything installed rather than to a fixed name —
+ *  pinning "claude" here would leave a user who only has Codex with a
+ *  companion that cannot start and no way to see why. */
+export function companionCli(installed: (cli: AgentCli) => boolean): AgentCli | null {
+  const s = getSettings();
+  const usable = AGENT_CLIS.filter(installed);
+  if (usable.length === 0) return null;
+  return (
+    usable.find((c) => c.id === s.companionCli) ??
+    usable.find((c) => c.id === s.defaultAgent) ??
+    usable.find((c) => COMPANION_RUNNERS[c.id]) ??
+    usable[0]
+  );
+}
+
+/** The companion's conversation with this CLI, minted once and then kept.
+ *
+ *  This is the load-bearing piece of "remembers who it is": the CLI stores the
+ *  transcript against the id, so holding the id is what makes tomorrow's
+ *  companion the same one as today's. Minted here rather than accepted from
+ *  the CLI because the structured tier has to *name* the session at launch —
+ *  it is `--session-id`, not something read back afterwards.
+ *
+ *  A v4 UUID because that is what the flag accepts. Kept per CLI: switching
+ *  agent and switching back returns to the right conversation rather than
+ *  fusing two transcripts that were never in the same format. */
+export function companionSessionId(cliId: string): string {
+  const existing = getSettings().companionSessions[cliId];
+  if (existing) return existing;
+  const id = newSessionId();
+  updateSettings({
+    companionSessions: { ...getSettings().companionSessions, [cliId]: id },
+  });
+  return id;
+}
+
+/** Forget the conversation — the "start over" the settings screen offers. The
+ *  next launch mints a new id, which is what makes it a fresh acquaintance
+ *  rather than a cleared screen over the same memory. */
+export function forgetCompanionSession(cliId: string): void {
+  const rest = { ...getSettings().companionSessions };
+  delete rest[cliId];
+  updateSettings({ companionSessions: rest });
+}
+
+function newSessionId(): string {
+  // randomUUID needs a secure context, which the app always is — but tests and
+  // the odd embedded webview are not, and a companion that cannot start
+  // because of an id generator is a poor trade.
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  const hex = (n: number) =>
+    Array.from({ length: n }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+  return `${hex(8)}-${hex(4)}-4${hex(3)}-a${hex(3)}-${hex(12)}`;
+}
+
+// ---------------------------------------------------------------- placement
+
+/** Where the companion sits, as a fraction of the space it can occupy.
+ *
+ *  Fractions rather than pixels because the window is resized constantly — a
+ *  remembered `left: 1380px` is off-screen the moment the window narrows, and
+ *  a position you have to re-set after every resize is not a remembered
+ *  position. 0 is flush left/top, 1 is flush right/bottom, so the value is
+ *  meaningful at any window size and clamping is the same operation as
+ *  validating it. */
+export interface CompanionSpot {
+  x: number;
+  y: number;
+}
+
+/** Bottom-right, above the status bar: the corner least likely to sit over the
+ *  editor's first column or the tab strip, and the one every floating helper
+ *  in every other app has trained people to look at. */
+export const DEFAULT_SPOT: CompanionSpot = { x: 0.97, y: 0.86 };
+
+const clamp01 = (n: number) => (Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0);
+
+export function clampSpot(spot: Partial<CompanionSpot> | null | undefined): CompanionSpot {
+  return { x: clamp01(spot?.x ?? DEFAULT_SPOT.x), y: clamp01(spot?.y ?? DEFAULT_SPOT.y) };
+}
+
+export interface Viewport {
+  width: number;
+  height: number;
+}
+
+/** Fraction -> the pixel offset to render at, never off-screen by
+ *  construction: the travel is the viewport minus the mascot, so x=1 puts its
+ *  right edge on the right edge rather than its left edge past it. */
+export function spotToPixels(spot: CompanionSpot, view: Viewport, size: number): {
+  left: number;
+  top: number;
+} {
+  const travelX = Math.max(0, view.width - size);
+  const travelY = Math.max(0, view.height - size);
+  const s = clampSpot(spot);
+  return { left: Math.round(s.x * travelX), top: Math.round(s.y * travelY) };
+}
+
+/** The inverse, for the end of a drag. */
+export function pixelsToSpot(
+  left: number,
+  top: number,
+  view: Viewport,
+  size: number,
+): CompanionSpot {
+  const travelX = Math.max(1, view.width - size);
+  const travelY = Math.max(1, view.height - size);
+  return clampSpot({ x: left / travelX, y: top / travelY });
+}
+
+/** Which side the chat panel opens on, and how far down it starts.
+ *
+ *  The panel is anchored to the companion rather than to a corner, because the
+ *  companion is what the user just clicked and a surface that appears somewhere
+ *  else reads as a different feature. It flips side when there is no room —
+ *  measured against the actual panel width rather than a hardcoded midpoint, so
+ *  it stays correct in a narrow window where *everything* is past the middle. */
+export function panelPlacement(
+  at: { left: number; top: number },
+  view: Viewport,
+  opts: { mascot: number; panelWidth: number; panelHeight: number; gap: number },
+): { left: number; top: number; side: "left" | "right" } {
+  const { mascot, panelWidth, panelHeight, gap } = opts;
+  const rightEdge = at.left + mascot + gap + panelWidth;
+  // Prefer the right, flip when it would overflow — and only take the left if
+  // there is actually room there, otherwise a companion dragged into a corner
+  // of a narrow window flips into a worse position than it started in.
+  const fitsRight = rightEdge <= view.width;
+  const fitsLeft = at.left - gap - panelWidth >= 0;
+  const side: "left" | "right" = fitsRight || !fitsLeft ? "right" : "left";
+  const left =
+    side === "right"
+      ? Math.min(at.left + mascot + gap, Math.max(0, view.width - panelWidth))
+      : Math.max(0, at.left - gap - panelWidth);
+  // Grows downward from the companion where it can, and is pushed up by the
+  // bottom edge otherwise — a panel whose input sits below the window is a
+  // panel you cannot type into, which is the one failure worth clamping for.
+  const top = Math.max(0, Math.min(at.top, view.height - panelHeight));
+  return { left, top, side };
+}
