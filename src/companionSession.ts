@@ -290,10 +290,11 @@ export async function startCompanion(opts: StartOptions): Promise<void> {
       ["CANOPY_COMPANION_AUTHORITY", authority],
       ["CANOPY_COMPANION_POLICY", actionPolicy(authority)],
     ];
-    // The companion belongs to no project, so it starts in the first root it
-    // has — somewhere real, with the rest reachable, rather than wherever the
-    // app happened to be launched from.
-    const cwd = roots[0];
+    // No cwd: the Rust side puts it in ~/.canopy/companion. Starting it in a
+    // project root made it inherit that repo's CLAUDE.md — one project's
+    // coding-agent rules governing an assistant that answers about all of
+    // them. Every root still reaches it through --add-dir.
+    const cwd = undefined;
 
     set({
       status: "starting",

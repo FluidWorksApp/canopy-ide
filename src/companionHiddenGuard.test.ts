@@ -80,3 +80,22 @@ describe("the companion session is invisible by construction", () => {
     expect(guardDoc).toContain("appear in no list of sessions");
   });
 });
+
+describe("the companion runs in no project", () => {
+  it("passes no project root as its cwd", () => {
+    // Running inside a repo auto-loads that repo's CLAUDE.md, and the
+    // companion then follows one project's coding-agent rules while answering
+    // about all of them — which is how it came to refuse a server it had been
+    // asked to start. Verified against the CLI: a neutral cwd plus --add-dir
+    // loads no project instructions at all.
+    const session = readFileSync(join(root, "src/companionSession.ts"), "utf8");
+    expect(session).toContain("const cwd = undefined");
+    expect(session).not.toContain("const cwd = roots[0]");
+  });
+
+  it("has the Rust side put it in its own directory", () => {
+    const rust = readFileSync(join(root, "src-tauri/src/companion.rs"), "utf8");
+    expect(rust).toContain("fn companion_home()");
+    expect(rust).toContain("create_dir_all");
+  });
+});

@@ -103,12 +103,31 @@ pub async fn companion_spawn(
     for (k, v) in env.unwrap_or_default() {
         cmd.env(k, v);
     }
-    if let Some(dir) = cwd
+    // The companion runs in a directory of its own, never inside a project.
+    //
+    // A CLI started inside a repo auto-loads that repo's CLAUDE.md — rules
+    // written for a coding agent working in that one checkout ("don't start
+    // servers", "the API is at :6001", a task-queue discipline). The companion
+    // is not that agent, and inheriting one project's house rules while
+    // answering about eight of them is worse than having none: it followed
+    // them, and refused to start a server it had been asked for.
+    //
+    // Every project still reaches it through --add-dir, which grants access
+    // without importing instructions.
+    let home = companion_home();
+    let _ = std::fs::create_dir_all(&home);
+    match cwd
         .as_ref()
         .map(std::path::Path::new)
         .filter(|d| d.is_dir())
     {
-        cmd.current_dir(dir);
+        Some(dir) => {
+            cmd.current_dir(dir);
+        }
+        None if home.is_dir() => {
+            cmd.current_dir(&home);
+        }
+        None => {}
     }
 
     let mut child = cmd
@@ -211,6 +230,17 @@ pub async fn companion_kill(state: tauri::State<'_, CompanionManager>) -> Result
 /// exactly one directory — so the name is validated to a bare filename and
 /// joined under a fixed root. A caller that wants to escape it has nothing to
 /// work with: no separators, no `..`, no absolute paths.
+/// `~/.canopy/companion` — the companion's own directory, and the cwd it runs
+/// in so that no project's CLAUDE.md is auto-discovered.
+fn companion_home() -> std::path::PathBuf {
+    let home = std::env::var("CANOPY_COMPANION_HOME")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default();
+    std::path::Path::new(&home)
+        .join(".canopy")
+        .join("companion")
+}
+
 fn companion_store_path(name: &str) -> Result<std::path::PathBuf, String> {
     if name.is_empty()
         || name.len() > 64
@@ -222,16 +252,7 @@ fn companion_store_path(name: &str) -> Result<std::path::PathBuf, String> {
     {
         return Err(format!("{name:?} is not a companion store file"));
     }
-    // `HOME`, with an override, exactly as notes.rs resolves its own store —
-    // one way of finding `~/.canopy` in this codebase, and a test that has to
-    // write somewhere real needs the override rather than the user's home.
-    let home = std::env::var("CANOPY_COMPANION_HOME")
-        .or_else(|_| std::env::var("HOME"))
-        .map_err(|_| "no home directory".to_string())?;
-    Ok(std::path::Path::new(&home)
-        .join(".canopy")
-        .join("companion")
-        .join(name))
+    Ok(companion_home().join(name))
 }
 
 #[tauri::command]

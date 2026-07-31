@@ -2020,6 +2020,14 @@ export default function App() {
         roots: p.components.map((c) => c.path),
         open: ws.openIds.includes(p.id),
         hibernated: Boolean(hibernated[p.id]),
+        // The configured commands come along, or canopy_start_server is
+        // unusable: it takes a command by name, and nothing else tells the
+        // companion what those names are.
+        components: p.components.map((c) => ({
+          label: c.label,
+          path: c.path,
+          commands: (c.commands ?? []).map((cmd) => cmd.name),
+        })),
       })),
     [ws.projects, ws.openIds, hibernated],
   );

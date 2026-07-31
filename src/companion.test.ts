@@ -9,6 +9,7 @@ import {
   companionSlug,
   forgetCompanionSession,
   panelPlacement,
+  permissionArgs,
   pixelsToSpot,
   spotToPixels,
   tierFor,
@@ -92,23 +93,44 @@ describe("tiers", () => {
     expect(resumed).not.toContain("--session-id");
   });
 
-  it("tells the CLI the same authority the bridge enforces", () => {
-    const base = {
+  it("bypasses the CLI's prompt, because headless has nobody to answer it", () => {
+    // The failure this encodes: Claude Code does not auto-grant MCP tools, and
+    // `-p` has no prompt to grant them at — so every canopy_* call came back
+    // ungranted, read-only ones included. The gating happens at the bridge
+    // (companion_gate), which can actually reach a human.
+    for (const authority of ["read", "confirm", "auto"] as const) {
+      const args = permissionArgs(authority);
+      expect(args[args.indexOf("--permission-mode") + 1]).toBe("bypassPermissions");
+    }
+  });
+
+  it("disallows the built-in writers unless the user said act freely", () => {
+    // Bash/Edit/Write never pass the bridge, so leaving them on would make
+    // "asks before it changes anything" false.
+    for (const authority of ["read", "confirm"] as const) {
+      const args = permissionArgs(authority);
+      expect(args).toContain("--disallowedTools");
+      for (const tool of ["Bash", "Edit", "Write"]) expect(args).toContain(tool);
+    }
+    expect(permissionArgs("auto")).not.toContain("--disallowedTools");
+  });
+
+  it("carries the permission flags into both fresh and resumed launches", () => {
+    const launch = {
       bin: "claude",
       sessionId: "id",
       systemPrompt: "p",
       roots: [],
       model: "",
+      authority: "confirm" as const,
     };
-    const modeOf = (authority: "read" | "confirm" | "auto") => {
-      const args = COMPANION_RUNNERS.claude.args({ ...base, authority });
-      return args[args.indexOf("--permission-mode") + 1];
-    };
-    // Answer-only has to be read-only in the CLI's own tools too, not just at
-    // Canopy's bridge — the CLI can edit files without asking the bridge.
-    expect(modeOf("read")).toBe("plan");
-    expect(modeOf("confirm")).toBe("default");
-    expect(modeOf("auto")).toBe("acceptEdits");
+    for (const args of [
+      COMPANION_RUNNERS.claude.args(launch),
+      COMPANION_RUNNERS.claude.resumeArgs(launch),
+    ]) {
+      expect(args).toContain("bypassPermissions");
+      expect(args).toContain("Bash");
+    }
   });
 
   it("passes --verbose wherever it streams JSON — the CLI refuses without it", () => {

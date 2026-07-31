@@ -368,6 +368,15 @@ export interface WorkspaceProject {
   roots: string[];
   open: boolean;
   hibernated: boolean;
+  /** Each component with the run commands Canopy has configured for it.
+   *
+   *  Carried because without it the companion cannot start anything:
+   *  `canopy_start_server` takes a `dir` and the *name* of a configured
+   *  command, and an agent that has never been told those names has no way to
+   *  guess them. It shelled out to `ls` instead and then told the user to run
+   *  the server themselves — which is the whole feature failing on a missing
+   *  field. */
+  components: { label: string; path: string; commands: string[] }[];
 }
 
 export interface UiOpContext {
@@ -453,7 +462,13 @@ export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unkn
     // front end predates the tool. Saying so beats answering for one project as
     // though it were the whole workspace.
     case "workspace":
-      return { projects: needCompanion(ctx.workspace, "canopy_workspace")() };
+      return {
+        projects: needCompanion(ctx.workspace, "canopy_workspace")(),
+        note:
+          "Each component lists the run commands Canopy has configured. Start one " +
+          "with canopy_start_server({ dir, command }) using the component's path and " +
+          "the command's name — do not run it through the shell.",
+      };
     case "workspace_git":
       return needCompanion(ctx.workspaceGit, "canopy_workspace_git")(op.project);
     case "workspace_agents":

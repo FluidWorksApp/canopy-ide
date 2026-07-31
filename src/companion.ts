@@ -155,6 +155,41 @@ export interface CompanionLaunch {
  * the prompt would also throw away the CLI's knowledge of its own tools, and
  * the companion's brief is an addition to that, not a substitute for it.
  */
+/**
+ * Permission flags — the half of the design that nearly sank it.
+ *
+ * Claude Code does not auto-grant MCP tools: they wait on a prompt. In headless
+ * `-p` mode there is nobody to answer that prompt, so every `canopy_*` call
+ * came back ungranted — including read-only ones like `canopy_project`. The
+ * companion could see its tools, call them, and have all of them refused, which
+ * it then explained to the user as "approve these in Canopy's permission
+ * settings" — a screen that does not exist.
+ *
+ * So the CLI's own prompt is bypassed, and the gating is done where it can
+ * actually reach a human: `companion_gate` in canopy_hook.rs, which puts the
+ * action on screen and blocks on the answer.
+ *
+ * That leaves the CLI's *built-in* tools, which the bridge cannot see. Bash,
+ * Edit and Write would change the world without ever passing the gate, so
+ * anything short of "act freely" disallows them outright. It costs the
+ * companion a shell; it is what makes "asks before it changes anything" true
+ * rather than aspirational — and the brief tells it to use the canopy_* tools
+ * for this work anyway.
+ */
+const BUILTIN_WRITERS = ["Edit", "Write", "NotebookEdit", "Bash", "KillShell"];
+
+export function permissionArgs(authority: CompanionAuthority): string[] {
+  if (authority === "auto") {
+    return ["--permission-mode", "bypassPermissions"];
+  }
+  return [
+    "--permission-mode",
+    "bypassPermissions",
+    "--disallowedTools",
+    ...BUILTIN_WRITERS,
+  ];
+}
+
 const CLAUDE_RUNNER: CompanionRunner = {
   tier: "structured",
   args: (o) => [
@@ -174,13 +209,7 @@ const CLAUDE_RUNNER: CompanionRunner = {
     o.systemPrompt,
     ...o.roots.flatMap((r) => ["--add-dir", r]),
     ...(o.model ? ["--model", o.model] : []),
-    // The companion's own gate is the bridge (see actionPolicy), but the CLI's
-    // built-in Edit/Write/Bash are outside the bridge's reach, so the CLI is
-    // told the same rule in the only language it has for it. `plan` is the
-    // read-only mode; `acceptEdits` still routes anything destructive through
-    // the CLI's own prompt, which the chat surfaces.
-    "--permission-mode",
-    o.authority === "read" ? "plan" : o.authority === "auto" ? "acceptEdits" : "default",
+    ...permissionArgs(o.authority),
   ],
   // --resume takes the id and keeps the same conversation; the prompt and dirs
   // are passed again because they describe *this* launch (the workspace may
@@ -199,8 +228,7 @@ const CLAUDE_RUNNER: CompanionRunner = {
     o.systemPrompt,
     ...o.roots.flatMap((r) => ["--add-dir", r]),
     ...(o.model ? ["--model", o.model] : []),
-    "--permission-mode",
-    o.authority === "read" ? "plan" : o.authority === "auto" ? "acceptEdits" : "default",
+    ...permissionArgs(o.authority),
   ],
 };
 

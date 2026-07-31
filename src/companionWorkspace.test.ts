@@ -4,14 +4,15 @@ import type { RepoReport } from "./companionWorkspace";
 import type { WorkspaceProject } from "./agentOps";
 
 const PROJECTS: WorkspaceProject[] = [
-  { name: "Canopy", roots: ["/gh/canopy"], open: true, hibernated: false },
+  { name: "Canopy", roots: ["/gh/canopy"], open: true, hibernated: false, components: [] },
   {
     name: "Banana",
     roots: ["/gh/banana", "/gh/banana-android"],
     open: false,
     hibernated: false,
+    components: [],
   },
-  { name: "Coraa", roots: ["/gh/coraa"], open: false, hibernated: true },
+  { name: "Coraa", roots: ["/gh/coraa"], open: false, hibernated: true, components: [] },
 ];
 
 const status = (over: Partial<import("./ipc").RepoStatus> = {}) =>
@@ -119,8 +120,8 @@ describe("attributing a session to a project", () => {
 
   it("takes the longest matching root when projects nest", () => {
     const nested: WorkspaceProject[] = [
-      { name: "Outer", roots: ["/gh"], open: true, hibernated: false },
-      { name: "Inner", roots: ["/gh/canopy"], open: true, hibernated: false },
+      { name: "Outer", roots: ["/gh"], open: true, hibernated: false, components: [] },
+      { name: "Inner", roots: ["/gh/canopy"], open: true, hibernated: false, components: [] },
     ];
     expect(projectOf(nested, "/gh/canopy/src")).toBe("Inner");
     expect(projectOf(nested, "/gh/other")).toBe("Outer");
@@ -130,7 +131,7 @@ describe("attributing a session to a project", () => {
     // /gh/banana-android must not be swallowed by /gh/banana as a string
     // prefix — they are different checkouts.
     const only: WorkspaceProject[] = [
-      { name: "Banana", roots: ["/gh/banana"], open: true, hibernated: false },
+      { name: "Banana", roots: ["/gh/banana"], open: true, hibernated: false, components: [] },
     ];
     expect(projectOf(only, "/gh/banana-android")).toBe("unknown");
   });

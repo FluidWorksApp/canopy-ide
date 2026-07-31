@@ -9,7 +9,7 @@
 // obvious thing would have been to show its TUI; what the user wants from a
 // companion is an answer, so tool calls are chips and prose is prose.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CompanionProposal, CompanionState } from "../companionSession";
 import { Markdown } from "./Markdown";
 
@@ -50,20 +50,36 @@ export function CompanionChat({
     input.current?.focus();
   }, []);
 
-  // Follow the stream. Only when already near the bottom, so scrolling back to
-  // read something is not undone by the next token.
-  useEffect(() => {
+  // Follow the stream.
+  //
+  // `stick` is the user's *intent*, recorded once when they scroll, rather than
+  // re-derived from the scroll position on every token. Re-deriving is the
+  // obvious version and it is broken: a single streamed chunk can grow the log
+  // by more than any threshold, so the check decides the user has scrolled away
+  // when they have not, and the log freezes exactly where it was for the rest
+  // of the answer. Programmatic scrolling keeps `stick` true because it lands
+  // at the bottom; only a real scroll upward clears it.
+  const stick = useRef(true);
+  const onScroll = () => {
     const el = log.current;
     if (!el) return;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-    if (nearBottom) el.scrollTop = el.scrollHeight;
-  }, [state.messages, proposal]);
+    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  };
+
+  useLayoutEffect(() => {
+    const el = log.current;
+    if (!el || !stick.current) return;
+    el.scrollTop = el.scrollHeight;
+  });
 
   const busy = state.status === "working";
   const canSend = draft.trim().length > 0 && !busy && state.status !== "failed";
 
   const submit = () => {
     if (!canSend) return;
+    // Sending is an explicit "I want to see what comes back", so it re-arms
+    // following even if they had scrolled up to re-read something.
+    stick.current = true;
     onSend(draft);
     setDraft("");
   };
@@ -86,7 +102,7 @@ export function CompanionChat({
         </button>
       </div>
 
-      <div className="companion-log" ref={log}>
+      <div className="companion-log" ref={log} onScroll={onScroll}>
         {state.messages.length === 0 && (
           <p className="companion-empty">
             Ask about anything across your projects — what changed, what’s running,

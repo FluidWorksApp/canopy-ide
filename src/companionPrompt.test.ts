@@ -85,6 +85,33 @@ describe("the brief", () => {
     expect(p).toContain("Never report an action you have not seen succeed");
   });
 
+  it("names the tool for running things, and forbids the shell for it", () => {
+    // Seen in the wild: asked to start a server, it ran `ls`, then handed the
+    // user a `cd … && npm run dev` to paste. Starting things is the feature.
+    const p = buildCompanionPrompt(base);
+    expect(p).toContain("canopy_start_server");
+    expect(p).toContain("never hand");
+    expect(p).toContain("Use the tools, not the shell");
+  });
+
+  it("says no project's CLAUDE.md governs it", () => {
+    // It refused to start a server citing "your CLAUDE.md rule" — a rule from
+    // one repo's coding agents, inherited because it was running in that repo.
+    // The cwd fix stops it being loaded; this stops it being obeyed if it is
+    // ever read some other way.
+    const p = buildCompanionPrompt(base);
+    expect(p).toContain("no repo's");
+    expect(p).toContain("not you");
+  });
+
+  it("puts a hard length limit on answers, not an adjective", () => {
+    // "Be brief" produced paragraphs. A number does not.
+    const p = buildCompanionPrompt(base);
+    expect(p).toContain("Two or three sentences");
+    expect(p).toContain("Answer first");
+    expect(p).toContain("No preamble");
+  });
+
   it("makes it say which project — it is in none of them", () => {
     expect(buildCompanionPrompt(base)).toContain("**Say which project.**");
   });
