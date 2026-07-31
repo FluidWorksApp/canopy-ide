@@ -335,6 +335,24 @@ export interface Settings {
    *  log to be rotated. */
   spotRetentionDays: number;
 
+  // ---- Clipboard history ----
+  /** Keep what you copy, so ⌘K can hand it back. Off by default and it must
+   *  stay that way: the first programmatic pasteboard read is what raises
+   *  macOS's pasteboard alert, and that has to follow a decision the user
+   *  made rather than an upgrade. */
+  clipboardHistory: boolean;
+  /** Write the history to ~/.canopy/clipboard.sqlite. Off keeps it in memory
+   *  for the session only — and deletes the file that was there. */
+  clipboardPersist: boolean;
+  /** How many clips to keep. */
+  clipboardKeep: number;
+  /** Drop clips older than this many days. 0 keeps them all (up to the count). */
+  clipboardRetentionDays: number;
+  /** Skip clips that look like credentials — a known key prefix, a named
+   *  `TOKEN=` line, a high-entropy token. Clips marked concealed by their
+   *  producer are skipped whatever this says. */
+  clipboardSkipSecrets: boolean;
+
   // ---- Voice dictation ----
   /** Hotkey that toggles dictation (start/insert). Used by "combo" mode. */
   dictationHotkey: Hotkey;
@@ -497,6 +515,11 @@ const DEFAULTS: Settings = {
   spotIndexTerminals: true,
   spotSearchAllProjects: false,
   spotRetentionDays: 0,
+  clipboardHistory: false,
+  clipboardPersist: true,
+  clipboardKeep: 200,
+  clipboardRetentionDays: 0,
+  clipboardSkipSecrets: true,
   dictationHotkey: DEFAULT_DICTATION_HOTKEY,
   dictationTriggerMode: "combo",
   dictationModKey: DEFAULT_DICTATION_MOD_KEY,

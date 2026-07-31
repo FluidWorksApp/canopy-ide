@@ -512,6 +512,17 @@ export function GlobeIcon({ size = 14, className }: IconProps) {
 }
 
 /** Settings: a gear. */
+/** A clipboard — the ⌘K section, and Settings' tab. */
+export function ClipboardIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)} strokeWidth={1.8}>
+      <rect x="6" y="4" width="12" height="17" rx="2" />
+      <path d="M9 4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v1.5a.5.5 0 0 1-.5.5h-5a.5.5 0 0 1-.5-.5Z" />
+      <path d="M9 11h6M9 15h4" />
+    </svg>
+  );
+}
+
 export function SettingsIcon({ size = 18, className }: IconProps) {
   return (
     <svg {...svgProps(size, className)}>

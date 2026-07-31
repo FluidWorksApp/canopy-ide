@@ -53,6 +53,7 @@ import {
 } from "../profiles";
 import { AGENT_TOOL_GROUPS, ALL_AGENT_TOOLS } from "../agentTools";
 import { spotSources } from "../spotSources";
+import * as clipboardStore from "../clipboardStore";
 import { INDEXABLE_AGENTS, fmtBytes, runIngest } from "../spotIndex";
 import {
   BUILTIN_MAP,
@@ -70,6 +71,7 @@ export type SettingsTab =
   | "editor"
   | "terminal"
   | "spotsearch"
+  | "clipboard"
   | "dictation"
   | "integrations"
   | "browser"
@@ -93,6 +95,7 @@ const TABS: { id: SettingsTab; label: string; group: string }[] = [
   { id: "agents", label: "Agents", group: "Agents" },
   { id: "dictation", label: "Dictation", group: "Agents" },
   { id: "spotsearch", label: "SpotSearch", group: "Agents" },
+  { id: "clipboard", label: "Clipboard", group: "Agents" },
   { id: "integrations", label: "Integrations", group: "Access" },
   { id: "browser", label: "Browser & Vault", group: "Access" },
   { id: "remote", label: "Remote access", group: "Access" },
@@ -1356,6 +1359,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
             )}
 
             {tab === "spotsearch" && <SpotSearchSettings s={s} patch={patch} />}
+            {tab === "clipboard" && <ClipboardSettings s={s} patch={patch} />}
 
 
             {tab === "dictation" && dictationOk && <DictationSettings />}
@@ -2423,6 +2427,213 @@ function SpotSearchSettings({
                   });
               }}>
               {busy === "clear" ? "Clearing…" : "Clear index"}
+            </Button>
+          </div>
+        </div>
+      </Item>
+    </>
+  );
+}
+
+/** Access states macOS reports for this app's pasteboard, said in plain words.
+ *  "default" means no alert has fired yet, so the app isn't in System Settings
+ *  at all — which is worth saying, because otherwise someone goes looking for
+ *  a switch that isn't there until the first capture. */
+const PASTEBOARD_ACCESS: Record<string, string> = {
+  default: "macOS hasn't asked yet — it will, once, the first time a copy is captured.",
+  ask: "macOS asks before each programmatic read. Set Canopy to “Always Allow” in System Settings → Privacy & Security → Pasteboard to stop the prompts.",
+  allow: "macOS is set to always allow Canopy the pasteboard.",
+  deny: "macOS is set to always deny Canopy the pasteboard, so nothing can be captured. Change it in System Settings → Privacy & Security → Pasteboard.",
+};
+
+/**
+ * Clipboard history: keep what you copy so ⌘K can hand it back.
+ *
+ * Off by default, and the screen leads with why rather than with a switch. Two
+ * things here are genuinely the user's call and not a default anyone should
+ * pick for them: whether an app watches everything they copy at all, and
+ * whether that lands on disk.
+ */
+function ClipboardSettings({
+  s,
+  patch,
+}: {
+  s: Settings;
+  patch: (p: Partial<Settings>) => void;
+}) {
+  const [status, setStatus] = useState<ipc.ClipboardStatus | null>(null);
+  const refresh = useCallback(() => {
+    void ipc
+      .clipboardStatus()
+      .then(setStatus)
+      .catch(() => setStatus(null));
+  }, []);
+  useEffect(refresh, [refresh, s.clipboardHistory, s.clipboardPersist]);
+
+  if (status && !status.supported) {
+    return (
+      <Item
+        name="Clipboard history"
+        desc="Not available on this platform yet. Capture is a native pasteboard watcher, and only the macOS one has been verified against a running Canopy — a watcher that half-works would be worse than none."
+      >
+        <span className="set-item-desc">Unavailable here.</span>
+      </Item>
+    );
+  }
+
+  return (
+    <>
+      <Item
+        name="Keep what I copy"
+        desc="Every copy — from a terminal, the editor, or any other app — is kept and offered back under Clipboard in ⌘K. Enter puts it on the clipboard, and straight into the terminal if one is focused."
+      >
+        <label className="set-inline-check">
+          <input
+            type="checkbox"
+            checked={s.clipboardHistory}
+            onChange={(e) => patch({ clipboardHistory: e.target.checked })}
+          />
+          <span>Keep a clipboard history</span>
+        </label>
+        {status?.access && (
+          <p className="set-item-desc">
+            {PASTEBOARD_ACCESS[status.access] ?? ""}
+          </p>
+        )}
+        <p className="set-item-desc">
+          Canopy watches a counter that says the clipboard changed, and only
+          reads the contents when it moves — at most once per copy, never on a
+          timer.
+        </p>
+      </Item>
+
+      <Item
+        name="Passwords and keys"
+        desc="Terminals are where most copying in this app happens, and what comes out of one is often a token. A clip that looks like a credential is skipped outright — not stored and hidden, never written down at all."
+      >
+        <label className="set-inline-check">
+          <input
+            type="checkbox"
+            checked={s.clipboardSkipSecrets}
+            onChange={(e) => patch({ clipboardSkipSecrets: e.target.checked })}
+          />
+          <span>Skip clips that look like credentials</span>
+        </label>
+        <p className="set-item-desc">
+          Known key prefixes (<code>sk-</code>, <code>ghp_</code>,{" "}
+          <code>AKIA</code>…), private keys, <code>TOKEN=</code> lines, and
+          long high-entropy tokens. Paths, URLs, commit SHAs and prose are
+          deliberately exempt — those are what a clipboard is for.
+        </p>
+        <p className="set-item-desc">
+          Clips a password manager marks concealed are skipped whatever this
+          says: those are recognised from the clip's type, without reading it.
+        </p>
+      </Item>
+
+      <Item
+        name="Where it's kept"
+        desc="On disk the history survives a restart, in a file only your account can read (~/.canopy/clipboard.sqlite, mode 0600). It is not encrypted — nothing in Canopy is encrypted at rest, and a key the app can unlock by itself at launch would not be much of one."
+      >
+        <label className="set-inline-check">
+          <input
+            type="checkbox"
+            checked={s.clipboardPersist}
+            onChange={(e) => patch({ clipboardPersist: e.target.checked })}
+          />
+          <span>Keep the history on disk between launches</span>
+        </label>
+        <p className="set-item-desc">
+          Switching this off deletes the file and keeps the history in memory
+          for this session only.
+        </p>
+      </Item>
+
+      <Item
+        name="How much to keep"
+        desc="The newest clips, up to this many. Older ones fall off the end."
+      >
+        <div className="spot-set-days">
+          <input
+            type="number"
+            min={10}
+            max={2000}
+            step={50}
+            value={s.clipboardKeep}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isFinite(v) && v >= 1)
+                patch({ clipboardKeep: Math.floor(v) });
+            }}
+          />
+          <span className="set-item-desc">clips</span>
+        </div>
+        <div className="spot-set-days">
+          <input
+            type="number"
+            min={0}
+            max={365}
+            step={7}
+            value={s.clipboardRetentionDays}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isFinite(v) && v >= 0)
+                patch({ clipboardRetentionDays: Math.floor(v) });
+            }}
+          />
+          <span className="set-item-desc">
+            days
+            {s.clipboardRetentionDays === 0
+              ? " — no age limit, just the count above"
+              : ""}
+          </span>
+        </div>
+      </Item>
+
+      <Item
+        name="The history"
+        desc="Unlike the search index, this is the only copy of what's in it — nothing here can be rebuilt from a file that still exists, so clearing it is permanent."
+      >
+        <div className="spot-set-index">
+          <p className="set-item-desc">
+            {status
+              ? `${status.clips.toLocaleString()} clip${
+                  status.clips === 1 ? "" : "s"
+                } · ${fmtBytes(status.bytes)}${
+                  status.persisted ? "" : " · memory only"
+                }`
+              : "Nothing kept yet."}
+          </p>
+          {status &&
+            status.skipped_secrets +
+              status.skipped_concealed +
+              status.skipped_large >
+              0 && (
+              <p className="set-item-desc">
+                Skipped since launch:{" "}
+                {[
+                  status.skipped_secrets > 0
+                    ? `${status.skipped_secrets} that looked like credentials`
+                    : null,
+                  status.skipped_concealed > 0
+                    ? `${status.skipped_concealed} marked concealed`
+                    : null,
+                  status.skipped_large > 0
+                    ? `${status.skipped_large} too large to keep`
+                    : null,
+                ]
+                  .filter(Boolean)
+                  .join(", ")}
+                .
+              </p>
+            )}
+          <div className="tool-bulk">
+            <Button
+              onClick={() => {
+                clipboardStore.clear();
+                refresh();
+              }}>
+              Clear history
             </Button>
           </div>
         </div>
