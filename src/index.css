@@ -15647,6 +15647,31 @@ a.btn-sm {
   white-space: pre-wrap;
 }
 
+/* ---- Fixed variant: the `title` layer (src/components/TooltipLayer.tsx) ----
+   The same bubble, placed against the viewport instead of a wrapper — its
+   trigger is any element in the app carrying a `title`, so there is nothing to
+   be position:relative to. left/top are measured and written inline, which is
+   why this has to outrank the per-side block above: those set an absolute edge
+   plus a centering transform that would fight the measured position. */
+.cnp-tooltip.cnp-tooltip-fixed[data-side] {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  transform-origin: 50% 50%;
+  /* No directional slide: the bubble is already exactly where the pointer is
+     looking, and the delay lives in JS here rather than in animation-delay. */
+  animation: cnp-tip-fixed var(--dur-pop) var(--ease-out) both;
+}
+@keyframes cnp-tip-fixed {
+  from { opacity: 0; transform: scale(0.98); }
+  to   { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cnp-tooltip.cnp-tooltip-fixed[data-side] { animation-duration: 1ms; }
+}
+/* Body-only bubbles (a long prose title) have no label row to set the rhythm. */
+.cnp-tooltip-fixed .cnp-tooltip-body { color: var(--text); }
+
 /* ---------- "something is running against this PR" ---------- */
 
 .pr-rail-running { border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }

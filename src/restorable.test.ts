@@ -49,6 +49,25 @@ describe("restorableFrom", () => {
     expect(row.profile).toBe("default");
   });
 
+  it("keeps each account's newest session in a shared directory", () => {
+    // The per-directory collapse must not bury the second login: two accounts
+    // working the same checkout are the point of profiles, and neither resumes
+    // under the other's config dir.
+    const rows = restorableFrom(
+      [
+        digest({ session_id: "work-new", profile: "work", updated: 300 }),
+        digest({ session_id: "work-old", profile: "work", updated: 200 }),
+        digest({ session_id: "personal", profile: "personal", updated: 100 }),
+      ],
+      [],
+      [],
+    );
+    expect(rows.map((r) => r.digest.session_id).sort()).toEqual(["personal", "work-new"]);
+    expect(rows.find((r) => r.profile === "work")?.superseded.map((d) => d.session_id)).toEqual(
+      ["work-old"],
+    );
+  });
+
   it("keeps a session out while its terminal is still alive", () => {
     const stats = [
       { id: 7, title: "claude", cwd: "/repo", total_cpu: 0, total_mem_bytes: 0, procs: [], ports: [], agent_hint: null },

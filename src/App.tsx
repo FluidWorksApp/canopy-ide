@@ -58,6 +58,7 @@ import { HelpDialog } from "./components/HelpDialog";
 import { AskDialog } from "./components/AskDialog";
 import { AboutDialog } from "./components/AboutDialog";
 import { Dictation } from "./components/Dictation";
+import { TooltipLayer } from "./components/TooltipLayer";
 import { Onboarding } from "./components/Onboarding";
 import { Welcome } from "./components/Welcome";
 import { Dialog } from "./components/Dialog";
@@ -2170,6 +2171,9 @@ export default function App() {
         />
       )}
       <Dictation />
+      {/* Last, and once: every `title` in the app is drawn by this one bubble
+          instead of the webview's native grey box. */}
+      <TooltipLayer />
     </div>
   );
 }

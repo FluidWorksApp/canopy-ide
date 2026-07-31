@@ -1897,8 +1897,8 @@ fn tools_list() -> serde_json::Value {
         _ => Vec::new(),
     };
     tools.extend(research_tool_defs());
-    tools.extend(session_tool_defs());
     tools.extend(notes_tool_defs());
+    tools.extend(session_tool_defs());
     // canopy_job_done is on by default everywhere (reporting an outcome is
     // core product), and inside a micro-task session (CANOPY_MICRO_TASK=1 on
     // the launch command) it survives even the Settings disable list — a
