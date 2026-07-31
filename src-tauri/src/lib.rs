@@ -3,12 +3,14 @@ mod agents;
 mod android;
 mod blocking;
 mod browser;
+mod chromium;
 mod cleanup;
 mod cli;
 mod context;
 mod crash;
 #[cfg(feature = "dictation")]
 mod dictation;
+mod stagehand;
 // Intel macOS builds compile dictation out (no compatible ONNX Runtime); a stub
 // keeps the command surface identical so the rest of this file is unchanged.
 #[cfg(not(feature = "dictation"))]
@@ -377,6 +379,7 @@ pub fn run() {
         .manage(portal::RemoteManager::default())
         .manage(preview::PreviewManager::default())
         .manage(browser::BrowserManager::default())
+        .manage(chromium::ChromiumManager::default())
         .manage(context::ContextBridge::default())
         .manage(agents::StatsCache::default())
         .manage(tunnel::TunnelManager::default())
@@ -679,6 +682,20 @@ pub fn run() {
             browser::browser_command,
             browser::browser_here,
             browser::browser_clear_data,
+            chromium::chromium_detect,
+            chromium::chromium_open,
+            chromium::chromium_navigate,
+            chromium::chromium_run_op,
+            chromium::chromium_command,
+            chromium::chromium_drain,
+            chromium::chromium_here,
+            chromium::chromium_close,
+            chromium::chromium_start_cast,
+            chromium::chromium_stop_cast,
+            chromium::chromium_capture,
+            chromium::chromium_metrics,
+            stagehand::stagehand_node_available,
+            stagehand::stagehand_bridge,
             cleanup::cleanup_scan,
             cleanup::cleanup_run,
             cleanup::cleanup_disk,
@@ -728,6 +745,13 @@ pub fn run() {
                 app.state::<preview::PreviewManager>().shutdown_all();
                 // ... and any embedded-browser views.
                 app.state::<browser::BrowserManager>().shutdown_all(app);
+                // A browser Canopy started is Canopy's to stop: left
+                // running it holds the profile lock and the next launch
+                // attaches to a window nobody can see.
+                let handle = app.clone();
+                tauri::async_runtime::block_on(async move {
+                    handle.state::<chromium::ChromiumManager>().shutdown().await;
+                });
                 // ... and any public-link tunnel process.
                 app.state::<tunnel::TunnelManager>().kill_all();
                 // ... and stop polling GitHub for pull requests.

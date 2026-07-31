@@ -17236,3 +17236,27 @@ a.btn-sm {
   color: var(--accent);
   border-color: color-mix(in srgb, var(--accent) 45%, transparent);
 }
+
+/* Chromium engine: the page arrives as JPEG frames from a headless browser, so
+   the "page" is an <img>. Contained rather than stretched — Chrome scales to
+   the box it was given, and a resize in flight would otherwise letterbox with
+   the wrong aspect for a frame or two. */
+.preview-cast-host {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: var(--bg);
+}
+.preview-cast {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  /* The stream is the page; a drag on it should not peel off a ghost image. */
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.preview-cast-waiting {
+  color: var(--fg-dim);
+  font-size: 13px;
+}
