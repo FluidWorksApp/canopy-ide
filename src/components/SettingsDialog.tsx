@@ -26,6 +26,7 @@ import {
 import { MASCOTS, mascotDef } from "../mascots";
 import {
   COMPANION_AUTHORITIES,
+  companionCli,
   forgetCompanionSession,
   tierNote,
 } from "../companion";
@@ -193,10 +194,9 @@ function CompanionSettings({
     void checkInstalledClis().then(setInstalled);
   }, []);
   const usable = AGENT_CLIS.filter((c) => installed[c.bin]);
-  const chosen =
-    usable.find((c) => c.id === s.companionCli) ??
-    usable.find((c) => c.id === s.defaultAgent) ??
-    usable[0];
+  // The same resolver the session uses, so this row can never show one CLI
+  // while the companion runs on another.
+  const chosen = companionCli((bin) => Boolean(installed[bin]));
   const models = chosen ? MODEL_SWITCH[chosen.id] : undefined;
   const name = s.companionName.trim() || mascotDef(s.mascot).label;
   const authority = COMPANION_AUTHORITIES.find((a) => a.id === s.companionAuthority);

@@ -4,6 +4,7 @@ import {
   DEFAULT_SPOT,
   actionPolicy,
   clampSpot,
+  companionCli,
   companionName,
   companionSessionId,
   companionSlug,
@@ -222,6 +223,45 @@ describe("tiers", () => {
       authority: "confirm",
     });
     expect(args).not.toContain("--model");
+  });
+});
+
+describe("which CLI it runs on", () => {
+  const anyInstalled = () => true;
+
+  it("takes the user's explicit choice", () => {
+    updateSettings({ companionCli: "codex", defaultAgent: "claude" });
+    expect(companionCli(anyInstalled)?.id).toBe("codex");
+  });
+
+  it("follows the default agent when nothing was picked for the companion", () => {
+    updateSettings({ companionCli: "", defaultAgent: "amp" });
+    expect(companionCli(anyInstalled)?.id).toBe("amp");
+  });
+
+  it("never overrules the user with a CLI Canopy happens to have verified", () => {
+    // The defect this pins: a dead resolver preferred a CLI with an entry in
+    // COMPANION_RUNNERS. A tier says which flags were checked against which
+    // binary — it says nothing about which agent the user wants to talk to,
+    // and letting it reorder this silently overrules a choice they made.
+    updateSettings({ companionCli: "", defaultAgent: "amp" });
+    expect(tierFor("amp")).toBe("terminal");
+    expect(COMPANION_RUNNERS.claude).toBeTruthy();
+    // claude has a verified runner and amp does not; amp still wins, because
+    // amp is what they set.
+    expect(companionCli(anyInstalled)?.id).toBe("amp");
+  });
+
+  it("falls back to anything installed rather than a hardcoded name", () => {
+    // Pinning "claude" here would leave someone who only has Codex with a
+    // companion that cannot start and no way to see why.
+    updateSettings({ companionCli: "nope", defaultAgent: "also-nope" });
+    const only = companionCli((bin) => bin === "codex");
+    expect(only?.id).toBe("codex");
+  });
+
+  it("says so when there is nothing to run", () => {
+    expect(companionCli(() => false)).toBeNull();
   });
 });
 

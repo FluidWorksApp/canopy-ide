@@ -309,21 +309,31 @@ export function tierNote(cliId: string): string {
   }
 }
 
-/** Which CLI the companion runs on.
+/** Which CLI the companion runs on. The only answer to that question — the
+ *  session, the settings screen and anything else all ask here.
  *
- *  An explicit choice wins; otherwise it follows the default agent, so someone
- *  who has never opened this screen still gets a companion on the CLI they
- *  already use. Falls back to anything installed rather than to a fixed name —
- *  pinning "claude" here would leave a user who only has Codex with a
- *  companion that cannot start and no way to see why. */
-export function companionCli(installed: (cli: AgentCli) => boolean): AgentCli | null {
+ *  The order is the user's, and nothing else gets a vote:
+ *
+ *    1. what they picked for the companion
+ *    2. their default agent, so someone who never opened this screen gets the
+ *       CLI they already use
+ *    3. whatever is installed
+ *
+ *  Deliberately NOT ranked by whether Canopy has a verified runner for the CLI.
+ *  A tier is a statement about which flags were checked against which binary —
+ *  it says nothing about which agent the user would rather talk to, and using
+ *  it to reorder this list would quietly overrule a choice they made. A CLI
+ *  with no runner still works; it just runs in the terminal tier, and the
+ *  settings row says so before they pick. */
+export function companionCli(
+  installed: (bin: string) => boolean,
+): AgentCli | null {
   const s = getSettings();
-  const usable = AGENT_CLIS.filter(installed);
+  const usable = AGENT_CLIS.filter((c) => installed(c.bin));
   if (usable.length === 0) return null;
   return (
     usable.find((c) => c.id === s.companionCli) ??
     usable.find((c) => c.id === s.defaultAgent) ??
-    usable.find((c) => COMPANION_RUNNERS[c.id]) ??
     usable[0]
   );
 }
