@@ -114,8 +114,11 @@ const basename = (p: string) => p.split("/").filter(Boolean).pop() ?? p;
  * point, and the files tree is still there for everything else.
  *
  * Declaration order is preserved (components as configured, then their commands
- * as configured, then ad-hoc runs). Nothing sorts by state: rows that reorder
- * themselves when a server goes up or down are rows you cannot aim at.
+ * as configured, then ad-hoc runs). Nothing sorts by run state: rows that
+ * reorder themselves when a server goes up or down are rows you cannot aim at.
+ * The one ordering that isn't declaration order is workspaces, which lead with
+ * the ones an agent is in — see below for why that doesn't have the same
+ * problem.
  */
 export function groupServers(
   components: ServerComponent[],
@@ -219,6 +222,16 @@ export function groupServers(
   for (const g of out) {
     for (const w of g.workspaces)
       w.running = w.entries.filter((e) => e.state === "running").length;
+    // Workspaces somebody is actually working in come first. Twenty branches
+    // with a checkout is the normal shape of this list, and the four with a
+    // CLI in them are the only ones you are ever looking for — the rest are
+    // folders that happen to exist.
+    //
+    // Binary on purpose, and not by what the agent is doing: an occupied
+    // workspace stays put for as long as the session lasts, where ranking
+    // working above idle would shuffle the list on every turn. Sort is stable,
+    // so within each half the order is still git's, not a state's.
+    g.workspaces.sort((a, b) => (b.agents.length ? 1 : 0) - (a.agents.length ? 1 : 0));
     // The header counts everything under it, workspaces included: a collapsed
     // group whose only live server is on a branch must not read as idle.
     g.running =

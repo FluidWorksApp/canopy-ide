@@ -135,6 +135,34 @@ describe("workspaceRows", () => {
     expect(main.running).toBe(0);
   });
 
+  it("names the agents in a workspace, when the caller can resolve them", () => {
+    const claude = {
+      sessionId: "s1",
+      ptyId: 7,
+      name: "claude",
+      state: "working" as const,
+    };
+    const rows = workspaceRows(
+      [branch({ name: "main", current: true }), branch({ name: "feat/a" })],
+      [
+        worktree({ path: REPO, branch: "main", is_main: true }),
+        worktree({ path: "/w/repo-wt-feat-a", branch: "feat/a" }),
+      ],
+      ctx({ agentsAt: (d) => (d === "/w/repo-wt-feat-a" ? [claude] : []) }),
+    );
+    expect(rows.find((r) => r.branch === "feat/a")!.agentList).toEqual([claude]);
+    expect(rows.find((r) => r.branch === "main")!.agentList).toEqual([]);
+  });
+
+  it("leaves the list empty when nobody can say who is where", () => {
+    const rows = workspaceRows(
+      [branch({ name: "main", current: true })],
+      [worktree({ path: REPO, branch: "main", is_main: true })],
+      ctx(),
+    );
+    expect(rows[0].agentList).toEqual([]);
+  });
+
   it("orders by what you're looking at, not by what's happening", () => {
     const rows = workspaceRows(
       [

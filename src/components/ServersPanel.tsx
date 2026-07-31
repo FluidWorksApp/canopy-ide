@@ -10,7 +10,7 @@
 // here and a start from the files panel are the same start, on the same tab.
 import { useState } from "react";
 import { serverUrl, splitPorts, type ServerEntry, type ServerGroup } from "../servers";
-import { principalAgent, type AgentRef } from "../workspaces";
+import { AgentChip } from "./AgentChip";
 import {
   CheckIcon,
   ChevronIcon,
@@ -39,15 +39,6 @@ interface ServersPanelProps {
   /** Project settings, where run commands are added and edited. */
   onEdit: () => void;
 }
-
-/** What an agent's lifecycle state means, in the row's own words. */
-const AGENT_STATE: Record<AgentRef["state"], string> = {
-  working: "working now",
-  waiting: "waiting on you",
-  idle: "idle",
-  ended: "finished",
-  unknown: "here",
-};
 
 const STATE_TITLE: Record<ServerEntry["state"], string> = {
   running: "running",
@@ -333,7 +324,6 @@ export function ServersPanel({
                   // row inside, and in this line's tooltip either way.
                   const wsAllPorts = [...new Set(w.entries.flatMap((e) => e.ports))];
                   const wsPorts = splitPorts(wsAllPorts).shown;
-                  const lead = principalAgent(w.agents);
                   return (
                     <div key={w.path} className="ws-runs">
                       <div
@@ -359,29 +349,7 @@ export function ServersPanel({
                             on its own, and the thing you need before one agent
                             can ask another for its server. Clicking opens that
                             agent's terminal. */}
-                        {lead && (
-                          <span
-                            className={`ws-run-agent ws-run-agent-${lead.state}`}
-                            title={
-                              `${lead.name} — ${AGENT_STATE[lead.state]}` +
-                              (w.agents.length > 1
-                                ? `\n+${w.agents.length - 1} more here: ${w.agents
-                                    .slice(1)
-                                    .map((a) => a.name)
-                                    .join(", ")}`
-                                : "") +
-                              (lead.ptyId != null ? "\nClick to open its terminal" : "")
-                            }
-                            onClick={(ev) => {
-                              ev.stopPropagation();
-                              if (lead.ptyId != null) onOpenAgent(lead.ptyId);
-                            }}
-                          >
-                            <span className="ws-run-agent-dot" />
-                            {lead.name}
-                            {w.agents.length > 1 && `+${w.agents.length - 1}`}
-                          </span>
-                        )}
+                        <AgentChip agents={w.agents} onOpen={onOpenAgent} />
                         {/* Only ever the port something is actually answering
                             on, read from the run itself. The lease this
                             workspace holds is plumbing — it is handed to the
