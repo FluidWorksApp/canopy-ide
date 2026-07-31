@@ -2255,8 +2255,9 @@ fn notes_tool_defs() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
             "name": "canopy_notes",
-            "description": "Read the user's scratchpad for this project: thoughts, ideas and to-dos they parked to pick up later. Call `search` before writing a note, so the same observation is not recorded twice. Scoped to the project you are working in.",
+            "description": "Read the user's scratchpad for this project: thoughts, ideas and to-dos they parked to pick up later. Call `search` before writing a note, so the same observation is not recorded twice. Scoped to one project: the one you are running in, or the one you name with `project`.",
             "inputSchema": { "type": "object", "properties": {
+                "project": { "type": "string", "description": "Which project this is about, by name. Only needed when you are not running inside it — the companion always is not" },
                 "action": { "type": "string", "enum": ["list", "search", "get"], "description": "list = current notes, newest first; search = match on title, tags, body and referenced files; get = one note in full, with its attachments and links" },
                 "id": { "type": "string", "description": "Note id for get, e.g. 0007-tier-donations" },
                 "query": { "type": "string", "description": "Search text" },
@@ -2268,6 +2269,7 @@ fn notes_tool_defs() -> Vec<serde_json::Value> {
             "name": "canopy_notes_write",
             "description": "Park a thought in the user's scratchpad. Use `create` for something you noticed that is real but is NOT part of the job you were given — a bug beside the one you were sent for, a refactor the code obviously wants, a missing test. Writing it down is how it survives; derailing onto it is not. Do not use this for the work you were asked to do, and do not use it as a progress log. `append` adds to a note, `status` moves it along, `link` ties it to a PR or a research entry, `attach` keeps a file with it, `remind` puts a time on it and the user is notified then — by the operating system, so it arrives whether or not Canopy is running.",
             "inputSchema": { "type": "object", "properties": {
+                "project": { "type": "string", "description": "Which project this is about, by name. Only needed when you are not running inside it — the companion always is not" },
                 "action": { "type": "string", "enum": ["create", "append", "status", "link", "attach", "remind"], "description": "create | append | status | link | attach | remind" },
                 "id": { "type": "string", "description": "Note id — required by everything except create" },
                 "title": { "type": "string", "description": "create: the thought, in one line. attach: what the file is." },
@@ -2292,8 +2294,9 @@ fn research_tool_defs() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
             "name": "canopy_research",
-            "description": "Read this project's research: findings other sessions recorded, what they concluded, and whether anything shipped from them. Call `search` or `list` BEFORE investigating anything substantial — the question may already be answered. `list` returns one-paragraph digests only; `get` returns one entry in full. Scoped to the project you are working in.",
+            "description": "Read this project's research: findings other sessions recorded, what they concluded, and whether anything shipped from them. Call `search` or `list` BEFORE investigating anything substantial — the question may already be answered. `list` returns one-paragraph digests only; `get` returns one entry in full. Scoped to one project: the one you are running in, or the one you name with `project`.",
             "inputSchema": { "type": "object", "properties": {
+                "project": { "type": "string", "description": "Which project this is about, by name. Only needed when you are not running inside it — the companion always is not" },
                 "action": { "type": "string", "enum": ["list", "search", "get"], "description": "list = current entries, newest first; search = match on title, digest, question and body; get = one entry in full" },
                 "id": { "type": "string", "description": "Entry id for get, e.g. 0007-index-staleness" },
                 "query": { "type": "string", "description": "Search text" },
@@ -2305,6 +2308,7 @@ fn research_tool_defs() -> Vec<serde_json::Value> {
             "name": "canopy_research_write",
             "description": "Record research in Canopy's research store — the ONLY place research output belongs. `start` opens an entry (do this before investigating, not after); `append` adds findings to its body; `source` stores long raw material (file dumps, logs, fetched pages) that must not sit in the body; `digest` sets the one paragraph every other agent reads instead of the whole entry; `status` moves it along; `link` ties it to the PR that implements it; `import` adopts a markdown file that is already in the repo (an old NOTES.md, a docs/spike.md) as an entry, keeping its text and pointing back at the file. Caps are enforced: an over-long digest or body is rejected, and the error says where the text belongs.",
             "inputSchema": { "type": "object", "properties": {
+                "project": { "type": "string", "description": "Which project this is about, by name. Only needed when you are not running inside it — the companion always is not" },
                 "action": { "type": "string", "enum": ["start", "digest", "append", "source", "status", "link", "import"], "description": "start | digest | append | source | status | link | import" },
                 "id": { "type": "string", "description": "Entry id — required by everything except start" },
                 "title": { "type": "string", "description": "start: the question in a few words. source: what this capture is." },

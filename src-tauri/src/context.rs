@@ -281,6 +281,71 @@ async fn editor(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (Sta
 /// wins, so a component nested inside another (a sub-package registered in its
 /// own right) resolves to the nearer one rather than to whichever was published
 /// first.
+/// Resolve a project the caller NAMED, rather than one inferred from where it
+/// happens to be sitting.
+///
+/// Notes and research are scoped to a project, and until now the only way to
+/// say which was the caller's cwd. That works for a coding agent, which lives
+/// in exactly one checkout, and fails for the companion, which deliberately
+/// lives in none — it could read every project's notes and write to none of
+/// them, and had to explain that to the user as a limitation.
+///
+/// Matched on name, case-insensitively, because the name is what the user and
+/// the companion both say out loud. An unknown name is None, so the caller gets
+/// the "which project?" error rather than silently landing in another one.
+/// Why a request found no project, said in the terms the caller can act on:
+/// the name it gave was not one Canopy has, or it gave none and its directory
+/// is not in one either.
+fn scope_hint(project: Option<&str>, cwd: &str) -> String {
+    match project {
+        Some(p) if !p.trim().is_empty() => format!(" (no project called \"{p}\")"),
+        _ => format!(" ({cwd} is not inside one)"),
+    }
+}
+
+fn project_by_name(app: &tauri::AppHandle, name: &str) -> Option<ProjectCandidate> {
+    let wanted = name.trim().to_lowercase();
+    if wanted.is_empty() {
+        return None;
+    }
+    let bridge = app.state::<ContextBridge>();
+    let snapshots = bridge.snapshots.lock().unwrap();
+    snapshots.values().find_map(|snap| {
+        let id = snap.get("id").and_then(|v| v.as_str())?;
+        if id.is_empty() {
+            return None;
+        }
+        let name = snap.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        if name.to_lowercase() != wanted {
+            return None;
+        }
+        let roots: Vec<String> = snap
+            .get("components")
+            .and_then(|v| v.as_array())
+            .map(|list| {
+                list.iter()
+                    .filter_map(|c| c.get("path").and_then(|p| p.as_str()))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some((id.to_string(), name.to_string(), roots))
+    })
+}
+
+/// The project a request is about: the one it named, else the one its cwd is
+/// in. Naming wins, so an agent that knows which project it means is never
+/// overruled by where it is running.
+fn project_for_request(
+    app: &tauri::AppHandle,
+    project: Option<&str>,
+    cwd: &str,
+) -> Option<ProjectCandidate> {
+    project
+        .and_then(|p| project_by_name(app, p))
+        .or_else(|| project_for_cwd(app, cwd))
+}
+
 fn project_for_cwd(app: &tauri::AppHandle, cwd: &str) -> Option<ProjectCandidate> {
     let bridge = app.state::<ContextBridge>();
     let snapshots = bridge.snapshots.lock().unwrap();
@@ -404,6 +469,9 @@ fn pick_project(candidates: &[ProjectCandidate], cwd: &str) -> Option<ProjectCan
 struct ResearchReq {
     action: String,
     cwd: String,
+    /// Which project this is about, by name. Absent falls back to `cwd`.
+    #[serde(default)]
+    project: Option<String>,
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
@@ -465,16 +533,17 @@ async fn research_op(
     if !authorized(&app, &headers) {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
     }
-    let Some((project_id, project_name, roots)) = project_for_cwd(&app, &req.cwd) else {
+    let Some((project_id, project_name, roots)) =
+        project_for_request(&app, req.project.as_deref(), &req.cwd)
+    else {
         return (
             StatusCode::BAD_REQUEST,
             format!(
-                "{} is not inside any project open in Canopy, and research is scoped to a \
-                 project. A worktree resolves to the checkout it came from, so this means \
-                 neither is open here — open the project and try again. Do not write to the \
-                 research store by hand: an entry made that way skips the status rules, the \
-                 size limits and the history.",
-                req.cwd
+                "Research is scoped to a project, and this call named none Canopy has open{}. \
+                 Pass `project` with the project's name to say which — or run from inside one \
+                 of its directories. Do not write to the research store by hand: an entry made \
+                 that way skips the status rules, the size limits and the history.",
+                scope_hint(req.project.as_deref(), &req.cwd)
             ),
         );
     };
@@ -600,6 +669,9 @@ async fn research_op(
 struct NotesReq {
     action: String,
     cwd: String,
+    /// Which project this is about, by name. Absent falls back to `cwd`.
+    #[serde(default)]
+    project: Option<String>,
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
@@ -653,14 +725,16 @@ async fn notes_op(
     if !authorized(&app, &headers) {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
     }
-    let Some((project_id, project_name, roots)) = project_for_cwd(&app, &req.cwd) else {
+    let Some((project_id, project_name, roots)) =
+        project_for_request(&app, req.project.as_deref(), &req.cwd)
+    else {
         return (
             StatusCode::BAD_REQUEST,
             format!(
-                "{} is not inside any project open in Canopy, and a note belongs to the \
-                 project it was written in. A worktree resolves to the checkout it came \
-                 from, so this means neither is open here — open the project and try again.",
-                req.cwd
+                "A note belongs to a project, and this call named none Canopy has open{}. \
+                 Pass `project` with the project's name to say which — or run from inside one \
+                 of its directories.",
+                scope_hint(req.project.as_deref(), &req.cwd)
             ),
         );
     };
