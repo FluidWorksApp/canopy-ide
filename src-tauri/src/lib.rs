@@ -607,6 +607,8 @@ pub fn run() {
             chromium::chromium_drain,
             chromium::chromium_here,
             chromium::chromium_close,
+            chromium::chromium_start_cast,
+            chromium::chromium_stop_cast,
             cleanup::cleanup_scan,
             cleanup::cleanup_run,
             cleanup::cleanup_disk,

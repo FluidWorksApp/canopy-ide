@@ -156,8 +156,19 @@ fn parse_devtools_url(line: &str) -> Option<String> {
 /// unauthenticated debugging port on it defensible at all. Everything else is
 /// noise suppression — a browser driven by an agent should not be asking about
 /// default-browser status or restoring the last crashed session.
-fn launch_args(profile: &Path, url: &str) -> Vec<String> {
-    vec![
+/// `headless` is the default and is what makes this engine sit inside a tab
+/// instead of beside it. A browser with a window is an OS window: it cannot be
+/// composited into a pane (reparenting a foreign window needs private APIs that
+/// would not survive notarisation), it takes focus, and it shows up in the dock.
+/// Headless has no window to fight — the page arrives as frames, painted into
+/// an ordinary <img>, which a dialog can cover like any other element.
+///
+/// The cost is that nobody can type into it. That is fine for the agent, which
+/// drives through the injected picker rather than through real input, but it
+/// means a site needing an interactive login has to be logged into headfully
+/// first — which is why this is a parameter and not a constant.
+fn launch_args(profile: &Path, url: &str, headless: bool) -> Vec<String> {
+    let mut args: Vec<String> = vec![
         "--remote-debugging-port=0".into(),
         // Explicit rather than relying on the default: this is a security
         // boundary and it should be readable as one.
@@ -169,8 +180,15 @@ fn launch_args(profile: &Path, url: &str) -> Vec<String> {
         // A restored "Chrome didn't shut down correctly" tab set would be the
         // user's, not ours, and would race whatever we are about to open.
         "--hide-crash-restore-bubble".into(),
-        url.to_string(),
-    ]
+    ];
+    if headless {
+        // The modern headless mode, not the old shell: it is the same browser
+        // with no window, so it keeps the profile, the extensions and the
+        // rendering behaviour that `--headless=old` quietly changed.
+        args.push("--headless=new".into());
+    }
+    args.push(url.to_string());
+    args
 }
 
 // ---------- CDP transport ----------
@@ -189,9 +207,31 @@ pub struct Cdp {
     next_id: AtomicI64,
 }
 
+/// A CDP event: everything the browser says that nobody asked for.
+pub struct CdpEvent {
+    pub method: String,
+    pub session: String,
+    pub params: serde_json::Value,
+}
+
 impl Cdp {
     /// Connect, and spawn the reader that fans replies back out.
-    pub async fn connect(ws_url: &str) -> Result<Arc<Self>, String> {
+    ///
+    /// `events` receives anything without an `id`. Screencast frames arrive
+    /// that way and there are a lot of them, so this is a channel rather than a
+    /// callback: a slow consumer must not be able to stall the socket that
+    /// every command also shares.
+    pub async fn connect_with_events(
+        ws_url: &str,
+        events: tokio::sync::mpsc::UnboundedSender<CdpEvent>,
+    ) -> Result<Arc<Self>, String> {
+        Self::open(ws_url, Some(events)).await
+    }
+
+    async fn open(
+        ws_url: &str,
+        events: Option<tokio::sync::mpsc::UnboundedSender<CdpEvent>>,
+    ) -> Result<Arc<Self>, String> {
         let (stream, _) = tokio_tungstenite::connect_async(ws_url)
             .await
             .map_err(|e| format!("could not reach the browser's DevTools endpoint: {e}"))?;
@@ -223,6 +263,19 @@ impl Cdp {
                 // A message with an `id` answers a call; anything else is an
                 // event, which nothing waits on synchronously.
                 let Some(id) = v.get("id").and_then(|i| i.as_i64()) else {
+                    if let (Some(sink), Some(method)) =
+                        (events.as_ref(), v.get("method").and_then(|m| m.as_str()))
+                    {
+                        let _ = sink.send(CdpEvent {
+                            method: method.to_string(),
+                            session: v
+                                .get("sessionId")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            params: v.get("params").cloned().unwrap_or(serde_json::Value::Null),
+                        });
+                    }
                     continue;
                 };
                 if let Some(tx) = waiting.lock().unwrap().remove(&id) {
@@ -376,7 +429,12 @@ impl ChromiumManager {
     ///
     /// One browser process serves every tab: a second process would mean a
     /// second profile lock on the same `--user-data-dir`, which Chrome refuses.
-    async fn cdp(&self, app: &tauri::AppHandle, exe: &str) -> Result<Arc<Cdp>, String> {
+    async fn cdp(
+        &self,
+        app: &tauri::AppHandle,
+        exe: &str,
+        headless: bool,
+    ) -> Result<Arc<Cdp>, String> {
         let mut slot = self.inner.lock().await;
         if let Some(running) = slot.as_mut() {
             // A browser the user quit leaves a socket that answers nothing.
@@ -387,7 +445,7 @@ impl ChromiumManager {
         }
         let profile = profile_dir(app)?;
         let mut child = tokio::process::Command::new(exe)
-            .args(launch_args(&profile, "about:blank"))
+            .args(launch_args(&profile, "about:blank", headless))
             .stderr(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .spawn()
@@ -410,12 +468,56 @@ impl ChromiumManager {
             let mut lines = BufReader::new(rest).lines();
             while let Ok(Some(_)) = lines.next_line().await {}
         });
-        let cdp = Cdp::connect(&url).await?;
+        let (etx, erx) = tokio::sync::mpsc::unbounded_channel();
+        let cdp = Cdp::connect_with_events(&url, etx).await?;
+        pump_frames(app.clone(), erx);
         *slot = Some(Running {
             child,
             cdp: cdp.clone(),
         });
         Ok(cdp)
+    }
+
+    /// Which tab a CDP session belongs to. Frames identify themselves by
+    /// session, and the frontend addresses everything by tab.
+    fn tab_for_session(&self, session: &str) -> Option<String> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, s)| s.id == session)
+            .map(|(tab, _)| tab.clone())
+    }
+
+    /// Start streaming this tab's pixels at the pane's size.
+    ///
+    /// Re-called on resize: Chrome scales frames to the max box given, so a
+    /// stale size means a blurry or letterboxed pane rather than a broken one.
+    pub async fn start_cast(&self, tab_id: &str, width: u32, height: u32) -> Result<(), String> {
+        let cdp = self.live().await?;
+        let s = self.session(tab_id)?;
+        cdp.call(
+            "Page.startScreencast",
+            serde_json::json!({
+                "format": "jpeg",
+                "quality": SCREENCAST_QUALITY,
+                "maxWidth": width.max(1),
+                "maxHeight": height.max(1),
+            }),
+            Some(&s.id),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Stop streaming — the tab went to the background, or the pane is covered.
+    /// Frames for a pane nobody can see are pure cost.
+    pub async fn stop_cast(&self, tab_id: &str) -> Result<(), String> {
+        let cdp = self.live().await?;
+        let s = self.session(tab_id)?;
+        cdp.call("Page.stopScreencast", serde_json::json!({}), Some(&s.id))
+            .await
+            .map(|_| ())
     }
 
     fn session(&self, tab_id: &str) -> Result<Session, String> {
@@ -437,8 +539,9 @@ impl ChromiumManager {
         exe: &str,
         tab_id: &str,
         url: &str,
+        headless: bool,
     ) -> Result<(), String> {
-        let cdp = self.cdp(app, exe).await?;
+        let cdp = self.cdp(app, exe, headless).await?;
         let target = cdp
             .call(
                 "Target.createTarget",
@@ -556,6 +659,88 @@ impl ChromiumManager {
     }
 }
 
+// ---------- screencast ----------
+//
+// A browser Canopy did not create is its own OS window, and there is no way to
+// composite that into a pane — reparenting a foreign window needs private APIs
+// and would not survive notarisation. So the page is streamed instead:
+// Page.startScreencast pushes JPEG frames, they go to the frontend as data URLs
+// and are painted into the pane, and input is sent back over Input.*.
+//
+// This is how every cloud-browser live view works, and it buys something the
+// child-webview engine can never have: the frames are just bytes, so the same
+// pane works over Canopy Remote, where a native view composited over this
+// window is meaningless.
+
+/// Frames are acked one at a time; Chrome will not send the next until the
+/// previous is acknowledged, which is the backpressure. Quality is a deliberate
+/// trade — this is a live view of a page being driven, not a screenshot, and
+/// screenshots have their own path (snapshot.rs) that is not lossy.
+const SCREENCAST_QUALITY: i64 = 60;
+
+/// Turn the frame stream on for a tab, and pump frames to the frontend.
+fn pump_frames(app: tauri::AppHandle, mut rx: tokio::sync::mpsc::UnboundedReceiver<CdpEvent>) {
+    tauri::async_runtime::spawn(async move {
+        use tauri::{Emitter, Manager};
+        while let Some(ev) = rx.recv().await {
+            match ev.method.as_str() {
+                "Page.screencastFrame" => {
+                    let Some(data) = ev.params.get("data").and_then(|d| d.as_str()) else {
+                        continue;
+                    };
+                    let session_id = ev
+                        .params
+                        .get("sessionId")
+                        .and_then(|s| s.as_i64())
+                        .unwrap_or_default();
+                    let mgr = app.state::<ChromiumManager>();
+                    let tab = mgr.tab_for_session(&ev.session);
+                    // Ack first, then deliver: a frame we fail to deliver must
+                    // still not stall the stream, and Chrome sends nothing more
+                    // until the ack lands.
+                    if let Ok(cdp) = mgr.live().await {
+                        let _ = cdp
+                            .call(
+                                "Page.screencastFrameAck",
+                                serde_json::json!({ "sessionId": session_id }),
+                                Some(&ev.session),
+                            )
+                            .await;
+                    }
+                    if let Some(tab_id) = tab {
+                        let _ = app.emit(
+                            "chromium:frame",
+                            serde_json::json!({
+                                "tabId": tab_id,
+                                "frame": format!("data:image/jpeg;base64,{data}"),
+                            }),
+                        );
+                    }
+                }
+                // The page moved: the URL bar and the history buttons are the
+                // frontend's, and it cannot see a navigation it did not cause.
+                "Page.frameNavigated" => {
+                    let url = ev
+                        .params
+                        .get("frame")
+                        .and_then(|f| f.get("url"))
+                        .and_then(|u| u.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let mgr = app.state::<ChromiumManager>();
+                    if let Some(tab_id) = mgr.tab_for_session(&ev.session) {
+                        let _ = app.emit(
+                            "chromium:nav",
+                            serde_json::json!({ "tabId": tab_id, "url": url }),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+}
+
 // ---------- commands ----------
 //
 // Deliberately the same shapes as browser.rs's, so the frontend's browser host
@@ -567,10 +752,11 @@ pub async fn chromium_open(
     exe: String,
     tab_id: String,
     url: String,
+    headless: Option<bool>,
 ) -> Result<(), String> {
     use tauri::Manager;
     let mgr = app.state::<ChromiumManager>();
-    mgr.open(&app, &exe, &tab_id, &url).await
+    mgr.open(&app, &exe, &tab_id, &url, headless.unwrap_or(true)).await
 }
 
 #[tauri::command]
@@ -650,6 +836,28 @@ pub async fn chromium_close(app: tauri::AppHandle, tab_id: String) -> Result<(),
     app.state::<ChromiumManager>().close(&tab_id).await
 }
 
+/// Start (or resize) the frame stream for a tab's pane.
+#[tauri::command]
+pub async fn chromium_start_cast(
+    app: tauri::AppHandle,
+    tab_id: String,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    use tauri::Manager;
+    app.state::<ChromiumManager>()
+        .start_cast(&tab_id, width, height)
+        .await
+}
+
+/// Stop the frame stream. Frames for a pane nobody is looking at are pure cost,
+/// so this is called whenever the tab goes to the background.
+#[tauri::command]
+pub async fn chromium_stop_cast(app: tauri::AppHandle, tab_id: String) -> Result<(), String> {
+    use tauri::Manager;
+    app.state::<ChromiumManager>().stop_cast(&tab_id).await
+}
+
 /// The picker, as text — the same bytes preview.rs and browser.rs inject.
 fn picker_source() -> String {
     // __canopyNativeBrowser selects the outbox transport: there is no parent to
@@ -713,11 +921,26 @@ mod tests {
     // profile being ours, so this is not a style assertion.
     #[test]
     fn always_launches_on_a_canopy_owned_profile_and_an_ephemeral_port() {
-        let args = launch_args(Path::new("/tmp/canopy-profile"), "https://example.com");
+        let args = launch_args(Path::new("/tmp/canopy-profile"), "https://example.com", true);
         assert!(args.iter().any(|a| a == "--user-data-dir=/tmp/canopy-profile"));
         assert!(args.iter().any(|a| a == "--remote-debugging-port=0"));
         assert!(args.iter().any(|a| a == "--remote-debugging-address=127.0.0.1"));
         assert_eq!(args.last().unwrap(), "https://example.com");
+    }
+
+    // Headless is what lets this engine live inside a tab: a browser with a
+    // window is an OS window, and there is no supported way to put one of those
+    // in a pane. The new mode specifically — --headless=old is a different
+    // browser with different rendering.
+    #[test]
+    fn launches_headless_by_default_and_headful_only_when_asked() {
+        let head = launch_args(Path::new("/p"), "about:blank", false);
+        assert!(!head.iter().any(|a| a.starts_with("--headless")));
+        let less = launch_args(Path::new("/p"), "about:blank", true);
+        assert!(less.iter().any(|a| a == "--headless=new"));
+        // The URL stays last either way; Chrome reads the first positional as
+        // the page to open and a flag after it is ignored.
+        assert_eq!(less.last().unwrap(), "about:blank");
     }
 
     #[test]

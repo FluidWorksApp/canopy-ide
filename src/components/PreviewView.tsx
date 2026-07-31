@@ -31,6 +31,7 @@ import {
   useBrowserEngine,
   useBrowserPane,
 } from "../browserHost";
+import { useChromiumFrame } from "../chromiumPane";
 import * as ipc from "../ipc";
 import {
   previewFeedbackContext,
@@ -147,6 +148,9 @@ export function PreviewView({
 }: PreviewViewProps) {
   const engine = useBrowserEngine();
   const native = engine === "webview";
+  // The Chromium engine's page is a frame stream, not a view: the browser runs
+  // headless, so there is no window to place and nothing to hide it from.
+  const cast = useChromiumFrame(tabId, engine === "chromium" && visible);
   // What the placeholder stands in with while the native view is out of the
   // way: a still of the page, or the app's own background — never a white hole.
   const pane = useBrowserPane(tabId, native);
@@ -856,6 +860,25 @@ export function PreviewView({
 
   const body = useMemo(() => {
     if (engine === null) return null;
+    if (engine === "chromium") {
+      // An ordinary <img> of an extraordinary thing. Because it is ordinary,
+      // every overlay in the app already layers over it correctly and none of
+      // the child-webview occlusion machinery is involved.
+      return (
+        <div
+          className="preview-frame preview-cast-host"
+          ref={(el) => {
+            if (el) cast.fit(el.getBoundingClientRect());
+          }}
+        >
+          {cast.frame ? (
+            <img className="preview-cast" src={cast.frame} alt="" draggable={false} />
+          ) : (
+            <div className="preview-cast-waiting">Starting the browser…</div>
+          )}
+        </div>
+      );
+    }
     if (native) {
       // Almost nothing is rendered into this div — it exists to be measured,
       // and the page is a native view browserHost parks on top of it. The one

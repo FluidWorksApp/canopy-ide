@@ -426,6 +426,23 @@ export const chromiumHere = (tabId: string) =>
 export const chromiumClose = (tabId: string) =>
   invoke<void>("chromium_close", { tabId }).catch(() => {});
 
+/** Start or resize the frame stream feeding a tab's pane. The browser runs
+ *  headless, so this stream IS the page as far as anyone can see it. */
+export const chromiumStartCast = (tabId: string, width: number, height: number) =>
+  invoke<void>("chromium_start_cast", { tabId, width, height });
+
+/** Stop streaming. Frames for a pane nobody is looking at are pure cost. */
+export const chromiumStopCast = (tabId: string) =>
+  invoke<void>("chromium_stop_cast", { tabId }).catch(() => {});
+
+/** A painted frame from a headless Chromium tab, as a data URL. */
+export const onChromiumFrame = (fn: (e: { tabId: string; frame: string }) => void) =>
+  listen<{ tabId: string; frame: string }>("chromium:frame", (e) => fn(e.payload));
+
+/** The page navigated itself — the URL bar can't see what it didn't cause. */
+export const onChromiumNav = (fn: (e: { tabId: string; url: string }) => void) =>
+  listen<{ tabId: string; url: string }>("chromium:nav", (e) => fn(e.payload));
+
 /** Messages a page pushed up: agent-op results, annotations, in-page
  *  navigations, the ready announcement after every load. */
 export interface BrowserEvents {
