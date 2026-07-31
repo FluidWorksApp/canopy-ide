@@ -32,6 +32,7 @@ use tauri::{AppHandle, Emitter};
 pub enum Store {
     Notes,
     Research,
+    Vault,
 }
 
 impl Store {
@@ -39,6 +40,7 @@ impl Store {
         match self {
             Store::Notes => "notes",
             Store::Research => "research",
+            Store::Vault => "vault",
         }
     }
 
@@ -57,6 +59,10 @@ impl Store {
             // within microseconds of each other inside one command. 200ms is
             // comfortably above that burst and still under a blink.
             Store::Research => Duration::from_millis(200),
+            // One vault, written by a deliberate human action at a time. There
+            // is no burst to coalesce; this is just enough to collapse the
+            // seal-and-write of a re-key into one event.
+            Store::Vault => Duration::from_millis(150),
         }
     }
 
@@ -72,6 +78,7 @@ impl Store {
         match self {
             Store::Notes => Duration::from_millis(1000),
             Store::Research => Duration::from_millis(1000),
+            Store::Vault => Duration::from_millis(1000),
         }
     }
 }
@@ -200,7 +207,7 @@ mod tests {
     /// next one added is where it gets got wrong.
     #[test]
     fn every_store_settles_below_perception_and_is_bounded_by_its_cap() {
-        for store in [Store::Notes, Store::Research] {
+        for store in [Store::Notes, Store::Research, Store::Vault] {
             assert!(
                 store.settle() < Duration::from_millis(500),
                 "{store:?} settles too slowly to feel live"

@@ -42,6 +42,9 @@ const STORES = [
     // Mutations that write no record, so the boundary cannot speak for them.
     delete_boundaries: ["notes_delete"],
     frontend_module: "notes.ts",
+    // The fields the pulse must carry, or null for a store with a single
+    // global instance and so nothing to scope by.
+    record_ids: ["meta.project_id", "meta.id"],
     /** Read commands in this file. None of them may pulse: a pulse a read can
      *  reach is a refetch loop that paces itself on the settle window and runs
      *  forever on no user action. */
@@ -54,9 +57,29 @@ const STORES = [
     boundary: "write_meta",
     delete_boundaries: ["research_delete"],
     frontend_module: "research.ts",
+    record_ids: ["meta.project_id", "meta.id"],
     // `link_impl` ends by calling research_get, so research_get sits on the
     // tail of a write path — pulsing from it would be the loop exactly.
     read_verbs: ["_list", "_get", "_search", "_read_file", "_for_file", "_dir"],
+  },
+  {
+    id: "vault",
+    file: "vault.rs",
+    // NOT `persist`, whose doc comment used to claim every mutation went
+    // through it: vault_create and vault_change_passphrase seal and call
+    // write_file directly. A design that trusted that comment put the pulse
+    // where creating or re-keying a vault would have been silent.
+    boundary: "write_file",
+    variant: "Vault",
+    delete_boundaries: [],
+    frontend_module: "vaultStore.ts",
+    // One vault, not one per project: there is no record to take ids from and
+    // the pulse is correctly scopeless.
+    record_ids: null,
+    // vault_status and vault_list both route through VaultState::key(), which
+    // postpones the auto-lock. A pulse reachable from either would mean a
+    // write keeps the vault unlocked.
+    read_verbs: ["_status", "_list", "_read", "_approvals"],
   },
 ] as const;
 
@@ -114,8 +137,10 @@ describe("the store change channel", () => {
     // changes, and then it is silently wrong. Every record carries both ids.
     for (const store of STORES) {
       const body = fnBody(read(store.file), store.boundary) ?? "";
-      expect(body, `${store.file}: ${store.boundary}`).toContain("meta.project_id");
-      expect(body, `${store.file}: ${store.boundary}`).toContain("meta.id");
+      for (const field of store.record_ids ?? []) {
+        expect(body, `${store.file}: ${store.boundary} must pulse with ${field}`).toContain(field);
+      }
+      // Never derived from where the file happens to sit, for any store.
       expect(
         body,
         `${store.file}: ${store.boundary} derives a value from the path — use the record's fields`,

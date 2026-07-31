@@ -6,6 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mockCommands } from "./test/setup";
 import { NOTES_EVENT, cached, refresh, type NotesChanged } from "./notes";
 import { registerStore, registeredStores, resetForTests } from "./stores";
+import {
+  noteUnlocked,
+  resetVaultStoreForTest,
+  subscribeVault,
+} from "./vaultStore";
 import * as ipc from "./ipc";
 
 const row = (over: Record<string, unknown> = {}) => ({
@@ -121,5 +126,58 @@ describe("the subscription", () => {
   it("reports what it routes, so the guard test can check coverage", () => {
     registerStore("notes", () => {});
     expect(registeredStores()).toContain("notes");
+  });
+});
+
+describe("the vault's guard on the channel", () => {
+  // Order matters: clear the routing table, install the spy, and only then let
+  // the store re-register — registering first would arm against the real ipc.
+  const arm = () => {
+    resetForTests();
+    let fire: ((e: ipc.StoreChange) => void) | undefined;
+    vi.spyOn(ipc, "onStoreChange").mockImplementation((cb) => {
+      fire = cb;
+      return Promise.resolve(() => {});
+    });
+    resetVaultStoreForTest();
+    return () => fire?.({ store: "vault", scope: "", id: "" });
+  };
+
+  it("does not refresh a locked vault, because asking would postpone the auto-lock", async () => {
+    // vault_status routes through VaultState::key(), which sets last_use. So a
+    // handler that asked on every pulse would mean "anything that writes the
+    // vault keeps the vault unlocked" — a security property traded away for a
+    // refresh that could only ever report "still locked".
+    const fire = arm();
+    const surface = vi.fn();
+    subscribeVault(surface);
+    noteUnlocked(false);
+    await Promise.resolve();
+
+    fire();
+    expect(surface).not.toHaveBeenCalled();
+  });
+
+  it("refreshes an unlocked vault that something is showing", async () => {
+    const fire = arm();
+    const surface = vi.fn();
+    subscribeVault(surface);
+    noteUnlocked(true);
+    await Promise.resolve();
+
+    fire();
+    expect(surface).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores a pulse when nothing is showing the vault", async () => {
+    const fire = arm();
+    const surface = vi.fn();
+    const stop = subscribeVault(surface);
+    noteUnlocked(true);
+    await Promise.resolve();
+    stop();
+
+    fire();
+    expect(surface).not.toHaveBeenCalled();
   });
 });

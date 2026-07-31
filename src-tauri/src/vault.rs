@@ -285,6 +285,11 @@ fn open(raw: &[u8], passphrase: &str) -> Result<([u8; 32], [u8; SALT_LEN], Vault
 /// beside it, then a rename, which is atomic on every filesystem Canopy runs
 /// on. 0600 on unix — the file is encrypted, and it still has no business being
 /// world-readable.
+/// This — not `persist` — is the vault's write boundary, and so the place the
+/// change channel speaks from. `vault_create` and the passphrase change seal
+/// and write directly, without going through `persist` at all.
+///
+/// The scope is empty: there is one vault, not one per project.
 fn write_file(bytes: &[u8]) -> Result<(), String> {
     let path = vault_path()?;
     let tmp = path.with_extension("enc.tmp");
@@ -294,11 +299,18 @@ fn write_file(bytes: &[u8]) -> Result<(), String> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
     }
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    crate::change::pulse(crate::change::Store::Vault, "", "");
+    Ok(())
 }
 
-/// Encrypt and persist the current contents. Every mutation goes through here,
-/// so the file on disk is never behind what the app believes.
+/// Encrypt and persist the current contents.
+///
+/// NOT the single funnel, despite how this reads: `vault_create` and
+/// `vault_change_passphrase` seal and call `write_file` themselves. A design
+/// that trusted the old wording here put the change channel's pulse in this
+/// function, where creating or re-keying a vault would have been silent.
+/// `write_file` is the boundary.
 fn persist(state: &mut VaultState) -> Result<(), String> {
     let key = state.key()?;
     let bytes = seal(&key, &state.salt.clone(), &state.data)?;

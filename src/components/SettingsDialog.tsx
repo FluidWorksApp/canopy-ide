@@ -15,6 +15,7 @@ import {
   DEFAULT_DICTATION_HOTKEY,
   DICTATION_WAVE_STYLES,
   type CursorStyle,
+  subscribeSettings,
   type DictationModKey,
   type DictationTriggerMode,
   type DictationWaveStyle,
@@ -2186,8 +2187,18 @@ function RemoteSettings({
   }, []);
 
   // Push our theme to the portal whenever remote access is on.
+  //
+  // On settings changes too, not only on the toggle. This is the one direction
+  // the store change channel cannot serve: the desktop is the authority on the
+  // theme and Rust only holds a mirror of it, so nothing downstream can notice
+  // a change the desktop never sent. Depending on `status?.enabled` alone meant
+  // switching theme or accent with remote already on left every connected
+  // client rendering the old palette until the toggle was cycled.
   useEffect(() => {
-    if (status?.enabled) void ipc.remoteSetTheme(readThemeTokens()).catch(() => {});
+    if (!status?.enabled) return;
+    const push = () => void ipc.remoteSetTheme(readThemeTokens()).catch(() => {});
+    push();
+    return subscribeSettings(push);
   }, [status?.enabled]);
 
   const on = status?.enabled ?? false;

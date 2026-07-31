@@ -16,6 +16,7 @@
 // the room, the screen recording, and whoever walks past.
 import { useCallback, useEffect, useState } from "react";
 import * as ipc from "../ipc";
+import { noteUnlocked, subscribeVault } from "../vaultStore";
 import { browserViewSnapshots } from "../browserSignals";
 import {
   generatePassword,
@@ -443,6 +444,10 @@ export function VaultSettings() {
       .vaultStatus()
       .then((st) => {
         setStatus(st);
+        // What the store needs to decide whether a later pulse is worth asking
+        // about: reading the status postpones the auto-lock, so a locked vault
+        // must not be polled by the channel. See vaultStore.ts.
+        noteUnlocked(st.unlocked);
         if (!st.unlocked) {
           setItems([]);
           setApprovals([]);
@@ -454,6 +459,9 @@ export function VaultSettings() {
       .catch(() => setStatus(null));
   }, []);
   useEffect(refresh, [refresh]);
+  // A vault written by anything other than this screen — a future importer, a
+  // second window — reaches it here rather than waiting for a remount.
+  useEffect(() => subscribeVault(refresh), [refresh]);
 
   // What the preview has loaded, asked once when the screen opens: the offer to
   // add it is only worth making while that page is still what the user was
