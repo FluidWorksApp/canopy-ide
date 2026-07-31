@@ -268,10 +268,11 @@
    *  and the form submits empty. Going through the prototype's own setter and
    *  then firing input/change is what the frameworks are listening for. */
   function setValue(el, value) {
+    // localName rather than instanceof: an input inside a same-origin iframe is
+    // an instance of *that* document's HTMLInputElement, not this one's, so the
+    // instanceof answers false for every field we reach through a frame.
     const proto =
-      el instanceof HTMLTextAreaElement
-        ? HTMLTextAreaElement.prototype
-        : HTMLInputElement.prototype;
+      el.localName === "textarea" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
     const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
     el.focus();
     setter.call(el, value);
@@ -281,6 +282,11 @@
     // Some forms only validate on blur, and a field that never blurs stays in
     // its "untouched" state with the submit button disabled.
     el.dispatchEvent(new Event("blur", { bubbles: true }));
+    // Did it stick? A framework that owns this field can reject the write and
+    // render its own state straight back, which leaves the field empty. Saying
+    // "filled" then is worse than saying nothing: the caller submits a blank
+    // form and the page, not Canopy, gets blamed for it.
+    return el.value === value;
   }
 
   window.__canopyVaultFill = function (usernameValue, passwordValue, dryRun) {
@@ -294,25 +300,31 @@
       });
     }
     const filled = [];
-    if (found.username && usernameValue) {
-      if (!dryRun) setValue(found.username, usernameValue);
-      filled.push("username");
-    }
-    if (found.password) {
-      if (!dryRun) setValue(found.password, passwordValue);
-      filled.push("password");
-    }
+    const refused = [];
+    const put = (el, value, name) => {
+      if (dryRun || setValue(el, value)) filled.push(name);
+      else refused.push(name);
+    };
+    if (found.username && usernameValue) put(found.username, usernameValue, "username");
+    if (found.password) put(found.password, passwordValue, "password");
     // Leave the caret where a person would carry on from.
     if (!dryRun && found.password && !found.username) found.password.focus();
     return JSON.stringify({
       filled,
+      refused: refused.length ? refused : undefined,
+      // Whether waiting could still change the answer. A form that has not
+      // rendered yet and a page that is still loading are both "come back in a
+      // moment"; the caller retries on this rather than on a guess.
+      ready: document.readyState === "complete",
       form: !!(found.password && found.password.form),
       frames: found.frames.blocked,
-      why: filled.length
-        ? undefined
-        : found.frames.blocked
-          ? "the login form is in a cross-origin frame, which Canopy cannot reach from the page"
-          : "no login fields on this page — it may not have rendered the form yet",
+      why: refused.length
+        ? `the page took the ${refused.join(" and ")} field back to empty straight after it was filled — it kept re-rendering the form for longer than Canopy waited`
+        : filled.length
+          ? undefined
+          : found.frames.blocked
+            ? "the login form is in a cross-origin frame, which Canopy cannot reach from the page"
+            : "no login fields on this page — it may not have rendered the form yet",
     });
   };
 })();

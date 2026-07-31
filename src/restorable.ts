@@ -17,6 +17,10 @@ export interface Restorable {
   command: string;
   /** Recognisable label: the last thing the human actually typed. */
   prompt: string;
+  /** Older sessions in this same directory, which this row stands in for. Not
+   *  offered — but "forget" has to tombstone them too, or dismissing the row
+   *  just promotes the next one and you dismiss the same directory 64 times. */
+  superseded: ipc.SessionDigest[];
 }
 
 /** The last human-authored prompt — tool output and injected context both
@@ -115,7 +119,7 @@ export function restorableFrom(
     if (!dir) return false;
     return liveAgents.some((a) => a.cwd === dir && a.agentId === (d.agent ?? "claude"));
   };
-  return digests
+  const rows = digests
     .filter((d) => {
       const id = d.session_id;
       if (!id || /-pty\d*$/.test(id)) return false;
@@ -172,5 +176,29 @@ export function restorableFrom(
     // the digests, and comes back here the moment it's resumable again (a
     // transcript written under a directory we can reach, a CLI that learns to
     // reopen by id).
-    .filter((r): r is Restorable => r.command !== null);
+    .filter((r): r is Omit<Restorable, "superseded"> => r.command !== null);
+  return newestPerDirectory(rows);
+}
+
+/**
+ * One row per (agent, directory) — the newest, since the list arrives sorted.
+ * The rest of that directory's sessions ride along as `superseded`.
+ *
+ * A long-lived checkout accrues one digest per conversation and they all share
+ * a cwd: this repo had 64 claude sessions under a single directory. Offering
+ * every one made a list nobody reads and a "Restore all" that would start 64
+ * agents at once. The one you want in a directory is the last one you were in;
+ * the others stay on disk, this only stops offering them.
+ */
+function newestPerDirectory(rows: Omit<Restorable, "superseded">[]): Restorable[] {
+  const byDir = new Map<string, Restorable>();
+  for (const r of rows) {
+    // \0 as the separator: it cannot appear in a path, so no directory name
+    // can be built that collides with another agent's key.
+    const key = `${r.agentId}\0${r.cwd}`;
+    const held = byDir.get(key);
+    if (held) held.superseded.push(r.digest);
+    else byDir.set(key, { ...r, superseded: [] });
+  }
+  return [...byDir.values()];
 }

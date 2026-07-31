@@ -19,6 +19,7 @@ import * as ipc from "../../ipc";
 import { getSettings, SETTINGS_CHANGE_EVENT } from "../../settings";
 import { modelFor, monaco, languageForPath } from "../../monaco-setup";
 import { getCaret, subscribeCaret } from "../../editorState";
+import { useEscapeBackstop, useEscapeLayer } from "../../useEscape";
 import { subscribe as prWatchSubscribe } from "../../prWatchStore";
 import { GuestSession, OwnerSession } from "../../collab";
 import { CollabView } from "../CollabView";
@@ -1472,6 +1473,78 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [addTerminal],
   );
 
+  // Which rows "Restore all" would actually reopen. Every row in the block, in
+  // the order the block renders them, each with the thunk that opens it — so
+  // the button, the checkboxes and the confirmation all count the same things.
+  const resumeItems = useMemo(
+    () => [
+      ...restorable.map((r) => ({
+        key: `s-${r.digest.session_id}`,
+        open: () => resumeSession(r),
+      })),
+      ...freshAgents.map((t, i) => ({
+        key: `a-${t.cwd}-${i}`,
+        open: () => reopenTerminal(t),
+      })),
+      ...rememberedShells.map((t, i) => ({
+        key: `t-${t.cwd}-${t.command ?? ""}-${i}`,
+        open: () => reopenTerminal(t),
+      })),
+    ],
+    [restorable, freshAgents, rememberedShells, resumeSession, reopenTerminal],
+  );
+
+  // Past a handful, "reopen everything" stops being a convenience and becomes a
+  // way to start a dozen agents by accident, so each row grows a checkbox and
+  // the button restores the selection instead. Below that the list is short
+  // enough to read at a glance and the checkboxes are just clutter.
+  const RESUME_PICK_FROM = 5;
+  // A machine can take a few agents starting at once; ten is where it stops
+  // being a choice you can take back, so that one gets confirmed.
+  const RESUME_CONFIRM_OVER = 10;
+  const pickable = resumeItems.length > RESUME_PICK_FROM;
+  const [picked, setPicked] = useState<string[]>([]);
+  // Rows come and go as sessions are restored or forgotten; a key left behind
+  // would keep "Restore selected (3)" claiming a row nobody can see.
+  const chosen = pickable ? picked.filter((k) => resumeItems.some((i) => i.key === k)) : [];
+  const [confirmResume, setConfirmResume] = useState<{
+    count: number;
+    go: () => void;
+  } | null>(null);
+
+  /** The row's checkbox, or nothing while the list is short. Stops propagation:
+   *  the row itself is still click-to-reopen, and ticking a box must not do
+   *  the very thing the box exists to hold back. */
+  const pickBox = (key: string) =>
+    pickable ? (
+      <input
+        type="checkbox"
+        className="resume-pick"
+        checked={chosen.includes(key)}
+        title="Select for Restore selected"
+        onClick={(e) => e.stopPropagation()}
+        onChange={(e) =>
+          setPicked((prev) =>
+            e.target.checked ? [...prev, key] : prev.filter((k) => k !== key),
+          )
+        }
+      />
+    ) : null;
+
+  const runResume = useCallback(
+    (items: { open: () => void }[]) => {
+      if (items.length === 0) return;
+      const go = () => {
+        items.forEach((i) => i.open());
+        setPicked([]);
+      };
+      if (items.length > RESUME_CONFIRM_OVER)
+        setConfirmResume({ count: items.length, go });
+      else go();
+    },
+    [],
+  );
+
   // Worktrees for the ticket tab's cross-reference. Loaded when a ticket tab
   // opens rather than polled — the Issues panel keeps its own copy for rows.
   const [ticketWorktrees, setTicketWorktrees] = useState<ipc.WorktreeInfo[]>(
@@ -2496,6 +2569,49 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [reapMicroTask],
   );
 
+  /** Ordinary sessions that asked to close themselves (canopy_close_session),
+   *  keyed by pty. Same wait-for-Stop discipline as a micro-task's ending, for
+   *  the same reason: the tool result and the agent's last words have to land
+   *  before the terminal goes. What happens at the end differs, though — this
+   *  is a session the user started, so it is *closed*, not reaped: the tab's
+   *  unmount kills the PTY and the session stays in restorables, exactly as if
+   *  the user had clicked ×. */
+  const selfClose = useRef(
+    new Map<number, { tabId: string; since: number; timer: number }>(),
+  );
+
+  const runSelfClose = useCallback(
+    (ptyId: number) => {
+      const entry = selfClose.current.get(ptyId);
+      if (!entry) return;
+      selfClose.current.delete(ptyId);
+      window.clearTimeout(entry.timer);
+      // Kill before closing rather than leaving it to the unmount: a tab that
+      // only *attaches* to its pty (one spawned from the phone) detaches on
+      // close and would leave the agent running — which is not what it asked
+      // for. A grace kill either way, so the CLI still flushes the transcript
+      // that keeps the session restorable.
+      void ipc.ptyKill(ptyId).catch(() => {});
+      // The tab is gone from under the user without them touching anything —
+      // say who did it, since the only other record is scrollback that closing
+      // takes with it.
+      onNotice("The agent closed its own session, as you asked.");
+      closeTabRef.current(entry.tabId);
+    },
+    [onNotice],
+  );
+
+  /** Begin a self-close: wait out the turn, then close the tab. Idempotent per
+   *  pty, so an agent that calls the tool twice still closes one tab. */
+  const beginSelfClose = useCallback(
+    (ptyId: number, tabId: string) => {
+      if (selfClose.current.has(ptyId)) return;
+      const timer = window.setTimeout(() => runSelfClose(ptyId), 10_000);
+      selfClose.current.set(ptyId, { tabId, since: Date.now(), timer });
+    },
+    [runSelfClose],
+  );
+
   /** Call a detached run off: settle its history entry the way closing its tab
    *  would have, keep what it printed, then kill the PTY. */
   const stopMicroRun = useCallback(
@@ -2597,6 +2713,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
       }
     }
   }, [events, reapMicroTask]);
+
+  // The same wait, for a session that asked to close itself.
+  useEffect(() => {
+    if (selfClose.current.size === 0) return;
+    for (const [ptyId, entry] of selfClose.current) {
+      if (events.some((e) => e.ts >= entry.since && isStopFor(e, ptyId))) {
+        runSelfClose(ptyId);
+      }
+    }
+  }, [events, runSelfClose]);
 
   /** A relay review's diff isn't in any local checkout, so an agent can't
    *  `git diff` for it — write the patch into the project (an authorized
@@ -2837,6 +2963,31 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (tab) restartRun(tab.id);
         return;
       }
+      // An agent closing its own session, because the user told it to. Keyed by
+      // terminal like restart, and the id came from the caller's environment,
+      // so the only tab this can ever reach is the one it is running in — the
+      // ProjectView that doesn't own that pty finds nothing and does nothing.
+      if (a.kind === "close_session") {
+        // A detached task first, and by pty rather than by tab: a viewer the
+        // user opened onto it is a window, not the session, and closing that
+        // would leave the agent running. Its ending is the fuller one anyway —
+        // history settled, session forgotten — so hand it to the same path
+        // job_done uses.
+        const detached = findRun(microRunsRef.current, a.ptyId);
+        if (detached) {
+          finishMicroTask(detached.ptyId);
+          return;
+        }
+        const tab = tabsRef.current.find(
+          (t): t is TermSubTab =>
+            t.type === "terminal" && a.ptyId != null && t.ptyId === a.ptyId,
+        );
+        if (tab?.ptyId == null) return;
+        // A micro-task in a tab of its own: same teardown as job_done "done".
+        if (tab.micro) finishMicroTask(tab.ptyId, tab.id);
+        else beginSelfClose(tab.ptyId, tab.id);
+        return;
+      }
       // A micro-task reported in (App already surfaced the notice). Done →
       // wait out the turn, then kill + forget, closing the tab if it had one.
       // Blocked → the agent wants the user: bring its tab forward, or mark the
@@ -2952,6 +3103,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     addTerminal,
     restartRun,
     finishMicroTask,
+    beginSelfClose,
     updateMicroRuns,
   ]);
 
@@ -3997,6 +4149,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
     setPeeking(false);
     setPinned(false);
   };
+  /** Escape puts the overlay panel away — the keyboard's answer to the click
+   *  outside that already dismisses it. Only in overlay mode: a docked panel
+   *  covers nothing, so there is nothing to get out from under, and Escape is
+   *  worth more to the terminal it would otherwise be taken from. */
+  const escapeSidePanel = useCallback(() => dismissPeekRef.current(), []);
+  useEscapeBackstop(escapeSidePanel, sidePrefs.overlay && sideOpen);
   useEffect(
     () => () => {
       if (openTimer.current !== null) window.clearTimeout(openTimer.current);
@@ -5312,7 +5470,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
       return next.size === prev.size ? prev : next;
     });
   }, [liveTermPtys]);
-  // Esc closes the overlay, matching every other overlay in the app.
+  // Esc closes the overlay, matching every other overlay in the app — and
+  // counts as a layer, so the press that closes it is not also the press that
+  // puts the side panel away underneath.
+  useEscapeLayer(wsDrawerOpen);
   useEffect(() => {
     if (!wsDrawerOpen) return;
     const onKey = (e: KeyboardEvent) => {
@@ -6345,20 +6506,33 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   </span>
                   <span className="resume-head-actions">
                     <Button
-                      title="Reopen everything below — agent sessions with their history, terminals with their command"
-                      onClick={() => {
-                        restorable.forEach(resumeSession);
-                        freshAgents.forEach(reopenTerminal);
-                        rememberedShells.forEach(reopenTerminal);
-                      }}>
-                      Restore all
+                      title={
+                        chosen.length > 0
+                          ? `Reopen the ${chosen.length} selected`
+                          : "Reopen everything below — agent sessions with their history, terminals with their command"
+                      }
+                      onClick={() =>
+                        runResume(
+                          chosen.length > 0
+                            ? resumeItems.filter((i) => chosen.includes(i.key))
+                            : resumeItems,
+                        )
+                      }>
+                      {chosen.length > 0
+                        ? `Restore selected (${chosen.length})`
+                        : "Restore all"}
                     </Button>
                     <Button icon
                       title="Forget everything here — remembered terminals and restorable agent sessions — for this project"
                       onClick={() => {
                         forgetTerminals(project.id);
                         setRemembered([]);
-                        forgetSessions(restorable.map((r) => r.digest));
+                        // Every row's whole directory, not just the session it
+                        // happens to be showing — otherwise "forget everything
+                        // here" leaves the next-oldest behind in each.
+                        forgetSessions(
+                          restorable.flatMap((r) => [r.digest, ...r.superseded]),
+                        );
                         setRestorable([]);
                       }}>
                       ✕
@@ -6378,6 +6552,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     title={`${r.agentId} · ${r.cwd}`}
                     onClick={() => resumeSession(r)}
                   >
+                    {pickBox(`s-${r.digest.session_id}`)}
                     <AgentIcon id={r.agentId} size={14} />
                     <span className="resume-prompt">
                       {r.prompt || <em>(no prompt captured)</em>}
@@ -6398,10 +6573,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
                       Resume
                     </Button>
                     <Button icon className="resume-forget"
-                      title="Forget this session — stops it resurfacing unless it's used again"
+                      title={
+                        r.superseded.length > 0
+                          ? `Forget this directory's ${r.superseded.length + 1} sessions — stops them resurfacing unless one is used again`
+                          : "Forget this session — stops it resurfacing unless it's used again"
+                      }
                       onClick={(e) => {
                         e.stopPropagation();
-                        forgetSessions([r.digest]);
+                        // The row stands for its directory, so dismissing it
+                        // has to take the sessions behind it too — otherwise
+                        // the next-oldest simply takes its place.
+                        forgetSessions([r.digest, ...r.superseded]);
                         setRestorable((prev) =>
                           prev.filter(
                             (x) => x.digest.session_id !== r.digest.session_id,
@@ -6429,6 +6611,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                           title={`${t.command ?? ""} — ${t.cwd}`}
                           onClick={() => reopenTerminal(t)}
                         >
+                          {pickBox(`a-${t.cwd}-${i}`)}
                           <AgentIcon id={cli?.id ?? "agent"} size={14} />
                           <span className="resume-prompt">
                             {cli?.name ?? t.title}
@@ -6463,6 +6646,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                         title={`${t.command ?? "shell"} — ${t.cwd}`}
                         onClick={() => reopenTerminal(t)}
                       >
+                        {pickBox(`t-${t.cwd}-${t.command ?? ""}-${i}`)}
                         <TerminalIcon size={13} />
                         <span className="resume-prompt">
                           {t.command ? (
@@ -6650,6 +6834,26 @@ const ProjectViewBody = memo(function ProjectViewBody({
           y={compMenu.menu.y}
           items={compMenu.menu.items}
           onClose={compMenu.close}
+        />
+      )}
+      {confirmResume && (
+        <Dialog
+          variant="danger"
+          title="Reopen every one of these?"
+          body="Each one starts its own agent process. A dozen at once will take the machine down with them."
+          meta={`${confirmResume.count} terminals`}
+          dismissLabel="Cancel"
+          onDismiss={() => setConfirmResume(null)}
+          actions={[
+            {
+              label: `Reopen all ${confirmResume.count}`,
+              primary: true,
+              onClick: () => {
+                confirmResume.go();
+                setConfirmResume(null);
+              },
+            },
+          ]}
         />
       )}
       {rootCreate && (

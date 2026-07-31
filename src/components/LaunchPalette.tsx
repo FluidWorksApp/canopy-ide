@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AGENT_CLIS, type AgentCli } from "../projects";
 import { AgentIcon, GlobeIcon, TerminalIcon } from "./icons";
 import { fuzzy } from "../fuzzy";
+import { useEscapeLayer } from "../useEscape";
 
 type Row =
   | { kind: "shell" }
@@ -40,6 +41,8 @@ export function LaunchPalette({
   onLaunchCli,
   onClose,
 }: LaunchPaletteProps) {
+  // Escape is the palette's own, all the way down to the panel behind it.
+  useEscapeLayer();
   const [query, setQuery] = useState("");
   const [sel, setSel] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);

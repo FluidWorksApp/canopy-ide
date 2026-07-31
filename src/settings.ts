@@ -8,12 +8,7 @@ import type { CaptureMode } from "./pageCapture";
 import { IS_MAC } from "./platform";
 
 export type Theme =
-  | "auto"
-  | "default"
-  | "gotham"
-  | "daylight"
-  | "vitrine"
-  | "custom";
+  "auto" | "default" | "gotham" | "daylight" | "vitrine" | "custom";
 
 /** What "auto" means right now: Default when macOS is in dark mode, Daylight
  *  in light mode. Every consumer of the skin (CSS data-theme, terminal
@@ -76,6 +71,13 @@ export const DEFAULT_DICTATION_HOTKEY: Hotkey = IS_MAC
   ? { meta: true, ctrl: false, alt: false, shift: false, code: "KeyD" }
   : { meta: false, ctrl: false, alt: true, shift: false, code: "KeyD" };
 
+/** Default hotkey for the recent-dictation picker: ⌃⌘V on Mac (SuprFlow's
+ *  binding, and free of any system paste), ⌃⌥V elsewhere — Ctrl+Shift+V is
+ *  terminal paste on Windows and Linux, so it is deliberately avoided. */
+export const DEFAULT_DICTATION_HISTORY_HOTKEY: Hotkey = IS_MAC
+  ? { meta: true, ctrl: true, alt: false, shift: false, code: "KeyV" }
+  : { meta: false, ctrl: true, alt: true, shift: false, code: "KeyV" };
+
 /** How dictation is triggered.
  *
  *  "combo" — the original two-key chord (⌘D), pressed to start and again to
@@ -125,11 +127,20 @@ export const DEFAULT_DICTATION_MOD_KEY: DictationModKey = IS_MAC
 
 /** Display label for a bare-modifier trigger key. */
 export function modKeyLabel(k: DictationModKey): string {
-  const side = k.endsWith("Left") ? "Left " : k.endsWith("Right") ? "Right " : "";
+  const side = k.endsWith("Left")
+    ? "Left "
+    : k.endsWith("Right")
+      ? "Right "
+      : "";
   const base = k.replace(/(Left|Right)$/, "");
   if (base === "CapsLock") return "Caps Lock";
   const glyph: Record<string, string> = IS_MAC
-    ? { Shift: "⇧ Shift", Control: "⌃ Control", Alt: "⌥ Option", Meta: "⌘ Command" }
+    ? {
+        Shift: "⇧ Shift",
+        Control: "⌃ Control",
+        Alt: "⌥ Option",
+        Meta: "⌘ Command",
+      }
     : { Shift: "Shift", Control: "Ctrl", Alt: "Alt", Meta: "Win" };
   return side + (glyph[base] ?? base);
 }
@@ -137,14 +148,13 @@ export function modKeyLabel(k: DictationModKey): string {
 /** The visualiser drawn in the recording pill while the mic is live. Ported
  *  from SuprFlow's wave styles; each is a canvas renderer in waveStyles.ts. */
 export type DictationWaveStyle =
-  | "classic"
-  | "equalizer"
-  | "particle"
-  | "ribbon"
-  | "pulse"
-  | "neon";
+  "classic" | "equalizer" | "particle" | "ribbon" | "pulse" | "neon";
 
-export const DICTATION_WAVE_STYLES: { id: DictationWaveStyle; label: string; hint: string }[] = [
+export const DICTATION_WAVE_STYLES: {
+  id: DictationWaveStyle;
+  label: string;
+  hint: string;
+}[] = [
   { id: "classic", label: "Classic", hint: "Simple animated bars" },
   { id: "equalizer", label: "Equalizer", hint: "Audio bars with reflection" },
   { id: "particle", label: "Particle", hint: "Flowing wave with particles" },
@@ -336,6 +346,9 @@ export interface Settings {
   dictationTriggerMode: DictationTriggerMode;
   /** Which bare modifier carries the trigger in "hold"/"doubleTap" mode. */
   dictationModKey: DictationModKey;
+  /** Hotkey that opens the recent-dictation picker. Hold its modifiers and tap
+   *  its key to walk back through what you said; release to paste. */
+  dictationHistoryHotkey: Hotkey;
   /** Registry id of the ASR model to use (see dictation.rs MODELS). Empty
    *  means "the default model" so a stored blank never pins a missing id. */
   dictationModel: string;
@@ -481,6 +494,7 @@ const DEFAULTS: Settings = {
   dictationHotkey: DEFAULT_DICTATION_HOTKEY,
   dictationTriggerMode: "combo",
   dictationModKey: DEFAULT_DICTATION_MOD_KEY,
+  dictationHistoryHotkey: DEFAULT_DICTATION_HISTORY_HOTKEY,
   dictationModel: "",
   dictationLanguage: "",
   dictationStreaming: false,
