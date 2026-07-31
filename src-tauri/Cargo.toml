@@ -177,6 +177,14 @@ libc = "0.2"
 # canopy_screenshot: the webview's own snapshot API, so capturing our own window
 # needs no Screen Recording permission. Same objc2 generation wry already links,
 # so this adds bindings, not a second Objective-C runtime.
+[target.'cfg(windows)'.dependencies]
+# Reaching CoreWebView2's settings to switch Edge's own keyboard shortcuts off
+# (webview_keys.rs). Both versions are pinned to what webview2-com-sys already
+# resolves to, so this adds no new crate to the graph — it only names two that
+# Tauri already builds on Windows.
+webview2-com = "0.38"
+windows-core = "0.61"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 block2 = "0.6"

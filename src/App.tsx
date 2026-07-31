@@ -59,6 +59,7 @@ import { HelpDialog } from "./components/HelpDialog";
 import { AskDialog } from "./components/AskDialog";
 import { AboutDialog } from "./components/AboutDialog";
 import { Dictation } from "./components/Dictation";
+import { TooltipLayer } from "./components/TooltipLayer";
 import { Onboarding } from "./components/Onboarding";
 import { Welcome } from "./components/Welcome";
 import { Dialog } from "./components/Dialog";
@@ -75,6 +76,7 @@ import {
   hintModifierOnly,
   useHeldModifier,
 } from "./useHeldModifier";
+import { commandHeld, matches, terminalOwnsCtrl } from "./shortcuts";
 import {
   checkForUpdateAnyChannel,
   installUpdate,
@@ -742,14 +744,13 @@ export default function App() {
       zoomHideTimer.current = window.setTimeout(() => setZoomPct(null), 1000);
     };
     const keys = (e: KeyboardEvent) => {
-      const mod = e.metaKey || e.ctrlKey;
+      const mod = commandHeld(e);
       // On Linux/Windows Ctrl is the modifier, but Ctrl+- and Ctrl+0 are also
       // meaningful inside terminals (readline undo, NUL). macOS uses Cmd so
       // there's no conflict there. Skip zoom if focus is inside an xterm canvas
       // or textarea so the keypress reaches the shell rather than being consumed.
       if (
-        e.ctrlKey &&
-        !e.metaKey &&
+        terminalOwnsCtrl(e) &&
         (e.target as HTMLElement | null)?.closest(
           ".xterm-screen, .xterm-helper-textarea",
         )
@@ -758,7 +759,7 @@ export default function App() {
       }
       if (e.key === "Escape") {
         setZen(false);
-      } else if (mod && e.shiftKey && e.code === "Enter") {
+      } else if (matches(e, "toggle-zen")) {
         e.preventDefault();
         toggleZen("keydown");
       } else if (mod && !e.altKey) {
@@ -1396,7 +1397,10 @@ export default function App() {
         // Keyed by terminal id, not a path: the project owning that pty is
         // already open (its server is running), so just broadcast — the owning
         // ProjectView matches by pty and acts, the rest ignore it.
-        if (a.kind === "restart_server") {
+        // Same routing for an agent closing itself: the tab lives in whichever
+        // ProjectView owns that pty, and the terminal is the only address the
+        // action has — canopy_close_session takes no arguments at all.
+        if (a.kind === "restart_server" || a.kind === "close_session") {
           window.dispatchEvent(
             new CustomEvent("canopy:agent-action", {
               detail: { projectId: null, action: a },
@@ -2177,6 +2181,9 @@ export default function App() {
         />
       )}
       <Dictation />
+      {/* Last, and once: every `title` in the app is drawn by this one bubble
+          instead of the webview's native grey box. */}
+      <TooltipLayer />
     </div>
   );
 }

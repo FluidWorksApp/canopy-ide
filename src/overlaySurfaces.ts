@@ -183,20 +183,29 @@ export const OVERLAY_SURFACES: OverlaySurface[] = [
     selector: ".cnp-tooltip",
     kind: "transient",
     covers: "edge",
-    // React derives onMouseEnter/onMouseLeave from delegated mouseover/mouseout
-    // at the root, so those are the events that reach it — a dispatched
-    // `mouseenter` is heard by nobody.
-    open: () =>
-      document
-        .querySelector(".cnp-tooltip-wrap")
-        ?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })),
-    close: () =>
+    // Two triggers, one bubble: the hand-written <Tooltip> wrapper, and any
+    // element carrying a `title` (TooltipLayer upgrades those). The layer
+    // listens for real pointer events on the document, and React derives
+    // onMouseEnter from a delegated mouseover — a dispatched `mouseenter` is
+    // heard by nobody either way, so fire the bubbling forms. The layer opens
+    // after its hover delay; the selftest polls, so that is a wait, not a miss.
+    open: () => {
+      const el =
+        document.querySelector(".cnp-tooltip-wrap") ??
+        document.querySelector("[title]");
+      el?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+      el?.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+    },
+    close: () => {
       document.querySelector(".cnp-tooltip-wrap")?.dispatchEvent(
         new MouseEvent("mouseout", {
           bubbles: true,
           relatedTarget: document.body,
         }),
-      ),
+      );
+      // The layer's dismissals are global: a press anywhere takes it down.
+      document.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    },
   },
   {
     id: "zoom-indicator",

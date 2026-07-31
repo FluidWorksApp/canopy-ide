@@ -8,10 +8,11 @@
 // But an underlined link that ignores a click reads as a broken link, so the
 // plain gesture is the default and the chord is the opt-in.
 import { IS_MAC } from "./platform";
+import { commandHeld, format } from "./shortcuts";
 import type { LinkClickMode } from "./settings";
 
 /** The chord, spelled the way this platform spells it. */
-export const LINK_CHORD = IS_MAC ? "⌘ click" : "Ctrl+click";
+export const LINK_CHORD = `${format("link-follow")}${IS_MAC ? " " : "+"}click`;
 
 /** True when this mouse event is a request to follow the link under it.
  *
@@ -37,7 +38,8 @@ export function opensLink(
   // macOS Ctrl+click is a right-click, and ⌃⌘-click belongs to the OS.
   if (IS_MAC ? e.ctrlKey : e.metaKey) return false;
   if (mode === "click") return !hasSelection;
-  return IS_MAC ? e.metaKey : e.ctrlKey;
+  // Shift and Alt may ride along — only the command modifier decides.
+  return commandHeld(e);
 }
 
 /** The bubble that appears while the pointer rests on a link. xterm underlines

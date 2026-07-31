@@ -135,12 +135,15 @@ export interface AgentAction {
     | "open_file"
     | "show_diff"
     | "notify"
-    | "job_done";
+    | "job_done"
+    | "close_session";
   route: string;
   dir?: string;
   name?: string;
   command?: string;
   url?: string;
+  /** The terminal the action is keyed to. For close_session it is the calling
+   *  agent's own — the tool takes no id, so it can name no other session. */
   ptyId?: number;
   path?: string;
   line?: number;
@@ -538,6 +541,8 @@ export interface SpotIngestReport {
   terminals: number;
   /** Research entries in the index after this call. */
   research: number;
+  /** Notes in the index after this call. */
+  notes: number;
   /** Documents dropped: vanished files, disabled agents, retention. */
   pruned: number;
 }
@@ -936,6 +941,200 @@ export const researchForFile = (projectId: string, path: string) =>
 export const researchDelete = (projectId: string, id: string) =>
   invoke<void>("research_delete", { projectId, id });
 
+// ---------- Notes (the scratchpad) ----------
+//
+// Scoped to one project exactly as research is, and for the same reason: a note
+// is about a codebase, and a list that mixed projects would answer "what should
+// I do here?" with everything you have ever thought. The store is Rust
+// (src-tauri/src/notes.rs) and is the only authority.
+
+export type NoteStatus =
+  | "ideation"
+  | "ready"
+  | "doing"
+  | "done"
+  | "parked"
+  | "archived";
+
+export interface NotePrLink {
+  repo: string;
+  number: number;
+  url: string;
+  /** "open" | "merged" | "closed" — a linked PR reaching "merged" is what moves
+   *  a note to `done` without anyone asserting it. */
+  state: string;
+}
+
+/** A file a note is about. `rev` is the commit it was captured at, so a stale
+ *  reference can say so instead of quietly showing you something else. */
+export interface NoteFileRef {
+  path: string;
+  start_line?: number | null;
+  end_line?: number | null;
+  rev: string;
+  /** Relative path under `attachments/` holding the frozen lines, if any. */
+  snapshot?: string | null;
+}
+
+export interface NoteLinks {
+  prs: NotePrLink[];
+  /** Research entry ids started from this note. */
+  research: string[];
+  /** TaskRun ids (taskHistory.ts) launched from this note. */
+  task_runs: string[];
+  branches: string[];
+  files: NoteFileRef[];
+}
+
+export interface NoteAttachment {
+  /** Relative to the note directory, always under `attachments/`. */
+  file: string;
+  /** "image" | "artifact". */
+  kind: string;
+  title: string;
+  origin: string;
+  bytes: number;
+}
+
+export interface NoteHistory {
+  at: number;
+  from: string;
+  to: string;
+  by: string;
+  note: string;
+}
+
+export interface NoteSummary {
+  id: string;
+  title: string;
+  status: NoteStatus;
+  /** The opening of the body, headings skipped — what a row shows under the
+   *  title. */
+  preview: string;
+  tags: string[];
+  created_at: number;
+  updated_at: number;
+  attachment_count: number;
+  image_count: number;
+  file_count: number;
+  pr_count: number;
+  research_count: number;
+}
+
+export interface NoteDetail extends NoteSummary {
+  body: string;
+  /** What the user was looking at when they captured it, as
+   *  `capturePageContext` composed it. Verbatim — it describes a moment. */
+  context: string;
+  /** Which surface captured it: "spot", "menu", "panel". */
+  origin: string;
+  attachments: NoteAttachment[];
+  links: NoteLinks;
+  history: NoteHistory[];
+  /** Absolute path to the note directory — what an agent handed the note reads
+   *  its attachments from. */
+  dir: string;
+}
+
+/** Without `status`, the archived are hidden: the scratchpad is a worklist. */
+export const notesList = (
+  projectId: string,
+  status?: NoteStatus[],
+  limit?: number,
+) => invoke<NoteSummary[]>("notes_list", { projectId, status, limit });
+
+export const notesGet = (projectId: string, id: string) =>
+  invoke<NoteDetail>("notes_get", { projectId, id });
+
+export interface NoteCreateArgs {
+  projectId: string;
+  projectName?: string;
+  roots?: string[];
+  /** May be the whole thought — a paragraph is cut for the title and kept in
+   *  full as the body rather than being refused. */
+  title: string;
+  body?: string;
+  tags?: string[];
+  context?: string;
+  origin?: string;
+  cwd?: string;
+}
+
+export const notesCreate = (args: NoteCreateArgs) =>
+  invoke<NoteSummary>("notes_create", { ...args });
+
+export interface NoteUpdateArgs {
+  projectId: string;
+  id: string;
+  title?: string;
+  body?: string;
+  append?: string;
+  tags?: string[];
+}
+
+export const notesUpdate = (args: NoteUpdateArgs) =>
+  invoke<NoteSummary>("notes_update", { ...args });
+
+/** `data` is base64 for kind "image", plain text otherwise. */
+export const notesAddAttachment = (args: {
+  projectId: string;
+  id: string;
+  kind: "image" | "artifact";
+  title: string;
+  data: string;
+  origin?: string;
+  ext?: string;
+}) => invoke<NoteAttachment>("notes_add_attachment", { ...args });
+
+export const notesSetStatus = (
+  projectId: string,
+  id: string,
+  status: NoteStatus,
+  by?: string,
+  note?: string,
+) => invoke<NoteSummary>("notes_set_status", { projectId, id, status, by, note });
+
+export interface NoteLinkArgs {
+  projectId: string;
+  id: string;
+  pr?: NotePrLink;
+  research?: string;
+  taskRun?: string;
+  branch?: string;
+  file?: NoteFileRef;
+}
+
+export const notesLink = (args: NoteLinkArgs) =>
+  invoke<NoteDetail>("notes_link", { ...args });
+
+/** Read a text attachment. The store lives outside every registered workspace
+ *  root, so fs_read_file cannot reach it — this is the only reader. */
+export const notesReadFile = (projectId: string, id: string, path: string) =>
+  invoke<string>("notes_read_file", { projectId, id, path });
+
+/** Read an image attachment as base64, for a `data:` URL in the detail tab. */
+export const notesReadImage = (projectId: string, id: string, path: string) =>
+  invoke<string>("notes_read_image", { projectId, id, path });
+
+/** Where a note lives — what an agent picking it up is pointed at. */
+export const notesDir = (projectId: string, id: string) =>
+  invoke<string>("notes_dir", { projectId, id });
+
+/** Copy a file already on disk into the note — a pasted image the palette
+ *  staged under `.canopy/spot/`, or a file the user attached. Copied into the
+ *  note's own directory because the source is inside the repo and dies with a
+ *  worktree; the note's directory does not. */
+export const notesAttachFile = (args: {
+  projectId: string;
+  id: string;
+  path: string;
+  title?: string;
+  kind?: "image" | "artifact";
+}) => invoke<NoteAttachment>("notes_attach_file", { ...args });
+
+export const notesDelete = (projectId: string, id: string) =>
+  invoke<void>("notes_delete", { projectId, id });
+
 /** One PR's state — "OPEN", "MERGED" or "CLOSED". The watcher only holds open
  *  PRs, so this is the only way to tell a merge from a close. */
 export const ghPrState = (repo: string, number: number) =>
@@ -992,6 +1191,9 @@ export const claudeSessionStats = (transcriptPath: string) =>
 export interface AgentSessionUsage {
   session_id: string;
   agent: string;
+  /** Which account profile ran it (see profiles.ts). "default" for the main
+   *  login and for CLIs that have no profile support. */
+  profile: string;
   cwd: string;
   title: string | null;
   model: string | null;
@@ -1018,6 +1220,9 @@ export interface PlanWindow {
  *  spend side in AgentSessionUsage. Only CLIs that actually report appear. */
 export interface PlanUsage {
   agent: string;
+  /** The account these limits belong to. Limits are per subscription, so a
+   *  machine with two logins reports two rows for the same CLI. */
+  profile: string;
   plan: string | null;
   windows: PlanWindow[];
   credits: number | null;
@@ -1026,6 +1231,35 @@ export interface PlanUsage {
   observed: number;
 }
 export const planUsage = () => invoke<PlanUsage[]>("plan_usage");
+
+// ---------- account profiles ----------
+
+/** One CLI account: a config directory plus the environment that points a CLI
+ *  at it. Canopy never holds the credential — the CLI logs in inside the
+ *  profile and owns the result. See src-tauri/src/profiles.rs. */
+export interface AgentProfile {
+  id: string;
+  label: string;
+  /** Absolute config root. `$HOME` for the default profile. */
+  root: string;
+  /** False for the default profile, which can't be renamed or removed. */
+  removable: boolean;
+}
+export const profilesList = () => invoke<AgentProfile[]>("profiles_list");
+/** Creates the directory layout and installs hooks + MCP into it. Does not log
+ *  anyone in; the caller opens a terminal for that. */
+export const profileCreate = (label: string) =>
+  invoke<AgentProfile>("profile_create", { label });
+/** Forgets the profile and answers where its files stayed — deleting a login
+ *  from under a misclick is not something this offers. */
+export const profileDelete = (id: string) => invoke<string>("profile_delete", { id });
+/** The env that points one CLI at one profile, as spawn-ready pairs. Empty for
+ *  the default profile and for CLIs with no config-home variable. */
+export const profileEnv = (agent: string, id: string) =>
+  invoke<[string, string][]>("profile_env", { agent, id });
+/** Re-run hook + MCP setup for one CLI inside one profile. */
+export const profileSetup = (agent: string, id: string) =>
+  invoke<SetupReport>("profile_setup", { agent, id });
 
 export interface FsChange {
   root: string;
@@ -1642,6 +1876,48 @@ export const gitBranchPatch = (
 export const gitRemoteUrl = (repo: string) =>
   invoke<string>("git_remote_url", { repo });
 
+/** What the branch can do about the branch it was cut from. */
+export type SyncState = "current" | "clean" | "conflict" | "unknown" | "blocked";
+
+export interface SyncProbe {
+  repo: string;
+  branch: string | null;
+  /** The ref measured against, e.g. "origin/main". */
+  base: string;
+  /** Base tip — dismissals key on it, so "not now" lasts until it moves. */
+  base_head: string;
+  behind: number;
+  ahead: number;
+  dirty: number;
+  state: SyncState;
+  /** Paths the merge would conflict in. Found without touching the worktree. */
+  conflicts: string[];
+  /** Uncommitted files the incoming commits also touch — git refuses to start
+   *  a merge over these, so they're worth naming before the user clicks. */
+  overlap: string[];
+  subjects: string[];
+  blocked: string | null;
+  /** Fetch failed: counts are from the last successful fetch, not from now. */
+  fetch_error: string | null;
+}
+
+export interface SyncOutcome {
+  merged: boolean;
+  conflicts: string[];
+  message: string;
+}
+
+/** Non-destructive: dry-runs the merge in the object store, so it is safe to
+ *  call on a timer while the user is mid-edit. `fetch` refreshes the remote. */
+export const gitSyncProbe = (repo: string, fetch: boolean, base?: string | null) =>
+  invoke<SyncProbe>("git_sync_probe", { repo, fetch, base: base ?? null });
+
+/** The only writing call — merges base into the current branch, on a click. */
+export const gitSyncApply = (repo: string, base: string) =>
+  invoke<SyncOutcome>("git_sync_apply", { repo, base });
+
+export const gitSyncAbort = (repo: string) => invoke<string>("git_sync_abort", { repo });
+
 export const gitWorkAudit = (repo: string) =>
   invoke<WorkAudit>("git_work_audit", { repo });
 
@@ -1994,6 +2270,11 @@ export interface SessionDigest {
   /** Where the session was launched. Pinned at first sighting and never
    *  updated, unlike `cwd`, which follows the agent as it cds. */
   launch_cwd?: string;
+  /** Which account profile this conversation belongs to. Resuming has to
+   *  relaunch against the same config dir — `--resume <id>` under the other
+   *  login looks in a store that has never heard of this session. Absent on
+   *  digests written before profiles existed, which means the default. */
+  profile?: string;
   /** The terminal that owns this session — our PTY id, inherited through the
    *  spawn env, as a string. Present only for sessions started under a Canopy
    *  terminal. This is the deterministic session -> surface binding: matching
@@ -2305,7 +2586,9 @@ export interface DictationStatus {
 export interface DictationProgress {
   /** Which model this event is about. */
   model: string;
-  phase: "download" | "extract" | "load" | "ready" | "error";
+  /** "transcribe" arrives only for recordings long enough to be split into
+   *  chunks; `pct` is the share of chunks already through the model. */
+  phase: "download" | "extract" | "load" | "transcribe" | "ready" | "error";
   pct: number;
   message: string | null;
 }

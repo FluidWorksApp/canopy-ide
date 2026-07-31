@@ -3,14 +3,13 @@
 // markdown description, with the start-work actions pinned to the bottom —
 // the two things you do with a ticket you're reading are understand it and
 // hand it to an agent.
-import { useMemo } from "react";
-import { renderMarkdown } from "../markdown";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type * as ipc from "../ipc";
 import { heldBadge } from "../branchSwitch";
 import { useBranchSwitch } from "../useBranchSwitch";
 import { TRACKERS } from "../trackers";
 import { AgentLaunchButton } from "./AgentLaunchButton";
+import { Markdown } from "./Markdown";
 import { TrackerIcon } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
 import { Button } from "./ui";
@@ -47,13 +46,6 @@ export function TicketView({
   const trackerName = TRACKERS.find((t) => t.id === source)?.name ?? source;
   const { openThere } = useBranchSwitch();
 
-  const html = useMemo(
-    () =>
-      ticket.body.trim()
-        ? renderMarkdown(ticket.body)
-        : "<p class='ticket-view-empty'>No description.</p>",
-    [ticket.body],
-  );
 
   // Link clicks are delegated globally (main.tsx), so every surface —
   // issue bodies, commit messages, PR text — behaves identically.
@@ -101,10 +93,14 @@ export function TicketView({
         </div>
       </div>
 
-      <div
-        className="ticket-view-body markdown-body"
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
+      {/* `external` on purpose: an issue body is authored by anyone who can
+          file on the repo, so it renders identically to a note and navigates
+          nothing. */}
+      {ticket.body.trim() ? (
+        <Markdown className="ticket-view-body" text={ticket.body} />
+      ) : (
+        <p className="ticket-view-empty">No description.</p>
+      )}
 
       <div className="ticket-view-actions">
         {/* One control: the primary action is the obvious thing (your default

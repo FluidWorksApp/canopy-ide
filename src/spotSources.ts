@@ -15,6 +15,7 @@ import { tabDisplayLabel } from "./components/ProjectView/helpers";
 import { completedTaskRuns, type TaskRun } from "./taskHistory";
 import { TRACKERS } from "./trackers";
 import { cached as researchCached, STATUS_LABELS as RESEARCH_STATUS_LABELS } from "./research";
+import { cached as notesCached, STATUS_LABELS as NOTE_STATUS_LABELS } from "./notes";
 import { getSnapshot as prSnapshot } from "./prWatchStore";
 import { toPrInfo } from "./prInbox";
 import { getSettings } from "./settings";
@@ -38,6 +39,22 @@ export type SpotAction =
    *  `switch-branch` is: creating the entry and launching the agent has to
    *  reach ProjectView's launcher, and a module-level closure cannot. */
   | { type: "start-research"; question: string }
+  /** Park what was typed in the scratchpad instead of acting on it.
+   *
+   *  The third thing you can do with a sentence, and the one the omnibox was
+   *  missing: run it, research it, or write it down for later. Named rather
+   *  than run through `custom` for the same reason the two above are — creating
+   *  the note has to carry the palette's pasted images and the page context,
+   *  and a module-level closure can reach neither. */
+  | {
+      type: "save-note";
+      text: string;
+      /** Absolute paths of images pasted into the palette. The palette staged
+       *  them under `.canopy/spot/`; the note copies them into itself, because
+       *  that directory is inside the repo and dies with a worktree. */
+      attachments?: string[];
+    }
+  | { type: "open-note"; id: string }
   | { type: "open-pr"; repo: string; pr: ipc.PrInfo }
   | { type: "open-server"; path: string; tabId: string | null }
   | { type: "open-task-run"; runId: string }
@@ -184,9 +201,54 @@ export function actionRows(query: string, ctx: SpotContext, attachments = 0): Sp
         score: -1,
         action: { type: "start-research", question: q },
       },
+      // The third verb, and the reason the scratchpad exists. Both rows above
+      // act now; this is the one that doesn't. It sits last of the three
+      // because the two that spend an agent are the ones you came here for
+      // more often — but it is always offered, because the whole failure this
+      // fixes is having a thought with nowhere to put it.
+      {
+        id: "act:save-note",
+        group: "Actions",
+        kind: "note",
+        title: q ? `Save for later: “${q}”` : "Save the pasted image for later",
+        detail: "into the scratchpad · nothing runs",
+        score: -0.5,
+        action: { type: "save-note", text: q },
+      },
     );
   }
   return rows;
+}
+
+/** Notes already in this project's scratchpad. Instant, from the cache notes.ts
+ *  keeps — so a thought you already wrote down surfaces on the first keystroke.
+ *  That is the whole point: a scratchpad you cannot find your way back into is
+ *  a place thoughts go to be lost politely. */
+export function noteRows(query: string, projectId: string): SpotRow[] {
+  return ranked(
+    query,
+    notesCached(projectId).map((note) => ({
+      hay: `${note.title} ${note.preview} ${note.tags.join(" ")}`,
+      row: {
+        id: `note:${note.id}`,
+        group: "Scratchpad",
+        kind: "note",
+        title: note.title,
+        // Status leads, as it does on a research row: whether this is a raw
+        // thought or something already in flight changes what you do with it,
+        // and that is worth knowing before the click rather than after.
+        detail: [
+          NOTE_STATUS_LABELS[note.status],
+          note.image_count > 0 ? `${note.image_count} image${note.image_count === 1 ? "" : "s"}` : "",
+          note.preview,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+        score: 0,
+        action: { type: "open-note", id: note.id } as SpotAction,
+      },
+    })),
+  );
 }
 
 /** Research already recorded in this project. Instant, from the cache
@@ -699,6 +761,10 @@ const SOURCES: SpotSource[] = [
   { id: "sessions", group: "Agent Sessions", blurb: "Agent sessions by prompt, branch and files touched (from their digests).", timing: "instant", rows: (q) => sessionRows(q.query, q.ctx) },
   // Above tickets and PRs deliberately: if what you are about to go and find
   // out has already been found out, that is the most useful row on the page.
+  // Above research and everything below it: if what you are about to type has
+  // already been written down, that is the most useful row on the page — the
+  // same argument research makes against tickets, one level further up.
+  { id: "notes", group: "Scratchpad", blurb: "Your own captured thoughts, ideas and to-dos in this project.", timing: "instant", rows: (q) => noteRows(q.query, q.ctx.projectId) },
   { id: "research", group: "Research", blurb: "Findings recorded in this project — what was investigated, and what shipped from it.", timing: "instant", rows: (q) => researchRows(q.query, q.ctx.projectId) },
   { id: "tickets", group: "Tickets", blurb: "Issues from the configured trackers. Fetches over the network, cached 60s.", timing: "deferred", rows: (q) => ticketRows(q.query, q.roots) },
   { id: "prs", group: "Pull Requests", blurb: "Open PRs the watcher has already fetched — no round trip here.", timing: "instant", rows: (q) => prRows(q.query) },

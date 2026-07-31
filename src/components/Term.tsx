@@ -17,6 +17,7 @@ import * as ipc from "../ipc";
 import { getSettings, THEME_CHANGE_EVENT, type Settings } from "../settings";
 import { terminalTheme } from "../terminalThemes";
 import { createLinkHint, opensLink } from "../terminalLinks";
+import { matchesChord, resolve } from "../shortcuts";
 
 /** Quote a dropped path for the shell, the way iTerm2/Terminal.app do. Paths
  *  that are pure safe chars pass through bare; anything else is single-quoted,
@@ -222,7 +223,8 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // Deleted rather than made a setting: stored settings win over DEFAULTS, so
     // a `webgl: false` default would silently do nothing for existing users.
 
-    // macOS natural text editing — the same mapping iTerm2 ships under that name.
+    // Natural text editing — on a Mac, the same mapping iTerm2 ships under
+    // that name; off it, only the parts that make sense without a Cmd key.
     //
     // xterm.js's defaults are wrong for a Mac shell, and actively destructive.
     // From its own Keyboard.ts, with `modifiers = alt?2 | meta?8`:
@@ -255,15 +257,28 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // reads it as kill-whole-line (bash: to line start) — the accepted
     // terminal meaning of the chord. Option+Backspace needs no entry: xterm
     // itself sends ESC+DEL, which zsh binds to backward-kill-word.
-    const NATURAL_EDITING: Record<string, string> = {
-      "alt+ArrowLeft": "\x1bb", // backward-word
-      "alt+ArrowRight": "\x1bf", // forward-word
-      "meta+ArrowLeft": "\x01", // beginning-of-line (C-a)
-      "meta+ArrowRight": "\x05", // end-of-line       (C-e)
-      "meta+Backspace": "\x15", // kill line         (C-u)
-    };
+    //
+    // The chords come from the registry, which is what keeps this map from
+    // shipping macOS semantics to everyone. The three Cmd-based entries are
+    // unbound off a Mac (see shared/shortcuts.json): there is no Command key
+    // there — Mod resolves to Ctrl, where Ctrl+Left already means word-jump,
+    // and Super belongs to the window manager. Home/End cover line start/end
+    // on those platforms natively. The Option ones stay: ESC-b/ESC-f is what
+    // readline binds to word movement on every platform.
+    const NATURAL_EDITING = (
+      [
+        ["term-word-left", "\x1bb"], // backward-word
+        ["term-word-right", "\x1bf"], // forward-word
+        ["term-line-start", "\x01"], // beginning-of-line (C-a)
+        ["term-line-end", "\x05"], // end-of-line       (C-e)
+        ["term-kill-line", "\x15"], // kill line         (C-u)
+      ] as const
+    ).flatMap(([id, seq]) => {
+      const chord = resolve(id);
+      return chord && chord.code ? [{ chord, seq }] : [];
+    });
     term.attachCustomKeyEventHandler((ev) => {
-      if (ev.type !== "keydown" || ev.ctrlKey) return true;
+      if (ev.type !== "keydown") return true;
       // Never touch a key that is mid-composition. Option+letter starts a dead
       // key on a US layout (Option+e = acute), and WebKit then reports a
       // collapsed, length-2 ev.key and stops honouring preventDefault. Bailing
@@ -271,14 +286,12 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       // handler, so returning false here would skip it and strand the
       // composition, making the next keypress behave as if Option were held.
       if (ev.isComposing || ev.keyCode === 229) return true;
-      // Only named keys (arrows, Backspace), and only with exactly one of
-      // Cmd/Option. `ev.key` for those is always a multi-char name, so a
-      // composed character can never collide with these entries.
-      if (ev.altKey === ev.metaKey) return true;
-      const seq = NATURAL_EDITING[`${ev.metaKey ? "meta" : "alt"}+${ev.key}`];
-      if (!seq) return true;
+      // Every modifier flag must agree, so a composed character can never
+      // collide with these entries and Option+Cmd+Left matches nothing.
+      const hit = NATURAL_EDITING.find(({ chord }) => matchesChord(ev, chord));
+      if (!hit) return true;
       ev.preventDefault();
-      term.input(seq);
+      term.input(hit.seq);
       return false;
     });
 

@@ -15,6 +15,7 @@ const nowSecs = Math.floor(NOW / 1000);
 
 const plan = (over: Partial<PlanUsage> = {}): PlanUsage => ({
   agent: "claude",
+  profile: "default",
   plan: "default_claude_max_20x",
   windows: [
     { label: "5h", used_percent: 18, resets_at: nowSecs + 2 * 3600 + 49 * 60 },
