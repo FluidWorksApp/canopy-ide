@@ -26,7 +26,7 @@ import { useBranchSwitch } from "../useBranchSwitch";
 import { DiffView, DiffModeEnum, SplitSide } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import * as ipc from "../ipc";
-import { renderMarkdown } from "../markdown";
+import { Markdown } from "./Markdown";
 import type { Notify, RelayHandle } from "../types";
 import { agentMenuItems } from "../agentMenu";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
@@ -264,20 +264,6 @@ type DiffData = {
   oldFile: { fileName: string };
   newFile: { fileName: string };
 };
-
-/** marked + DOMPurify per call is too expensive to run inside render loops. */
-const Markdown = memo(function Markdown({
-  text,
-  className,
-}: {
-  text: string;
-  className: string;
-}) {
-  const html = useMemo(() => renderMarkdown(text), [text]);
-  return (
-    <div className={className} dangerouslySetInnerHTML={{ __html: html }} />
-  );
-});
 
 /** Self-ticking elapsed counter, so the tick re-renders this span and not the
  *  whole tab. */
@@ -1266,15 +1252,11 @@ export function PrView({
   );
 
   // The PR body is markdown (headings, tables, code) — render it, don't dump it
-  // as raw text. renderMarkdown sanitizes with DOMPurify, which matters: a PR
-  // body is authored by whoever opened it, and raw HTML in the webview reaches
-  // every Tauri command. Memoised so it isn't re-parsed on each keystroke.
+  // as raw text. <Markdown> sanitizes with DOMPurify and memoises the parse,
+  // which matters on both counts: a PR body is authored by whoever opened it
+  // and raw HTML in the webview reaches every Tauri command, and this tab
+  // re-renders on every keystroke in the review composer.
   const bodyText = conv?.body?.trim() ? conv.body : bodyFallback;
-  const bodyHtml = useMemo(
-    () => (bodyText.trim() ? renderMarkdown(bodyText) : ""),
-    [bodyText],
-  );
-  const mapHtml = useMemo(() => (map ? renderMarkdown(map) : ""), [map]);
 
   const byPath = useMemo(
     () => threadsByPath(conv?.threads ?? []),
@@ -1914,13 +1896,10 @@ export function PrView({
       <div className="pr-body">
         <div className="pr-overview">
           <div className="pr-overview-main">
-            {bodyHtml && (
-              <div
-                className="markdown-body pr-description"
-                dangerouslySetInnerHTML={{ __html: bodyHtml }}
-              />
+            {bodyText.trim() && (
+              <Markdown className="pr-description" text={bodyText} />
             )}
-            {mapHtml && (
+            {map && (
               <div className="pr-description pr-map is-agent-made">
                 {/* Named, not just styled. This is a model's reading of the
                     diff sitting directly under the PR's own description, and
@@ -1936,10 +1915,7 @@ export function PrView({
                     {reviewBusy ? "Reviewing…" : "Review again"}
                   </Button>
                 </div>
-                <div
-                  className="markdown-body"
-                  dangerouslySetInnerHTML={{ __html: mapHtml }}
-                />
+                <Markdown text={map ?? ""} />
                 {/* Where the other half of the review went. Without this the
                     findings are a surprise you meet by scrolling: staged, real,
                     and unmentioned by the one card that says a review ran. */}
@@ -1963,7 +1939,7 @@ export function PrView({
                 )}
               </div>
             )}
-            {!mapHtml && !reviewBusy && !settling && onMicroTask && (
+            {!map && !reviewBusy && !settling && onMicroTask && (
               <div className="pr-map-cta">
                 {/* The one thing this empty state exists to offer, so it wears
                     the primary tier. As a btn-mini it sat at the same weight as
@@ -2020,7 +1996,7 @@ export function PrView({
                       </div>
                       {r.body.trim() && (
                         <Markdown
-                          className="markdown-body pr-comment-body"
+                          className="pr-comment-body"
                           text={r.body}
                         />
                       )}
@@ -2051,7 +2027,7 @@ export function PrView({
                         </span>
                       </div>
                       <Markdown
-                        className="markdown-body pr-comment-body"
+                        className="pr-comment-body"
                         text={c.body}
                       />
                     </div>
@@ -2673,7 +2649,7 @@ const ThreadCard = memo(function ThreadCard({
             </span>
             {isNit(c.body) && <span className="pr-thread-tag">nit</span>}
           </div>
-          <Markdown className="markdown-body pr-comment-body" text={c.body} />
+          <Markdown className="pr-comment-body" text={c.body} />
         </div>
       ))}
       {compact && t.comments.length > 2 && (

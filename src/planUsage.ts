@@ -97,11 +97,22 @@ export function tooltip(plan: PlanUsage, now = Date.now()): string {
   return [head, ...lines, stale].filter(Boolean).join("\n");
 }
 
-/** The plan row for the CLI driving the tray, if it reports one. */
+/** The plan row for the CLI driving the tray, if it reports one.
+ *
+ *  Matched on the account too, not just the CLI: a machine with two logins
+ *  reports one row per subscription, and the tray follows a specific session.
+ *  Showing that session the *other* account's headroom would be worse than
+ *  showing nothing — it reads as room the user does not have. An unmatched
+ *  profile therefore yields null rather than falling back to any row. */
 export function planFor(
   plans: PlanUsage[],
   agent: string | null | undefined,
+  profile: string = "default",
 ): PlanUsage | null {
   if (!agent) return null;
-  return plans.find((p) => p.agent === agent) ?? null;
+  return (
+    plans.find(
+      (p) => p.agent === agent && (p.profile || "default") === profile,
+    ) ?? null
+  );
 }

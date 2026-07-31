@@ -14,6 +14,7 @@ export type SideTab =
   | "prs"
   | "trackers"
   | "tasks"
+  | "notes"
   | "research"
   | "agents"
   | "team"
@@ -40,6 +41,11 @@ export interface TermSubTab {
    *  Restored with the tab, or a woken project's servers would all come back
    *  fighting for the same port. */
   env?: [string, string][];
+  /** Which account profile this terminal's CLI was launched under, when it
+   *  wasn't the default one. Display only — the isolation is carried by `env`
+   *  — but it has to be restored with the tab, because a session's identity on
+   *  screen must not change just because the app was reopened. */
+  profile?: string;
   /** Launched from a component run command — lives in the run rail, not the
    *  terminal strip. */
   run?: boolean;
@@ -82,6 +88,18 @@ export interface ResearchSubTab {
   id: string;
   type: "research";
   researchId: string;
+  /** Last known title, so the tab strip has a label before the first read. */
+  title: string;
+}
+
+/** One note, open. Holds only the id, for the same reason ResearchSubTab does:
+ *  the note changes while it is on screen (you edit it, an agent links a PR)
+ *  and the view re-reads the store on every notes event, so a copy on the tab
+ *  would be a second version of the truth going stale in the background. */
+export interface NoteSubTab {
+  id: string;
+  type: "note";
+  noteId: string;
   /** Last known title, so the tab strip has a label before the first read. */
   title: string;
 }
@@ -233,6 +251,7 @@ export type SubTab =
   | PrSubTab
   | TicketSubTab
   | ResearchSubTab
+  | NoteSubTab
   | CommitSubTab
   | BranchSubTab
   | ReviewSubTab
@@ -326,6 +345,8 @@ export function describeTab(tab: SubTab | undefined) {
       // The id, not just the title: an agent told the user is looking at
       // research can call canopy_research get on it.
       return { kind: "research", label: tab.title, researchId: tab.researchId };
+    case "note":
+      return { kind: "note", label: tab.title, noteId: tab.noteId };
     case "pr":
       return { kind: "pr", label: `#${tab.pr.number} ${tab.pr.title}` };
     case "commit":
@@ -377,6 +398,9 @@ export function tabDisplayLabel(t: SubTab): string {
       // Number first, the way the entry is cited everywhere else (a PR body, a
       // supersedes link), so the tab and the reference read the same.
       return `${t.researchId.split("-")[0]} ${t.title}`;
+    case "note":
+      // Same reasoning as research: the number is how a note is referred to.
+      return `${t.noteId.split("-")[0]} ${t.title}`;
     case "commit":
       return `${t.short} ${t.subject}`;
     case "branch":

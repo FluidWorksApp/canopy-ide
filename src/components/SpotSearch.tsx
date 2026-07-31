@@ -16,6 +16,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import * as ipc from "../ipc";
 import { fuzzyRanges } from "../fuzzy";
+import { useEscapeLayer } from "../useEscape";
 import { SearchIcon } from "./icons";
 import { SpotRowIcon } from "./spotIcons";
 import { runIngest } from "../spotIndex";
@@ -104,6 +105,8 @@ function Marked({ text, query }: { text: string; query: string }) {
 }
 
 export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
+  // Escape is the palette's own, all the way down to the panel behind it.
+  useEscapeLayer();
   const [query, setQuery] = useState("");
   const [asyncRows, setAsyncRows] = useState<SpotRow[]>([]);
   const [busy, setBusy] = useState(false);
@@ -226,6 +229,18 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
       onAction({
         type: "start-research",
         question: briefWithAttachments(row.action.question, shots),
+      });
+      return;
+    }
+    // A note keeps its images as attachments rather than as paths inlined into
+    // the text: the note outlives this palette, this project's worktrees, and
+    // the `.canopy/spot/` directory these are staged in, so what it needs is
+    // the files themselves — which is what the paths let ProjectView copy.
+    if (shots.length > 0 && row.action.type === "save-note") {
+      onAction({
+        type: "save-note",
+        text: row.action.text,
+        attachments: shots.map((s) => s.path),
       });
       return;
     }
