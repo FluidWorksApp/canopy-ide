@@ -141,6 +141,23 @@ function saveRelayChat(label: string, msgs: ipc.RelayChatMsg[]) {
   }
 }
 
+/** Ops that answer without a project to answer about.
+ *
+ *  `ask` is a background agent's question, whose cwd may be a worktree Canopy
+ *  does not track. The rest are the companion's: it runs in no project by
+ *  design, and its whole job is the view across all of them. */
+const PROJECTLESS_OPS = new Set([
+  "ask",
+  "confirm",
+  "workspace",
+  "workspace_git",
+  "workspace_agents",
+  "workspace_search",
+  "open_project",
+  "recall",
+  "remember",
+]);
+
 function publishScopes(state: WorkspaceState) {
   void ipc
     .setContextScopes(
@@ -1732,8 +1749,13 @@ export default function App() {
             : undefined);
         const roots = project?.components.map((c) => c.path) ?? [];
         // An "ask" needs no project — a background agent with a question is
-        // exactly the case where its cwd may be a worktree we don't track.
-        if (!roots.length && op.op !== "ask") {
+        // exactly the case where its cwd may be a worktree we don't track. The
+        // companion's ops are the same case taken further: it deliberately runs
+        // inside no project (so it inherits no repo's CLAUDE.md), and every one
+        // of them answers ACROSS projects rather than about the one its caller
+        // sits in. Requiring a project here rejected the only agent that was
+        // never meant to have one.
+        if (!roots.length && !PROJECTLESS_OPS.has(op.op)) {
           void ipc.browserResult(
             op.id,
             false,
