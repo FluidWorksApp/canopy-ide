@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "policy": {
+    "oneTimeGraceDays": 365,
+    "lapsedGraceDays": 30
+  },
+  "tiers": [
+    {
+      "id": "bronze",
+      "name": "Bronze",
+      "label": "supporter:bronze",
+      "color": "cd7f32",
+      "description": "Opened by a Canopy supporter (bronze tier, weight 1)",
+      "weight": 1,
+      "minMonthlyUsd": 5
+    },
+    {
+      "id": "silver",
+      "name": "Silver",
+      "label": "supporter:silver",
+      "color": "aab2bd",
+      "description": "Opened by a Canopy supporter (silver tier, weight 2)",
+      "weight": 2,
+      "minMonthlyUsd": 25
+    },
+    {
+      "id": "gold",
+      "name": "Gold",
+      "label": "supporter:gold",
+      "color": "e3b341",
+      "description": "Opened by a Canopy supporter (gold tier, weight 4)",
+      "weight": 4,
+      "minMonthlyUsd": 100
+    }
+  ]
+}
