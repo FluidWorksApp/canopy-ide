@@ -103,7 +103,11 @@ pub async fn companion_spawn(
     for (k, v) in env.unwrap_or_default() {
         cmd.env(k, v);
     }
-    if let Some(dir) = cwd.as_ref().map(std::path::Path::new).filter(|d| d.is_dir()) {
+    if let Some(dir) = cwd
+        .as_ref()
+        .map(std::path::Path::new)
+        .filter(|d| d.is_dir())
+    {
         cmd.current_dir(dir);
     }
 
@@ -111,7 +115,10 @@ pub async fn companion_spawn(
         .spawn()
         .map_err(|e| format!("could not start `{command}`: {e}"))?;
     let stdin = child.stdin.take().ok_or("the companion CLI has no stdin")?;
-    let stdout = child.stdout.take().ok_or("the companion CLI has no stdout")?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or("the companion CLI has no stdout")?;
     let stderr = child.stderr.take();
 
     // stdout: one JSON object per line, forwarded as it arrives. `next_line`
@@ -240,7 +247,10 @@ mod tests {
     async fn a_fresh_manager_holds_no_child() {
         let state = CompanionManager::default();
         assert!(state.running.lock().await.is_none());
-        assert_eq!(state.generation.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            state.generation.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
     }
 
     /// Writing before a spawn has to be a reported error rather than a panic:
