@@ -3,6 +3,7 @@
 // a desktop IDE, so the app suppresses it globally (see main.tsx) and shows
 // this instead.
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEscapeLayer } from "../useEscape";
 
 export interface MenuItem {
   /** Omitted only on a plain separator (`separator: true` with no label). */
@@ -34,6 +35,7 @@ interface ContextMenuProps {
 export function ContextMenu({ x, y, items, above, onClose }: ContextMenuProps) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ x, y });
+  useEscapeLayer();
 
   // Keep the menu inside the window — near the bottom/right edge it would
   // otherwise open off-screen and be unusable.
@@ -63,6 +65,8 @@ export function ContextMenu({ x, y, items, above, onClose }: ContextMenuProps) {
       if (ref.current?.contains(e.target as Node)) return;
       onClose();
     };
+    // Only this menu goes away on Escape — the panel it was opened from stays,
+    // because the menu counts itself as an Escape layer below.
     const esc = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     const bail = () => onClose();
     window.addEventListener("mousedown", close, true);
