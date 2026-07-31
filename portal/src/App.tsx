@@ -1,63 +1,34 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+// Canopy Remote.
+//
+// One socket, one state, two shells. Everything below the shell split is shared:
+// the same panels, the same detail views, the same fused agent rows out of
+// `shared/model`. What differs above it is only navigation — panes on a desk, a
+// stack on a phone — because those are genuinely different, and pretending
+// otherwise is what produced a wide layout that was just a stretched phone.
+
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Wire, auth, savedToken, clearToken, type Msg } from './wire'
 import { wsTransport } from './wsTransport'
+import { makeRpc, type Rpc } from './rpc'
+import { useViewportFit, useWide } from './useMedia'
+import { alertFor, notifyState, registerWorker, showAlert, wantsNotifications } from './notify'
+import { CompactShell } from './shells/CompactShell'
+import { WideShell } from './shells/WideShell'
+import { PANELS } from './panels'
+import { targetKey, type PanelCtx, type Target } from './panels/types'
+import { NewAgentSheet } from './NewAgentSheet'
 import {
+  applyTheme,
+  buildRows,
   type Digest,
   type Project,
+  type Pty,
   type Stat,
   type Usage,
-  type Pty,
   type Workspace,
-  type AgentRow,
-  buildRows,
-  agentsForProject,
-  agentMeta,
-  basename,
-  applyTheme,
-  resumeCommand,
 } from '@shared/model'
-import { AgentCard, ProjectCard, AgentBadge } from '@shared/components'
-import { AgentTerminal } from '@shared/AgentTerminal'
-import {
-  IconBack,
-  IconBolt,
-  IconBranch,
-  IconFile,
-  IconFolder,
-  IconPlus,
-  IconPower,
-  IconResume,
-  IconSend,
-  IconStop,
-  IconTerminal,
-} from '@shared/icons'
+import { derivePending, parseAgentEvent, type AgentEventEntry } from '@shared/notifications'
 import type { Transport } from '@shared/transport'
-
-/** Publish the *visible* viewport as CSS vars. `100dvh` still counts the strip
- *  behind the on-screen keyboard on Android Chrome and iOS Safari, so a shell
- *  sized to it puts its composer under the keys. `--vh` is what the user can
- *  actually see; `--vv-top` is how far the browser has pushed the visual
- *  viewport down, which iOS does instead of resizing. */
-function useViewportFit() {
-  useEffect(() => {
-    const vv = window.visualViewport
-    if (!vv) return
-    const root = document.documentElement
-    const apply = () => {
-      root.style.setProperty('--vh', `${Math.round(vv.height)}px`)
-      root.style.setProperty('--vv-top', `${Math.round(vv.offsetTop)}px`)
-    }
-    apply()
-    vv.addEventListener('resize', apply)
-    vv.addEventListener('scroll', apply)
-    return () => {
-      vv.removeEventListener('resize', apply)
-      vv.removeEventListener('scroll', apply)
-      root.style.removeProperty('--vh')
-      root.style.removeProperty('--vv-top')
-    }
-  }, [])
-}
 
 export default function App() {
   const [token, setToken] = useState<string | null>(savedToken())
@@ -99,7 +70,7 @@ function PinGate({ onToken }: { onToken: (t: string) => void }) {
           <span className="mark-dot" />
           CANOPY<span className="mark-thin">·REMOTE</span>
         </div>
-        <p className="gate-sub">Mission control for your agents.</p>
+        <p className="gate-sub">Your workspace, wherever you are.</p>
         <form onSubmit={submit} autoComplete="off">
           <div className="pin-wrap">
             <input
@@ -126,64 +97,67 @@ function PinGate({ onToken }: { onToken: (t: string) => void }) {
   )
 }
 
-type Route =
-  | { name: 'home' }
-  | { name: 'project'; id: string }
-  | { name: 'agent'; pty: number }
-  | { name: 'history'; key: string }
-
-/** A single instrument readout in the deck header. */
-function Gauge({ n, label, tone }: { n: number; label: string; tone?: string }) {
-  return (
-    <div className={`gauge ${tone ?? ''} ${n === 0 ? 'zero' : ''}`}>
-      <span className="gauge-n">{n}</span>
-      <span className="gauge-l">{label}</span>
-    </div>
-  )
-}
-
-function SubHead({ icon, title, n, dim }: { icon: React.ReactNode; title: string; n: number; dim?: boolean }) {
-  return (
-    <div className={`subhead ${dim ? 'dim' : ''}`}>
-      <span className="subhead-i">{icon}</span>
-      {title}
-      <span className="subhead-n">{n}</span>
-    </div>
-  )
-}
+/** How many hook events to keep for `derivePending`. It only ever looks
+ *  backwards until each session's last resolving event, so a bounded tail is
+ *  enough — and unbounded growth on a page left open all day is not. */
+const EVENT_TAIL = 400
 
 function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
+  const wide = useWide()
+
+  // ---- live state from the socket ----
   const [up, setUp] = useState(false)
   const [projects, setProjects] = useState<Project[]>([])
   const [sessions, setSessions] = useState<Digest[]>([])
   const [usage, setUsage] = useState<Usage[]>([])
   const [instance, setInstance] = useState('')
+  const [roots, setRoots] = useState<string[]>([])
   const [stats, setStats] = useState<Map<number, Stat>>(new Map())
   const [livePtys, setLivePtys] = useState<Pty[]>([])
-  const [route, setRoute] = useState<Route>({ name: 'home' })
-  const [tab, setTab] = useState<'agents' | 'projects'>('agents')
-  const [newAgent, setNewAgent] = useState<{ open: boolean; projectId?: string }>({ open: false })
+  const [events, setEvents] = useState<AgentEventEntry[]>([])
+
+  // ---- navigation ----
+  const [projectId, setProjectId] = useState<string>()
+  const [panelId, setPanelId] = useState(PANELS[0].id)
+  const [tabs, setTabs] = useState<Target[]>([])
+  const [activeKey, setActiveKey] = useState<string>()
+  const [newAgent, setNewAgent] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+
   const wireRef = useRef<Wire | null>(null)
   const transportRef = useRef<Transport | null>(null)
+  const rpcRef = useRef<Rpc | null>(null)
+
+  const openTarget = useCallback((t: Target) => {
+    const key = targetKey(t)
+    setTabs((prev) => (prev.some((x) => targetKey(x) === key) ? prev : [...prev, t]))
+    setActiveKey(key)
+  }, [])
 
   useEffect(() => {
     const wire = new Wire(token)
     wireRef.current = wire
     transportRef.current = wsTransport(wire)
-    wire.onStatus = setUp
+    rpcRef.current = makeRpc(wire)
+    wire.onStatus = (ok) => {
+      setUp(ok)
+      // A dropped socket means the server has forgotten every in-flight action
+      // id; leaving those promises hanging would wedge a panel until timeout.
+      if (!ok) rpcRef.current?.reset('connection lost')
+    }
     wire.onAuthFail = onLogout
     wire.on((m: Msg) => {
       if (m.t === 'snapshot') {
         const ws = (m.projects as Workspace) || { projects: [] }
         const all = ws?.projects ?? []
         const openIds = ws?.openIds
-        // Show only the projects open in the IDE (its tabs), not every one ever
-        // registered.
+        // Only the projects open in the IDE (its tabs), not every one ever
+        // registered — the same scope the server now applies to sessions.
         setProjects(openIds && openIds.length ? all.filter((p) => openIds.includes(p.id)) : all)
         setSessions((m.sessions as Digest[]) ?? [])
         setUsage((m.usage as Usage[]) ?? [])
         setInstance(m.instance ?? '')
+        setRoots((m.roots as string[]) ?? [])
         setLivePtys((m.ptys as Pty[]) ?? [])
         applyTheme(m.theme as Record<string, string> | undefined)
       } else if (m.t === 'event') {
@@ -197,12 +171,18 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
               next.delete(id)
               return next
             })
+        } else if (m.name === 'agent:event') {
+          // The raw hook line, parsed exactly once, exactly as the desktop
+          // parses it — see shared/notifications.ts.
+          const raw = typeof m.payload === 'string' ? m.payload : JSON.stringify(m.payload)
+          const data = parseAgentEvent(raw)
+          if (data) setEvents((prev) => [...prev, { ts: Date.now(), data }].slice(-EVENT_TAIL))
         }
       } else if (m.t === 'spawned') {
-        setNewAgent({ open: false })
-        setRoute({ name: 'agent', pty: m.pty })
+        setNewAgent(false)
+        openTarget({ kind: 'terminal', pty: m.pty })
       } else if (m.t === 'spawn-error') {
-        setNewAgent({ open: false })
+        setNewAgent(false)
         setNotice(m.message || 'Could not start the agent.')
       }
     })
@@ -212,602 +192,116 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
       clearInterval(poll)
       wire.close()
     }
-  }, [token, onLogout])
+  }, [token, onLogout, openTarget])
+
+  // A notification tap (handled by the service worker) asks the live tab to open
+  // that agent rather than opening a second one.
+  useEffect(() => {
+    const on = (e: MessageEvent) => {
+      if (e.data?.t === 'open-pty' && typeof e.data.pty === 'number') {
+        openTarget({ kind: 'terminal', pty: e.data.pty })
+      }
+    }
+    navigator.serviceWorker?.addEventListener('message', on)
+    if (notifyState() === 'granted' && wantsNotifications()) void registerWorker()
+    return () => navigator.serviceWorker?.removeEventListener('message', on)
+  }, [openTarget])
+
+  // Deep link from a cold notification tap: /remote/#pty=12.
+  useEffect(() => {
+    const m = /^#pty=(\d+)$/.exec(location.hash)
+    if (m) {
+      openTarget({ kind: 'terminal', pty: Number(m[1]) })
+      history.replaceState(null, '', location.pathname)
+    }
+  }, [openTarget])
 
   const rows = useMemo(
     () => buildRows(sessions, usage, stats, instance, livePtys),
     [sessions, usage, stats, instance, livePtys],
   )
-  // Terminals are live PTYs with no agent behind them. They get their own
-  // section rather than mixing into "Active now", and they stay out of the
-  // gauges and the tab count so those keep meaning *agents*.
-  const terminals = rows.filter((r) => r.terminal)
-  const agents = rows.filter((r) => !r.terminal)
-  const live = agents.filter((r) => r.live)
-  const offline = agents.filter((r) => !r.live)
-  const needs = live.filter((r) => r.needsYou).length
-  const idle = agents.length - live.length
-  const spawn = (cwd: string, command?: string) =>
+  const pending = useMemo(() => derivePending(events), [events])
+
+  // Fire an OS notification for every card this device has not seen yet. A ref,
+  // not state: firing must not wait on a render, and a re-render must not
+  // re-fire what already buzzed.
+  const notified = useRef(new Set<string>())
+  useEffect(() => {
+    for (const item of pending) {
+      if (notified.current.has(item.key)) continue
+      notified.current.add(item.key)
+      void showAlert(alertFor(item))
+    }
+    // Keys are per-session-per-event, so the set would grow all day otherwise.
+    if (notified.current.size > 500) notified.current = new Set(pending.map((p) => p.key))
+  }, [pending])
+
+  const project = useMemo(
+    () => projects.find((p) => p.id === projectId) ?? projects[0],
+    [projects, projectId],
+  )
+
+  const closeTab = useCallback((key: string) => {
+    setTabs((prev) => {
+      const next = prev.filter((t) => targetKey(t) !== key)
+      setActiveKey((cur) =>
+        cur !== key ? cur : next.length ? targetKey(next[next.length - 1]) : undefined,
+      )
+      return next
+    })
+  }, [])
+
+  const spawn = useCallback((cwd: string, command?: string) => {
     wireRef.current?.send({ t: 'spawn', cwd, command })
-  // Live agent → its terminal; offline agent → its history (with one-tap resume).
-  const openAgent = (row: AgentRow) =>
-    row.live && row.ptyId !== undefined
-      ? setRoute({ name: 'agent', pty: row.ptyId })
-      : setRoute({ name: 'history', key: row.key })
-  const resume = (row: AgentRow) => {
-    if (row.resumeCwd) spawn(row.resumeCwd, resumeCommand(row.agent, row.sessionId))
+  }, [])
+
+  if (!transportRef.current || !rpcRef.current) return null
+
+  const ctx: PanelCtx = {
+    rpc: rpcRef.current,
+    transport: transportRef.current,
+    projects,
+    project,
+    roots,
+    rows,
+    stats,
+    pending,
+    openKey: activeKey,
+    open: openTarget,
+    spawn,
   }
 
-  // The route's view. The New-agent sheet and notice are lifted OUT of this
-  // switch and rendered once below, so they overlay EVERY route — a "New agent"
-  // button on the project page opens the sheet just like it does on home.
-  let body: React.ReactNode
-  const historyRow = route.name === 'history' ? rows.find((r) => r.key === route.key) : undefined
-  const projectFor = route.name === 'project' ? projects.find((p) => p.id === route.id) : undefined
-
-  if (route.name === 'agent' && transportRef.current) {
-    const row = rows.find((r) => r.ptyId === route.pty)
-    body = (
-      <Detail
-        transport={transportRef.current}
-        pty={route.pty}
-        row={row}
-        onBack={() => setRoute({ name: 'home' })}
-      />
-    )
-  } else if (historyRow) {
-    body = (
-      <HistoryView row={historyRow} onBack={() => setRoute({ name: 'home' })} onResume={() => resume(historyRow)} />
-    )
-  } else if (projectFor) {
-    body = (
-      <ProjectDetail
-        project={projectFor}
-        rows={agentsForProject(projectFor, rows, projects)}
-        onBack={() => setRoute({ name: 'home' })}
-        onOpen={openAgent}
-        onNew={() => setNewAgent({ open: true, projectId: projectFor.id })}
-      />
-    )
-  } else {
-    body = (
-      <div className="app">
-        <header className="deck">
-        <div className="deck-top">
-          <div className="mark">
-            <span className={`mark-dot ${up ? 'live' : 'down'}`} />
-            Canopy<span className="mark-thin">Remote</span>
-          </div>
-          <span className={`conn ${up ? 'on' : ''}`}>{up ? 'Connected' : 'Connecting…'}</span>
-          <button className="iconbtn" onClick={onLogout} aria-label="Sign out">
-            <IconPower s={17} />
-          </button>
-        </div>
-        <div className="gauges">
-          <Gauge n={live.length} label="live" tone="ok" />
-          <Gauge n={needs} label="needs you" tone="warn" />
-          <Gauge n={idle} label="idle" />
-        </div>
-      </header>
-
-      <div className="segmented" role="tablist">
-        <button
-          role="tab"
-          className={tab === 'agents' ? 'on' : ''}
-          onClick={() => setTab('agents')}
-        >
-          <IconBolt s={14} /> Agents<span className="seg-n">{agents.length}</span>
-        </button>
-        <button
-          role="tab"
-          className={tab === 'projects' ? 'on' : ''}
-          onClick={() => setTab('projects')}
-        >
-          <IconFolder s={14} /> Projects<span className="seg-n">{projects.length}</span>
-        </button>
-      </div>
-
-      {tab === 'agents' ? (
-        rows.length === 0 ? (
-          <div className="empty big">
-            <div className="empty-mark">
-              <IconTerminal s={30} />
-            </div>
-            No agents running. Start one below.
-          </div>
-        ) : (
-          <>
-            {live.length > 0 && (
-              <section className="block">
-                <SubHead icon={<IconBolt s={13} />} title="Active now" n={live.length} />
-                <div className="list">
-                  {live.map((r, i) => (
-                    <AgentCard key={r.key} row={r} index={i} onOpen={() => openAgent(r)} />
-                  ))}
-                </div>
-              </section>
-            )}
-            {terminals.length > 0 && (
-              <section className="block">
-                <SubHead icon={<IconTerminal s={13} />} title="Terminals" n={terminals.length} />
-                <div className="list">
-                  {terminals.map((r, i) => (
-                    <AgentCard
-                      key={r.key}
-                      row={r}
-                      index={live.length + i}
-                      onOpen={() => openAgent(r)}
-                    />
-                  ))}
-                </div>
-              </section>
-            )}
-            {offline.length > 0 && (
-              <section className="block">
-                <SubHead icon={<IconResume s={13} />} title="Recent" n={offline.length} dim />
-                <div className="list">
-                  {offline.map((r, i) => (
-                    <AgentCard
-                      key={r.key}
-                      row={r}
-                      index={live.length + terminals.length + i}
-                      onOpen={() => openAgent(r)}
-                    />
-                  ))}
-                </div>
-              </section>
-            )}
-          </>
-        )
-      ) : (
-        <section className="block">
-          {projects.length === 0 ? (
-            <div className="empty">No projects open in Canopy.</div>
-          ) : (
-            <div className="list">
-              {projects.map((p, i) => (
-                <ProjectCard
-                  key={p.id}
-                  project={p}
-                  agents={agentsForProject(p, rows, projects)}
-                  index={i}
-                  onOpen={() => setRoute({ name: 'project', id: p.id })}
-                />
-              ))}
-            </div>
-          )}
-        </section>
-      )}
-
-        {tab === 'agents' && (
-          <button className="fab" onClick={() => setNewAgent({ open: true })}>
-            <IconPlus s={19} /> New agent
-          </button>
-        )}
-      </div>
-    )
+  const shellProps = {
+    ctx,
+    up,
+    panelId,
+    onPanel: setPanelId,
+    tabs,
+    activeKey,
+    onSelectTab: setActiveKey,
+    onCloseTab: closeTab,
+    projects,
+    onProject: setProjectId,
+    onNewAgent: () => setNewAgent(true),
+    onLogout,
   }
 
   return (
     <>
-      {body}
+      {wide ? <WideShell {...shellProps} /> : <CompactShell {...shellProps} />}
       {notice && (
         <div className="notice" onClick={() => setNotice(null)}>
           {notice} <span className="notice-x">✕</span>
         </div>
       )}
-      {newAgent.open && (
+      {newAgent && (
         <NewAgentSheet
           projects={projects}
-          initialProjectId={newAgent.projectId}
+          initialProjectId={project?.id}
           onLaunch={spawn}
-          onClose={() => setNewAgent({ open: false })}
+          onClose={() => setNewAgent(false)}
         />
       )}
     </>
-  )
-}
-
-const CLIS = ['claude', 'codex', 'gemini', 'aider', 'opencode', 'amp', 'omp']
-
-/** Pick a project → component (cwd) → agent CLI, and launch a fresh terminal. */
-function NewAgentSheet({
-  projects,
-  initialProjectId,
-  onLaunch,
-  onClose,
-}: {
-  projects: Project[]
-  initialProjectId?: string
-  onLaunch: (cwd: string, command?: string) => void
-  onClose: () => void
-}) {
-  const [projectId, setProjectId] = useState(initialProjectId ?? projects[0]?.id ?? '')
-  const project = projects.find((p) => p.id === projectId) ?? projects[0]
-  const comps = project?.components ?? []
-  const [path, setPath] = useState(comps[0]?.path ?? '')
-  const [cli, setCli] = useState('claude')
-
-  const launch = () => {
-    const cwd = path || comps[0]?.path
-    if (!cwd) return
-    onLaunch(cwd, cli === 'shell' ? undefined : cli)
-  }
-
-  return (
-    <div className="sheet-backdrop" onClick={onClose}>
-      <div className="sheet" onClick={(e) => e.stopPropagation()}>
-        <div className="sheet-grip" />
-        <h3>
-          <IconBolt s={17} /> New agent
-        </h3>
-
-        <label>Project</label>
-        <div className="field">
-          <IconFolder s={15} />
-          <select
-            value={projectId}
-            onChange={(e) => {
-              setProjectId(e.target.value)
-              const p = projects.find((x) => x.id === e.target.value)
-              setPath(p?.components?.[0]?.path ?? '')
-            }}
-          >
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {comps.length > 1 && (
-          <>
-            <label>Folder</label>
-            <div className="field">
-              <IconTerminal s={15} />
-              <select value={path} onChange={(e) => setPath(e.target.value)}>
-                {comps.map((c) => (
-                  <option key={c.path} value={c.path}>
-                    {c.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </>
-        )}
-
-        <label>Agent</label>
-        <div className="cli-grid">
-          {[...CLIS, 'shell'].map((c) => {
-            const m = agentMeta(c)
-            return (
-              <button
-                key={c}
-                className={`cli ${cli === c ? 'on' : ''}`}
-                style={{ ['--hue' as string]: m.hue }}
-                onClick={() => setCli(c)}
-              >
-                <AgentBadge agent={c} sz={26} />
-                <span>{m.label}</span>
-              </button>
-            )
-          })}
-        </div>
-
-        <div className="sheet-actions">
-          <button className="ghost" onClick={onClose}>
-            Cancel
-          </button>
-          <button className="primary" onClick={launch} disabled={!path}>
-            Launch {agentMeta(cli).label}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function CrumbBar({
-  onBack,
-  badge,
-  name,
-  sub,
-  trailing,
-}: {
-  onBack: () => void
-  badge?: React.ReactNode
-  name: string
-  sub?: React.ReactNode
-  trailing?: React.ReactNode
-}) {
-  return (
-    <header className="bar">
-      <button className="iconbtn back" onClick={onBack} aria-label="Back">
-        <IconBack s={19} />
-      </button>
-      {badge}
-      <div className="crumb">
-        <span className="crumb-name">{name}</span>
-        {sub && <span className="crumb-sub">{sub}</span>}
-      </div>
-      {trailing}
-    </header>
-  )
-}
-
-function ProjectDetail({
-  project,
-  rows,
-  onBack,
-  onOpen,
-  onNew,
-}: {
-  project: Project
-  rows: AgentRow[]
-  onBack: () => void
-  onOpen: (row: AgentRow) => void
-  onNew: () => void
-}) {
-  const terminals = rows.filter((r) => r.terminal)
-  const agents = rows.filter((r) => !r.terminal)
-  const live = agents.filter((r) => r.live)
-  const offline = agents.filter((r) => !r.live)
-  return (
-    <div className="app">
-      <CrumbBar
-        onBack={onBack}
-        name={project.name}
-        sub={
-          <>
-            {live.length} live · {agents.length} agent{agents.length === 1 ? '' : 's'}
-            {terminals.length > 0 && ` · ${terminals.length} terminal${terminals.length === 1 ? '' : 's'}`}
-          </>
-        }
-      />
-
-      <div className="chips indent">
-        {(project.components ?? []).map((c, j) => (
-          <span className="chip" key={j}>
-            <IconFolder s={12} /> {c.label}
-          </span>
-        ))}
-      </div>
-
-      {rows.length === 0 && (
-        <div className="empty big">
-          <div className="empty-mark">
-            <IconTerminal s={30} />
-          </div>
-          No agents in this project yet.
-        </div>
-      )}
-
-      {live.length > 0 && (
-        <section className="block">
-          <SubHead icon={<IconBolt s={13} />} title="Active" n={live.length} />
-          <div className="list">
-            {live.map((r, i) => (
-              <AgentCard key={r.key} row={r} index={i} onOpen={() => onOpen(r)} />
-            ))}
-          </div>
-        </section>
-      )}
-
-      {terminals.length > 0 && (
-        <section className="block">
-          <SubHead icon={<IconTerminal s={13} />} title="Terminals" n={terminals.length} />
-          <div className="list">
-            {terminals.map((r, i) => (
-              <AgentCard key={r.key} row={r} index={live.length + i} onOpen={() => onOpen(r)} />
-            ))}
-          </div>
-        </section>
-      )}
-
-      {offline.length > 0 && (
-        <section className="block">
-          <SubHead icon={<IconResume s={13} />} title="Recent" n={offline.length} dim />
-          <div className="list">
-            {offline.map((r, i) => (
-              <AgentCard
-                key={r.key}
-                row={r}
-                index={live.length + terminals.length + i}
-                onOpen={() => onOpen(r)}
-              />
-            ))}
-          </div>
-        </section>
-      )}
-
-      <button className="fab" onClick={onNew}>
-        <IconPlus s={19} /> New agent
-      </button>
-    </div>
-  )
-}
-
-/** An offline agent's saved history, with one-tap resume (spawns its CLI's
- *  resume command in this Canopy — so a session from any instance can be
- *  revived and driven right here). */
-function HistoryView({
-  row,
-  onBack,
-  onResume,
-}: {
-  row: AgentRow
-  onBack: () => void
-  onResume: () => void
-}) {
-  const m = agentMeta(row.agent)
-  const prompts = (row.prompts ?? []).filter((p) => p.trim() && !p.trim().startsWith('<'))
-  return (
-    <div className="app">
-      <CrumbBar
-        onBack={onBack}
-        badge={<AgentBadge agent={row.agent} sz={30} />}
-        name={m.label}
-        sub={
-          row.branch ? (
-            <span className="crumb-sub mono">
-              <IconBranch s={12} /> {row.branch}
-            </span>
-          ) : undefined
-        }
-        trailing={
-          row.resumeCwd ? (
-            <button className="primary sm" onClick={onResume}>
-              <IconResume s={14} /> Resume
-            </button>
-          ) : undefined
-        }
-      />
-
-      <section className="block">
-        <SubHead icon={<IconTerminal s={13} />} title="Conversation" n={prompts.length} />
-        {prompts.length === 0 ? (
-          <div className="empty">No saved prompts for this session.</div>
-        ) : (
-          <div className="history">
-            {prompts.map((p, i) => (
-              <div className="hprompt" key={i}>
-                {p}
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
-
-      {row.files && row.files.length > 0 && (
-        <section className="block">
-          <SubHead icon={<IconFile s={13} />} title="Files touched" n={row.files.length} />
-          <div className="hfiles">
-            {row.files.map((f, i) => (
-              <span className="hfile" key={i}>
-                <IconFile s={13} />
-                <code className="mono">{f}</code>
-              </span>
-            ))}
-          </div>
-        </section>
-      )}
-    </div>
-  )
-}
-
-const KEYS: [string, string][] = [
-  ['return', '\r'],
-  ['esc', '\x1b'],
-  ['tab', '\t'],
-  ['^C', '\x03'],
-  ['↑', '\x1b[A'],
-  ['↓', '\x1b[B'],
-]
-
-function Detail({
-  transport,
-  pty,
-  row,
-  onBack,
-}: {
-  transport: Transport
-  pty: number
-  row?: AgentRow
-  onBack: () => void
-}) {
-  const [text, setText] = useState('')
-  const m = agentMeta(row?.agent ?? 'shell')
-  const send = () => {
-    if (!text) return
-    // Enter has to be its own write, a beat after the text: TUIs like Codex read
-    // a burst ending in \r as a paste and drop a literal newline in the composer
-    // instead of submitting, so "text\r" in one write left the message sitting
-    // there waiting on a second Enter. Same two-write pattern (and delay) the
-    // desktop uses to message an agent.
-    transport.writePty(pty, text)
-    setTimeout(() => transport.writePty(pty, '\r'), 350)
-    setText('')
-  }
-  return (
-    <div className="detail">
-      <header className="bar detail-bar">
-        <button className="iconbtn back" onClick={onBack} aria-label="Back">
-          <IconBack s={19} />
-        </button>
-        <AgentBadge agent={row?.agent ?? 'shell'} sz={30} />
-        <div className="detail-title">
-          <span className="detail-name">{row?.terminal ? 'Terminal' : m.label}</span>
-          <span className="detail-sub">
-            {/* A terminal has no agent state to report — what it's running and
-             *  where is the useful line. */}
-            {!row?.terminal && <span className={`dot ${row?.state ?? 'idle'}`} />}
-            {row?.terminal ? (
-              <span className="mono ell">{row.title || basename(row.cwd) || 'shell'}</span>
-            ) : row?.branch ? (
-              <span className="mono ell">
-                <IconBranch s={11} /> {row.branch}
-              </span>
-            ) : (
-              <span>{row?.state ?? 'idle'}</span>
-            )}
-          </span>
-        </div>
-        <button
-          className="danger sm"
-          onClick={() => {
-            // Terminate the agent's PTY, then return to the list — the session
-            // drops off "Active" as its pty:exit propagates. Without the
-            // navigation the kill fired silently and the button read as dead.
-            transport.killPty(pty)
-            onBack()
-          }}
-        >
-          <IconStop s={13} /> Stop
-        </button>
-      </header>
-
-      <AgentTerminal transport={transport} pty={pty} />
-
-      <div className="keys">
-        {KEYS.map(([label, data]) => (
-          <button key={label} onClick={() => transport.writePty(pty, data)}>
-            {label}
-          </button>
-        ))}
-      </div>
-
-      <form
-        className="composer"
-        autoComplete="off"
-        onSubmit={(e) => {
-          e.preventDefault()
-          send()
-        }}
-      >
-        {/* A bare text input in a form reads to Chrome as a fillable field, so
-         *  Android floated its passwords/cards/addresses strip over the
-         *  composer. Naming it, opting out of autofill and declaring it plain
-         *  text takes the field out of those heuristics. */}
-        <input
-          type="text"
-          name="canopy-message"
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder={row?.terminal ? 'Run a command…' : 'Message the agent…'}
-          autoComplete="off"
-          autoCapitalize="off"
-          autoCorrect="off"
-          spellCheck={false}
-          enterKeyHint="send"
-          data-form-type="other"
-          data-lpignore="true"
-          data-1p-ignore
-        />
-        <button className="primary send" type="submit" aria-label="Send">
-          <IconSend s={18} />
-        </button>
-      </form>
-    </div>
   )
 }

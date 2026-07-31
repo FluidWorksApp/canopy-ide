@@ -10,6 +10,7 @@ import type { SpotRow } from "../spotSources";
 import {
   AgentIcon,
   AgentsIcon,
+  ClipboardIcon,
   CommitIcon,
   DiffIcon,
   DocumentIcon,
@@ -54,6 +55,7 @@ export const SPOT_ICONS: Record<string, () => ReactNode> = {
   collab: () => <TeamIcon />,
   "shared-project": () => <TeamIcon />,
   agent: () => <AgentsIcon size={14} />,
+  clip: () => <ClipboardIcon />,
 };
 
 /** Parametric kinds — `cli:claude`, `agent:codex`, `tracker:linear` — resolved

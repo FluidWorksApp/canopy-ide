@@ -13,6 +13,8 @@ import type { Notify } from "../types";
 import { useBranchSwitch } from "../useBranchSwitch";
 import { splitPatch } from "./PrView";
 import { STATE_META, lastHumanPrompt } from "./AgentsPanel";
+import { ashFor } from "../ash";
+import { Ash } from "./Ash";
 import { AgentRuntime } from "./AgentRuntime";
 import { effectiveState } from "../agentState";
 import { AgentIcon, GitBranchIcon, RestartIcon } from "./icons";
@@ -659,11 +661,8 @@ export function AgentWorkspaceView({
     onNotice,
   ]);
 
-  const st = ws?.state
-    ? STATE_META[ws.state]
-    : digest?.state
-      ? STATE_META[digest.state]
-      : undefined;
+  const lifecycle = ws?.state ?? digest?.state;
+  const st = lifecycle ? STATE_META[lifecycle] : undefined;
   const task = lastHumanPrompt(digest?.prompts);
   // The working-time clock, preferring the freshly-joined workspace (re-read on
   // every poll) over the digest the panel handed us when the tab opened.
@@ -1007,9 +1006,19 @@ export function AgentWorkspaceView({
           and the scoped diff below carry the real numbers. */}
       <div className="ticket-view-head aw-banner">
         <div className="ticket-view-title">
-          {st && (
-            <span className={`agent-state-dot ${st.cls}`} title={st.label} />
-          )}
+          {st &&
+            (() => {
+              const look = ashFor(lifecycle);
+              return (
+                <Ash
+                  state={look.state}
+                  tone={look.tone}
+                  size={18}
+                  className="agent-state-ash"
+                  title={st.label}
+                />
+              );
+            })()}
           <AgentIcon id={agent} size={16} className="ticket-view-mark" />
           <span className="aw-agent">{agent}</span>
           {ws?.branch && (

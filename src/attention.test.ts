@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { ASH_STATES, ashGlyph, ashMayInterrupt } from "./ash";
 import {
+  ashStateFor,
   attentionItems,
   badgeFor,
   clearAttentionHistory,
@@ -128,17 +130,90 @@ describe("routing to the OS", () => {
       true,
     );
   });
+
+  // The state clause IS ashMayInterrupt — not a second predicate that happens
+  // to agree with it today. For the sources with no say of their own, the two
+  // must be the same function.
+  it("is exactly ashMayInterrupt for a source that adds nothing", () => {
+    for (const source of ["agent", "app", "project"] as const) {
+      for (const kind of ["fyi", "question"] as const) {
+        for (const tone of ["info", "success", "warn", "error"] as const) {
+          const x = item({ source, kind, tone });
+          expect(shouldReachOS(x, false), `${source}/${kind}/${tone}`).toBe(
+            ashMayInterrupt(ashStateFor(x)),
+          );
+        }
+      }
+    }
+  });
+});
+
+describe("the face an item wears", () => {
+  it("gives an outstanding question `needs`, and an error one `blocked`", () => {
+    expect(ashStateFor(item({ kind: "question" }))).toBe("needs");
+    expect(ashStateFor(item({ kind: "question", tone: "error" }))).toBe(
+      "blocked",
+    );
+  });
+
+  it("separates a question you answered from one that withdrew itself", () => {
+    // "You never answered this" and "it sorted itself out" read very
+    // differently a day later — the distinction `resolution` exists to record.
+    const q = { kind: "question" as const, resolvedAt: 5 };
+    expect(ashStateFor(item({ ...q, resolution: "answered" }))).toBe("done");
+    expect(ashStateFor(item({ ...q, resolution: "withdrawn" }))).toBe("sleeping");
+  });
+
+  it("maps FYI tones onto faces", () => {
+    expect(ashStateFor(item({ tone: "info" }))).toBe("done");
+    expect(ashStateFor(item({ tone: "success" }))).toBe("done");
+    expect(ashStateFor(item({ tone: "error" }))).toBe("blocked");
+  });
+
+  // main maps canopy_notify's warn level to `needs`, and `needs` is one of the
+  // two states allowed to interrupt. `explaining` reads better in the abstract
+  // but would silently stop warns raising a banner.
+  it("keeps a warn FYI on a face that may interrupt", () => {
+    expect(ashStateFor(item({ tone: "warn" }))).toBe("needs");
+    expect(ashMayInterrupt(ashStateFor(item({ tone: "warn" })))).toBe(true);
+  });
+
+  it("only ever asks Ash for a state Ash knows", () => {
+    const every: AttentionItem[] = [
+      item({ kind: "question" }),
+      item({ kind: "question", tone: "error" }),
+      item({ kind: "question", resolvedAt: 1, resolution: "answered" }),
+      item({ kind: "question", resolvedAt: 1, resolution: "withdrawn" }),
+      ...(["info", "success", "warn", "error"] as const).map((tone) =>
+        item({ tone }),
+      ),
+    ];
+    for (const x of every) expect(ASH_STATES).toContain(ashStateFor(x));
+  });
 });
 
 describe("osPayload", () => {
-  it("titles from the source and names the project", () => {
+  it("titles from the source, names the project, and wears the glyph", () => {
     expect(osPayload(item({ source: "task", projectName: "api" })).title).toBe(
-      "Canopy — Task · api",
+      `Canopy — Task · api ${ashGlyph("done")}`,
     );
   });
 
   it("falls back to the bare source title with no project", () => {
-    expect(osPayload(item({ source: "team" })).title).toBe("Canopy — Team");
+    expect(osPayload(item({ source: "team" })).title).toBe(
+      `Canopy — Team ${ashGlyph("done")}`,
+    );
+  });
+
+  it("carries the glyph on every banner, not just the two that had it", () => {
+    // Was hand-written at two call sites; a teammate's message and an agent's
+    // question never got one.
+    expect(osPayload(item({ source: "team", kind: "question" })).title).toContain(
+      ashGlyph("needs"),
+    );
+    expect(osPayload(item({ source: "agent", tone: "error" })).title).toContain(
+      ashGlyph("blocked"),
+    );
   });
 
   it("folds the body in", () => {

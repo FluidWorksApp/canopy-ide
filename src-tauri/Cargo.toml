@@ -189,7 +189,11 @@ windows-core = "0.61"
 objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSValue", "NSGeometry", "NSDictionary", "NSString", "NSError", "NSData"] }
-objc2-app-kit = { version = "0.3", features = ["NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphics", "NSColor", "NSResponder", "NSView"] }
+# NSPasteboard is clipboard.rs's whole native surface — a changeCount poll and
+# one string read per copy. A feature on the crate already here rather than a
+# clipboard dependency: tauri-plugin-clipboard-manager can only read on demand
+# from the webview's ACL, which is exactly what a history cannot be built on.
+objc2-app-kit = { version = "0.3", features = ["NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphics", "NSColor", "NSResponder", "NSView", "NSPasteboard"] }
 objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKSnapshotConfiguration", "block2"] }
 # Click-aware notifications (notify.rs). The same crate tauri-plugin-notification
 # already pulls in through notify-rust, so this unifies rather than adding a

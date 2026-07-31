@@ -48,6 +48,7 @@ import { runUiOp } from "./agentOps";
 import { getSettings, THEME_CHANGE_EVENT } from "./settings";
 import { useTabDrag } from "./tabDrag";
 import * as prWatch from "./prWatchStore";
+import * as clipboardStore from "./clipboardStore";
 import { CollabManager, safeName } from "./collab";
 import { ProjectView } from "./components/ProjectView";
 import { TitleBar } from "./components/TitleBar";
@@ -1333,6 +1334,15 @@ export default function App() {
   useEffect(() => {
     prWatch.setPaths(watchedPaths);
   }, [watchedPaths]);
+
+  // The clipboard watcher's rules live in Settings and its project tag is
+  // whichever project is in front. Re-declared on both — the store drops an
+  // unchanged declaration before it reaches IPC, so this is free while nothing
+  // moves, and off by default means the common case declares "don't watch" once
+  // and never opens a store at all.
+  useEffect(() => {
+    clipboardStore.sync(ws.activeId ?? "");
+  }, [ws.activeId]);
 
   // SpotSearch's index, kept up to date and pruned while the app runs rather
   // than only when someone opens ⌘K (see spotIndexJob.ts). Every project the

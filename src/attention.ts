@@ -33,6 +33,7 @@
 // is lost, is about how you work rather than any one project, and must not put
 // a write on the path of anything real.
 
+import { ashGlyph, ashMayInterrupt, type AshState } from "./ash";
 import type { DeepLink } from "./deepLinks";
 import type { NoticeKind } from "./types";
 
@@ -137,6 +138,38 @@ export function toastMs(item: AttentionItem): number | null {
   return urgencyOf(item) === "high" ? null : 4500;
 }
 
+/** The face this item wears (ash.ts). One mapping, so the notification list,
+ *  the toast and the native title cannot drift into three vocabularies.
+ *
+ *  A warn FYI gets `needs`, following what `main` already does for
+ *  `canopy_notify`'s warn level (`ashGlyph(level === "error" ? "blocked" :
+ *  "needs")`). `explaining` reads better in the abstract — a warning is not
+ *  waiting on anyone — but `needs` is the only one of the two that may
+ *  interrupt, and a warn that stopped raising a banner would be a silent
+ *  regression. Worth revisiting together; it is one line here.
+ *
+ *  A withdrawn question gets `sleeping` rather than `done` — "it sorted itself
+ *  out" and "you dealt with it" are the distinction `resolution` exists to
+ *  record, and the list already says "No longer needed" underneath. */
+export function ashStateFor(item: AttentionItem): AshState {
+  if (item.kind === "question")
+    return item.resolvedAt == null
+      ? item.tone === "error"
+        ? "blocked"
+        : "needs"
+      : item.resolution === "withdrawn"
+        ? "sleeping"
+        : "done";
+  switch (item.tone) {
+    case "error":
+      return "blocked";
+    case "warn":
+      return "needs";
+    default:
+      return "done";
+  }
+}
+
 /** Whether this item should leave the app for the OS.
  *
  *  One rule in one place, replacing `if (document.hasFocus()) return;` copied
@@ -144,19 +177,20 @@ export function toastMs(item: AttentionItem): number | null {
  *  rather than read here so the rule stays a pure function and the test suite
  *  can state "not focused" without a DOM.
  *
- *  Three ways through, and the last is the only one that reads the scale:
+ *  The state clause is `ashMayInterrupt` — the design's "only these may pull
+ *  the user out of what they are doing" rule, called rather than restated, so
+ *  there is one predicate and not two that agree until someone edits one.
  *
- *  - a question, by definition: something is waiting on the user.
- *  - `team` or `task`, because the premise of both is that you are not
- *    watching. A teammate's file lands as "success" and a micro-task's whole
- *    promise is that you tabbed away — the tone describes the event, not how
- *    much it matters that you never saw it.
- *  - anything above low. `warn` earns a banner; routine chatter does not. */
+ *  It is OR'd with a source clause rather than replacing it, because
+ *  `ashMayInterrupt` reads the face and this also has to read where the item
+ *  came from. `team` and `task` reach the OS at any tone: a teammate's file
+ *  lands as "success" and a micro-task's whole promise is that you tabbed away,
+ *  so both wear `done` — and on `main` today both raise a banner. Dropping the
+ *  source clause would silently stop shipping those. */
 export function shouldReachOS(item: AttentionItem, focused: boolean): boolean {
   if (focused) return false;
-  if (item.kind === "question") return true;
-  if (item.source === "team" || item.source === "task") return true;
-  return urgencyOf(item) !== "low";
+  if (ashMayInterrupt(ashStateFor(item))) return true;
+  return item.source === "team" || item.source === "task";
 }
 
 /** The native banner's title. Was hand-written per call site — `"Canopy — Team"`,
@@ -172,11 +206,18 @@ const SOURCE_TITLE: Record<AttentionSource, string> = {
 /** Title and body for the OS, project named where there is one. A banner read
  *  minutes later from another Space has no context but the two strings it
  *  carries, so the project goes in rather than being left for the user to
- *  guess at. */
+ *  guess at.
+ *
+ *  The `ashGlyph` prefix was two hand-written call sites on `main`
+ *  (`Canopy — Task ${ashGlyph(...)}`). Deriving it here instead means every
+ *  banner wears the face, including the ones those two sites never covered —
+ *  a teammate's message, a file transfer, an agent's question — rather than
+ *  the glyph being something each new caller has to remember. */
 export function osPayload(item: AttentionItem): { title: string; body: string } {
   const base = SOURCE_TITLE[item.source];
+  const named = item.projectName ? `${base} · ${item.projectName}` : base;
   return {
-    title: item.projectName ? `${base} · ${item.projectName}` : base,
+    title: `${named} ${ashGlyph(ashStateFor(item))}`,
     body: item.body ? `${item.title} — ${item.body}` : item.title,
   };
 }

@@ -1,6 +1,7 @@
 import { memo } from "react";
 import type { UpdateAvailability } from "../updater";
-import type { AttentionItem } from "../attention";
+import { ashStateFor, type AttentionItem } from "../attention";
+import { Ash } from "./Ash";
 import { CloseIcon } from "./icons";
 import { Button } from "./ui";
 
@@ -85,6 +86,10 @@ function NoticeToastImpl({ item, onDismiss, onFollow }: NoticeToastProps) {
       onClick={clickable ? onFollow : onDismiss}
       title={clickable ? "Open" : "dismiss"}
     >
+      {/* Compact tier, for the same reason as the list rows: below 25 the
+          ladder turns expression off and a question would read as a tinted
+          blob rather than a face. */}
+      <Ash state={ashStateFor(item)} size={26} className="notice-ash" />
       <div className="notice-text">
         {item.projectName && (
           <span className="notice-project">{item.projectName}</span>

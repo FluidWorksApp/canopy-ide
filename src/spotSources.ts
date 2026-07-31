@@ -20,6 +20,7 @@ import { getSnapshot as prSnapshot } from "./prWatchStore";
 import { toPrInfo } from "./prInbox";
 import { getSettings } from "./settings";
 import { heldBadge, heldBranches } from "./branchSwitch";
+import { getSnapshot as clipboardSnapshot } from "./clipboardStore";
 
 /** What Enter does on a row — ProjectView owns the dispatch, this names it. */
 export type SpotAction =
@@ -62,6 +63,13 @@ export type SpotAction =
    *  module-level closure can't — only ProjectView's dispatch is inside the
    *  provider. */
   | { type: "switch-branch"; repo: string; branch: string }
+  /** Put a clip back: onto the system clipboard always, and straight into the
+   *  focused terminal when there is one. Named rather than `custom` for the
+   *  same reason as the two above — pasting has to reach the active tab's
+   *  handle, which lives in ProjectView and not in a module-level closure. The
+   *  row carries the id, never the text: the palette holds previews, and the
+   *  clip is fetched whole only when this runs. */
+  | { type: "paste-clip"; clipId: number }
   /** The escape hatch for registered sources: the row does its own opening.
    *  Still bound by the rule above — `run` must land the user on something
    *  native, not open a browser and call it a result. */
@@ -271,6 +279,60 @@ export function researchRows(query: string, projectId: string): SpotRow[] {
       },
     })),
   );
+}
+
+/** What you copied. Instant, from the store clipboardStore keeps in sync — the
+ *  point of the feature is that a clip is there the moment you reach for it,
+ *  and a debounced round trip per keystroke would not be that.
+ *
+ *  Empty query shows the most recent, which is the whole recall story: ⌘K, look,
+ *  Enter. Clips from other projects are kept but ranked behind this one's — the
+ *  history is machine-wide (every ~/.canopy store except research is), and a
+ *  snippet you copied in the repo next door is still yours. */
+export function clipRows(query: string, ctx: SpotContext): SpotRow[] {
+  const clips = clipboardSnapshot();
+  const elsewhere = (c: ipc.Clip) => !!c.project && c.project !== ctx.projectId;
+  // Same project first with nothing typed; once something is typed the ranking
+  // is on the text, where where-you-copied-it matters much less than what it
+  // says. The store hands them over newest-first, so this is the only ordering
+  // decision made here.
+  const ordered = query.trim()
+    ? clips
+    : [...clips.filter((c) => !elsewhere(c)), ...clips.filter(elsewhere)];
+  return ranked(
+    query,
+    ordered.map((c) => ({
+      hay: c.preview,
+      row: {
+        id: `clip:${c.id}`,
+        group: "Clipboard",
+        kind: "clip",
+        // A clip whose preview is empty is whitespace — still worth offering
+        // back, still needs something on the row to be a row at all.
+        title: c.preview || `${c.chars.toLocaleString()} characters`,
+        detail: [
+          relativeTime(c.ts),
+          c.lines > 1 ? `${c.lines} lines` : null,
+          c.chars > 280 ? `${c.chars.toLocaleString()} chars` : null,
+          elsewhere(c) ? "another project" : null,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+        score: 0,
+        action: { type: "paste-clip", clipId: c.id } as SpotAction,
+      },
+    })),
+  );
+}
+
+/** "just now" / "14m" / "3h" / "2d". A clipboard row's whole job is telling you
+ *  which of three similar-looking snippets is the one you just copied. */
+function relativeTime(ts: number): string {
+  const secs = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+  if (secs < 45) return "just now";
+  if (secs < 3600) return `${Math.round(secs / 60)}m ago`;
+  if (secs < 86_400) return `${Math.round(secs / 3600)}h ago`;
+  return `${Math.round(secs / 86_400)}d ago`;
 }
 
 export function tabRows(query: string, ctx: SpotContext): SpotRow[] {
@@ -686,6 +748,10 @@ export interface SpotSource {
 const SOURCES: SpotSource[] = [
   { id: "actions", group: "Actions", blurb: "The launcher entries, and running what you typed as a one-shot task.", timing: "instant", rows: (q) => actionRows(q.query, q.ctx, q.attachments) },
   { id: "tabs", group: "Open Tabs", blurb: "Everything open in this project's tab strip.", timing: "instant", rows: (q) => tabRows(q.query, q.ctx) },
+  // High, and above Files on purpose: what you copied a minute ago is the thing
+  // you are most likely to be reaching for, and it is the one row here that
+  // disappears if you go and find it somewhere else first.
+  { id: "clipboard", group: "Clipboard", blurb: "What you copied. Off until you switch it on in Settings → Clipboard.", timing: "instant", rows: (q) => clipRows(q.query, q.ctx) },
   { id: "files", group: "Files", blurb: "File names under the project's components.", timing: "deferred", rows: (q) => fileRows(q.query, q.corpus) },
   { id: "symbols", group: "Symbols", blurb: "Workspace symbols from language servers already running — never starts one.", timing: "deferred", minQuery: 2, rows: (q) => codeSymbolRows(q.query, q.roots) },
   { id: "content", group: "In Files", blurb: "Text inside the project's files (ripgrep, live per query).", timing: "deferred", minQuery: 2, rows: (q) => contentRows(q.query, q.roots) },

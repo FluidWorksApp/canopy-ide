@@ -4,6 +4,7 @@ import type { ReviewPayload } from "../ReviewView";
 import type { PreviewAnnotation, PreviewShot } from "../../preview";
 import type { DeviceAnnotation } from "../../android";
 import type { Project } from "../../projects";
+import type { TabStatus } from "../../tabGroups";
 import { getSettings } from "../../settings";
 
 export type SideTab =
@@ -278,6 +279,35 @@ export interface RailChip {
   action?: React.ReactNode;
   onSelect: () => void;
   onClose: () => void;
+}
+
+/** A run of the tab strip. Agents stack by state, documents by kind — a PR has
+ *  no state to settle, but "put the pull requests away" is the same gesture as
+ *  folding Idle, so every run folds the same way. */
+export interface StripGroup {
+  key: string;
+  /** Chip caption, or null for a run with no chip: the flat agent run that
+   *  grouping-off renders, which has nothing to fold it into. */
+  label: string | null;
+  /** Set on the three agent runs — what colours the chip and its dot. */
+  status: TabStatus | null;
+  /** The kind icon a document run wears in place of a status dot. */
+  icon: React.ReactNode;
+  tabs: SubTab[];
+  /** What the strip actually renders. Everything while the stack is open; when
+   *  it's folded, only the tab you are on — folding away the tab whose pane is
+   *  in front would leave you looking at a view with nothing in the strip to
+   *  say what it is. */
+  shown: SubTab[];
+}
+
+/** The two tab-strip settings, in the units the strip wants them in. */
+export function tabPrefs(): { grouped: boolean; idleDelayMs: number } {
+  const s = getSettings();
+  return {
+    grouped: s.groupTabsByStatus,
+    idleDelayMs: Math.max(0, s.idleGroupDelaySeconds) * 1000,
+  };
 }
 
 /** The side panel's three behaviour settings, read together — they're one
