@@ -8137,6 +8137,69 @@ input[type="radio"]:disabled {
   text-align: left;
 }
 
+/* ---------- mascot picker ---------- */
+
+/* Wider cards than the skin grid: a mascot card carries four faces in a row,
+   where a skin card carries three dots. */
+.mascot-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.mascot-card {
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  corner-shape: squircle;
+  cursor: pointer;
+  color: var(--text);
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+
+.mascot-card:hover {
+  border-color: var(--border-strong);
+}
+
+.mascot-card-active {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-raised));
+}
+
+/* The four states that carry meaning, side by side — the card has to show what
+   distinguishes one mascot from another, and that is the range, not the
+   resting face. Sunk panel so the faces sit on a surface rather than floating
+   on the card. */
+.mascot-faces {
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  gap: 4px;
+  padding: 9px 8px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  background: var(--bg-deep);
+}
+
+.mascot-name {
+  margin-top: 9px;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.mascot-note {
+  margin-top: 1px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  text-align: left;
+}
+
 /* Help reuses the old section head style. */
 .set-head {
   font-size: 10px;

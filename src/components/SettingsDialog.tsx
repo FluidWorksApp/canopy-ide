@@ -23,6 +23,8 @@ import {
   type Settings,
   type Theme,
 } from "../settings";
+import { MASCOTS } from "../mascots";
+import { Mascot } from "./Mascot";
 import { Button, Checkbox, Field, Row, Segmented, Select, Stepper, Switch, TextInput } from "./ui";
 import { drawWave } from "../waveStyles";
 import { LINK_CHORD } from "../terminalLinks";
@@ -1016,6 +1018,39 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                         Use skin colour
                       </Button>
                     )}
+                  </div>
+                </Item>
+                <Item
+                  name="Mascot"
+                  tag="Applies immediately"
+                  desc="The face Canopy uses to say what it's doing — in the agents list, notifications, empty screens and crash reports."
+                >
+                  <div className="mascot-grid">
+                    {MASCOTS.map((m) => (
+                      <button
+                        key={m.id}
+                        className={`mascot-card${
+                          s.mascot === m.id ? " mascot-card-active" : ""
+                        }`}
+                        onClick={() => patch({ mascot: m.id })}
+                      >
+                        {/* The mascot itself, drawn by the thing being picked —
+                            a swatch would go stale the moment one is edited.
+                            `as` pins each card to its own rather than to the
+                            chosen one, which is what makes this a comparison.
+                            The four states are the ones that carry meaning:
+                            waiting on you, blocked, done, asleep. */}
+                        <span className="mascot-faces">
+                          {(["needs", "blocked", "done", "sleeping"] as const).map(
+                            (state) => (
+                              <Mascot key={state} as={m.id} state={state} size={30} />
+                            ),
+                          )}
+                        </span>
+                        <span className="mascot-name">{m.label}</span>
+                        <span className="mascot-note">{m.note}</span>
+                      </button>
+                    ))}
                   </div>
                 </Item>
                 <Item

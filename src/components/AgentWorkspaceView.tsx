@@ -14,7 +14,7 @@ import { useBranchSwitch } from "../useBranchSwitch";
 import { splitPatch } from "./PrView";
 import { STATE_META, lastHumanPrompt } from "./AgentsPanel";
 import { ashFor } from "../ash";
-import { Ash } from "./Ash";
+import { Mascot } from "./Mascot";
 import { AgentRuntime } from "./AgentRuntime";
 import { effectiveState } from "../agentState";
 import { AgentIcon, GitBranchIcon, RestartIcon } from "./icons";
@@ -1010,7 +1010,7 @@ export function AgentWorkspaceView({
             (() => {
               const look = ashFor(lifecycle);
               return (
-                <Ash
+                <Mascot
                   state={look.state}
                   tone={look.tone}
                   size={18}

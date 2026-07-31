@@ -23,7 +23,7 @@ import {
   withLoadNote,
   type LoadScope,
 } from "../resourceLoad";
-import { Ash } from "./Ash";
+import { Mascot } from "./Mascot";
 import { StatsPanel } from "./StatsPanel";
 import { CleanupDialog } from "./CleanupDialog";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
@@ -710,7 +710,7 @@ export const StatusBar = memo(function StatusBar({
           // count is the only part of the rest anybody reads at a glance.
           title={`running agents: ${agents.map((a) => a.name).join(", ")}`}
         >
-          <Ash state="thinking" size={16} className="status-agent-ash" />
+          <Mascot state="thinking" size={16} className="status-agent-ash" />
           {agents
             .slice(0, AGENTS_LISTED)
             .map((a) => a.name)

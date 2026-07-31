@@ -26,7 +26,7 @@ import {
   type CrashIssueOutcome,
 } from "../crash";
 import { updateSettings } from "../settings";
-import { Ash } from "./Ash";
+import { Mascot } from "./Mascot";
 import { Button } from "./ui";
 
 interface Props {
@@ -295,7 +295,7 @@ export class ErrorBoundary extends Component<Props, State> {
     if (!error) return this.props.children;
     return (
       <div className="crash-fallback">
-        <Ash state="blocked" size={56} className="crash-ash" />
+        <Mascot state="blocked" size={56} className="crash-ash" />
         <div className="crash-title">
           {this.props.label ? `${this.props.label} crashed` : "Something crashed"}
         </div>

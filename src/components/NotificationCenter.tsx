@@ -21,7 +21,7 @@ import {
   urgencyOf,
   type AttentionItem,
 } from "../attention";
-import { Ash } from "./Ash";
+import { Mascot } from "./Mascot";
 import { timeAgo } from "../dictationHistory";
 import { Button } from "./ui";
 import { useEscape } from "../useEscape";
@@ -76,7 +76,7 @@ function Row({
           16 a question and a blocked item would differ by hue alone. At 26 the
           crosses and the raised brow actually draw, which is the whole reason
           for a face in a list you are scanning. */}
-      <Ash state={ashStateFor(item)} size={26} className="notif-ash" />
+      <Mascot state={ashStateFor(item)} size={26} className="notif-ash" />
       <div className="notif-main">
         <div className="notif-head">
           <span className="notif-source">{SOURCE_LABEL[item.source]}</span>
@@ -158,7 +158,7 @@ function NotificationCenterImpl({
 
         {items.length === 0 && (
           <div className="notif-empty ash-scene">
-            <Ash state="sleeping" size={64} />
+            <Mascot state="sleeping" size={64} />
             <div>Nothing has needed you.</div>
           </div>
         )}

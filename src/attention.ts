@@ -33,7 +33,8 @@
 // is lost, is about how you work rather than any one project, and must not put
 // a write on the path of anything real.
 
-import { ashGlyph, ashMayInterrupt, type AshState } from "./ash";
+import { ashMayInterrupt, type AshState } from "./ash";
+import { mascotGlyph } from "./mascots";
 import type { DeepLink } from "./deepLinks";
 import type { NoticeKind } from "./types";
 
@@ -208,16 +209,17 @@ const SOURCE_TITLE: Record<AttentionSource, string> = {
  *  carries, so the project goes in rather than being left for the user to
  *  guess at.
  *
- *  The `ashGlyph` prefix was two hand-written call sites on `main`
+ *  The glyph prefix was two hand-written call sites on `main`
  *  (`Canopy — Task ${ashGlyph(...)}`). Deriving it here instead means every
  *  banner wears the face, including the ones those two sites never covered —
  *  a teammate's message, a file transfer, an agent's question — rather than
- *  the glyph being something each new caller has to remember. */
+ *  the glyph being something each new caller has to remember. Through the
+ *  registry, so a banner uses the chosen mascot's forms and not Ash's. */
 export function osPayload(item: AttentionItem): { title: string; body: string } {
   const base = SOURCE_TITLE[item.source];
   const named = item.projectName ? `${base} · ${item.projectName}` : base;
   return {
-    title: `${named} ${ashGlyph(ashStateFor(item))}`,
+    title: `${named} ${mascotGlyph(ashStateFor(item))}`,
     body: item.body ? `${item.title} — ${item.body}` : item.title,
   };
 }

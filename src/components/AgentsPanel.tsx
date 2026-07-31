@@ -10,7 +10,7 @@ import { agentDisplayName, type TabName } from "../agentDisplayName";
 import { effectiveState, silenceLabel } from "../agentState";
 import { ashFor } from "../ash";
 import { forgetSessions, markRestored, restorableFrom } from "../restorable";
-import { Ash } from "./Ash";
+import { Mascot } from "./Mascot";
 import { AgentRuntime } from "./AgentRuntime";
 import {
   AgentIcon,
@@ -736,7 +736,7 @@ export function AgentsPanel({
             (() => {
               const look = ashFor(shown);
               return (
-                <Ash
+                <Mascot
                   state={look.state}
                   tone={look.tone}
                   size={16}
@@ -999,7 +999,7 @@ export function AgentsPanel({
               ) : (
                 <>
                   <div className="pending-q-text">
-                    <Ash state="needs" size={16} className="pending-ash" />
+                    <Mascot state="needs" size={16} className="pending-ash" />
                     {item.message}
                   </div>
                   {/* Respond without leaving the panel: Allow types the accept
@@ -1054,7 +1054,7 @@ export function AgentsPanel({
               title="Open the terminal running this agent"
             >
               <div className="pending-q-text">
-                <Ash state="done" size={16} className="pending-ash" />
+                <Mascot state="done" size={16} className="pending-ash" />
                 {item.message}
               </div>
               <div className="pending-footer">
@@ -1253,7 +1253,7 @@ export function AgentsPanel({
 
       {agentSessions.length === 0 ? (
         <div className="tree-empty ash-scene">
-          <Ash state="sleeping" size={64} />
+          <Mascot state="sleeping" size={64} />
           <div>
             No agents running. Launch <code>claude</code>, <code>codex</code>, etc. from the ＋
             menu or by right-clicking a component.
