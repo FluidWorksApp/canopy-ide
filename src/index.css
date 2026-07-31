@@ -4687,39 +4687,12 @@ body.dragging-tab * {
   border-left: 1px solid var(--border);
 }
 
-/* The tabs behind the chip — folded away, or scrolled in underneath it —
-   drawn as the edges of the cards they are. One layer for a single hidden tab,
-   a second once there are more, so the stack's depth is visible before you
-   read the count. */
-.tab-stack-away::before,
-.tab-stack-deep::after {
-  content: "";
-  position: absolute;
-  /* Wide enough that most of the card is hidden behind the pill and only its
-     edge shows: a card peeking out from behind the stack, not a shape parked
-     next to it. The pill segments sit at z-index 1, so these pass underneath. */
-  top: 9px;
-  bottom: 9px;
-  width: 22px;
-  right: 8px;
-  background: var(--bg-raised-opaque, var(--bg-raised));
-  border: 1px solid color-mix(in srgb, var(--text-dim) 45%, transparent);
-  border-radius: 4px;
-}
-
-.tab-stack-deep::after {
-  top: 11px;
-  bottom: 11px;
-  right: 3px;
-  opacity: 0.55;
-}
-
-/* Room reserved for the cards to peek out of, so they land in the chip's own
-   footprint. They used to hang off the face itself and were drawn over the
-   overflow caret beside it and over the group's first tab. */
-.tab-stack-away {
-  padding-right: 17px;
-}
+/* Nothing is drawn outside the chip's own box. The folded stack used to grow
+   card edges from behind the pill to say "there are more behind this" — and at
+   a 9px chip in a 30px bar that never read as paper, only ever as a shape
+   stuck to the pill's right side. It also spilled onto the neighbour, which is
+   how it first went wrong. The count badge and the overflow caret already say
+   the same thing in words, twice. */
 
 .tab-stack-dot {
   width: 6px;

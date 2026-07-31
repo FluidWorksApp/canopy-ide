@@ -356,8 +356,8 @@ function PaneBarImpl({
               {group.label && (
                 <span
                   className={`tab-stack ${away > 0 ? "tab-stack-away" : ""} ${
-                    away > 1 ? "tab-stack-deep" : ""
-                  } ${stripOverflow[group.key]?.stuck ? "tab-stack-stuck" : ""}`}
+                    stripOverflow[group.key]?.stuck ? "tab-stack-stuck" : ""
+                  }`}
                   data-stack-chip=""
                 >
                   <button
