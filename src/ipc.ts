@@ -135,12 +135,15 @@ export interface AgentAction {
     | "open_file"
     | "show_diff"
     | "notify"
-    | "job_done";
+    | "job_done"
+    | "close_session";
   route: string;
   dir?: string;
   name?: string;
   command?: string;
   url?: string;
+  /** The terminal the action is keyed to. For close_session it is the calling
+   *  agent's own — the tool takes no id, so it can name no other session. */
   ptyId?: number;
   path?: string;
   line?: number;
@@ -1560,6 +1563,48 @@ export const gitBranchPatch = (
 export const gitRemoteUrl = (repo: string) =>
   invoke<string>("git_remote_url", { repo });
 
+/** What the branch can do about the branch it was cut from. */
+export type SyncState = "current" | "clean" | "conflict" | "unknown" | "blocked";
+
+export interface SyncProbe {
+  repo: string;
+  branch: string | null;
+  /** The ref measured against, e.g. "origin/main". */
+  base: string;
+  /** Base tip — dismissals key on it, so "not now" lasts until it moves. */
+  base_head: string;
+  behind: number;
+  ahead: number;
+  dirty: number;
+  state: SyncState;
+  /** Paths the merge would conflict in. Found without touching the worktree. */
+  conflicts: string[];
+  /** Uncommitted files the incoming commits also touch — git refuses to start
+   *  a merge over these, so they're worth naming before the user clicks. */
+  overlap: string[];
+  subjects: string[];
+  blocked: string | null;
+  /** Fetch failed: counts are from the last successful fetch, not from now. */
+  fetch_error: string | null;
+}
+
+export interface SyncOutcome {
+  merged: boolean;
+  conflicts: string[];
+  message: string;
+}
+
+/** Non-destructive: dry-runs the merge in the object store, so it is safe to
+ *  call on a timer while the user is mid-edit. `fetch` refreshes the remote. */
+export const gitSyncProbe = (repo: string, fetch: boolean, base?: string | null) =>
+  invoke<SyncProbe>("git_sync_probe", { repo, fetch, base: base ?? null });
+
+/** The only writing call — merges base into the current branch, on a click. */
+export const gitSyncApply = (repo: string, base: string) =>
+  invoke<SyncOutcome>("git_sync_apply", { repo, base });
+
+export const gitSyncAbort = (repo: string) => invoke<string>("git_sync_abort", { repo });
+
 export const gitWorkAudit = (repo: string) =>
   invoke<WorkAudit>("git_work_audit", { repo });
 
@@ -2223,7 +2268,9 @@ export interface DictationStatus {
 export interface DictationProgress {
   /** Which model this event is about. */
   model: string;
-  phase: "download" | "extract" | "load" | "ready" | "error";
+  /** "transcribe" arrives only for recordings long enough to be split into
+   *  chunks; `pct` is the share of chunks already through the model. */
+  phase: "download" | "extract" | "load" | "transcribe" | "ready" | "error";
   pct: number;
   message: string | null;
 }

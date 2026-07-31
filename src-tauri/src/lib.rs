@@ -34,6 +34,7 @@ mod shortcuts;
 mod snapshot;
 mod spot;
 mod stores;
+mod sync;
 mod sysaudio;
 mod tunnel;
 mod vault;
@@ -557,6 +558,9 @@ pub fn run() {
             git::git_fetch,
             git::git_pull,
             git::git_push,
+            sync::git_sync_probe,
+            sync::git_sync_apply,
+            sync::git_sync_abort,
             git::git_clone,
             git::git_diff,
             git::git_log,

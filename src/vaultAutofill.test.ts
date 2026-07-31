@@ -21,6 +21,7 @@ const SCRIPT = readFileSync(
 
 interface Result {
   filled: string[];
+  refused?: string[];
   skipped?: string;
   why?: string;
   form?: boolean;
@@ -564,5 +565,74 @@ describe("more than one form on the page", () => {
     expect(valueOf("#cur")).toBe("hunter2");
     expect(valueOf("#new1")).toBe("");
     expect(valueOf("#dn")).toBe("");
+  });
+});
+
+// A fill that did not take must not be reported as one that did.
+//
+// This is the failure that sends a caller on to submit a blank form: the script
+// finds both fields, writes to both, and the page — still starting up, or
+// owning the field from a framework — puts them straight back to empty. Saying
+// "filled" there blames the page for what the fill did not do.
+describe("reporting what actually stuck", () => {
+  /** A field whose owner rejects writes it did not make, the way a controlled
+   *  component re-renders its own (still empty) state over the top. */
+  const controlled = (selector: string) => {
+    const el = document.querySelector(selector) as HTMLInputElement;
+    el.addEventListener("input", () => {
+      el.value = "";
+    });
+  };
+
+  const runFill = (user = "sam", pass = "hunter2"): Result => {
+    // eslint-disable-next-line no-eval
+    (0, eval)(SCRIPT);
+    return JSON.parse(
+      (
+        window as unknown as {
+          __canopyVaultFill: (u: string, p: string, dry?: boolean) => string;
+        }
+      ).__canopyVaultFill(user, pass),
+    );
+  };
+
+  it("reports a field the page took back as refused, not filled", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="username" autocomplete="username">
+        <input name="password" type="password" autocomplete="current-password">
+      </form>`;
+    controlled('[name="password"]');
+    const out = runFill();
+
+    expect(out.filled).toEqual(["username"]);
+    expect(out.refused).toEqual(["password"]);
+    expect(out.why).toMatch(/took the password field back to empty/);
+  });
+
+  it("says so when the page takes back everything", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="username" autocomplete="username">
+        <input name="password" type="password" autocomplete="current-password">
+      </form>`;
+    controlled('[name="username"]');
+    controlled('[name="password"]');
+    const out = runFill();
+
+    expect(out.filled).toEqual([]);
+    expect(out.refused).toEqual(["username", "password"]);
+  });
+
+  it("still reports a fill that stuck", () => {
+    document.body.innerHTML = `
+      <form>
+        <input name="username" autocomplete="username">
+        <input name="password" type="password" autocomplete="current-password">
+      </form>`;
+    const out = runFill();
+    expect(out.filled).toEqual(["username", "password"]);
+    expect(out.refused).toBeUndefined();
+    expect(out.why).toBeUndefined();
   });
 });

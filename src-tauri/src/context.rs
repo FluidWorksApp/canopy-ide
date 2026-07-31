@@ -787,8 +787,9 @@ struct Action {
     command: Option<String>,
     /// open_preview: the localhost URL to open in the embedded browser.
     url: Option<String>,
-    /// stop_server / restart_server / message_agent / job_done: the terminal
-    /// id to act on.
+    /// stop_server / restart_server / message_agent / job_done / close_session:
+    /// the terminal id to act on. For close_session it is the caller's own
+    /// CANOPY_PTY — the tool takes no id, so it can name no other terminal.
     #[serde(rename = "ptyId")]
     pty_id: Option<u32>,
     /// open_file / show_diff: the file to put in front of the user, and where
@@ -803,8 +804,9 @@ struct Action {
     /// summary. The artifact URL, if any, rides in `url` above.
     status: Option<String>,
     summary: Option<String>,
-    /// job_done: the launching app instance (env CANOPY_INSTANCE), so a pty id
-    /// recycled across an app restart can't close an unrelated tab.
+    /// job_done / close_session: the launching app instance (env
+    /// CANOPY_INSTANCE), so a pty id recycled across an app restart can't
+    /// close an unrelated tab.
     instance: Option<String>,
 }
 
@@ -942,6 +944,38 @@ async fn action(
                 "done" => "Acknowledged — the user has been told. If this terminal is a Canopy micro-task it now closes: say goodbye in one sentence and start nothing new.".to_string(),
                 _ => "Noted — Canopy told the user what you need. This session stays open; wait for their reply here.".to_string(),
             }
+        }
+        "close_session" => {
+            // The id is the sidecar's own CANOPY_PTY, never an argument — an
+            // agent has no way to name someone else's terminal here. It still
+            // has to be a live Canopy pty of *this* app run: an id from a
+            // previous launch names a different terminal now.
+            let Some(id) = act.pty_id else {
+                return (StatusCode::BAD_REQUEST, "close_session needs ptyId".into());
+            };
+            let stale = act
+                .instance
+                .as_deref()
+                .is_some_and(|i| i != crate::pty::instance_token());
+            if stale || app.state::<crate::pty::PtyManager>().get(id).is_none() {
+                return (
+                    StatusCode::NOT_FOUND,
+                    format!("Terminal {id} isn't a live Canopy terminal in this window — nothing to close"),
+                );
+            }
+            // Keyed by terminal like restart_server: route is empty, App
+            // broadcasts, and the ProjectView owning the pty closes the tab
+            // once this turn ends.
+            let _ = app.emit(
+                "agent:action",
+                serde_json::json!({
+                    "kind": "close_session",
+                    "route": "",
+                    "ptyId": id,
+                    "cwd": act.cwd,
+                }),
+            );
+            "Closing this terminal — Canopy waits for your turn to end first. Say goodbye in one sentence, start nothing new, and call no more tools.".to_string()
         }
         "open_file" | "show_diff" => {
             let Some(path) = act.path.as_deref() else {
