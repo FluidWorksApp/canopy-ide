@@ -2,7 +2,12 @@
 // tokens, estimated cost. Token/model data comes from Claude Code session
 // transcripts (path arrives via hook events); cost is an estimate from a
 // static pricing map.
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  PROFILE_CHANGE_EVENT,
+  activeProfile,
+  setActiveProfile,
+} from "../profiles";
 import {
   PROBE_INTERVAL_MS,
   baseLabel,
@@ -995,6 +1000,11 @@ export const StatusBar = memo(function StatusBar({
           {chipText(plan)}
         </span>
       )}
+      {/* Which account new agents launch as. Beside the plan chip on purpose:
+          that headroom belongs to *this* account, and the two are unreadable
+          apart. Hidden entirely until a second account exists — one account is
+          not a choice, and a chip that never changes is furniture. */}
+      <AccountSwitcher />
       {/* Between the spend and the stats: the two things either side of it are
           what Canopy costs you and what it is doing, which is exactly where
           asking for support belongs. Opens in the system browser — a donate
@@ -1048,3 +1058,96 @@ export const StatusBar = memo(function StatusBar({
     </div>
   );
 });
+
+/** The global account switch. Sessions already running keep the account they
+ *  were launched with — the config-dir variable is read by the CLI at startup
+ *  — so this changes what the *next* launch uses, and the tab badge is what
+ *  tells the two apart on screen. */
+function AccountSwitcher() {
+  const [profiles, setProfiles] = useState<ipc.AgentProfile[]>([]);
+  const [accounts, setAccounts] = useState<Record<string, ipc.AccountStatus[]>>(
+    {},
+  );
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(activeProfile());
+
+  const refresh = useCallback(() => {
+    setActive(activeProfile());
+    void ipc
+      .profilesList()
+      .then((list) => {
+        setProfiles(list);
+        for (const p of list) {
+          void ipc
+            .profileAccounts(p.id)
+            .then((a) => setAccounts((prev) => ({ ...prev, [p.id]: a })))
+            .catch(() => {});
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    window.addEventListener(PROFILE_CHANGE_EVENT, refresh);
+    // A sign-in finishes in a terminal, not here: re-read on focus so the
+    // account appears without the app being restarted.
+    window.addEventListener("focus", refresh);
+    return () => {
+      window.removeEventListener(PROFILE_CHANGE_EVENT, refresh);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [refresh]);
+
+  if (profiles.length < 2) return null;
+  const current = profiles.find((p) => p.id === active) ?? profiles[0];
+  /** The CLIs this account actually holds a login for — the one thing that
+   *  makes switching predictable instead of a surprise login prompt. */
+  const heldBy = (id: string) =>
+    (accounts[id] ?? []).filter((a) => a.state === "in");
+
+  return (
+    <span className="status-account-anchor">
+      <button
+        className="status-item status-account"
+        title={`New agents launch as ${current.label} — click to switch`}
+        onClick={() => setOpen((v) => !v)}
+      >
+        ◐ {current.label}
+      </button>
+      {open && (
+        <div
+          className="status-account-menu"
+          onMouseLeave={() => setOpen(false)}
+        >
+          {profiles.map((p) => {
+            const held = heldBy(p.id);
+            return (
+              <button
+                key={p.id}
+                className={`status-account-row ${p.id === active ? "is-active" : ""}`}
+                onClick={() => {
+                  setActiveProfile(p.id);
+                  setOpen(false);
+                }}
+              >
+                <span className="status-account-label">
+                  {p.id === active ? "✓ " : ""}
+                  {p.label}
+                </span>
+                {/* Said up front rather than discovered at a login prompt. */}
+                <span className="status-account-held">
+                  {p.id === "default"
+                    ? "your existing logins"
+                    : held.length
+                      ? held.map((a) => a.agent).join(", ")
+                      : "no logins yet"}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </span>
+  );
+}

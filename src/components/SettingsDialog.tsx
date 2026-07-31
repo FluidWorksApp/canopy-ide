@@ -450,14 +450,40 @@ function AgentAccounts({
   ) => void;
 }) {
   const [profiles, setProfiles] = useState<ipc.AgentProfile[]>([]);
+  // Who each profile is signed in as, keyed by profile id. Without this the
+  // panel can only offer "Sign in" — including to a profile that is already
+  // signed in, which is exactly what it looked like when this shipped.
+  const [accounts, setAccounts] = useState<
+    Record<string, ipc.AccountStatus[]>
+  >({});
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
-    void ipc.profilesList().then(setProfiles).catch(() => {});
+    void ipc
+      .profilesList()
+      .then((list) => {
+        setProfiles(list);
+        for (const p of list) {
+          void ipc
+            .profileAccounts(p.id)
+            .then((a) => setAccounts((prev) => ({ ...prev, [p.id]: a })))
+            .catch(() => {});
+        }
+      })
+      .catch(() => {});
   }, []);
   useEffect(refresh, [refresh]);
+
+  // A sign-in happens in a terminal this dialog closes to open, so the panel is
+  // gone by the time it completes. Re-reading whenever the window regains focus
+  // is what makes the new account show up on the way back in, rather than on
+  // the next app launch.
+  useEffect(() => {
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [refresh]);
 
   const create = () => {
     const label = draft.trim();
@@ -548,20 +574,45 @@ function AgentAccounts({
           <div className="cli-account-path" title={p.root}>
             {p.root}
           </div>
-          {p.removable && (
-            <div className="cli-account-signin">
-              {capable.map((cli) => (
-                <Button
-                  key={cli.id}
-                  size="sm"
-                  onClick={() => signIn(p, cli)}
-                  title={`Open a terminal running ${cli.bin} against this account — log in there`}
-                >
-                  <AgentIcon id={cli.id} size={12} /> Sign in
-                </Button>
-              ))}
-            </div>
-          )}
+          {/* One row per CLI, showing the account it actually holds. The whole
+              point of a profile is knowing which login is in it — an
+              undifferentiated "Sign in" on a profile that is already signed in
+              is indistinguishable from the feature not working. */}
+          <div className="cli-account-clis">
+            {capable.map((cli) => {
+              const st = (accounts[p.id] ?? []).find((a) => a.agent === cli.id);
+              const signedIn = st?.state === "in";
+              return (
+                <div key={cli.id} className="cli-account-cli">
+                  <AgentIcon id={cli.id} size={13} />
+                  <span className="cli-account-cli-name">{cli.name}</span>
+                  <span
+                    className={`cli-account-who ${signedIn ? "" : "cli-account-who-out"}`}
+                    title={
+                      signedIn
+                        ? `${cli.name} is signed in as ${st?.account ?? "this account"}`
+                        : st?.state === "unknown"
+                          ? `Canopy can't read ${cli.name}'s sign-in state — it keeps credentials somewhere we haven't verified`
+                          : `No ${cli.name} login in this account yet`
+                    }
+                  >
+                    {signedIn
+                      ? (st?.account ?? "signed in")
+                      : st?.state === "unknown"
+                        ? "—"
+                        : "not signed in"}
+                  </span>
+                  <Button
+                    size="sm"
+                    onClick={() => signIn(p, cli)}
+                    title={`Open a terminal running ${cli.bin} against this account — log in there`}
+                  >
+                    {signedIn ? "Re-sign in" : "Sign in"}
+                  </Button>
+                </div>
+              );
+            })}
+          </div>
         </div>
       ))}
 

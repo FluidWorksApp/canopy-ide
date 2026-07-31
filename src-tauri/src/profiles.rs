@@ -272,6 +272,128 @@ pub fn profile_of_path(home: &str, path: &Path) -> String {
     best.1
 }
 
+// ---------- who is signed in ----------
+//
+// "I signed this profile in and the panel still says Sign in" is the whole
+// reason this exists. A profile is only useful if you can see *which account*
+// it holds — otherwise two rows named Work and Personal are indistinguishable
+// from two empty directories.
+//
+// Read from what the CLI records about the account, never from the credential:
+// the token itself is none of our business, and both CLIs write a plain account
+// identity beside it. Where we have no verified way to tell, the answer is
+// `unknown` rather than a guess — a row claiming to be signed in when it is not
+// sends the user to debug the wrong thing.
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct AccountStatus {
+    pub agent: String,
+    /// "in" (an account is recorded), "out" (nothing is), or "unknown" (this
+    /// CLI gives us no signal we have verified).
+    pub state: &'static str,
+    /// The account, as the CLI itself recorded it — an email, usually. None
+    /// when signed in through something that carries no identity (an API key).
+    pub account: Option<String>,
+}
+
+/// The email inside a JWT's claims, without verifying it — this is a local file
+/// the CLI wrote for itself, and we are reading a label off it, not trusting it
+/// to authorize anything.
+fn jwt_email(token: &str) -> Option<String> {
+    use base64::Engine;
+    let payload = token.split('.').nth(1)?;
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+    claims["email"].as_str().map(|s| s.to_string())
+}
+
+/// Claude records the signed-in account in `.claude.json` under `oauthAccount`,
+/// beside (never inside) the credential — which lives in the Keychain on macOS
+/// and in `.credentials.json` elsewhere. That makes this the one signal that
+/// reads the same on every platform.
+fn claude_account(cfg: &Path, home: &str) -> AccountStatus {
+    // Verified against the CLI: with CLAUDE_CONFIG_DIR set, `.claude.json` is
+    // created *inside* that directory rather than beside it.
+    let state_file = if cfg == Path::new(home) {
+        cfg.join(".claude.json")
+    } else {
+        cfg.join(".claude").join(".claude.json")
+    };
+    let account = std::fs::read_to_string(state_file)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| {
+            let acct = &v["oauthAccount"];
+            acct["emailAddress"]
+                .as_str()
+                .or_else(|| acct["displayName"].as_str())
+                .map(|s| s.to_string())
+        });
+    AccountStatus {
+        agent: "claude".into(),
+        state: if account.is_some() { "in" } else { "out" },
+        account,
+    }
+}
+
+/// Codex keeps `auth.json` under CODEX_HOME with either an API key or an OAuth
+/// bundle whose id_token carries the account's email.
+fn codex_account(cfg: &Path) -> AccountStatus {
+    let parsed = std::fs::read_to_string(cfg.join(".codex").join("auth.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    let Some(v) = parsed else {
+        return AccountStatus {
+            agent: "codex".into(),
+            state: "out",
+            account: None,
+        };
+    };
+    if v["OPENAI_API_KEY"].as_str().is_some_and(|k| !k.is_empty()) {
+        return AccountStatus {
+            agent: "codex".into(),
+            state: "in",
+            // An API key names no person. Saying so is better than showing a
+            // blank where every other row shows an email.
+            account: Some("API key".into()),
+        };
+    }
+    let email = v["tokens"]["id_token"].as_str().and_then(jwt_email);
+    AccountStatus {
+        agent: "codex".into(),
+        state: if v["tokens"]["access_token"].is_string() {
+            "in"
+        } else {
+            "out"
+        },
+        account: email,
+    }
+}
+
+/// What each CLI's account looks like inside one profile.
+pub fn account_status(home: &str, id: &str) -> Vec<AccountStatus> {
+    let root = root_for(home, id);
+    PROFILE_AGENTS
+        .iter()
+        .map(|agent| match *agent {
+            "claude" => claude_account(&root, home),
+            "codex" => codex_account(&root),
+            // opencode and amp both moved their credentials somewhere we have
+            // not verified (opencode.db; amp's settings.json holds no key on a
+            // signed-in machine). Until that is checked against the real CLIs,
+            // "unknown" is the honest answer and the row simply offers to sign
+            // in rather than asserting a state it cannot read.
+            other => AccountStatus {
+                agent: other.into(),
+                state: "unknown",
+                account: None,
+            },
+        })
+        .collect()
+}
+
 // ---------- commands ----------
 
 fn home() -> Result<String, String> {
@@ -299,6 +421,13 @@ pub async fn profile_create(label: String) -> Result<Profile, String> {
         let _ = crate::agents::setup_agent_in(agent, &profile.root, &home);
     }
     Ok(profile)
+}
+
+/// Which account each CLI holds inside one profile — what the Accounts panel
+/// shows instead of an undifferentiated "Sign in".
+#[tauri::command]
+pub async fn profile_accounts(id: String) -> Result<Vec<AccountStatus>, String> {
+    Ok(account_status(&home()?, &id))
 }
 
 #[tauri::command]
@@ -475,6 +604,98 @@ mod tests {
             profile_of_path(&h, &home.join(".claude/projects/x/a.jsonl")),
             DEFAULT_ID
         );
+    }
+
+    /// The bug this shipped with: a profile that was signed in still rendered
+    /// an undifferentiated "Sign in", because nothing ever read who was in it.
+    #[test]
+    fn a_signed_in_profile_reports_the_account_it_holds() {
+        let home = scratch("account-claude");
+        let h = home.to_string_lossy().to_string();
+        create(&h, "work").unwrap();
+        let root = root_for(&h, "work");
+        // Verified layout: with CLAUDE_CONFIG_DIR set, `.claude.json` lands
+        // *inside* the config dir.
+        std::fs::write(
+            root.join(".claude/.claude.json"),
+            r#"{"oauthAccount":{"emailAddress":"vj@example.com"}}"#,
+        )
+        .unwrap();
+
+        let by_agent = |all: Vec<AccountStatus>, agent: &str| {
+            all.into_iter().find(|a| a.agent == agent).unwrap()
+        };
+        let claude = by_agent(account_status(&h, "work"), "claude");
+        assert_eq!(claude.state, "in");
+        assert_eq!(claude.account.as_deref(), Some("vj@example.com"));
+
+        // An empty profile is signed out, not "unknown" — we know exactly where
+        // Claude would have written the account and it isn't there.
+        let codex = by_agent(account_status(&h, "work"), "codex");
+        assert_eq!(codex.state, "out");
+
+        // And the default profile reads its own file, one level up.
+        std::fs::write(
+            home.join(".claude.json"),
+            r#"{"oauthAccount":{"emailAddress":"me@example.com"}}"#,
+        )
+        .unwrap();
+        let default = by_agent(account_status(&h, DEFAULT_ID), "claude");
+        assert_eq!(default.account.as_deref(), Some("me@example.com"));
+    }
+
+    #[test]
+    fn codex_reports_the_email_in_its_token_and_names_an_api_key_as_one() {
+        let home = scratch("account-codex");
+        let h = home.to_string_lossy().to_string();
+        create(&h, "work").unwrap();
+        let root = root_for(&h, "work");
+        let auth = root.join(".codex/auth.json");
+
+        // A JWT we assemble here: the payload is the only part read, and it is
+        // read as a label, never trusted to authorize anything.
+        use base64::Engine;
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"email":"vj@example.com"}"#);
+        std::fs::write(
+            &auth,
+            format!(
+                r#"{{"OPENAI_API_KEY":null,"tokens":{{"id_token":"h.{claims}.s","access_token":"a"}}}}"#
+            ),
+        )
+        .unwrap();
+        let codex = account_status(&h, "work")
+            .into_iter()
+            .find(|a| a.agent == "codex")
+            .unwrap();
+        assert_eq!(codex.state, "in");
+        assert_eq!(codex.account.as_deref(), Some("vj@example.com"));
+
+        // An API key names no person, and a blank where every other row shows
+        // an email reads as a bug.
+        std::fs::write(&auth, r#"{"OPENAI_API_KEY":"sk-test"}"#).unwrap();
+        let keyed = account_status(&h, "work")
+            .into_iter()
+            .find(|a| a.agent == "codex")
+            .unwrap();
+        assert_eq!(keyed.state, "in");
+        assert_eq!(keyed.account.as_deref(), Some("API key"));
+    }
+
+    /// A CLI whose credential store we have not verified must say so. Claiming
+    /// "signed in" on a guess sends the user to debug the wrong thing.
+    #[test]
+    fn unverified_clis_report_unknown_rather_than_guessing() {
+        let home = scratch("account-unknown");
+        let h = home.to_string_lossy().to_string();
+        create(&h, "work").unwrap();
+        for agent in ["opencode", "amp"] {
+            let s = account_status(&h, "work")
+                .into_iter()
+                .find(|a| a.agent == agent)
+                .unwrap();
+            assert_eq!(s.state, "unknown", "{agent} claimed a state it can't read");
+        }
     }
 
     #[test]

@@ -1548,6 +1548,77 @@ body.resizing-side * {
   font-weight: 600;
 }
 
+/* The account switch. Sits beside the plan chip because that chip's headroom
+   belongs to this account — read apart, either one is ambiguous. */
+.status-account-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+.status-account {
+  max-width: 16ch;
+  overflow: hidden;
+  color: var(--text-dim);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+}
+
+.status-account:hover {
+  color: var(--text);
+}
+
+.status-account-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  min-width: 220px;
+  padding: 4px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  box-shadow: var(--shadow-2);
+}
+
+.status-account-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 8px;
+  background: none;
+  border: none;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.status-account-row:hover {
+  background: var(--bg-alt);
+}
+
+.status-account-row.is-active .status-account-label {
+  font-weight: 600;
+}
+
+/* Which CLIs this account can actually launch. Said before the switch, not
+   after a surprise login prompt. */
+.status-account-held {
+  flex: none;
+  color: var(--text-faint);
+  font-size: 10.5px;
+}
+
 .status-plan.is-critical {
   background: var(--danger-soft, rgba(220, 76, 70, 0.16));
   color: var(--danger, #dc4c46);
@@ -3413,6 +3484,32 @@ body.resizing-side * {
   border-radius: var(--r-sm);
   corner-shape: squircle;
   padding: 0 6px;
+}
+
+/* This account holds no login for that CLI yet. Not a warning — launching is
+   how you sign in — so it reads quieter than .cli-install. */
+.cli-signin {
+  padding: 0 6px;
+  color: var(--text-faint);
+  font-size: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+}
+
+/* Which account the launcher is about to use. A label, not a control: the
+   switch lives in the status bar, and two places to change one thing is how
+   they disagree. */
+.cli-account-banner {
+  padding: 4px 10px 6px;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+}
+
+.cli-account-banner strong {
+  color: var(--text-dim);
+  font-weight: 600;
 }
 
 /* Newer version available — its own click target inside the row. */
@@ -14488,10 +14585,40 @@ a.btn-sm {
   text-align: left;
 }
 
-.cli-account-signin {
+/* One line per CLI inside an account: who it is signed in as, and the button
+   that changes that. The identity is the point — an undifferentiated "Sign in"
+   is indistinguishable from the account being empty. */
+.cli-account-clis {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.cli-account-cli {
+  display: grid;
+  grid-template-columns: auto 110px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.cli-account-cli-name {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.cli-account-who {
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cli-account-who-out {
+  color: var(--text-faint);
+  font-style: italic;
 }
 
 .cli-account-note {

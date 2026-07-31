@@ -185,6 +185,13 @@ export interface PaneBarProps {
   onShareProject: (memberId: string, memberName: string) => void;
   onOpenPreview: () => void;
   onLaunchCli: (cli: AgentCli) => void;
+  /** The non-default account new agents launch as, and the profile-capable
+   *  CLIs it holds no login for yet. Null on the default account. */
+  account?: { label: string; missing: string[] } | null;
+  /** Profile id -> display name, so a tab badge shows the account by the name
+   *  the user gave it rather than by its slug. One name per account, everywhere
+   *  it appears. */
+  profileLabels?: Record<string, string>;
   onRunCliUpdate: (cli: AgentCli, e: React.MouseEvent) => void;
   onRefreshInstalled: () => void;
   onRefreshUpdates: () => void;
@@ -207,7 +214,7 @@ function PaneBarImpl({
   onSelectTab, onTabContextMenu, onCloseTab, onCommitRename, onCancelRename,
   onRenameDraftChange, onNewShell,
   onClearScrollback, onHardReset, onToggleView,
-  onShareFile, onShareProject, onOpenPreview, onLaunchCli, onRunCliUpdate,
+  onShareFile, onShareProject, onOpenPreview, onLaunchCli, account, profileLabels, onRunCliUpdate,
   onRefreshInstalled, onRefreshUpdates, onOpenAllTabs,
   activeTabElRef,
 }: PaneBarProps) {
@@ -382,9 +389,9 @@ function PaneBarImpl({
                   {tab.type === "terminal" && tab.profile && (
                     <span
                       className="tab-profile"
-                      title={`Running under the "${tab.profile}" account`}
+                      title={`Running under the "${profileLabels?.[tab.profile] ?? tab.profile}" account`}
                     >
-                      {tab.profile}
+                      {profileLabels?.[tab.profile] ?? tab.profile}
                     </span>
                   )}
                   {hints.has(tab.id) && (
@@ -514,9 +521,25 @@ function PaneBarImpl({
                 <span><GlobeIcon size={15} className="cli-icon" /> Preview</span>
               </div>
               <div className="cli-sep" />
+              {/* Which account these launch as. Only when it isn't the default
+                  one — a banner on every launcher would be noise for anyone
+                  not using accounts. */}
+              {account && (
+                <div className="cli-account-banner" title="Change it from the account chip in the status bar">
+                  launching as <strong>{account.label}</strong>
+                </div>
+              )}
               {AGENT_CLIS.map((cli) => (
                 <div key={cli.id} className="cli-item" onClick={() => { setCliMenuOpen(false); onLaunchCli(cli); }}>
                   <span><AgentIcon id={cli.id} size={15} className="cli-icon" /> {cli.name}</span>
+                  {/* Said here rather than discovered at a login prompt: this
+                      account holds no login for that CLI, so launching it will
+                      ask for one. Still launchable — that is how you sign in. */}
+                  {installed[cli.bin] && account?.missing.includes(cli.id) && (
+                    <span className="cli-signin" title={`${account.label} has no ${cli.name} login yet — launching will ask you to sign in`}>
+                      sign in
+                    </span>
+                  )}
                   {!installed[cli.bin] && <span className="cli-install">install</span>}
                   {installed[cli.bin] && cliUpdates[cli.bin]?.hasUpdate && (
                     <span
