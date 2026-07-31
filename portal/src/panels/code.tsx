@@ -4,17 +4,13 @@
 // my repo?" is not, and that is the question you actually have on a phone.
 
 import { useMemo, useState } from 'react'
-import { IconChevron, IconDiff, IconFile, IconFolder, IconSearch } from '@shared/icons'
+import { IconDiff, IconFile, IconFolder, IconSearch } from '@shared/icons'
+import { FileTree, type DirEntry } from '@shared/FileTree'
+import '@shared/fileTree.css'
 import { basename } from '@shared/model'
 import { useAsync } from '../useAsync'
 import { AsyncBody, Pill, Row, SubHead } from './ui'
 import { repoOf, type PanelCtx, type PanelDef } from './types'
-
-interface DirEntry {
-  name: string
-  path: string
-  is_dir: boolean
-}
 
 interface SearchHit {
   path: string
@@ -33,95 +29,11 @@ interface GitStatus {
   entries: GitEntry[]
 }
 
-/**
- * A lazily-expanded tree.
+/** Content search across the project's roots.
  *
- * One `fs_read_dir` per directory the user actually opens, cached by path.
- * Loading the whole tree up front is fine on a desktop and is a several-second
- * stall on a phone — and the roots of a Canopy project include every worktree,
- * so "the whole tree" can be a dozen checkouts.
- */
-function Tree({ ctx, root, label }: { ctx: PanelCtx; root: string; label: string }) {
-  const [open, setOpen] = useState<Record<string, boolean>>({ [root]: true })
-  return <Branch ctx={ctx} path={root} label={label} depth={0} open={open} setOpen={setOpen} />
-}
-
-function Branch({
-  ctx,
-  path,
-  label,
-  depth,
-  open,
-  setOpen,
-}: {
-  ctx: PanelCtx
-  path: string
-  label: string
-  depth: number
-  open: Record<string, boolean>
-  setOpen: (f: (o: Record<string, boolean>) => Record<string, boolean>) => void
-}) {
-  const isOpen = !!open[path]
-  // Only fetch once expanded, and keep the result after collapsing — reopening
-  // a directory should be instant, not another round trip.
-  const [everOpened, setEverOpened] = useState(isOpen)
-  const kids = useAsync<DirEntry[]>(
-    () => (everOpened ? ctx.rpc.call<DirEntry[]>('fs_read_dir', { path }) : Promise.resolve([])),
-    [path, everOpened],
-  )
-
-  const toggle = () => {
-    setEverOpened(true)
-    setOpen((o) => ({ ...o, [path]: !o[path] }))
-  }
-
-  return (
-    <>
-      <Row
-        icon={
-          <span className={`twisty ${isOpen ? 'open' : ''}`}>
-            <IconChevron s={13} />
-          </span>
-        }
-        title={label}
-        onClick={toggle}
-      />
-      {isOpen && (
-        <div className="tree-kids" style={{ ['--depth' as string]: depth + 1 }}>
-          <AsyncBody state={kids} empty="Empty folder.">
-            {(entries) =>
-              entries
-                // Noise on a small screen, and never what you came to read.
-                .filter((e) => e.name !== '.git' && e.name !== 'node_modules')
-                .map((e) =>
-                  e.is_dir ? (
-                    <Branch
-                      key={e.path}
-                      ctx={ctx}
-                      path={e.path}
-                      label={e.name}
-                      depth={depth + 1}
-                      open={open}
-                      setOpen={setOpen}
-                    />
-                  ) : (
-                    <Row
-                      key={e.path}
-                      on={ctx.openKey === `file:${e.path}`}
-                      icon={<IconFile s={14} />}
-                      title={e.name}
-                      onClick={() => ctx.open({ kind: 'file', path: e.path })}
-                    />
-                  ),
-                )
-            }
-          </AsyncBody>
-        </div>
-      )}
-    </>
-  )
-}
-
+ *  The portal's own control, not a port of anything: the desktop answers this
+ *  with the ⌘K palette, which is a different interaction entirely. On a phone
+ *  the search belongs on the panel it searches. */
 function FileSearch({ ctx, roots }: { ctx: PanelCtx; roots: string[] }) {
   const [q, setQ] = useState('')
   const [live, setLive] = useState('')
@@ -153,7 +65,7 @@ function FileSearch({ ctx, roots }: { ctx: PanelCtx; roots: string[] }) {
         />
       </form>
       {live.trim().length >= 2 && (
-        <AsyncBody state={hits} empty={`Nothing matches “${live}”.`}>
+        <AsyncBody state={hits} empty={`Nothing matches “${live}”.`} skeletonRows={4}>
           {(rows) => (
             <>
               <SubHead title="Matches" n={rows.length} />
@@ -183,16 +95,41 @@ export const filesPanel: PanelDef = {
   List({ ctx }) {
     const comps = ctx.project?.components ?? []
     const roots = useMemo(() => comps.map((c) => c.path), [comps])
+    // The IDE's own tree, not a lookalike. `readOnly` switches off the git
+    // overlay, the fs watcher and every mutation — which is exactly the remote
+    // surface Rust grants, so the component and the permission agree. No
+    // `iconUrl`: the desktop's set is 1250 bundled SVGs, and baking those into
+    // the binary to pull over a mobile link is a bad trade.
+    const fs = useMemo(
+      () => ({ readDir: (path: string) => ctx.rpc.call<DirEntry[]>('fs_read_dir', { path }) }),
+      [ctx.rpc],
+    )
     if (!comps.length) return <div className="panel-empty">This project has no folders.</div>
     return (
       <>
         <FileSearch ctx={ctx} roots={roots} />
-        {comps.map((c) => (
-          <Tree key={c.path} ctx={ctx} root={c.path} label={c.label} />
-        ))}
+        <FileTree
+          roots={roots}
+          fs={fs}
+          readOnly
+          changedPaths={EMPTY}
+          selectedPath={selectedPathOf(ctx)}
+          onOpenFile={(path) => ctx.open({ kind: 'file', path })}
+        />
       </>
     )
   },
+}
+
+/** No local git overlay on a remote tree — the Changes panel is where "what
+ *  changed" is answered, and it asks the server. */
+const EMPTY: Set<string> = new Set()
+
+/** The file the detail pane is showing, so the tree marks its row the way the
+ *  desktop marks the open tab's file. */
+function selectedPathOf(ctx: PanelCtx): string | null {
+  const key = ctx.openKey ?? ''
+  return key.startsWith('file:') ? key.slice('file:'.length) : null
 }
 
 /**

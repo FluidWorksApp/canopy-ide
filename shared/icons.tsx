@@ -258,3 +258,31 @@ export const IconCheck = (p: IconProps) => (
     <path d="M5 12.5 10 17.5 19 7" />
   </Svg>
 )
+
+// ---- shared with the desktop -----------------------------------------------
+
+/** Disclosure caret — a hairline stroked "›". Rotate it 90° (via a class on the
+ *  wrapping element) to point down when the section/folder is open. Shared by
+ *  the file tree rows and the component-section headers so they read the same.
+ *
+ *  Lives here rather than in the desktop's icons.tsx because the shared FileTree
+ *  needs it and must not import from `src/`. `src/components/icons.tsx`
+ *  re-exports it, so there is exactly one of these shapes in the product. */
+export function ChevronIcon({ size = 10, className }: { size?: number; className?: string }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden
+    >
+      <path d="M9 5l7 7-7 7" />
+    </svg>
+  )
+}
