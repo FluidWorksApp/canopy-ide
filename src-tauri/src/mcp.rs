@@ -1026,7 +1026,7 @@ mod tests {
             "--api-key=bb_live_secretvalue".into(),
             "--token".into(),
             "hunter2".into(),
-            "AIzaSyBNtGu9QEzetAjtdVXF5AaITV3rghu1KPE".into(),
+            "AIzaFAKE-not-a-real-key".into(),
             "--headless".into(),
         ]);
         assert_eq!(

@@ -1,0 +1,10 @@
+#!/bin/sh
+# Checked into the repo rather than left in .git/hooks so every clone gets it.
+# `npm install` points core.hooksPath here (see the "prepare" script).
+#
+# Scans only what is staged, so it costs nothing on an ordinary commit. The same
+# scanner runs over the whole tree in CI — this hook is the fast path, not the
+# guarantee.
+if command -v node >/dev/null 2>&1; then
+  node "$(git rev-parse --show-toplevel)/scripts/secret-scan.mjs" --staged || exit 1
+fi

@@ -33,6 +33,20 @@ jobs:
       - run: npm run lint
       - run: npm run test
 
+  # The .githooks/pre-commit copy of this scan can be skipped (`commit -n`) or
+  # simply missing in a clone that never ran `npm install`, so the same scanner
+  # runs here over every tracked file. Needs no toolchain beyond node and is the
+  # cheapest job in the file — a leaked credential should fail fast.
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/secret-scan.mjs
+
   # THIRD-PARTY-NOTICES.md is what discharges the attribution conditions of the
   # MIT/BSD/ISC/Apache dependencies Canopy redistributes, so letting it go stale
   # is a compliance bug rather than a docs nit. Regenerating and diffing catches

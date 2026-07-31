@@ -21,7 +21,10 @@
     "build:hook:release": "node scripts/prepare-sidecar.mjs --release",
     "build:portal": "vite build --config portal/vite.config.ts",
     "licenses": "node scripts/generate-third-party-notices.mjs",
-    "licenses:check": "node scripts/generate-third-party-notices.mjs --check"
+    "licenses:check": "node scripts/generate-third-party-notices.mjs --check",
+    "secrets": "node scripts/secret-scan.mjs",
+    "secrets:staged": "node scripts/secret-scan.mjs --staged",
+    "prepare": "git config core.hooksPath .githooks || true"
   },
   "dependencies": {
     "@codingame/monaco-vscode-files-service-override": "~25.1.2",

@@ -970,10 +970,11 @@ mod tests {
     #[test]
     fn secrets_are_recognised_by_prefix_by_name_and_by_shape() {
         // Named themselves.
-        assert!(looks_secret("sk-ant-api03-AAAAbbbbCCCCddddEEEEffff"));
-        assert!(looks_secret("ghp_16C7e42F292c6912E7710c838347Ae178B4a"));
+        assert!(looks_secret("sk-ant-api03-AAAAbbbbCCCCddddEEEEffff")); // secret-scan:allow
+        assert!(looks_secret("ghp_16C7e42F292c6912E7710c838347Ae178B4a")); // secret-scan:allow
         assert!(looks_secret("AKIAIOSFODNN7EXAMPLE0000"));
         assert!(looks_secret(
+            // secret-scan:allow
             "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNza\n-----END OPENSSH PRIVATE KEY-----"
         ));
         // A .env line — the name decides, not the value's shape.
