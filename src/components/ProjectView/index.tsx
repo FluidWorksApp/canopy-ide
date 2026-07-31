@@ -3441,6 +3441,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (act.note) onNotice(act.note);
       } else if (act.do === "chat") {
         openChat(act.peer, act.name);
+      } else if (act.do === "note") {
+        // The note tab reads the store itself and says so if the note is gone,
+        // so the title is only a label until it loads — no round trip here
+        // just to open a tab.
+        openNote(act.noteId, "");
       } else if (act.do === "file") {
         const { path, line } = act;
         void openFileRef.current(path).then(() => {
@@ -3457,7 +3462,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     };
     window.addEventListener("canopy:deep-link", onLink);
     return () => window.removeEventListener("canopy:deep-link", onLink);
-  }, [project.id, openChat, onNotice, relay.status.members]);
+  }, [project.id, openChat, openNote, onNotice, relay.status.members]);
 
   // A browser-control op (canopy_browser_*): pick the preview tab it targets —
   // by origin when it names a URL, else the active/first preview tab, creating

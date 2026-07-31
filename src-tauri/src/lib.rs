@@ -33,6 +33,7 @@ mod prwatch;
 mod pty;
 mod punch;
 mod relay;
+mod remind;
 mod remote;
 mod research;
 mod selftest;
@@ -395,6 +396,7 @@ pub fn run() {
         .manage(clipboard::Clipboard::default())
         .manage(companion::CompanionManager::default())
         .manage(cli::pending_from_env())
+        .manage(cli::pending_link_from_env())
         .setup(|app| {
             // ONNX Runtime is loaded dynamically on every platform (Cargo.toml
             // builds ort with `load-dynamic`). Point ort at the libonnxruntime
@@ -466,6 +468,7 @@ pub fn run() {
             crash::crash_issue_draft,
             crash::file_crash_issue,
             cli::cli_take_pending_open,
+            cli::cli_take_pending_link,
             cli::cli_install_shim,
             notify::notify_native,
             selftest::selftest_config,
@@ -556,6 +559,8 @@ pub fn run() {
             notes::notes_read_image,
             notes::notes_dir,
             notes::notes_delete,
+            notes::notes_remind,
+            notes::notes_due,
             spot::spot_save_context_text,
             fsx::workspace_add,
             fsx::workspace_remove,

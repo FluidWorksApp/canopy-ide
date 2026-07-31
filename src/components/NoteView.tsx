@@ -16,10 +16,12 @@ import {
   STATUS_LABELS,
   STATUS_STEP,
   remove as removeNote,
+  remind,
   rename,
   setStatus,
   update,
 } from "../notes";
+import { IS_MAC } from "../platform";
 import type { Notify } from "../types";
 import { ago } from "./ProjectView/helpers";
 import { AgentLaunchButton } from "./AgentLaunchButton";
@@ -34,6 +36,7 @@ import {
   TrashIcon,
 } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
+import { NoteReminder } from "./NoteReminder";
 import { Button } from "./ui";
 
 interface NoteViewProps {
@@ -192,6 +195,16 @@ export function NoteView({
           >
             captured {ago(note.created_at)}
           </span>
+          {/* The other half of parking a thought: a time to be handed it back.
+              Beside "captured" on purpose — when it arrived and when it comes
+              back are the same question asked in two directions. */}
+          <NoteReminder
+            reminder={note.reminder}
+            systemCapable={IS_MAC}
+            onSet={(at, message) =>
+              void remind(projectId, note.id, at, message).catch(fail)
+            }
+          />
           {note.tags.map((t) => (
             <span key={t} className="note-tag">
               {t}
