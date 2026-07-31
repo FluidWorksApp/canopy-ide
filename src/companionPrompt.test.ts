@@ -121,6 +121,17 @@ describe("the brief", () => {
     expect(p).toContain("canopy_start_server");
   });
 
+  it("tells it how to scope notes and research rather than calling them impossible", () => {
+    // Ash reported this as a hard limitation and offered to spawn a coding
+    // session instead: "I can't write to the research store myself — it's
+    // project-scoped, and my session sits outside every project." It is
+    // scoped, not out of reach; naming the project is all it takes.
+    const p = buildCompanionPrompt(base);
+    expect(p).toContain("Notes and research belong to a project");
+    expect(p).toContain("pass");
+    expect(p).toContain("do not need to start a coding session");
+  });
+
   it("makes it say which project — it is in none of them", () => {
     expect(buildCompanionPrompt(base)).toContain("**Say which project.**");
   });
