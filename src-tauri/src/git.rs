@@ -4023,6 +4023,11 @@ pub struct AgentWorkspace {
     pub session_id: String,
     pub agent: Option<String>,
     pub state: Option<String>,
+    /// Which rung of the evidence ladder produced `state`. Carried through so
+    /// the workspace header needs no second source — it used to compute the
+    /// chip from the raw state and the clock from a decay function with the CPU
+    /// hard-coded to zero, and show both answers at once.
+    pub state_via: Option<String>,
     pub cwd: Option<String>,
     pub updated: Option<u64>,
     /// The session's working-time clock, as canopy_hook.rs keeps it: seconds
@@ -4097,6 +4102,7 @@ pub async fn agent_workspace(
         session_id,
         dstr("agent"),
         dstr("state"),
+        dstr("state_via"),
         digest.get("updated").and_then(|v| v.as_u64()),
         touched,
         dstr("cwd"),
@@ -4129,7 +4135,9 @@ pub async fn agent_workspace_at(
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
             && !s.contains("..")
     };
-    let (sid, state_s, updated, touched, branch_fallback, clock) = match session_id.as_deref() {
+    let (sid, state_s, state_via, updated, touched, branch_fallback, clock) = match session_id
+        .as_deref()
+    {
         Some(s) if valid(s) => {
             let home = std::env::var("HOME").unwrap_or_default();
             let digest: Option<serde_json::Value> = std::fs::read_to_string(
@@ -4159,6 +4167,7 @@ pub async fn agent_workspace_at(
             (
                 s.to_string(),
                 dstr("state"),
+                dstr("state_via"),
                 updated,
                 touched,
                 dstr("branch"),
@@ -4167,6 +4176,7 @@ pub async fn agent_workspace_at(
         }
         _ => (
             String::new(),
+            None,
             None,
             None,
             Vec::new(),
@@ -4180,6 +4190,7 @@ pub async fn agent_workspace_at(
         sid,
         agent,
         state_s,
+        state_via,
         updated,
         touched,
         Some(cwd),
@@ -4313,6 +4324,7 @@ fn workspace_join(
     session_id: String,
     agent: Option<String>,
     state: Option<String>,
+    state_via: Option<String>,
     updated: Option<u64>,
     touched: Vec<String>,
     cwd: Option<String>,
@@ -4404,6 +4416,7 @@ fn workspace_join(
         session_id,
         agent,
         state,
+        state_via,
         cwd,
         updated,
         active_secs: clock.active_secs,

@@ -18,7 +18,7 @@ use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, Master
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -118,6 +118,32 @@ pub struct Session {
     /// WebView `Channel`. Bounded + lossy so remote lag never touches PTY
     /// backpressure.
     subscribers: broadcast::Sender<PtyEvent>,
+    /// When this terminal last painted, and how much it has painted in total.
+    ///
+    /// The decisive signal for "is this agent working". A turn in flight is
+    /// silent in hook events by construction — nothing fires between the last
+    /// tool call and the end of the turn — and near-zero in CPU while the model
+    /// responds, so the two signals the lifecycle used to lean on go quiet
+    /// together over exactly the window that matters. A CLI redrawing a spinner
+    /// is neither: it is writing bytes.
+    ///
+    /// Stamped in `record_remote`, which already runs on every flush with the
+    /// bytes in hand, so this costs no syscall and no extra wakeup. The byte
+    /// counter is here because a terminal repainting the same frame is still
+    /// output — diffing rendered text would call that silence.
+    last_output_ms: AtomicU64,
+    output_bytes: AtomicU64,
+    /// When the human last typed, so the CLI's echo of a keystroke is not read
+    /// as the agent working.
+    last_input_ms: AtomicU64,
+}
+
+/// Wall-clock milliseconds. Only ever differenced against itself.
+pub(crate) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[derive(Default)]
@@ -337,15 +363,40 @@ impl Session {
             return Err(format!("terminal {} is not accepting input", self.id));
         }
         queue.extend_from_slice(bytes);
+        self.last_input_ms.store(now_ms(), Ordering::Relaxed);
         self.input_ready.notify_one();
         Ok(())
+    }
+
+    /// Milliseconds since this terminal last painted, and since the human last
+    /// typed into it. `None` before either has ever happened — an unanswered
+    /// question, not a very long silence.
+    pub fn quiet_ms(&self, now: u64) -> Option<u64> {
+        let last = self.last_output_ms.load(Ordering::Relaxed);
+        (last > 0).then(|| now.saturating_sub(last))
+    }
+
+    pub fn since_input_ms(&self, now: u64) -> Option<u64> {
+        let last = self.last_input_ms.load(Ordering::Relaxed);
+        (last > 0).then(|| now.saturating_sub(last))
+    }
+
+    pub fn output_bytes(&self) -> u64 {
+        self.output_bytes.load(Ordering::Relaxed)
     }
 
     /// Feed a freshly-flushed chunk to remote consumers: append to the bounded
     /// scrollback and fan it out to any subscribers, both under one lock so an
     /// attaching viewer never sees a torn boundary. Best-effort — no subscribers
     /// (or a lagging one) is fine and never blocks the flusher.
+    ///
+    /// Also where the output clock is stamped. This runs on every flush for
+    /// every pty, headless ones included, and the bytes are already in hand —
+    /// so "when did this terminal last say anything" costs two relaxed stores.
     fn record_remote(&self, data: &[u8]) {
+        self.last_output_ms.store(now_ms(), Ordering::Relaxed);
+        self.output_bytes
+            .fetch_add(data.len() as u64, Ordering::Relaxed);
         let mut ring = self.scrollback.lock().unwrap();
         ring.extend(data.iter().copied());
         let overflow = ring.len().saturating_sub(SCROLLBACK_CAP);
@@ -651,6 +702,13 @@ impl PtyManager {
             scrollback: Mutex::new(VecDeque::new()),
             size: Mutex::new((cols, rows)),
             subscribers: broadcast::channel(BROADCAST_CAP).0,
+            // Zero means "has never happened", which is why these are not
+            // stamped with the spawn time: a terminal that has not painted yet
+            // is an unanswered question, not a terminal that has been silent
+            // since it started.
+            last_output_ms: AtomicU64::new(0),
+            output_bytes: AtomicU64::new(0),
+            last_input_ms: AtomicU64::new(0),
         });
 
         state.sessions.lock().unwrap().insert(id, session.clone());

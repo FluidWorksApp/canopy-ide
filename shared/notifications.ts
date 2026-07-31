@@ -11,6 +11,8 @@
 // re-exports the four types below so the desktop keeps importing them from
 // where it always has.
 
+import { fidelityFor } from "./agentLife/fidelity";
+
 export interface QuestionOption {
   label: string;
   description?: string;
@@ -38,6 +40,11 @@ export interface AgentEventData {
   /** Empty when the hook carried no agent stamp (a bare claude). */
   agent: string;
   message?: string;
+  /** What the installer classified this moment as, when it could — the same
+   *  vocabulary shared/agentLife/attention.ts reduces. Present only for the
+   *  CLIs whose plugin fires an explicit signal; the rest are mapped from the
+   *  event name. Nothing anywhere re-derives meaning from `message`. */
+  signal?: string;
   /** codex's turn-complete carries the agent's last words. */
   lastAssistantMessage?: string;
   transcriptPath?: string;
@@ -89,6 +96,8 @@ export function parseAgentEvent(raw: string): AgentEventData | null {
     agent: typeof parsed.agent === "string" ? parsed.agent : "",
   };
   if (parsed.message != null) data.message = String(parsed.message);
+  if (typeof parsed.canopy_signal === "string")
+    data.signal = parsed.canopy_signal;
   const last = parsed["last-assistant-message"];
   if (typeof last === "string" && last.trim())
     data.lastAssistantMessage = last.trim();
@@ -114,9 +123,22 @@ export function parseAgentEvent(raw: string): AgentEventData | null {
 }
 
 /** Claude's post-completion idle notice arrives through the same Notification
- *  hook as real permission requests — the message text is the only thing that
- *  tells "I'm blocked on you" apart from "I'm done and waiting". */
+ *  hook as real permission requests, and claude's message text is the only
+ *  thing that tells "I'm blocked on you" apart from "I'm done and waiting".
+ *
+ *  Consulted only for a CLI whose manifest says its notification is `mixed` —
+ *  today that is claude alone. Every other CLI either fires an explicit signal
+ *  or cannot say, and guessing from prose is what put an aider y/n confirm in
+ *  the "finished" pile. See shared/agentLife/fidelity.json. */
 const IDLE_RE = /waiting for (your )?input/i;
+
+/** Whether this event means the agent has merely finished, rather than being
+ *  blocked. The signal wins outright when the installer set one. */
+function meansFinished(d: AgentEventData): boolean {
+  if (d.signal) return d.signal === "turn-end";
+  if (fidelityFor(d.agent || "claude").notification !== "mixed") return false;
+  return IDLE_RE.test(d.message ?? "");
+}
 
 export function derivePending(events: AgentEventEntry[]): PendingItem[] {
   const pendingBySession = new Map<string, PendingItem[]>();
@@ -156,7 +178,7 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
           ? `${agent} needs permission${tool ? `: ${tool}` : ""}`
           : "Agent needs attention");
       const list = pendingBySession.get(sessionId) ?? [];
-      if (IDLE_RE.test(message)) {
+      if (meansFinished(d)) {
         // Completion notice, not a request. One per session is enough —
         // replace an earlier one instead of stacking.
         pendingBySession.set(sessionId, [

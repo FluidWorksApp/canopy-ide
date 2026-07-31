@@ -17,7 +17,7 @@ interface AgentRuntimeProps {
   /** The session digest (or agent workspace) carrying the clock fields. */
   timing?: ActiveTiming;
   /** Whether the agent is believed to be working *right now*. Callers pass
-   *  `effectiveState(...) === "working"`, never the raw digest state: a CLI
+   *  `agentLife(...).state === "working"`, never the raw digest state: a CLI
    *  that dies mid-turn leaves "working" on disk forever, and a timer counting
    *  up from that is worse than no timer. False freezes both numbers at what
    *  the hook actually credited. */

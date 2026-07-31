@@ -35,10 +35,11 @@ const LIFECYCLE: Record<string, AshLook> = {
   waiting: { state: "needs", tone: "warn" },
   idle: { state: "done", tone: "dim" },
   ended: { state: "sleeping", tone: "dim" },
-  stale: { state: "sleeping", tone: "warn" },
+  unknown: { state: "sleeping", tone: "warn" },
+  starting: { state: "thinking", tone: "dim" },
 };
 
-/** The face and colour for one of `effectiveState()`'s lifecycle values. */
+/** The face and colour for one `LifeState` (see shared/agentLife). */
 export function ashFor(state: string | null | undefined): AshLook {
   return (state ? LIFECYCLE[state] : undefined) ?? { state: "idle", tone: "dim" };
 }

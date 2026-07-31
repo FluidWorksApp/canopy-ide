@@ -1,3 +1,4 @@
+import { agentLife, type LifeState } from "../shared/agentLife";
 // One list of the things you can be working on.
 //
 // Git has two lists — branches and worktrees — and the Git panel used to show
@@ -312,7 +313,7 @@ export interface AgentRef {
   ptyId: number | null;
   /** The CLI, e.g. "claude". Not the branch and not the tab title. */
   name: string;
-  state: "working" | "waiting" | "idle" | "ended" | "unknown";
+  state: LifeState;
 }
 
 /** Live agent sessions whose working directory is inside `dir`.
@@ -332,13 +333,15 @@ export function agentsIn(
     surface?: string;
     instance?: string;
     state?: string;
+    state_via?: string;
+    updated?: number;
   }[],
   thisInstance: string | null,
+  now: number = Date.now() / 1000,
 ): AgentRef[] {
   const seen = new Set<string>();
   const out: AgentRef[] = [];
   for (const d of digests) {
-    if (d.state === "ended") continue;
     if (thisInstance && d.instance && d.instance !== thisInstance) continue;
     // `launch_cwd` as well as `cwd`: an agent that cd'd deeper is still working
     // in the workspace it was started in, and an agent that cd'd *out* is not
@@ -347,27 +350,37 @@ export function agentsIn(
     if (!where || !(under(where, dir) || (d.launch_cwd && under(d.launch_cwd, dir))))
       continue;
     if (seen.has(d.session_id)) continue;
+    // The one ladder. Ended sessions are dropped here rather than by matching
+    // the recorded string: five of seven CLIs cannot write `ended` at all, so
+    // the string test only ever caught two of them.
+    const life = agentLife({ digest: d as never, now });
+    if (life.state === "ended") continue;
     seen.add(d.session_id);
     const pty = d.surface ? Number(d.surface) : NaN;
     out.push({
       sessionId: d.session_id,
       ptyId: Number.isFinite(pty) ? pty : null,
       name: d.agent ?? "agent",
-      state:
-        d.state === "working" || d.state === "waiting" || d.state === "idle"
-          ? d.state
-          : "unknown",
+      // The one ladder. This used to whitelist three strings and map everything
+      // else to "unknown", which quietly made a stale `working` indistinguishable
+      // from a fresh one.
+      state: life.state,
     });
   }
   return out;
 }
 
-/** The one that matters on a one-line row: whoever is actually mid-turn, else
- *  the one blocked on you, else any of them. */
+/** The one that matters on a one-line row: whoever needs you, else whoever is
+ *  mid-turn, else any of them.
+ *
+ *  Blocked before working, which is the other way round from how this used to
+ *  read — and the old order was how a crashed agent still claiming "working"
+ *  hid a genuinely blocked one behind it on the same row. It also disagreed
+ *  with every other list in the app, all of which sort what needs you first. */
 export function principalAgent(agents: AgentRef[]): AgentRef | null {
   return (
-    agents.find((a) => a.state === "working") ??
     agents.find((a) => a.state === "waiting") ??
+    agents.find((a) => a.state === "working") ??
     agents[0] ??
     null
   );

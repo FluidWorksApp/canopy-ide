@@ -1,3 +1,4 @@
+import { NO_ATTENTION, agentLife, bucketFor } from './agentLife'
 // Shared domain model for Canopy's agent views — the single source of truth
 // used by BOTH shells: the desktop app (src/, over Tauri IPC) and the mobile
 // portal (portal/, over WebSocket). It is pure TypeScript: no React, no
@@ -27,6 +28,11 @@ export interface Digest {
   branch?: string
   agent?: string
   state?: 'working' | 'waiting' | 'idle' | 'ended'
+  /** Which rung produced `state`; absent on pre-upgrade and store rows. */
+  state_via?: string
+  /** True for a row rebuilt from the CLI's own history, which records no
+   *  lifecycle at all. Such a row is `unknown`, never `idle`. */
+  store?: boolean
   prompts?: string[]
   files?: string[]
   surface?: string
@@ -50,6 +56,10 @@ export interface Stat {
   total_mem_bytes: number
   ports: number[]
   procs: { name: string; cmd: string }[]
+  /** Milliseconds since this terminal last painted / was typed into. The
+   *  signal that separates a model thinking from an agent at its prompt. */
+  quiet_ms?: number | null
+  since_input_ms?: number | null
 }
 
 /** A live PTY session, from the snapshot (authoritative liveness). */
@@ -116,10 +126,15 @@ export function resumeCommand(agent: string, sessionId?: string): string {
 }
 
 export const STATE_LABEL: Record<string, string> = {
+  starting: 'starting',
   working: 'working',
   waiting: 'needs you',
   idle: 'idle',
   ended: 'ended',
+  // Said rather than hidden. Every row read from a CLI's own history used to
+  // arrive here as `d.state || 'idle'` — an invented answer for a record that
+  // holds no lifecycle at all.
+  unknown: 'no signal',
 }
 
 export function lastHumanPrompt(prompts?: string[]): string | undefined {
@@ -132,7 +147,7 @@ export function lastHumanPrompt(prompts?: string[]): string | undefined {
 }
 
 function rank(s: string): number {
-  return s === 'working' ? 3 : s === 'waiting' ? 2 : s === 'idle' ? 1 : 0
+  return s === 'waiting' ? 3 : s === 'working' ? 2 : s === 'idle' ? 1 : 0
 }
 
 const normCwd = (p?: string): string => (p ?? '').replace(/\/+$/, '')
@@ -183,10 +198,26 @@ export function buildRows(
       if (live) claimed.add(surfaceId)
       const liveStat = live ? stats.get(surfaceId) : undefined
       const u = d.session_id ? usageBy.get(d.session_id) : undefined
+      // The one ladder, over evidence that was already in this object literal
+      // and going unread: the digest's own recorded state and rung, the live
+      // stat's CPU and quiet time, and whether a terminal is still there.
+      const life = agentLife({
+        digest: { ...d, store: d.store } as never,
+        pty: live
+          ? {
+              kind: 'live',
+              hint: { bin: d.agent ?? '', interactive: true },
+              cpu: liveStat?.total_cpu ?? 0,
+              quietForMs: liveStat?.quiet_ms ?? undefined,
+              sinceInputMs: liveStat?.since_input_ms ?? undefined,
+            }
+          : undefined,
+        now: Date.now() / 1000,
+      })
       return {
         key: d.session_id || `${d.instance ?? ''}:${d.surface ?? i}`,
         agent: d.agent!,
-        state: d.state || 'idle',
+        state: life.state,
         branch: d.branch,
         cwd: d.cwd,
         lastPrompt: lastHumanPrompt(d.prompts),
@@ -196,7 +227,7 @@ export function buildRows(
         memBytes: liveStat?.total_mem_bytes,
         cost: u?.cost,
         tokens: u ? u.input_tokens + u.output_tokens : undefined,
-        needsYou: live && d.state === 'waiting',
+        needsYou: bucketFor(life, NO_ATTENTION) === 'attention',
         updated: d.updated,
         activeSecs: d.active_secs,
         runSecs: d.run_secs,
@@ -217,10 +248,24 @@ export function buildRows(
     .filter((p) => !claimed.has(p.id))
     .map((p) => {
       const stat = stats.get(p.id)
+      // A terminal with no digest is not "idle" — that was a hard-coded string
+      // sitting two lines above a CPU reading it ignored, and it let the portal
+      // call a terminal idle while the desktop called the same pty working. The
+      // process rungs answer it honestly.
+      const life = agentLife({
+        pty: {
+          kind: 'live',
+          hint: { bin: agentFromTitle(p.title) ?? 'shell', interactive: true },
+          cpu: stat?.total_cpu ?? 0,
+          quietForMs: stat?.quiet_ms ?? undefined,
+          sinceInputMs: stat?.since_input_ms ?? undefined,
+        },
+        now: Date.now() / 1000,
+      })
       return {
         key: `pty:${p.id}`,
         agent: agentFromTitle(p.title) ?? 'shell',
-        state: 'idle',
+        state: life.state,
         cwd: p.cwd,
         title: p.title?.trim() || undefined,
         terminal: true,

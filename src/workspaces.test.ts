@@ -291,4 +291,19 @@ describe("who is working where", () => {
     expect(principalAgent(agents)?.sessionId).toBe("busy");
     expect(principalAgent([])).toBeNull();
   });
+
+  // This used to read the other way round, and it was the only list in the app
+  // that did: a crashed agent still claiming "working" would sit on the row
+  // while the agent actually stopped at a permission prompt went unmentioned.
+  it("prefers the one blocked on you over the one merely working", () => {
+    const agents = agentsIn(
+      "/w/repo-wt-a",
+      [
+        d({ session_id: "busy", surface: "1", state: "working" }),
+        d({ session_id: "blocked", surface: "2", state: "waiting" }),
+      ],
+      "inst-1",
+    );
+    expect(principalAgent(agents)?.sessionId).toBe("blocked");
+  });
 });

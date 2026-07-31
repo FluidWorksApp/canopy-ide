@@ -992,8 +992,24 @@ body,
   opacity: 0.7;
 }
 
+/* Starting: a process is here and nothing has spoken for it yet. Dimmer than
+   working and not pulsing — it is not doing anything yet. */
+.tab-status-starting {
+  background: var(--text-dim);
+  opacity: 0.6;
+}
+
+/* No signal. Deliberately not the same as idle: we have lost track of this one,
+   which is a different fact from "it finished". Hollow like ended, warm like a
+   warning, because the honest reading is "check on this". */
+.tab-status-unknown {
+  background: transparent;
+  border: 1.5px dashed color-mix(in srgb, var(--warn) 70%, transparent);
+  opacity: 0.75;
+}
+
 /* Unseen activity on a tab you're not looking at — a ring on top of whatever
-   state the dot already shows. */
+   state the dot already shows. It selects no group and never has. */
 .tab-status-unread {
   outline: 1.5px solid color-mix(in srgb, var(--warn) 60%, transparent);
   outline-offset: 1.5px;
@@ -5492,8 +5508,12 @@ body.dragging-tab * {
 .aw-stat-state.st-idle {
   color: var(--text-dim);
 }
-.aw-stat-state.st-stale {
+.aw-stat-state.st-unknown {
   color: var(--warn);
+  opacity: 0.8;
+}
+.aw-stat-state.st-starting {
+  color: var(--text-dim);
   opacity: 0.8;
 }
 /* Make the close affordance unmistakable: a red-bordered target that reads as
@@ -6630,7 +6650,7 @@ body.dragging-tab * {
 /* Lost track of it. A hollow ring, deliberately not green and deliberately not
    the same as `idle`: we know this agent stopped reporting, not that it
    finished. Never pulses — the pulse is the claim we can no longer make. */
-.agent-state-dot.st-stale {
+.agent-state-dot.st-unknown {
   background: transparent;
   border: 1px dashed var(--warn);
   opacity: 0.75;

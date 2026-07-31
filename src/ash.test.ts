@@ -21,11 +21,12 @@ describe("ashFor", () => {
   });
 
   // The panel distinguishes "session ended" from "we lost track of it" by the
-  // dot's colour, not its shape. Ash has to keep that apart or `stale` reads as
-  // a clean exit.
+  // dot's colour, not its shape. Ash has to keep that apart or `unknown` reads
+  // as a clean exit — which matters more now that `unknown` is what every
+  // uncorroborated state decays into, for all seven CLIs.
   it("separates a lost agent from a finished one by tone, not face", () => {
-    expect(ashFor("stale").state).toBe(ashFor("ended").state);
-    expect(ashFor("stale").tone).not.toBe(ashFor("ended").tone);
+    expect(ashFor("unknown").state).toBe(ashFor("ended").state);
+    expect(ashFor("unknown").tone).not.toBe(ashFor("ended").tone);
   });
 
   it("falls back to idle for a session nothing has spoken for", () => {

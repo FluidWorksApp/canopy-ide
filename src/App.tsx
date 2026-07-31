@@ -2549,7 +2549,13 @@ export default function App() {
 
       {confirmClose && (() => {
         const roots = confirmClose.components.map((c) => c.path);
-        const activeAgents = pendingForRoots(allPending, roots).filter((i) => i.kind !== "idle");
+        // Agents with something outstanding — a question or a permission
+        // prompt. Named for what it is: this list is filtered to agents that
+        // are *blocked*, and the sentence below used to call them "actively
+        // working", which is the opposite of its own input.
+        const blockedAgents = pendingForRoots(allPending, roots).filter(
+          (i) => i.kind !== "idle",
+        );
         const isAsleep = confirmClose.id in hibernated;
         const metaLine = confirmClose.components
           .map((c) => `${c.label}  ${c.path}`)
@@ -2580,8 +2586,8 @@ export default function App() {
             variant="danger"
             title={`Close ${confirmClose.name}?`}
             body={
-              activeAgents.length > 0
-                ? `${activeAgents.length === 1 ? "1 agent is actively working" : `${activeAgents.length} agents are actively working`} — closing will interrupt ${activeAgents.length === 1 ? "it" : "them"}. All terminals and servers will be stopped.`
+              blockedAgents.length > 0
+                ? `${blockedAgents.length === 1 ? "1 agent is waiting on you" : `${blockedAgents.length} agents are waiting on you`} — closing will discard ${blockedAgents.length === 1 ? "its question" : "their questions"}. All terminals and servers will be stopped.`
                 : "All terminals, agents, and servers in this project will be stopped."
             }
             meta={metaLine}

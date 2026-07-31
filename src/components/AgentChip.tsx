@@ -8,11 +8,14 @@ import { principalAgent, type AgentRef } from "../workspaces";
 
 /** What an agent's lifecycle state means, in the row's own words. */
 const AGENT_STATE: Record<AgentRef["state"], string> = {
+  starting: "starting up",
   working: "working now",
   waiting: "waiting on you",
   idle: "idle",
   ended: "finished",
-  unknown: "here",
+  // Not "here", which promised more than we know. This row can no longer claim
+  // an agent is present when nothing has reported for it.
+  unknown: "no signal",
 };
 
 export function AgentChip({

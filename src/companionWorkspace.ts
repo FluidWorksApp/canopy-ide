@@ -1,3 +1,4 @@
+import { agentLife } from "../shared/agentLife";
 // The cross-project answers — the ones no coding agent can give.
 //
 // A coding agent's `canopy_project` answers about the project it is in because
@@ -162,6 +163,14 @@ export async function workspaceAgents(
   const scope = scopeTo(projects, project);
   const roots = scope.flatMap((p) => p.roots);
   const digests = await ipc.sessionDigests(roots).catch(() => []);
+  // Joined against the live terminals, because a digest alone cannot tell a
+  // session that is working from one that died mid-turn last Tuesday — and Ash
+  // saying "claude is working in canopy" about a dead session is worse than
+  // saying nothing. Both fields the ladder needs were already in the digest;
+  // the CPU and quiet time come from here.
+  const stats = await ipc.ptyStats().catch(() => []);
+  const byPty = new Map(stats.map((s) => [String(s.id), s]));
+  const now = Date.now() / 1000;
   const agents = digests
     .filter((d) => d.agent)
     .map((d) => ({
@@ -172,7 +181,22 @@ export async function workspaceAgents(
       // The last thing the user asked it, which is what actually says what a
       // session is for — a title would be the launcher's guess.
       title: d.prompts?.[d.prompts.length - 1]?.slice(0, 200) ?? null,
-      state: d.state ?? null,
+      state: agentLife({
+        digest: d as never,
+        pty: (() => {
+          const s = d.surface ? byPty.get(d.surface) : undefined;
+          return s
+            ? {
+                kind: "live" as const,
+                hint: s.agent_hint,
+                cpu: s.total_cpu,
+                quietForMs: s.quiet_ms ?? undefined,
+                sinceInputMs: s.since_input_ms ?? undefined,
+              }
+            : undefined;
+        })(),
+        now,
+      }).state,
       updated: d.updated ?? null,
     }))
     // Sessions in a directory belonging to none of the scoped projects are
@@ -184,7 +208,10 @@ export async function workspaceAgents(
     agents,
     note: agents.length
       ? "Your own session is deliberately absent from this list."
-      : "No coding sessions are running in these projects.",
+      // Hedged, because this is asserted from digests: a CLI whose hooks are
+      // not installed writes none at all, and the flat claim was false for
+      // exactly the people most likely to ask.
+      : "No coding sessions reported in these projects — note that a CLI without Canopy's hooks installed reports nothing at all.",
   };
 }
 

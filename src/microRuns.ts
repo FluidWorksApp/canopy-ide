@@ -1,3 +1,4 @@
+import type { LifeState } from "../shared/agentLife";
 // Micro-tasks that run without a tab. A one-shot job — review this PR, raise
 // that one — used to open a terminal tab, take the front of the window, and
 // close itself when it was done: a lot of ceremony for something the user
@@ -72,13 +73,16 @@ export function elapsedLabel(ms: number): string {
  *  reached for, when a hook told us, else its lifecycle state. */
 export function runNote(
   run: MicroRun,
-  state: "working" | "waiting" | "idle" | "ended",
+  state: LifeState,
   lastStep: string | undefined,
   now: number,
 ): string {
   const age = elapsedLabel(now - run.startedAt);
   if (run.blocked || state === "waiting") return `Needs you · ${age}`;
   if (state === "ended") return `Wrapping up · ${age}`;
+  // We have lost track of it. Said plainly rather than dressed as "Started N
+  // ago", which reads as a run that is fine and merely young.
+  if (state === "unknown") return `No signal · ${age}`;
   if (lastStep) return `${lastStep} · ${age}`;
   return state === "working" ? `Working · ${age}` : `Started ${age} ago`;
 }

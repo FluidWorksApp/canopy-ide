@@ -1,44 +1,38 @@
-// Status grouping for the agent tab strip.
+// Where a tab sits in the strip, and when it is allowed to move.
 //
-// An agent tab's place in the strip follows the agent's state: the ones
-// blocked on you sit leftmost, the ones burning CPU next, the quiet ones last.
-// Three buckets, because that is the whole question you ask a row of agents —
-// who needs me, who is working, who is done.
+// This file used to answer two questions and now answers one. Which bucket a
+// session belongs in is `bucketFor` in shared/agentLife — the whole point of
+// that module is that there is one answer. What is left here is the animation:
+// a tab that has just gone quiet must not jump out from under the pointer.
 //
 // Promotion is instant: a tab that wants attention is never held back by a
-// timer. Only the fall *into* idle is delayed, by a settling window, because
-// an agent between tool calls dips quiet for a second at a time and a strip
-// that reshuffles on every dip is unusable — the tab you were reaching for
-// moves out from under the pointer. Waiting for the quiet to hold means a tab
-// moves once, when the agent has genuinely stopped.
+// timer. Only the fall *into* the quiet bucket is delayed, by a settling
+// window, because an agent between tool calls dips quiet for a second at a time
+// and a strip that reshuffles on every dip is unusable. Waiting for the quiet
+// to hold means a tab moves once, when the agent has genuinely stopped.
+//
+// The removed function is worth naming, because it read as obviously correct:
+//
+//   statusFor(state, unread) {
+//     if (unread || state === "waiting") return "attention";
+//     ...
+//
+// `unread` was tested *before* `working`, and the only thing that ever cleared
+// it was looking at the tab. So an agent mid-turn — flagged by a six-second CPU
+// dip, or by any OSC bell — sat under "Needs you" with a green pulsing dot
+// beside the words, and stayed there after it resumed. See
+// shared/agentLife/compose.ts for the ordering that replaced it.
 import { useEffect, useMemo, useRef, useState } from "react";
+import { BUCKET_LABEL, BUCKET_ORDER, type Bucket } from "../shared/agentLife";
 
-/** The three buckets. Also their left-to-right order in the strip. */
-export type TabStatus = "attention" | "active" | "idle";
+/** The three buckets, re-exported under the names this file's callers use. */
+export type TabStatus = Bucket;
 
-export const STATUS_ORDER: readonly TabStatus[] = ["attention", "active", "idle"] as const;
+export const STATUS_ORDER: readonly TabStatus[] = BUCKET_ORDER;
 
-/** Group headings. Deliberately about the agent, not the machine: "Needs you"
- *  is an instruction, "waiting" would be a state you have to interpret. */
-export const STATUS_LABEL: Record<TabStatus, string> = {
-  attention: "Needs you",
-  active: "Working",
-  idle: "Idle",
-};
+export const STATUS_LABEL: Record<TabStatus, string> = BUCKET_LABEL;
 
-/** The session states a terminal tab's dot already reports. */
-export type AgentState = "working" | "waiting" | "idle" | "ended";
-
-/** Which bucket a tab belongs in right now, before any settling. `unread` is
- *  unseen activity (an OSC notice, the went-quiet heuristic) and counts as
- *  wanting attention just as much as a formally `waiting` session does. */
-export function statusFor(state: AgentState, unread?: boolean): TabStatus {
-  if (unread || state === "waiting") return "attention";
-  if (state === "working") return "active";
-  return "idle";
-}
-
-/** A tab's settled bucket, plus when its pending fall to idle started (absent
+/** A tab's settled bucket, plus when its pending fall to quiet started (absent
  *  unless it is mid-fall). */
 export interface Settled {
   group: TabStatus;
@@ -56,7 +50,7 @@ export interface SettleResult {
  *  never read from the clock, so the whole state machine is testable.
  *
  *  A tab absent from `prev` adopts its raw status outright — a tab that opens
- *  idle (a resumed session, a reopened workspace) belongs in Idle immediately
+ *  quiet (a resumed session, a reopened workspace) belongs in Idle immediately
  *  rather than sliding there a minute later. */
 export function settleGroups(
   prev: Map<string, Settled>,
@@ -68,13 +62,13 @@ export function settleGroups(
   let wake: number | null = null;
   for (const [id, target] of targets) {
     const was = prev.get(id);
-    if (target !== "idle" || !was || was.group === "idle" || delayMs <= 0) {
+    if (target !== "quiet" || !was || was.group === "quiet" || delayMs <= 0) {
       groups.set(id, { group: target });
       continue;
     }
     const since = was.pendingSince ?? now;
     if (now - since >= delayMs) {
-      groups.set(id, { group: "idle" });
+      groups.set(id, { group: "quiet" });
       continue;
     }
     groups.set(id, { group: was.group, pendingSince: since });

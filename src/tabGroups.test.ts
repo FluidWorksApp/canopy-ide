@@ -5,7 +5,6 @@ import {
   sameGroups,
   settleGroups,
   shownInStack,
-  statusFor,
   targetsKey,
   type Settled,
   type TabStatus,
@@ -16,36 +15,18 @@ const want = (entries: Record<string, TabStatus>) => new Map(Object.entries(entr
 const plain = (m: Map<string, Settled>) =>
   Object.fromEntries([...m].map(([id, s]) => [id, s.group]));
 
-describe("statusFor", () => {
-  it("puts a session blocked on you in attention", () => {
-    expect(statusFor("waiting")).toBe("attention");
-  });
-
-  it("treats unseen activity as attention whatever the session state", () => {
-    expect(statusFor("idle", true)).toBe("attention");
-    expect(statusFor("working", true)).toBe("attention");
-    expect(statusFor("ended", true)).toBe("attention");
-  });
-
-  it("groups working as active, idle and ended as idle", () => {
-    expect(statusFor("working")).toBe("active");
-    expect(statusFor("idle")).toBe("idle");
-    expect(statusFor("ended")).toBe("idle");
-  });
-});
-
 describe("settleGroups", () => {
   const DELAY = 60_000;
 
   it("adopts the raw status for a tab it has never seen", () => {
-    const { groups, wake } = settleGroups(new Map(), want({ a: "idle", b: "active" }), 0, DELAY);
-    expect(plain(groups)).toEqual({ a: "idle", b: "active" });
+    const { groups, wake } = settleGroups(new Map(), want({ a: "quiet", b: "active" }), 0, DELAY);
+    expect(plain(groups)).toEqual({ a: "quiet", b: "active" });
     expect(wake).toBeNull();
   });
 
   it("promotes to attention immediately, with no settling", () => {
     const { groups } = settleGroups(
-      prev({ a: { group: "idle" }, b: { group: "active" } }),
+      prev({ a: { group: "quiet" }, b: { group: "active" } }),
       want({ a: "attention", b: "attention" }),
       0,
       DELAY,
@@ -55,7 +36,7 @@ describe("settleGroups", () => {
 
   it("holds a tab in place until it has been quiet for the whole delay", () => {
     let state = prev({ a: { group: "active" } });
-    const targets = want({ a: "idle" });
+    const targets = want({ a: "quiet" });
 
     ({ groups: state } = settleGroups(state, targets, 1_000, DELAY));
     expect(plain(state)).toEqual({ a: "active" });
@@ -64,13 +45,13 @@ describe("settleGroups", () => {
     expect(plain(state)).toEqual({ a: "active" });
 
     ({ groups: state } = settleGroups(state, targets, 1_000 + DELAY, DELAY));
-    expect(plain(state)).toEqual({ a: "idle" });
+    expect(plain(state)).toEqual({ a: "quiet" });
   });
 
   it("reports when a pending fall is due, so a caller can wake for it", () => {
     const { groups, wake } = settleGroups(
       prev({ a: { group: "active" }, b: { group: "attention" } }),
-      want({ a: "idle", b: "idle" }),
+      want({ a: "quiet", b: "quiet" }),
       500,
       DELAY,
     );
@@ -80,7 +61,7 @@ describe("settleGroups", () => {
 
   it("restarts the clock when work resumes mid-fall", () => {
     let state = prev({ a: { group: "active" } });
-    ({ groups: state } = settleGroups(state, want({ a: "idle" }), 0, DELAY));
+    ({ groups: state } = settleGroups(state, want({ a: "quiet" }), 0, DELAY));
     expect(state.get("a")?.pendingSince).toBe(0);
 
     // A burst of work: back to active outright, and the pending fall is gone.
@@ -88,21 +69,21 @@ describe("settleGroups", () => {
     expect(state.get("a")?.pendingSince).toBeUndefined();
 
     // Quiet again — the delay is measured from here, not from the first dip.
-    ({ groups: state } = settleGroups(state, want({ a: "idle" }), 31_000, DELAY));
+    ({ groups: state } = settleGroups(state, want({ a: "quiet" }), 31_000, DELAY));
     expect(plain(state)).toEqual({ a: "active" });
-    ({ groups: state } = settleGroups(state, want({ a: "idle" }), 31_000 + DELAY, DELAY));
-    expect(plain(state)).toEqual({ a: "idle" });
+    ({ groups: state } = settleGroups(state, want({ a: "quiet" }), 31_000 + DELAY, DELAY));
+    expect(plain(state)).toEqual({ a: "quiet" });
   });
 
   it("settles instantly when the delay is off", () => {
-    const { groups, wake } = settleGroups(prev({ a: { group: "active" } }), want({ a: "idle" }), 0, 0);
-    expect(plain(groups)).toEqual({ a: "idle" });
+    const { groups, wake } = settleGroups(prev({ a: { group: "active" } }), want({ a: "quiet" }), 0, 0);
+    expect(plain(groups)).toEqual({ a: "quiet" });
     expect(wake).toBeNull();
   });
 
   it("drops tabs that have closed", () => {
     const { groups } = settleGroups(
-      prev({ a: { group: "idle" }, b: { group: "active" } }),
+      prev({ a: { group: "quiet" }, b: { group: "active" } }),
       want({ b: "active" }),
       0,
       DELAY,
@@ -111,8 +92,8 @@ describe("settleGroups", () => {
   });
 
   it("keeps a tab already in idle there without inventing a fall", () => {
-    const { groups, wake } = settleGroups(prev({ a: { group: "idle" } }), want({ a: "idle" }), 9, DELAY);
-    expect(plain(groups)).toEqual({ a: "idle" });
+    const { groups, wake } = settleGroups(prev({ a: { group: "quiet" } }), want({ a: "quiet" }), 9, DELAY);
+    expect(plain(groups)).toEqual({ a: "quiet" });
     expect(wake).toBeNull();
   });
 });
@@ -156,9 +137,9 @@ describe("shownInStack", () => {
 
 describe("sameGroups", () => {
   it("is true only for the same ids in the same buckets at the same point", () => {
-    expect(sameGroups(prev({ a: { group: "idle" } }), prev({ a: { group: "idle" } }))).toBe(true);
-    expect(sameGroups(prev({ a: { group: "idle" } }), prev({ a: { group: "active" } }))).toBe(false);
-    expect(sameGroups(prev({ a: { group: "idle" } }), prev({}))).toBe(false);
+    expect(sameGroups(prev({ a: { group: "quiet" } }), prev({ a: { group: "quiet" } }))).toBe(true);
+    expect(sameGroups(prev({ a: { group: "quiet" } }), prev({ a: { group: "active" } }))).toBe(false);
+    expect(sameGroups(prev({ a: { group: "quiet" } }), prev({}))).toBe(false);
     expect(
       sameGroups(prev({ a: { group: "active", pendingSince: 1 } }), prev({ a: { group: "active" } })),
     ).toBe(false);
@@ -167,9 +148,9 @@ describe("sameGroups", () => {
 
 describe("targetsKey", () => {
   it("changes when a tab's status changes and when the set changes", () => {
-    const base = targetsKey(want({ a: "idle", b: "active" }));
-    expect(targetsKey(want({ a: "idle", b: "active" }))).toBe(base);
+    const base = targetsKey(want({ a: "quiet", b: "active" }));
+    expect(targetsKey(want({ a: "quiet", b: "active" }))).toBe(base);
     expect(targetsKey(want({ a: "active", b: "active" }))).not.toBe(base);
-    expect(targetsKey(want({ a: "idle" }))).not.toBe(base);
+    expect(targetsKey(want({ a: "quiet" }))).not.toBe(base);
   });
 });

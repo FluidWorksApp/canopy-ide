@@ -1,0 +1,30 @@
+{
+  "$comment": "Every threshold the lifecycle question uses, defined once and read by both languages. Before this file the same family of questions was answered with six different silence windows (6s, 60s, 300s, 600s, 900s, 1800s) and four different CPU cut points (0, 2, 10, 300), several of them hand-copied between files with comments admitting they mirrored each other. Adding a number here is cheap; adding one somewhere else is what src/agentLifeGuard.test.ts exists to stop.",
+
+  "$comment_cpu": "Below this the session's whole process tree is doing nothing. The number is a sum over the subtree as a percent of one core, and five of seven CLIs keep a long-lived `canopy-hook --mcp` child, so this is a floor for 'something is running', never a measure of how hard.",
+  "quietCpuPercent": 2,
+
+  "$comment_output": "How recently the pty must have painted for us to call it working. The decisive channel: an agent thinking is silent in hooks and quiet in CPU, but a CLI redrawing a spinner is writing bytes. Tune this from a measured distribution across all seven CLIs, never from a guess.",
+  "quietOutputMs": 3000,
+
+  "$comment_answer": "After the human types, the CLI echoes. Output inside this window of an input is the echo, not the agent working.",
+  "answerWindowMs": 5000,
+
+  "$comment_hook": "How long a hook event's claim that a turn is in flight stands on its own. Generous on purpose: a long build or test run is a normal reason for silence, and the events that bracket a tool call are that far apart by definition.",
+  "hookTrustSecs": 300,
+
+  "$comment_startup": "A process is here but nothing has spoken for it yet. Long enough for a CLI to boot and fire SessionStart.",
+  "startupGraceSecs": 20,
+
+  "$comment_idlegroup": "How long quiet must hold before a tab falls into the Idle stack. Animation, not derivation — an agent between tool calls dips quiet for a second at a time and a strip that reshuffles on every dip is unusable.",
+  "idleGroupDelayMs": 60000,
+
+  "$comment_peer": "How old a session digest may be before other agents stop being told about it.",
+  "peerMaxAgeSecs": 1800,
+
+  "$comment_learn": "How long after a hook names an agent we may still attribute an unidentifiable binary to it.",
+  "learnWindowSecs": 600,
+
+  "$comment_credit": "The longest gap between two hook events that may be credited to the working clock.",
+  "creditedGapSecs": 900
+}

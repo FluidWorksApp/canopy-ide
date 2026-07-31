@@ -1,0 +1,85 @@
+{
+  "$comment": "What each CLI can actually prove about its own lifecycle. Read by TypeScript (fidelity.ts) and by Rust (agent_life.rs, include_str!) so the two can never drift. Every event name here is asserted by src/agentFidelityGuard.test.ts to appear literally inside that CLI's setup_* function in src-tauri/src/agents.rs, and vice versa: a plugin template that renames an event fails CI instead of silently freezing that CLI's state forever. Do not hand-edit a row without re-reading the installer and bumping verifiedAt.",
+  "clis": [
+    {
+      "id": "claude",
+      "endsSession": ["SessionEnd"],
+      "endsTurn": ["Stop"],
+      "startsTurn": ["UserPromptSubmit"],
+      "toolActivity": ["PostToolUse", "PreToolUse"],
+      "structuredBlock": ["PreToolUse:AskUserQuestion"],
+      "notification": "mixed",
+      "promptReadyText": "waiting for",
+      "verifiedAt": "2026-07-31",
+      "$note": "The only CLI whose own completion notice is distinguishable from a permission request by text it authors itself. promptReadyText is consulted only because notification is \"mixed\"."
+    },
+    {
+      "id": "codex",
+      "endsSession": ["SessionEnd"],
+      "endsTurn": ["Stop"],
+      "startsTurn": ["UserPromptSubmit"],
+      "toolActivity": ["PostToolUse"],
+      "structuredBlock": ["PermissionRequest"],
+      "notification": "none",
+      "unstampedBus": true,
+      "needsTrust": true,
+      "verifiedAt": "2026-07-31",
+      "$note": "PermissionRequest is its own event, so blocked is structural and no text is read. unstampedBus: the legacy notify line (agents.rs setup_codex_notify) appends to the bus with no canopy_pty stamp. needsTrust: hooks are written but inert until the user runs /hooks."
+    },
+    {
+      "id": "agy",
+      "endsSession": [],
+      "endsTurn": ["PostInvocation"],
+      "startsTurn": ["PreInvocation"],
+      "toolActivity": ["PreToolUse", "PostToolUse"],
+      "structuredBlock": [],
+      "notification": "unmapped",
+      "verifiedAt": "2026-07-31",
+      "$note": "agy's hook stdin carries no message field and the helper is registered without --message, so nothing in a Notification can be read. Declared unmapped rather than guessed: before this manifest every agy notification returned \"waiting\" and the session stayed pinned there until its next PostInvocation. Flip this to \"block\" the day agy's payload is verified."
+    },
+    {
+      "id": "aider",
+      "endsSession": [],
+      "endsTurn": [],
+      "startsTurn": [],
+      "toolActivity": [],
+      "structuredBlock": [],
+      "notification": "attention-only",
+      "verifiedAt": "2026-07-31",
+      "$note": "One integration total: notifications-command, which aider runs both after a turn and at a y/n confirm. It wants the keyboard and cannot say which kind. Classified attention-only, never \"finished\" — idle is what auto-hibernation SIGTERMs and what the folded Idle stack hides, and the two failure directions are not symmetric."
+    },
+    {
+      "id": "opencode",
+      "endsSession": [],
+      "endsTurn": ["session.idle"],
+      "startsTurn": [],
+      "toolActivity": ["tool.execute.after", "file.edited"],
+      "structuredBlock": ["permission.asked"],
+      "notification": "block",
+      "verifiedAt": "2026-07-31",
+      "$note": "The permission signal arrives on its own bus event. It used to be re-encoded as prose and re-parsed, which let a tool-supplied title containing \"waiting for\" convert a block into \"finished\"."
+    },
+    {
+      "id": "omp",
+      "endsSession": [],
+      "endsTurn": ["turn_end"],
+      "startsTurn": ["turn_start"],
+      "toolActivity": ["tool_result"],
+      "structuredBlock": ["tool_approval_requested"],
+      "notification": "block",
+      "verifiedAt": "2026-07-31",
+      "$note": "Registered through try/catch against an API its own installer calls \"in flux\": a rename registers nothing and throws nothing. The guard test over these names is the only thing that would notice."
+    },
+    {
+      "id": "amp",
+      "endsSession": [],
+      "endsTurn": ["agent.end"],
+      "startsTurn": ["agent.start"],
+      "toolActivity": ["tool.result"],
+      "structuredBlock": [],
+      "notification": "none",
+      "verifiedAt": "2026-07-31",
+      "$note": "No notification event of any kind, so \"blocked on you\" is structurally unprovable for amp. An amp session parked on an approval prompt used to read \"working\" indefinitely; it now decays to unknown rather than being fabricated into waiting."
+    }
+  ]
+}

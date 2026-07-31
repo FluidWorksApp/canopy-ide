@@ -1,3 +1,4 @@
+mod agent_life;
 mod agentid;
 mod agents;
 mod android;
@@ -679,6 +680,7 @@ pub fn run() {
             agents::hook_bridge_path,
             agents::set_context_scopes,
             agents::session_digests,
+            agents::pty_stats,
             agents::session_forget,
             profiles::profiles_list,
             profiles::profile_create,

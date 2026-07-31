@@ -1557,7 +1557,22 @@ export interface SessionStats {
   ports: number[];
   /** Absent when the terminal is an idle shell. */
   agent_hint: AgentHint | null;
+  /** Milliseconds since this terminal last painted, and since the human last
+   *  typed into it. `null` before either has ever happened — which is not the
+   *  same as a very long silence.
+   *
+   *  The signal that separates "the model is thinking" from "the agent is at
+   *  its prompt": both look identical in CPU and in hook events, and a CLI
+   *  redrawing a spinner is writing bytes. See shared/agentLife. */
+  quiet_ms: number | null;
+  since_input_ms: number | null;
+  output_bytes: number;
 }
+/** The latest process reading for every live terminal, on demand — for a caller
+ *  that needs one now and has no `onPtyStats` subscription. Reads the cache the
+ *  monitor already fills. */
+export const ptyStats = (): Promise<SessionStats[]> => invoke<SessionStats[]>("pty_stats");
+
 export const onPtyStats = (
   cb: (stats: SessionStats[]) => void,
 ): Promise<UnlistenFn> =>
@@ -2123,6 +2138,9 @@ export interface AgentWorkspace {
   session_id: string;
   agent: string | null;
   state: string | null;
+  /** The rung that produced `state`, carried through from the digest so this
+   *  view needs no second source. See shared/agentLife. */
+  state_via?: string | null;
   cwd: string | null;
   updated: number | null;
   /** The session's working-time clock (see SessionDigest.active_secs): seconds
@@ -2446,6 +2464,14 @@ export interface SessionDigest {
    *  "idle" (finished, nothing outstanding) or "ended" (session closed).
    *  Absent for pre-upgrade digests and CLIs read straight from disk. */
   state?: "working" | "waiting" | "idle" | "ended";
+  /** Which rung of the evidence ladder produced `state` — a tool-name equality
+   *  reads differently from a text match, and after the fact there is no other
+   *  way to tell. Absent on pre-upgrade digests and on rows read from a CLI's
+   *  own store, which is itself evidence: no rung, no certainty. */
+  state_via?: string;
+  /** How well `state` is backed. Nothing destructive may act on a state that
+   *  is not `proven`. See shared/agentLife/compose.ts `reclaimable`. */
+  state_confidence?: "proven" | "reported" | "inferred";
   /** Subagents (Claude's Task tool) that finished in the current turn, zeroed
    *  when the next human prompt starts. */
   subagents?: number;

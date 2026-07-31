@@ -1,5 +1,6 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type React from "react";
+import type { LifeState } from "../../shared/agentLife";
 import {
   AgentIcon,
   ChevronIcon,
@@ -143,7 +144,10 @@ export interface PaneBarProps {
   renameDraft: string;
   collabPaths: Set<string>;
   isAgentTab: (t: SubTab) => t is TermSubTab;
-  tabState: (t: TermSubTab) => "working" | "waiting" | "idle" | "ended";
+  tabState: (t: TermSubTab) => LifeState;
+  /** Unseen activity on this terminal — an additive ring, never a state of its
+   *  own and never a reason to move the tab. */
+  tabRing?: (t: TermSubTab) => boolean;
   /** Drag-to-reorder for the whole strip. One handle, not one per run: a tab is
    *  still confined to the run it was picked up from (the runs are handed to
    *  useTabDragGroups), but a dozen runs must not cost a dozen sets of window
@@ -221,7 +225,7 @@ export interface PaneBarProps {
 function PaneBarImpl({
   tabGroups, stripDrag, stripRef, openStacks, onToggleStack,
   stripTabs, activeTabId, flashTabId, renamingTabId, renameDraft,
-  collabPaths, isAgentTab, tabState, showHints,
+  collabPaths, isAgentTab, tabState, tabRing, showHints,
   shellChips, runChips, runSummary, shellMenuOpen, setShellMenuOpen,
   runMenuOpen, setRunMenuOpen, activeSection,
   activeFileKind, activeFileView,
@@ -392,7 +396,9 @@ function PaneBarImpl({
                 >
                   {tab.type === "terminal" ? (
                     <span
-                      className={`tab-status tab-status-${tabState(tab)} ${tab.unread ? "tab-status-unread" : ""}`}
+                      className={`tab-status tab-status-${tabState(tab)} ${
+                        (tabRing?.(tab) ?? tab.unread) ? "tab-status-unread" : ""
+                      }`}
                       aria-hidden
                     />
                   ) : tab.type === "pr" ? (

@@ -1,0 +1,226 @@
+[
+  {
+    "name": "gone pty beats a waiting digest",
+    "digest": { "state": "waiting", "state_via": "structured-block", "agent": "claude", "updated": 1799999940 },
+    "pty": { "kind": "gone" },
+    "now": 1800000000,
+    "expect": { "state": "ended", "via": "process-gone", "confidence": "proven" }
+  },
+  {
+    "name": "no agent process on a live pty is ended",
+    "digest": { "state": "working", "state_via": "tool-activity", "agent": "claude", "updated": 1799999995 },
+    "pty": { "kind": "live", "hint": false, "cpu": 90 },
+    "now": 1800000000,
+    "expect": { "state": "ended", "via": "process-gone", "confidence": "proven" }
+  },
+  {
+    "name": "claude SessionEnd",
+    "digest": { "state": "ended", "state_via": "session-end", "agent": "claude", "updated": 1799999990 },
+    "pty": null,
+    "now": 1800000000,
+    "expect": { "state": "ended", "via": "session-end", "confidence": "proven" }
+  },
+  {
+    "name": "claude AskUserQuestion is a proven block",
+    "digest": { "state": "waiting", "state_via": "structured-block", "agent": "claude", "updated": 1799999990 },
+    "pty": null,
+    "now": 1800000000,
+    "expect": { "state": "waiting", "via": "structured-block", "confidence": "proven" }
+  },
+  {
+    "name": "codex PermissionRequest is a proven block",
+    "digest": { "state": "waiting", "state_via": "structured-block", "agent": "codex", "updated": 1799999990 },
+    "pty": null,
+    "now": 1800000000,
+    "expect": { "state": "waiting", "via": "structured-block", "confidence": "proven" }
+  },
+  {
+    "name": "opencode permission.asked is a proven block",
+    "digest": { "state": "waiting", "state_via": "declared-block", "agent": "opencode", "updated": 1799999990 },
+    "pty": null,
+    "now": 1800000000,
+    "expect": { "state": "waiting", "via": "declared-block", "confidence": "proven" }
+  },
+  {
+    "name": "aider can only ever report an ambiguous block",
+    "digest": { "state": "waiting", "state_via": "declared-block", "agent": "aider", "updated": 1799999990 },
+    "pty": null,
+    "now": 1800000000,
+    "expect": { "state": "waiting", "via": "declared-block", "confidence": "reported" }
+  },
+  {
+    "name": "agy cannot map its notification at all",
+    "digest": { "state": "waiting", "state_via": "declared-block", "agent": "agy", "updated": 1799999999 },
+    "pty": { "kind": "live", "hint": true, "cpu": 0, "quietForMs": 600000 },
+    "now": 1800000000,
+    "expect": { "state": "unknown", "via": "none", "confidence": "inferred" }
+  },
+  {
+    "name": "amp cannot report a block at all",
+    "digest": { "state": "waiting", "state_via": "declared-block", "agent": "amp", "updated": 1799999999 },
+    "pty": { "kind": "live", "hint": true, "cpu": 0, "quietForMs": 600000 },
+    "now": 1800000000,
+    "expect": { "state": "unknown", "via": "none", "confidence": "inferred" }
+  },
+  {
+    "name": "claude Stop is a proven idle",
+    "digest": { "state": "idle", "state_via": "turn-boundary", "agent": "claude", "updated": 1799999990 },
+    "pty": null,
+    "now": 1800000000,
+    "expect": { "state": "idle", "via": "turn-boundary", "confidence": "proven" }
+  },
+  {
+    "name": "codex hooks are inert until trusted, so its idle is only reported",
+    "digest": { "state": "idle", "state_via": "turn-boundary", "agent": "codex", "updated": 1799999990 },
+    "pty": null,
+    "now": 1800000000,
+    "expect": { "state": "idle", "via": "turn-boundary", "confidence": "reported" }
+  },
+  {
+    "name": "aider declares no turn boundary, so a digest claiming one is not believed",
+    "digest": { "state": "idle", "state_via": "turn-boundary", "agent": "aider", "updated": 1799999990 },
+    "pty": { "kind": "live", "hint": true, "cpu": 0, "quietForMs": 600000 },
+    "now": 1800000000,
+    "expect": { "state": "unknown", "via": "none", "confidence": "inferred" }
+  },
+  {
+    "name": "a fresh turn start is working",
+    "digest": { "state": "working", "state_via": "turn-start", "agent": "claude", "updated": 1799999995 },
+    "pty": null,
+    "now": 1800000000,
+    "expect": { "state": "working", "via": "turn-start", "confidence": "proven" }
+  },
+  {
+    "name": "a fresh tool boundary is working",
+    "digest": { "state": "working", "state_via": "tool-activity", "agent": "claude", "updated": 1799999995 },
+    "pty": null,
+    "now": 1800000000,
+    "expect": { "state": "working", "via": "tool-activity", "confidence": "proven" }
+  },
+  {
+    "name": "a working claim just inside the trust window still stands",
+    "digest": { "state": "working", "state_via": "tool-activity", "agent": "claude", "updated": 1799999701 },
+    "pty": { "kind": "live", "hint": true, "cpu": 0, "quietForMs": 600000 },
+    "now": 1800000000,
+    "expect": { "state": "working", "via": "tool-activity", "confidence": "proven" }
+  },
+  {
+    "name": "codex usage limit: quiet in events, CPU and output together",
+    "digest": { "state": "working", "state_via": "tool-activity", "agent": "codex", "updated": 1799999160 },
+    "pty": { "kind": "live", "hint": true, "cpu": 0, "quietForMs": 600000 },
+    "now": 1800000000,
+    "expect": { "state": "unknown", "via": "none", "confidence": "inferred" }
+  },
+  {
+    "name": "an hour into a cargo build is still working",
+    "digest": { "state": "working", "state_via": "tool-activity", "agent": "claude", "updated": 1799996400 },
+    "pty": { "kind": "live", "hint": true, "cpu": 90, "quietForMs": 600000 },
+    "now": 1800000000,
+    "expect": { "state": "working", "via": "cpu", "confidence": "inferred" }
+  },
+  {
+    "name": "a painting terminal is working even for a CLI with no hooks at all",
+    "digest": { "agent": "aider" },
+    "pty": { "kind": "live", "hint": true, "cpu": 0, "quietForMs": 200 },
+    "now": 1800000000,
+    "expect": { "state": "working", "via": "output", "confidence": "inferred" }
+  },
+  {
+    "name": "output trailing a keystroke is the CLI's echo, not work",
+    "digest": { "agent": "amp" },
+    "pty": { "kind": "live", "hint": true, "cpu": 0, "quietForMs": 900, "sinceInputMs": 200 },
+    "now": 1800000000,
+    "expect": { "state": "unknown", "via": "none", "confidence": "inferred" }
+  },
+  {
+    "name": "output that outlives the echo window is work",
+    "digest": { "agent": "amp" },
+    "pty": { "kind": "live", "hint": true, "cpu": 0, "quietForMs": 100, "sinceInputMs": 4000 },
+    "now": 1800000000,
+    "expect": { "state": "working", "via": "output", "confidence": "inferred" }
+  },
+  {
+    "name": "a build with no output channel gets no corroboration from it",
+    "digest": { "agent": "amp" },
+    "pty": { "kind": "live", "hint": true, "cpu": 0 },
+    "now": 1800000000,
+    "expect": { "state": "unknown", "via": "none", "confidence": "inferred" }
+  },
+  {
+    "name": "silence never decays a proven block",
+    "digest": { "state": "waiting", "state_via": "structured-block", "agent": "claude", "updated": 1799136000 },
+    "pty": { "kind": "live", "hint": true, "cpu": 0, "quietForMs": 999999 },
+    "now": 1800000000,
+    "expect": { "state": "waiting", "via": "structured-block", "confidence": "proven" }
+  },
+  {
+    "name": "silence never decays an idle either",
+    "digest": { "state": "idle", "state_via": "turn-boundary", "agent": "claude", "updated": 1799136000 },
+    "pty": { "kind": "live", "hint": true, "cpu": 0, "quietForMs": 999999 },
+    "now": 1800000000,
+    "expect": { "state": "idle", "via": "turn-boundary", "confidence": "proven" }
+  },
+  {
+    "name": "a row read from the CLI's own history records no live state",
+    "digest": { "agent": "claude", "store": true, "updated": 1799999990 },
+    "pty": null,
+    "now": 1800000000,
+    "expect": { "state": "unknown", "via": "none", "confidence": "inferred" }
+  },
+  {
+    "name": "a digest from another launch of the app means nothing here",
+    "digest": { "state": "working", "state_via": "turn-start", "agent": "claude", "foreign": true, "updated": 1799999999 },
+    "pty": null,
+    "now": 1800000000,
+    "expect": { "state": "unknown", "via": "none", "confidence": "inferred" }
+  },
+  {
+    "name": "nothing has ever reported for this terminal",
+    "digest": {},
+    "pty": { "kind": "live", "hint": true, "cpu": 0, "quietForMs": 999999 },
+    "now": 1800000000,
+    "expect": { "state": "unknown", "via": "none", "confidence": "inferred" }
+  },
+  {
+    "name": "a process that has just appeared is starting, not unknown",
+    "digest": {},
+    "pty": { "kind": "live", "hint": true, "cpu": 0, "quietForMs": 999999, "firstSeen": 1799999997 },
+    "now": 1800000000,
+    "expect": { "state": "starting", "via": "startup", "confidence": "inferred" }
+  },
+  {
+    "name": "once the startup grace is spent we say so",
+    "digest": {},
+    "pty": { "kind": "live", "hint": true, "cpu": 0, "quietForMs": 999999, "firstSeen": 1799999900 },
+    "now": 1800000000,
+    "expect": { "state": "unknown", "via": "none", "confidence": "inferred" }
+  },
+  {
+    "name": "a pre-upgrade waiting is read as declared, never structured",
+    "digest": { "state": "waiting", "agent": "claude", "updated": 1799999990 },
+    "pty": null,
+    "now": 1800000000,
+    "expect": { "state": "waiting", "via": "declared-block", "confidence": "proven" }
+  },
+  {
+    "name": "a pre-upgrade working still decays",
+    "digest": { "state": "working", "agent": "claude", "updated": 1799990001 },
+    "pty": { "kind": "live", "hint": true, "cpu": 0, "quietForMs": 999999 },
+    "now": 1800000000,
+    "expect": { "state": "unknown", "via": "none", "confidence": "inferred" }
+  },
+  {
+    "name": "omp turn_end is a proven idle",
+    "digest": { "state": "idle", "state_via": "turn-boundary", "agent": "omp", "updated": 1799999990 },
+    "pty": null,
+    "now": 1800000000,
+    "expect": { "state": "idle", "via": "turn-boundary", "confidence": "proven" }
+  },
+  {
+    "name": "an unknown CLI declares nothing and falls through to the process",
+    "digest": { "state": "waiting", "state_via": "declared-block", "agent": "some-in-house-cli", "updated": 1799999999 },
+    "pty": { "kind": "live", "hint": true, "cpu": 50 },
+    "now": 1800000000,
+    "expect": { "state": "working", "via": "cpu", "confidence": "inferred" }
+  }
+]
