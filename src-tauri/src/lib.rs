@@ -467,6 +467,7 @@ pub fn run() {
             research::research_delete,
             notes::notes_list,
             notes::notes_get,
+            notes::notes_search,
             notes::notes_create,
             notes::notes_update,
             notes::notes_add_attachment,

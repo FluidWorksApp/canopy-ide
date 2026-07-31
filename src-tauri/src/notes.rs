@@ -599,6 +599,50 @@ pub fn notes_list(
         .collect())
 }
 
+/// Find notes matching `query`.
+///
+/// Exists mainly for the agents. "Has this already been noticed?" is the
+/// question worth asking before adding the two hundred and first thought to a
+/// scratchpad, and without it an agent's only option is to list everything and
+/// read it — which is how a context window gets spent on a duplicate.
+///
+/// Ranked by where the match landed: a title hit is a different kind of answer
+/// than a word buried in the body.
+#[tauri::command]
+pub fn notes_search(
+    project_id: String,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<Summary>, String> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Ok(Vec::new());
+    }
+    let cap = limit.unwrap_or(LIST_DEFAULT).clamp(1, LIST_MAX);
+    let mut hits: Vec<(u8, Summary)> = Vec::new();
+    for (m, dir) in load_project(&project_id)? {
+        let body = read_body(&dir);
+        let rank = if m.title.to_lowercase().contains(&needle) {
+            0
+        } else if m.tags.iter().any(|t| t.to_lowercase().contains(&needle)) {
+            1
+        } else if body.to_lowercase().contains(&needle) {
+            2
+        } else if m.context.to_lowercase().contains(&needle)
+            || m.links.files.iter().any(|f| f.path.to_lowercase().contains(&needle))
+        {
+            3
+        } else {
+            continue;
+        };
+        hits.push((rank, summarize(&m, &body)));
+    }
+    // Stable within a rank, so the newest-first order load_project established
+    // survives — two title hits should come back most-recent first.
+    hits.sort_by_key(|(rank, _)| *rank);
+    Ok(hits.into_iter().take(cap).map(|(_, s)| s).collect())
+}
+
 #[tauri::command]
 pub fn notes_get(project_id: String, id: String) -> Result<Detail, String> {
     let dir = note_dir(&project_id, &id)?;
@@ -1797,6 +1841,42 @@ mod tests {
         std::fs::remove_file(project_dir(p).unwrap().join("project.json")).unwrap();
         let third = create(p, "Third");
         assert_eq!(third.id, "0003-third");
+    }
+
+    #[test]
+    fn search_ranks_a_title_hit_above_one_buried_in_the_body() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _home = Home::new("search");
+        let p = "proj";
+        let buried = create(p, "Something else entirely");
+        update_impl(
+            p.into(),
+            buried.id.clone(),
+            None,
+            Some("we should tier donations eventually".into()),
+            None,
+            None,
+        )
+        .unwrap();
+        let titled = create(p, "Tier donations by amount");
+
+        let hits = notes_search(p.into(), "tier donations".into(), None).unwrap();
+        assert_eq!(hits.len(), 2);
+        // The title hit answers the question; the body mention is a lead.
+        assert_eq!(hits[0].id, titled.id);
+        assert_eq!(hits[1].id, buried.id);
+    }
+
+    #[test]
+    fn search_is_empty_rather_than_everything_for_an_empty_query() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _home = Home::new("search-empty");
+        let p = "proj";
+        create(p, "Anything");
+        assert!(notes_search(p.into(), "   ".into(), None).unwrap().is_empty());
+        assert!(notes_search(p.into(), "nothing matches this".into(), None)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
