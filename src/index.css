@@ -320,12 +320,52 @@
     rgba(6, 7, 10, 0.72);
 }
 
-:root[data-theme="vitrine"] .side-peek-frost,
 :root[data-theme="vitrine"] .palette {
   --glass-base: var(--bg-overlay);
   --glass-tint: 100%;
   --glass-sheen: rgba(255, 255, 255, 0.1);
   --glass-lip: rgba(255, 255, 255, 0.12);
+}
+
+/* The side panel is the largest sheet you look at with your work still behind
+   it, so on the glass skin it is the one that most has to read as glass. It
+   used to share the palette's tuning above — --bg-overlay at full tint, a
+   near-solid 0.92 wash. That is right for a menu: small, short-lived, and it
+   has to hold up when the blur is dropped. On a sheet this size it reads as a
+   slab, which is what the skin is meant not to have.
+
+   So: about half the wash, and the frost does the rest of the work. The blur
+   goes up because a wider kernel is what turns the editor behind into a field
+   of light rather than smeared text, and brightness() is the piece the other
+   surfaces don't need — real frosted glass scatters light forward, so it sits
+   brighter than what it covers. Without it a thin wash over a dark editor is
+   just a darker hole. */
+:root[data-theme="vitrine"] .side-peek-frost {
+  --glass-lip: rgba(255, 255, 255, 0.2);
+  background:
+    linear-gradient(
+      104deg,
+      rgba(255, 255, 255, 0.14) 0%,
+      rgba(255, 255, 255, 0.055) 32%,
+      rgba(255, 255, 255, 0.018) 72%,
+      transparent 100%
+    ),
+    radial-gradient(
+      115% 42% at 0% 0%,
+      color-mix(in srgb, var(--accent) 13%, transparent),
+      transparent 72%
+    ),
+    radial-gradient(
+      120% 38% at 15% 100%,
+      color-mix(in srgb, var(--cyan) 10%, transparent),
+      transparent 74%
+    ),
+    rgba(12, 15, 20, 0.5);
+  backdrop-filter: blur(52px) saturate(215%) brightness(128%);
+  -webkit-backdrop-filter: blur(52px) saturate(215%) brightness(128%);
+  /* The trailing edge is where the sheet meets the work it covers, and at half
+     the wash the shared hairline is too faint to find it. */
+  border-right-color: color-mix(in srgb, var(--border-strong) 80%, transparent);
 }
 
 :root[data-theme="vitrine"] .workspace-overlay {
