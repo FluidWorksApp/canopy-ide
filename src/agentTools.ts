@@ -104,6 +104,22 @@ export const AGENT_TOOL_GROUPS: AgentToolGroup[] = [
     ],
   },
   {
+    id: "notes",
+    label: "Scratchpad",
+    blurb:
+      "The user's own thoughts, ideas and to-dos for this project. An agent reads it to " +
+      "avoid noting the same thing twice, and writes to it to park something real that " +
+      "isn't the job it was given.",
+    tools: [
+      { name: "canopy_notes", label: "Read notes", note: "What's already been written down" },
+      {
+        name: "canopy_notes_write",
+        label: "Park a note",
+        note: "Capture a side-observation instead of chasing it",
+      },
+    ],
+  },
+  {
     id: "research",
     label: "Research",
     blurb:

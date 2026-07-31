@@ -254,6 +254,8 @@ pub struct SpotIngestReport {
     pub terminals: usize,
     /// Research entries in the index after this call.
     pub research: usize,
+    /// Notes in the index after this call.
+    pub notes: usize,
     /// Documents dropped: vanished files, disabled agents, retention.
     pub pruned: usize,
 }
@@ -640,12 +642,39 @@ pub async fn spot_ingest(
         }
         let research = docs.len();
 
+        // ---- notes ----
+        // Same treatment as research above, and for the same reasons: a small
+        // set, rewritten rather than appended to, so replacing it outright is
+        // both cheap and how a deleted note leaves the index.
+        let note_docs = crate::notes::index_docs();
+        conn.execute("DELETE FROM docs WHERE kind = 'note'", [])
+            .map_err(|e| e.to_string())?;
+        for doc in &note_docs {
+            conn.execute(
+                "INSERT INTO docs (kind, key, agent, cwd, title, body, meta, ts)
+                 VALUES ('note', ?1, 'note', ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    // Project-qualified: note numbers restart per project and
+                    // `key` has to be unique across the index.
+                    format!("{}/{}", doc.project_id, doc.id),
+                    doc.cwd,
+                    doc.title,
+                    doc.body,
+                    doc.dir,
+                    doc.ts.max(0),
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        let notes = note_docs.len();
+
         Ok(SpotIngestReport {
             more,
             pending,
             messages,
             terminals,
             research,
+            notes,
             pruned,
         })
     })

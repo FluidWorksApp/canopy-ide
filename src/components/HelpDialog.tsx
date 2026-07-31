@@ -1,56 +1,14 @@
 // Help: what Canopy is, how the agent features work, and every shortcut.
 // Static on purpose — this must render instantly and work offline.
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { format, helpRows } from "../shortcuts";
 import { useEscape } from "../useEscape";
-import { IS_MAC } from "../platform";
 import { Button } from "./ui";
 
 interface HelpDialogProps {
   onClose: () => void;
   /** Re-open the first-run walkthrough on demand. */
   onReplayIntro?: () => void;
-}
-
-const SHORTCUTS: [string, string][] = [
-  ["⌘N", "New tab — shell, preview or an agent (type to filter, ↵ to open)"],
-  ["⌘⇧N", "New project"],
-  ["⌘O", "Open project folder"],
-  ["⌘⇧M", "Manage projects (create, edit, delete)"],
-  ["⌘1…9", "Jump to a tab — hold ⌘ and the tabs show their numbers"],
-  ["⌥1…9", "Jump to a project — hold ⌥ and the pills show their numbers"],
-  ["⌘⌥← / ⌘⌥→", "Previous / next project"],
-  ["⌘T", "New terminal in the active project"],
-  ["⌃⇥ / ⌃⇧⇥", "Next / previous tab"],
-  ["⌃⌘← / ⌃⌘→", "Previous / next tab"],
-  ["⌘W", "Close tab"],
-  ["⌘⇧W", "Close project"],
-  ["⌘P", "Quick-open a file"],
-  ["⌘⇧F", "Find in files"],
-  ["⌘K", "SpotSearch — search everything, or run what you type as a task"],
-  ["⌘B", "Toggle sidebar"],
-  ["⌘⇧Enter", "Focus mode (Esc leaves)"],
-  ["⌘D", "Voice dictation — speak, press again to insert (Esc cancels)"],
-  ["⌘, ", "Settings"],
-  ["⌥← / ⌥→", "Terminal: jump word left / right"],
-  ["⌘← / ⌘→", "Terminal: start / end of line"],
-  ["⌥⌫", "Terminal: delete word"],
-  ["⌘⌫", "Terminal: delete line"],
-];
-
-/** The table is written in macOS glyphs. Every accelerator is CmdOrCtrl-based,
- *  so off macOS the same chord is spelled with Ctrl/Alt/Shift — show that
- *  rather than teaching a Windows user a key their keyboard doesn't have. */
-function forPlatform(keys: string): string {
-  if (IS_MAC) return keys;
-  return keys
-    .replace(/[⌘⌃]/g, "Ctrl+")
-    .replace(/⌥/g, "Alt+")
-    .replace(/⇧/g, "Shift+")
-    .replace(/⌫/g, "Backspace")
-    // Control+CmdOrCtrl collapses to one Ctrl off macOS, where both halves of
-    // the chord are the same key.
-    .replace(/(Ctrl\+)+/g, "Ctrl+")
-    .replace(/\+ /g, "+");
 }
 
 export function HelpDialog({ onClose, onReplayIntro }: HelpDialogProps) {
@@ -76,7 +34,8 @@ export function HelpDialog({ onClose, onReplayIntro }: HelpDialogProps) {
           <div className="set-head">Getting started</div>
           <p>
             A <strong>project</strong> is one or more directories (frontend,
-            backend, …) opened together. Create one with ⌘N, then launch a
+            backend, …) opened together. Create one with{" "}
+            <code>{format("new-project")}</code>, then launch a
             shell or an agent CLI from the ＋ menu, the empty-state grid, or by
             right-clicking a directory in the sidebar. Terminals keep running
             when you switch projects.
@@ -117,12 +76,12 @@ export function HelpDialog({ onClose, onReplayIntro }: HelpDialogProps) {
           <div className="set-head">Keyboard shortcuts</div>
           <table className="help-keys">
             <tbody>
-              {SHORTCUTS.map(([keys, what]) => (
-                <tr key={keys}>
+              {helpRows().map((row) => (
+                <tr key={row.id}>
                   <td>
-                    <code>{forPlatform(keys)}</code>
+                    <code>{row.keys}</code>
                   </td>
-                  <td>{what}</td>
+                  <td>{row.label}</td>
                 </tr>
               ))}
             </tbody>

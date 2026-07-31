@@ -39,6 +39,10 @@ export interface TerminalSnapshot {
   agentId?: string;
   /** The conversation that was live in it, for `<cli> --resume <id>`. */
   sessionId?: string;
+  /** The account it was running under. Waking has to put the CLI back on the
+   *  same login: the resume command carries a session id that only exists in
+   *  that account's store, so a wake onto the default one comes back empty. */
+  profile?: string;
   /** A headless PTY from the remote portal. It outlives hibernation (we never
    *  spawned it, so we never kill it) — reattached on wake if still alive. */
   attachId?: number;
@@ -128,6 +132,7 @@ export function snapshotTabs(
           run: t.run,
           agentId,
           sessionId: agentId ? sessionId : undefined,
+          profile: t.profile,
           attachId: t.attachId,
         });
         break;

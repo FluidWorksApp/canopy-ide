@@ -16,6 +16,7 @@ import {
 } from "react";
 import { Panel, PanelGroup } from "react-resizable-panels";
 import * as ipc from "../../ipc";
+import { format, matches, matchesModifierClick } from "../../shortcuts";
 import { getSettings, SETTINGS_CHANGE_EVENT } from "../../settings";
 import { modelFor, monaco, languageForPath } from "../../monaco-setup";
 import { getCaret, subscribeCaret } from "../../editorState";
@@ -25,6 +26,14 @@ import { GuestSession, OwnerSession } from "../../collab";
 import { CollabView } from "../CollabView";
 import { SharedProjectView } from "../SharedProjectView";
 import type { AgentCli } from "../../projects";
+import {
+  activeProfile,
+  launchEnv,
+  profileBadge,
+  setActiveProfile,
+  supportsProfiles,
+  PROFILE_CHANGE_EVENT,
+} from "../../profiles";
 import { startCommandParked } from "../../agentSeed";
 import {
   AGENT_CLIS,
@@ -79,6 +88,7 @@ import {
   progressBrief,
   runLabelFor,
   raisePrTask,
+  noteTask,
   researchTask,
   reviewPrTask,
   type CustomMicroTask,
@@ -86,6 +96,8 @@ import {
   type MicroTaskEnv,
 } from "../../microTasks";
 import { TasksPanel, type RunningMicroTask } from "../TasksPanel";
+import { NotesPanel } from "../NotesPanel";
+import { NoteView } from "../NoteView";
 import { ResearchPanel } from "../ResearchPanel";
 import { ResearchImportCta } from "../ResearchImportCta";
 import { ResearchView } from "../ResearchView";
@@ -99,6 +111,15 @@ import {
   settleIfRunning as researchSettleIfRunning,
   start as researchStart,
 } from "../../research";
+import { resolveWikilink } from "../../wikilinks";
+import {
+  NEXT_STATUSES as NEXT_NOTE_STATUSES,
+  cached as notesCached,
+  create as createNote,
+  noteContext,
+  refresh as refreshNotes,
+  setStatus as setNoteStatus,
+} from "../../notes";
 import { TaskHistoryView } from "../TaskHistoryView";
 import { InstructionsView } from "../InstructionsView";
 import {
@@ -236,6 +257,7 @@ import {
   type TermSubTab,
   type FileSubTab,
   type TicketSubTab,
+  type NoteSubTab,
   type ResearchSubTab,
   type BranchSubTab,
   type CommitSubTab,
@@ -330,8 +352,9 @@ function TermPorts({
 }: {
   ptyId: number | null | undefined;
   stats: ipc.SessionStats[];
-  /** Open in the in-app preview tab; plain click. ⌘/ctrl-click still goes to
-   *  the system browser for the times a real browser is the point. */
+  /** Open in the in-app preview tab; plain click. Cmd-click (Ctrl-click off a
+   *  Mac) still goes to the system browser for the times a real browser is the
+   *  point. */
   onPreview: (url: string) => void;
 }) {
   if (ptyId == null) return null;
@@ -343,9 +366,11 @@ function TermPorts({
         <button
           key={p}
           className="term-port"
-          title={`Preview http://localhost:${p} in Canopy — ⌘-click for your browser`}
+          title={`Preview http://localhost:${p} in Canopy — ${format(
+            "open-external",
+          )}-click for your browser`}
           onClick={(e) => {
-            if (e.metaKey || e.ctrlKey) {
+            if (matchesModifierClick(e, "open-external")) {
               void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
                 openUrl(`http://localhost:${p}`),
               );
@@ -490,6 +515,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
     refreshInstalled,
     refreshUpdates,
   } = useCliLauncher();
+  // The account profiles this machine has. One entry (the default) is the
+  // normal case and the launcher renders exactly as it did before profiles
+  // existed; the list only grows when the user makes a second login.
+  const [profiles, setProfiles] = useState<ipc.AgentProfile[]>([]);
+  useEffect(() => {
+    const pull = () => void ipc.profilesList().then(setProfiles).catch(() => {});
+    pull();
+    // Creating or removing a profile happens in Settings, which is a different
+    // component tree — the event is how this list learns about it without the
+    // user having to reopen the project.
+    window.addEventListener(PROFILE_CHANGE_EVENT, pull);
+    return () => window.removeEventListener(PROFILE_CHANGE_EVENT, pull);
+  }, []);
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
   const [palette, setPalette] = useState<PaletteMode | null>(null);
   /** The ⌘N launcher — the ＋ menu as a type-and-Enter list. */
@@ -772,6 +810,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
       title?: string,
       icon?: string,
       run = false,
+      // Stamped on top of the workspace port — an agent CLI launched under a
+      // non-default account profile carries the variable that points it at that
+      // login's config dir (see profiles.ts).
+      extraEnv?: [string, string][],
+      profile?: string,
     ) => {
       const id = tabId();
       // Every terminal opened inside a workspace gets that workspace's port,
@@ -779,7 +822,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // "run the dev server and check it" is the case that matters most, and it
       // types the command itself. Derived from the path alone (see
       // workspaces.portForPath) so this stays a synchronous, IPC-free lookup.
-      const env = portEnv(portForPath(cwd));
+      const env = [...portEnv(portForPath(cwd)), ...(extraEnv ?? [])];
       setTabs((prev) => [
         ...prev,
         {
@@ -791,6 +834,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           command,
           icon,
           env: env.length ? env : undefined,
+          profile,
           run,
         },
       ]);
@@ -1428,7 +1472,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
 
   const resumeSession = useCallback(
-    (r: Restorable) => {
+    async (r: Restorable) => {
       if (!r.command || !r.cwd) return;
       // Already open — focus that tab instead of spawning a second identical
       // resume. The resume command carries the session id, so command+cwd
@@ -1450,11 +1494,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
       setRestorable((prev) =>
         prev.filter((x) => x.digest.session_id !== r.digest.session_id),
       );
+      // Resume against the account that owns the conversation, not the one
+      // selected for new launches. `--resume <id>` is looked up inside the
+      // CLI's config dir, so the wrong login doesn't resume a different
+      // session — it reports this one as not existing.
+      const env =
+        r.profile && r.profile !== "default"
+          ? await ipc.profileEnv(r.agentId, r.profile).catch(() => [])
+          : [];
       addTerminal(
         r.cwd,
         r.command,
         r.digest.agent ?? "agent",
         AGENT_CLIS.find((c) => c.id === r.agentId)?.icon,
+        false,
+        env,
+        env.length ? r.profile : undefined,
       );
     },
     [addTerminal],
@@ -1919,6 +1974,27 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [patchTabRaw],
   );
 
+  /** Open a note as a tab. Same shape as openResearch: the tab holds the id
+   *  and the last known title, and the view re-reads the store itself. */
+  const openNote = useCallback(
+    (noteId: string, title: string) => {
+      const existing = tabsRef.current.find(
+        (t): t is NoteSubTab => t.type === "note" && t.noteId === noteId,
+      );
+      if (existing) {
+        if (title && title !== existing.title) {
+          patchTabRaw(existing.id, { title } as Partial<SubTab>);
+        }
+        setActiveTabId(existing.id);
+        return;
+      }
+      const id = tabId();
+      setTabs((prev) => [...prev, { id, type: "note", noteId, title }]);
+      setActiveTabId(id);
+    },
+    [patchTabRaw],
+  );
+
   /** Hand ticket context to an agent terminal that is already running. */
   const sendTicketToAgent = useCallback((target: AgentTarget, text: string) => {
     // Same two-write pattern as the model switcher: text, then Enter a beat
@@ -2209,6 +2285,97 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  binding is the harness), and a run that dies halfway still leaves the
    *  question and whatever it managed to record, which is the whole complaint
    *  this module answers. */
+  /** Park what the user typed, with whatever was on screen and whatever they
+   *  pasted. The third verb in ⌘K, and the only one that starts nothing.
+   *
+   *  Page context is captured as text only — no screenshot. The pixel capture
+   *  is a native call that is macOS-only (issue #211) and costs a frame, and a
+   *  picture of whatever page happened to be open is usually noise weeks later;
+   *  the text half (active tab, caret, selection, terminal tail) is free and is
+   *  the part that still means something when you come back. */
+  const saveNote = useCallback(
+    async (text: string, attachments: string[] = []) => {
+      const body = text.trim();
+      if (!body && attachments.length === 0) return;
+      const dir = componentsRef.current[0]?.path;
+      const active = tabsRef.current.find((t) => t.id === activeTabIdRef.current);
+      const termText =
+        active?.type === "terminal"
+          ? (termHandles.current.get(active.id)?.captureText(2000) ?? undefined)
+          : undefined;
+      try {
+        const context = dir
+          ? await capturePageContext({ activeTab: active, dir, termText, rect: null })
+          : "";
+        const note = await createNote({
+          projectId: project.id,
+          projectName: project.name,
+          roots,
+          // An image with nothing typed is still a thought worth keeping; it
+          // just has to name itself something.
+          title: body || "Pasted image",
+          context,
+          origin: "spot",
+          cwd: roots[0],
+        });
+        // Copied one at a time and failures reported per image: a note that
+        // saved but lost its screenshot should say so, not look like a success.
+        let lost = 0;
+        for (const path of attachments) {
+          await ipc
+            .notesAttachFile({ projectId: project.id, id: note.id, path, kind: "image" })
+            .catch(() => {
+              lost += 1;
+            });
+        }
+        await refreshNotes(project.id);
+        onNotice(
+          lost > 0
+            ? `Saved “${note.title}” — but ${lost} image${lost === 1 ? "" : "s"} could not be attached.`
+            : `Saved “${note.title}” to the scratchpad.`,
+          lost > 0 ? "error" : "success",
+        );
+      } catch (err) {
+        onNotice(String(err), "error");
+      }
+    },
+    [project.id, project.name, roots, onNotice],
+  );
+
+  /** Hand a note to an agent. Moves it to `doing` only when the launch
+   *  actually happened and only when the store would accept the move — a note
+   *  in the archive stays where it is rather than being quietly resurrected by
+   *  a button press. */
+  const workOnNote = useCallback(
+    async (note: ipc.NoteDetail, userQuery = "", agentId?: string) => {
+      const dir = await ipc
+        .notesDir(project.id, note.id)
+        .catch(() => note.dir);
+      const ok = await startMicroTask(
+        noteTask,
+        {
+          dir: roots[0] ?? "",
+          projectId: project.id,
+          noteId: note.id,
+          title: note.title,
+          brief: noteContext(note, dir),
+        },
+        userQuery,
+        agentId,
+      );
+      if (ok && (NEXT_NOTE_STATUSES[note.status] ?? []).includes("doing")) {
+        await setNoteStatus(
+          project.id,
+          note.id,
+          "doing",
+          "Canopy",
+          "handed to an agent",
+        ).catch(() => {});
+      }
+    },
+    [project.id, roots, startMicroTask],
+  );
+
   const startResearch = useCallback(
     async (question: string, userQuery = "") => {
       const q = question.trim();
@@ -2753,26 +2920,25 @@ const ProjectViewBody = memo(function ProjectViewBody({
         setActiveTabId(tab.id);
         return;
       }
-      // ⌘K — the menu accelerator never fires while focus is in xterm/Monaco
-      // (same macOS routing gap as the tab-cycle chord above), so the palette
-      // must also open from here. Opening an open palette is a no-op.
-      if (
-        (e.metaKey || e.ctrlKey) &&
-        !e.shiftKey &&
-        !e.altKey &&
-        e.code === "KeyK"
-      ) {
+      // SpotSearch — the menu accelerator never fires while focus is in
+      // xterm/Monaco (same macOS routing gap as the tab-cycle chord below), so
+      // the palette must also open from here. Opening an open palette is a
+      // no-op.
+      if (matches(e, "spot-search")) {
         e.preventDefault();
         setSpotOpen(true);
         return;
       }
-      // Ctrl+Cmd+Arrow (matches the "Next/Previous Tab" accelerators).
-      if (!(e.ctrlKey && (e.metaKey || e.altKey))) return;
-      if (e.code === "ArrowRight" || e.code === "ArrowLeft") {
-        e.preventDefault();
-        lastKeydownNav.t = Date.now();
-        cycleTabs(e.code === "ArrowRight" ? 1 : -1);
-      }
+      // The registry's chord, so this is by construction the same key the
+      // "Next/Previous Tab" accelerators advertise — on Windows and Linux too,
+      // where they are Ctrl+PageDown/PageUp rather than the Mac's ⌃⌘→/←. The
+      // hand-written test accepted Ctrl+Alt+Arrow off a Mac, answering a chord
+      // the menu never offered.
+      const dir = matches(e, "next-tab") ? 1 : matches(e, "prev-tab") ? -1 : 0;
+      if (dir === 0) return;
+      e.preventDefault();
+      lastKeydownNav.t = Date.now();
+      cycleTabs(dir);
     };
     const next = () => {
       if (recentKeydown()) return;
@@ -2789,10 +2955,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const d = (e as CustomEvent).detail as {
         command?: string;
         title?: string;
+        // Signing a profile in is one of these flows, and its whole point is
+        // the environment: the same `claude` has to start against the new
+        // account's config dir, or the login lands on the default one.
+        env?: [string, string][];
+        profile?: string;
       };
       const first = componentsRef.current[0];
       if (d?.command && first)
-        addTerminal(first.path, d.command, d.title ?? d.command, "⚙");
+        addTerminal(
+          first.path,
+          d.command,
+          d.title ?? d.command,
+          "⚙",
+          false,
+          d.env,
+          d.profile,
+        );
     };
     window.addEventListener("canopy:run-command", runCommand);
     window.addEventListener("menu:close-tab", closeTabHandler);
@@ -3330,6 +3509,50 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
   openFileRef.current = openFile;
 
+  /** Follow a `[[wikilink]]` from any surface that owns its text.
+   *
+   *  One handler for all of them, so a link resolves identically in a note and
+   *  in a research write-up. An unresolved target becomes a new note — that is
+   *  Obsidian's behaviour and the reason the syntax earns its place: linking to
+   *  a thought is how you record it before you have written it. */
+  const followWikilink = useCallback(
+    async (target: string) => {
+      // The file list is fetched per click rather than held: following a
+      // wikilink is a rare, deliberate act, and a corpus kept warm for it would
+      // be a tree walk's worth of strings resident for the life of the tab.
+      const files = await ipc.fsListFiles(roots).catch(() => [] as string[]);
+      const hit = resolveWikilink(target, {
+        notes: notesCached(project.id),
+        research: researchCached(project.id),
+        files,
+      });
+      switch (hit.kind) {
+        case "note":
+          openNote(hit.id, hit.title);
+          return;
+        case "research":
+          openResearch(hit.id, hit.title);
+          return;
+        case "file":
+          void openFile(hit.path);
+          return;
+        case "new":
+          if (!hit.title) return;
+          void createNote({
+            projectId: project.id,
+            projectName: project.name,
+            roots,
+            title: hit.title,
+            origin: "wikilink",
+            cwd: roots[0],
+          })
+            .then((n) => openNote(n.id, n.title))
+            .catch((e) => onNotice(String(e), "error"));
+      }
+    },
+    [project.id, project.name, roots, openNote, openResearch, openFile, onNotice],
+  );
+
   const saveFile = useCallback(
     async (path: string) => {
       const model = monaco.editor.getModel(monaco.Uri.file(path));
@@ -3676,7 +3899,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
             });
           }
           const { command } = terminalLaunch(t);
-          return addTerminal(t.cwd, command, t.title, t.icon, t.run);
+          // Back on the account it slept on. Without this the resume command
+          // is right and the store it reads is wrong, which surfaces as a
+          // woken agent that has forgotten the conversation.
+          const env =
+            t.agentId && t.profile && t.profile !== "default"
+              ? await ipc.profileEnv(t.agentId, t.profile).catch(() => [])
+              : [];
+          return addTerminal(
+            t.cwd,
+            command,
+            t.title,
+            t.icon,
+            t.run,
+            env,
+            env.length ? t.profile : undefined,
+          );
         }
         case "file": {
           await openFileRef.current(t.path, { diff: t.view === "diff" });
@@ -4413,13 +4651,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // Which CLI the front terminal is running, resolved independently of
   // modelTarget: that one is null for any CLI Canopy can't switch models on
   // (Codex among them), and the plan chip has to work there too.
-  const activeAgentId = useMemo(() => {
+  // The CLI *and* the account, resolved together off the same terminal. Read
+  // separately they drift: this falls back to the first terminal when the front
+  // tab isn't one, so taking the id from here and the account from the active
+  // tab would pair one session's CLI with another session's login — and the
+  // plan chip would report headroom belonging to neither.
+  const activeAgent = useMemo(() => {
     const termTabs = tabs.filter((t): t is TermSubTab => t.type === "terminal");
     const active = termTabs.find((t) => t.id === activeTabId) ?? termTabs[0];
-    if (!active || active.ptyId == null) return null;
+    if (!active || active.ptyId == null) return { id: null, profile: null };
     const s = projectStats.find((x) => x.id === active.ptyId);
-    return s ? (identifyAgent(s.agent_hint)?.id ?? null) : null;
+    return {
+      id: s ? (identifyAgent(s.agent_hint)?.id ?? null) : null,
+      profile: active.profile ?? null,
+    };
   }, [tabs, activeTabId, projectStats]);
+  const activeAgentId = activeAgent.id;
 
   // Change that session's model by typing the CLI's own command into its
   // terminal — the same thing the user would type, so the CLI's confirmations,
@@ -4450,11 +4697,31 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  component header passes that component's path so it starts in the right
    *  directory rather than wherever the ＋ menu would have put it. */
   const launchCli = useCallback(
-    (cli: AgentCli, at?: string) => {
+    async (cli: AgentCli, at?: string, asProfile?: string) => {
       const cwd = at ?? componentsRef.current[0]?.path;
       if (!cwd) return;
       if (installed[cli.bin]) {
-        addTerminal(cwd, shellBin(cli.bin), cli.name, cli.icon);
+        // Picking an account from the menu also makes it the selection: the
+        // next launch of this CLI should be the account you just chose, not the
+        // one you left behind two launches ago.
+        if (asProfile && asProfile !== activeProfile(cli.id)) {
+          setActiveProfile(cli.id, asProfile);
+        }
+        // Resolved before the terminal opens: the config-dir variable has to be
+        // in the child's environment from its first instruction, because the
+        // CLI reads it at startup. Exporting it afterwards would leave this
+        // session on the default login while the tab claimed otherwise.
+        const profile = activeProfile(cli.id);
+        const env = await launchEnv(cli.id);
+        addTerminal(
+          cwd,
+          shellBin(cli.bin),
+          cli.name,
+          cli.icon,
+          false,
+          env,
+          env.length ? profile : undefined,
+        );
         // Surface the new agent where it lives: the Agents section, expanded so
         // the just-launched row is actually in view.
         setSideTab("agents");
@@ -4504,18 +4771,45 @@ const ProjectViewBody = memo(function ProjectViewBody({
       onClick: () => addTerminal(cwd),
     },
     { label: "", separator: true },
-    ...AGENT_CLIS.map((cli) => ({
-      label: cli.name,
-      icon: <AgentIcon id={cli.id} size={15} />,
-      // A context-menu row has one click target, so the update hint here is
-      // informational — the ＋ menu and launch grid carry the clickable badge.
-      hint: installed[cli.bin]
+    ...AGENT_CLIS.map((cli) => {
+      const updateHint = installed[cli.bin]
         ? cliUpdates[cli.bin]?.hasUpdate
           ? `⇡ ${cliUpdates[cli.bin]?.latest}`
           : undefined
-        : "install",
-      onClick: () => launchCli(cli, cwd),
-    })),
+        : "install";
+      // A second login only appears once the user has made one. Until then
+      // every row is exactly the single-click launch it has always been —
+      // this feature must cost nothing to the people not using it.
+      const accounts =
+        supportsProfiles(cli.id) && profiles.length > 1 && installed[cli.bin]
+          ? profiles
+          : [];
+      if (accounts.length === 0) {
+        return {
+          label: cli.name,
+          icon: <AgentIcon id={cli.id} size={15} />,
+          // A context-menu row has one click target, so the update hint here is
+          // informational — the ＋ menu and launch grid carry the clickable badge.
+          hint: updateHint,
+          onClick: () => void launchCli(cli, cwd),
+        };
+      }
+      const current = activeProfile(cli.id);
+      return {
+        label: cli.name,
+        icon: <AgentIcon id={cli.id} size={15} />,
+        // The account in front, so which login the next launch uses is legible
+        // without opening anything.
+        hint: profileBadge(profiles, current) ?? updateHint,
+        submenu: accounts.map((p) => ({
+          label: p.label,
+          // A tick rather than a separate "current" row: the list is short and
+          // the question is only ever "which of these".
+          hint: p.id === current ? "✓" : undefined,
+          onClick: () => void launchCli(cli, cwd, p.id),
+        })),
+      };
+    }),
   ];
 
   const compMenu = useContextMenu();
@@ -5537,6 +5831,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
         case "start-research":
           void startResearch(action.question);
           return;
+        case "save-note":
+          void saveNote(action.text, action.attachments);
+          return;
+        case "open-note": {
+          const row = notesCached(project.id).find((n) => n.id === action.id);
+          openNote(action.id, row?.title ?? action.id);
+          return;
+        }
         case "open-research":
           openResearch(
             action.id,
@@ -5623,6 +5925,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       switchTo,
       startResearch,
       openResearch,
+      saveNote,
+      openNote,
       project.id,
     ],
   );
@@ -5772,11 +6076,29 @@ const ProjectViewBody = memo(function ProjectViewBody({
               if (entry) openResearch(entry.id, entry.id);
               else void openFile(path);
             }}
+            onWikilink={(t) => void followWikilink(t)}
             onClosed={() => closeTab(tab.id)}
             // The tab strip keeps its own copy of the title so it has a label
             // before the first read; a rename has to reach it or the tab keeps
             // showing the name the entry no longer has.
             onRenamed={(title) => patchTabRaw(tab.id, { title } as Partial<SubTab>)}
+            onNotice={onNotice}
+          />
+        );
+      case "note":
+        return (
+          <NoteView
+            projectId={project.id}
+            id={tab.noteId}
+            agentTargets={agentTargets}
+            installed={installed}
+            onStartNew={(note, agentId) => void workOnNote(note, "", agentId)}
+            onSendToAgent={(note, target) =>
+              sendTicketToAgent(target, noteContext(note, note.dir))
+            }
+            onOpenResearch={(rid) => openResearch(rid, rid)}
+            onWikilink={(t) => void followWikilink(t)}
+            onClosed={() => closeTab(tab.id)}
             onNotice={onNotice}
           />
         );
@@ -7084,6 +7406,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
           projectId={project.id}
         />
       ))}
+      {sidePane("notes", () => (
+        <NotesPanel
+          projectId={project.id}
+          projectName={project.name}
+          roots={roots}
+          onOpen={(n) => openNote(n.id, n.title)}
+        />
+      ))}
       {sidePane("research", () => (
         <ResearchPanel
           projectId={project.id}
@@ -7259,6 +7589,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         modelSwitch={modelTarget?.sw ?? null}
         agentLabel={modelTarget?.label}
         agentId={activeAgentId}
+        agentProfile={activeAgent.profile}
         activePtyId={activeTab?.type === "terminal" ? activeTab.ptyId : null}
       />
       {launcherOpen && visible && (
