@@ -4,13 +4,13 @@ mod android;
 mod blocking;
 mod browser;
 mod chromium;
-mod stagehand;
 mod cleanup;
 mod cli;
 mod context;
 mod crash;
 #[cfg(feature = "dictation")]
 mod dictation;
+mod stagehand;
 // Intel macOS builds compile dictation out (no compatible ONNX Runtime); a stub
 // keeps the command surface identical so the rest of this file is unchanged.
 #[cfg(not(feature = "dictation"))]

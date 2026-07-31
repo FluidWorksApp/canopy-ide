@@ -71,23 +71,53 @@ pub struct Browser {
 #[cfg(target_os = "macos")]
 fn candidates() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("Google Chrome", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-        ("Chromium", "/Applications/Chromium.app/Contents/MacOS/Chromium"),
-        ("Microsoft Edge", "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
-        ("Brave Browser", "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"),
+        (
+            "Google Chrome",
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        ),
+        (
+            "Chromium",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ),
+        (
+            "Microsoft Edge",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        ),
+        (
+            "Brave Browser",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        ),
         ("Arc", "/Applications/Arc.app/Contents/MacOS/Arc"),
-        ("Vivaldi", "/Applications/Vivaldi.app/Contents/MacOS/Vivaldi"),
+        (
+            "Vivaldi",
+            "/Applications/Vivaldi.app/Contents/MacOS/Vivaldi",
+        ),
     ]
 }
 
 #[cfg(target_os = "windows")]
 fn candidates() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("Google Chrome", r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
-        ("Google Chrome", r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
-        ("Microsoft Edge", r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
-        ("Microsoft Edge", r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
-        ("Brave Browser", r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe"),
+        (
+            "Google Chrome",
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        ),
+        (
+            "Google Chrome",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ),
+        (
+            "Microsoft Edge",
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        ),
+        (
+            "Microsoft Edge",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        ),
+        (
+            "Brave Browser",
+            r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+        ),
     ]
 }
 
@@ -324,7 +354,10 @@ impl Cdp {
                 .unwrap_or("unknown CDP error");
             return Err(format!("{method}: {text}"));
         }
-        Ok(reply.get("result").cloned().unwrap_or(serde_json::Value::Null))
+        Ok(reply
+            .get("result")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
     }
 }
 
@@ -385,7 +418,8 @@ fn profile_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .app_data_dir()
         .map_err(|e| format!("no app data directory: {e}"))?;
     let dir = base.join("chromium-profile");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("could not create the browser profile: {e}"))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("could not create the browser profile: {e}"))?;
     Ok(dir)
 }
 
@@ -418,9 +452,7 @@ async fn await_devtools_url(
         }
     })
     .await
-    .map_err(|_| {
-        format!("the browser never reported a DevTools endpoint. It said:\n{seen}")
-    })??;
+    .map_err(|_| format!("the browser never reported a DevTools endpoint. It said:\n{seen}"))??;
     Ok((found, reader.into_inner()))
 }
 
@@ -659,11 +691,7 @@ impl ChromiumManager {
     /// The same contract as browser.rs's eval_json, deliberately: everything
     /// built on that — run_op, cmd, drain, here — works against either engine
     /// without knowing which one it is talking to.
-    pub async fn eval_json(
-        &self,
-        tab_id: &str,
-        code: String,
-    ) -> Result<serde_json::Value, String> {
+    pub async fn eval_json(&self, tab_id: &str, code: String) -> Result<serde_json::Value, String> {
         let cdp = self.live().await?;
         let s = self.session(tab_id)?;
         let reply = cdp
@@ -812,7 +840,8 @@ pub async fn chromium_open(
 ) -> Result<(), String> {
     use tauri::Manager;
     let mgr = app.state::<ChromiumManager>();
-    mgr.open(&app, &exe, &tab_id, &url, headless.unwrap_or(true)).await
+    mgr.open(&app, &exe, &tab_id, &url, headless.unwrap_or(true))
+        .await
 }
 
 #[tauri::command]
@@ -836,7 +865,9 @@ pub async fn chromium_run_op(
         "window.__canopyBrowser ? window.__canopyBrowser.run({}) : null",
         serde_json::to_string(&op).map_err(|e| e.to_string())?
     );
-    app.state::<ChromiumManager>().eval_json(&tab_id, code).await
+    app.state::<ChromiumManager>()
+        .eval_json(&tab_id, code)
+        .await
 }
 
 #[tauri::command]
@@ -952,10 +983,8 @@ mod tests {
     #[test]
     fn reads_the_devtools_url_out_of_chrome_chatter() {
         assert_eq!(
-            parse_devtools_url(
-                "DevTools listening on ws://127.0.0.1:52301/devtools/browser/ab-cd"
-            )
-            .as_deref(),
+            parse_devtools_url("DevTools listening on ws://127.0.0.1:52301/devtools/browser/ab-cd")
+                .as_deref(),
             Some("ws://127.0.0.1:52301/devtools/browser/ab-cd")
         );
     }
@@ -998,10 +1027,18 @@ mod tests {
     // profile being ours, so this is not a style assertion.
     #[test]
     fn always_launches_on_a_canopy_owned_profile_and_an_ephemeral_port() {
-        let args = launch_args(Path::new("/tmp/canopy-profile"), "https://example.com", true);
-        assert!(args.iter().any(|a| a == "--user-data-dir=/tmp/canopy-profile"));
+        let args = launch_args(
+            Path::new("/tmp/canopy-profile"),
+            "https://example.com",
+            true,
+        );
+        assert!(args
+            .iter()
+            .any(|a| a == "--user-data-dir=/tmp/canopy-profile"));
         assert!(args.iter().any(|a| a == "--remote-debugging-port=0"));
-        assert!(args.iter().any(|a| a == "--remote-debugging-address=127.0.0.1"));
+        assert!(args
+            .iter()
+            .any(|a| a == "--remote-debugging-address=127.0.0.1"));
         assert_eq!(args.last().unwrap(), "https://example.com");
     }
 
