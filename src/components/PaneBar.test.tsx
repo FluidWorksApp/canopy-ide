@@ -160,3 +160,86 @@ describe("PaneBar tab rename", () => {
     expect(screen.getByText("zsh")).toHaveClass("tab-title");
   });
 });
+
+// The strip's runs live here but their state lives in ProjectView; these are
+// about the wiring between the two, which is what the ProjectView/ split moved.
+const stack = (over: Partial<StripGroup>): StripGroup => ({
+  key: "idle",
+  label: "Idle",
+  status: "idle",
+  icon: null,
+  tabs: [],
+  shown: [],
+  ...over,
+});
+
+describe("PaneBar stacks", () => {
+  it("renders no chip at all for a run with nothing in it", () => {
+    render(paneBar({ tabGroups: [stack({})] }));
+    expect(document.querySelector(".tab-stack")).toBeNull();
+    expect(document.querySelector(".tab-group")).toBeNull();
+  });
+
+  it("names a run on its chip and counts everything in it, folded or not", () => {
+    const tabs = [term("t1", "zsh"), term("t2", "server")];
+    render(paneBar({ tabGroups: [stack({ tabs, shown: [tabs[0]] })] }));
+
+    expect(screen.getByText("Idle")).toHaveClass("tab-stack-name");
+    // Two in the stack, one on screen: the count is the stack's, not the row's.
+    expect(screen.getByText("2")).toHaveClass("tab-stack-count");
+    expect(document.querySelectorAll(".tab")).toHaveLength(1);
+  });
+
+  it("offers what is out of sight, whether folded away or scrolled behind the pin", () => {
+    const tabs = [term("t1", "zsh"), term("t2", "server"), term("t3", "log")];
+    const onStackOverflow = vi.fn();
+    render(
+      paneBar({
+        tabGroups: [stack({ tabs, shown: tabs.slice(0, 2) })],
+        // One folded + one behind the chip = two away, of three.
+        stripOverflow: { idle: { stuck: true, hidden: ["t1"] } },
+        onStackOverflow,
+      }),
+    );
+    const more = document.querySelector<HTMLButtonElement>(".tab-stack-more")!;
+    expect(more.title).toBe("2 out of sight — pick one");
+    expect(document.querySelector(".tab-stack")).toHaveClass("tab-stack-stuck");
+    more.click();
+    expect(onStackOverflow).toHaveBeenCalled();
+  });
+
+  it("marks a folded run, and never counts the active tab it is holding out", () => {
+    const tabs = [term("t1", "zsh"), term("t2", "server")];
+    render(
+      paneBar({
+        tabGroups: [stack({ tabs, shown: [tabs[1]] })],
+        openStacks: { idle: false },
+        activeTabId: "t2",
+      }),
+    );
+    expect(document.querySelector(".tab-group")).toHaveClass("tab-group-folded");
+    // Folded, so the chip says how to get the rest back rather than how to fold.
+    expect(
+      document.querySelector<HTMLButtonElement>(".tab-stack-face")!.title,
+    ).toBe("1 idle folded — click to open");
+    // …and the tab it is holding out is still in the strip, and still active.
+    expect(document.querySelector(".tab")).toHaveClass("tab-active");
+  });
+
+  it("gives the whole strip one drag handle, not one per run", () => {
+    const itemProps = vi.fn((id: string) => ({
+      "data-drag-id": id,
+      onPointerDown: noop,
+    }));
+    render(
+      paneBar({
+        tabGroups: [
+          run("attention", [term("t1", "zsh")]),
+          run("files", [term("t2", "server")]),
+        ],
+        stripDrag: { dragId: null, dragOffsetX: 0, itemProps },
+      }),
+    );
+    expect(itemProps.mock.calls.map(([id]) => id)).toEqual(["t1", "t2"]);
+  });
+});
