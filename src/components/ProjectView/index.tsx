@@ -1459,6 +1459,78 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [addTerminal],
   );
 
+  // Which rows "Restore all" would actually reopen. Every row in the block, in
+  // the order the block renders them, each with the thunk that opens it — so
+  // the button, the checkboxes and the confirmation all count the same things.
+  const resumeItems = useMemo(
+    () => [
+      ...restorable.map((r) => ({
+        key: `s-${r.digest.session_id}`,
+        open: () => resumeSession(r),
+      })),
+      ...freshAgents.map((t, i) => ({
+        key: `a-${t.cwd}-${i}`,
+        open: () => reopenTerminal(t),
+      })),
+      ...rememberedShells.map((t, i) => ({
+        key: `t-${t.cwd}-${t.command ?? ""}-${i}`,
+        open: () => reopenTerminal(t),
+      })),
+    ],
+    [restorable, freshAgents, rememberedShells, resumeSession, reopenTerminal],
+  );
+
+  // Past a handful, "reopen everything" stops being a convenience and becomes a
+  // way to start a dozen agents by accident, so each row grows a checkbox and
+  // the button restores the selection instead. Below that the list is short
+  // enough to read at a glance and the checkboxes are just clutter.
+  const RESUME_PICK_FROM = 5;
+  // A machine can take a few agents starting at once; ten is where it stops
+  // being a choice you can take back, so that one gets confirmed.
+  const RESUME_CONFIRM_OVER = 10;
+  const pickable = resumeItems.length > RESUME_PICK_FROM;
+  const [picked, setPicked] = useState<string[]>([]);
+  // Rows come and go as sessions are restored or forgotten; a key left behind
+  // would keep "Restore selected (3)" claiming a row nobody can see.
+  const chosen = pickable ? picked.filter((k) => resumeItems.some((i) => i.key === k)) : [];
+  const [confirmResume, setConfirmResume] = useState<{
+    count: number;
+    go: () => void;
+  } | null>(null);
+
+  /** The row's checkbox, or nothing while the list is short. Stops propagation:
+   *  the row itself is still click-to-reopen, and ticking a box must not do
+   *  the very thing the box exists to hold back. */
+  const pickBox = (key: string) =>
+    pickable ? (
+      <input
+        type="checkbox"
+        className="resume-pick"
+        checked={chosen.includes(key)}
+        title="Select for Restore selected"
+        onClick={(e) => e.stopPropagation()}
+        onChange={(e) =>
+          setPicked((prev) =>
+            e.target.checked ? [...prev, key] : prev.filter((k) => k !== key),
+          )
+        }
+      />
+    ) : null;
+
+  const runResume = useCallback(
+    (items: { open: () => void }[]) => {
+      if (items.length === 0) return;
+      const go = () => {
+        items.forEach((i) => i.open());
+        setPicked([]);
+      };
+      if (items.length > RESUME_CONFIRM_OVER)
+        setConfirmResume({ count: items.length, go });
+      else go();
+    },
+    [],
+  );
+
   // Worktrees for the ticket tab's cross-reference. Loaded when a ticket tab
   // opens rather than polled — the Issues panel keeps its own copy for rows.
   const [ticketWorktrees, setTicketWorktrees] = useState<ipc.WorktreeInfo[]>(
@@ -6148,20 +6220,33 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   </span>
                   <span className="resume-head-actions">
                     <Button
-                      title="Reopen everything below — agent sessions with their history, terminals with their command"
-                      onClick={() => {
-                        restorable.forEach(resumeSession);
-                        freshAgents.forEach(reopenTerminal);
-                        rememberedShells.forEach(reopenTerminal);
-                      }}>
-                      Restore all
+                      title={
+                        chosen.length > 0
+                          ? `Reopen the ${chosen.length} selected`
+                          : "Reopen everything below — agent sessions with their history, terminals with their command"
+                      }
+                      onClick={() =>
+                        runResume(
+                          chosen.length > 0
+                            ? resumeItems.filter((i) => chosen.includes(i.key))
+                            : resumeItems,
+                        )
+                      }>
+                      {chosen.length > 0
+                        ? `Restore selected (${chosen.length})`
+                        : "Restore all"}
                     </Button>
                     <Button icon
                       title="Forget everything here — remembered terminals and restorable agent sessions — for this project"
                       onClick={() => {
                         forgetTerminals(project.id);
                         setRemembered([]);
-                        forgetSessions(restorable.map((r) => r.digest));
+                        // Every row's whole directory, not just the session it
+                        // happens to be showing — otherwise "forget everything
+                        // here" leaves the next-oldest behind in each.
+                        forgetSessions(
+                          restorable.flatMap((r) => [r.digest, ...r.superseded]),
+                        );
                         setRestorable([]);
                       }}>
                       ✕
@@ -6181,6 +6266,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     title={`${r.agentId} · ${r.cwd}`}
                     onClick={() => resumeSession(r)}
                   >
+                    {pickBox(`s-${r.digest.session_id}`)}
                     <AgentIcon id={r.agentId} size={14} />
                     <span className="resume-prompt">
                       {r.prompt || <em>(no prompt captured)</em>}
@@ -6201,10 +6287,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
                       Resume
                     </Button>
                     <Button icon className="resume-forget"
-                      title="Forget this session — stops it resurfacing unless it's used again"
+                      title={
+                        r.superseded.length > 0
+                          ? `Forget this directory's ${r.superseded.length + 1} sessions — stops them resurfacing unless one is used again`
+                          : "Forget this session — stops it resurfacing unless it's used again"
+                      }
                       onClick={(e) => {
                         e.stopPropagation();
-                        forgetSessions([r.digest]);
+                        // The row stands for its directory, so dismissing it
+                        // has to take the sessions behind it too — otherwise
+                        // the next-oldest simply takes its place.
+                        forgetSessions([r.digest, ...r.superseded]);
                         setRestorable((prev) =>
                           prev.filter(
                             (x) => x.digest.session_id !== r.digest.session_id,
@@ -6232,6 +6325,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                           title={`${t.command ?? ""} — ${t.cwd}`}
                           onClick={() => reopenTerminal(t)}
                         >
+                          {pickBox(`a-${t.cwd}-${i}`)}
                           <AgentIcon id={cli?.id ?? "agent"} size={14} />
                           <span className="resume-prompt">
                             {cli?.name ?? t.title}
@@ -6266,6 +6360,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                         title={`${t.command ?? "shell"} — ${t.cwd}`}
                         onClick={() => reopenTerminal(t)}
                       >
+                        {pickBox(`t-${t.cwd}-${t.command ?? ""}-${i}`)}
                         <TerminalIcon size={13} />
                         <span className="resume-prompt">
                           {t.command ? (
@@ -6453,6 +6548,26 @@ const ProjectViewBody = memo(function ProjectViewBody({
           y={compMenu.menu.y}
           items={compMenu.menu.items}
           onClose={compMenu.close}
+        />
+      )}
+      {confirmResume && (
+        <Dialog
+          variant="danger"
+          title="Reopen every one of these?"
+          body="Each one starts its own agent process. A dozen at once will take the machine down with them."
+          meta={`${confirmResume.count} terminals`}
+          dismissLabel="Cancel"
+          onDismiss={() => setConfirmResume(null)}
+          actions={[
+            {
+              label: `Reopen all ${confirmResume.count}`,
+              primary: true,
+              onClick: () => {
+                confirmResume.go();
+                setConfirmResume(null);
+              },
+            },
+          ]}
         />
       )}
       {rootCreate && (
