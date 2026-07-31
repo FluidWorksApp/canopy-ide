@@ -10,7 +10,10 @@
 // canopy_job_done is on by default like everything else, and disabling it here
 // only reaches ordinary sessions: inside a micro-task terminal the sidecar
 // ignores the disable list for it (env CANOPY_MICRO_TASK), because a stripped
-// completion tool would strand the ephemeral tab open forever.
+// completion tool would strand the ephemeral tab open forever. canopy_name_task
+// is exempted in the same place and for a smaller reason: every micro-task brief
+// tells the agent to call it, and a brief naming a tool that isn't there is a
+// brief that lies.
 export interface AgentToolGroup {
   id: string;
   label: string;
@@ -80,6 +83,11 @@ export const AGENT_TOOL_GROUPS: AgentToolGroup[] = [
       { name: "canopy_show_diff", label: "Show diff", note: "Show a file's change vs HEAD" },
       { name: "canopy_notify", label: "Notify", note: "A notice in the window" },
       { name: "canopy_job_done", label: "Job done", note: "Report a task's outcome" },
+      {
+        name: "canopy_name_task",
+        label: "Name its task",
+        note: "Titles and tags its own run in your Tasks list",
+      },
       { name: "canopy_vault_list", label: "Vault list", note: "Which logins exist — never the passwords" },
       { name: "canopy_vault_fill", label: "Vault fill", note: "Sign in to a page; the agent never sees the password" },
       { name: "canopy_vault_read", label: "Vault read", note: "Plain-text password, for entries you mark readable" },

@@ -145,9 +145,16 @@ import {
   recordTaskEnd,
   recordTaskStart,
   researchEntryForFile,
+  runTitle,
   updateTaskRun,
   type TaskRun,
 } from "../../taskHistory";
+import {
+  askedLine,
+  hasIdentity,
+  identityPatch,
+  taskIdentity,
+} from "../../taskIdentity";
 import {
   hasTasksToList,
   taskMenuItem,
@@ -2226,6 +2233,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
           projectId: project.id,
           projectName: project.name,
           brief: def.buildContext(payload, userQuery, env),
+          // A worktree we made for this run is one the brief tells the agent
+          // to delete, which takes the conversation's directory with it — and
+          // `--resume` is resolved inside the CLI's config dir, keyed by that
+          // directory. Recorded now, while the launcher is the only thing that
+          // knows: afterwards there is nothing on disk to tell a throwaway
+          // worktree from a real one the user happened to be working in.
+          ephemeralCwd: Boolean(env?.cleanup),
         });
       /** Type the brief in for a CLI that takes no prompt argument: write, then
        *  submit a beat later, once the agent has had time to come up. */
@@ -2552,6 +2566,63 @@ const ProjectViewBody = memo(function ProjectViewBody({
       void startMicroTask(adhocTaskDef(brief, label), { dir }, "");
     },
     [startMicroTask],
+  );
+
+  /** Carry a finished task's conversation on as an ordinary agent session.
+   *
+   *  The whole design of a micro-task is that it ends: the tab closes, the
+   *  session is forgotten, and the run becomes a row with a summary under it.
+   *  That is right until the moment you read the summary and want to say "good
+   *  — now do the other half", which today means starting a fresh agent and
+   *  re-explaining everything the last one already worked out.
+   *
+   *  This is the door out of the one-shot. The agent's own transcript survives
+   *  the teardown (session_forget only drops Canopy's digest), so resuming by
+   *  the recorded session id reopens the conversation with every file it read
+   *  and every conclusion it reached still in context — as a normal terminal,
+   *  restorable and persistent, not a task. It ends where the task ended, which
+   *  is the point: the next thing the user types is the next turn. */
+  const continueTaskSession = useCallback(
+    (run: TaskRun) => {
+      if (!run.sessionId) {
+        onNotice("This run never reported a session, so there is nothing to reopen.");
+        return;
+      }
+      if (run.ephemeralCwd) {
+        // Honest rather than hopeful: `--resume` is looked up inside the CLI's
+        // config dir, keyed by the directory the conversation ran in, so a
+        // throwaway worktree that has since been removed takes the only way
+        // back with it. Better said here than as a CLI error in a new tab.
+        onNotice(
+          "This task ran in a temporary worktree that has been removed, so its conversation can't be reopened.",
+        );
+        return;
+      }
+      const cmd = restoreCommand(run.agent, run.sessionId);
+      if (!cmd) {
+        onNotice(`${run.agent} can't reopen a past conversation.`);
+        return;
+      }
+      // Same guard as restoring any other session: command + cwd names this
+      // exact conversation, so a second click focuses it instead of running a
+      // second copy of the same agent against the same transcript.
+      const open = tabsRef.current.find(
+        (t): t is TermSubTab =>
+          t.type === "terminal" && t.command === cmd && t.cwd === run.cwd,
+      );
+      if (open) {
+        setActiveTabId(open.id);
+        return;
+      }
+      const id = addTerminal(
+        run.cwd,
+        cmd,
+        runTitle(run),
+        AGENT_CLIS.find((c) => c.id === run.agent)?.icon,
+      );
+      if (id) onNotice(`Picked “${runTitle(run)}” back up where it left off.`);
+    },
+    [addTerminal, onNotice],
   );
 
   /** Micro-tasks waiting to be torn down: job_done was acknowledged, and we hold
@@ -3087,6 +3158,42 @@ const ProjectViewBody = memo(function ProjectViewBody({
         else beginSelfClose(tab.ptyId, tab.id);
         return;
       }
+      // A task naming itself, mid-run. The row it renames may be a detached
+      // run's (the usual case) or a tab's, and either way the history entry
+      // takes the same name — a run that is renamed while it works and reverts
+      // to the launcher's label the moment it finishes would be worse than
+      // never having been renamed.
+      if (a.kind === "task_named") {
+        const named = taskIdentity(a);
+        if (!hasIdentity(named)) return;
+        const tab = tabsRef.current.find(
+          (t): t is TermSubTab =>
+            t.type === "terminal" &&
+            a.ptyId != null &&
+            t.ptyId === a.ptyId &&
+            Boolean(t.micro),
+        );
+        const detached = findRun(microRunsRef.current, a.ptyId);
+        const ptyId = tab?.ptyId ?? detached?.ptyId;
+        if (ptyId == null) return;
+        const runId = tab?.micro?.runId ?? detached?.runId;
+        if (runId) updateTaskRun(runId, identityPatch(a));
+        if (detached)
+          updateMicroRuns((runs) =>
+            patchRun(runs, ptyId, {
+              label: named.title ?? detached.label,
+              icon: named.icon ?? detached.icon,
+            }),
+          );
+        else if (tab)
+          patchTabRaw(tab.id, {
+            customTitle: named.title
+              ? `${named.title} · task`
+              : tab.customTitle,
+            icon: named.icon ?? tab.icon,
+          } as Partial<SubTab>);
+        return;
+      }
       // A micro-task reported in (App already surfaced the notice). Done →
       // wait out the turn, then kill + forget, closing the tab if it had one.
       // Blocked → the agent wants the user: bring its tab forward, or mark the
@@ -3105,6 +3212,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
         const ptyId = tab?.ptyId ?? detached?.ptyId;
         if (ptyId == null) return;
         const runId = tab?.micro?.runId ?? detached?.runId;
+        // A run that never called canopy_name_task can still name itself here,
+        // and one that did may have learnt something since.
+        const named = taskIdentity(a);
+        const asked = askedLine(a.asked);
+        const identity = {
+          ...identityPatch(a),
+          ...(asked ? { asked } : {}),
+        };
+        // The conversation behind the run, while there is still a live binding
+        // to read it from: the session is forgotten seconds from now and the
+        // pty→session map dies with the PTY.
+        const sessionId = liveSessionByPtyRef.current.get(ptyId);
         // A run bound to a research entry has to move it. Nothing else will:
         // the agent may have finished without calling `status`, or — as
         // happened with a sidecar older than the research module — may never
@@ -3138,14 +3257,24 @@ const ProjectViewBody = memo(function ProjectViewBody({
               summary: a.summary,
               url: a.url,
               files,
+              sessionId,
               askedForUser: true,
+              ...identity,
             });
           // A detached run does not steal the window — the toast App raised
           // said what happened, and the Tasks row now says "Needs you" with the
           // terminal one click away.
           if (tab) setActiveTabId(tab.id);
           else
-            updateMicroRuns((runs) => patchRun(runs, ptyId, { blocked: true }));
+            updateMicroRuns((runs) =>
+              patchRun(runs, ptyId, {
+                blocked: true,
+                // A blocked run stays on screen, so a name it sent with the
+                // block is worth taking; an absent one leaves what is there.
+                ...(named.title ? { label: named.title } : {}),
+                ...(named.icon ? { icon: named.icon } : {}),
+              }),
+            );
         } else {
           if (runId)
             recordTaskEnd(runId, {
@@ -3153,6 +3282,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
               summary: a.summary,
               url: a.url,
               files,
+              sessionId,
+              ...identity,
             });
           finishMicroTask(ptyId, tab?.id);
         }
@@ -3204,6 +3335,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     finishMicroTask,
     beginSelfClose,
     updateMicroRuns,
+    patchTabRaw,
   ]);
 
   // The tail of a deep link (deepLinks.ts): App resolved the project and
@@ -3839,6 +3971,33 @@ const ProjectViewBody = memo(function ProjectViewBody({
   liveSessionIdsRef.current = liveSessionIds;
   const liveSessionByPtyRef = useRef(liveSessionByPty);
   liveSessionByPtyRef.current = liveSessionByPty;
+
+  /** Write each running task's conversation id into its history entry, as soon
+   *  as the CLI's first hook event reveals it.
+   *
+   *  Stamped while the run is alive because there is no later. When a task
+   *  ends, Canopy forgets its session (session_forget, so a one-shot never
+   *  turns up in restorables) and the pty dies, taking the pty→session binding
+   *  with it — but the CLI's own transcript stays on disk, and this id is the
+   *  only handle left on it. That is what "Continue as a session" resumes.
+   *
+   *  Guarded by a set rather than by comparing the store: updateTaskRun writes
+   *  localStorage and fires the history event, and doing that on every poll for
+   *  every running task would repaint every panel watching it, forever. */
+  const sessionStamped = useRef(new Set<string>());
+  useEffect(() => {
+    const stamp = (runId: string | undefined, ptyId: number) => {
+      if (!runId || sessionStamped.current.has(runId)) return;
+      const sid = liveSessionByPty.get(ptyId);
+      if (!sid) return;
+      sessionStamped.current.add(runId);
+      updateTaskRun(runId, { sessionId: sid });
+    };
+    for (const r of microRuns) stamp(r.runId, r.ptyId);
+    for (const t of tabs)
+      if (t.type === "terminal" && t.micro?.runId && t.ptyId != null)
+        stamp(t.micro.runId, t.ptyId);
+  }, [liveSessionByPty, microRuns, tabs]);
 
   // ---------- hibernation ----------
   // Sits here rather than up with the other tab plumbing because a snapshot is
@@ -6492,6 +6651,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             onRunAgain={(run: TaskRun) =>
               runAdhocTask(run.brief, run.cwd, run.label)
             }
+            onContinueSession={continueTaskSession}
             onOpenFile={(path) => void openFile(path)}
             focus={tab.focus}
           />

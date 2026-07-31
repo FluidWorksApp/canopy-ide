@@ -16,6 +16,16 @@ export interface TaskRun {
   taskId: string;
   label: string;
   icon?: string;
+  /** What the agent called this run once it knew what the job was, and the
+   *  glyph it picked to go with it (taskIdentity.ts). Kept beside `label`
+   *  rather than overwriting it: the launcher's name is what the run was
+   *  started as, and "run again" and the search index both want it. */
+  title?: string;
+  agentIcon?: string;
+  /** A few words about what kind of work this was — the agent's own. */
+  tags?: string[];
+  /** The agent's one-line reading of the ask, recorded next to its answer. */
+  asked?: string;
   /** Agent CLI registry id (projects.ts), e.g. "claude". */
   agent: string;
   /** Where the agent ran; also where "run again" would run it. */
@@ -37,6 +47,20 @@ export interface TaskRun {
   files?: string[];
   /** Tail of the terminal, plain text, captured just before the tab closed. */
   output?: string;
+  /** The CLI's own session id for this run — the conversation behind it.
+   *
+   *  Recorded while the run is still going, because nothing else will: a
+   *  micro-task's session is forgotten the moment it ends (session_forget in
+   *  reapMicroTask) and the pty→session binding dies with the PTY. The CLI's
+   *  transcript survives both, so with this id the run can be picked up as an
+   *  ordinary agent session — which is what "Continue as a session" does. */
+  sessionId?: string;
+  /** False when the run's working directory was a throwaway worktree the task
+   *  deletes on its way out. `--resume <id>` is resolved inside the CLI's own
+   *  config dir, keyed by the directory it ran in, so a conversation whose
+   *  directory is gone cannot be reopened — and offering it would be a button
+   *  that drops you into a CLI error. Absent means "not a throwaway". */
+  ephemeralCwd?: boolean;
   /** The agent reported `blocked` at some point — it asked for the user. Set
    *  while the run is still going (blocked is not an ending: the user can
    *  answer and the task finishes), and read when the tab closes to tell an
@@ -208,6 +232,22 @@ export function completedTaskRuns(projectId?: string): TaskRun[] {
       .sort((a, b) => (b.endedAt ?? b.startedAt) - (a.endedAt ?? a.startedAt))
   );
 }
+
+/** What to call a run on screen: what the agent named it, else what it was
+ *  launched as. One function so the rail, the sheet and the tab title cannot
+ *  disagree about which of the two they are showing. */
+export const runTitle = (run: TaskRun): string => run.title || run.label;
+
+/** The glyph to put in front of it — the agent's pick over the task's, since a
+ *  task's icon says what kind of job it was and the agent's says what this one
+ *  actually turned out to be. */
+export const runIcon = (run: TaskRun): string | undefined =>
+  run.agentIcon || run.icon;
+
+/** Can this run be picked back up as an ordinary agent session? Needs the
+ *  conversation's id and a directory still on disk to resume it in. */
+export const canResumeRun = (run: TaskRun): boolean =>
+  Boolean(run.sessionId) && !run.ephemeralCwd;
 
 export function removeTaskRun(id: string): void {
   write(read().filter((r) => r.id !== id));

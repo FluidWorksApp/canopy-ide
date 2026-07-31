@@ -6,6 +6,9 @@ import {
   recordTaskEnd,
   recordTaskStart,
   removeTaskRun,
+  runIcon,
+  runTitle,
+  canResumeRun,
   sweepStaleRuns,
   taskRuns,
   updateTaskRun,
@@ -360,5 +363,44 @@ describe("researchEntryForFile", () => {
     expect(researchEntryForFile("/Users/me/code/research/notes.md")).toBeNull();
     // The store's own root, with no entry in the path.
     expect(researchEntryForFile("/Users/me/.canopy/research/p-123/")).toBeNull();
+  });
+});
+
+describe("what a run is called on screen", () => {
+  it("prefers what the agent named it over what it was launched as", () => {
+    const id = start({ label: "Can you please help in setting…", icon: "⚡" });
+    updateTaskRun(id, { title: "Task identity, in the harness", agentIcon: "◈" });
+    const run = taskRuns()[0];
+    expect(runTitle(run)).toBe("Task identity, in the harness");
+    expect(runIcon(run)).toBe("◈");
+    // The launcher's name is kept, not replaced: "run again" and the search
+    // index both want the words the user actually typed.
+    expect(run.label).toBe("Can you please help in setting…");
+  });
+
+  it("falls back to the launcher's name for a run that never named itself", () => {
+    start({ label: "Raise PR", icon: "⇈" });
+    const run = taskRuns()[0];
+    expect(runTitle(run)).toBe("Raise PR");
+    expect(runIcon(run)).toBe("⇈");
+  });
+});
+
+describe("canResumeRun", () => {
+  it("needs a session id — a run that never reported one has nothing to reopen", () => {
+    const id = start();
+    expect(canResumeRun(taskRuns()[0])).toBe(false);
+    updateTaskRun(id, { sessionId: "s-1" });
+    expect(canResumeRun(taskRuns()[0])).toBe(true);
+  });
+
+  /** `--resume <id>` is resolved inside the CLI's own config dir, keyed by the
+   *  directory the conversation ran in. A task that made itself a worktree
+   *  deletes it on the way out, so there is nowhere left to resume — offering
+   *  it would be a button that lands you in a CLI error. */
+  it("refuses a run whose worktree was thrown away", () => {
+    const id = start({ ephemeralCwd: true });
+    updateTaskRun(id, { sessionId: "s-1" });
+    expect(canResumeRun(taskRuns()[0])).toBe(false);
   });
 });

@@ -6777,6 +6777,36 @@ body.dragging-tab * {
   font-size: 12px;
   line-height: 1.5;
 }
+/* The agent's one-line reading of the ask, above the brief it was given. Set at
+   the body's own weight while the brief stays dim: it is the sentence worth
+   reading, and the brief below it is the evidence for it. */
+.task-history-asked {
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+/* A tag the agent gave its own run. Quieter than the project chip beside it —
+   these are decoration on a row that is read for its title and its summary, and
+   four of them at full contrast would out-shout both. */
+.task-tag {
+  flex: 0 0 auto;
+  background: color-mix(in srgb, var(--bg-raised) 70%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  color: var(--text-dim);
+  font-size: 9px;
+  letter-spacing: 0.02em;
+  padding: 0 5px;
+  margin-left: 5px;
+  white-space: nowrap;
+}
+/* In the side rail the label is a block that already wraps a note under it, so
+   the tags ride on the title's line rather than claiming one of their own. */
+.task-label .task-tag {
+  display: inline-block;
+  vertical-align: baseline;
+}
 .task-history-files {
   display: flex;
   flex-wrap: wrap;

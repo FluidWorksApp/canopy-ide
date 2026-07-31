@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { TasksPanel, type RunningMicroTask } from "./TasksPanel";
 import type { CustomMicroTask } from "../microTasks";
+import type { TaskRun } from "../taskHistory";
 
 // A micro-task runs with no tab now, so this panel is the whole of it: if a row
 // doesn't say what the task is doing, or its buttons act on the wrong run,
@@ -119,5 +120,51 @@ describe("the Running list", () => {
       />,
     );
     expect(container.querySelectorAll(".task-row-running")).toHaveLength(2);
+  });
+});
+
+describe("a finished run wears the name the agent gave it", () => {
+  // The row is the whole surface for a task nobody watched, and for anything
+  // ad-hoc the launcher could only name it after the first few words the user
+  // typed. What the agent called the job once it had read the code is the first
+  // time this row says what the work actually was.
+  const finished = (over: Partial<TaskRun> = {}): TaskRun => ({
+    id: "r1",
+    taskId: "adhoc",
+    label: "Can you please help in setting…",
+    icon: "⚡",
+    agent: "claude",
+    cwd: "/repo",
+    projectId: "p1",
+    brief: "Can you please help in setting up the harness…",
+    startedAt: 1,
+    endedAt: 2,
+    status: "done",
+    summary: "Added icon, title and tags to the task harness.",
+    ...over,
+  });
+
+  const seed = (run: TaskRun) =>
+    localStorage.setItem("canopy.taskHistory", JSON.stringify([run]));
+
+  it("shows the agent's title, glyph and tags over the launcher's", () => {
+    seed(
+      finished({
+        title: "Task identity, in the harness",
+        agentIcon: "◈",
+        tags: ["tasks", "mcp"],
+      }),
+    );
+    panel();
+    expect(screen.getByText(/Task identity, in the harness/)).toBeTruthy();
+    expect(screen.queryByText(/Can you please help in setting…/)).toBeNull();
+    expect(screen.getByText("tasks")).toBeTruthy();
+    expect(screen.getByText("mcp")).toBeTruthy();
+  });
+
+  it("keeps the launcher's name for a run that never named itself", () => {
+    seed(finished());
+    panel();
+    expect(screen.getByText(/Can you please help in setting…/)).toBeTruthy();
   });
 });

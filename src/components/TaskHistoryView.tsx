@@ -8,10 +8,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
+  canResumeRun,
   clearTaskHistory,
   completedTaskRuns,
   removeTaskRun,
   resolveTaskFile,
+  runIcon,
+  runTitle,
   TASK_HISTORY_EVENT,
   tidyOutput,
   type TaskRun,
@@ -59,6 +62,9 @@ interface TaskHistoryViewProps {
    *  runs from this project: the brief would otherwise be fired into another
    *  project's tree while being recorded against this one. */
   onRunAgain?: (run: TaskRun) => void;
+  /** Reopen this run's conversation as an ordinary agent session, so the work
+   *  carries on from where the one-shot stopped instead of starting over. */
+  onContinueSession?: (run: TaskRun) => void;
   /** Open a path in the editor — the files an agent touched are clickable. */
   onOpenFile?: (path: string) => void;
   /** A run to open expanded, when the tab was opened from that run's row. */
@@ -69,6 +75,7 @@ export function TaskHistoryView({
   projectId,
   projectName,
   onRunAgain,
+  onContinueSession,
   onOpenFile,
   focus,
 }: TaskHistoryViewProps) {
@@ -116,8 +123,22 @@ export function TaskHistoryView({
       if (filter !== "all" && r.status !== filter) return false;
       if (!q) return true;
       // Searches everything the user can see plus the brief and the transcript:
-      // "that task where it said rate limit" has to find it.
-      return [r.label, r.summary, r.brief, r.url, r.cwd, r.agent, r.output]
+      // "that task where it said rate limit" has to find it. The agent's own
+      // title, tags and reading of the ask are in here for the same reason —
+      // they are the words a user is most likely to remember it by, since they
+      // are the words the row showed them.
+      return [
+        r.label,
+        r.title,
+        r.summary,
+        r.asked,
+        r.brief,
+        r.url,
+        r.cwd,
+        r.agent,
+        r.output,
+        ...(r.tags ?? []),
+      ]
         .filter(Boolean)
         .some((s) => (s as string).toLowerCase().includes(q));
     });
@@ -220,8 +241,21 @@ export function TaskHistoryView({
                   onClick={() => setOpen(expanded ? null : run.id)}
                 >
                   <span className={`task-history-dot st-${run.status}`} title={run.status} />
-                  <span className="task-icon">{run.icon || "◆"}</span>
-                  <span className="task-history-label">{run.label}</span>
+                  <span className="task-icon">{runIcon(run) || "◆"}</span>
+                  {/* What the agent called it, if it got as far as saying —
+                      with the launcher's own name kept in the tooltip, since
+                      that is the one that says which surface it was run from. */}
+                  <span
+                    className="task-history-label"
+                    title={run.title ? `Launched as “${run.label}”` : undefined}
+                  >
+                    {runTitle(run)}
+                  </span>
+                  {run.tags?.map((t) => (
+                    <span className="task-tag" key={t}>
+                      {t}
+                    </span>
+                  ))}
                   {/* Only in the everywhere view — in the scoped one every row
                       is this project and the chip would be noise on all of them. */}
                   {everywhere && (
@@ -259,6 +293,22 @@ export function TaskHistoryView({
                           brief into `run.cwd`, and a run from elsewhere would
                           land in another project's tree while being recorded
                           against this one. */}
+                      {/* The one-shot's exit door: the agent's transcript
+                          outlives its terminal, so the conversation can be
+                          picked up as an ordinary session rather than started
+                          again from nothing. Offered only where it can actually
+                          work — a run whose worktree was torn down has no
+                          directory left to resume in. */}
+                      {onContinueSession &&
+                        canResumeRun(run) &&
+                        run.projectId === projectId && (
+                          <Button
+                            title="Open this run's conversation as a normal agent session, with everything it worked out still in context"
+                            onClick={() => onContinueSession(run)}
+                          >
+                            <AgentsIcon size={12} /> Continue as a session
+                          </Button>
+                        )}
                       {onRunAgain && run.projectId === projectId && (
                         <Button
                           title="Run this task again, in the same directory"
@@ -283,6 +333,16 @@ export function TaskHistoryView({
                         row, so it is the one that gets a mark of its own. */}
                     <div className="task-history-section">
                       <div className="task-history-section-head">You asked</div>
+                      {/* The agent's own reading of the ask, above the brief it
+                          read. A brief is several hundred words of launcher
+                          prose and protocol, and recalling what a run was about
+                          should not mean reading past all of it — and where the
+                          two disagree, that is the most useful line on the
+                          page: it is the misunderstanding, in writing, right
+                          above the answer it produced. */}
+                      {run.asked && (
+                        <div className="task-history-asked">{run.asked}</div>
+                      )}
                       <div className="task-history-brief">{run.brief}</div>
                     </div>
 

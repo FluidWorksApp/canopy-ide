@@ -102,14 +102,29 @@ export const EFFECT_HEADING: Record<TaskEffect, string> = {
  *  context builder honors; this makes it structural for micro-task briefs. */
 export const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim();
 
-/** The completion contract appended to every micro-task brief: do the one job,
- *  call canopy_job_done, stop. The print fallback covers CLIs without the MCP
- *  bridge (only claude registers it today) so the ending is still legible. */
+/** The contract appended to every micro-task brief: name the job, do the one
+ *  job, call canopy_job_done, stop. The print fallback covers CLIs without the
+ *  MCP bridge (only claude registers it today) so the ending is still legible.
+ *
+ *  The naming half is asked for early and deliberately so. A run is named at
+ *  launch from what the launcher had — a payload, or the head of the brief —
+ *  and for anything ad-hoc that is a row reading "Can you please help in
+ *  setting…", which says what was typed and nothing about the work. The agent
+ *  is the only party that can say what the job turned out to be, and it knows
+ *  within a minute of starting; asking for it at the end would name a run only
+ *  once it was over, which is exactly when the name stops being useful. */
 export function microTaskProtocol(): string {
   return (
     `This is a one-shot micro-task: do exactly this job and nothing else — no follow-up work, ` +
-    `no servers, no unrelated fixes. When finished, call the \`canopy_job_done\` tool with ` +
-    `status "done", a one-sentence summary, and the url if the job produced one. If you cannot ` +
+    `no servers, no unrelated fixes. As soon as you know what the job actually is — after your ` +
+    `first look at it, not at the end — call \`canopy_name_task\` once with: a \`title\` of a few ` +
+    `words naming this specific run, an \`icon\` that is a single Unicode symbol (◎ ⚒ ⇈ ◍ ◇ ⌕ ▶ — ` +
+    `not a letter, a word, or a \`:shortcode:\`), and up to four one-word \`tags\` for the area and ` +
+    `kind of work ("review", "rust", "flaky-test"). That is what the user sees in their Tasks ` +
+    `list instead of the first line of this brief. When finished, call the \`canopy_job_done\` ` +
+    `tool with status "done", a one-sentence summary of what happened, \`asked\`: one line saying ` +
+    `what you understood the ask to be, and the url if the job produced one — plus title, icon ` +
+    `and tags if you never named the task or would name it differently now. If you cannot ` +
     `finish, call it with status "blocked" and say what you need. If the canopy_job_done tool ` +
     `is not available, print \`JOB DONE: <summary>\` as your final line instead. After Canopy ` +
     `acknowledges, stop — one closing sentence at most; Canopy will close this terminal.`
