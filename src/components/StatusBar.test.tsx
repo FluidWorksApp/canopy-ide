@@ -16,7 +16,28 @@ vi.mock("../ipc", () => ({
   onPtyStats: vi.fn(),
   agentUsage: vi.fn(),
   planUsage: vi.fn(),
+  gitSyncProbe: vi.fn(),
+  gitSyncApply: vi.fn(),
+  gitSyncAbort: vi.fn(),
 }));
+
+/** A branch sitting level with its base — the quiet default, so every test
+ *  that isn't about drift sees no chip. */
+const inSync = {
+  repo: "/repo",
+  branch: "main",
+  base: "origin/main",
+  base_head: "aaa111",
+  behind: 0,
+  ahead: 0,
+  dirty: 0,
+  state: "current",
+  conflicts: [],
+  overlap: [],
+  subjects: [],
+  blocked: null,
+  fetch_error: null,
+};
 
 const noSub = async () => () => {};
 
@@ -37,6 +58,7 @@ beforeEach(() => {
     path: null,
   } as never);
   vi.mocked(ipc.onGitChange).mockImplementation(noSub as never);
+  vi.mocked(ipc.gitSyncProbe).mockResolvedValue(inSync as never);
   vi.mocked(ipc.onAppStats).mockImplementation(noSub as never);
   vi.mocked(ipc.onPtyStats).mockImplementation(noSub as never);
   vi.mocked(ipc.agentUsage).mockResolvedValue([]);
@@ -69,6 +91,81 @@ const base = {
   visible: true,
   projects: [{ name: "canopy", roots: ["/repo"] }],
 };
+
+describe("the tray's base-branch chip", () => {
+  const behind = {
+    ...inSync,
+    branch: "fix/login",
+    behind: 4,
+    ahead: 2,
+    state: "clean",
+    subjects: ["fix nav", "bump deps"],
+  };
+
+  it("stays out of the way while the branch is level with its base", async () => {
+    render(<StatusBar {...base} events={[]} />);
+    await screen.findByText(/main/);
+    expect(screen.queryByText(/\+4/)).toBeNull();
+  });
+
+  it("raises the news by itself, and merges on the click", async () => {
+    vi.mocked(ipc.gitSyncProbe).mockResolvedValue(behind as never);
+    vi.mocked(ipc.gitSyncApply).mockResolvedValue({
+      merged: true,
+      conflicts: [],
+      message: "Fast-forward",
+    } as never);
+    render(<StatusBar {...base} events={[]} />);
+
+    // Opens itself: the whole point is not waiting for the user to go looking.
+    expect(await screen.findByText("main has 4 new commits")).toBeTruthy();
+    fireEvent.click(screen.getByText("Merge main in"));
+    expect(ipc.gitSyncApply).toHaveBeenCalledWith("/repo", "origin/main");
+  });
+
+  it("names the conflicting files and promises nothing has changed yet", async () => {
+    vi.mocked(ipc.gitSyncProbe).mockResolvedValue({
+      ...behind,
+      state: "conflict",
+      conflicts: ["src/a.ts", "src/b.ts"],
+    } as never);
+    render(<StatusBar {...base} events={[]} />);
+
+    expect(await screen.findByText("main has 4 new commits — 2 files would conflict")).toBeTruthy();
+    expect(screen.getByText("src/a.ts")).toBeTruthy();
+    expect(screen.getByText(/Nothing has been changed yet/)).toBeTruthy();
+    // Offered, not forced — and nothing ran just from looking.
+    expect(screen.getByText("Merge and resolve now")).toBeTruthy();
+    expect(ipc.gitSyncApply).not.toHaveBeenCalled();
+  });
+
+  it("won't merge over uncommitted work, and says which file is in the way", async () => {
+    vi.mocked(ipc.gitSyncProbe).mockResolvedValue({
+      ...behind,
+      dirty: 2,
+      overlap: ["src/a.ts"],
+    } as never);
+    render(<StatusBar {...base} events={[]} />);
+
+    const btn = (await screen.findByText("Merge main")) as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    expect(screen.getByText(/Commit or stash it/)).toBeTruthy();
+  });
+
+  it("takes 'keep working' for an answer until the base moves again", async () => {
+    vi.mocked(ipc.gitSyncProbe).mockResolvedValue(behind as never);
+    const { rerender } = render(<StatusBar {...base} events={[]} />);
+
+    fireEvent.click(await screen.findByText("Keep working"));
+    expect(screen.queryByText("main has 4 new commits")).toBeNull();
+    // The chip itself stays: dismissing hides the panel, not the fact.
+    expect(screen.getByText(/main \+4/)).toBeTruthy();
+
+    // A re-probe of the same tip must not pop back up.
+    rerender(<StatusBar {...base} events={[]} />);
+    expect(screen.queryByText("main has 4 new commits")).toBeNull();
+  });
+});
 
 describe("the tray's plan chip", () => {
   const claudePlan = {
