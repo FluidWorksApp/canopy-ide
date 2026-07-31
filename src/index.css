@@ -881,6 +881,12 @@ body,
   flex: 0 0 auto;
   background: var(--text-dim);
   box-sizing: border-box;
+  /* The dot crossfades between states. Same event as the tab sliding into
+     another status group, so it should read as gradual there too. */
+  transition:
+    background-color 260ms ease,
+    border-color 260ms ease,
+    opacity 260ms ease;
 }
 
 .tab-status-working {
@@ -4138,6 +4144,10 @@ body.resizing-side * {
      is nothing left to clip here. */
   overflow-y: hidden;
   flex: 1;
+  /* Positioned so it is the offsetParent of every tab: the regroup animation
+     measures tabs in strip-local coordinates (see tabFlip.ts), which is what
+     makes it immune to the strip itself scrolling or moving. */
+  position: relative;
   /* No visible scrollbar on the tab row: this WebView renders the overlay
      scrollbar as a thick bar under the tabs. The active tab scrolls itself
      into view (see the follow effect) and shift/trackpad wheel still scroll,
@@ -4293,11 +4303,267 @@ body.dragging-tab * {
    file/PR tabs visibly quieter — workload on the left, reference on the right. */
 .tab-group {
   display: flex;
+  /* Never squeeze a run to fit: the strip scrolls instead. Without this the
+     groups shrink past their tabs and a crowded strip silently compresses to
+     slivers rather than overflowing — and nothing can be sticky in a strip
+     that never scrolls. */
+  flex: 0 0 auto;
 }
 
 .tab-group + .tab-group:not(:empty) {
   border-left: 2px solid var(--border);
   margin-left: 3px;
+}
+
+/* Status grouping (Settings → Agents → Group tabs by status). The agent half of
+   the strip becomes three stacks — Needs you | Working | Idle — each a chip
+   standing in for the tabs behind it. Click a chip to fold its tabs away or
+   deal them back out; Idle arrives folded, since a pile of finished agents is
+   something you want out of the way rather than something to read past. Tabs
+   slide between the stacks (tabFlip.ts) as their agent changes state, and the
+   pane under the tab you're on never moves with them. */
+/* The chip pins to the left edge of the scrollport while its own tabs scroll
+   past underneath, and is pushed out by the next chip exactly when its group
+   ends — sticky section headers, turned sideways. Its containing block is the
+   group, which is what makes each chip hand over to the next one.
+
+   The strip's own background travels with it, so tabs sliding beneath don't
+   show through the gap around the chip. */
+.tab-stack {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  align-self: stretch;
+  gap: 3px;
+  padding: 0 5px;
+  background: var(--bg-alt);
+  flex: 0 0 auto;
+  user-select: none;
+}
+
+/* The pill you actually see and click. Separate from the sticky wrapper
+   because sticky always forms a stacking context, and the folded stack's card
+   edges sit behind this face inside it. */
+.tab-stack-face {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  position: relative;
+  padding: 3px 6px 3px 7px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  white-space: nowrap;
+  cursor: pointer;
+  /* A stack only exists while it holds tabs, so this plays exactly when one
+     appears — the chip arriving is itself the "something moved here" cue. It
+     starts dimmed rather than invisible: a webview whose frame loop is asleep
+     freezes an animation at its first keyframe, and a heading you can't read
+     is a worse failure than one that doesn't fade in. */
+  animation: tab-stack-in 240ms ease-out;
+}
+
+.tab-stack-face:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
+/* Pinned, with its group's tabs running underneath: lift it off them, or the
+   chip reads as just another tab that happens to be first. */
+.tab-stack-stuck {
+  box-shadow: 7px 0 9px -7px rgb(0 0 0 / 0.6);
+}
+
+/* Everything out of sight — folded, or scrolled in behind the pin. The count
+   is the point; the caret says it opens. */
+.tab-stack-more {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  padding: 3px 4px;
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.tab-stack-more:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
+/* The tabs behind the chip — folded away, or scrolled in underneath it —
+   drawn as the edges of the cards they are. One layer for a single hidden tab,
+   a second once there are more, so the stack's depth is visible before you
+   read the count. */
+.tab-stack-away .tab-stack-face::before,
+.tab-stack-deep .tab-stack-face::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  top: 3px;
+  bottom: 3px;
+  left: 10px;
+  right: -5px;
+  background: var(--bg-raised);
+  border: 1px solid color-mix(in srgb, var(--text-dim) 55%, transparent);
+  border-radius: 5px;
+  /* Behind the chip's own background but still in front of the strip: the
+     chip is positioned without a stacking context of its own. */
+  z-index: -1;
+}
+
+.tab-stack-deep .tab-stack-face::after {
+  top: 6px;
+  bottom: 6px;
+  left: 20px;
+  right: -10px;
+  opacity: 0.5;
+}
+
+/* Room for the cards to peek out on the right without touching the next tab. */
+.tab-stack-away {
+  padding-right: 16px;
+}
+
+.tab-stack-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--text-dim);
+  box-sizing: border-box;
+}
+
+.tab-stack-count {
+  font-size: 9px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text-dim);
+}
+
+/* One element that turns, rather than two glyphs that swap. ChevronIcon points
+   right at rest and is turned by whoever uses it (the file tree does the same),
+   so folded is "›" and open is the same glyph pointing down. */
+.tab-stack-chevron,
+.tab-stack-more svg {
+  opacity: 0.6;
+  transition: transform 200ms ease;
+}
+
+.tab-stack-face[aria-expanded="true"] .tab-stack-chevron,
+.tab-stack-more svg {
+  transform: rotate(90deg);
+}
+
+/* A stack's colour is its state, matching the dot each tab already carries —
+   one vocabulary, read at either scale. */
+.tab-group-attention .tab-stack-face {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+}
+
+.tab-group-attention .tab-stack-dot {
+  background: var(--warn);
+}
+
+.tab-group-attention .tab-stack-count {
+  background: color-mix(in srgb, var(--warn) 22%, transparent);
+  color: var(--warn);
+}
+
+.tab-group-active .tab-stack-dot {
+  background: var(--ok);
+}
+
+/* Idle reads as receded, not disabled: the whole run steps back a little so the
+   left of the strip is where the eye lands, and hovering brings it back. */
+.tab-group-idle .tab-stack-dot {
+  background: transparent;
+  border: 1px solid var(--text-dim);
+}
+
+.tab-group-idle .tab-stack-face {
+  opacity: 0.8;
+}
+
+.tab-group-idle .tab-stack-face:hover {
+  opacity: 1;
+}
+
+.tab-group-idle .tab:not(.tab-active) {
+  opacity: 0.62;
+}
+
+.tab-group-idle .tab:hover {
+  opacity: 1;
+}
+
+/* The tab you're on is never folded away — it sits beside its own stack, so a
+   pane in front always has a tab in the strip naming it. Ringed, because out
+   here on its own it would otherwise read as ungrouped. */
+.tab-group-folded .tab {
+  box-shadow:
+    inset 0 2px 0 var(--accent),
+    0 0 0 1px var(--border);
+  border-radius: 0 4px 4px 0;
+}
+
+@keyframes tab-stack-in {
+  from {
+    opacity: 0.35;
+    transform: translateX(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Dealt back out: tabs returning from a stack fade up rather than blinking in,
+   while the FLIP slides everything after them out of the way. */
+.tab {
+  animation: tab-appear 200ms ease-out;
+}
+
+@keyframes tab-appear {
+  from {
+    opacity: 0.3;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* State changes fade rather than snap — the dot recolouring and a tab receding
+   into Idle are the same event, and both should read as one movement. */
+.tab {
+  transition:
+    opacity 220ms ease,
+    background-color 220ms ease,
+    color 220ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab,
+  .tab-stack-face,
+  .tab-stack-chevron {
+    transition: none;
+    animation: none;
+  }
 }
 
 .tab-agent {

@@ -18,6 +18,17 @@ import { Panel, PanelGroup } from "react-resizable-panels";
 import * as ipc from "../../ipc";
 import { format, matches, matchesModifierClick } from "../../shortcuts";
 import { getSettings, SETTINGS_CHANGE_EVENT } from "../../settings";
+import {
+  DOC_STACKS,
+  STATUS_LABEL,
+  docStackFor,
+  shownInStack,
+  statusFor,
+  useSettledGroups,
+  type TabStatus,
+} from "../../tabGroups";
+import { revealScroll, useStripOverflow } from "../../tabSticky";
+import { useFlipStrip } from "../../tabFlip";
 import { modelFor, monaco, languageForPath } from "../../monaco-setup";
 import { getCaret, subscribeCaret } from "../../editorState";
 import { useEscapeBackstop, useEscapeLayer } from "../../useEscape";
@@ -49,13 +60,20 @@ import {
 } from "../../projects";
 import {
   AgentIcon,
+  AgentsIcon,
   CheckIcon,
   ChevronIcon,
   FailIcon,
+  FilesIcon,
+  GitBranchIcon,
+  GlobeIcon,
+  IssueIcon,
   LiveDot,
   PlayIcon,
+  PullRequestIcon,
   RestartIcon,
   StopIcon,
+  TeamIcon,
   TerminalIcon,
 } from "../icons";
 import type { OpenFile } from "../../types";
@@ -152,7 +170,7 @@ import { ChangesPanel, type ChangeGroup } from "../ChangesPanel";
 import { Dialog } from "../Dialog";
 import { BranchSwitchProvider, useBranchSwitch } from "../../useBranchSwitch";
 import { askDialog } from "../../branchSwitch";
-import { useTabDrag, applyOrder } from "../../tabDrag";
+import { useTabDragGroups, applyOrder } from "../../tabDrag";
 import { agentIdForCommand, identifyAgent } from "../../agentIdentity";
 import { tabNamesByPty } from "../../agentDisplayName";
 import {
@@ -251,7 +269,9 @@ import {
   previewLabel,
   tabDisplayLabel,
   tabId,
+  tabPrefs as readTabPrefs,
   type SideTab,
+  type StripGroup,
   type SubTab,
   type DocSubTab,
   type TermSubTab,
@@ -299,6 +319,19 @@ export type {
   PreviewSubTab,
   DeviceSubTab,
   RailChip,
+  StripGroup,
+};
+
+/** A document stack wears its kind's icon where a status stack wears a dot —
+ *  the same icon its tabs carry, so a folded stack still says what is in it. */
+const DOC_STACK_ICONS: Record<string, ReactNode> = {
+  workspaces: <AgentsIcon size={11} />,
+  files: <FilesIcon size={11} />,
+  browser: <GlobeIcon size={11} />,
+  tasks: <IssueIcon size={11} />,
+  reviews: <PullRequestIcon size={11} />,
+  history: <GitBranchIcon size={11} />,
+  team: <TeamIcon size={11} />,
 };
 
 const decoder = new TextDecoder();
@@ -2856,15 +2889,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
   // Keep the active tab in view when it changes (cycling, jumping, closing) —
-  // a strip that scrolls but doesn't follow leaves you looking at the wrong tabs.
+  // a strip that scrolls but doesn't follow leaves you looking at the wrong
+  // tabs. The following itself is revealActiveTab, further down: it needs the
+  // strip and the pinned chip, which are measured there.
   const activeTabElRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    if (!visible) return;
-    activeTabElRef.current?.scrollIntoView({
-      inline: "nearest",
-      block: "nearest",
-    });
-  }, [activeTabId, visible]);
   useEffect(() => {
     if (!visible) return;
     const closeTabHandler = () => {
@@ -5056,31 +5084,231 @@ const ProjectViewBody = memo(function ProjectViewBody({
       ),
     [stripTabs, isAgentTab],
   );
-  const tabGroups: SubTab[][] = useMemo(
-    () => [
-      stripTabs.filter(isAgentTab),
-      stripTabs.filter((t) => t.type !== "terminal"),
-    ],
+  const agentTabs = useMemo(
+    () => stripTabs.filter(isAgentTab),
     [stripTabs, isAgentTab],
   );
-  barTabsRef.current = useMemo(() => tabGroups.flat(), [tabGroups]);
-  // Drag to reorder, one strip per group: agents stay left of docs however you
-  // shuffle them, and a tab dropped outside its own group simply snaps back.
-  // The order lives in `tabs` itself, so the panes (which are all mounted)
-  // follow along without anything else having to know about the drag.
+  const refTabs = useMemo(
+    () => stripTabs.filter((t) => t.type !== "terminal"),
+    [stripTabs],
+  );
+
+  // Tab-strip preferences, re-read on every settings write (updateSettings
+  // announces each patch on this event) so turning grouping on regroups the
+  // strip you are looking at rather than the one you get after a relaunch.
+  const [tabPrefs, setTabPrefs] = useState(readTabPrefs);
+  useEffect(() => {
+    const onChange = () =>
+      setTabPrefs((prev) => {
+        const next = readTabPrefs();
+        return prev.grouped === next.grouped &&
+          prev.idleDelayMs === next.idleDelayMs
+          ? prev
+          : next;
+      });
+    window.addEventListener(SETTINGS_CHANGE_EVENT, onChange);
+    return () => window.removeEventListener(SETTINGS_CHANGE_EVENT, onChange);
+  }, []);
+
+  // Where each agent tab sits in the strip follows its agent: blocked-on-you
+  // first, working next, quiet last — settled, so an agent pausing between tool
+  // calls doesn't shuffle the strip (see tabGroups.ts). Computed for every agent
+  // tab whether or not grouping is on: the state machine is cheap, and keeping
+  // it running means turning the setting back on doesn't start every tab from
+  // scratch in the wrong bucket.
+  const statusTargets = useMemo(
+    () =>
+      new Map<string, TabStatus>(
+        agentTabs.map((t) => [t.id, statusFor(tabState(t), t.unread)]),
+      ),
+    [agentTabs, tabState],
+  );
+  const settledStatus = useSettledGroups(statusTargets, tabPrefs.idleDelayMs);
+  // Fall back to the raw status for a tab the settler hasn't seen yet (its
+  // effect runs after this render), so a new tab is never briefly homeless.
+  const groupOf = useCallback(
+    (id: string): TabStatus =>
+      settledStatus.get(id) ?? statusTargets.get(id) ?? "idle",
+    [settledStatus, statusTargets],
+  );
+
+  const grouped = tabPrefs.grouped;
+  const byStatus = useCallback(
+    (s: TabStatus) => (grouped ? agentTabs.filter((t) => groupOf(t.id) === s) : []),
+    [grouped, agentTabs, groupOf],
+  );
+  const attentionTabs = useMemo(() => byStatus("attention"), [byStatus]);
+  const workingTabs = useMemo(() => byStatus("active"), [byStatus]);
+  const quietTabs = useMemo(() => byStatus("idle"), [byStatus]);
+
+  // Each status run is a stack: one chip standing in for the tabs folded behind
+  // it, opened and closed by clicking it. Idle starts folded — six finished
+  // agents are a pile you want out of the way, not six tabs to read past — and
+  // the two runs that are still yours to act on start open.
+  // Absent means open: only the fold you have actually asked for is stored, so
+  // a stack that appears for the first time (a kind of document you just
+  // opened) arrives open rather than guessing.
+  const [openStacks, setOpenStacks] = useState<Record<string, boolean>>({
+    idle: false,
+  });
+  const toggleStack = useCallback(
+    (key: string) => setOpenStacks((p) => ({ ...p, [key]: p[key] === false })),
+    [],
+  );
+  // A tab that starts wanting you is never left folded away: arriving in Needs
+  // you pops that stack open, whatever state you last left it in. Fold it again
+  // and the next arrival opens it again — the stack is yours to close, but not
+  // at the cost of hiding a question.
+  const attentionKey = attentionTabs.map((t) => t.id).join(",");
+  const seenAttention = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const now = new Set(attentionKey ? attentionKey.split(",") : []);
+    const arrived = [...now].some((id) => !seenAttention.current.has(id));
+    seenAttention.current = now;
+    if (arrived)
+      setOpenStacks((p) => (p.attention === false ? { ...p, attention: true } : p));
+  }, [attentionKey]);
+
+  const tabGroups: StripGroup[] = useMemo(() => {
+    const run = (
+      key: string,
+      label: string | null,
+      status: TabStatus | null,
+      icon: ReactNode,
+      group: SubTab[],
+    ): StripGroup => ({
+      key,
+      label,
+      status,
+      icon,
+      tabs: group,
+      shown: shownInStack(
+        group,
+        label == null || openStacks[key] !== false,
+        activeTabId,
+      ),
+    });
+    return [
+      ...(grouped
+        ? [
+            run("attention", STATUS_LABEL.attention, "attention", null, attentionTabs),
+            run("active", STATUS_LABEL.active, "active", null, workingTabs),
+            run("idle", STATUS_LABEL.idle, "idle", null, quietTabs),
+          ]
+        : [run("all", null, null, null, agentTabs)]),
+      ...DOC_STACKS.map((d) =>
+        run(
+          d.key,
+          d.label,
+          null,
+          DOC_STACK_ICONS[d.key],
+          refTabs.filter((t) => docStackFor(t.type) === d.key),
+        ),
+      ),
+    ];
+  }, [
+    grouped,
+    agentTabs,
+    refTabs,
+    attentionTabs,
+    workingTabs,
+    quietTabs,
+    openStacks,
+    activeTabId,
+  ]);
+  // The number hints, and the digits that jump to them, count what is on
+  // screen — a hint on a tab folded into a stack would point at nothing.
+  barTabsRef.current = useMemo(
+    () => tabGroups.flatMap((g) => g.shown),
+    [tabGroups],
+  );
+
+  // Drag to reorder, confined to the run the tab was picked up from: a tab can
+  // only be dropped among its own kind, and a tab dropped outside simply snaps
+  // back. The order lives in `tabs` itself, so the panes (which are all
+  // mounted) follow along without anything else having to know about the drag.
+  // Only what is on screen is draggable — ids folded into a stack have no
+  // element to hit. One handle for the whole strip rather than one per run:
+  // there are a dozen runs now, and each useTabDrag costs its own listeners.
   const reorderGroup = useCallback(
     (ids: string[]) => setTabs((prev) => applyOrder(prev, (t) => t.id, ids)),
     [],
   );
-  const agentDrag = useTabDrag(
-    tabGroups[0].map((t) => t.id),
+  const stripDrag = useTabDragGroups(
+    useMemo(() => tabGroups.map((g) => g.shown.map((t) => t.id)), [tabGroups]),
     reorderGroup,
   );
-  const docDrag = useTabDrag(
-    tabGroups[1].map((t) => t.id),
-    reorderGroup,
+  // Regrouping never touches which tab is open — every pane stays mounted and
+  // `activeTabId` is untouched, so the view under a tab that goes idle is the
+  // same view, mid-scroll and all. It does move in the strip, though, so follow
+  // it there; a tab that slid out of sight would be the same disappearing act
+  // this grouping exists to prevent.
+  const activeGroupKey = activeTabId ? groupOf(activeTabId) : null;
+  // …and slide it there rather than cutting, so the move is something you can
+  // follow with your eyes instead of a tab teleporting mid-glance.
+  const stripRef = useRef<HTMLDivElement | null>(null);
+  useFlipStrip(stripRef);
+  /** Put the active tab somewhere you can actually see it. Every route that
+   *  changes tabs ends here — clicking, Ctrl-Tab, a jump from the agents panel,
+   *  a pick from a stack's overflow menu — because "the pane changed but the
+   *  strip still shows something else" is the same disappearing act whichever
+   *  door you came through.
+   *
+   *  Not `scrollIntoView`: it is happy to park a tab flush against the left
+   *  edge, which is precisely where the pinned chip is painted. */
+  const settleReveal = useRef(0);
+  const revealActiveTab = useCallback(() => {
+    const pass = () => {
+      const root = stripRef.current;
+      const el = activeTabElRef.current;
+      if (!root || !el || root.offsetParent === null) return;
+      const chip = el
+        .closest(".tab-group")
+        ?.querySelector<HTMLElement>("[data-stack-chip]");
+      const to = revealScroll(
+        root.scrollLeft,
+        root.clientWidth,
+        el.offsetLeft,
+        el.offsetWidth,
+        chip?.offsetWidth ?? 0,
+      );
+      // Instant, not smooth: a smooth scroll is driven by the frame loop, and
+      // an occluded window's frame loop is asleep — the one case where the tab
+      // most needs to be found is the one where the easing would never arrive.
+      if (to != null) root.scrollLeft = to;
+    };
+    pass();
+    // Twice, because leaving a tab can shrink the strip in the same beat: the
+    // tab you were on was being held out of a folded stack, and it folds back
+    // the moment it stops being active. The strip narrows under the scroll we
+    // just set, the browser clamps it, and the tab we were revealing ends up
+    // short of the right edge. The second pass measures what actually settled.
+    window.clearTimeout(settleReveal.current);
+    settleReveal.current = window.setTimeout(pass, 0);
+  }, []);
+  useEffect(() => {
+    if (!visible) return;
+    revealActiveTab();
+    return () => window.clearTimeout(settleReveal.current);
+  }, [activeTabId, activeGroupKey, visible, revealActiveTab]);
+  // Which chips are pinned, and which tabs have scrolled in behind them. Keyed
+  // off the rendered runs so it re-measures when a tab opens, closes or
+  // restacks — not just when you scroll.
+  const stripOverflow = useStripOverflow(
+    stripRef,
+    tabGroups.map((g) => `${g.key}:${g.shown.length}`).join("|"),
   );
-  const groupDrags = useMemo(() => [agentDrag, docDrag], [agentDrag, docDrag]);
+  const onStackOverflow = useCallback(
+    (e: React.MouseEvent, group: StripGroup) =>
+      tabMenu.open(
+        e,
+        group.tabs.map((t) => ({
+          label: `${t.id === activeTabId ? "› " : ""}${tabDisplayLabel(t)}`,
+          onClick: () => setActiveTabId(t.id),
+        })),
+      ),
+    [tabMenu.open, activeTabId],
+  );
   // Shells and runs each get a compact rail; Rail collapses to a dropdown at 2+.
   const shellChips: RailChip[] = useMemo(
     () =>
@@ -6368,7 +6596,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
       )}
       <PaneBar
         tabGroups={tabGroups}
-        groupDrags={groupDrags}
+        stripDrag={stripDrag}
+        stripRef={stripRef}
+        openStacks={openStacks}
+        onToggleStack={toggleStack}
+        stripOverflow={stripOverflow}
+        onStackOverflow={onStackOverflow}
         stripTabs={stripTabs}
         activeTabId={activeTabId}
         flashTabId={flashTabId}

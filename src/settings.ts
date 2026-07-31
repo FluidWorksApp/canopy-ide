@@ -290,6 +290,16 @@ export interface Settings {
   /** How many agent terminals to keep live per project before auto-hibernation
    *  starts reclaiming the stalest idle ones. */
   maxLiveAgents: number;
+  /** Fold the agent tab strip into Needs you / Working / Idle stacks instead of
+   *  leaving it in open order. The tab you are looking at never changes when it
+   *  restacks — only where it sits in the strip, and it is never the one folded
+   *  away. */
+  groupTabsByStatus: boolean;
+  /** How long an agent has to stay quiet before its tab falls into the Idle
+   *  stack. Promotions (a question, fresh work) are always immediate; only the
+   *  fall is delayed, so an agent pausing between tool calls doesn't shuffle
+   *  the strip under your pointer. */
+  idleGroupDelaySeconds: number;
   /** Where the user's own micro-tasks used to live, back when they were
    *  app-wide. They belong to a project now (`Project.customTasks`), and
    *  adoptLegacyCustomTasks() empties this on first launch. Kept so that
@@ -463,6 +473,8 @@ const DEFAULTS: Settings = {
   relayAddr: "",
   autoHibernate: false,
   maxLiveAgents: 8,
+  groupTabsByStatus: true,
+  idleGroupDelaySeconds: 60,
   customMicroTasks: [],
   disabledTools: [],
   trackerKeys: {},
