@@ -2064,11 +2064,33 @@ export default function App() {
       })),
     [ws.projects, ws.openIds, hibernated],
   );
+  // One launcher, called by the mount effect, by the install-finished events,
+  // and by the Retry button. A second copy would drift from this one the first
+  // time a launch argument changed.
+  const launchCompanion = useCallback(
+    () =>
+      checkInstalledClis().then((installed) =>
+        startCompanion({
+          projects: companionProjectsRef.current,
+          installed: (bin) => Boolean(installed[bin]),
+          tools: companionToolNames(
+            getSettings().disabledTools,
+            getSettings().companionAuthority,
+          ),
+        }),
+      ),
+    [],
+  );
+  const startCompanionRef = useRef(launchCompanion);
+  startCompanionRef.current = launchCompanion;
+
   const companionOn = useSyncExternalStore(
     subscribeSettings,
     () => getSettings().companionEnabled,
     () => false,
   );
+  const companionProjectsRef = useRef(companionProjects);
+  companionProjectsRef.current = companionProjects;
   /** A proposal waiting on the user, rendered as a chip in the companion's
    *  chat. One at a time: the agent is blocked on the answer, so it cannot be
    *  asking two things at once. */
@@ -2127,18 +2149,10 @@ export default function App() {
       return;
     }
     let cancelled = false;
-    const attempt = () =>
-      void checkInstalledClis().then((installed) => {
-        if (cancelled) return;
-        void startCompanion({
-          projects: companionProjects,
-          installed: (bin) => Boolean(installed[bin]),
-          tools: companionToolNames(
-            getSettings().disabledTools,
-            getSettings().companionAuthority,
-          ),
-        });
-      });
+    const attempt = () => {
+      if (cancelled) return;
+      void startCompanionRef.current();
+    };
     attempt();
     // Try again when an install finishes. The companion ships on, so a machine
     // with no agent CLI is an ordinary starting state rather than an error —
@@ -2463,6 +2477,7 @@ export default function App() {
           onDismissNotice={dismissToast}
           onFollowNotice={(item) => void followAttention(item)}
           onInstallCli={() => setSettingsOpen({ tab: "agents" })}
+          onRetry={() => void launchCompanion()}
           proposal={proposal}
           onAnswerProposal={(accepted) => {
             if (!proposal) return;

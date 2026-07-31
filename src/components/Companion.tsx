@@ -57,6 +57,8 @@ interface CompanionProps {
   onAnswerProposal: (accepted: boolean) => void;
   /** Open Settings where an agent CLI can be installed. */
   onInstallCli: () => void;
+  /** Start the session again after it died. */
+  onRetry: () => void;
 }
 
 /** Whether a native browser view is on screen right now.
@@ -153,6 +155,7 @@ export function Companion({
   proposal,
   onAnswerProposal,
   onInstallCli,
+  onRetry,
 }: CompanionProps) {
   const state = useSyncExternalStore(subscribeCompanion, companionState, () => companionState());
   const browserShowing = useBrowserShowing();
@@ -317,6 +320,7 @@ export function Companion({
           proposal={proposal}
           onAnswer={onAnswerProposal}
           onInstall={onInstallCli}
+          onRetry={onRetry}
           onSend={(text) => void sendToCompanion(text)}
           onClose={() => setOpen(false)}
         />

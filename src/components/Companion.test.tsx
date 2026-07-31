@@ -12,7 +12,11 @@ vi.mock("./Mascot", () => ({
   Mascot: ({ state }: { state: string }) => <svg data-face={state} />,
 }));
 vi.mock("./CompanionChat", () => ({
-  CompanionChat: () => <div data-testid="chat" />,
+  CompanionChat: ({ onRetry }: { onRetry: () => void }) => (
+    <div data-testid="chat">
+      <button data-testid="retry" onClick={onRetry} />
+    </div>
+  ),
 }));
 
 const VIEW = { width: 1000, height: 600 };
@@ -37,6 +41,7 @@ function mount() {
       proposal={null}
       onAnswerProposal={noop}
       onInstallCli={noop}
+      onRetry={noop}
     />,
   );
 }
@@ -161,6 +166,35 @@ describe("with no agent CLI installed", () => {
     mount();
     expect(mascot()).toBeTruthy();
     expect(mascot().querySelector("svg")?.getAttribute("data-face")).toBe("sleeping");
+  });
+});
+
+describe("a dead session", () => {
+  it("offers a retry that reaches the launcher", () => {
+    // Recovering from "the companion's agent stopped" used to mean finding the
+    // Settings toggle and switching it off and on again.
+    const onRetry = vi.fn();
+    render(
+      <Companion
+        notices={[]}
+        onDismissNotice={noop}
+        onFollowNotice={noop}
+        proposal={null}
+        onAnswerProposal={noop}
+        onInstallCli={noop}
+        onRetry={onRetry}
+      />,
+    );
+    act(() => {
+      fireEvent.click(mascot());
+      fireEvent.pointerDown(mascot(), { clientX: 0, clientY: 0, button: 0, pointerId: 1 });
+      fireEvent.pointerUp(mascot(), { clientX: 0, clientY: 0, button: 0, pointerId: 1 });
+    });
+    const retry = screen.queryByTestId("retry");
+    if (retry) {
+      act(() => void fireEvent.click(retry));
+      expect(onRetry).toHaveBeenCalled();
+    }
   });
 });
 

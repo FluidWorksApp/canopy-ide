@@ -23,6 +23,8 @@ interface Props {
   onAnswer: (accepted: boolean) => void;
   /** Take the user to where an agent CLI can be installed. */
   onInstall: () => void;
+  /** Start the session again after it died. */
+  onRetry: () => void;
   name: string;
   at: { left: number; top: number; side: "left" | "right" };
   width: number;
@@ -40,6 +42,7 @@ export function CompanionChat({
   proposal,
   onAnswer,
   onInstall,
+  onRetry,
   onSend,
   onClose,
 }: Props) {
@@ -120,6 +123,14 @@ export function CompanionChat({
             </button>
           </div>
         )}
+        {state.status === "failed" && !state.error && (
+          <div className="companion-needs">
+            <p>The session stopped.</p>
+            <button className="companion-needs-cta" onClick={onRetry} type="button">
+              Retry
+            </button>
+          </div>
+        )}
         {state.status !== "unavailable" && state.messages.length === 0 && (
           <p className="companion-empty">
             Ask about anything across your projects — what changed, what’s running,
@@ -192,7 +203,17 @@ export function CompanionChat({
         </div>
       )}
 
-      {state.error && <div className="companion-error">{state.error}</div>}
+      {state.error && (
+        <div className="companion-error">
+          <span className="companion-error-text">{state.error}</span>
+          {/* An agent that stopped is the one failure the user can actually do
+              something about, and having to find the Settings toggle to turn
+              the companion off and on again is not that something. */}
+          <button className="companion-retry" onClick={onRetry} type="button">
+            Retry
+          </button>
+        </div>
+      )}
 
       <div className="companion-compose">
         <textarea

@@ -19995,3 +19995,33 @@ a.btn-sm {
   font-weight: 600;
   cursor: pointer;
 }
+
+/* The error strip carries its own way out. An agent that stopped is the one
+   failure the user can act on, and hunting for the Settings toggle to turn the
+   companion off and on again is not acting on it. */
+.companion-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.companion-error-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.companion-retry {
+  flex: none;
+  padding: 3px 10px;
+  border-radius: 5px;
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.companion-retry:hover {
+  background: color-mix(in srgb, currentColor 14%, transparent);
+}
