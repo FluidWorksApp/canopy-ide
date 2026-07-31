@@ -21,7 +21,7 @@ const SHORTCUTS: [string, string][] = [
   ["⌘⌥← / ⌘⌥→", "Previous / next project"],
   ["⌘T", "New terminal in the active project"],
   ["⌃⇥ / ⌃⇧⇥", "Next / previous tab"],
-  ["⌃⌘← / ⌃⌘→", "Previous / next tab"],
+  ["⌃⌘← / ⌃⌘→", "Previous / next tab (the Tabs menu's chord)"],
   ["⌘W", "Close tab"],
   ["⌘⇧W", "Close project"],
   ["⌘P", "Quick-open a file"],
@@ -47,6 +47,7 @@ function forPlatform(keys: string): string {
     .replace(/⌥/g, "Alt+")
     .replace(/⇧/g, "Shift+")
     .replace(/⌫/g, "Backspace")
+    .replace(/⇥/g, "Tab")
     // Control+CmdOrCtrl collapses to one Ctrl off macOS, where both halves of
     // the chord are the same key.
     .replace(/(Ctrl\+)+/g, "Ctrl+")

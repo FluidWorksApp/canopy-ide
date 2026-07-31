@@ -151,6 +151,7 @@ import {
   hintModifierOnly,
   useHeldModifier,
 } from "../../useHeldModifier";
+import { tabCycleDirection } from "../../tabCycle";
 import { GitPanel } from "../GitPanel";
 import { TicketsPanel, type AgentTarget } from "../TicketsPanel";
 import { PrsPanel } from "../PrsPanel";
@@ -2640,13 +2641,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
         setSpotOpen(true);
         return;
       }
-      // Ctrl+Cmd+Arrow (matches the "Next/Previous Tab" accelerators).
-      if (!(e.ctrlKey && (e.metaKey || e.altKey))) return;
-      if (e.code === "ArrowRight" || e.code === "ArrowLeft") {
-        e.preventDefault();
-        lastKeydownNav.t = Date.now();
-        cycleTabs(e.code === "ArrowRight" ? 1 : -1);
-      }
+      // Ctrl+Tab / Ctrl+Shift+Tab, and Ctrl+Cmd+Arrow (what the "Next/Previous
+      // Tab" accelerators advertise).
+      const dir = tabCycleDirection(e);
+      if (dir === 0) return;
+      e.preventDefault();
+      // Tab is the one chord here that means something downstream — xterm
+      // would send it to the shell as a completion request, and it is the
+      // browser's own focus key — so it stops at the capture phase rather than
+      // merely losing its default action.
+      if (e.code === "Tab") e.stopPropagation();
+      lastKeydownNav.t = Date.now();
+      cycleTabs(dir);
     };
     const next = () => {
       if (recentKeydown()) return;
