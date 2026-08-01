@@ -46,22 +46,53 @@ export interface SettleResult {
   wake: number | null;
 }
 
+/** Reasons a tab is not allowed to move right now, whatever its agent is
+ *  doing. Both are about the same thing: a strip that rearranges itself while
+ *  you are reading it costs you the map of where everything was, and the move
+ *  explains far less than the disorientation costs.
+ *
+ *  This is the one lever that is not a timer. The settling window below makes
+ *  moves *rare*; these make them *wait for you* — which is what the adaptive-
+ *  interface literature keeps landing on. Findlater & McGrenere (CHI 2004)
+ *  found system-driven rearrangement loses to a layout the user controls, and
+ *  the ephemeral-adaptation work that followed it got the same benefit with no
+ *  movement at all, by changing how an item looks rather than where it is. The
+ *  strip already does the looking part — the dot, the ring, the chip colour. */
+export interface SettleHold {
+  /** The pointer is in the strip. Nothing moves under a cursor that is about
+   *  to click something; everything that came due lands when it leaves. */
+  frozen?: boolean;
+  /** The tab whose pane is in front. It never moves while you are in it —
+   *  looking at an agent is exactly when its position must not change under
+   *  you. It settles the moment you go somewhere else. */
+  hold?: string | null;
+}
+
 /** Fold raw statuses into settled ones. Pure: `now` and `delayMs` are given,
  *  never read from the clock, so the whole state machine is testable.
  *
  *  A tab absent from `prev` adopts its raw status outright — a tab that opens
  *  quiet (a resumed session, a reopened workspace) belongs in Idle immediately
- *  rather than sliding there a minute later. */
+ *  rather than sliding there a minute later. That holds even under a hold: a
+ *  tab with no place yet cannot keep the place it had. */
 export function settleGroups(
   prev: Map<string, Settled>,
   targets: Map<string, TabStatus>,
   now: number,
   delayMs: number,
+  { frozen = false, hold = null }: SettleHold = {},
 ): SettleResult {
   const groups = new Map<string, Settled>();
   let wake: number | null = null;
   for (const [id, target] of targets) {
     const was = prev.get(id);
+    // Held: keep the place, and the fall it was part-way through. Nothing is
+    // forgotten, so letting go applies what came due rather than restarting
+    // every clock — several tabs move at once, which reads as one event.
+    if (was && (frozen || id === hold)) {
+      groups.set(id, was);
+      continue;
+    }
     if (target !== "quiet" || !was || was.group === "quiet" || delayMs <= 0) {
       groups.set(id, { group: target });
       continue;
@@ -142,6 +173,7 @@ export function targetsKey(targets: Map<string, TabStatus>): string {
 export function useSettledGroups(
   targets: Map<string, TabStatus>,
   delayMs: number,
+  { frozen = false, hold = null }: SettleHold = {},
 ): Map<string, TabStatus> {
   const [settled, setSettled] = useState<Map<string, Settled>>(() => new Map());
   // The effect reads the newest map without depending on it: state it wrote
@@ -152,11 +184,16 @@ export function useSettledGroups(
   const targetsRef = useRef(targets);
   targetsRef.current = targets;
 
+  // Both holds are effect dependencies, so letting go re-runs immediately: the
+  // pointer leaving the strip is the moment the moves it was holding back land.
   useEffect(() => {
     let timer = 0;
     const run = () => {
       const now = Date.now();
-      const { groups, wake } = settleGroups(ref.current, targetsRef.current, now, delayMs);
+      const { groups, wake } = settleGroups(ref.current, targetsRef.current, now, delayMs, {
+        frozen,
+        hold,
+      });
       if (!sameGroups(ref.current, groups)) {
         ref.current = groups;
         setSettled(groups);
@@ -167,7 +204,7 @@ export function useSettledGroups(
     };
     run();
     return () => window.clearTimeout(timer);
-  }, [key, delayMs]);
+  }, [key, delayMs, frozen, hold]);
 
   return useMemo(() => {
     const out = new Map<string, TabStatus>();

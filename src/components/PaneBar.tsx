@@ -315,19 +315,19 @@ function PaneBarImpl({
       .slice(0, 9)
       .forEach((t, i) => hints.set(t.id, i + 1));
 
-  // The pile: which chips the strip has scrolled past, and where each one pins.
-  // A run with nothing in it renders nothing at all, so the place in the pile is
-  // counted over what is actually on screen — otherwise closing the last PR
-  // would leave a gap in the pile where its chip used to pin.
-  const nubs = useChipPins(stripRef);
+  // The queue: which chips the strip has scrolled past, and where each one
+  // pins. A run with nothing in it renders nothing at all, so a place in the
+  // queue is counted over what is actually on screen — otherwise closing the
+  // last PR would leave a gap where its chip used to pin.
+  const pins = useChipPins(stripRef);
   const drawn = tabGroups.filter((g) => g.tabs.length > 0);
   const pinIndex = new Map<string, number>();
   for (const g of drawn) if (g.label) pinIndex.set(g.key, pinIndex.size);
 
-  /** Scroll a run back into view from its nub: park it one pixel past its own
-   *  pin, so it is the chip shown in full rather than the first one the pile
-   *  has closed over — a run you asked to come back to must not arrive folded
-   *  into the stack you clicked. */
+  /** Scroll a run back into view from its compact chip: park it one pixel past
+   *  its own pin, so it is the chip shown in full rather than the last one in
+   *  the queue — a run you asked to come back to must not arrive still queued
+   *  up on the left. */
   const revealRun = (key: string, pin: number) => {
     const root = stripRef.current;
     const anchor = root?.querySelector<HTMLElement>(`[${ANCHOR_ATTR}="${key}"]`);
@@ -362,7 +362,7 @@ function PaneBarImpl({
           const open = group.label == null || openStacks[group.key] !== false;
           const folded = group.tabs.length - group.shown.length;
           const pin = pinIndex.get(group.key);
-          const nub = nubs[group.key] === true;
+          const queued = pins[group.key] === "compact";
           return (
             <div
               className={`tab-group tab-group-${group.key} ${
@@ -388,13 +388,19 @@ function PaneBarImpl({
                         : ""
                     }`}
                     data-stack-chip=""
-                    data-pin={nub ? "nub" : undefined}
+                    data-pin={pins[group.key]}
                     style={{
-                      // Its own place in the pile, and the order they overlap
-                      // in: a chip on its way in slides *under* the one already
-                      // pinned, and surfaces as that one collapses to a nub.
+                      // Its own place in the queue, and the order they overlap
+                      // in: a chip arriving passes *over* the one pinned in
+                      // front of it, covering it from the right. So the chip
+                      // coming in is readable the whole way, and the one going
+                      // out is worn down to about the width it is about to
+                      // settle at — by the time it goes compact the seam is
+                      // already where the eye expects it. The other way round
+                      // (arriving chip underneath) is what left a sliver of a
+                      // name sticking out from behind the chip in front.
                       ["--pin-left" as string]: `${pinOffset(pin)}px`,
-                      zIndex: pinIndex.size - pin + 2,
+                      zIndex: pin + 2,
                     }}
                   >
                     <button
@@ -402,16 +408,16 @@ function PaneBarImpl({
                       className="tab-stack-face"
                       aria-expanded={open}
                       title={
-                        nub
-                          ? `${group.tabs.length} ${group.label.toLowerCase()}, stacked up behind you — click to go back to them`
+                        queued
+                          ? `${group.tabs.length} ${group.label.toLowerCase()}, queued up behind you — click to go back to them`
                           : open
                             ? `${group.tabs.length} ${group.label.toLowerCase()} — click to fold`
                             : `${folded} ${group.label.toLowerCase()} folded — click to open`
                       }
-                      // A nub is a chip you have scrolled past, so the useful
-                      // thing to do with it is go back to it — folding a run
+                      // A queued chip is a run you have scrolled past, so the
+                      // useful thing to do with it is go back — folding a run
                       // you cannot see would only move the strip under you.
-                      onClick={() => (nub ? revealRun(group.key, pin) : onToggleStack(group.key))}
+                      onClick={() => (queued ? revealRun(group.key, pin) : onToggleStack(group.key))}
                     >
                       {group.icon ?? <span className="tab-stack-dot" aria-hidden />}
                       <span className="tab-stack-name">{group.label}</span>
@@ -521,6 +527,13 @@ function PaneBarImpl({
             </div>
           );
         })}
+        {/* Room for the last chip to reach its place in the queue. Without it
+            the strip simply runs out and the final run's chip stops short,
+            half-under the one in front. An element rather than padding on the
+            strip: trailing padding on a flex scroll container is the classic
+            case browsers disagree about. Its width is measured and set by
+            useChipPins, and is 0 on a strip that doesn't need it. */}
+        <span className="tab-strip-tail" aria-hidden />
       </div>
 
       <Rail

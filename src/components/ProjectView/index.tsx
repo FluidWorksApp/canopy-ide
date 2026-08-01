@@ -21,6 +21,7 @@ import { getSettings, SETTINGS_CHANGE_EVENT } from "../../settings";
 import {
   DOC_STACKS,
   STATUS_LABEL,
+  STATUS_ORDER,
   docStackFor,
   shownInStack,
   useSettledGroups,
@@ -5534,7 +5535,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
       ),
     [agentTabs, tabLife, attention],
   );
-  const settledStatus = useSettledGroups(statusTargets, tabPrefs.idleDelayMs);
+  // …and it only ever moves when moving costs you nothing. Mid-gesture is
+  // never such a moment: a tab that slides out from under a cursor already on
+  // its way down is a misclick the strip caused, and ⌘ held numbers the tabs
+  // 1-9 by position, so a tab moving between reading the digit and pressing it
+  // sends you somewhere you didn't ask for. Both freeze the whole strip;
+  // everything they held back lands together the moment you finish. See
+  // SettleHold — the settling window makes a move rare, these make it wait for
+  // you. (The pointer listeners live with stripRef, further down.)
+  const [pointerInStrip, setPointerInStrip] = useState(false);
+  const settledStatus = useSettledGroups(statusTargets, tabPrefs.idleDelayMs, {
+    frozen: pointerInStrip || tabHints,
+    hold: activeTabId,
+  });
   // Fall back to the raw status for a tab the settler hasn't seen yet (its
   // effect runs after this render), so a new tab is never briefly homeless.
   const groupOf = useCallback(
@@ -5598,9 +5611,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
     return [
       ...(grouped
         ? [
-            run("attention", STATUS_LABEL.attention, "attention", null, attentionTabs),
-            run("active", STATUS_LABEL.active, "active", null, workingTabs),
-            run("quiet", STATUS_LABEL.quiet, "quiet", null, quietTabs),
+            // Always this order, whatever is in them: needs you, working,
+            // idle. Read off STATUS_ORDER rather than spelled out here, so
+            // there is one place that says what the priority is — the strip
+            // reads by position as much as by label, and a compact chip on the
+            // left has only its position and its colour to go on.
+            ...STATUS_ORDER.map((s) =>
+              run(s, STATUS_LABEL[s], s, null, { attention: attentionTabs, active: workingTabs, quiet: quietTabs }[s]),
+            ),
           ]
         : [run("all", null, null, null, agentTabs)]),
       ...DOC_STACKS.map((d) =>
@@ -5655,6 +5673,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // follow with your eyes instead of a tab teleporting mid-glance.
   const stripRef = useRef<HTMLDivElement | null>(null);
   useFlipStrip(stripRef);
+  // Whether the pointer is in the strip — one of the two holds on regrouping
+  // (see the settler above). Listeners on the element rather than props on the
+  // bar: this is a fact about a DOM node the bar is already handing back, and
+  // the bar has no other use for it. `pointerleave` fires for a window the
+  // pointer leaves outright, so the hold cannot get stuck on.
+  useEffect(() => {
+    const el = stripRef.current;
+    if (!el) return;
+    const enter = () => setPointerInStrip(true);
+    const leave = () => setPointerInStrip(false);
+    el.addEventListener("pointerenter", enter);
+    el.addEventListener("pointerleave", leave);
+    return () => {
+      el.removeEventListener("pointerenter", enter);
+      el.removeEventListener("pointerleave", leave);
+    };
+  }, []);
   /** Put the active tab somewhere you can actually see it. Every route that
    *  changes tabs ends here — clicking, Ctrl-Tab, a jump from the agents panel,
    *  a pick from a stack's overflow menu — because "the pane changed but the
@@ -5671,16 +5706,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (!root || !el || root.offsetParent === null) return;
       const group = el.closest(".tab-group");
       const chip = group?.querySelector<HTMLElement>("[data-stack-chip]");
-      // What the pile will cover once this run's own chip is pinned: the nubs
-      // of every run before it, then that chip at its full width. The face is
-      // measured rather than the chip because a chip currently collapsed into
-      // the pile has a narrowed wrapper and a full-width face — and this run is
-      // about to be the one shown in full.
-      const face = chip?.querySelector<HTMLElement>(".tab-stack-face");
+      // What the queue will cover once this run's own chip is pinned: the
+      // compact chips of every run before it, then this one with its name on.
+      // Its remembered full width, not its current one — a chip queued up on
+      // the left measures compact, and this run is about to be the one shown in
+      // full (see useChipPins).
       const anchor = group?.querySelector(`[${ANCHOR_ATTR}]`);
       const at = anchor ? [...root.querySelectorAll(`[${ANCHOR_ATTR}]`)].indexOf(anchor) : -1;
       const pinned = chip
-        ? pinOffset(Math.max(0, at)) + Math.max(chip.offsetWidth, face?.offsetWidth ?? 0)
+        ? pinOffset(Math.max(0, at)) + (Number(chip.dataset.fullW) || chip.offsetWidth)
         : 0;
       const to = revealScroll(
         root.scrollLeft,
