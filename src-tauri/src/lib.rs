@@ -573,7 +573,6 @@ pub fn run() {
             provenance::provenance_record,
             provenance::provenance_for_pr,
             provenance::provenance_for_session,
-            provenance::provenance_all,
             provenance::provenance_backfill,
             spot::spot_save_context_text,
             fsx::workspace_add,

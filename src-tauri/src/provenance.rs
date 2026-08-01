@@ -419,15 +419,6 @@ pub async fn provenance_for_session(
     query(&store, |e| e.session_id == session_id, MAX_EDGES)
 }
 
-/// Everything on file, newest first.
-#[tauri::command]
-pub async fn provenance_all(
-    store: State<'_, ProvenanceStore>,
-    limit: Option<usize>,
-) -> Result<Vec<EdgeOut>, String> {
-    query(&store, |_| true, limit.unwrap_or(200).min(MAX_EDGES))
-}
-
 /// Adopt the history already on disk: the live writers' join, run late.
 ///
 /// The cwd check is what keeps it honest — a digest is attributed only when its

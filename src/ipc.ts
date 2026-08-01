@@ -1542,9 +1542,6 @@ export const provenanceForPr = (repo: string, prNumber: number) =>
 export const provenanceForSession = (sessionId: string) =>
   invoke<ProvenanceEdge[]>("provenance_for_session", { sessionId });
 
-export const provenanceAll = (limit?: number) =>
-  invoke<ProvenanceEdge[]>("provenance_all", { limit });
-
 /** Adopt the history already on disk. `prs` comes from the PR watcher the
  *  frontend already holds, so this needs no network of its own. */
 export const provenanceBackfill = (

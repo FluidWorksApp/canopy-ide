@@ -126,9 +126,3 @@ export function resolveAgentForPr(
       : `${newest.agent ?? "that agent"} cannot reopen a conversation by id`,
   });
 }
-
-/** Can the caller put a message in front of this agent without starting
- *  anything? Only the live rung — every other one spawns a process, which is a
- *  different decision and, for the companion, one that goes through the gate. */
-export const isReachable = (a: PrAgent): a is PrAgent & { ptyId: number } =>
-  a.kind === "live" && a.ptyId != null;

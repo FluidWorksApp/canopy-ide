@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isReachable, resolveAgentForPr, type ResolveContext } from "./agentForPr";
+import { resolveAgentForPr, type ResolveContext } from "./agentForPr";
 import type { ProvenanceEdge } from "./ipc";
 
 const edge = (over: Partial<ProvenanceEdge> = {}): ProvenanceEdge => ({
@@ -35,7 +35,6 @@ describe("who to send a PR change request to", () => {
     expect(got.kind).toBe("live");
     expect(got.sessionId).toBe("old");
     expect(got.ptyId).toBe(7);
-    expect(isReachable(got)).toBe(true);
   });
 
   it("when none is live, the newest wins", () => {
@@ -58,7 +57,6 @@ describe("who to send a PR change request to", () => {
     );
     expect(got.kind).toBe("elsewhere");
     expect(got.ptyId).toBeUndefined();
-    expect(isReachable(got)).toBe(false);
     expect(got.why).toMatch(/another Canopy window/);
   });
 
