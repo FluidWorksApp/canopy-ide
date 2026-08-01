@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DOC_STACKS,
+  STATUS_ORDER,
   docStackFor,
   sameGroups,
   settleGroups,
@@ -95,6 +96,81 @@ describe("settleGroups", () => {
     const { groups, wake } = settleGroups(prev({ a: { group: "quiet" } }), want({ a: "quiet" }), 9, DELAY);
     expect(plain(groups)).toEqual({ a: "quiet" });
     expect(wake).toBeNull();
+  });
+
+  describe("holds", () => {
+    it("moves nothing while the pointer is in the strip — not even a promotion", () => {
+      const { groups, wake } = settleGroups(
+        prev({ a: { group: "quiet" }, b: { group: "active" } }),
+        want({ a: "attention", b: "quiet" }),
+        0,
+        DELAY,
+        { frozen: true },
+      );
+      expect(plain(groups)).toEqual({ a: "quiet", b: "active" });
+      // And no timer either: nothing can land while the hold is on, and the
+      // caller re-runs the moment it lifts.
+      expect(wake).toBeNull();
+    });
+
+    it("lands everything that came due at once when the pointer leaves", () => {
+      // Two tabs mid-fall, frozen well past their due time. Letting go is one
+      // event, not two — which is the only way a move reads as explaining
+      // something rather than as the strip twitching.
+      let state = prev({ a: { group: "active", pendingSince: 0 }, b: { group: "active", pendingSince: 0 } });
+      const targets = want({ a: "quiet", b: "quiet" });
+      ({ groups: state } = settleGroups(state, targets, DELAY * 3, DELAY, { frozen: true }));
+      expect(plain(state)).toEqual({ a: "active", b: "active" });
+      ({ groups: state } = settleGroups(state, targets, DELAY * 3, DELAY));
+      expect(plain(state)).toEqual({ a: "quiet", b: "quiet" });
+    });
+
+    it("never moves the tab you are looking at, and moves the others", () => {
+      const { groups } = settleGroups(
+        prev({ a: { group: "active" }, b: { group: "active" } }),
+        want({ a: "attention", b: "attention" }),
+        0,
+        DELAY,
+        { hold: "a" },
+      );
+      expect(plain(groups)).toEqual({ a: "active", b: "attention" });
+    });
+
+    it("settles the held tab as soon as you go somewhere else", () => {
+      let state = prev({ a: { group: "active" } });
+      const targets = want({ a: "attention" });
+      ({ groups: state } = settleGroups(state, targets, 0, DELAY, { hold: "a" }));
+      expect(plain(state)).toEqual({ a: "active" });
+      ({ groups: state } = settleGroups(state, targets, 10, DELAY, { hold: "b" }));
+      expect(plain(state)).toEqual({ a: "attention" });
+    });
+
+    it("still places a tab it has never seen — there is no place to hold", () => {
+      const { groups } = settleGroups(new Map(), want({ a: "attention" }), 0, DELAY, {
+        frozen: true,
+        hold: "a",
+      });
+      expect(plain(groups)).toEqual({ a: "attention" });
+    });
+  });
+});
+
+describe("run order", () => {
+  it("is the priority order, always — the strip is read by position", () => {
+    // A chip that has queued up on the left is down to its colour, its count
+    // and where it sits. Two of those three are only worth anything if the
+    // order never changes: needs you, then working, then idle, then the
+    // document runs in the order they are declared in.
+    expect(STATUS_ORDER).toEqual(["attention", "active", "quiet"]);
+    expect(DOC_STACKS.map((d) => d.key)).toEqual([
+      "workspaces",
+      "files",
+      "browser",
+      "tasks",
+      "reviews",
+      "history",
+      "team",
+    ]);
   });
 });
 

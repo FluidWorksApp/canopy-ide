@@ -78,17 +78,21 @@ describe("revealScroll", () => {
 
 describe("samePins", () => {
   it("is true for identical readings, so a scroll that changes nothing is free", () => {
-    expect(samePins({ a: true }, { a: true })).toBe(true);
+    expect(samePins({ a: "pinned" }, { a: "pinned" })).toBe(true);
     expect(samePins({}, {})).toBe(true);
   });
 
-  it("is false when a chip joins or leaves the pile", () => {
-    expect(samePins({ a: true }, { a: true, b: true })).toBe(false);
-    expect(samePins({ a: true, b: true }, { a: true })).toBe(false);
-    expect(samePins({}, { a: true })).toBe(false);
+  it("is false when a chip joins or leaves the queue", () => {
+    expect(samePins({ a: "pinned" }, { a: "compact", b: "pinned" })).toBe(false);
+    expect(samePins({ a: "compact", b: "pinned" }, { a: "pinned" })).toBe(false);
+    expect(samePins({}, { a: "pinned" })).toBe(false);
   });
 
-  it("is false when the pile is the same size but holds different chips", () => {
-    expect(samePins({ a: true }, { b: true })).toBe(false);
+  it("is false when the queue is the same size but holds different chips", () => {
+    expect(samePins({ a: "pinned" }, { b: "pinned" })).toBe(false);
+  });
+
+  it("is false when a chip goes compact in place — the handover is the change", () => {
+    expect(samePins({ a: "pinned" }, { a: "compact" })).toBe(false);
   });
 });

@@ -47,13 +47,22 @@ describe("sticky stack chips", () => {
     expect(ruleBody(sel)).toMatch(new RegExp(`var\\(\\s*${token}\\s*,\\s*var\\(`));
   });
 
-  it("collapses a chip to the width its arithmetic assumes", () => {
-    // The pile is laid out by CSS (`--pin-left` on each chip) and computed in
+  it("compacts a chip to the width its arithmetic assumes", () => {
+    // The queue is laid out by CSS (`--pin-left` on each chip) and computed in
     // tabSticky.ts (`pinOffset`), so the two have to agree on how wide a
-    // collapsed chip is. Disagree by a few pixels and the chips overlap or
-    // leave gaps, which only shows up on a strip crowded enough to pile up.
+    // compact chip is. Disagree by a few pixels and the chips overlap or leave
+    // gaps — which only shows up on a strip crowded enough to queue up.
     expect(CSS).toContain(`--tab-nub-w: ${NUB_W}px;`);
-    expect(ruleBody('.tab-stack[data-pin="nub"]')).toContain("flex-basis: var(--tab-nub-w)");
+    expect(ruleBody('.tab-stack[data-pin="compact"]')).toContain("flex-basis: var(--tab-nub-w)");
+  });
+
+  it("queues compact chips beside each other, never over each other", () => {
+    // Chips overlapping by a few pixels each — a deck rather than a queue — is
+    // a row of half-glyphs: the state colour is there, but which run each one
+    // is is not. A compact chip drops its name and keeps its whole face.
+    const body = ruleBody('.tab-stack[data-pin="compact"]');
+    expect(body).not.toMatch(/mask-image/);
+    expect(CSS).toContain('.tab-stack[data-pin="compact"] .tab-stack-name');
   });
 
   it("gives every chip the whole strip to hold on to", () => {
@@ -69,8 +78,8 @@ describe("sticky stack chips", () => {
     // so any *decoration* keyed off "pinned" means opening one stack restyles a
     // different one, which is exactly how this looked broken. The backdrop is
     // unconditional instead, and invisible either way: it is the bar's colour.
-    // (Collapsing into the pile is not decoration — it is the chip giving up
-    // the room the next one needs, and it is keyed off the pile, not the edge.)
+    // (Going compact is not decoration — it is the chip giving up the room the
+    // next one needs, and it is keyed off the queue, not off the edge.)
     expect(CSS).not.toContain("tab-stack-stuck");
     expect(ruleBody(".tab-stack")).toMatch(/background:/);
   });

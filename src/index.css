@@ -4522,10 +4522,10 @@ body.resizing-side * {
 .tabs {
   display: flex;
   overflow-x: auto;
-  /* How much of a stack chip is left showing once the next one has closed over
-     it. Mirrored by NUB_W in tabSticky.ts, which does the pile's arithmetic —
-     stickyChipGuard.test.ts holds the two to the same number. */
-  --tab-nub-w: 28px;
+  /* How wide a stack chip is once it has queued up on the left: its icon and
+     its count, without its name. Mirrored by NUB_W in tabSticky.ts, which does
+     the queue's arithmetic — stickyChipGuard.test.ts holds the two together. */
+  --tab-nub-w: 50px;
   /* The strip scrolls sideways and only sideways. Left at the default, the
      `auto` on x makes y `auto` too, and the row's 1px of vertical overflow was
      enough for a trackpad flick to rubber-band the whole strip up and down and
@@ -4731,6 +4731,15 @@ body.dragging-tab * {
   width: 0;
 }
 
+/* Scroll room for the last chip to reach its place in the queue — exactly the
+   shortfall, measured by useChipPins, and 0 whenever the strip is long enough
+   already. Never a fixed gap: dead space at the end of a strip that didn't
+   need any is a strip that scrolls past its own last tab. */
+.tab-strip-tail {
+  flex: 0 0 auto;
+  width: var(--tab-tail, 0px);
+}
+
 /* Status grouping (Settings → Agents → Group tabs by status). The agent half of
    the strip becomes three stacks — Needs you | Working | Idle — each a chip
    standing in for the tabs behind it. Click a chip to fold its tabs away or
@@ -4738,17 +4747,24 @@ body.dragging-tab * {
    something you want out of the way rather than something to read past. Tabs
    slide between the stacks (tabFlip.ts) as their agent changes state, and the
    pane under the tab you're on never moves with them. */
-/* The chip pins near the left edge of the scrollport while its own tabs scroll
-   past underneath — sticky section headers, turned sideways. Not *at* the edge:
-   it stops after the chips already pinned there, so the runs behind you pile up
-   instead of one pushing out the next (`--pin-left`, set per chip; the pile's
-   arithmetic is tabSticky.ts). Nothing is ever pushed off the strip.
+/* The chip holds a place near the left edge of the scrollport while its own
+   tabs scroll past underneath — sticky section headers, turned sideways. Not
+   *at* the edge: it stops after the chips already queued there, so the runs
+   behind you line up instead of one pushing out the next (`--pin-left`, set per
+   chip; the queue's arithmetic is tabSticky.ts). Nothing is ever pushed off the
+   strip.
+
+   `relative` until it has arrived, `sticky` from then on (data-pin, set by
+   useChipPins). Sticky from the start would take hold as soon as the chip's
+   natural place passed the offset — which is a chip's width before the one
+   still shown in full has given up its room, so the two overlapped and the
+   arriving chip read as half a word glued to the last one. Taking hold only on
+   arrival means it takes hold exactly where it already was.
 
    The strip's own background travels with it, so tabs sliding beneath don't
    show through the gap around the chip. */
 .tab-stack {
-  position: sticky;
-  left: var(--pin-left, 0px);
+  position: relative;
   z-index: 2;
   display: inline-flex;
   align-items: center;
@@ -4765,6 +4781,11 @@ body.dragging-tab * {
   user-select: none;
 }
 
+.tab-stack[data-pin] {
+  position: sticky;
+  left: var(--pin-left, 0px);
+}
+
 /* The glass skin's bar is a wash over an ambient field that shifts across the
    window, so there is no flat colour to borrow. Blur what is behind instead:
    over the bar alone that is the bar, and over a tab sliding past it is a
@@ -4775,19 +4796,26 @@ body.dragging-tab * {
   backdrop-filter: blur(14px) saturate(140%);
 }
 
-/* Closed over by the next chip. It keeps its place in the pile rather than
-   leaving, folded down to its dot the way a card slides under the one dealt on
-   top of it: the run behind you is still named, still coloured by its state,
-   and still one click from coming back. Only the wrapper narrows — the face
-   keeps its full width and is clipped, so the label reads as continuing under
-   the chip in front rather than as a pill that has been cut short, and so
-   measuring the face still says how wide this chip is when shown in full. */
-.tab-stack[data-pin="nub"] {
+/* Already passed: the chip drops its name and its caret and queues up beside
+   the others, still a whole pill — its state colour, its icon, its count.
+   Not a deck: chips overlapping each other, each showing an edge of the one
+   behind, left you with a row of half-glyphs and no way to tell them apart.
+   They line up instead, in the order they always appear in — attention, then
+   working, then idle, then the document runs — so a compact chip is read by
+   its place as much as by its face, and the row it makes is the same row every
+   time. What it drops is the two things it can afford to: the name, which the
+   colour and the order already say, and the fold caret, which belongs to a run
+   whose tabs are on screen. */
+.tab-stack[data-pin="compact"] {
   flex-basis: var(--tab-nub-w);
+  justify-content: center;
+  padding: 0 3px;
   overflow: hidden;
-  padding-right: 0;
-  /* Fade begins after the dot, never across it. */
-  mask-image: linear-gradient(to right, #000 79%, transparent);
+}
+
+.tab-stack[data-pin="compact"] .tab-stack-name,
+.tab-stack[data-pin="compact"] .tab-stack-chevron {
+  display: none;
 }
 
 /* The pill you actually see and click. Separate from the sticky wrapper
