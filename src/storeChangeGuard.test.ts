@@ -52,6 +52,18 @@ const STORES = [
     // compaction happens inside the boundary above.
     delete_boundaries: [],
   },
+  {
+    id: "sessions",
+    file: "agents.rs",
+    variant: "Sessions",
+    module: "sessionDigests.ts",
+    // The digests are written by the hook binary in ANOTHER process, which
+    // cannot call the channel. The bridge that tails its event file is the
+    // moment those writes become visible in-app, so the bridge speaks for
+    // them — the same "the write announces itself" rule, one hop later.
+    boundary: "start_hook_bridge",
+    delete_boundaries: ["session_forget"],
+  },
 ] as const;
 
 /** Rust comments are where the words "std::fs::write" appear most often in
