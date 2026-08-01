@@ -77,6 +77,18 @@ export function NoteView({
   /** Non-null while the body is being edited. */
   const [bodyDraft, setBodyDraft] = useState<string | null>(null);
   const titleInput = useRef<HTMLInputElement>(null);
+  /** The editor is as tall as what's in it, never taller than needed and never
+   *  shorter than the tab (CSS floors it at the region's height). A textarea
+   *  does not size to its content on its own, so without this a long note gets
+   *  a scrollbar of its own inside a region that is already scrolling. */
+  const fitBody = useCallback((el: HTMLTextAreaElement | null) => {
+    if (!el) return;
+    el.style.height = "auto";
+    // Only pin a height when the text is taller than the tab — otherwise leave
+    // it to the stylesheet, so the editor still fills a window you resize.
+    el.style.height =
+      el.scrollHeight > el.clientHeight ? `${el.scrollHeight}px` : "";
+  }, []);
   /** Delete asks twice. There is no shared confirm dialog to reach from here,
    *  and a second click on the same button is a better guard than a modal
    *  anyway: it costs nothing to arm and nothing to abandon. */
@@ -286,15 +298,27 @@ export function NoteView({
           must not be the flex child that grows: a two-line note would then
           stretch to fill the tab and push its own attachments to the bottom
           edge, far from the text they belong to. */}
-      <div className="note-scroll">
+      {/* The blank below a short note is part of the note, not a margin around
+          it: a click that lands on the region itself — never on a child — is
+          the same "click to edit" the text has. */}
+      <div
+        className="note-scroll"
+        onClick={(e) => {
+          if (bodyDraft === null && e.target === e.currentTarget) setBodyDraft(note.body);
+        }}
+      >
       {/* The thought itself. Click to edit — the commonest thing you do with a
           parked note is add the bit you remembered afterwards. */}
       {bodyDraft !== null ? (
         <textarea
           className="note-body-input"
           autoFocus
+          ref={fitBody}
           value={bodyDraft}
-          onChange={(e) => setBodyDraft(e.target.value)}
+          onChange={(e) => {
+            setBodyDraft(e.target.value);
+            fitBody(e.currentTarget);
+          }}
           onBlur={commitBody}
           onKeyDown={(e) => {
             if (e.key === "Escape") {
