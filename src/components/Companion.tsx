@@ -22,9 +22,11 @@ import {
 } from "react";
 import {
   DEFAULT_SPOT,
+  PANEL,
   clampSpot,
   companionName,
   panelPlacement,
+  panelSize,
   pixelsToSpot,
   spotToPixels,
   type CompanionSpot,
@@ -46,8 +48,10 @@ import type { AshState } from "../ash";
 /** The mascot's rendered box. Everything else measures against it, so it is one
  *  number rather than a magic constant in three files. */
 const MASCOT = 54;
-const PANEL_WIDTH = 352;
-const PANEL_HEIGHT = 380;
+/** The card's width, which is the panel's resting width — the notice and the
+ *  chat are the same column of the same companion, and the chat growing does
+ *  not widen a one-line notice. */
+const PANEL_WIDTH = PANEL.width;
 /** What a notice card is taken to be tall before it has been measured — one
  *  line of title, one of body. Only the bottom clamp reads it, so being wrong
  *  for a frame costs nothing; being wrong forever is what `PANEL_HEIGHT` was. */
@@ -150,6 +154,10 @@ export function Companion({
   const view = useViewport();
   const [spot, saveSpot] = useSpot();
   const [open, setOpen] = useState(false);
+  // Kept across open/close on purpose: someone who grew the panel to read a long
+  // answer wants the next one that size too, and re-clicking the control every
+  // time it is summoned is exactly the cost the control was added to remove.
+  const [expanded, setExpanded] = useState(false);
   // Live position while dragging: settings are only written on release, so a
   // drag does not put a localStorage write on every pointermove.
   const [dragSpot, setDragSpot] = useState<CompanionSpot | null>(null);
@@ -161,15 +169,19 @@ export function Companion({
   const name = companionName();
 
   const at = spotToPixels(dragSpot ?? spot, view, MASCOT);
+  const size = useMemo(
+    () => panelSize(expanded, view, GAP),
+    [expanded, view.width, view.height], // eslint-disable-line react-hooks/exhaustive-deps
+  );
   const panel = useMemo(
     () =>
       panelPlacement(at, view, {
         mascot: MASCOT,
-        panelWidth: PANEL_WIDTH,
-        panelHeight: PANEL_HEIGHT,
+        panelWidth: size.width,
+        panelHeight: size.height,
         gap: GAP,
       }),
-    [at.left, at.top, view.width, view.height], // eslint-disable-line react-hooks/exhaustive-deps
+    [at.left, at.top, view.width, view.height, size.width, size.height], // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   // The notice being shown. One at a time, newest first: the companion is a
@@ -327,8 +339,10 @@ export function Companion({
           state={state}
           name={name}
           at={panel}
-          width={PANEL_WIDTH}
-          height={PANEL_HEIGHT}
+          width={size.width}
+          height={size.height}
+          expanded={expanded}
+          onToggleExpand={() => setExpanded((v) => !v)}
           proposal={proposal}
           onAnswer={onAnswerProposal}
           onInstall={onInstallCli}

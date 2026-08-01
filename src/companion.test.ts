@@ -10,10 +10,15 @@ import {
   companionSlug,
   forgetCompanionSession,
   panelPlacement,
+  panelSize,
   permissionArgs,
   pixelsToSpot,
   spotToPixels,
   tierFor,
+  toolDetail,
+  toolLabel,
+  PANEL,
+  PANEL_BIG,
 } from "./companion";
 import { getSettings, updateSettings } from "./settings";
 
@@ -386,5 +391,58 @@ describe("panel placement", () => {
   it("keeps the input on screen when the companion sits at the bottom", () => {
     const p = panelPlacement({ left: 200, top: 870 }, { width: 1440, height: 900 }, opts);
     expect(p.top + opts.panelHeight).toBeLessThanOrEqual(900);
+  });
+});
+
+describe("the panel's two sizes", () => {
+  const view = { width: 1440, height: 900 };
+
+  it("grows when expanded, and stays a panel rather than a window", () => {
+    expect(panelSize(false, view)).toEqual(PANEL);
+    expect(panelSize(true, view)).toEqual(PANEL_BIG);
+    expect(PANEL_BIG.width).toBeLessThan(view.width / 2);
+  });
+
+  it("never asks for more room than the window has", () => {
+    // The placement arithmetic runs in pixels before anything is drawn, so an
+    // unclamped 660 in a 500px window is placed as if it fit — and takes the
+    // compose box off the bottom edge with it.
+    const small = { width: 460, height: 500 };
+    const p = panelSize(true, small);
+    expect(p.width).toBeLessThanOrEqual(small.width);
+    expect(p.height).toBeLessThanOrEqual(small.height);
+    const placed = panelPlacement({ left: 300, top: 400 }, small, {
+      mascot: 54,
+      panelWidth: p.width,
+      panelHeight: p.height,
+      gap: 14,
+    });
+    expect(placed.top + p.height).toBeLessThanOrEqual(small.height);
+  });
+});
+
+describe("a tool call, written for a reader", () => {
+  it("drops the mcp prefix, which is all a truncated row would show", () => {
+    expect(toolLabel("mcp__canopy__canopy_show_diff")).toBe("canopy_show_diff");
+    // Server names have underscores of their own; splitting on "__" is what
+    // survives that.
+    expect(toolLabel("mcp__claude_ai_Gmail__get_message")).toBe("get_message");
+    expect(toolLabel("Read")).toBe("Read");
+    expect(toolLabel("")).toBe("");
+  });
+
+  it("shortens a path from the front, where the repeated part is", () => {
+    const d = toolDetail("/Users/shoaib/Documents/GitHub/canopy/src/components/CompanionChat.tsx");
+    expect(d.startsWith("…/")).toBe(true);
+    expect(d).toContain("CompanionChat.tsx");
+    expect(d.length).toBeLessThanOrEqual(48);
+  });
+
+  it("leaves a short one alone, and truncates prose from the end", () => {
+    expect(toolDetail("src/companion.ts")).toBe("src/companion.ts");
+    expect(toolDetail(undefined)).toBe("");
+    const prose = toolDetail("select:mcp__canopy__canopy_show_diff,mcp__canopy__canopy_editor_state");
+    expect(prose.startsWith("select:")).toBe(true);
+    expect(prose.endsWith("…")).toBe(true);
   });
 });

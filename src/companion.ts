@@ -425,6 +425,65 @@ export interface Viewport {
   height: number;
 }
 
+/** The chat panel at rest, and the size the expand control grows it to.
+ *
+ *  Two sizes rather than a resize handle: the panel is anchored to a mascot the
+ *  user drags around, so a remembered width and height would have to be
+ *  re-clamped against every window and every corner — for a surface whose only
+ *  real question is "am I reading a sentence or a conversation". */
+export const PANEL = { width: 352, height: 380 };
+export const PANEL_BIG = { width: 620, height: 660 };
+
+/** The panel's box, never larger than the window it has to live in. Clamped
+ *  here rather than in CSS because the placement arithmetic is done in pixels
+ *  before anything is drawn — a panel that is 660 tall in a 500px window would
+ *  be placed as if it fit and take its input off the bottom edge. */
+export function panelSize(
+  expanded: boolean,
+  view: Viewport,
+  gap = 14,
+): { width: number; height: number } {
+  const base = expanded ? PANEL_BIG : PANEL;
+  return {
+    width: Math.max(240, Math.min(base.width, view.width - gap * 2)),
+    height: Math.max(220, Math.min(base.height, view.height - gap * 2)),
+  };
+}
+
+// ------------------------------------------------------------- the tool trail
+
+/** How a tool call is written for a reader.
+ *
+ *  An MCP tool arrives as `mcp__canopy__canopy_show_diff`, and on a single
+ *  truncating line that is a row of prefix with the actual verb cut off the
+ *  end — the one part of the name that says what is happening. */
+export function toolLabel(name: string): string {
+  const parts = name.split("__");
+  return parts[0] === "mcp" && parts.length >= 3 ? parts.slice(2).join("__") : name;
+}
+
+const DETAIL_MAX = 44;
+
+/** The argument, shortened from the front.
+ *
+ *  Paths are the common case and their meaning is at the tail: ten calls into a
+ *  turn every chip said `/Users/shoaib/Documents/GitHub/canopy/…` and nothing
+ *  else. Trailing ellipsis is kept for everything that is not a path, where the
+ *  front is what identifies it. */
+export function toolDetail(detail: string | undefined | null): string {
+  const d = (detail ?? "").trim();
+  if (d.length <= DETAIL_MAX) return d;
+  if (d.includes("/") && !/\s/.test(d)) {
+    const parts = d.split("/").filter(Boolean);
+    let out = parts.pop() ?? d;
+    while (parts.length && out.length + parts[parts.length - 1].length + 1 <= DETAIL_MAX) {
+      out = `${parts.pop()}/${out}`;
+    }
+    return out.length > DETAIL_MAX ? `…${out.slice(-DETAIL_MAX)}` : `…/${out}`;
+  }
+  return `${d.slice(0, DETAIL_MAX - 1)}…`;
+}
+
 /** Fraction -> the pixel offset to render at, never off-screen by
  *  construction: the travel is the viewport minus the mascot, so x=1 puts its
  *  right edge on the right edge rather than its left edge past it. */

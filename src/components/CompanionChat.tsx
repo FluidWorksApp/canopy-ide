@@ -7,15 +7,17 @@
 //
 // Deliberately not a terminal. The session behind it is an agent CLI, and the
 // obvious thing would have been to show its TUI; what the user wants from a
-// companion is an answer, so tool calls are chips and prose is prose.
+// companion is an answer, so tool calls are a single status line and prose is
+// prose.
 
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
-import type { CompanionProposal, CompanionState } from "../companionSession";
+import type { CompanionProposal, CompanionState, CompanionTool } from "../companionSession";
 import {
   companionSpotlight,
   spotlightHint,
   subscribeSpotlight,
 } from "../companionContext";
+import { toolDetail, toolLabel } from "../companion";
 import { Markdown } from "./Markdown";
 
 interface Props {
@@ -34,6 +36,10 @@ interface Props {
   at: { left: number; top: number; side: "left" | "right" };
   width: number;
   height: number;
+  /** Whether the panel is at its larger size. Owned by the host, which is what
+   *  places the panel — this only draws the control that asks for it. */
+  expanded: boolean;
+  onToggleExpand: () => void;
   onSend: (text: string) => void;
   onClose: () => void;
 }
@@ -48,6 +54,8 @@ export function CompanionChat({
   onAnswer,
   onInstall,
   onRetry,
+  expanded,
+  onToggleExpand,
   onSend,
   onClose,
 }: Props) {
@@ -114,6 +122,19 @@ export function CompanionChat({
           {name}
           {state.cliName && <span className="companion-cli"> · {state.cliName}</span>}
         </span>
+        {/* Bigger, not fullscreen: the panel is still a thing hanging off the
+            mascot, and a conversation you are reading properly needs room for
+            the answer rather than the whole window. */}
+        <button
+          className="companion-grow"
+          onClick={onToggleExpand}
+          type="button"
+          aria-label={expanded ? "Shrink the panel" : "Expand the panel"}
+          aria-pressed={expanded}
+          title={expanded ? "Shrink" : "Expand"}
+        >
+          {expanded ? "⤡" : "⤢"}
+        </button>
         <button className="companion-esc" onClick={onClose} type="button" aria-label="Close">
           esc
         </button>
@@ -147,19 +168,15 @@ export function CompanionChat({
             what a piece of code does.
           </p>
         )}
-        {state.messages.map((m) => (
+        {state.messages.map((m, i) => (
           <div key={m.id} className={`companion-msg companion-msg-${m.who}`}>
             <span className="companion-who">{m.who === "you" ? "you" : name.toLowerCase()}</span>
             <div className="companion-body">
               {(m.tools ?? []).length > 0 && (
-                <div className="companion-tools">
-                  {(m.tools ?? []).map((t, i) => (
-                    <span key={`${t.name}-${i}`} className="companion-tool" title={t.detail}>
-                      {t.name}
-                      {t.detail && <span className="companion-tool-detail">{t.detail}</span>}
-                    </span>
-                  ))}
-                </div>
+                <ToolTrail
+                  tools={m.tools ?? []}
+                  live={busy && i === state.messages.length - 1}
+                />
               )}
               {m.who === "ash" ? (
                 m.text ? (
@@ -271,6 +288,63 @@ export function CompanionChat({
           {busy ? "…" : "Send"}
         </button>
       </div>
+    </div>
+  );
+}
+
+/** Every tool a reply ran, on one line.
+ *
+ *  It used to be one chip per call, wrapped. A single ordinary question runs a
+ *  dozen tools, so the answer the user actually asked for arrived under ten
+ *  lines of `mcp__canopy__canopy_…` — the panel is 380px tall, and the machinery
+ *  was pushing the result off the bottom of it. None of those lines was ever
+ *  read; what the user wants while it works is "it is still going, and it is
+ *  doing this one now", and afterwards, "it looked at some things first".
+ *
+ *  So: the newest call, live, with a count of what came before it. The whole
+ *  list is still one click away, because "which files did it read" is a fair
+ *  question — it simply is not worth the standing cost of showing it. */
+function ToolTrail({ tools, live }: { tools: CompanionTool[]; live: boolean }) {
+  const [open, setOpen] = useState(false);
+  const head = tools[tools.length - 1];
+  const before = tools.length - 1;
+  const detail = toolDetail(head.detail);
+  return (
+    <div className={`companion-trail${open ? " companion-trail-open" : ""}`}>
+      <button
+        className="companion-trail-row"
+        onClick={() => setOpen((v) => !v)}
+        type="button"
+        aria-expanded={open}
+        title={open ? "Hide the tool calls" : "Show every tool call"}
+      >
+        <span
+          className={`companion-trail-mark${live ? " companion-trail-mark-live" : ""}`}
+          aria-hidden
+        >
+          {live ? "◍" : "✓"}
+        </span>
+        <span className="companion-trail-name">{toolLabel(head.name)}</span>
+        {detail && <span className="companion-trail-detail">{detail}</span>}
+        {before > 0 && (
+          <span
+            className="companion-trail-count"
+            title={`${before} more before this one`}
+          >
+            +{before}
+          </span>
+        )}
+      </button>
+      {open && (
+        <div className="companion-trail-all">
+          {tools.map((t, i) => (
+            <span key={`${t.name}-${i}`} className="companion-tool" title={t.detail}>
+              {toolLabel(t.name)}
+              {t.detail && <span className="companion-tool-detail">{toolDetail(t.detail)}</span>}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

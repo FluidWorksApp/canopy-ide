@@ -13,9 +13,20 @@ vi.mock("./Mascot", () => ({
   Mascot: ({ state }: { state: string }) => <svg data-face={state} />,
 }));
 vi.mock("./CompanionChat", () => ({
-  CompanionChat: ({ onRetry }: { onRetry: () => void }) => (
-    <div data-testid="chat">
+  CompanionChat: ({
+    onRetry,
+    onToggleExpand,
+    width,
+    height,
+  }: {
+    onRetry: () => void;
+    onToggleExpand: () => void;
+    width: number;
+    height: number;
+  }) => (
+    <div data-testid="chat" data-width={width} data-height={height}>
       <button data-testid="retry" onClick={onRetry} />
+      <button data-testid="grow" onClick={onToggleExpand} />
     </div>
   ),
 }));
@@ -250,6 +261,49 @@ describe("the notice it delivers", () => {
     // Still fully on screen, which is the only thing the clamp is for.
     expect(top).toBeGreaterThanOrEqual(0);
     expect(top).toBeLessThanOrEqual(VIEW.height);
+  });
+});
+
+describe("expanding the chat", () => {
+  /** Open the panel the way a click does. */
+  function openChat() {
+    const el = mascot();
+    stubCapture(el);
+    act(() => {
+      pointer(el, "Down", 0, 0);
+      pointer(el, "Up", 0, 0);
+    });
+    return screen.getByTestId("chat");
+  }
+
+  it("gives the panel more room, still placed inside the window", () => {
+    updateSettings({ companionSpot: { x: 1, y: 1 } });
+    mount();
+    const chat = openChat();
+    const before = Number(chat.dataset.height);
+    act(() => void fireEvent.click(screen.getByTestId("grow")));
+    const after = Number(screen.getByTestId("chat").dataset.height);
+    expect(after).toBeGreaterThan(before);
+    // The window here is 600 tall: an unclamped expanded height would be placed
+    // as if it fit and take the compose box off the bottom edge.
+    expect(after).toBeLessThanOrEqual(VIEW.height);
+    expect(Number(screen.getByTestId("chat").dataset.width)).toBeLessThanOrEqual(VIEW.width);
+  });
+
+  it("stays expanded the next time it is opened", () => {
+    // Re-clicking the control on every summon is the cost the control exists to
+    // remove.
+    mount();
+    openChat();
+    act(() => void fireEvent.click(screen.getByTestId("grow")));
+    const big = Number(screen.getByTestId("chat").dataset.height);
+    act(() => {
+      pointer(mascot(), "Down", 0, 0);
+      pointer(mascot(), "Up", 0, 0);
+    });
+    expect(screen.queryByTestId("chat")).toBeNull();
+    openChat();
+    expect(Number(screen.getByTestId("chat").dataset.height)).toBe(big);
   });
 });
 
