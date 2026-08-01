@@ -10392,6 +10392,54 @@ input[type="radio"]:disabled {
   cursor: default;
 }
 
+/* "raised by claude · running · Send a change" — which agent session opened
+   this PR, and the way back to it. Sits in the sub-header with the rest of the
+   PR's facts, because that is what it is: one more fact about the PR. */
+.pr-raised {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: default;
+}
+.pr-raised strong {
+  font-weight: 500;
+  color: var(--text);
+}
+.pr-raised-rung {
+  padding: 1px 6px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  background: var(--bg-raised);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.pr-raised-send {
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+.pr-raised-send:hover {
+  background: var(--bg-raised);
+  color: var(--text);
+}
+.pr-raised-input {
+  width: min(340px, 40vw);
+  padding: 2px 7px;
+  border: 1px solid var(--accent);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  background: var(--bg-input, var(--bg-raised));
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+}
+
 .pr-checks {
   padding: 1px 6px;
   border-radius: var(--r-xs);

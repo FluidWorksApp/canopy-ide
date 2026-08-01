@@ -137,7 +137,8 @@ export interface AgentAction {
     | "notify"
     | "job_done"
     | "task_named"
-    | "close_session";
+    | "close_session"
+    | "message_agent";
   route: string;
   dir?: string;
   /** Where the calling agent was standing. Sent on every action by the sidecar
@@ -158,6 +159,10 @@ export interface AgentAction {
   summary?: string;
   /** job_done: what the agent understood it was asked for. */
   asked?: string;
+  /** message_agent: a PR number or url instead of a ptyId. Rust routes this
+   *  form here rather than answering it — only the frontend holds the
+   *  pty→session binding and can reopen an ended conversation. */
+  pr?: string;
   /** job_done / task_named: what the agent calls this run. Straight from the
    *  model and clamped where it is read (taskIdentity.ts) — nothing here has
    *  been checked for length, for being one glyph, or for being a string. */

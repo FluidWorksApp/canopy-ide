@@ -2854,11 +2854,12 @@ fn tool_defs() -> serde_json::Value {
         },
         {
             "name": "canopy_message_agent",
-            "description": "Send a message to another agent session by typing it into its terminal. Hand off work, warn about a shared file, ask what it's doing; ids come from canopy_agents. It replies in its own session — read that with canopy_server_output. Interrupts it, so make it worth the interruption.",
+            "description": "Send a message to another agent session by typing it into its terminal. Hand off work, warn about a shared file, ask what it's doing; ids come from canopy_agents. It replies in its own session — read that with canopy_server_output. Interrupts it, so make it worth the interruption.\n\nPass `pr` instead of `ptyId` to reach whoever raised a pull request, without knowing who that was: Canopy holds the record of which session produced which PR, and routes to it — typing into it if it is still running, reopening its conversation if it has ended, and starting a fresh agent told what it is picking up if there is nothing left to reopen. This is the right way to act on \"change something about PR #N\": the session that wrote it already has the context a new one would have to rediscover.",
             "inputSchema": { "type": "object", "properties": {
                 "ptyId": { "type": "integer", "description": "Terminal id of the agent to message (from canopy_agents)" },
+                "pr": { "type": "string", "description": "A pull request number (\"323\") or url, instead of ptyId — Canopy finds the session that raised it" },
                 "text": { "type": "string", "description": "What to say — one line, sent as if typed" }
-            }, "required": ["ptyId", "text"], "additionalProperties": false }
+            }, "required": ["text"], "additionalProperties": false }
         },
         {
             "name": "canopy_tickets",
@@ -2998,8 +2999,14 @@ fn describe_action(name: &str, args: &serde_json::Value) -> (String, Option<Stri
         ),
         "canopy_stop_server" => ("Stop a server".into(), arg("ptyId")),
         "canopy_restart_server" => ("Restart a server".into(), arg("ptyId")),
+        // The `pr` form can reopen an ended conversation or start a fresh
+        // agent, so it must not be described as typing into a terminal. What
+        // the user is approving has to be what actually happens.
         "canopy_message_agent" => (
-            "Type into another agent's terminal".into(),
+            match arg("pr") {
+                Some(pr) => format!("Send a change to whoever raised {pr} — reopening or starting an agent if needed"),
+                None => "Type into another agent's terminal".into(),
+            },
             arg("text").map(|t| t.chars().take(160).collect()),
         ),
         "canopy_claim" => ("Claim files".into(), arg("note")),
@@ -3195,10 +3202,19 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
             })))
         }
         "canopy_message_agent" => {
-            let pty = args
-                .get("ptyId")
-                .and_then(|v| v.as_u64())
-                .ok_or("missing required argument: ptyId (a terminal id from canopy_agents)")?;
+            let pty = args.get("ptyId").and_then(|v| v.as_u64());
+            let pr = args.get("pr").and_then(|v| v.as_str());
+            // One of the two, never neither. `pr` is the indirect form: Canopy
+            // looks up which session produced that PR and applies the ladder
+            // (running here -> reopen its conversation -> a fresh agent told
+            // what it is picking up). An agent cannot work that out itself —
+            // the record lives in Canopy's provenance store.
+            if pty.is_none() && pr.is_none() {
+                return Err("say who to message: ptyId (a terminal id from canopy_agents) \
+                            or pr (a pull request number or url, and Canopy finds whoever \
+                            raised it)"
+                    .into());
+            }
             let body = args
                 .get("text")
                 .and_then(|v| v.as_str())
@@ -3207,6 +3223,7 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 "kind": "message_agent",
                 "cwd": cwd(),
                 "ptyId": pty,
+                "pr": pr,
                 "text": body,
             })))
         }
@@ -4492,6 +4509,50 @@ mod tests {
 
     fn digest(pty: &str, instance: &str, cwd: &str) -> serde_json::Value {
         serde_json::json!({ "surface": pty, "instance": instance, "cwd": cwd })
+    }
+
+    /// The gate shows the user what will actually happen. `pr` can reopen an
+    /// ended conversation or start a fresh agent, so describing it as typing
+    /// into a terminal would be asking approval for the wrong thing.
+    #[test]
+    fn messaging_a_prs_author_is_not_described_as_typing_into_a_terminal() {
+        let (typed, _) = describe_action(
+            "canopy_message_agent",
+            &serde_json::json!({ "ptyId": 6, "text": "hi" }),
+        );
+        assert_eq!(typed, "Type into another agent's terminal");
+
+        let (routed, detail) = describe_action(
+            "canopy_message_agent",
+            &serde_json::json!({ "pr": "#323", "text": "drop the retry" }),
+        );
+        assert!(routed.contains("#323"), "the PR is the thing being approved");
+        assert!(routed.contains("raised"));
+        assert_eq!(detail.as_deref(), Some("drop the retry"));
+    }
+
+    /// Either form is enough, neither is not. The old schema required `ptyId`;
+    /// an agent that passes only `pr` must not be told it is missing an
+    /// argument it should never have had to know.
+    #[test]
+    fn message_agent_takes_a_terminal_or_a_pr_but_needs_one_of_them() {
+        let def = tool_defs();
+        let tool = def
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "canopy_message_agent")
+            .expect("canopy_message_agent is registered");
+        let required: Vec<&str> = tool["inputSchema"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(required, vec!["text"], "ptyId is no longer mandatory");
+        let props = &tool["inputSchema"]["properties"];
+        assert!(props.get("pr").is_some());
+        assert!(props.get("ptyId").is_some());
     }
 
     /// One whole turn, event by event, as the wire delivers it. The numbers that
