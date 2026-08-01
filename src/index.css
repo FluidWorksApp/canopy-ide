@@ -7008,16 +7008,6 @@ body.dragging-tab * {
   align-items: center;
   gap: 10px;
 }
-/* The switch and its word are one control, so they hover and read as one. */
-.task-history-scope {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--text-dim);
-  font-size: var(--fs-sm);
-  white-space: nowrap;
-}
-
 .task-history-scroll {
   flex: 1;
   overflow-y: auto;
@@ -7218,19 +7208,6 @@ body.dragging-tab * {
 .task-history-said.is-silent {
   color: var(--text-faint);
   font-style: italic;
-}
-
-/* Which project a run belongs to — only shown in the all-projects view. */
-.task-history-project {
-  flex: 0 0 auto;
-  margin-left: 6px;
-  background: var(--bg-raised);
-  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-  border-radius: var(--r-xs);
-  corner-shape: squircle;
-  color: var(--text-dim);
-  font-size: 10px;
-  padding: 0 6px;
 }
 
 /* Both clocks in one right-hand column, stacked to match the two lines beside

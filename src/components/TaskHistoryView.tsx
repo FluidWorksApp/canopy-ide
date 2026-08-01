@@ -35,7 +35,7 @@ import {
   TasksIcon,
   TrashIcon,
 } from "./icons";
-import { Button, Segmented, Switch, TextInput } from "./ui";
+import { Button, Segmented, TextInput } from "./ui";
 
 const PER_PAGE = 25;
 
@@ -102,9 +102,9 @@ function dayGroup(ms: number): string {
 }
 
 interface TaskHistoryViewProps {
-  /** The project this tab was opened from — the default scope. */
+  /** The project this tab was opened from — the only scope this view has. */
   projectId: string;
-  /** Name of that project, for the "everywhere" view's per-row label. */
+  /** Name of that project, for the header's scope line. */
   projectName: string;
   /** Launch this run's task again, in the directory it ran in. Only offered for
    *  runs from this project: the brief would otherwise be fired into another
@@ -128,8 +128,7 @@ export function TaskHistoryView({
   focus,
 }: TaskHistoryViewProps) {
   // The log is app-wide, the view is not: you opened this from a project, so
-  // that project's work is what you meant. "Everywhere" is one click away.
-  const [everywhere, setEverywhere] = useState(false);
+  // that project's work is what you meant, and it is all this view ever shows.
   const [runs, setRuns] = useState<TaskRun[]>(() => completedTaskRuns(projectId));
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Outcome | "all">("all");
@@ -159,11 +158,11 @@ export function TaskHistoryView({
   // A task finishing while this tab is open should land in the list — the whole
   // point is that you can leave it open and watch outcomes arrive.
   useEffect(() => {
-    const refresh = () => setRuns(completedTaskRuns(everywhere ? undefined : projectId));
+    const refresh = () => setRuns(completedTaskRuns(projectId));
     refresh();
     window.addEventListener(TASK_HISTORY_EVENT, refresh);
     return () => window.removeEventListener(TASK_HISTORY_EVENT, refresh);
-  }, [everywhere, projectId]);
+  }, [projectId]);
 
   // What the header states and what the filter tabs count. Over the whole
   // scope, not the current filter — a count that moves when you click it is a
@@ -287,7 +286,7 @@ export function TaskHistoryView({
                   {durTotal(tally.ms)} of agent time
                 </span>
                 <span className="task-history-stat task-history-scope-note">
-                  {everywhere ? "across every project" : `in ${projectName}`}
+                  in {projectName}
                 </span>
               </>
             )}
@@ -325,25 +324,6 @@ export function TaskHistoryView({
               ),
             }))}
           />
-          <span className="status-spacer" />
-          <span
-            className="task-history-scope"
-            title={
-              everywhere
-                ? `Showing tasks from every project — switch off for ${projectName} only`
-                : "Tasks run in your other projects too"
-            }
-          >
-            <Switch
-              checked={everywhere}
-              aria-label="Show tasks from every project"
-              onChange={(on) => {
-                setEverywhere(on);
-                setPage(0);
-              }}
-            />
-            All projects
-          </span>
         </div>
       </div>
 
@@ -358,7 +338,7 @@ export function TaskHistoryView({
           <span className="task-history-empty-note">
             {runs.length === 0
               ? "One-shot tasks land here when they finish — with what the agent reported and the tail of its terminal, which is otherwise gone the moment the tab closes itself."
-              : "Nothing in this scope answers to that search and filter. Widen one of them, or turn on all projects."}
+              : "Nothing here answers to that search and filter. Widen one of them."}
           </span>
         </div>
       ) : (
@@ -417,14 +397,6 @@ export function TaskHistoryView({
                                 {t}
                               </span>
                             ))}
-                            {/* Only in the everywhere view — in the scoped one
-                                every row is this project and the chip would be
-                                noise on all of them. */}
-                            {everywhere && (
-                              <span className="task-history-project" title={run.cwd}>
-                                {run.projectName ?? run.cwd.split("/").filter(Boolean).pop()}
-                              </span>
-                            )}
                           </span>
                           {/* A line of its own. It used to share one with the
                               title and the tags and the clock, which left the
