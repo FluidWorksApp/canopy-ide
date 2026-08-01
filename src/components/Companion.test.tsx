@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { Companion } from "./Companion";
 import { getSettings, updateSettings } from "../settings";
 import { DEFAULT_SPOT } from "../companion";
+import type { AttentionItem } from "../attention";
 
 // The companion draws a real <Mascot> and, when opened, a real <Markdown>.
 // Neither is what these tests are about, and Markdown drags a sanitizer and a
@@ -32,10 +33,10 @@ beforeEach(() => {
 
 const noop = () => {};
 
-function mount() {
+function mount(notices: AttentionItem[] = []) {
   return render(
     <Companion
-      notices={[]}
+      notices={notices}
       onDismissNotice={noop}
       onFollowNotice={noop}
       proposal={null}
@@ -195,6 +196,60 @@ describe("a dead session", () => {
       act(() => void fireEvent.click(retry));
       expect(onRetry).toHaveBeenCalled();
     }
+  });
+});
+
+describe("the notice it delivers", () => {
+  const item = (over: Partial<AttentionItem> = {}): AttentionItem => ({
+    id: "n1",
+    kind: "fyi",
+    tone: "info",
+    title: "something happened",
+    source: "app",
+    ts: 0,
+    ...over,
+  });
+
+  const card = () => document.querySelector(".companion-notice") as HTMLElement;
+
+  it("wears the tone it is reporting, not the one card for everything", () => {
+    // A failure and a success used to be the same card: no tone class at all,
+    // and the reader was left to find the severity in a 54px face beside it.
+    mount([item({ tone: "error", title: "could not determine current branch" })]);
+    expect(card().className).toContain("companion-notice-error");
+  });
+
+  it("does not give an error the standing edge that means 'still waiting'", () => {
+    // The bug: the edge was drawn for anything that does not fade, and an error
+    // does not fade either — so a failure came up wearing the question's accent
+    // while Ash wore blocked red for the same item.
+    mount([item({ tone: "error" })]);
+    expect(card().className).not.toContain("companion-notice-held");
+  });
+
+  it("keeps the standing edge for a question nobody has answered", () => {
+    mount([item({ kind: "question", tone: "warn" })]);
+    expect(card().className).toContain("companion-notice-held");
+  });
+
+  it("drops it again once that question is resolved", () => {
+    mount([item({ kind: "question", tone: "warn", resolvedAt: 1 })]);
+    expect(card().className).not.toContain("companion-notice-held");
+  });
+
+  it("stands beside the companion, not a chat panel's height above it", () => {
+    // It used to be placed with the chat panel's geometry, so the panel's 380px
+    // bottom clamp applied to a ~76px card: with the companion in its default
+    // bottom-right corner the notice was parked a third of the window above the
+    // mascot supposedly saying it, floating unattached over the work.
+    updateSettings({ companionSpot: { x: 1, y: 1 } });
+    mount([item()]);
+    const top = parseFloat(card().style.top);
+    const mascotTop = parseFloat(mascot().style.top);
+    expect(mascotTop - top).toBeLessThan(120);
+    // Still fully on screen, which is the only thing the clamp is for.
+    expect(top).toBeGreaterThanOrEqual(0);
+    expect(top).toBeLessThanOrEqual(VIEW.height);
   });
 });
 
