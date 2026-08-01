@@ -25,13 +25,35 @@ function px(blocks: Block[]): string {
   return blocks.map(([x, y, w, h]) => `M${x} ${y}h${w}v${h}h${-w}z`).join("");
 }
 
+/** How much of its own box a line icon's ink actually covers, measured across
+ *  the rail set: the paths run roughly 3->21 inside a 24 grid. A pixel twin's
+ *  blocks, by contrast, use all eight of their eight. */
+const LINE_INK_RATIO = 0.741;
+
+/** The box a twin draws in so it carries the same weight as the line icon the
+ *  caller asked for.
+ *
+ *  Both sets were rendered at the same number and the twins came out a third
+ *  larger on average — the sparsest line glyph, Git, was twice — because a
+ *  full-bleed 8x8 block grid is not the same amount of ink as a 1.8px stroke
+ *  inside a 24 grid with margins. `size` therefore means here what it means
+ *  everywhere else in the app: the size of the equivalent line icon. The twin
+ *  works out its own box.
+ *
+ *  Snapped to whole blocks. 22 * 0.741 is 16.3, which would land every block
+ *  edge on a 2.04px boundary and undo the one thing this icon set is for. */
+function inkBox(size: number): number {
+  return Math.max(8, Math.round((size * LINE_INK_RATIO) / 8) * 8);
+}
+
 function pixelIcon(blocks: Block[]) {
   const d = px(blocks);
   return function PixelIcon({ size = 22, className }: IconProps) {
+    const box = inkBox(size);
     return (
       <svg
-        width={size}
-        height={size}
+        width={box}
+        height={box}
         viewBox="0 0 8 8"
         /* Geometry, not paint: this keeps the block edges on whole device
            pixels at whatever size the caller asks for. It lives on the

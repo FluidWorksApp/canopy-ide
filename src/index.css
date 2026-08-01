@@ -753,11 +753,34 @@ body,
   cursor: pointer;
   border: 1px solid transparent;
   white-space: nowrap;
+  /* The same 200px an editor tab gets, for the same reason: one project called
+     after a long worktree path took the whole strip, and everything else you
+     had open — and the ＋ — went off the end of a row people don't think to
+     scroll. The strip still scrolls when there are genuinely many. */
+  max-width: 200px;
   transition:
     background var(--dur-fast) var(--ease-out),
     color var(--dur-fast) var(--ease-out),
     border-color var(--dur-fast) var(--ease-out),
     box-shadow var(--dur-fast) var(--ease-out);
+}
+
+/* The name is the one child of a pill that carries no class of its own — the
+   frost, the badge, the ⌥ hint and the ✕ all do — and it is the only part
+   whose length isn't ours. It takes the squeeze. */
+.project-tab > span:not([class]) {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Everything else in the pill keeps its size: an icon that shrinks is a
+   smudge, and a ✕ that shrinks is a miss. */
+.project-tab > .project-tab-frost,
+.project-tab > .badge,
+.project-tab > .tab-close {
+  flex: 0 0 auto;
 }
 
 .project-tab:hover {
@@ -1605,6 +1628,22 @@ body.resizing-side * {
   background: var(--bg-raised);
   border: 1px solid var(--border);
   color: var(--text);
+  /* A branch name is whatever somebody typed, and this chip is first in the
+     row: at sixty characters it ran half the tray and pushed the model, the
+     spend and the stats corner off the window edge, where the only way back to
+     them was scrolling a 30px strip. The name gives way instead. Nothing is
+     lost to the ellipsis that the chip's own title doesn't still spell out —
+     the branch and the changed-file count both live there. */
+  max-width: 28ch;
+}
+
+/* The cap is on the chip, but the text is in the button, and text-overflow
+   only truncates the box the text is actually in. */
+.status-branch .status-model-btn {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .status-dirty {
@@ -1680,6 +1719,13 @@ body.resizing-side * {
   border: none;
   cursor: pointer;
   font: inherit;
+  /* Ordinary text rather than the flex row .status-item hands every chip: an
+     account label is a bare text node, which inside a flex box is an anonymous
+     item that no ellipsis can reach — the cap above cut a long label off
+     mid-letter and said nothing about it. The line-height is the centring the
+     flex box was doing, kept. */
+  display: block;
+  line-height: 20px;
 }
 
 .status-account:hover {
@@ -2499,8 +2545,25 @@ body.resizing-side * {
   cursor: pointer;
 }
 
+/* The component's own name, which is a directory's name: never ours to
+   predict. Left to wrap it turned a one-line group header into four lines at a
+   narrow panel width. */
+.component-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A flex item is blockified, so this span was a block with two inline buttons
+   loose inside it — squeezed by a long title they stacked, and the header grew
+   a second row of chrome. */
 .component-actions {
   margin-left: auto;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
 }
 
 .component-commands {
@@ -3769,6 +3832,10 @@ body.resizing-side * {
   width: 520px;
   max-height: 80vh;
   overflow-y: auto;
+  /* Paths and commands appear in these dialogs and have no spaces to break at
+     — the same reason .confirm carries this, and the same fix, because a
+     second answer to one question is how two dialogs stop looking alike. */
+  overflow-wrap: anywhere;
 }
 
 .modal h3 {
@@ -5085,7 +5152,13 @@ body.dragging-tab * {
   display: flex;
   align-items: center;
   gap: 4px;
-  flex: 0 0 auto;
+  /* The rail is the part of this bar that may lose width, because losing it
+     costs nothing: the chip inside stays --rail-chip-w and scrolls, which is
+     what the overflow below is already for. Refusing to shrink, it pushed the
+     buttons at the end of the bar out of the window on a narrow one — off the
+     edge of a row that, unlike this rail, cannot be scrolled to. */
+  flex: 0 1 auto;
+  min-width: 0;
   max-width: 46%;
   overflow-x: auto;
   padding: 0 6px;
@@ -5380,6 +5453,8 @@ body.dragging-tab * {
   display: flex;
   gap: 2px;
   padding: 0 6px;
+  /* Controls don't yield: the strip and the rails beside them do. */
+  flex: 0 0 auto;
 }
 
 /* ---------- Agent Workspace overlay ----------
@@ -5820,6 +5895,24 @@ body.dragging-tab * {
   color: var(--text);
 }
 
+/* The tile is a fixed 96x82 box; the name inside it is not. A custom entry is
+   named by whoever added it, and even a shipped one ("Antigravity CLI") clears
+   the tile by a pixel or two on a wider font. A name with nowhere to break
+   lands in the tiles either side of it instead of yielding, so let it break
+   wherever it has to, hold it to the two lines the tile has room for, and
+   ellipsise the rest. */
+.launch-card > span:not(.launch-install):not(.launch-update) {
+  max-width: 100%;
+  min-width: 0;
+  text-align: center;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
 .launch-install {
   position: absolute;
   top: 5px;
@@ -5853,6 +5946,20 @@ body.dragging-tab * {
   background: var(--bg-alt);
 }
 
+/* Nothing bounds a version: amp reports `0.0.1785586633`, which is a unix
+   timestamp. Pinned by `right` with no cap, the badge grows leftwards out of
+   its own tile and onto a second line across the icon — so it reads as sitting
+   on the tile beside it. The tile is the limit, one line, and the ellipsis
+   says the rest; the full before-and-after is already in the title. */
+.launch-install,
+.launch-update {
+  box-sizing: border-box;
+  max-width: calc(100% - 10px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .cli-icon svg,
 .launch-card svg {
   flex: 0 0 auto;
@@ -5874,8 +5981,15 @@ body.dragging-tab * {
   flex: 0 0 auto;
 }
 
+/* flex: 1 alone still refuses to go below the label's own text, so the file
+   name in it held the bar open and pushed Split and the actions off the
+   right. No rtl here — this label is a sentence, not a bare path. */
 .diff-label {
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--warn);
 }
 
@@ -6403,7 +6517,15 @@ body.dragging-tab * {
   color: var(--danger);
 }
 
+/* A file name out of a repository has no length limit, and this row clips —
+   so a long one did not merely crowd the stage button, it deleted it. The
+   name yields first; the button keeps its size. */
 .change-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 62%;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -6413,6 +6535,11 @@ body.dragging-tab * {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* Ellipsize the LEFT: `src/components/...` is the same on every row, and the
+     deepest folder is the one that says which file this is. Same trick as
+     .pd-dir-path and .cli-account-path. */
+  direction: rtl;
+  text-align: left;
 }
 
 /* one section per component in the change feed */
@@ -9369,9 +9496,17 @@ input[type="radio"]:disabled {
   background: var(--accent);
 }
 
+/* A file name comes from the repo, so "never shrink" was a promise the row
+   could not keep: the directory beside it was squeezed to nothing first, and
+   then the name itself ran out past the palette's edge, cut mid-word with no
+   ellipsis to admit it. The name still yields last — the detail's basis of 0
+   means it gives way first — but it does yield. */
 .palette-name {
   color: var(--text);
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .palette-row-active .palette-name {
@@ -11215,7 +11350,15 @@ input[type="radio"]:disabled {
   gap: 6px;
   margin-bottom: 2px;
 }
+/* A source file name is as long as someone made it, and the tags after it
+   are the only thing saying whether the thread is resolved, outdated or
+   blocking. The name is what gives way. */
 .pr-thread-where {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: var(--mono, monospace);
   font-size: 10px;
   color: var(--accent);
@@ -11953,7 +12096,14 @@ input[type="radio"]:disabled {
   color: var(--fg-dim);
   opacity: 0.8;
 }
+/* One of these is a branch name, so the line it sits on is only as wide as the
+   panel happens to be. It ends in an ellipsis rather than outside the panel;
+   the whole of it is in the row's title. */
 .prs-row-stat {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -12039,6 +12189,10 @@ input[type="radio"]:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text);
+  /* Ellipsize the LEFT. Cutting a path from the right hides the file name,
+     which is the only part that says which diff this is. */
+  direction: rtl;
+  text-align: left;
 }
 .pr-file-stat {
   flex: 0 0 auto;
@@ -12166,6 +12320,17 @@ input[type="radio"]:disabled {
   /* The owner is almost never the interesting half of owner/name, but dropping
      it would make two repos called "api" the same link. Dimmed, not cut. */
   color: var(--text-faint);
+  /* Capped, and ellipsized from the LEFT so the cut falls on the owner rather
+     than the name — same reasoning as the line above, now enforced. An
+     unbounded nwo used to eat the title and push the state off the rail. */
+  display: inline-block;
+  max-width: 12ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+  direction: rtl;
+  text-align: left;
 }
 .pr-link-title {
   flex: 1 1 auto;
@@ -12504,7 +12669,17 @@ input[type="radio"]:disabled {
 .ws-row-gone .ws-mark {
   color: var(--warn);
 }
+/* A branch name comes from the repository, so nothing bounds it. Left as a
+   flex child that refuses to shrink it pushed `own space` and the agent chip
+   off the panel — the two things the row is read for. The name gives way
+   first now; the chips beside it never move. The cap keeps it from eating
+   the row before anything else has had a chance to. */
 .ws-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 62%;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -12610,6 +12785,12 @@ input[type="radio"]:disabled {
   position: fixed;
   z-index: 500;
   min-width: 180px;
+  /* What these rows name is a branch or a directory, and with no ceiling the
+     menu simply grew to hold one. Past the window's width the clamp in
+     ContextMenu.tsx can only pin it to the left margin, which puts the whole
+     trailing column — hints, submenu carets — off screen with no way to reach
+     it. The same ceiling .ctx-menu-search already keeps, for the same content. */
+  max-width: min(420px, 90vw);
   padding: 4px;
   display: flex;
   flex-direction: column;
@@ -12765,8 +12946,15 @@ textarea,
   color: var(--text-dim);
 }
 
+/* Truncating here is what the ceiling above buys: the hint and the caret hold
+   one column down the menu instead of landing wherever each row's name ended.
+   This was scoped to the searchable menu alone, which left every right-click
+   menu carrying a branch name to grow instead of ellipsise. */
 .ctx-label {
   flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .ctx-hint {
@@ -12846,6 +13034,10 @@ textarea,
   z-index: 450;
   width: 360px;
   padding: 13px 14px;
+  /* The notes are the release's prose, not ours: a URL or a version tag with
+     no space in it was clipped dead at this edge, and the only way to the rest
+     of the sentence was a horizontal scrollbar inside a toast. */
+  overflow-wrap: anywhere;
   /* Lifted overlay-glass surface, matching the palette and notice toasts. */
   border: 1px solid var(--border-strong);
   border-radius: var(--r-lg);
@@ -13057,6 +13249,10 @@ textarea,
   align-items: center;
   min-width: 0;
   flex: 1;
+  /* min-width: 0 lets this group shrink, but without a clip its own children
+     kept drawing where they no longer fit — the id landed on top of the
+     workspace chip. Shrinking has to mean hiding, not overlapping. */
+  overflow: hidden;
 }
 
 .ticket-id {
@@ -13072,12 +13268,24 @@ textarea,
   white-space: nowrap;
 }
 
+/* The trailing group. `flex: 0 0 auto` was true while everything in it was a
+   count or a glyph; an assignee is a person's handle, and a long one pushed the
+   send button off the row and left the title nothing. Half the row is the most
+   it may hold — past that the ticket you are reading has no name. */
 .ticket-meta {
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: 10px;
   color: var(--text-dim);
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 50%;
+}
+
+/* The fixed end of the row: whatever the handle does, these keep their size. */
+.ticket-meta > .ticket-wt,
+.ticket-meta > .ticket-start {
   flex: 0 0 auto;
 }
 
@@ -13095,6 +13303,17 @@ textarea,
   color: var(--ok);
 }
 
+/* A login is up to 39 characters and this group does not shrink, so a long
+   one took the row away from the ticket title. Capped rather than dropped:
+   ten characters still names a person. */
+.ticket-assignee {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 10ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .ticket-assignee.ticket-mine {
   color: var(--accent);
 }
@@ -13195,6 +13414,13 @@ textarea,
   margin-top: 6px;
   font-size: 11px;
   color: var(--text-dim);
+  /* An author name and a refs list are both as long as the repository made
+     them, and the buttons at the end were being pushed off the header
+     entirely. Wrapping is the right yield here rather than truncation: this
+     is a detail header with room below it, and a ref you cannot read is a ref
+     you have to go elsewhere for. */
+  flex-wrap: wrap;
+  row-gap: 4px;
 }
 
 .commit-hash {
@@ -14139,8 +14365,21 @@ textarea,
   gap: 7px;
 }
 
+/* Same rule as the rows below: the heading is the side that gives, and the
+   actions and the count keep their size — otherwise a narrow pane clips
+   Restore all instead of shortening the words above it. */
+.resume-head > span:first-child {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
 .resume-head-actions {
+  flex: 0 0 auto;
   gap: 4px;
+}
+
+.resume-head .badge {
+  flex: 0 0 auto;
 }
 
 .resume-subhead {
@@ -14202,16 +14441,45 @@ textarea,
   white-space: nowrap;
 }
 
+/* A branch and a directory are repo-supplied: `worktree-fix-companion-hides-
+   for-browser` is a real one. `flex: 0 0 auto` on text nobody controls the
+   length of is how a row breaks — the span refuses to shrink below its
+   content, so it pushes the Resume button out of the row rather than
+   truncating, and the button ends up clipped off the right edge. Text yields
+   and ellipsises; only controls keep their size. */
 .resume-dir,
-.resume-branch,
+.resume-branch {
+  font-size: 10px;
+  color: var(--text-dim);
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 32%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Bounded by construction — "2h ago", never longer. It carries the margin that
+   pins the trailing group to the right edge, so the actions line up down the
+   list instead of landing wherever that row's text happened to end. */
 .resume-age {
   font-size: 10px;
   color: var(--text-dim);
   flex: 0 0 auto;
+  margin-left: auto;
+  padding-left: 4px;
 }
 
 .resume-branch {
   color: var(--ok);
+}
+
+/* The actions are the fixed end of the row: whatever the text does, these keep
+   their size and stay on screen. */
+.resume-row > .btn,
+.resume-row > .btn-sm,
+.resume-row > .resume-forget {
+  flex: 0 0 auto;
 }
 
 .resume-row .btn-sm {
@@ -14729,13 +14997,29 @@ a.btn-sm {
   flex: 0 0 auto;
 }
 
+/* The chips whose text comes from a repo and a filesystem. `flex: 0 0 auto`
+   above is right for a dot, a glyph and a stopwatch; on these it meant a long
+   branch kept every pixel it asked for and the row clipped what came after it
+   at its own edge — which is where the workspace button and the port chip are,
+   so on a row with a long branch they were not reachable at any panel width.
+   They shrink twice as fast as the name beside them: two chips at four
+   characters each tell you less than one name at twelve. */
 .ap-body .agent-dir,
 .ap-body .agent-branch,
 .ap-body .share-branch {
+  flex: 0 2 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 40%;
+}
+
+/* The name is capped at 60% by .agent-name; what the rule above took from it
+   was the right to give any of that back when the row runs out of room. */
+.ap-body .agent-name {
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .ap-body .restore-actions .btn-sm,
@@ -14775,8 +15059,13 @@ a.btn-sm {
   border-color: var(--accent);
 }
 
+/* Ash carries the strip's severity, so she is a control, not text: she keeps
+   her size. A title with no spaces in it — a path, a compiler symbol — was
+   pressing the 26px face down to 13 and flattening it into an oval, which is
+   the one thing in the strip that cannot afford to be unreadable. */
 .notice-ash {
   margin-right: 2px;
+  flex: 0 0 auto;
 }
 
 .notice-text {
@@ -14784,6 +15073,12 @@ a.btn-sm {
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+  /* What a notice is about is usually a path or a compiler symbol, and neither
+     has a space in it — so min-width alone bought nothing and the title ran
+     out through the strip's own border. `anywhere` for the same reason .confirm
+     and .cnp-tooltip use it: the string is one unbroken token and there is no
+     gentler break to find. */
+  overflow-wrap: anywhere;
 }
 
 /* Which project this came from — the thing the old app-global toast could
@@ -14808,8 +15103,11 @@ a.btn-sm {
   border-color: var(--accent);
 }
 
+/* The fixed end of the strip: whatever the text does, dismissing stays
+   reachable. */
 .notice-x {
   margin-left: auto;
+  flex: 0 0 auto;
   padding: 2px;
   display: grid;
   place-items: center;
@@ -15326,9 +15624,16 @@ a.btn-sm {
   color: var(--accent);
 }
 
+/* Whatever the peer called themselves. It gives way so the time beside it —
+   which is how you tell this message from the one under it — stays on the
+   card. */
 .team-inbox-from {
   font-weight: 600;
   color: var(--text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .team-inbox-head .team-member-age {
@@ -18647,6 +18952,12 @@ a.btn-sm {
   font-size: var(--fs-sm);
   color: var(--text);
   text-align: left;
+  /* Most of what this tooltip carries is a path or a command, and a path has
+     no spaces in it — so `max-width` alone does nothing and the string runs
+     out through the border instead of wrapping inside it. `anywhere` rather
+     than `break-word` because the latter still refuses to break a single
+     unbroken token, which is exactly what a path is. */
+  overflow-wrap: anywhere;
 }
 
 /* Card density: a body and/or meta line is present. */
