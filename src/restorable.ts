@@ -25,6 +25,31 @@ export interface Restorable {
   superseded: ipc.SessionDigest[];
 }
 
+/**
+ * Where a resume of this session has to run.
+ *
+ * Never `cwd` on its own. That is where the agent was when it last reported,
+ * and it moves: an agent that cds, a session Canopy relocates into a worktree,
+ * or — the one that bites — a resume that already went to the wrong place and
+ * whose hooks then wrote *that* directory back onto the digest. Agents that
+ * namespace a conversation by directory (claude, gemini, cursor) only find it
+ * again from the directory it was filed under, so resuming from a drifted cwd
+ * answers "No conversation found".
+ *
+ * `resume_cwd` is the backend's verified answer (agents.rs): the directory
+ * whose encoding is the bucket actually holding the transcript. `launch_cwd` is
+ * the next best thing when a digest predates it, and `cwd` the last resort.
+ *
+ * One function because every surface that spawns a resume has to agree — the
+ * restorable list already did, and the palette and the message-an-agent path
+ * did not, which is how the same session opened in two different directories.
+ */
+export const resumeCwd = (
+  digest: ipc.SessionDigest | undefined,
+  fallback = "",
+): string =>
+  digest?.resume_cwd || digest?.launch_cwd || digest?.cwd || fallback;
+
 /** The last human-authored prompt — tool output and injected context both
  *  start with '<', and a session is recognised by what you asked it. */
 const lastHumanPrompt = (prompts?: string[]) =>
@@ -117,7 +142,7 @@ export function restorableFrom(
   // from disk rather than reported through hooks (omp), and it is what makes
   // the row come back the moment the terminal closes.
   const runningHere = (d: ipc.SessionDigest) => {
-    const dir = d.resume_cwd || d.cwd || "";
+    const dir = resumeCwd(d);
     if (!dir) return false;
     return liveAgents.some((a) => a.cwd === dir && a.agentId === (d.agent ?? "claude"));
   };
@@ -166,7 +191,7 @@ export function restorableFrom(
       return {
         digest,
         agentId,
-        cwd: digest.resume_cwd || digest.cwd || "",
+        cwd: resumeCwd(digest),
         command:
           digest.resumable === false ? null : restoreCommand(agentId, digest.session_id),
         prompt: lastHumanPrompt(digest.prompts) ?? "",

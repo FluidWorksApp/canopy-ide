@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { forgetSessions, restorableFrom } from "./restorable";
+import { forgetSessions, restorableFrom, resumeCwd } from "./restorable";
 import type { SessionDigest } from "./ipc";
 
 // A digest for a session whose terminal is gone: `surface` names a pty id, and
@@ -12,6 +12,38 @@ const digest = (over: Partial<SessionDigest> = {}): SessionDigest => ({
   updated: 1000,
   prompts: ["fix the flaky test"],
   ...over,
+});
+
+describe("resumeCwd", () => {
+  it("never resumes from a cwd that has drifted", () => {
+    // The exact shape of the bug: an agent relocated into a worktree, whose
+    // digest was then rewritten by a hook firing from the home directory — a
+    // resume that had already gone to the wrong place. `cwd` says home, and the
+    // conversation is in the worktree.
+    expect(
+      resumeCwd(
+        digest({
+          resume_cwd: "/repo/.claude/worktrees/wt-fix",
+          launch_cwd: "/repo",
+          cwd: "/Users/dev",
+        }),
+      ),
+    ).toBe("/repo/.claude/worktrees/wt-fix");
+  });
+
+  it("prefers the launch dir to a drifted one when the backend named neither", () => {
+    // A digest written before resume_cwd existed. Where it started still beats
+    // where it wandered to.
+    const d = digest({ launch_cwd: "/repo", cwd: "/repo/src/api" });
+    delete d.resume_cwd;
+    expect(resumeCwd(d)).toBe("/repo");
+  });
+
+  it("falls back to what the caller holds, and only then", () => {
+    expect(resumeCwd(undefined, "/repo")).toBe("/repo");
+    expect(resumeCwd(digest({ resume_cwd: "/tree" }), "/repo")).toBe("/tree");
+    expect(resumeCwd(undefined)).toBe("");
+  });
 });
 
 describe("restorableFrom", () => {
