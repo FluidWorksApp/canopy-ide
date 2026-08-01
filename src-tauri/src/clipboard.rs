@@ -209,6 +209,16 @@ mod pb {
         NSPasteboard::generalPasteboard().changeCount() as i64
     }
 
+    /// Run one pasteboard call inside its own autorelease pool.
+    ///
+    /// The watcher runs on a bare `std::thread`, which -- unlike a Cocoa run
+    /// loop thread -- never drains the pool AppKit returns objects into. Every
+    /// `generalPasteboard()` handed back a retained object that nothing
+    /// released, forever.
+    pub fn autoreleased<T>(f: impl FnOnce() -> T) -> T {
+        objc2::rc::autoreleasepool(|_| f())
+    }
+
     /// The UTIs currently declared on the pasteboard. Type metadata, not data —
     /// this is how a clip can be recognised as concealed without reading it.
     pub fn types() -> Vec<String> {
@@ -254,6 +264,10 @@ mod pb {
 #[cfg(not(target_os = "macos"))]
 mod pb {
     pub const SUPPORTED: bool = false;
+    pub fn autoreleased<T>(f: impl FnOnce() -> T) -> T {
+        f()
+    }
+
     pub fn change_count() -> i64 {
         0
     }
@@ -735,13 +749,17 @@ fn spawn_poller(app: AppHandle, state: &Clipboard) {
         // The count as it is *now*, recorded without reading anything. This is
         // what keeps enabling the feature from capturing whatever the last app
         // put there — very often a password.
-        let mut last = pb::change_count();
+        let mut last = pb::autoreleased(pb::change_count);
         while alive() {
             std::thread::sleep(POLL);
             if !alive() {
                 break;
             }
-            let count = pb::change_count();
+            // Every AppKit call here returns autoreleased objects, and a plain
+            // std::thread has no pool to drain them into — so they accumulated
+            // for the life of the process, roughly a hundred thousand a day at
+            // this interval. Invisible in a CPU profile; not invisible in RSS.
+            let count = pb::autoreleased(pb::change_count);
             if count == last {
                 continue;
             }

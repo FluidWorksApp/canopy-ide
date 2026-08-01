@@ -40,19 +40,19 @@ const SOURCE_LABEL: Record<AttentionItem["source"], string> = {
 function Row({
   item,
   onFollow,
+  now,
 }: {
   item: AttentionItem;
   onFollow: (item: AttentionItem) => void;
+  /** One clock for the whole panel. Each row used to arm its own 30s interval,
+   *  and the store keeps up to 300 items — so opening the panel started 300
+   *  uncoordinated timers, each re-rendering its own row (and its Mascot). */
+  now: number;
 }) {
   const waiting = isOutstanding(item);
   // A row with no target is not clickable, and says so by not looking it —
   // a click that lands nowhere is worse than one that isn't offered.
   const clickable = item.where != null;
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const t = window.setInterval(() => setNow(Date.now()), 30_000);
-    return () => window.clearInterval(t);
-  }, []);
   return (
     <div
       className={`notif-row notif-${urgencyOf(item)}${waiting ? " notif-waiting" : ""}${
@@ -110,6 +110,12 @@ function NotificationCenterImpl({
   onClose: () => void;
 }) {
   useEscape(onClose);
+  // One clock for every row, ticking only while the panel is open.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(t);
+  }, []);
   const waiting = outstandingQuestions(items);
   const history = items.filter((x) => !isOutstanding(x));
   // Opening the list is what "read" means. Deliberately not on mount of each
@@ -143,7 +149,7 @@ function NotificationCenterImpl({
           <>
             <div className="notif-section">Waiting on you</div>
             {waiting.map((x) => (
-              <Row key={x.id} item={x} onFollow={onFollow} />
+              <Row key={x.id} item={x} onFollow={onFollow} now={now} />
             ))}
           </>
         )}
@@ -152,7 +158,7 @@ function NotificationCenterImpl({
           <>
             {waiting.length > 0 && <div className="notif-section">Earlier</div>}
             {history.map((x) => (
-              <Row key={x.id} item={x} onFollow={onFollow} />
+              <Row key={x.id} item={x} onFollow={onFollow} now={now} />
             ))}
           </>
         )}

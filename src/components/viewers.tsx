@@ -137,6 +137,14 @@ export function SheetView({ bytes }: { bytes: Uint8Array }) {
   const [sheets, setSheets] = useState<{ name: string; html: string }[] | null>(null);
   const [active, setActive] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  // Sanitising a whole spreadsheet's generated <table> is not render-body work:
+  // this is the active tab's pane, so it was re-run on every ProjectView render
+  // — about twice a second while an agent is working. Every other HTML surface
+  // in the app already memoises this; this one was the outlier.
+  const sheetHtml = useMemo(
+    () => sanitizeHtml(sheets?.[active]?.html ?? ""),
+    [sheets, active],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -176,7 +184,7 @@ export function SheetView({ bytes }: { bytes: Uint8Array }) {
       )}
       <div
         className="viewer-scroll sheet-table"
-        dangerouslySetInnerHTML={{ __html: sanitizeHtml(sheets[active]?.html ?? "") }}
+        dangerouslySetInnerHTML={{ __html: sheetHtml }}
       />
     </div>
   );

@@ -3,6 +3,7 @@
 // channel inside the request, so a teammate can review a branch they don't have
 // checked out (or a repo they don't have at all). Same diff widget as commits
 // and PRs; only the source differs.
+import { useDiffData } from "../diffData";
 import { useState } from "react";
 import type { ReactNode } from "react";
 import { DiffView, DiffModeEnum } from "@git-diff-view/react";
@@ -30,6 +31,8 @@ export function ReviewView({
   /** "Ask an agent to review this" control. */
   agentBar?: ReactNode;
 }) {
+  // Stable diff `data` identities; see diffData.ts.
+  const dataFor = useDiffData();
   const [split, setSplit] = useState(true);
   const files = review.patch ? splitPatch(review.patch) : [];
   return (
@@ -60,11 +63,7 @@ export function ReviewView({
             <div key={f.path} className="pr-file">
               <div className="pr-file-name">{f.path}</div>
               <DiffView
-                data={{
-                  hunks: [f.patch],
-                  oldFile: { fileName: f.path },
-                  newFile: { fileName: f.path },
-                }}
+                data={dataFor(f)}
                 diffViewMode={split ? DiffModeEnum.Split : DiffModeEnum.Unified}
                 diffViewHighlight
                 diffViewTheme="dark"

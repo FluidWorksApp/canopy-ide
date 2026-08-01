@@ -316,11 +316,16 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [attention, toastTick],
   );
+  // Depend on the *fact* that something is timed, not on the array. `toasts` is
+  // a fresh array every tick, so `[toasts]` tore the interval down and built a
+  // new one on each of its own ticks — nine teardown/setup cycles for a 4.5s
+  // toast, on top of nine full App re-renders.
+  const toastsAreTimed = toasts.some((t) => toastMs(t) != null);
   useEffect(() => {
-    if (!toasts.some((t) => toastMs(t) != null)) return;
+    if (!toastsAreTimed) return;
     const t = window.setInterval(() => setToastTick((n) => n + 1), 500);
     return () => window.clearInterval(t);
-  }, [toasts]);
+  }, [toastsAreTimed]);
   // Team relay: one socket per app, so the state lives here and every
   // ProjectView renders the same picture. Chat keeps a rolling transcript
   // (received + our own sends); the inbox holds commands awaiting action.
@@ -682,8 +687,15 @@ export default function App() {
       ipc.onRelayCollab((m) => {
         const mgr = collab.current!;
         const known = mgr.get(m.doc) !== undefined;
+        const before = mgr.structure();
         mgr.receive(m);
-        setCollabTick((n) => n + 1);
+        // Only when something a consumer can see actually moved. `collabTick`
+        // rides the relay handle, which is threaded into every ProjectView, so
+        // bumping it per frame re-rendered every open project — including the
+        // ones behind `display: none` — on each of a collaborator's keystrokes.
+        // The frames that matter (a share opening or ending, a project joined,
+        // a file's first edit) all change `structure()`; the keystrokes do not.
+        if (mgr.structure() !== before) setCollabTick((n) => n + 1);
         // Only the invitation is worth interrupting for. Everything else on
         // this channel is a keystroke.
         if (!known && m.body.kind === "offer") {

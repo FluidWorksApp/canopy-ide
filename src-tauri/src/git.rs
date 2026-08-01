@@ -3754,19 +3754,30 @@ pub async fn git_commit_patch(
     repo: String,
     hash: String,
 ) -> Result<CommitPatch, String> {
-    use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     /// Big enough for any patch a human reviews; past this the cost is all in
     /// shipping and rendering megabytes of generated diff (lockfiles, vendored
     /// trees) that nobody reads line by line.
     const MAX_PATCH_BYTES: usize = 2 * 1024 * 1024;
-    static CACHE: OnceLock<Mutex<HashMap<String, CommitPatch>>> = OnceLock::new();
+    /// Commits are immutable, so a hit is always valid — but "always valid" is
+    /// not "keep forever". Each entry is up to MAX_PATCH_BYTES, so scrolling a
+    /// history view in a large repo used to retain a couple of hundred megabytes
+    /// for the life of the process. Insertion-ordered, oldest evicted first: the
+    /// case worth keeping is the tab you just closed, not the commit you looked
+    /// at an hour ago.
+    const MAX_CACHED_PATCHES: usize = 24;
+    static CACHE: OnceLock<Mutex<Vec<(String, CommitPatch)>>> = OnceLock::new();
 
     let top = repo_path(&state, &repo)?;
     let hash = checked_hash(&hash)?;
     let cache_key = format!("{}\x1f{hash}", top.display());
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(hit) = cache.lock().unwrap().get(&cache_key) {
+    let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
+    if let Some((_, hit)) = cache
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(k, _)| k == &cache_key)
+    {
         return Ok(hit.clone());
     }
 
@@ -3785,7 +3796,13 @@ pub async fn git_commit_patch(
         deletions: dels,
         truncated,
     };
-    cache.lock().unwrap().insert(cache_key, result.clone());
+    {
+        let mut held = cache.lock().unwrap();
+        held.push((cache_key, result.clone()));
+        while held.len() > MAX_CACHED_PATCHES {
+            held.remove(0);
+        }
+    }
     Ok(result)
 }
 

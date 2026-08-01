@@ -126,6 +126,11 @@ interface StatusBarProps {
  *  tooltip still carries every name. */
 const AGENTS_LISTED = 3;
 
+/** When each repo last paid for a network fetch. Module scope so it survives
+ *  the effect being torn down and rebuilt by a tab switch — which is exactly
+ *  the case that used to buy a fetch every time. */
+const lastFetchAt = new Map<string, number>();
+
 export const StatusBar = memo(function StatusBar({
   roots,
   agents,
@@ -399,8 +404,24 @@ export const StatusBar = memo(function StatusBar({
         // No remote, no base branch, not a repo: this chip simply doesn't
         // apply. Nothing to report and nothing broken.
         .catch(() => !cancelled && setSync(null));
-    run(true);
-    const timer = setInterval(() => run(true), PROBE_INTERVAL_MS);
+    // A network `git fetch` on *mount*, and this effect re-runs whenever the
+    // project becomes visible or the branch funnel moves a ref — so tab-hopping
+    // three projects meant three fetches. Keep a floor per repo: inside the
+    // probe interval, re-measure for free off what we already have.
+    const repo = roots[0];
+    if (Date.now() - (lastFetchAt.get(repo) ?? 0) >= PROBE_INTERVAL_MS) {
+      lastFetchAt.set(repo, Date.now());
+      run(true);
+    } else {
+      run(false);
+    }
+    const timer = setInterval(() => {
+      // A minimised or occluded window has nobody to show news to; it catches
+      // up when it comes back.
+      if (document.visibilityState !== "visible") return;
+      lastFetchAt.set(repo, Date.now());
+      run(true);
+    }, PROBE_INTERVAL_MS);
     const sub = ipc.onGitChange(() => run(false));
     return () => {
       cancelled = true;

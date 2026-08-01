@@ -1,5 +1,6 @@
 // Content of one file sub-tab: native viewer (preview), Monaco (source),
 // git diff (HEAD vs working tree), or the external-change diff.
+import { useMemo } from "react";
 import type { ReactNode } from "react";
 import type { OpenFile } from "../types";
 import * as ipc from "../ipc";
@@ -38,6 +39,17 @@ interface FileViewProps {
 
 export function FileView(props: FileViewProps) {
   const { file } = props;
+  // Decoded once per byte array rather than per render. `modelFor` hands back
+  // the existing model and discards this when one is already open, so the
+  // branches below were re-decoding the whole file — potentially megabytes —
+  // on every render of the active pane, to build a string usually thrown away.
+  // It has to live above the early returns: a hook cannot be conditional, and
+  // the empty-string shortcut is wrong because `modelFor` *creates* the model
+  // from it the first time a file is opened.
+  const text = useMemo(
+    () => (file.bytes ? decoder.decode(file.bytes) : ""),
+    [file.bytes],
+  );
 
   // Refused before the bytes were read — say why, and offer the two things
   // that are actually useful for a file Canopy can't show.
@@ -86,7 +98,6 @@ export function FileView(props: FileViewProps) {
 
   // Git diff: HEAD vs current working copy.
   if (file.view === "diff" && file.diffOriginal != null) {
-    const text = file.bytes ? decoder.decode(file.bytes) : "";
     const current = modelFor(file.path, text).getValue();
     return (
       <DiffView
@@ -101,7 +112,6 @@ export function FileView(props: FileViewProps) {
   }
 
   if (file.kind === "code" || file.view === "source") {
-    const text = file.bytes ? decoder.decode(file.bytes) : "";
     const model = modelFor(file.path, text);
     return (
       <MonacoEditor

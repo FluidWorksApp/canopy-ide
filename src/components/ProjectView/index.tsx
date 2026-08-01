@@ -3996,7 +3996,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
           !seenRepo.has(g.repo) &&
           (seenRepo.add(g.repo), true),
       );
-      setChangeGroups(groups);
+      // Bail when unchanged. `git:change` fires for every commit, stage and
+      // branch switch an agent makes, and a fresh array with identical contents
+      // re-renders the whole project for nothing.
+      setChangeGroups((prev) =>
+        JSON.stringify(prev) === JSON.stringify(groups) ? prev : groups,
+      );
     } finally {
       setChangesLoading(false);
     }
@@ -4013,7 +4018,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // makes in a terminal, which write inside .git and so never reach fs:change
   // at all. Its debounce is the Rust one, replacing the 400ms timer here.
   useEffect(() => {
-    const gitSub = ipc.onGitChange(() => void refreshChanges());
+    // Only when it was one of *our* repos. The event names the root that moved,
+    // and every project used to re-shell `git status` for all its components on
+    // any repo's commit — including the projects sitting behind `display: none`.
+    const gitSub = ipc.onGitChange((e) => {
+      const mine = rootsRef.current.some(
+        (r) => e.root === r || r.startsWith(e.root + "/") || e.root.startsWith(r + "/"),
+      );
+      if (mine) void refreshChanges();
+    });
     const unlisten = ipc.onFsChange(async (e) => {
       const now = Date.now();
       for (const path of e.paths) {
@@ -6010,6 +6023,29 @@ const ProjectViewBody = memo(function ProjectViewBody({
       ),
     [serverComponents, runTabs, projectStats],
   );
+
+  // ⌘K's context, memoised. A fresh object literal here re-ran every instant
+  // palette source — tabs, clipboard, sessions, notes, research, PRs, servers,
+  // task history — plus their fuzzy ranking, on every ProjectView render, i.e.
+  // several times a second under a working agent, for a list the user has not
+  // retyped. SpotSearch routes its *deferred* sources through a ref for exactly
+  // this reason; the instant ones key on `ctx` directly.
+  const spotCtx = useMemo(
+    () => ({
+      components: components.map((c) => ({ label: c.label, path: c.path })),
+      tabs,
+      serverGroups,
+      digests: wsDigests,
+      projectId: project.id,
+      clis: AGENT_CLIS.filter((c) => installed[c.bin]).map((c) => ({
+        id: c.id,
+        name: c.name,
+      })),
+      installed,
+    }),
+    [components, tabs, serverGroups, wsDigests, project.id, installed],
+  );
+
   const serversRunning = runningCount(serverGroups);
 
 
@@ -8372,21 +8408,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       )}
       {spotOpen && visible && (
         <SpotSearch
-          ctx={{
-            components: components.map((c) => ({
-              label: c.label,
-              path: c.path,
-            })),
-            tabs,
-            serverGroups,
-            digests: wsDigests,
-            projectId: project.id,
-            clis: AGENT_CLIS.filter((c) => installed[c.bin]).map((c) => ({
-              id: c.id,
-              name: c.name,
-            })),
-            installed,
-          }}
+          ctx={spotCtx}
           onAction={onSpotAction}
           onClose={() => setSpotOpen(false)}
         />

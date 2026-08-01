@@ -584,6 +584,33 @@ export class CollabManager {
     return doc;
   }
 
+  /** Everything a React consumer can actually observe about this manager,
+   *  as one string.
+   *
+   *  The manager is mutable, so a tick is how the UI learns it moved — but the
+   *  relay channel is overwhelmingly keystrokes, and a keystroke changes none
+   *  of this. Bumping per frame meant a remote collaborator typing re-rendered
+   *  every open project, including the ones behind `display: none`, eight to
+   *  fifteen times a second. Callers bump only when this string changes.
+   *
+   *  Cheap by construction: it walks the shared docs and joined projects,
+   *  which number in the handful, never the document text. */
+  structure(): string {
+    const parts: string[] = [];
+    for (const [doc, s] of this.sessions) {
+      // `edited` is in here because the collaborated-changes list keys on it;
+      // it flips once, on the first edit to a path, not per keystroke.
+      const owner = s instanceof OwnerSession;
+      parts.push(`s:${doc}:${owner ? (s as OwnerSession).path : ""}:${owner && (s as OwnerSession).edited ? 1 : 0}`);
+    }
+    for (const [doc, p] of this.ownedProjects) {
+      parts.push(`o:${doc}:${p.root}:${[...p.members].sort().join(",")}`);
+    }
+    for (const doc of this.joinedProjects.keys()) parts.push(`j:${doc}`);
+    for (const doc of this.projectOffers.keys()) parts.push(`f:${doc}`);
+    return parts.sort().join("|");
+  }
+
   /** Members a project (by root) is already shared with, so the share menu can
    *  mark them instead of offering a duplicate invite. */
   projectSharedWith(root: string): ReadonlySet<string> {
