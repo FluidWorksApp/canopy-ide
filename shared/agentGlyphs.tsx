@@ -1,10 +1,10 @@
-// Agent CLI brand marks for the portal — the EXACT same vector logos Canopy
-// ships in the desktop (src/components/icons.tsx). Copied verbatim (paths +
-// official brand fills) so the phone shows the identical icons to the app's
-// terminal menu, not an invented rendering. Kept in sync by hand because the
-// portal is a separate build and must not import from the desktop tree.
+// Agent CLI brand marks — the one copy. The phone and the desktop's terminal
+// menu render these same paths and official brand fills; there used to be a
+// second set in src/components/icons.tsx "kept in sync by hand", which is a
+// promise no file keeps. The desktop re-exports from here, because the portal
+// is a separate build and must not import from the desktop tree.
 //
-// Sources (as in the desktop):
+// Sources:
 //   Claude   — simple-icons `claude`, #D97757
 //   Codex    — lobe-icons `codex` (OpenAI Codex CLI mark), #7A9DFF
 //   Gemini   — simple-icons `googlegemini`, #8E75B2
@@ -15,6 +15,8 @@
 //   others   — a terminal glyph (matches the app's Shell / Antigravity rows)
 
 import type { ReactElement } from 'react'
+
+import { IconTerminal } from './icons'
 
 interface P {
   size?: number
@@ -71,20 +73,29 @@ export function OpenCodeIcon({ size = 14, className }: P) {
   )
 }
 
+/** Aider's lettermark: a lowercase terminal `a` — a bowl and a stem — in its
+ *  brand green. Drawn as paths rather than live <text> so it is the same mark
+ *  on every machine: as type it depended on a monospace font resolving, which
+ *  shifted between installs and rasterised differently in exports. */
 export function AiderIcon({ size = 14, className }: P) {
   return (
-    <svg {...brand(size, className, '0 0 24 24')}>
-      <text x="12" y="18" textAnchor="middle" fill="#14b014" fontSize="20" fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace">
-        a
-      </text>
+    <svg {...brand(size, className, '0 0 24 24')} fill="#14b014">
+      <path
+        fillRule="evenodd"
+        d="M11.3 9.6a4.9 4.9 0 1 0 0 9.8 4.9 4.9 0 0 0 0-9.8zm0 2.2a2.7 2.7 0 1 1 0 5.4 2.7 2.7 0 0 1 0-5.4z"
+      />
+      <path d="M15.4 9.6h2.2v9.8h-2.2z" />
     </svg>
   )
 }
 
+/** oh-my-pi (omp) — a stylized π. The real mark is a pink→purple→cyan gradient
+ *  and that gradient is the identity, so it stays. Redrawn on the 24 grid the
+ *  rest of the set uses; it was the one 64-unit viewBox here. */
 export function OmpIcon({ size = 14, className }: P) {
   const id = 'omp-g-portal'
   return (
-    <svg {...brand(size, className, '0 0 64 64')}>
+    <svg {...brand(size, className, '0 0 24 24')}>
       <defs>
         <linearGradient id={id} x1="0" y1="0" x2="1" y2="1">
           <stop offset="0" stopColor="#ed4abf" />
@@ -92,20 +103,16 @@ export function OmpIcon({ size = 14, className }: P) {
           <stop offset="1" stopColor="#5ad8e6" />
         </linearGradient>
       </defs>
-      <path d="M14 16h36v8H40v32h-8V24h-6v22h-8V24h-4z" fill={`url(#${id})`} />
+      <path d="M5.25 6h13.5v3H15v12h-3V9h-2.25v8.25h-3V9h-1.5z" fill={`url(#${id})`} />
     </svg>
   )
 }
 
 /** Terminal glyph — the app's fallback for CLIs with no brand mark (Shell,
- *  Antigravity), and for anything unknown. Inherits currentColor. */
+ *  Antigravity), and for anything unknown. The set's shell, at the set's
+ *  weight; it was a bare chevron and underscore at a weight of its own. */
 export function TerminalGlyph({ size = 14, className }: P) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden>
-      <path d="m5 8 4 4-4 4" />
-      <path d="M13 16h6" />
-    </svg>
-  )
+  return <IconTerminal size={size} className={className} />
 }
 
 const BRAND: Record<string, (p: P) => ReactElement> = {

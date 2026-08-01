@@ -1,0 +1,40 @@
+/* Beacon — the skin for anyone who needs contrast and shouldn't have to
+   negotiate for it. Body text is white on black at 21:1, and the dim metadata
+   everywhere else in the app — timestamps, branch names, row subtitles — clears
+   11:1 here. The other skins put --text-dim somewhere between 3.5 and 6, which
+   is a legitimate place for it when dimness is the point; this is the one skin
+   where it isn't.
+
+   The borders look wrong next to the other blocks and are meant to. A hairline
+   at Default's #262a3f sits about 1.2:1 off its own surface — visible only
+   because the eye fills in an edge it already expects. On pure black there is
+   no gradient to lean on, so structure has to be drawn rather than implied, and
+   both border tokens are lifted until the line itself carries the separation.
+
+   Same reason the ring is 3px at 75% rather than the 2px/55% every other skin
+   uses: a focus ring is the one piece of state with no other channel — no
+   colour change, no label, no position — so on the skin chosen for visibility
+   it is the last thing that may be a suggestion. */
+:root[data-theme="beacon"] {
+  --bg-deep: #000000;
+  --bg-alt: #0d0d0d;
+  --bg: #000000;
+  --bg-raised: #1c1c1c;
+  --bg-overlay: #1c1c1c;
+  --border: #4d4d4d;
+  --border-strong: #8a8a8a;
+  --text: #ffffff;
+  --text-dim: #d9d9d9;
+  --text-faint: #ababab;
+  --accent: #ffd400;
+  --accent-soft: color-mix(in srgb, var(--accent) 18%, transparent);
+  --danger: #ff9494;
+  --ok: #7bec93;
+  --warn: #ffc45c;
+  --magenta: #dcbcff;
+  --cyan: #8ad9fc;
+  --on-accent: #000000;
+  --on-danger: #14090a;
+  --ring: 0 0 0 3px color-mix(in srgb, var(--accent) 75%, transparent);
+  color-scheme: dark;
+}

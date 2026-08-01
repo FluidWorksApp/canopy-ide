@@ -1,0 +1,40 @@
+/* Meridian — cool paper and ink.
+   Close enough to Daylight that the obvious question is why both exist, and
+   the answer is the top three tokens. Daylight's shell runs #e4e7ee → #edeff4
+   → #f7f8fa: a 1.16:1 step from the activity rail to the editor canvas, which
+   at a glance is one flat field with faint borders drawn on it. Meridian runs
+   #dfe4ec → #eaeef4 → #f6f8fb and carries a blue cast through all five
+   surfaces, so the rail sits behind the panel and the panel behind the editor
+   without needing a border to say so. Body ink drops from #1c1f26 to #16202e
+   to hold up against the lighter canvas.
+   Palette is the design handoff's; the hexes are transcribed, not tuned. */
+:root[data-theme="meridian"] {
+  --bg-deep: #dfe4ec;
+  --bg-alt: #eaeef4;
+  --bg: #f6f8fb;
+  --bg-raised: #ffffff;
+  --bg-overlay: #ffffff;
+  --border: #d3dae4;
+  --border-strong: #b0bac8;
+  --text: #16202e;
+  --text-dim: #525e70;
+  --text-faint: #848e9e;
+  --accent: #1f5fbf;
+  --accent-soft: color-mix(in srgb, var(--accent) 10%, transparent);
+  --danger: #bf2f3f;
+  --ok: #1b7048;
+  --warn: #7d5309;
+  --magenta: #6134b5;
+  --cyan: #0e6470;
+  --on-accent: #ffffff;
+  --on-danger: #ffffff;
+  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+  /* index.css's shadows are cool-black at dark-shell opacities; on paper they
+     read as grey smudge rather than lift, so they are restated in the ink. */
+  --shadow-1: 0 1px 2px rgba(22, 32, 46, 0.1);
+  --shadow-2:
+    0 4px 14px rgba(22, 32, 46, 0.12), 0 1px 3px rgba(22, 32, 46, 0.08);
+  --shadow-3:
+    0 24px 64px rgba(22, 32, 46, 0.22), 0 6px 18px rgba(22, 32, 46, 0.12);
+  color-scheme: light;
+}

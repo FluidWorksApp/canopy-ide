@@ -1,0 +1,41 @@
+/* Dusk — sepia night: the amber-terminal reading of a dark shell, and the one
+   dark skin built for late hours. Nothing above roughly 470nm carries weight in
+   any of these colours, so the window sits warm end to end without ever tipping
+   into orange.
+
+   It shares a shelf with two skins it must not be confused for. Ember is warm
+   too, but its bias is red and its accent is fired copper; Dusk's bias is amber
+   and its accent is gold. Gotham also lands on gold, but a Gotham surface is
+   neutral charcoal with the gold sitting on top of it — here the warmth goes
+   all the way down, shell to overlay, and the accent is the surface's own hue
+   raised in value.
+
+   --accent and --warn are unusually close, which in any other skin would be a
+   bug: a primary action and a warning must not read as the same thing. They
+   survive it here because the accent is on screen constantly and a warning is
+   not, so the eye reads them by frequency and position rather than by hue —
+   and the low-blue premise leaves no room to move --warn anywhere else without
+   putting a cold colour in the one skin that exists to avoid one. */
+:root[data-theme="dusk"] {
+  --bg-deep: #16120e;
+  --bg-alt: #1d1813;
+  --bg: #191410;
+  --bg-raised: #251f18;
+  --bg-overlay: #2d2620;
+  --border: #352d24;
+  --border-strong: #4d4234;
+  --text: #ece0cf;
+  --text-dim: #a8967e;
+  --text-faint: #756757;
+  --accent: #e0b060;
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --danger: #dd6a5c;
+  --ok: #8fb56a;
+  --warn: #d99a48;
+  --magenta: #c294c0;
+  --cyan: #78aeae;
+  --on-accent: #1a1206;
+  --on-danger: #190b09;
+  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+  color-scheme: dark;
+}

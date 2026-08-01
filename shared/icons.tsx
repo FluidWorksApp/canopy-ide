@@ -1,21 +1,37 @@
 // Line icons for the portal — inline SVG so they ship offline (no icon font, no
 // CDN), scale crisply, and inherit `currentColor` so they follow whatever the
 // surrounding text colour is. Deliberately hairline + geometric to sit with the
-// instrument aesthetic. One shape, one job; sized by the `s` prop.
+// instrument aesthetic. One shape, one job.
+//
+// One weight, one grid. Every glyph is drawn on 24×24 and stroked at 1.8 with
+// round caps and joins, declared once in `Svg` and never overridden per glyph:
+// a set with seven weights in it reads as mixed-weight in a screenshot even
+// when every shape is right. A glyph that looks wrong at 1.8 is too dense, and
+// the fix is fewer lines, not a thinner one.
+//
+// This file is canonical for every shape the desktop and the portal both draw.
+// It cannot import from `src/` — it is compiled into the remote portal, which
+// has no access to that tree — so the direction is fixed: the drawing lives
+// here and `src/components/icons.tsx` re-exports it under the desktop's name.
+//
+// Sized by `s` (what the portal writes) or `size` (what the desktop writes);
+// they are the same number, and each glyph carries the default its own surface
+// has always used.
 
 import type { ReactNode, SVGProps } from 'react'
 
-type IconProps = SVGProps<SVGSVGElement> & { s?: number }
+type IconProps = Omit<SVGProps<SVGSVGElement>, 's' | 'size'> & { s?: number; size?: number }
 
-function Svg({ s = 16, children, ...rest }: IconProps & { children: ReactNode }) {
+function Svg({ s = 16, size, children, ...rest }: IconProps & { children: ReactNode }) {
+  const n = size ?? s
   return (
     <svg
-      width={s}
-      height={s}
+      width={n}
+      height={n}
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth={1.7}
+      strokeWidth={1.8}
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden
@@ -26,6 +42,8 @@ function Svg({ s = 16, children, ...rest }: IconProps & { children: ReactNode })
   )
 }
 
+/** Branch: the fork, drawn for the tray. Wider nodes and a shorter run than the
+ *  rail's `IconGit` because this one has to survive 12px beside text. */
 export const IconBranch = (p: IconProps) => (
   <Svg {...p}>
     <circle cx="6" cy="6" r="2.4" />
@@ -35,6 +53,8 @@ export const IconBranch = (p: IconProps) => (
   </Svg>
 )
 
+/** A chip: pins on four sides of a square die. Machine, not process — the load
+ *  reading beside it is the machine's. */
 export const IconCpu = (p: IconProps) => (
   <Svg {...p}>
     <rect x="7" y="7" width="10" height="10" rx="1.5" />
@@ -42,28 +62,35 @@ export const IconCpu = (p: IconProps) => (
   </Svg>
 )
 
+/** Token spend: a currency mark. A coin rather than a gauge because the number
+ *  beside it is a total that only goes up. */
 export const IconToken = (p: IconProps) => (
   <Svg {...p}>
     <circle cx="12" cy="12" r="8.5" />
-    <path d="M12 7.5v9M9.5 9.8h3.4a1.8 1.8 0 0 1 0 3.6H9.5h3.6a1.8 1.8 0 0 1 0 3.6H9.2" opacity="0.9" />
+    <path d="M12 7.5v9M9.6 9.8h3.3a1.8 1.8 0 0 1 0 3.5H9.6h3.4a1.8 1.8 0 0 1 0 3.5H9.4" />
   </Svg>
 )
 
-/** Stopwatch — elapsed work, not a time of day. */
+/** Stopwatch — elapsed work, not a time of day. The crown and the winder are
+ *  what separate it from `IconClock` at tray size. */
 export const IconStopwatch = (p: IconProps) => (
-  <Svg {...p}>
+  <Svg s={12} {...p}>
     <circle cx="12" cy="13.5" r="7.5" />
     <path d="M12 10v3.5l2.2 1.6" />
     <path d="M9.5 2.5h5M18.6 6.4 20 5" />
   </Svg>
 )
 
+/** A folder, with the tab. Detail inside it — document lines, a fold — turns to
+ *  mush at rail size, so the silhouette carries the whole signal. The desktop's
+ *  Files rail button is this same shape. */
 export const IconFolder = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M3.5 6.5A1.5 1.5 0 0 1 5 5h3.6l1.6 2H19a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 19 18H5a1.5 1.5 0 0 1-1.5-1.5z" />
+  <Svg s={18} {...p}>
+    <path d="M3 8a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.5.7l1.2 1.3H19a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
   </Svg>
 )
 
+/** A wall clock: a time of day. Deliberately not the stopwatch. */
 export const IconClock = (p: IconProps) => (
   <Svg {...p}>
     <circle cx="12" cy="12" r="8.5" />
@@ -77,6 +104,7 @@ export const IconChevron = (p: IconProps) => (
   </Svg>
 )
 
+/** A bolt: start something now. */
 export const IconBolt = (p: IconProps) => (
   <Svg {...p}>
     <path d="M13 2.5 4.5 13.5H11l-1 8L19.5 10H13z" />
@@ -89,15 +117,17 @@ export const IconPlus = (p: IconProps) => (
   </Svg>
 )
 
+/** Send: an arrow up out of the composer. */
 export const IconSend = (p: IconProps) => (
   <Svg {...p}>
     <path d="M12 20V5M6 11l6-6 6 6" />
   </Svg>
 )
 
+/** Kill: the transport square. */
 export const IconStop = (p: IconProps) => (
-  <Svg {...p}>
-    <rect x="6.5" y="6.5" width="11" height="11" rx="2" />
+  <Svg s={14} {...p}>
+    <rect x="6.5" y="6.5" width="11" height="11" rx="1.5" />
   </Svg>
 )
 
@@ -108,10 +138,13 @@ export const IconPower = (p: IconProps) => (
   </Svg>
 )
 
+/** A shell: a prompt and a cursor rule *inside a screen*. The box is the whole
+ *  point — a bare chevron and underscore reads as a stray caret at 14px, not as
+ *  a terminal. */
 export const IconTerminal = (p: IconProps) => (
-  <Svg {...p}>
+  <Svg s={14} {...p}>
     <rect x="3" y="4.5" width="18" height="15" rx="2" />
-    <path d="M7 9.5l3 2.5-3 2.5M13 15h4" />
+    <path d="M7 9.8l2.8 2.4L7 14.6M12.8 15h4.4" />
   </Svg>
 )
 
@@ -121,6 +154,7 @@ export const IconBack = (p: IconProps) => (
   </Svg>
 )
 
+/** A document with the corner turned. */
 export const IconFile = (p: IconProps) => (
   <Svg {...p}>
     <path d="M6 3.5h7l5 5V20a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1z" />
@@ -128,55 +162,64 @@ export const IconFile = (p: IconProps) => (
   </Svg>
 )
 
+/** Resume: the transport triangle. Hollow here — the portal's row controls are
+ *  all outlines, and a solid mark in among them reads as a badge. */
 export const IconResume = (p: IconProps) => (
   <Svg {...p}>
-    <path d="M8 5.5l10 6.5-10 6.5z" />
+    <path d="M8.5 5.4 19.5 12l-11 6.6z" />
   </Svg>
 )
 
 // ---- the panel rail -------------------------------------------------------
-// One per remote module that lists something. Same hairline geometry as above,
-// and deliberately close to the desktop rail's shapes so the two apps read as
-// one product rather than two that happen to share a backend.
+// One per remote module that lists something. Same geometry as above, and
+// deliberately close to the desktop rail's shapes so the two apps read as one
+// product rather than two that happen to share a backend.
 
+/** Changes: an added line over a removed line — the shape of a diff hunk. An
+ *  earlier attempt combined a plus, a minus and a chevron and read as a shell
+ *  prompt at 17px; two marks and two rules is all that survives. */
 export const IconDiff = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M6 4v10" />
-    <path d="M3 7h6" />
-    <path d="M18 20V10" />
-    <path d="M15 17h6" />
+  <Svg s={18} {...p}>
+    <path d="M4 8h4M6 6v4" />
+    <path d="M11.5 8H20" />
+    <path d="M4 16h4" />
+    <path d="M11.5 16H20" />
   </Svg>
 )
 
+/** Git: the branch fork everyone recognises, at rail size. */
 export const IconGit = (p: IconProps) => (
-  <Svg {...p}>
-    <circle cx="6.5" cy="6" r="2.5" />
-    <circle cx="6.5" cy="18" r="2.5" />
-    <circle cx="17.5" cy="12" r="2.5" />
-    <path d="M6.5 8.5v7" />
-    <path d="M15 12H9a2.5 2.5 0 0 1-2.5-2.5" />
+  <Svg s={18} {...p}>
+    <circle cx="7" cy="5.5" r="2.3" />
+    <circle cx="7" cy="18.5" r="2.3" />
+    <circle cx="17" cy="9" r="2.3" />
+    <path d="M7 7.8v8.4" />
+    <path d="M17 11.3c0 3.6-3.3 4.7-7 5" />
   </Svg>
 )
 
+/** A pull request: a branch landing on a third node, with the arrow back into
+ *  the trunk. The arrow is what separates it from `IconGit` at 12px. */
 export const IconPr = (p: IconProps) => (
-  <Svg {...p}>
-    <circle cx="6.5" cy="6" r="2.5" />
-    <circle cx="6.5" cy="18" r="2.5" />
-    <circle cx="17.5" cy="18" r="2.5" />
-    <path d="M6.5 8.5v7" />
-    <path d="M17.5 15.5V9a3 3 0 0 0-3-3h-2.5" />
-    <path d="M14 3.5 11.5 6 14 8.5" />
+  <Svg s={14} {...p}>
+    <circle cx="7" cy="6" r="2.2" />
+    <circle cx="7" cy="18" r="2.2" />
+    <circle cx="17" cy="18" r="2.2" />
+    <path d="M7 8.2v7.6" />
+    <path d="M17 15.8V11a2.5 2.5 0 0 0-2.5-2.5H11" />
+    <path d="M12.8 6.4l-1.9 2.1 1.9 2.1" />
   </Svg>
 )
 
+/** Issues: the circle-dot every tracker uses for an open issue. */
 export const IconIssue = (p: IconProps) => (
-  <Svg {...p}>
+  <Svg s={18} {...p}>
     <circle cx="12" cy="12" r="8.5" />
-    <path d="M12 8v4.5" />
-    <path d="M12 16h.01" />
+    <circle cx="12" cy="12" r="2.6" fill="currentColor" stroke="none" />
   </Svg>
 )
 
+/** A rack: two units, an LED each. Things this project runs. */
 export const IconServer = (p: IconProps) => (
   <Svg {...p}>
     <rect x="3.5" y="4" width="17" height="6" rx="1.5" />
@@ -186,6 +229,7 @@ export const IconServer = (p: IconProps) => (
   </Svg>
 )
 
+/** A book: written knowledge, as opposed to a run of it. */
 export const IconBook = (p: IconProps) => (
   <Svg {...p}>
     <path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H19v16H5.5A1.5 1.5 0 0 1 4 18.5z" />
@@ -193,6 +237,7 @@ export const IconBook = (p: IconProps) => (
   </Svg>
 )
 
+/** A flask: an experiment. */
 export const IconFlask = (p: IconProps) => (
   <Svg {...p}>
     <path d="M10 3.5v6L4.8 18a1.6 1.6 0 0 0 1.4 2.5h11.6a1.6 1.6 0 0 0 1.4-2.5L14 9.5v-6" />
@@ -201,22 +246,27 @@ export const IconFlask = (p: IconProps) => (
   </Svg>
 )
 
+/** MCP tools: a plug going into a socket. The set already has a rack and a bot,
+ *  so the shape has to say "something external connected to the agents" rather
+ *  than "a tool" in the generic sense. */
 export const IconPlug = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M9 3.5v5" />
-    <path d="M15 3.5v5" />
-    <path d="M6.5 8.5h11v3a5.5 5.5 0 0 1-11 0z" />
-    <path d="M12 17v3.5" />
+  <Svg s={18} {...p}>
+    <path d="M9 3v5" />
+    <path d="M15 3v5" />
+    <path d="M6 8h12v3a6 6 0 0 1-6 6 6 6 0 0 1-6-6z" />
+    <path d="M12 17v4" />
   </Svg>
 )
 
+/** A bell: the attention channel. */
 export const IconBell = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M6 10a6 6 0 0 1 12 0c0 3.5.8 5.2 1.5 6H4.5C5.2 15.2 6 13.5 6 10z" />
-    <path d="M10 19.5a2 2 0 0 0 4 0" />
+  <Svg s={14} {...p}>
+    <path d="M18 8.5a6 6 0 1 0-12 0c0 5.5-2 7-2 7h16s-2-1.5-2-7" />
+    <path d="M13.7 19.5a2 2 0 0 1-3.4 0" />
   </Svg>
 )
 
+/** A gauge with the needle over: machine load, which has a ceiling. */
 export const IconGauge = (p: IconProps) => (
   <Svg {...p}>
     <path d="M4 17a8 8 0 1 1 16 0" />
@@ -224,17 +274,20 @@ export const IconGauge = (p: IconProps) => (
   </Svg>
 )
 
+/** A magnifier: find. */
 export const IconSearch = (p: IconProps) => (
-  <Svg {...p}>
-    <circle cx="11" cy="11" r="6.5" />
-    <path d="M15.8 15.8 20 20" />
+  <Svg s={14} {...p}>
+    <circle cx="10.5" cy="10.5" r="6.5" />
+    <path d="M15.4 15.4 20 20" />
   </Svg>
 )
 
+/** A cross: dismiss. Also what a failed check looks like — same mark, and the
+ *  desktop exports it under both names. */
 export const IconClose = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M6 6l12 12" />
-    <path d="M18 6 6 18" />
+  <Svg s={14} {...p}>
+    <path d="M6.5 6.5l11 11" />
+    <path d="M17.5 6.5l-11 11" />
   </Svg>
 )
 
@@ -246,43 +299,29 @@ export const IconMenu = (p: IconProps) => (
   </Svg>
 )
 
+/** Fetch: the circle that doesn't quite close, with the arrow head at the gap. */
 export const IconRefresh = (p: IconProps) => (
   <Svg {...p}>
-    <path d="M20 12a8 8 0 1 1-2.4-5.7" />
-    <path d="M20 4v4.5h-4.5" />
+    <path d="M20.5 12a8.5 8.5 0 1 1-3-6.5" />
+    <path d="M20.5 4v5h-5" />
   </Svg>
 )
 
+/** A tick: passed. */
 export const IconCheck = (p: IconProps) => (
-  <Svg {...p}>
-    <path d="M5 12.5 10 17.5 19 7" />
+  <Svg s={14} {...p}>
+    <path d="M4 12.5l5 5L20 6.5" />
   </Svg>
 )
 
 // ---- shared with the desktop -----------------------------------------------
 
-/** Disclosure caret — a hairline stroked "›". Rotate it 90° (via a class on the
- *  wrapping element) to point down when the section/folder is open. Shared by
- *  the file tree rows and the component-section headers so they read the same.
+/** Disclosure caret — a stroked "›". Rotate it 90° (via a class on the wrapping
+ *  element) to point down when the section/folder is open. Shared by the file
+ *  tree rows and the component-section headers so they read the same.
  *
  *  Lives here rather than in the desktop's icons.tsx because the shared FileTree
  *  needs it and must not import from `src/`. `src/components/icons.tsx`
- *  re-exports it, so there is exactly one of these shapes in the product. */
-export function ChevronIcon({ size = 10, className }: { size?: number; className?: string }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2.2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-      aria-hidden
-    >
-      <path d="M9 5l7 7-7 7" />
-    </svg>
-  )
-}
+ *  re-exports it, so there is exactly one of these shapes in the product. It is
+ *  `IconChevron` at the size a disclosure row wants — not a second drawing. */
+export const ChevronIcon = (p: IconProps) => <IconChevron s={10} {...p} />

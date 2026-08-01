@@ -5,9 +5,14 @@ import { invoke } from "@tauri-apps/api/core";
 // one file per subset covers 100–900, so the four weights the Vitrine skin
 // uses cost no more than one would. Each @font-face carries a unicode-range,
 // so a session that never types Cyrillic never loads the Cyrillic file.
-// Referenced by --font-ui/--font-mono; see the Vitrine block in index.css.
+// Referenced by --font-ui/--font-mono; see src/skins/vitrine.css.
 import "@fontsource-variable/archivo/wght.css";
 import "@fontsource-variable/jetbrains-mono/index.css";
+// The Pixel skin's two voices. Single weight, latin only, and both are tiny
+// (a few KB each) — an 8-bit skin whose type fell back to the system sans
+// would be the one thing in it that isn't 8-bit. See src/skins/pixel.css.
+import "@fontsource/press-start-2p/index.css";
+import "@fontsource/vt323/index.css";
 import "./index.css";
 import { monacoReady } from "./monaco-setup";
 import { applyTheme, getSettings, watchSystemTheme } from "./settings";

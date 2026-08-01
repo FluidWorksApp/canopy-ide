@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
-import { render } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
+import { act, render } from "@testing-library/react";
 import { ActivityRail } from "./ActivityRail";
+import { THEME_CHANGE_EVENT } from "../settings";
 
 const props = {
   sideTab: "files" as const,
@@ -53,9 +54,48 @@ describe("ActivityRail", () => {
   // Tools left the tab groups but not the tab behaviour: it still opens a
   // panel, so it must keep the active marker the plain foot buttons lack.
   it("keeps Tools marked active when its panel is the open one", () => {
-    const { container } = render(<ActivityRail {...props} sideTab="tools" open pinned />);
+    const { container } = render(
+      <ActivityRail {...props} sideTab="tools" open pinned />,
+    );
     const tools = container.querySelector('[aria-label^="Tools"]');
     expect(tools?.className).toContain("rail-btn-active");
     expect(tools?.className).toContain("rail-btn-pinned");
+  });
+
+  // The twins are the Pixel skin's only icons, and the swap is invisible to
+  // every other assertion in this file: a rail that quietly kept drawing 24px
+  // strokes under an 8-bit palette would look wrong and test green. The
+  // viewBox is the cheapest thing that can only be true of a twin.
+  describe("under the Pixel skin", () => {
+    afterEach(() => {
+      delete document.documentElement.dataset.theme;
+    });
+
+    const boxes = (root: HTMLElement) =>
+      [...root.querySelectorAll("svg")].map((s) => s.getAttribute("viewBox"));
+
+    it("draws the 8x8 twins for every icon in the rail", () => {
+      document.documentElement.dataset.theme = "pixel";
+      const { container } = render(<ActivityRail {...props} />);
+      expect(boxes(container)).toEqual(Array(14).fill("0 0 8 8"));
+    });
+
+    it("swaps back and forth when the skin changes under it", () => {
+      const { container } = render(<ActivityRail {...props} />);
+      expect(boxes(container).every((b) => b === "0 0 24 24")).toBe(true);
+
+      // What applyTheme() does, in the order it does it: stamp, then announce.
+      act(() => {
+        document.documentElement.dataset.theme = "pixel";
+        window.dispatchEvent(new CustomEvent(THEME_CHANGE_EVENT));
+      });
+      expect(boxes(container).every((b) => b === "0 0 8 8")).toBe(true);
+
+      act(() => {
+        document.documentElement.dataset.theme = "gotham";
+        window.dispatchEvent(new CustomEvent(THEME_CHANGE_EVENT));
+      });
+      expect(boxes(container).every((b) => b === "0 0 24 24")).toBe(true);
+    });
   });
 });

@@ -31,7 +31,9 @@ export function MonacoEditor({ model, onSave, onDirty, onCursor }: MonacoEditorP
     if (!el) return;
     const s = getSettings();
     const editor = monaco.editor.create(el, {
-      theme: "canopy-dark",
+      // No `theme` here on purpose: Monaco's theme is global, and
+      // monaco-setup.ts already set it to the active skin's (and re-sets it on
+      // every skin switch). Naming one here would fight that on mount.
       automaticLayout: true,
       minimap: { enabled: false },
       fontFamily: s.editorFontFamily,

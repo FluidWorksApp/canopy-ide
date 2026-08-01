@@ -1,0 +1,40 @@
+/* Plum — deep aubergine surfaces under a rose accent. Every other skin picks
+   its accent out of the green/blue/gold end of the wheel, so this is the one
+   place in the roster where the primary action is warm and saturated; the
+   surfaces are pushed the same way, purple-black rather than the blue-black
+   `:root` uses, so the accent belongs to the room instead of sitting on top
+   of it.
+
+   The hazard is that --accent (rose) and --danger (red) are 25° of hue apart
+   and near-identical in luminance — measured, they are 1.17:1, which means no
+   amount of squinting will ever separate them by brightness, and --on-accent
+   and --on-danger are both near-black so the ink on a filled control says
+   nothing either. What keeps them apart is surface, not colour: accent is a
+   persistent fill (primary buttons, the focus ring, the terminal cursor) while
+   danger is text or a border on its own row and only becomes a fill on hover
+   of a destructive control. The two never occupy the same state at the same
+   time, which is the separation being relied on — hue and saturation alone
+   (330/71% against 355/83%) would not carry it. */
+:root[data-theme="plum"] {
+  --bg-deep: #120d16;
+  --bg-alt: #191220;
+  --bg: #150f1a;
+  --bg-raised: #221929;
+  --bg-overlay: #2a2033;
+  --border: #332741;
+  --border-strong: #493854;
+  --text: #ebe0f0;
+  --text-dim: #9e8daa;
+  --text-faint: #6d5f78;
+  --accent: #e878b0;
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --danger: #f0616e;
+  --ok: #6fcf97;
+  --warn: #e0aa55;
+  --magenta: #c79bf5;
+  --cyan: #68c9df;
+  --on-accent: #1a0710;
+  --on-danger: #1a0a0c;
+  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+  color-scheme: dark;
+}

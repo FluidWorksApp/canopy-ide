@@ -1,4 +1,7 @@
 @import "../shared/fileTree.css";
+/* One token block per skin. See src/skins/skins.css — and src/skins/types.ts
+   for why a skin is a directory entry rather than an edit in five files. */
+@import "./skins/skins.css";
 
 /* ---------- theme ----------
    Every color in this file (with a handful of deliberate exceptions — a docx
@@ -87,171 +90,10 @@
   color-scheme: dark;
 }
 
-/* Gotham — dark charcoal/gunmetal + gold, pure color-and-type personality
-   (no logos, no marks, nothing but a palette — same idea as a "Dracula" or
-   "Nord" published editor theme). */
-:root[data-theme="gotham"] {
-  --bg-deep: #090b0e;
-  --bg-alt: #101317;
-  --bg: #0d0f12;
-  --bg-raised: #171b20;
-  --bg-overlay: #1e2228;
-  --border: #2b2f36;
-  --border-strong: #3a3f4a;
-  --text: #e8e6df;
-  --text-dim: #8b8d93;
-  --text-faint: #575a60;
-  --accent: #d4af37;
-  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
-  --danger: #e0483e;
-  --ok: #4caf7d;
-  --warn: #e2943a;
-  --magenta: #c792ea;
-  --cyan: #89ddff;
-  --on-accent: #14110a;
-  --on-danger: #14100a;
-  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
-  color-scheme: dark;
-}
-
-/* Daylight — clean light theme; matches the design handoff's light token set. */
-:root[data-theme="daylight"] {
-  --bg-deep: #e4e7ee;
-  --bg-alt: #edeff4;
-  --bg: #f7f8fa;
-  --bg-raised: #ffffff;
-  --bg-overlay: #ffffff;
-  --border: #d9dde5;
-  --border-strong: #b9c0cf;
-  --text: #1c1f26;
-  --text-dim: #626a7e;
-  --text-faint: #99a0b2;
-  --accent: #3b6fd6;
-  --accent-soft: color-mix(in srgb, var(--accent) 10%, transparent);
-  --danger: #c9414f;
-  --ok: #2f9e5c;
-  --warn: #a5690f;
-  --magenta: #8250df;
-  --cyan: #1b7c83;
-  --on-accent: #ffffff;
-  --on-danger: #ffffff;
-  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
-  --shadow-1: 0 1px 2px rgba(28, 31, 38, 0.1);
-  --shadow-2:
-    0 4px 14px rgba(28, 31, 38, 0.12), 0 1px 3px rgba(28, 31, 38, 0.08);
-  --shadow-3:
-    0 24px 64px rgba(28, 31, 38, 0.22), 0 6px 18px rgba(28, 31, 38, 0.12);
-  color-scheme: light;
-}
-
-/* Vitrine — the glass skin. The other three are palette swaps; this one swaps
-   the material too. Every surface is a white wash with no ink of its own,
-   composited over one ambient field painted on <html>, and the panes that
-   float over your work frost what is behind them. Tokens here, the handful of
-   rules that need the material rather than the colour just below. */
-:root[data-theme="vitrine"] {
-  /* Surfaces are alpha, not colour. Nesting deepens the wash on purpose —
-     that is the layering cue the opaque skins get from five distinct greys. */
-  --bg-deep: rgba(255, 255, 255, 0.022);
-  --bg-alt: rgba(255, 255, 255, 0.034);
-  --bg: rgba(255, 255, 255, 0.012);
-  --bg-raised: rgba(255, 255, 255, 0.055);
-  /* Deliberately the least glassy value in the skin. Everything painted with
-     it floats over content rather than beside it, and the frost that would
-     otherwise carry it is not guaranteed: this engine drops backdrop-filter
-     in snapshots and behind an ancestor that has one of its own (a dialog
-     inside .confirm-backdrop is exactly that case). Tint has to hold the
-     legibility on its own; the blur is the refinement on top. */
-  --bg-overlay: rgba(14, 17, 22, 0.92);
-
-  /* Solid mirrors of the five above, for the one consumer that can't
-     composite over the ambient field: the remote portal renders in a browser
-     of its own and only receives the tokens. See readThemeTokens() in
-     SettingsDialog.tsx — it prefers `--x-opaque` when a skin declares one. */
-  --bg-opaque: #07080a;
-  --bg-alt-opaque: #0e1116;
-  --bg-raised-opaque: #171b22;
-  --border-opaque: #242932;
-
-  --border: rgba(255, 255, 255, 0.075);
-  --border-strong: rgba(255, 255, 255, 0.16);
-
-  --text: #edeff1;
-  --text-dim: rgba(237, 239, 241, 0.52);
-  --text-faint: rgba(237, 239, 241, 0.32);
-
-  --accent: #b4f04a;
-  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
-  --danger: #ff6b6b;
-  --ok: #5be08a;
-  --warn: #ffc24b;
-  --magenta: #c29bff;
-  --cyan: #4be3e8;
-  --on-accent: #0a1206;
-  --on-danger: #1a0a0a;
-  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
-
-  /* The skin brings its own two voices, both bundled (see main.tsx): Archivo
-     for anything set in latin, JetBrains Mono for labels, counts and code.
-     Only the chrome follows these — the editor and terminal keep their own
-     font settings, which are the user's to pick, not a skin's to override. */
-  --font-ui:
-    "Archivo Variable", -apple-system, BlinkMacSystemFont, "Segoe UI",
-    sans-serif;
-  --font-mono: "JetBrains Mono Variable", "SF Mono", Menlo, Monaco, monospace;
-
-  /* A corner is where glass shows its thickness, so every radius goes up a
-     step. */
-  --r-xs: 6px;
-  --r-sm: 9px;
-  --r-md: 13px;
-  --r-lg: 16px;
-
-  /* A lit lip on top and a cast shadow below — a sheet of glass has both, and
-     the lip is what stops a wash reading as a stain. */
-  --shadow-1: inset 0 1px 0 rgba(255, 255, 255, 0.055);
-  --shadow-2:
-    inset 0 1px 0 rgba(255, 255, 255, 0.09), 0 6px 20px rgba(0, 0, 0, 0.34);
-  --shadow-3:
-    inset 0 1px 0 rgba(255, 255, 255, 0.17), 0 14px 38px rgba(0, 0, 0, 0.46);
-
-  color-scheme: dark;
-
-  /* The field. The only opaque thing in the skin, and the reason the washes
-     above are legible at all. On <html> rather than an element so it costs no
-     extra layer and never repaints: four blooms in the agent hues, a 28px
-     grid so an empty pane doesn't read as flat black, over the base gradient. */
-  background:
-    linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px) 0 0 / 28px
-      28px,
-    linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px) 0
-      0 / 28px 28px,
-    radial-gradient(
-      46vw 46vw at 4% -8%,
-      rgba(255, 138, 76, 0.2),
-      transparent 66%
-    ),
-    radial-gradient(
-      52vw 52vw at 64% -6%,
-      rgba(126, 166, 255, 0.19),
-      transparent 66%
-    ),
-    radial-gradient(
-      48vw 48vw at 18% 92%,
-      rgba(255, 93, 122, 0.15),
-      transparent 66%
-    ),
-    radial-gradient(
-      44vw 44vw at 94% 78%,
-      rgba(194, 155, 255, 0.17),
-      transparent 66%
-    ),
-    linear-gradient(155deg, #0b0d11, #07080a 52%, #090b0f);
-}
-
 /* html, body and #root all paint var(--bg); three stacked washes would come
-   out an opaque grey and bury the field. The field above is this stack's
-   background — everything below it is glass. */
+   out an opaque grey and bury the field. The field painted on <html> by the
+   token block (src/skins/vitrine.css) is this stack's background — everything
+   below it is glass. */
 :root[data-theme="vitrine"] body,
 :root[data-theme="vitrine"] #root {
   background: transparent;
@@ -388,6 +230,107 @@
 :root[data-theme="vitrine"] .btn-sm.btn-accent:hover:not(:disabled) {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
   border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+/* Pixel — the 8-bit skin, and the second one that swaps the material and not
+   just the colour. Its tokens, its zeroed radii and its two fonts are in
+   src/skins/pixel.css. What lives here is the other half: the things the
+   hardware it is imitating could not do. Each rule below is a capability
+   removed, not a decoration added — that is the test for whether something
+   belongs in this run. */
+
+/* An edge on that hardware was a row of whole pixels or it was nothing.
+   A hairline is a thing you can only draw once a display has more dots than
+   the layout has coordinates, so every border the chrome draws doubles.
+   border-width alone: colour and style still belong to whichever rule owns
+   the surface, and none of them have to know this skin exists. */
+:root[data-theme="pixel"] .confirm,
+:root[data-theme="pixel"] .modal,
+:root[data-theme="pixel"] .ctx-menu,
+:root[data-theme="pixel"] .ctx-submenu,
+:root[data-theme="pixel"] .status-menu,
+:root[data-theme="pixel"] .cli-menu,
+:root[data-theme="pixel"] .review-menu,
+:root[data-theme="pixel"] .note-remind-menu,
+:root[data-theme="pixel"] .cnp-tooltip,
+:root[data-theme="pixel"] .notice,
+:root[data-theme="pixel"] .update-toast,
+:root[data-theme="pixel"] .palette,
+:root[data-theme="pixel"] .btn,
+:root[data-theme="pixel"] .btn-sm,
+:root[data-theme="pixel"] .btn-icon {
+  border-width: 2px;
+}
+
+/* No blur, anywhere. backdrop-filter reads the pixels already behind a
+   surface and resamples them; a machine with one framebuffer and no path
+   back out of it could not, so a pane of that era either covered what was
+   under it or it did not. Every surface here paints a wash of its own as
+   well, which is what still holds the contrast once the frost is gone.
+   Vitrine's frosted panes sit on another data-theme and never reach this
+   skin — this list is the ones that frost on every skin. */
+:root[data-theme="pixel"] .side-peek-frost,
+:root[data-theme="pixel"] .palette,
+:root[data-theme="pixel"] .palette-backdrop,
+:root[data-theme="pixel"] .dlg-scrim,
+:root[data-theme="pixel"] .md-lightbox,
+:root[data-theme="pixel"] .workspace-handle,
+:root[data-theme="pixel"] .workspace-overlay,
+:root[data-theme="pixel"] .aw-touched-more,
+:root[data-theme="pixel"] .hib-frost {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* A skin has no business in the motion tokens: --ease-out is one curve so
+   that everything in the window moves as one thing, and a palette that
+   retimed the app would be a palette doing something you did not ask for.
+   This skin is the exception the token was not written for, because here
+   the timing IS the material — that hardware redrew whole frames from a
+   table, so nothing it ever showed you eased. It stepped. Six steps across
+   --dur-med is about a frame every 33ms, which is a cadence rather than a
+   curve with the smoothness taken out. Nothing else in the run is touched:
+   the durations, and the properties that animate, stay the app's. */
+:root[data-theme="pixel"] {
+  --ease-out: steps(6, end);
+}
+
+/* The rail's own marks are drawn with literal radii — 999px on the badge and
+   the pinned dot — so the palette's zeroed --r-* tokens cannot reach them,
+   and a 999px pill is a circle that exists only in the antialiasing. Squared
+   here rather than in the token block for exactly that reason. */
+:root[data-theme="pixel"] .rail-badge,
+:root[data-theme="pixel"] .rail-btn-pinned::after,
+:root[data-theme="pixel"] .rail-conn {
+  border-radius: 0;
+}
+
+/* The active tab inverts instead of taking the wash and the bar. --accent-soft
+   is the accent at 14% — a tint, and a tint is something you can only draw
+   with more colours than you have pixels. This skin has the pixels. So the
+   tile fills solid and the glyph is punched out of it in the rail's own
+   ground, and the 3px bar comes off with the wash: a stripe beside a filled
+   tile is a hairline again, and it has nothing left to distinguish. */
+:root[data-theme="pixel"] .rail-btn-active {
+  background: var(--accent);
+  color: var(--bg-deep);
+}
+
+:root[data-theme="pixel"] .rail-btn-active::before {
+  display: none;
+}
+
+/* Pinned still has to read as latched, and its dot was capping a bar that no
+   longer exists. It becomes a whole 4px block in the corner of the tile,
+   inked in the ground so it is visible against the fill — accent on accent
+   would be nothing. Only on a tile that is actually inverted: a pinned button
+   that is not the active one (the sidebar toggle) keeps the accent mark it
+   draws on every other skin. */
+:root[data-theme="pixel"] .rail-btn-active.rail-btn-pinned::after {
+  bottom: 4px;
+  width: 4px;
+  height: 4px;
+  background: var(--bg-deep);
 }
 
 /* Custom — Default's palette as the base; --accent/--on-accent are
@@ -1187,7 +1130,9 @@ body,
 
 .rail-btn-active {
   /* Icon stays white (same as hover); the accent-soft wash + left accent bar
-     carry the "active" signal, not the icon color. */
+     carry the "active" signal, not the icon color. The Pixel skin cannot draw
+     a 14% wash and inverts the whole tile instead — see the
+     :root[data-theme="pixel"] run at the top of this file. */
   color: var(--text);
   background: var(--accent-soft);
 }
@@ -1241,6 +1186,15 @@ body,
   height: 3px;
   border-radius: 999px;
   background: var(--accent);
+}
+
+/* The bar gives up its last few pixels so the cap has somewhere to be. Both
+   are 3px of accent on the same edge, so at full length they touch and the
+   pair reads as one bar that is slightly longer than its neighbours' — which
+   is not a signal, it is a rendering artefact you'd file a bug about. Only
+   when the pinned tab is also the active one: nothing else draws the bar. */
+.rail-btn-active.rail-btn-pinned::before {
+  bottom: 12px;
 }
 
 /* ---------- hover-peek side panel ----------
@@ -11915,7 +11869,6 @@ input[type="radio"]:disabled {
   flex: 1;
 }
 
-
 /* Context menu (ContextMenu.tsx). Above the confirm backdrop (400) so a menu
    opened from a dialog is still reachable. */
 .ctx-menu {
@@ -13905,7 +13858,9 @@ a.btn-sm {
   border: 1px solid var(--border-strong);
   border-radius: var(--r-md);
   corner-shape: squircle;
-  box-shadow: var(--shadow-2), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  box-shadow:
+    var(--shadow-2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 .notif-panel-head {

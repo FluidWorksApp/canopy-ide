@@ -1,0 +1,27 @@
+/* Slate — Default with the blue lifted out of the greys: cool neutral surfaces
+   and a steel accent, for anyone who reads a tinted shell as noise while a diff
+   is on screen. Where Ember warms the same neutrals and Void drops them toward
+   black, Slate keeps Default's depth and only drains the hue. */
+:root[data-theme="slate"] {
+  --bg-deep: #101317;
+  --bg-alt: #161a20;
+  --bg: #13171c;
+  --bg-raised: #1e242c;
+  --bg-overlay: #262d37;
+  --border: #2c343e;
+  --border-strong: #414c59;
+  --text: #dbe2ea;
+  --text-dim: #8d9aa9;
+  --text-faint: #606b77;
+  --accent: #6fa8dc;
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --danger: #e0707f;
+  --ok: #7cbf8a;
+  --warn: #d9a95f;
+  --magenta: #a992d8;
+  --cyan: #6fc4d4;
+  --on-accent: #0c1015;
+  --on-danger: #150c0e;
+  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+  color-scheme: dark;
+}

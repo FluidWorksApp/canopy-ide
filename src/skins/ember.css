@@ -1,0 +1,33 @@
+/* Ember — warm charcoal + copper, for anyone who finds Default's blue-black
+   midnight too cold to sit in all day. It is the warm end of the three dark
+   neutrals: Ember here, Slate at neutral, Void at the bottom. Every surface
+   carries a red bias rather than the blue one `:root` uses, so the greys read
+   as unlit metal instead of unlit screen.
+
+   The accent is a fired copper, not an orange. That distinction is the whole
+   skin: orange at this size and frequency reads as a warning, and the primary
+   action colour is on screen constantly. Held down in saturation and value it
+   settles into the same metal as the surfaces and stops shouting. */
+:root[data-theme="ember"] {
+  --bg-deep: #131010;
+  --bg-alt: #1a1616;
+  --bg: #161212;
+  --bg-raised: #221d1c;
+  --bg-overlay: #2a2422;
+  --border: #332b29;
+  --border-strong: #4a3d39;
+  --text: #ede4df;
+  --text-dim: #a3928a;
+  --text-faint: #6f605a;
+  --accent: #e07a4a;
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --danger: #e8535b;
+  --ok: #77b569;
+  --warn: #dfa04a;
+  --magenta: #c78bd4;
+  --cyan: #6fb8bd;
+  --on-accent: #1a0e07;
+  --on-danger: #1a0a0b;
+  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+  color-scheme: dark;
+}
