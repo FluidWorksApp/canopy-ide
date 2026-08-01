@@ -1998,24 +1998,38 @@ export function PrView({
                 )}
               </div>
             )}
-            {/* `mapRead` gates this for the same reason `settling` does: an
-                offer to review appearing for one frame and then being pushed
-                down the page by the review that was already on disk reads as
-                the tab not knowing what it has. */}
-            {mapRead && !map && !reviewBusy && !settling && onMicroTask && (
-              <div className="pr-map-cta">
-                {/* The one thing this empty state exists to offer, so it wears
-                    the primary tier. As a btn-mini it sat at the same weight as
-                    "Regenerate" and "Drop" and nobody found it. */}
-                <Button size="sm" variant="accent"
-                  onClick={() => launch(prReviewTask, { repo, pr })}>
-                  {prReviewTask.icon} Review this for me
-                </Button>
-                <span className="pr-files-note">
-                  risk-ranked, findings staged as drafts, nothing posted
-                </span>
-              </div>
-            )}
+            {/* Three gates, all of them about this button appearing in the
+                place it will stay. `mapRead` and `settling` are the same point
+                either side of a review run: an offer to review that shows for a
+                frame and is then shoved down the page by the review already on
+                disk reads as the tab not knowing what it has.
+
+                `descLoading` is the third, and it's the one the placeholder
+                above makes necessary rather than fixes. The artifact is a local
+                file read and the description is a network round trip, so this
+                would light up under a still-shimmering card and then jump the
+                moment the real text — of a length nothing can know in advance —
+                landed above it. A skeleton can hold a card's *position*; it
+                can't hold its height. So the offer waits for the prose. */}
+            {!descLoading &&
+              mapRead &&
+              !map &&
+              !reviewBusy &&
+              !settling &&
+              onMicroTask && (
+                <div className="pr-map-cta">
+                  {/* The one thing this empty state exists to offer, so it
+                      wears the primary tier. As a btn-mini it sat at the same
+                      weight as "Regenerate" and "Drop" and nobody found it. */}
+                  <Button size="sm" variant="accent"
+                    onClick={() => launch(prReviewTask, { repo, pr })}>
+                    {prReviewTask.icon} Review this for me
+                  </Button>
+                  <span className="pr-files-note">
+                    risk-ranked, findings staged as drafts, nothing posted
+                  </span>
+                </div>
+              )}
           </div>
 
           <aside className="pr-rail">
