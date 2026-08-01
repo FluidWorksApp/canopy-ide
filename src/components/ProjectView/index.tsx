@@ -48,7 +48,10 @@ import { modelFor, monaco, languageForPath } from "../../monaco-setup";
 import { getCaret, subscribeCaret } from "../../editorState";
 import { setCompanionSpotlight } from "../../companionContext";
 import { useEscapeBackstop, useEscapeLayer } from "../../useEscape";
-import { subscribe as prWatchSubscribe } from "../../prWatchStore";
+import {
+  getSnapshot as prWatchSnapshot,
+  subscribe as prWatchSubscribe,
+} from "../../prWatchStore";
 import { GuestSession, OwnerSession } from "../../collab";
 import { CollabView } from "../CollabView";
 import { SharedProjectView } from "../SharedProjectView";
@@ -169,6 +172,10 @@ import {
   updateTaskRun,
   type TaskRun,
 } from "../../taskHistory";
+import { record as recordProvenance } from "../../provenance";
+import { resolveAgentForPr, type PrAgent } from "../../agentForPr";
+import { parsePrUrl } from "../../provenance";
+import { toPrInfo } from "../../prInbox";
 import {
   askedLine,
   hasIdentity,
@@ -3360,10 +3367,31 @@ const ProjectViewBody = memo(function ProjectViewBody({
         }
         // Files the session touched, when a hook wrote a digest for it — the
         // same pty→digest binding the Agents panel uses.
-        const files = digestBySurface(
+        const digest = digestBySurface(
           wsDigestsRef.current,
           thisInstanceRef.current,
-        ).get(String(ptyId))?.files;
+        ).get(String(ptyId));
+        const files = digest?.files;
+        // If it opened a PR, write down that this session did. Now, not later:
+        // a micro-task is forgotten seconds from here (finishMicroTask →
+        // sessionForget) and its worktree is deleted by its own last
+        // instruction, so this is the last moment anything can join the two.
+        // Blocked runs record too — a run that pushed a PR and then stopped to
+        // ask something still produced the PR.
+        const ranIn = digest?.cwd ?? a.cwd;
+        void recordProvenance({
+          // The directory it ran in, not a project component: Rust resolves any
+          // directory of a repo to its main checkout, and a task's worktree is
+          // the one thing we always know.
+          repo: ranIn,
+          url: a.url,
+          branch: digest?.branch,
+          sessionId,
+          agent: digest?.agent,
+          profile: digest?.profile,
+          cwd: ranIn,
+          via: "job_done",
+        });
         if (a.status === "blocked") {
           // Blocked is not an ending — the agent is waiting on the user and the
           // run continues. Keep what it said and mark that it asked, so that if
@@ -3407,6 +3435,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
         return;
       }
       if (d?.projectId !== project.id) return;
+      // The companion asking to reach whoever raised a PR, without knowing who
+      // that was. Rust hands it over here because only this side holds the
+      // pty→session binding and can reopen an ended conversation or open a tab
+      // for a fresh one. Same route as the PR tab's "Send a change".
+      if (a.kind === "message_agent" && a.pr && a.text) {
+        void routeToRaiser(a.pr, a.text);
+        return;
+      }
       if (a.kind === "open_preview" && a.url) {
         openPreview(a.url);
       } else if (a.kind === "start_server" && a.dir && a.command) {
@@ -4106,6 +4142,32 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const liveSessionByPtyRef = useRef(liveSessionByPty);
   liveSessionByPtyRef.current = liveSessionByPty;
 
+  /** Every session that is up, and how to reach it: its terminal here, or null
+   *  when it is running somewhere this window cannot type into.
+   *
+   *  Both halves are needed by the PR tab's "Raised by" (agentForPr.ts). A
+   *  session with no terminal here is not the same as one that has ended — it
+   *  must not be offered as reachable, and it must NOT be resumed either, since
+   *  a second process on one conversation id is how you corrupt it. */
+  const liveSessions = useMemo(() => {
+    const m = new Map<string, number | null>();
+    for (const d of wsDigests) {
+      if (!d.session_id) continue;
+      if (lifeFor({ digest: d as never, now: lifeClock / 1000 }).state === "ended")
+        continue;
+      m.set(d.session_id, null);
+    }
+    // A terminal in this window beats the digest's word: it is the binding the
+    // hook stamped this launch, so it cannot name a recycled pty.
+    for (const [pty, sid] of liveSessionByPty) {
+      if (sid && projectStats.some((s) => s.id === pty)) m.set(sid, pty);
+    }
+    return m;
+  }, [wsDigests, liveSessionByPty, projectStats, lifeClock]);
+  // Read from the agent-action handler, which is not re-created per render.
+  const liveSessionsRef = useRef(liveSessions);
+  liveSessionsRef.current = liveSessions;
+
   /** Write each running task's conversation id into its history entry, as soon
    *  as the CLI's first hook event reveals it.
    *
@@ -4464,6 +4526,81 @@ const ProjectViewBody = memo(function ProjectViewBody({
       };
     },
     [addTerminal],
+  );
+
+  /** Send a change request about a PR back to the session that raised it.
+   *
+   *  The point of the whole provenance track: before this, "amend this PR"
+   *  meant starting a fresh agent in a fresh worktree that had to rediscover
+   *  everything the first one already knew. `to` comes from agentForPr.ts —
+   *  the same resolver the companion uses, so both agree on who owns a PR.
+   *
+   *  A cold PR still gets an agent; it just gets one that is told what it is
+   *  picking up, rather than one that is pretending to be the original. */
+  const sendToRaiser = useCallback(
+    async (repo: string, pr: ipc.PrInfo, to: PrAgent, text: string) => {
+      const brief =
+        `About pull request #${pr.number} "${pr.title}" (${pr.url}), which you opened from ` +
+        `${pr.branch}: ${text}\n\nWhen the change is made, push so the PR updates.`;
+      if (to.kind === "cold" || !to.sessionId) {
+        const started = await startMicroTask(
+          addressPrCommentsTask,
+          { repo, pr },
+          text,
+        );
+        onNotice(
+          started
+            ? `No conversation left to reopen — started a fresh agent on #${pr.number}.`
+            : `Couldn't start an agent for #${pr.number}.`,
+        );
+        return;
+      }
+      const { note } = await messageAgent({
+        ptyId: to.ptyId,
+        sessionId: to.sessionId,
+        agentId: to.agent ?? undefined,
+        cwd: to.cwd ?? "",
+        text: brief,
+      });
+      onNotice(note);
+    },
+    [messageAgent, onNotice, startMicroTask],
+  );
+
+  /** The same, entered by PR number or url rather than from the PR's own tab —
+   *  which is how the companion asks (`canopy_message_agent({pr})`). */
+  const routeToRaiser = useCallback(
+    async (pr: string, text: string) => {
+      const number = Number(parsePrUrl(pr)?.number ?? pr.replace(/^#/, ""));
+      if (!Number.isSafeInteger(number) || number <= 0) {
+        onNotice(`"${pr}" isn't a pull request I can look up.`);
+        return;
+      }
+      // Through the watcher's rows, so a number alone resolves to the repo it
+      // belongs to — the companion names a PR, not a checkout.
+      const row = prWatchSnapshot().rows.find(
+        (r) =>
+          r.number === number &&
+          rootsRef.current.some(
+            (x) => x === r.repo || x.startsWith(`${r.repo}/`),
+          ),
+      );
+      if (!row) {
+        onNotice(`No open PR #${number} in this project.`);
+        return;
+      }
+      const edges = await ipc.provenanceForPr(row.repo, number).catch(() => []);
+      const dirs = await Promise.all(
+        edges.map((e) => ipc.fsStat(e.cwd).then(() => e.cwd, () => null)),
+      );
+      const alive = new Set(dirs.filter(Boolean) as string[]);
+      const to = resolveAgentForPr(edges, {
+        live: liveSessionsRef.current,
+        dirExists: (dir) => alive.has(dir),
+      });
+      await sendToRaiser(row.repo, toPrInfo(row), to, text);
+    },
+    [onNotice, sendToRaiser],
   );
   const runningAgents = useMemo(
     () =>
@@ -6561,6 +6698,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             digest={tab.digest}
             onOpenCommit={openCommit}
             onOpenPr={openPr}
+            onOpenPrNumber={(r, n, u) => void openPrByNumber(r, n, u)}
             onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
             onNotice={onNotice}
             onMessageAgent={(text) =>
@@ -6700,6 +6838,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
               sendTicketToAgent(target, prConflictContext(tab.pr))
             }
             onMicroTask={startMicroTask}
+            liveSessions={liveSessions}
+            onSendToRaiser={(to, text) =>
+              void sendToRaiser(tab.repo, tab.pr, to, text)
+            }
           />
         );
       case "review":

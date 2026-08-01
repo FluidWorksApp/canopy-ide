@@ -38,8 +38,19 @@ const STORES = [
     id: "notes",
     file: "notes.rs",
     variant: "Notes",
+    module: "notes.ts",
     boundary: "write_meta",
     delete_boundaries: ["notes_delete"],
+  },
+  {
+    id: "provenance",
+    file: "provenance.rs",
+    variant: "Provenance",
+    module: "provenance.ts",
+    boundary: "append",
+    // Nothing deletes an edge: a row is never updated or removed in place, and
+    // compaction happens inside the boundary above.
+    delete_boundaries: [],
   },
 ] as const;
 
@@ -110,13 +121,15 @@ describe("the store change channel", () => {
     expect(variants.length).toBeGreaterThan(0);
 
     const frontend = readFileSync(join(__dirname, "stores.ts"), "utf8");
-    const registered = readFileSync(join(__dirname, "notes.ts"), "utf8");
     expect(frontend).toContain("registerStore");
 
     for (const variant of variants) {
       const store = STORES.find((s) => s.variant === variant);
       expect(store, `change.rs has ${variant} but storeChangeGuard has no entry for it`).toBeTruthy();
-      // The handler is registered at module scope in the store's own module.
+      // The handler is registered at module scope in the store's own module —
+      // read per store rather than from one hard-coded file, or the second
+      // store to be added passes by being looked for in the first one's module.
+      const registered = readFileSync(join(__dirname, store!.module), "utf8");
       expect(
         registered.includes(`registerStore("${store!.id}"`) ||
           frontend.includes(`registerStore("${store!.id}"`),
@@ -129,7 +142,7 @@ describe("the store change channel", () => {
   it("never pulses from a function the read path can reach", () => {
     // A pulse inside a read is a loop: change -> refetch -> read -> change.
     // It paces itself on the settle window and never stops.
-    const readVerbs = ["_list", "_get", "_search", "_due"];
+    const readVerbs = ["_list", "_get", "_search", "_due", "_for_", "_all", "read_"];
     for (const store of STORES) {
       const src = stripComments(read(store.file));
       for (const m of src.matchAll(/(^|\s)fn\s+(\w+)\s*[(<]/gm)) {

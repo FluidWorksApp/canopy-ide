@@ -31,12 +31,14 @@ use tauri::{AppHandle, Emitter};
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Store {
     Notes,
+    Provenance,
 }
 
 impl Store {
     pub fn as_str(self) -> &'static str {
         match self {
             Store::Notes => "notes",
+            Store::Provenance => "provenance",
         }
     }
 
@@ -50,6 +52,12 @@ impl Store {
     fn settle(self) -> Duration {
         match self {
             Store::Notes => Duration::from_millis(60),
+            // Longer, because the writes come in a different shape. A backfill
+            // sweep appends one edge per matching digest as fast as it can read
+            // them, and at 60ms a several-hundred-row adoption would announce
+            // itself several hundred times. Nothing is watching an edge closely
+            // enough to notice a quarter second.
+            Store::Provenance => Duration::from_millis(250),
         }
     }
 

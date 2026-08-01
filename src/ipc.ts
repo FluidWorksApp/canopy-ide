@@ -137,9 +137,13 @@ export interface AgentAction {
     | "notify"
     | "job_done"
     | "task_named"
-    | "close_session";
+    | "close_session"
+    | "message_agent";
   route: string;
   dir?: string;
+  /** Where the calling agent was standing. Sent on every action by the sidecar
+   *  (canopy_hook.rs), and the fallback for a run whose hook wrote no digest. */
+  cwd?: string;
   name?: string;
   command?: string;
   url?: string;
@@ -155,6 +159,10 @@ export interface AgentAction {
   summary?: string;
   /** job_done: what the agent understood it was asked for. */
   asked?: string;
+  /** message_agent: a PR number or url instead of a ptyId. Rust routes this
+   *  form here rather than answering it — only the frontend holds the
+   *  pty→session binding and can reopen an ended conversation. */
+  pr?: string;
   /** job_done / task_named: what the agent calls this run. Straight from the
    *  model and clamped where it is read (taskIdentity.ts) — nothing here has
    *  been checked for length, for being one glyph, or for being a string. */
@@ -1468,9 +1476,9 @@ export const onGitChange = (cb: (e: GitChange) => void): Promise<UnlistenFn> =>
  *  the reader asks for what it needs, and a store nobody is showing costs one
  *  ignored event. Subscribe through `src/stores.ts`, never directly. */
 export interface StoreChange {
-  /** Matches a `change::Store` variant in Rust: "notes". */
+  /** Matches a `change::Store` variant in Rust: "notes", "provenance". */
   store: string;
-  /** Which slice moved — a project id, for notes. */
+  /** Which slice moved — a project id for notes, a repo path for provenance. */
   scope: string;
   /** The item that moved, or "" when the change is not about one item. */
   id: string;
@@ -1480,6 +1488,66 @@ export const onStoreChange = (
   cb: (e: StoreChange) => void,
 ): Promise<UnlistenFn> =>
   listen<StoreChange>("store:change", (event) => cb(event.payload));
+
+// ---------- Provenance (which session produced which PR) ----------
+
+/** Which writer recorded an edge. See src-tauri/src/provenance.rs. */
+export type ProvenanceVia = "job_done" | "pr_watch" | "backfill";
+
+/** One edge: this session produced this pull request. Recorded when it was made
+ *  rather than joined on demand, because the evidence decays — see the module
+ *  header in provenance.rs. */
+export interface ProvenanceEdge {
+  /** Repo toplevel, absolute. */
+  repo: string;
+  pr_number: number;
+  pr_url: string;
+  branch: string;
+  session_id: string;
+  agent?: string | null;
+  /** Which CLI profile owned the conversation — a resume has to relaunch
+   *  against the same config dir or `--resume <id>` looks in the wrong store. */
+  profile?: string | null;
+  cwd: string;
+  via: ProvenanceVia;
+  /** Unix seconds. */
+  at: number;
+  /** Derived from `via` in Rust so the mapping lives in one language. */
+  confidence: "declared" | "observed" | "inferred";
+}
+
+export interface ProvenanceBackfillReport {
+  scanned: number;
+  matched: number;
+  recorded: number;
+  unattributable: number;
+}
+
+/** Returns whether anything was written — false means it was already on file. */
+export const provenanceRecord = (edge: {
+  repo: string;
+  prNumber: number;
+  prUrl: string;
+  branch: string;
+  sessionId: string;
+  agent?: string | null;
+  profile?: string | null;
+  cwd: string;
+  via: ProvenanceVia;
+}) => invoke<boolean>("provenance_record", { ...edge });
+
+export const provenanceForPr = (repo: string, prNumber: number) =>
+  invoke<ProvenanceEdge[]>("provenance_for_pr", { repo, prNumber });
+
+export const provenanceForSession = (sessionId: string) =>
+  invoke<ProvenanceEdge[]>("provenance_for_session", { sessionId });
+
+/** Adopt the history already on disk. `prs` comes from the PR watcher the
+ *  frontend already holds, so this needs no network of its own. */
+export const provenanceBackfill = (
+  repo: string,
+  prs: { number: number; url: string; branch: string }[],
+) => invoke<ProvenanceBackfillReport>("provenance_backfill", { repo, prs });
 
 // ---------- Context bridge (agent-facing MCP context) ----------
 

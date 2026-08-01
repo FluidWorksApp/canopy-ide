@@ -1112,6 +1112,9 @@ struct Action {
     line: Option<u32>,
     /// notify / message_agent: what to say.
     text: Option<String>,
+    /// message_agent: a pull request number or url, instead of `ptyId` — reach
+    /// whoever raised it without having to know who that was.
+    pr: Option<String>,
     /// notify: info | success | warn | error.
     level: Option<String>,
     /// job_done: how the micro-task ended (done | blocked) and its one-line
@@ -1401,7 +1404,41 @@ async fn action(
             "Told the user.".to_string()
         }
         "message_agent" => {
-            let (Some(id), Some(text)) = (act.pty_id, act.text.as_deref()) else {
+            let Some(text) = act.text.as_deref() else {
+                return (StatusCode::BAD_REQUEST, "message_agent needs text".into());
+            };
+            // The `pr` form names a pull request rather than a terminal, and
+            // resolving it is the frontend's job: only it holds the pty→session
+            // binding, and only it can reopen an ended conversation or open a
+            // tab for a fresh agent. So this hands over rather than answering.
+            if act.pty_id.is_none() {
+                let Some(pr) = act.pr.as_deref() else {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "message_agent needs ptyId or pr".into(),
+                    );
+                };
+                let _ = app.emit(
+                    "agent:action",
+                    serde_json::json!({
+                        "kind": "message_agent",
+                        "route": act.cwd.clone().unwrap_or_default(),
+                        "cwd": act.cwd,
+                        "pr": pr,
+                        "text": text,
+                    }),
+                );
+                return (
+                    StatusCode::OK,
+                    format!(
+                        "Routing to whoever raised {pr}: typed into that session if it is still \
+                         running, its conversation reopened if not, and a fresh agent told what \
+                         it is picking up if there is nothing left to reopen. It answers in its \
+                         own session, not here."
+                    ),
+                );
+            }
+            let (Some(id), Some(text)) = (act.pty_id, Some(text)) else {
                 return (
                     StatusCode::BAD_REQUEST,
                     "message_agent needs ptyId and text".into(),

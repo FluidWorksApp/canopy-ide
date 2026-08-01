@@ -50,6 +50,8 @@ import {
 } from "../microTasks";
 import { rowFor, subscribe as subscribeToPrs } from "../prWatchStore";
 import { TASK_HISTORY_EVENT, taskRuns, type TaskRun } from "../taskHistory";
+import { RaisedBy } from "./RaisedBy";
+import type { PrAgent } from "../agentForPr";
 import { repoLabel } from "../prs";
 import {
   actionable,
@@ -143,6 +145,11 @@ interface PrViewProps {
     payload: P,
     query: string,
   ) => Promise<boolean>;
+  /** Every session running now: id → its terminal, null for another window.
+   *  What turns a recorded edge into "and it is still up". */
+  liveSessions?: Map<string, number | null>;
+  /** Send a change request back to whoever raised this PR. */
+  onSendToRaiser?: (to: PrAgent, text: string) => void;
 }
 
 type Review = "approve" | "request-changes" | "comment";
@@ -289,6 +296,8 @@ export function PrView({
   onStartResolve,
   onSendResolve,
   onMicroTask,
+  liveSessions,
+  onSendToRaiser,
 }: PrViewProps) {
   const [patch, setPatch] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1842,6 +1851,14 @@ export function PrView({
             <span className="pr-when" title={absTime(pr.created)}>
               opened {ago(pr.created)}
             </span>
+          )}
+          {liveSessions && onSendToRaiser && (
+            <RaisedBy
+              repo={repo}
+              number={pr.number}
+              live={liveSessions}
+              onSend={onSendToRaiser}
+            />
           )}
           <span className="pr-stat pr-add">+{pr.additions}</span>
           <span className="pr-stat pr-del">−{pr.deletions}</span>

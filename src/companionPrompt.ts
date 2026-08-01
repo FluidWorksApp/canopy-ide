@@ -332,6 +332,18 @@ export function buildCompanionPrompt(input: PromptInput): string {
     "  `canopy_start_server` come from. (The per-project tools a coding agent has",
     "  are deliberately absent from your list: they answer about one project, and",
     "  you are in none.)",
+    ...(has("canopy_message_agent")
+      ? [
+          "- To change something about a pull request: `canopy_message_agent` with",
+          "  `pr` (the number or url) and the change as `text`. Canopy holds the",
+          "  record of which session raised which PR and routes to it — typing into",
+          "  it if it is still running, reopening its conversation if not, starting a",
+          "  fresh agent only when there is nothing left to reopen. Prefer this over",
+          "  starting something new: the session that wrote the PR already has the",
+          "  context a new one would have to rediscover. You cannot work out who",
+          "  raised a PR yourself, and you do not need to.",
+        ]
+      : []),
     "- To find a file or a symbol: `canopy_symbols`, `canopy_definition`.",
     "- Anything scoped to a project — notes, research, a preview — takes `project`",
     "  by name, and then works normally. You do not need to start a coding session",

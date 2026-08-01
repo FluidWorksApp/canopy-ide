@@ -32,6 +32,7 @@ mod portal;
 mod preview;
 mod procenv;
 mod profiles;
+mod provenance;
 mod prwatch;
 mod pty;
 mod punch;
@@ -395,6 +396,7 @@ pub fn run() {
         .manage(spot::SpotIndex::default())
         .manage(research::ResearchStore::default())
         .manage(notes::NotesStore::default())
+        .manage(provenance::ProvenanceStore::default())
         .manage(vault::Vault::default())
         .manage(clipboard::Clipboard::default())
         .manage(companion::CompanionManager::default())
@@ -568,6 +570,10 @@ pub fn run() {
             notes::notes_delete,
             notes::notes_remind,
             notes::notes_due,
+            provenance::provenance_record,
+            provenance::provenance_for_pr,
+            provenance::provenance_for_session,
+            provenance::provenance_backfill,
             spot::spot_save_context_text,
             fsx::workspace_add,
             fsx::workspace_remove,

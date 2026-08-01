@@ -25,6 +25,17 @@ vi.mock("./ipc", () => ({
     handlers.next = cb;
     return Promise.resolve(() => {});
   },
+  // A snapshot is where a repo's history gets adopted (provenance.ts), and
+  // that module registers a change-channel handler when it loads. Neither is
+  // this file's subject; both have to exist for the import to work.
+  onStoreChange: () => new Promise<never>(() => {}),
+  provenanceBackfill: vi.fn(async () => ({
+    scanned: 0,
+    matched: 0,
+    recorded: 0,
+    unattributable: 0,
+  })),
+  provenanceForPr: vi.fn(async () => []),
 }));
 
 import * as store from "./prWatchStore";
