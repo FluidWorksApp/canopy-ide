@@ -5200,10 +5200,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
           env,
           env.length ? profile : undefined,
         );
-        // Surface the new agent where it lives: the Agents section, expanded so
-        // the just-launched row is actually in view.
-        setSideTab("agents");
-        setPinned(true);
       } else if (cli.rebound || !cli.install) {
         // Two cases, one answer: an override points somewhere the vendor's
         // installer can never satisfy, and a custom entry has no installer at all
