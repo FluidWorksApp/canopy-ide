@@ -45,6 +45,7 @@ import { revealScroll } from "../../tabSticky";
 import { useFlipStrip } from "../../tabFlip";
 import { modelFor, monaco, languageForPath } from "../../monaco-setup";
 import { getCaret, subscribeCaret } from "../../editorState";
+import { setCompanionSpotlight } from "../../companionContext";
 import { useEscapeBackstop, useEscapeLayer } from "../../useEscape";
 import { subscribe as prWatchSubscribe } from "../../prWatchStore";
 import { GuestSession, OwnerSession } from "../../collab";
@@ -5878,6 +5879,24 @@ const ProjectViewBody = memo(function ProjectViewBody({
   useEffect(() => {
     const publish = () => {
       const caret = getCaret();
+      // The companion's spotlight rides the same publish: what the visible
+      // project has in front of the user, for the envelope every companion
+      // message carries. Before the dedup check on purpose — visibility is
+      // part of the spotlight's identity, and the module dedups itself.
+      setCompanionSpotlight(
+        project.id,
+        visible
+          ? {
+              project: project.name,
+              tab: describeTab(tabs.find((t) => t.id === activeTabId)),
+              caret:
+                caret &&
+                tabs.some((t) => t.type === "file" && t.file.path === caret.path)
+                  ? { path: caret.path, line: caret.line }
+                  : null,
+            }
+          : null,
+      );
       const snapshot = JSON.stringify({
         id: project.id,
         name: project.name,
@@ -5991,8 +6010,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
       window.clearTimeout(t);
     };
   }, []);
-  // A closed project's servers die with it; drop its snapshot too.
-  useEffect(() => () => void ipc.contextRemove(project.id), [project.id]);
+  // A closed project's servers die with it; drop its snapshot too — and its
+  // spotlight, or the companion would keep being told about a view that is gone.
+  useEffect(
+    () => () => {
+      void ipc.contextRemove(project.id);
+      setCompanionSpotlight(project.id, null);
+    },
+    [project.id],
+  );
 
   // The agent behind the active *terminal* tab, if any — the "Agent Workspace"
   // toggle and its overlay only exist here. Identity is the live process (same

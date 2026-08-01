@@ -135,4 +135,25 @@ describe("the brief", () => {
   it("makes it say which project — it is in none of them", () => {
     expect(buildCompanionPrompt(base)).toContain("**Say which project.**");
   });
+
+  it("explains the context envelope so it reads as grounding, not as user words", () => {
+    // Every message arrives with a bracketed `[Canopy: …]` line naming what
+    // the user was looking at (companionContext.ts). Unexplained, the model
+    // either quotes it back or asks about it; explained, "this file" resolves.
+    const p = buildCompanionPrompt(base);
+    expect(p).toContain("## Where the user is");
+    expect(p).toContain("[Canopy:");
+    expect(p).toContain("not the user's words");
+    expect(p).toContain("Never read the line back");
+  });
+
+  it("points at canopy_editor_state only when the session holds it", () => {
+    const withTool = buildCompanionPrompt({
+      ...base,
+      tools: [...base.tools, "canopy_editor_state"],
+    });
+    expect(withTool).toContain("canopy_editor_state");
+    // The brief must not name a tool this session was not handed.
+    expect(buildCompanionPrompt(base)).not.toContain("canopy_editor_state");
+  });
 });

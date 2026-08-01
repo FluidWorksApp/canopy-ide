@@ -2089,6 +2089,43 @@ export default function App() {
       })),
     [ws.projects, ws.openIds, hibernated],
   );
+  // Closed and hibernated projects get a minimal snapshot in the context
+  // bridge — id, name, component paths, no live state. The bridge resolves
+  // `project` arguments (notes, research) against its snapshots, and those
+  // used to exist only while a ProjectView was mounted: a companion told it
+  // could reach every project got "no project called X" back for exactly the
+  // closed ones its brief promised it could read. Open projects are excluded
+  // here because their ProjectView publishes the rich snapshot, and this one
+  // must not race it; a ProjectView's unmount removes its snapshot before this
+  // effect re-runs, so a project that closes is re-covered in the same commit.
+  const publishedClosedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const closed = new Set<string>();
+    for (const p of ws.projects) {
+      // A hibernated tab keeps its place in openIds but mounts no ProjectView
+      // (that is the saving), so it needs this cover exactly like a closed one.
+      const asleep = Boolean(hibernated[p.id]) && !waking[p.id];
+      if (ws.openIds.includes(p.id) && !asleep) continue;
+      closed.add(p.id);
+      void ipc.contextPublish(
+        p.id,
+        JSON.stringify({
+          id: p.id,
+          name: p.name,
+          closed: true,
+          components: p.components.map((c) => ({ label: c.label, path: c.path })),
+        }),
+      );
+    }
+    // A project deleted from the workspace (not merely opened) must not leave
+    // a ghost snapshot answering for it.
+    for (const id of publishedClosedRef.current) {
+      if (!closed.has(id) && !ws.projects.some((p) => p.id === id)) {
+        void ipc.contextRemove(id);
+      }
+    }
+    publishedClosedRef.current = closed;
+  }, [ws.projects, ws.openIds, hibernated, waking]);
   // One launcher, called by the mount effect, by the install-finished events,
   // and by the Retry button. A second copy would drift from this one the first
   // time a launch argument changed.

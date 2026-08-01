@@ -9,8 +9,13 @@
 // obvious thing would have been to show its TUI; what the user wants from a
 // companion is an answer, so tool calls are chips and prose is prose.
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { CompanionProposal, CompanionState } from "../companionSession";
+import {
+  companionSpotlight,
+  spotlightHint,
+  subscribeSpotlight,
+} from "../companionContext";
 import { Markdown } from "./Markdown";
 
 interface Props {
@@ -49,6 +54,11 @@ export function CompanionChat({
   const [draft, setDraft] = useState("");
   const log = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
+
+  // What the next message will be grounded in — the same spotlight the
+  // envelope reads, shown so "which project does it think I'm on" is never a
+  // mystery the user has to ask the companion itself.
+  const spot = useSyncExternalStore(subscribeSpotlight, companionSpotlight, () => null);
 
   // Opening the panel puts the caret in it: this is summoned to be typed into,
   // and a click-then-click-again is the one thing a summon must not cost.
@@ -212,6 +222,18 @@ export function CompanionChat({
           <button className="companion-retry" onClick={onRetry} type="button">
             Retry
           </button>
+        </div>
+      )}
+
+      {spot && !dead && (
+        <div
+          className="companion-sees"
+          title={`${name} is told what you're looking at with each message`}
+        >
+          <span className="companion-sees-eye" aria-hidden>
+            ◉
+          </span>
+          {spotlightHint(spot)}
         </div>
       )}
 

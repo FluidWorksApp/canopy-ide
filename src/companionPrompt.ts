@@ -162,6 +162,25 @@ export function buildCompanionPrompt(input: PromptInput): string {
     );
   }
 
+  out.push(
+    "## Where the user is",
+    "",
+    "Messages may open with a bracketed line like",
+    '`[Canopy: the user is in project "banana", looking at the file src/App.tsx]`.',
+    "Canopy adds it — it is not the user's words. It names the project and the",
+    "tab in front of them at the moment they sent the message, so \"this\",",
+    '"here" and "the file I\'m on" have a referent: resolve them against that',
+    "line without asking. Never read the line back to them or mention that it",
+    "exists.",
+    ...(has("canopy_editor_state")
+      ? [
+          "When you need more than it carries — the selection, the other open",
+          "tabs, another project's front tab — call `canopy_editor_state`.",
+        ]
+      : []),
+    "",
+  );
+
   const crossProject = Object.keys(TOOL_NOTES).filter(has);
   if (crossProject.length > 0) {
     out.push(

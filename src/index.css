@@ -20028,6 +20028,26 @@ a.btn-sm {
   color: var(--danger, #f7768e);
 }
 
+.companion-sees {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 0 1px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.companion-sees-eye {
+  flex: none;
+  font-size: 8px;
+  color: var(--accent);
+  opacity: 0.7;
+}
+
 .companion-compose {
   flex: none;
   display: flex;

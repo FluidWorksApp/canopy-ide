@@ -21,6 +21,7 @@ import {
   type CompanionAuthority,
   type CompanionLaunch,
 } from "./companion";
+import { companionSpotlight, spotlightEnvelope } from "./companionContext";
 import { buildCompanionPrompt, type PromptProject } from "./companionPrompt";
 import {
   startOneshot,
@@ -428,8 +429,15 @@ export async function sendToCompanion(text: string): Promise<void> {
       { id: nextId(), who: "ash", text: "" },
     ],
   });
+  // The envelope rides the wire, not the panel: the user reads their own
+  // words back, and the agent reads them grounded in what was on screen when
+  // they were sent. Attached per message rather than per session because the
+  // user moves — the file in front of them at question three is not the one
+  // from question one.
+  const spot = companionSpotlight();
+  const wire = spot ? `${spotlightEnvelope(spot)}\n\n${body}` : body;
   try {
-    await transport.send(body);
+    await transport.send(wire);
   } catch (err) {
     set({ status: "ready", error: String(err) });
   }
