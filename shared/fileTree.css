@@ -165,7 +165,17 @@
   font-size: 11px;
   width: 16px;
   flex: 0 0 16px;
-  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* The Material file icons arrive at full saturation and shout next to our own
+   palette; knocking them back sits them in the theme. Scoped to the image on
+   purpose — the folder glyph beside them is a stroked icon painted in
+   `currentColor`, and desaturating it would pull the row's colour off the theme
+   it is supposed to be matching. */
+.tree-file-icon img {
   filter: saturate(0.8);
 }
 

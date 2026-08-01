@@ -3557,10 +3557,6 @@ body.resizing-side * {
   color: var(--text-dim);
 }
 
-.folder-svg {
-  vertical-align: -1px;
-}
-
 /* ---------- CLI launcher menu ---------- */
 
 .cli-menu-anchor {

@@ -12,10 +12,17 @@
 // desktop's ipc module here, which is what makes that possible; the seam was
 // already half-built (`readDir`, `readOnly`) for live-shared projects, and this
 // finishes it.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { Dialog } from "./Dialog";
-import { ChevronIcon } from "./icons";
+import { ChevronIcon, IconFolder } from "./icons";
 import { WindowedList } from "./WindowedList";
 import { Button } from "./ui/Button";
 
@@ -98,6 +105,12 @@ interface FileTreeProps {
    *  bake into the binary and pull over a mobile link — so the portal passes
    *  nothing and gets the tree's own rows without them. */
   iconUrl?: (fileName: string) => string | undefined;
+  /** The folder glyph, for the same reason `iconUrl` is injected: so the tree
+   *  wears the icon set of the shell it's rendered in. The desktop passes the
+   *  very component its rail uses, so the two frames are identical by
+   *  construction rather than by a copied path. The portal passes nothing and
+   *  gets `IconFolder` from the shared set. */
+  folderIcon?: () => ReactNode;
   /** No git overlay, no filesystem watch, no rename/delete/create — for a tree
    *  that isn't the local disk (a teammate's shared project). */
   readOnly?: boolean;
@@ -116,26 +129,21 @@ interface DirState {
 // encode it rather than interpolate it raw into an id.
 const rowId = (path: string) => `tree-row-${encodeURIComponent(path)}`;
 
-// Standard IDE-style yellow folder (VS Code-like), inline SVG.
-function FolderIcon({ open }: { open: boolean }) {
-  return (
-    <svg width="15" height="13" viewBox="0 0 16 14" className="folder-svg">
-      {open ? (
-        <>
-          <path
-            d="M1.5 2.5h4l1.5 1.5h6.5a1 1 0 0 1 1 1v1h-11l-2 6h-1v-8.5a1 1 0 0 1 1-1z"
-            fill="#dcb67a"
-          />
-          <path d="M3.2 6.5h12.3l-1.8 6H1.5l1.7-6z" fill="#e8c88f" />
-        </>
-      ) : (
-        <path
-          d="M1.5 2.5h4l1.5 1.5h7.5a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1z"
-          fill="#dcb67a"
-        />
-      )}
-    </svg>
-  );
+// The folder glyph, from whichever shell is rendering the tree. Each app owns
+// one folder frame — the desktop's rail folder, the portal's `IconFolder` — and
+// the tree borrows it rather than drawing a third, so the folder in the rail and
+// the folder in the tree beside it are the same shape at the same weight.
+//
+// Every one of them strokes `currentColor`, which is what makes the row's own
+// colour reach the icon: dim for a file, `--warn` when git says modified, faded
+// with the row when it's ignored. The filled #dcb67a folder this replaces was
+// the only hard-coded colour left in the tree and the only glyph that ignored
+// the theme.
+//
+// One shape for open and closed: the chevron to its left already says which,
+// and a second silhouette only competes with it.
+function FolderIcon({ render }: { render?: () => ReactNode }) {
+  return <>{render ? render() : <IconFolder s={15} />}</>;
 }
 
 /** Real file-type icon from the Material Icon Theme; falls back to its own
@@ -170,6 +178,7 @@ export function FileTree({
   fs,
   readDir,
   iconUrl,
+  folderIcon,
   readOnly,
   taskMenuFor,
 }: FileTreeProps) {
@@ -665,7 +674,7 @@ export function FileTree({
         </span>
         <span className="tree-file-icon">
           {item.isDir ? (
-            <FolderIcon open={expanded} />
+            <FolderIcon render={folderIcon} />
           ) : (
             <FileIcon name={item.name} iconUrl={iconUrl} />
           )}
