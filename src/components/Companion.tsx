@@ -11,7 +11,15 @@
 // later without touching the mascot, the drag or the panel — only what supplies
 // the viewport changes.
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import {
   DEFAULT_SPOT,
   clampSpot,
@@ -28,7 +36,7 @@ import {
   type CompanionProposal,
   type CompanionState,
 } from "../companionSession";
-import { ashStateFor, toastMs, type AttentionItem } from "../attention";
+import { ashStateFor, isOutstanding, type AttentionItem } from "../attention";
 import { browserViewSnapshots, onBrowserSignal } from "../browserSignals";
 import { getSettings, updateSettings, SETTINGS_CHANGE_EVENT } from "../settings";
 import { Mascot } from "./Mascot";
@@ -40,6 +48,10 @@ import type { AshState } from "../ash";
 const MASCOT = 54;
 const PANEL_WIDTH = 352;
 const PANEL_HEIGHT = 380;
+/** What a notice card is taken to be tall before it has been measured — one
+ *  line of title, one of body. Only the bottom clamp reads it, so being wrong
+ *  for a frame costs nothing; being wrong forever is what `PANEL_HEIGHT` was. */
+const NOTICE_HEIGHT = 76;
 const GAP = 14;
 /** How far the pointer has to travel before a press counts as a drag rather
  *  than a click. Below this, a click with a shaky hand would move the companion
@@ -190,6 +202,27 @@ export function Companion({
   // belongs.
   const notice = notices[notices.length - 1];
 
+  // The card is not the panel, and placing it with the panel's geometry meant
+  // the panel's 380px bottom clamp: with the companion parked near the bottom
+  // edge — where it starts — the card was pushed a third of the window above
+  // the mascot supposedly saying it, floating unattached in the middle of the
+  // work. It gets its own placement, off its own height.
+  //
+  // Measured rather than assumed, because the height is genuinely variable: a
+  // title that wraps to four lines is three times a one-liner, and the height's
+  // only job here is to keep the card's bottom on screen.
+  const [noticeHeight, setNoticeHeight] = useState(NOTICE_HEIGHT);
+  const noticeAt = useMemo(
+    () =>
+      panelPlacement(at, view, {
+        mascot: MASCOT,
+        panelWidth: PANEL_WIDTH,
+        panelHeight: noticeHeight,
+        gap: GAP,
+      }),
+    [at.left, at.top, view.width, view.height, noticeHeight], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
   const onPointerDown = useCallback(
     (e: React.PointerEvent) => {
       // Left button only — a right click is the context menu everywhere else.
@@ -303,10 +336,11 @@ export function Companion({
       {notice && !dragging && (
         <CompanionNotice
           item={notice}
-          at={panel}
+          at={noticeAt}
           more={notices.length - 1}
           onDismiss={() => onDismissNotice(notice.id)}
           onFollow={() => onFollowNotice(notice)}
+          onHeight={setNoticeHeight}
         />
       )}
 
@@ -335,20 +369,34 @@ function CompanionNotice({
   more,
   onDismiss,
   onFollow,
+  onHeight,
 }: {
   item: AttentionItem;
   at: { left: number; top: number; side: "left" | "right" };
   more: number;
   onDismiss: () => void;
   onFollow: () => void;
+  onHeight: (px: number) => void;
 }) {
-  // A question never fades — it is outstanding until answered, and the
-  // companion is only its messenger. `toastMs` is the queue's own rule; this
-  // does not get to invent a second one.
-  const fades = toastMs(item) != null;
+  // The standing accent edge means "outstanding" — a question nobody has
+  // answered yet. It used to be drawn for anything that does not fade, which an
+  // *error* also satisfies (high urgency, no timer), so a failure wore the
+  // question's accent while Ash wore `blocked` red for the same item. That is
+  // precisely the disagreement the corner strip removed when it dropped its own
+  // stripe. `isOutstanding` is the queue's own predicate; this does not get to
+  // invent a second one, and the tone gets its own quiet tint below instead.
+  const held = isOutstanding(item);
+  const box = useRef<HTMLDivElement>(null);
+  // Before paint, so the card is never drawn once at the assumed height and
+  // again where it belongs.
+  useLayoutEffect(() => {
+    const h = box.current?.offsetHeight;
+    if (h) onHeight(h);
+  }, [item.id, item.title, item.body, item.projectName, onHeight]);
   return (
     <div
-      className={`companion-notice companion-notice-${at.side}${fades ? "" : " companion-notice-held"}`}
+      ref={box}
+      className={`companion-notice companion-notice-${at.side} companion-notice-${item.tone}${held ? " companion-notice-held" : ""}`}
       style={{ left: at.left, top: at.top, width: PANEL_WIDTH }}
       role="status"
     >

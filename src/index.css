@@ -8685,7 +8685,13 @@ input[type="radio"]:disabled {
 .palette-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 200;
+  /* Above the transient layer — the corner notice stack (300) and the companion
+     with its card (318–320) — and below the dialogs (400+). This is a modal
+     surface: it takes the keyboard and dims everything behind it, so a toast
+     that goes on painting over the list it is filtering, and a mascot sitting
+     on top of the results, are both the scrim failing to be a scrim. Was 200,
+     which put it under everything that arrives while you are typing. */
+  z-index: 330;
   display: flex;
   justify-content: center;
   align-items: flex-start;
@@ -19688,8 +19694,27 @@ a.btn-sm {
   animation: companion-in 0.21s cubic-bezier(0.2, 0.9, 0.2, 1) both;
 }
 
+/* The kind, as the same quiet border tint the corner strip carries (see
+   .notice-success and friends). Ash's face is the severity — the card only has
+   to read as its kind out of the corner of the eye, without competing. Without
+   these an error and a success were the same card, and the one coloured thing
+   on a failure was the accent edge below, which says the opposite. `info` keeps
+   the default border: nothing happened that needs a colour. */
+.companion-notice-success {
+  border-color: color-mix(in srgb, var(--ok) 55%, var(--border-strong));
+}
+
+.companion-notice-warn {
+  border-color: color-mix(in srgb, var(--warn) 55%, var(--border-strong));
+}
+
+.companion-notice-error {
+  border-color: var(--danger);
+}
+
 /* A question never fades, so it gets a standing accent edge — the card is a
-   view of something still outstanding, not an announcement that has been made. */
+   view of something still outstanding, not an announcement that has been made.
+   After the tone rules, so the edge survives its own card's tint. */
 .companion-notice-held {
   border-left: 2px solid var(--accent);
 }
