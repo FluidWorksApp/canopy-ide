@@ -12735,6 +12735,213 @@ textarea,
   margin-left: auto;
 }
 
+/* ---------- prune dialog (bulk branch/workspace removal) ---------- */
+
+/* Taller than the cleanup dialog's list on purpose: this one is read by
+   scrolling, and a repo that needs pruning has ninety rows in here. */
+.prn-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 52vh;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  font-size: 12px;
+}
+
+/* The controls stay put while the list scrolls under them — with ninety rows,
+   a filter you have to scroll back up to reach is a filter nobody uses. */
+.prn-controls {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-bottom: 6px;
+  /* The dialog panel's own surface, so rows scrolling under this are covered
+     rather than showing through it. */
+  background: var(--bg-overlay);
+}
+
+.prn-note {
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
+.prn-note code {
+  font-family: var(--font-mono);
+}
+
+.prn-note-warn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--warn);
+}
+
+/* Same shape as the cleanup dialog's Trash toggle: a checkbox whose label is a
+   noun phrase, with the consequence spelled out under it. */
+.prn-mode {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.prn-mode em {
+  display: block;
+  font-style: normal;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+
+.prn-mode input {
+  margin-top: 2px;
+}
+
+/* Everything in the scroll box keeps its natural height. Without this the
+   column flex squeezes each group down to a sliver to make them all fit, which
+   is exactly the opposite of what a scrolling list is for. */
+.prn-body > * {
+  flex: 0 0 auto;
+}
+
+.prn-group {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  overflow: hidden;
+}
+
+.prn-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.prn-group-name {
+  white-space: nowrap;
+}
+
+/* Risk reads in the heading colour, the same way Loose ends does it: red means
+   pruning this loses work. */
+.prn-head-uncommitted {
+  color: var(--danger);
+}
+
+.prn-head-unpushed {
+  color: var(--warn);
+}
+
+.prn-head-safe {
+  color: var(--accent);
+}
+
+.prn-spacer {
+  flex: 1;
+}
+
+.prn-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 8px;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.prn-row:hover {
+  background: var(--bg-alt);
+}
+
+/* A ticked row that costs something is marked on the row itself, not only in
+   the total at the bottom — the total is one line and this is ninety. */
+.prn-row-lossy {
+  box-shadow: inset 2px 0 0 var(--danger);
+}
+
+.prn-row-off {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.prn-name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40%;
+  flex: 0 0 auto;
+}
+
+.prn-chip {
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 4px;
+  corner-shape: squircle;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.prn-chip-warn {
+  color: var(--warn);
+  border-color: color-mix(in oklab, var(--warn) 45%, transparent);
+}
+
+.prn-chip-live {
+  color: var(--accent);
+  border-color: color-mix(in oklab, var(--accent) 45%, transparent);
+}
+
+.prn-why {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+/* Git kept this one. The reason replaces the row's usual sentence, so it has to
+   read as an answer rather than as more description. */
+.prn-why-refused {
+  color: var(--warn);
+}
+
+.prn-age {
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.prn-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 2px;
+  color: var(--text-dim);
+}
+
+.prn-error {
+  color: var(--danger);
+}
+
 /* ---------- agent workspace tab ---------- */
 
 .aw-pr {
