@@ -19,6 +19,7 @@ import { AgentChip } from "./AgentChip";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { RestartIcon } from "./icons";
 import { LooseEnds } from "./LooseEnds";
+import { PruneDialog } from "./PruneDialog";
 import { Button } from "./ui";
 
 /** `askDialog` speaks the switch dialog's vocabulary of actions, which has no
@@ -105,6 +106,11 @@ export function GitPanel({
   const [section, setSection] = useState<Section>("branches");
   const [busy, setBusy] = useState<string | null>(null);
   const [branchFilter, setBranchFilter] = useState("");
+  const [pruning, setPruning] = useState(false);
+  /** Bumped when a bulk prune finishes. The lists here refresh off `refresh()`
+   *  and `loadWorktrees()`, but Loose ends reads its own audit — this is how it
+   *  is told that ninety of the rows it is showing have just gone. */
+  const [pruned, setPruned] = useState(0);
   // Every switch, and every question that isn't one, goes through the one
   // funnel mounted above this panel — so a refusal is answerable from here
   // whether or not this panel is the surface still on screen.
@@ -752,6 +758,18 @@ export function GitPanel({
             {s === "loose" ? "Loose ends" : s[0].toUpperCase() + s.slice(1)}
           </button>
         ))}
+        <span className="git-spacer" />
+        {/* On the tab strip rather than inside one section, because it is about
+            the repo and not about whichever list you happen to be reading —
+            Branches, Loose ends and the Servers panel's workspace rows are all
+            long for the same reason, and this is the one thing that shortens
+            all three. */}
+        <Button size="sm" variant="ghost"
+          disabled={!repo}
+          title="Review every branch and workspace at once, and take the leftovers away"
+          onClick={() => setPruning(true)}>
+          Prune…
+        </Button>
       </div>
 
       {busy && <div className="git-busy">{busy}…</div>}
@@ -884,6 +902,8 @@ export function GitPanel({
       {section === "loose" && (
         <LooseEnds
           repo={repo}
+          refreshKey={pruned}
+          onPrune={() => setPruning(true)}
           onOpenBranch={onOpenBranch}
           onOpenTerminal={onOpenTerminal}
           onNotice={onNotice}
@@ -918,10 +938,24 @@ export function GitPanel({
       )}
 
 
-      {/* No dialog is mounted here. Every question this panel asks — a switch
-          git refused, a workspace being removed, a branch being deleted — is
-          put on screen by the one dialog above us, so it stays answerable even
-          when another side tab takes this panel off screen. */}
+      {/* The one dialog this panel does mount. Every *question* it asks — a
+          switch git refused, a workspace being removed, a branch being deleted
+          — still goes to the funnel above us, so it stays answerable when
+          another side tab takes this panel off screen. Pruning is not a
+          question: it is a working surface with a filter, a selection and a
+          list you scroll, and it belongs to the panel you opened it from. */}
+      <PruneDialog
+        open={pruning}
+        repo={repo}
+        busy={[...serverCwds, ...agentCwds]}
+        onNotice={onNotice}
+        onChanged={() => {
+          setPruned((n) => n + 1);
+          void refresh();
+          void loadWorktrees(true);
+        }}
+        onClose={() => setPruning(false)}
+      />
 
       {ctx.menu && (
         <ContextMenu x={ctx.menu.x} y={ctx.menu.y} items={ctx.menu.items} onClose={ctx.close} />

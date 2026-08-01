@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useState } from "react";
 import * as ipc from "../ipc";
 import { askDialog, heldBadge } from "../branchSwitch";
+import { baseName, whyRefused } from "../prune";
 import { useBranchSwitch } from "../useBranchSwitch";
 import type { Notify } from "../types";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
@@ -22,6 +23,13 @@ interface LooseEndsProps {
   onOpenBranch: (repo: string, branch: ipc.BranchWork) => void;
   onOpenTerminal: (cwd: string, label: string) => void;
   onNotice: Notify;
+  /** Open the bulk prune screen. This panel takes loose ends away one at a
+   *  time, which is the wrong shape once there are ninety of them — so the
+   *  summary that counts them offers the screen that clears them. */
+  onPrune?: () => void;
+  /** Bumped by the owner after something outside this panel moved a ref — a
+   *  bulk prune. Re-reads the audit; nothing else about it changes. */
+  refreshKey?: number;
   /** The "Tasks ▸" submenu for a right-clicked branch, built by the owner (it
    *  knows the task registry). Omitted where tasks don't apply. */
   taskMenuFor?: (b: ipc.BranchWork) => MenuItem;
@@ -77,32 +85,15 @@ function bucketOf(b: ipc.BranchWork, countsDegraded: boolean): Bucket {
 const ago = (days: number) =>
   days === 0 ? "today" : days === 1 ? "yesterday" : `${days}d ago`;
 
-/** The folder's own name — what a person calls a workspace. */
-const baseName = (path: string) => path.replace(/\/+$/, "").split("/").pop() || path;
-
 const files = (n: number) => `${n} uncommitted file${n === 1 ? "" : "s"}`;
-
-/** Why git kept a branch, in words. Only the two refusals a bulk cleanup
- *  actually meets are worth naming; anything else keeps git's own first line,
- *  which is better than the silence this used to keep. */
-function whyRefused(err: string): string {
-  const at = /checked out at '([^']+)'/.exec(err)?.[1];
-  if (at) return `it's open in ${baseName(at)}`;
-  if (/not fully merged/i.test(err))
-    return `it still has commits that aren't on the base branch`;
-  return (
-    err
-      .split("\n")
-      .map((l) => l.replace(/^(error|fatal|warning):\s*/i, "").trim())
-      .find(Boolean) ?? "git wouldn't say why"
-  );
-}
 
 export function LooseEnds({
   repo,
   onOpenBranch,
   onOpenTerminal,
   onNotice,
+  onPrune,
+  refreshKey = 0,
   taskMenuFor,
 }: LooseEndsProps) {
   const ctx = useContextMenu();
@@ -153,7 +144,7 @@ export function LooseEnds({
   // was started — so this list stops going stale behind the shared dialog.
   useEffect(() => {
     void load();
-  }, [load, version]);
+  }, [load, version, refreshKey]);
 
   // A different repo is a different audit; the "left alone" filter can't follow.
   useEffect(() => {
@@ -479,6 +470,15 @@ export function LooseEnds({
           <strong>{cleanable}</strong> safe to remove
         </span>
         <span className="git-spacer" />
+        {/* Beside the counts, because the counts are the argument for it: two
+            numbers in the nineties are not a list you clear a row at a time. */}
+        {onPrune && (
+          <Button size="sm" variant="accent"
+            title="Review every branch and workspace at once, and take the leftovers away"
+            onClick={onPrune}>
+            Prune…
+          </Button>
+        )}
         <Button size="sm" onClick={() => void load()} disabled={busy}>
           {busy ? "…" : "Recheck"}
         </Button>
