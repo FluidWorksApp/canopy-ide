@@ -346,6 +346,36 @@ fn project_for_request(
         .or_else(|| project_for_cwd(app, cwd))
 }
 
+/// The directory an action or a browser op should be *routed* by: the project
+/// the caller named, else the directory it happens to be sitting in.
+///
+/// The cwd alone was the whole routing story, and for a coding agent it still
+/// is — it lives in one checkout and that checkout is the answer. The companion
+/// lives in none, so its cwd (`~/.canopy/companion`) matched no project and the
+/// frontend fell back to "the single open project": correct with one project
+/// open, and with two it refused outright — "an agent asked to act, but its
+/// directory isn't in any open project" — so the companion could not put a
+/// preview in front of the user at all. Naming the project is how an agent that
+/// is in none says which one it means.
+///
+/// An unknown name is an error rather than a fallback, on the same terms as
+/// notes and research: silently landing in another project is worse than being
+/// told the name was wrong.
+fn route_for_project(
+    app: &tauri::AppHandle,
+    project: Option<&str>,
+    cwd: Option<&str>,
+) -> Result<String, String> {
+    match project.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(name) => project_by_name(app, name)
+            .and_then(|(_, _, roots)| roots.into_iter().next())
+            .ok_or_else(|| {
+                format!("no project called \"{name}\" — canopy_workspace lists them by name")
+            }),
+        None => Ok(cwd.unwrap_or_default().to_string()),
+    }
+}
+
 fn project_for_cwd(app: &tauri::AppHandle, cwd: &str) -> Option<ProjectCandidate> {
     let bridge = app.state::<ContextBridge>();
     let snapshots = bridge.snapshots.lock().unwrap();
@@ -1062,6 +1092,10 @@ struct Action {
     /// The agent's cwd (the sidecar's), for routing to a project when no more
     /// specific target is given.
     cwd: Option<String>,
+    /// open_preview: which project's window to open it in, by name. What an
+    /// agent that is inside no project uses instead of its cwd.
+    #[serde(default)]
+    project: Option<String>,
     /// start_server: the component directory + the run command's name.
     dir: Option<String>,
     command: Option<String>,
@@ -1149,12 +1183,23 @@ async fn action(
                     format!("{url} isn't an http:// or https:// URL — the preview opens web pages"),
                 );
             }
-            let route = act.cwd.clone().unwrap_or_default();
+            let route = match route_for_project(&app, act.project.as_deref(), act.cwd.as_deref()) {
+                Ok(route) => route,
+                Err(e) => return (StatusCode::BAD_REQUEST, e),
+            };
             let _ = app.emit(
                 "agent:action",
                 serde_json::json!({ "kind": "open_preview", "route": route, "url": url }),
             );
-            format!("Opened a preview of {url} in Canopy.")
+            match act
+                .project
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+            {
+                Some(p) => format!("Opened a preview of {url} in {p}."),
+                None => format!("Opened a preview of {url} in Canopy."),
+            }
         }
         "stop_server" => {
             let Some(id) = act.pty_id else {
@@ -1405,6 +1450,10 @@ async fn action(
 struct BrowserOp {
     op: String,
     cwd: Option<String>,
+    /// Which project's preview to drive, by name — for an agent (the
+    /// companion) whose cwd is inside none of them.
+    #[serde(default)]
+    project: Option<String>,
     url: Option<String>,
     /// navigate: back | forward | reload (when no url is given).
     action: Option<String>,
@@ -1654,6 +1703,14 @@ async fn browser(
         }
     }
 
+    // Which window's preview this drives. Checked before a ticket is minted:
+    // an unknown project name must come back as an error the agent can read,
+    // not as a request nobody answers until the timeout.
+    let route = match route_for_project(&app, op.project.as_deref(), op.cwd.as_deref()) {
+        Ok(route) => route,
+        Err(e) => return (StatusCode::BAD_REQUEST, e),
+    };
+
     let bridge = app.state::<ContextBridge>();
     let id = bridge.next_op.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1664,7 +1721,7 @@ async fn browser(
         serde_json::json!({
             "id": id,
             "op": op.op,
-            "route": op.cwd.clone().unwrap_or_default(),
+            "route": route,
             "url": op.url,
             "action": op.action,
             "ref": op.r#ref,

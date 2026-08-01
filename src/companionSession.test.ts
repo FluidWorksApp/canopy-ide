@@ -1,5 +1,35 @@
 import { describe, expect, it } from "vitest";
-import { isStaleResume } from "./companionSession";
+import { isStaleResume, retryDelay } from "./companionSession";
+
+// A launch that failed used to sit failed: only a *stale resume* healed itself,
+// and everything else waited for the user to notice a dead mascot and click
+// Retry. A transient failure — the CLI's own service briefly unreachable, a
+// machine still waking — is the common case and should never reach them.
+describe("trying a failed launch again", () => {
+  it("backs off rather than hammering", () => {
+    const first = retryDelay(0)!;
+    const second = retryDelay(1)!;
+    const third = retryDelay(2)!;
+    expect(first).toBeGreaterThan(0);
+    expect(second).toBeGreaterThan(first);
+    expect(third).toBeGreaterThan(second);
+  });
+
+  it("gives up, so a permanently broken CLI is not a spawn loop", () => {
+    // A missing binary or a bad flag fails identically forever; retrying it
+    // costs the user money and tells them nothing. Three tries, then the panel
+    // says so and a person decides.
+    expect(retryDelay(3)).toBeNull();
+    expect(retryDelay(9)).toBeNull();
+  });
+
+  it("finishes the ladder inside a minute", () => {
+    // Long enough to outlast a blip, short enough that a user who steps away
+    // for coffee comes back to a working companion rather than a dead one.
+    const total = [0, 1, 2].reduce((sum, n) => sum + (retryDelay(n) ?? 0), 0);
+    expect(total).toBeLessThanOrEqual(60_000);
+  });
+});
 
 // The bug this whole branch exists for: the very first launch failed (a missing
 // CLI flag), but the session had already been marked as "this CLI has a

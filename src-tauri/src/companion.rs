@@ -130,7 +130,25 @@ pub async fn companion_spawn(
     }
     cmd.env("CANOPY", "1");
     if let Some(ctx) = app.try_state::<crate::context::ContextBridge>() {
-        if let Some((port, token)) = ctx.env() {
+        // The bridge binds its port asynchronously at startup, and the
+        // companion launches from the frontend's first mount — a race the
+        // companion sometimes lost. Losing it meant spawning with no
+        // CANOPY_CTX_PORT at all, so every canopy_* call answered "this
+        // session isn't running inside a Canopy terminal" until the app was
+        // restarted (a running companion is never respawned). Wait for the
+        // port instead: it arrives within milliseconds of setup, and a bounded
+        // wait keeps a bridge that genuinely failed to bind from wedging the
+        // spawn forever.
+        let mut bridge = ctx.env();
+        let mut waited = std::time::Duration::ZERO;
+        const STEP: std::time::Duration = std::time::Duration::from_millis(50);
+        const CEILING: std::time::Duration = std::time::Duration::from_secs(5);
+        while bridge.is_none() && waited < CEILING {
+            tokio::time::sleep(STEP).await;
+            waited += STEP;
+            bridge = ctx.env();
+        }
+        if let Some((port, token)) = bridge {
             cmd.env("CANOPY_CTX_PORT", port.to_string());
             cmd.env("CANOPY_CTX_TOKEN", token);
         }

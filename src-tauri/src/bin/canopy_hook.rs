@@ -2615,7 +2615,8 @@ fn tool_defs() -> serde_json::Value {
             "name": "canopy_open_preview",
             "description": "Open a URL in Canopy's preview browser for the user to look at and annotate. To drive the page yourself, use canopy_browser_navigate instead.",
             "inputSchema": { "type": "object", "properties": {
-                "url": { "type": "string", "description": "An http:// or https:// URL — a local server or a remote page" }
+                "url": { "type": "string", "description": "An http:// or https:// URL — a local server or a remote page" },
+                "project": { "type": "string", "description": "Which project's window to open it in, by name. Only needed when you are not running inside one — the companion always is not" }
             }, "required": ["url"], "additionalProperties": false }
         },
         {
@@ -2647,7 +2648,8 @@ fn tool_defs() -> serde_json::Value {
             "description": "Load a URL in Canopy's embedded preview (opening or reusing the tab), or move through history. Local servers and remote pages both work. Waits for the page; returns its final url and title. The tab isn't brought to the front — it drives in the background, so keep using the other browser tools rather than assuming the user is watching.",
             "inputSchema": { "type": "object", "properties": {
                 "url": { "type": "string", "description": "An http:// or https:// URL — a local server (see canopy_project runServers) or any remote page" },
-                "action": { "type": "string", "enum": ["back", "forward", "reload"], "description": "History move instead of a url" }
+                "action": { "type": "string", "enum": ["back", "forward", "reload"], "description": "History move instead of a url" },
+                "project": { "type": "string", "description": "Which project's preview to drive, by name. Only needed when you are not running inside one — the companion always is not" }
             }, "additionalProperties": false }
         },
         {
@@ -2655,7 +2657,8 @@ fn tool_defs() -> serde_json::Value {
             "description": "The previewed page as it stands: url, title, visible text, and each interactive element with a numbered ref, label, CSS selector, and React component. Refs address click/type and stay valid until the page re-renders. Use instead of a screenshot.",
             "inputSchema": { "type": "object", "properties": {
                 "url": { "type": "string", "description": "Which preview tab (by origin); defaults to the active one" },
-                "max": { "type": "integer", "description": "Max elements (default 150)" }
+                "max": { "type": "integer", "description": "Max elements (default 150)" },
+                "project": { "type": "string", "description": "Which project's preview to drive, by name. Only needed when you are not running inside one — the companion always is not" }
             }, "additionalProperties": false }
         },
         {
@@ -2664,7 +2667,8 @@ fn tool_defs() -> serde_json::Value {
             "inputSchema": { "type": "object", "properties": {
                 "ref": { "type": "integer", "description": "Element ref from canopy_browser_snapshot" },
                 "selector": { "type": "string", "description": "CSS selector, if no ref is at hand" },
-                "url": { "type": "string", "description": "Which preview tab (by origin)" }
+                "url": { "type": "string", "description": "Which preview tab (by origin)" },
+                "project": { "type": "string", "description": "Which project's preview to drive, by name. Only needed when you are not running inside one — the companion always is not" }
             }, "additionalProperties": false }
         },
         {
@@ -2676,7 +2680,8 @@ fn tool_defs() -> serde_json::Value {
                 "text": { "type": "string", "description": "Text to enter (or option to pick)" },
                 "submit": { "type": "boolean", "description": "Press Enter afterwards" },
                 "append": { "type": "boolean", "description": "Append instead of replacing" },
-                "url": { "type": "string", "description": "Which preview tab (by origin)" }
+                "url": { "type": "string", "description": "Which preview tab (by origin)" },
+                "project": { "type": "string", "description": "Which project's preview to drive, by name. Only needed when you are not running inside one — the companion always is not" }
             }, "required": ["text"], "additionalProperties": false }
         },
         {
@@ -2686,7 +2691,8 @@ fn tool_defs() -> serde_json::Value {
                 "ref": { "type": "integer", "description": "Element ref from canopy_browser_snapshot" },
                 "selector": { "type": "string", "description": "CSS selector, if no ref is at hand" },
                 "label": { "type": "string", "description": "Short caption shown on the cursor (default \"look here\")" },
-                "url": { "type": "string", "description": "Which preview tab (by origin)" }
+                "url": { "type": "string", "description": "Which preview tab (by origin)" },
+                "project": { "type": "string", "description": "Which project's preview to drive, by name. Only needed when you are not running inside one — the companion always is not" }
             }, "additionalProperties": false }
         },
         {
@@ -2694,7 +2700,8 @@ fn tool_defs() -> serde_json::Value {
             "description": "Evaluate JavaScript in the previewed page and return the result JSON-serialized; promises are awaited. For interactions prefer click/type — they fire the events the app listens for.",
             "inputSchema": { "type": "object", "properties": {
                 "code": { "type": "string", "description": "JavaScript to evaluate in the page" },
-                "url": { "type": "string", "description": "Which preview tab (by origin)" }
+                "url": { "type": "string", "description": "Which preview tab (by origin)" },
+                "project": { "type": "string", "description": "Which project's preview to drive, by name. Only needed when you are not running inside one — the companion always is not" }
             }, "required": ["code"], "additionalProperties": false }
         },
         {
@@ -2703,7 +2710,8 @@ fn tool_defs() -> serde_json::Value {
             "inputSchema": { "type": "object", "properties": {
                 "lines": { "type": "integer", "description": "Most recent messages (default 100)" },
                 "clear": { "type": "boolean", "description": "Empty the buffer after reading" },
-                "url": { "type": "string", "description": "Which preview tab (by origin)" }
+                "url": { "type": "string", "description": "Which preview tab (by origin)" },
+                "project": { "type": "string", "description": "Which project's preview to drive, by name. Only needed when you are not running inside one — the companion always is not" }
             }, "additionalProperties": false }
         },
         {
@@ -2711,7 +2719,8 @@ fn tool_defs() -> serde_json::Value {
             "description": "Requests the previewed page made, collected in the page itself: method, URL, status, duration. Finds failing or missing API calls. Covers fetch, XHR and subresources; the document request that loaded the page happened before the collector did, so it is not listed.",
             "inputSchema": { "type": "object", "properties": {
                 "url": { "type": "string", "description": "Which open preview to read, by origin; defaults to the one in front" },
-                "lines": { "type": "integer", "description": "How many of the most recent requests (default 100)" }
+                "lines": { "type": "integer", "description": "How many of the most recent requests (default 100)" },
+                "project": { "type": "string", "description": "Which project's preview to drive, by name. Only needed when you are not running inside one — the companion always is not" }
             }, "additionalProperties": false }
         },
         {
@@ -2719,7 +2728,8 @@ fn tool_defs() -> serde_json::Value {
             "description": "A picture of the previewed page as rendered, returned as an image. Use it whenever the question is how something LOOKS — overlap, contrast, spacing, cut-off text — which the DOM snapshot cannot see. Needs the preview tab to be in front, because it reads composited pixels: Canopy will not move the user's front tab for you, so this fails while they are working elsewhere. Everything else — snapshot, click, type, eval, console, network — works on a background tab.",
             "inputSchema": { "type": "object", "properties": {
                 "max": { "type": "integer", "description": "Widest the image should be, in pixels (default 1200)" },
-                "url": { "type": "string", "description": "Which preview tab, when several are open" }
+                "url": { "type": "string", "description": "Which preview tab, when several are open" },
+                "project": { "type": "string", "description": "Which project's preview to drive, by name. Only needed when you are not running inside one — the companion always is not" }
             }, "additionalProperties": false }
         },
         {
@@ -3163,6 +3173,11 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 "kind": "open_preview",
                 "cwd": cwd(),
                 "url": url,
+                // Which window it lands in. Absent for a coding agent, whose
+                // cwd already answers it; the companion sits in no project, so
+                // without this its previews had nowhere to go the moment a
+                // second project was open.
+                "project": args.get("project").and_then(|v| v.as_str()),
             })))
         }
         "canopy_open_file" | "canopy_show_diff" => {

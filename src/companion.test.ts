@@ -104,8 +104,12 @@ describe("tiers", () => {
     expect(resumed).toContain(launch.sessionId);
   });
 
-  it("locks codex down for answer-only in its own sandbox", () => {
-    // Codex's built-in tools never pass Canopy's gate, same as claude's.
+  it("keeps codex read-only at every authority, as claude's writers are", () => {
+    // Codex's built-in tools never pass Canopy's gate, same as claude's — and
+    // the answer has to be the same one, or "the companion does not edit
+    // files" would depend on which CLI the user happened to pick. Codex
+    // defaults to workspace-write, so anything less than this let it edit on
+    // codex what it could not edit on claude.
     const base = {
       bin: "codex",
       sessionId: "id",
@@ -113,12 +117,14 @@ describe("tiers", () => {
       roots: [],
       model: "",
     };
-    expect(COMPANION_RUNNERS.codex.args({ ...base, authority: "read" }).join(" ")).toContain(
-      "read-only",
-    );
-    expect(
-      COMPANION_RUNNERS.codex.args({ ...base, authority: "auto" }).join(" "),
-    ).not.toContain("read-only");
+    for (const authority of ["read", "confirm", "auto"] as const) {
+      expect(COMPANION_RUNNERS.codex.args({ ...base, authority }).join(" ")).toContain(
+        "read-only",
+      );
+      expect(
+        COMPANION_RUNNERS.codex.resumeArgs({ ...base, authority }).join(" "),
+      ).toContain("read-only");
+    }
   });
 
   it("carries the session id, the reach and the brief into both launches", () => {
@@ -159,15 +165,27 @@ describe("tiers", () => {
     }
   });
 
-  it("disallows the built-in writers unless the user said act freely", () => {
+  it("disallows the built-in writers at every authority, act-freely included", () => {
     // Bash/Edit/Write never pass the bridge, so leaving them on would make
-    // "asks before it changes anything" false.
-    for (const authority of ["read", "confirm"] as const) {
+    // "asks before it changes anything" false — and the companion does not
+    // edit files at all, which is a statement about what it is rather than a
+    // caution that relaxes as the user trusts it more. "Act freely" is freedom
+    // with Canopy's own tools; the code is written by a coding agent in a
+    // checkout the user can watch.
+    for (const authority of ["read", "confirm", "auto"] as const) {
       const args = permissionArgs(authority);
       expect(args).toContain("--disallowedTools");
-      for (const tool of ["Bash", "Edit", "Write"]) expect(args).toContain(tool);
+      for (const tool of ["Bash", "Edit", "Write", "NotebookEdit", "KillShell"]) {
+        expect(args).toContain(tool);
+      }
     }
-    expect(permissionArgs("auto")).not.toContain("--disallowedTools");
+  });
+
+  it("leaves reading alone — that is what understanding code needs", () => {
+    for (const authority of ["read", "confirm", "auto"] as const) {
+      const args = permissionArgs(authority);
+      for (const tool of ["Read", "Grep", "Glob"]) expect(args).not.toContain(tool);
+    }
   });
 
   it("carries the permission flags into both fresh and resumed launches", () => {
