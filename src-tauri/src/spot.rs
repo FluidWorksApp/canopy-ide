@@ -967,7 +967,11 @@ mod tests {
         // The ring slid: same length, new content at the end.
         let n = full_b.len();
         full_b[n - 1] = b'z';
-        assert_eq!(full_a.len(), full_b.len(), "the length cannot tell these apart");
+        assert_eq!(
+            full_a.len(),
+            full_b.len(),
+            "the length cannot tell these apart"
+        );
         assert_ne!(tail_stamp(&full_a), tail_stamp(&full_b));
     }
 

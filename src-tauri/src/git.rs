@@ -3772,12 +3772,7 @@ pub async fn git_commit_patch(
     let hash = checked_hash(&hash)?;
     let cache_key = format!("{}\x1f{hash}", top.display());
     let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
-    if let Some((_, hit)) = cache
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|(k, _)| k == &cache_key)
-    {
+    if let Some((_, hit)) = cache.lock().unwrap().iter().find(|(k, _)| k == &cache_key) {
         return Ok(hit.clone());
     }
 
