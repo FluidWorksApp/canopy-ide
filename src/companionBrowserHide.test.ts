@@ -25,7 +25,7 @@
 // component does. If the two rules ever point at each other again, it stops
 // converging and this goes red.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { join } from "node:path";
 import {
@@ -295,19 +295,41 @@ describe("one channel, and nothing reaching around it", () => {
     // point of it. Everything ELSE asks the channel. A new consumer added here
     // is a fifth spelling of "what is in front", which is what this replaced.
     const allowed = new Set([
-      "src/browserHost.ts", // publishes them
       "src/browserSignals.ts", // defines them
       "src/browserWatchdog.ts", // deliberately independent
       "src/selftest/browserSelftest.ts", // asserts on the raw contract
       "src/companionBrowserHide.test.ts", // this file
     ]);
+    // `--untracked` is the whole of this guard's reach, and it is not a
+    // nicety. A new consumer is a NEW FILE, and a new file is untracked until
+    // somebody commits it — so the tracked-only search passes on exactly the
+    // change this exists to catch, and goes red one commit later, against
+    // whoever pulls next. This test made that mistake about itself: the file
+    // holding the channel mentioned the snapshots in its header comment, and
+    // the guard called the tree clean right up until the commit landed.
     const hits = execSync(
-      "git grep -l 'browserViewSnapshots' -- 'src/*' || true",
+      "git grep -l --untracked 'browserViewSnapshots' -- 'src/*' || true",
       { encoding: "utf8" },
     )
       .split("\n")
       .filter(Boolean)
       .filter((f) => !allowed.has(f));
     expect(hits).toEqual([]);
+  });
+
+  it("catches a consumer that has not been committed yet", () => {
+    // The guard above, held to its own claim. Without --untracked this passes
+    // while a brand-new reacher-around sits in the working tree.
+    const probe = join(process.cwd(), "src/zzGuardProbe.ts");
+    writeFileSync(probe, "export const x = browserViewSnapshots;\n");
+    try {
+      const hits = execSync(
+        "git grep -l --untracked 'browserViewSnapshots' -- 'src/*' || true",
+        { encoding: "utf8" },
+      );
+      expect(hits).toContain("src/zzGuardProbe.ts");
+    } finally {
+      rmSync(probe, { force: true });
+    }
   });
 });
