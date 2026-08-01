@@ -170,18 +170,25 @@ export interface CompanionLaunch {
  * action on screen and blocks on the answer.
  *
  * That leaves the CLI's *built-in* tools, which the bridge cannot see. Bash,
- * Edit and Write would change the world without ever passing the gate, so
- * anything short of "act freely" disallows them outright. It costs the
- * companion a shell; it is what makes "asks before it changes anything" true
- * rather than aspirational — and the brief tells it to use the canopy_* tools
- * for this work anyway.
+ * Edit and Write would change the world without ever passing the gate, so they
+ * are disallowed outright — at every authority, including "act freely".
+ *
+ * At every authority because the companion does not edit files. That is what it
+ * *is*, not a caution that scales with trust: it is the assistant that answers
+ * across eight projects, and the thing that edits code is a coding agent in one
+ * checkout, whose work the user can see in a diff, on a branch, in a session
+ * they opened. "Act freely" is freedom with Canopy's own tools — start a
+ * server, make a worktree, write a note — not a licence to rewrite source in a
+ * project whose tab is not even open.
+ *
+ * Withheld rather than requested, on this file's usual terms: the brief also
+ * says it, but a brief is a rule an agent can reason its way past, and this is
+ * the worst agent to discover that on. Reading is untouched (Read, Grep, Glob),
+ * which is what "understand code across repos" actually needs.
  */
 const BUILTIN_WRITERS = ["Edit", "Write", "NotebookEdit", "Bash", "KillShell"];
 
-export function permissionArgs(authority: CompanionAuthority): string[] {
-  if (authority === "auto") {
-    return ["--permission-mode", "bypassPermissions"];
-  }
+export function permissionArgs(_authority: CompanionAuthority): string[] {
   return [
     "--permission-mode",
     "bypassPermissions",
@@ -274,14 +281,21 @@ const CODEX_RUNNER: CompanionRunner = {
   ],
 };
 
-/** Codex's own sandbox, set to match the authority the bridge enforces.
+/** Codex's own sandbox — read-only at every authority, which is codex's half of
+ *  "the companion does not edit files".
  *
- *  `read-only` is the honest mapping for answer-only: like claude's disallowed
- *  built-ins, it stops the CLI changing anything through its own tools, which
- *  never pass Canopy's gate. Anything above that is left to codex's default,
- *  because the gate is what asks. */
-function codexSandbox(authority: CompanionAuthority): string[] {
-  return authority === "read" ? ["-c", "sandbox_mode=\"read-only\""] : [];
+ *  The same reasoning as claude's disallowed built-ins, and it has to be the
+ *  same *answer* or the guarantee would depend on which CLI the user happened
+ *  to pick: codex's default sandbox is workspace-write, so leaving anything
+ *  above answer-only to the default meant the companion could edit files
+ *  through its own tools on codex while it could not on claude. The gate only
+ *  governs `canopy_*` calls; it never sees a write codex makes on its own.
+ *
+ *  `authority` is still what decides the gate, and every mutating canopy_* tool
+ *  it grants keeps working — this sandbox governs codex's own shell and file
+ *  ops, not MCP. */
+function codexSandbox(_authority: CompanionAuthority): string[] {
+  return ["-c", "sandbox_mode=\"read-only\""];
 }
 
 /** Keyed by the registry id in projects.ts. Each entry is a statement about

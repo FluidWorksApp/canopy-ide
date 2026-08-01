@@ -136,6 +136,45 @@ describe("the brief", () => {
     expect(buildCompanionPrompt(base)).toContain("**Say which project.**");
   });
 
+  it("says flatly that it does not edit files, at every authority", () => {
+    // The companion is not a coding agent, and the tools that would let it
+    // edit are withheld at every authority (permissionArgs). The brief has to
+    // agree, or it spends turns offering a fix it cannot make and then
+    // apologising — which is what "I'm sorry, I can't write to that" looked
+    // like from the user's side.
+    for (const authority of ["read", "confirm", "auto"] as const) {
+      const p = buildCompanionPrompt({ ...base, authority });
+      expect(p).toContain("**You do not edit files.**");
+      expect(p).toContain("Not at any authority");
+    }
+  });
+
+  it("says what to do instead of editing, rather than only what it cannot do", () => {
+    const p = buildCompanionPrompt({
+      ...base,
+      tools: [...base.tools, "canopy_workspace_agents", "canopy_message_agent", "canopy_notes_write"],
+    });
+    expect(p).toContain("Say precisely what should change and where");
+    expect(p).toContain("canopy_message_agent");
+    expect(p).toContain("canopy_notes_write");
+    expect(p).toContain("do not apologise for a limitation");
+    // And it still says reading is untouched — the companion answers "what
+    // does this code do" across every repo.
+    expect(p).toContain("You read everything");
+  });
+
+  it("does not name a hand-off tool the session was not given", () => {
+    const p = buildCompanionPrompt(base);
+    expect(p).toContain("**You do not edit files.**");
+    expect(p).not.toContain("canopy_message_agent");
+    expect(p).not.toContain("canopy_notes_write");
+  });
+
+  it("tells act-freely mode that its freedom is Canopy's tools, not the source", () => {
+    const p = buildCompanionPrompt({ ...base, authority: "auto" });
+    expect(p).toContain("not a licence to edit code");
+  });
+
   it("explains the context envelope so it reads as grounding, not as user words", () => {
     // Every message arrives with a bracketed `[Canopy: …]` line naming what
     // the user was looking at (companionContext.ts). Unexplained, the model
