@@ -4513,7 +4513,7 @@ mod integration_tests {
 
 #[cfg(test)]
 mod tests {
-        /// The manifest must name every CLI we know how to set up. A supported CLI
+    /// The manifest must name every CLI we know how to set up. A supported CLI
     /// missing from it declares nothing, which is safe — it falls through to
     /// the process rungs — but silently: its hooks would stop being read and
     /// nothing would say so.
@@ -4527,7 +4527,7 @@ mod tests {
             );
         }
     }
-use super::claude_bucket;
+    use super::claude_bucket;
     use super::first_version_token;
     use super::probe_target;
     use super::sh_quote;

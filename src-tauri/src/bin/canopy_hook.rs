@@ -963,7 +963,9 @@ fn update_digest(
     // this CLI has no way to make) leaves the prior state standing.
     let prev_state = digest["state"].as_str().unwrap_or("idle").to_string();
     let decided = declared_state(agent, hook_event, event);
-    let state = decided.map(|(s, _, _)| s.to_string()).unwrap_or_else(|| prev_state.clone());
+    let state = decided
+        .map(|(s, _, _)| s.to_string())
+        .unwrap_or_else(|| prev_state.clone());
     digest["state"] = serde_json::json!(state);
     if let Some((_, via, conf)) = decided {
         digest["state_via"] = serde_json::json!(via);

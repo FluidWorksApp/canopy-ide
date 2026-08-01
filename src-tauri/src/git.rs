@@ -4135,55 +4135,54 @@ pub async fn agent_workspace_at(
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
             && !s.contains("..")
     };
-    let (sid, state_s, state_via, updated, touched, branch_fallback, clock) = match session_id
-        .as_deref()
-    {
-        Some(s) if valid(s) => {
-            let home = std::env::var("HOME").unwrap_or_default();
-            let digest: Option<serde_json::Value> = std::fs::read_to_string(
-                PathBuf::from(&home)
-                    .join(".canopy")
-                    .join("sessions")
-                    .join(format!("{s}.json")),
-            )
-            .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok());
-            let d = digest.as_ref();
-            let dstr = |k: &str| {
-                d.and_then(|v| v.get(k))
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-            };
-            let touched = d
-                .and_then(|v| v.get("files"))
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|f| f.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let updated = d.and_then(|v| v.get("updated")).and_then(|v| v.as_u64());
-            (
-                s.to_string(),
-                dstr("state"),
-                dstr("state_via"),
-                updated,
-                touched,
-                dstr("branch"),
-                SessionClock::of(d),
-            )
-        }
-        _ => (
-            String::new(),
-            None,
-            None,
-            None,
-            Vec::new(),
-            None,
-            SessionClock::default(),
-        ),
-    };
+    let (sid, state_s, state_via, updated, touched, branch_fallback, clock) =
+        match session_id.as_deref() {
+            Some(s) if valid(s) => {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let digest: Option<serde_json::Value> = std::fs::read_to_string(
+                    PathBuf::from(&home)
+                        .join(".canopy")
+                        .join("sessions")
+                        .join(format!("{s}.json")),
+                )
+                .ok()
+                .and_then(|raw| serde_json::from_str(&raw).ok());
+                let d = digest.as_ref();
+                let dstr = |k: &str| {
+                    d.and_then(|v| v.get(k))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                };
+                let touched = d
+                    .and_then(|v| v.get("files"))
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|f| f.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let updated = d.and_then(|v| v.get("updated")).and_then(|v| v.as_u64());
+                (
+                    s.to_string(),
+                    dstr("state"),
+                    dstr("state_via"),
+                    updated,
+                    touched,
+                    dstr("branch"),
+                    SessionClock::of(d),
+                )
+            }
+            _ => (
+                String::new(),
+                None,
+                None,
+                None,
+                Vec::new(),
+                None,
+                SessionClock::default(),
+            ),
+        };
     workspace_join(
         &top,
         base,

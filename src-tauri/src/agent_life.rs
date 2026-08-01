@@ -233,7 +233,10 @@ pub fn all_fidelity() -> &'static Vec<CliFidelity> {
 }
 
 fn can_declare_block(f: &CliFidelity) -> bool {
-    matches!(f.notification.as_str(), "block" | "mixed" | "attention-only")
+    matches!(
+        f.notification.as_str(),
+        "block" | "mixed" | "attention-only"
+    )
 }
 
 fn reachable(f: &CliFidelity, via: &str) -> bool {
@@ -312,7 +315,13 @@ pub fn agent_life(digest: &serde_json::Value, pty: Option<&PtyEvidence>, now: u6
     // `waiting` that outlived the session that wrote it.
     if let Some(p) = pty {
         if !p.live || !p.has_agent {
-            return say(LifeState::Ended, Confidence::Proven, "process-gone", now, None);
+            return say(
+                LifeState::Ended,
+                Confidence::Proven,
+                "process-gone",
+                now,
+                None,
+            );
         }
     }
 
@@ -329,7 +338,13 @@ pub fn agent_life(digest: &serde_json::Value, pty: Option<&PtyEvidence>, now: u6
         };
         match via.unwrap_or("") {
             "session-end" => {
-                return say(LifeState::Ended, Confidence::Proven, "session-end", updated, None)
+                return say(
+                    LifeState::Ended,
+                    Confidence::Proven,
+                    "session-end",
+                    updated,
+                    None,
+                )
             }
             "structured-block" => {
                 return say(
@@ -371,7 +386,13 @@ pub fn agent_life(digest: &serde_json::Value, pty: Option<&PtyEvidence>, now: u6
         // Rung 7 — the terminal is painting. The decisive channel, and the only
         // positive evidence at all for a CLI whose hooks cannot say "working".
         if painting(p, pol) {
-            return say(LifeState::Working, Confidence::Inferred, "output", now, None);
+            return say(
+                LifeState::Working,
+                Confidence::Inferred,
+                "output",
+                now,
+                None,
+            );
         }
         // Rung 8 — the process tree is burning CPU. Weakest positive rung.
         if p.cpu >= pol.quiet_cpu_percent {
