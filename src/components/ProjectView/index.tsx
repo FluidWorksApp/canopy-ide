@@ -41,7 +41,7 @@ import { lifeFor, useAttentionMemory, useFirstSeen } from "../../agentLifeStore"
  *  different questions ("is anything running" and "is this runaway") that had
  *  drifted into sharing a threshold. */
 const QUIET_CPU = POLICY.quietCpuPercent;
-import { revealScroll } from "../../tabSticky";
+import { ANCHOR_ATTR, pinOffset, revealScroll } from "../../tabSticky";
 import { clearActiveTab, setActiveTab } from "../../activeView";
 import { useFlipStrip } from "../../tabFlip";
 import { modelFor, monaco, languageForPath } from "../../monaco-setup";
@@ -5666,22 +5666,32 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  door you came through.
    *
    *  Not `scrollIntoView`: it is happy to park a tab flush against the left
-   *  edge, which is precisely where the pinned chip is painted. */
+   *  edge, which is precisely where the pinned chips are painted. */
   const settleReveal = useRef(0);
   const revealActiveTab = useCallback(() => {
     const pass = () => {
       const root = stripRef.current;
       const el = activeTabElRef.current;
       if (!root || !el || root.offsetParent === null) return;
-      const chip = el
-        .closest(".tab-group")
-        ?.querySelector<HTMLElement>("[data-stack-chip]");
+      const group = el.closest(".tab-group");
+      const chip = group?.querySelector<HTMLElement>("[data-stack-chip]");
+      // What the pile will cover once this run's own chip is pinned: the nubs
+      // of every run before it, then that chip at its full width. The face is
+      // measured rather than the chip because a chip currently collapsed into
+      // the pile has a narrowed wrapper and a full-width face — and this run is
+      // about to be the one shown in full.
+      const face = chip?.querySelector<HTMLElement>(".tab-stack-face");
+      const anchor = group?.querySelector(`[${ANCHOR_ATTR}]`);
+      const at = anchor ? [...root.querySelectorAll(`[${ANCHOR_ATTR}]`)].indexOf(anchor) : -1;
+      const pinned = chip
+        ? pinOffset(Math.max(0, at)) + Math.max(chip.offsetWidth, face?.offsetWidth ?? 0)
+        : 0;
       const to = revealScroll(
         root.scrollLeft,
         root.clientWidth,
         el.offsetLeft,
         el.offsetWidth,
-        chip?.offsetWidth ?? 0,
+        pinned,
       );
       // Instant, not smooth: a smooth scroll is driven by the frame loop, and
       // an occluded window's frame loop is asleep — the one case where the tab
