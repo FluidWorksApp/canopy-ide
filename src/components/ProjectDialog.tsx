@@ -5,6 +5,7 @@ import * as ipc from "../ipc";
 import type { Component, Project } from "../projects";
 import { newProjectId } from "../projects";
 import { useEscape } from "../useEscape";
+import { FilesIcon } from "./icons";
 import { Button } from "./ui";
 
 interface ProjectDialogProps {
@@ -134,12 +135,7 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
           {components.map((c, i) => (
             <div key={c.path} className="pd-dir-card">
               <div className="pd-dir-head">
-                <svg width="16" height="14" viewBox="0 0 16 14" className="pd-dir-glyph">
-                  <path
-                    d="M1.5 2.5h4l1.5 1.5h7.5a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1z"
-                    fill="#dcb67a"
-                  />
-                </svg>
+                <FilesIcon size={16} className="pd-dir-glyph" />
                 <div className="pd-dir-title">
                   <input
                     className="pd-dir-label"

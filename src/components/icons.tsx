@@ -533,6 +533,17 @@ export function ClipboardIcon({ size = 14, className }: IconProps) {
   );
 }
 
+/** Copy: one sheet lifted off another. Distinct from ClipboardIcon on purpose —
+ *  a clipboard is a place things are kept, this is the act of duplicating one. */
+export function CopyIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <rect x="9" y="9" width="11" height="11" rx="2" />
+      <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+    </svg>
+  );
+}
+
 export function SettingsIcon({ size = 18, className }: IconProps) {
   return (
     <svg {...svgProps(size, className)}>

@@ -7709,8 +7709,13 @@ body.dragging-tab * {
   padding: 10px 12px;
 }
 
+/* The card's folder mark. Dim like the path beneath it rather than bright like
+   the label: the directory's name is the thing to read, and the glyph only says
+   what kind of thing it names. The colour lives here, not in the SVG, so it
+   follows the theme. */
 .pd-dir-glyph {
   flex: 0 0 auto;
+  color: var(--text-dim);
 }
 
 .pd-dir-title {
