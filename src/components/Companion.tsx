@@ -37,7 +37,7 @@ import {
   type CompanionState,
 } from "../companionSession";
 import { ashStateFor, isOutstanding, type AttentionItem } from "../attention";
-import { browserViewSnapshots, onBrowserSignal } from "../browserSignals";
+import { useNativeSurface } from "../activeView";
 import { getSettings, updateSettings, SETTINGS_CHANGE_EVENT } from "../settings";
 import { Mascot } from "./Mascot";
 import { CompanionChat } from "./CompanionChat";
@@ -71,34 +71,6 @@ interface CompanionProps {
   onInstallCli: () => void;
   /** Start the session again after it died. */
   onRetry: () => void;
-}
-
-/** Whether a native browser view is on screen right now.
- *
- *  The companion has to get out of the way of one, and not for tidiness: a
- *  child webview is composited above the entire window with no z-order API
- *  (see the note on `browserEngine` in settings.ts), so anything painted over
- *  it makes the host hide the page to keep the overlay readable. A mascot
- *  parked over a preview would not float above it — it would blank it.
- *
- *  Read from the host's own snapshots rather than measured here, for the same
- *  reason the watchdog does: re-deriving it would just reach the same wrong
- *  answer by a second route. */
-function useBrowserShowing(): boolean {
-  const [showing, setShowing] = useState(false);
-  useEffect(() => {
-    const read = () => setShowing(browserViewSnapshots().some((v) => v.shown));
-    read();
-    // Signals cover every deliberate show/hide; the interval catches the ones
-    // nothing announces — a pane drag, a tab closing under it.
-    const off = onBrowserSignal(read);
-    const timer = window.setInterval(read, 400);
-    return () => {
-      off();
-      window.clearInterval(timer);
-    };
-  }, []);
-  return showing;
 }
 
 function useViewport() {
@@ -170,7 +142,11 @@ export function Companion({
   onRetry,
 }: CompanionProps) {
   const state = useSyncExternalStore(subscribeCompanion, companionState, () => companionState());
-  const browserShowing = useBrowserShowing();
+  // Whether a native browser view is claiming the pane. One subscription to the
+  // one channel (activeView.ts) — not a measurement taken here, and not a timer
+  // of its own: a mascot parked over a child webview does not float above it,
+  // it makes the host blank the page to keep the mascot readable.
+  const browserInFront = useNativeSurface();
   const view = useViewport();
   const [spot, saveSpot] = useSpot();
   const [open, setOpen] = useState(false);
@@ -301,10 +277,12 @@ export function Companion({
 
   const dragging = Boolean(dragSpot);
 
-  // Nothing at all while a native browser view is up — not hidden with CSS,
+  // Nothing at all while a browser tab is in front — not hidden with CSS,
   // which would still leave a painted box for the host's occlusion walk to
-  // find and answer by blanking the page.
-  if (browserShowing) return null;
+  // find and answer by blanking the page. The notice and the chat go with it;
+  // they hang off the mascot, and a card floating where the mascot isn't would
+  // blank the page on its own.
+  if (browserInFront) return null;
 
   return (
     <>

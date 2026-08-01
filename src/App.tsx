@@ -101,7 +101,7 @@ import { Dialog } from "./components/Dialog";
 import { shouldOnboard, markOnboarded } from "./onboarding";
 import { isSelftest, setSelftestMode } from "./selftest/mode";
 import { startBrowserWatchdog } from "./browserWatchdog";
-import { browserViewSnapshots } from "./browserSignals";
+import { activeView } from "./activeView";
 import { startSpotIndexJob } from "./spotIndexJob";
 import { useNoteReminders } from "./useNoteReminders";
 import { loadZoom, setZoom, applyZoom, STEP } from "./zoom";
@@ -1835,11 +1835,11 @@ export default function App() {
             // as though it were all of them.
             ...(companionOpsRef.current ?? {}),
             // The page an agent's browser ops are driving, for the vault ops.
-            // The tab id comes from the view snapshots; the URL comes from the
-            // page itself, because a redirect (every login flow has one) moves
-            // it without anything on this side re-rendering.
+            // The tab id comes from the activeView channel; the URL comes from
+            // the page itself, because a redirect (every login flow has one)
+            // moves it without anything on this side re-rendering.
             preview: async () => {
-              const tabId = browserViewSnapshots().find((v) => v.wanted)?.tabId;
+              const tabId = activeView().nativeTabId;
               if (!tabId) return null;
               const here = await ipc.browserHere(tabId).catch(() => null);
               return here?.url ? { tabId, url: here.url } : null;

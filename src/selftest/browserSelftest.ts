@@ -30,7 +30,7 @@ import {
 } from "../overlaySurfaces";
 import { BROWSER_INPUT_EVENT } from "../components/PreviewView";
 import { refreshBrowserViews, suppressBrowserViews } from "../browserHost";
-import { updateSettings } from "../settings";
+import { getSettings, updateSettings } from "../settings";
 import {
   startBrowserWatchdog,
   watchdogViolations,
@@ -562,6 +562,80 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
         viewSays,
       );
       return `back after ${Date.now() - away}ms`;
+    });
+
+    // ---- the companion gets out of the way, and comes back ----
+    // The one surface whose contract is not "the page hides for it" but "it
+    // hides for the page" — it unmounts entirely while a browser tab is in
+    // front, because a mascot parked on a native view does not float above it,
+    // it blanks it.
+    //
+    // Every other surface in the registry is exercised by exerciseSurface,
+    // which opens it and checks the PAGE moved. That loop cannot express this
+    // one: there is nothing to open, the companion is simply always there, and
+    // "the page hid for it" is the failure rather than the pass.
+    //
+    // It needs its own step for a second reason. The bug this replaced was a
+    // deadlock — the companion hid on "is a view shown", the host hid the view
+    // on "is anything painted over it", and the two settled on a mascot in the
+    // corner over a page that never appeared, from the first frame, forever.
+    // No unit test of either side alone can see that; it only exists where the
+    // two run against each other, which is here.
+    await step("companion", "The companion stands aside for a browser tab", async () => {
+      // A skip here is reported as an ok step, so each one also goes into the
+      // run's notes: "the companion stands aside — passed" over a check that
+      // never ran is the exact shape of reassurance this suite exists to
+      // refuse.
+      const skip = (why: string) => {
+        notes.push(`companion: not tested — ${why}`);
+        return `skipped — ${why}`;
+      };
+      if (!getSettings().companionEnabled) {
+        return skip("the companion is switched off in this profile");
+      }
+      const pane = view()?.hostRect ?? null;
+      // Establish it is really on screen first, with the tab in the back. A
+      // companion that never renders at all would otherwise satisfy "not over
+      // the page" without anything having been tested.
+      window.dispatchEvent(new CustomEvent("menu:new-terminal"));
+      await until(
+        "the page stayed on screen after another tab took the front",
+        view,
+        (v) => v?.shown !== true,
+        DEADLINE.nav,
+        viewSays,
+      );
+      if (!(await settle(() => painting(".companion")))) {
+        return skip("the companion never appeared even with no browser tab in front");
+      }
+      if (!coversPane(".companion", pane)) {
+        // Parked somewhere the page does not reach — dragged into the rail, or
+        // a window too small for the default corner to land in the pane. The
+        // page was right not to move, and so was the companion.
+        return skip("the companion sits clear of the pane in this window");
+      }
+
+      // Back to the browser tab: the whole of the ask, in one line each.
+      for (let i = 0; i < 6 && view()?.shown !== true; i++) {
+        window.dispatchEvent(new CustomEvent(i % 2 === 0 ? "menu:prev-tab" : "menu:next-tab"));
+        for (let w = 0; w < 30 && view()?.shown !== true; w++) await sleep(50);
+      }
+      const gone = await settle(() => !painting(".companion"));
+      // The page second, and deliberately so: if the companion stayed, this is
+      // what says the consequence was real rather than cosmetic.
+      await until(
+        "the page never came back — the companion is still standing on it",
+        view,
+        (v) => v?.shown === true,
+        DEADLINE.show,
+        viewSays,
+      );
+      if (!gone) {
+        throw new StepFailure(
+          "the companion was still painted over the page after its tab came to the front",
+        );
+      }
+      return "stood aside for the tab, and was back when it left";
     });
 
     // ---- navigation drops the stale frame ----

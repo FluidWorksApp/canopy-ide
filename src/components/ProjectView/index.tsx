@@ -42,6 +42,7 @@ import { lifeFor, useAttentionMemory, useFirstSeen } from "../../agentLifeStore"
  *  drifted into sharing a threshold. */
 const QUIET_CPU = POLICY.quietCpuPercent;
 import { revealScroll } from "../../tabSticky";
+import { clearActiveTab, setActiveTab } from "../../activeView";
 import { useFlipStrip } from "../../tabFlip";
 import { modelFor, monaco, languageForPath } from "../../monaco-setup";
 import { getCaret, subscribeCaret } from "../../editorState";
@@ -4018,6 +4019,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
     () => tabs.find((t) => t.id === activeTabId) ?? null,
     [tabs, activeTabId],
   );
+  // Publish the tab in front to the one channel anything can subscribe to
+  // (activeView.ts). Only the visible project publishes — every open project
+  // keeps a ProjectView mounted, and a backgrounded one announcing its own tab
+  // would make "what is the user looking at" depend on render order.
+  useEffect(() => {
+    if (!visible) return;
+    setActiveTab(project.id, activeTab?.id ?? null, activeTab?.type ?? null);
+  }, [visible, project.id, activeTab?.id, activeTab?.type]);
+  // Closing the project clears it, but only if this project is still the one on
+  // record — see clearActiveTab.
+  useEffect(() => () => clearActiveTab(project.id), [project.id]);
+
   // The pty of the terminal tab in front, so the Agents panel can highlight its
   // row — relating the tab you're looking at back to its entry in the list.
   const activePty = activeTab?.type === "terminal" ? activeTab.ptyId : null;

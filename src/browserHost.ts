@@ -63,6 +63,7 @@ import {
   type ViewSnapshot,
 } from "./browserSignals";
 import { isRegisteredOverlay } from "./overlaySurfaces";
+import { setNativeSurface } from "./activeView";
 import * as ipc from "./ipc";
 import { getSettings } from "./settings";
 
@@ -292,16 +293,40 @@ export function occludersOver(host: Element, view: RectLike): Candidate[] {
   return found;
 }
 
+/** Is a native view claiming this rectangle — its tab in front of an open
+ *  project, with a URL and a placeholder big enough to draw in?
+ *
+ *  Deliberately says nothing about occlusion, and that is the whole of its
+ *  value. It is the state of the app's inputs, not of this module's decisions,
+ *  so a surface can ask it without the answer changing because the surface
+ *  itself is on screen. See the note on `claiming` in browserSignals.
+ *
+ *  One function rather than the expression written twice: `apply` uses it to
+ *  decide whether the walk is worth paying for, the snapshot exports it, and
+ *  the two drifting apart would mean a companion hiding for a view that was
+ *  never going to appear (or, worse, staying up for one that was). */
+function claimsSpace(wanted: boolean, bounds: Bounds | null): boolean {
+  return wanted && !!bounds && showable(bounds);
+}
+
 function apply() {
   scheduled = 0;
   const zoom = currentZoom();
   const viewport = { width: window.innerWidth, height: window.innerHeight };
   const anyWanted = [...views.values()].some((e) => e.wanted);
+  /** Told to the activeView channel at the end of the pass, so everything that
+   *  floats hears about a native view from the layer that placed it rather than
+   *  by polling for it. Collected inside the loop and published outside, because
+   *  "no view is claiming anything" is a state this has to be able to reach —
+   *  a loop body that never runs would otherwise leave the last tab on record
+   *  forever, and closing the only preview tab would never clear it. */
+  let claimedBy: string | null = null;
 
   for (const [tabId, e] of views) {
     const host = e.wanted ? e.host() : null;
     const rect = host?.getBoundingClientRect() ?? null;
     const bounds = rect ? webviewBounds(rect, viewport, zoom) : null;
+    if (claimsSpace(e.wanted, bounds)) claimedBy ??= tabId;
     if (bounds && !sameBounds(bounds, e.bounds)) {
       e.bounds = bounds;
       emitBrowserSignal({ t: "bounds", at: Date.now(), tabId, bounds });
@@ -310,7 +335,8 @@ function apply() {
         .catch(() => {});
     }
     // Only pay for the walk when this view would otherwise be on screen.
-    const over = host && rect && bounds && showable(bounds) ? occludersOver(host, rect) : null;
+    const over =
+      host && rect && claimsSpace(e.wanted, bounds) ? occludersOver(host, rect) : null;
     const clear = !!over && over.length === 0;
     const visible = e.wanted && suppressed === 0 && e.forced === 0 && clear;
     if (visible !== e.shown) {
@@ -364,6 +390,10 @@ function apply() {
     }
     publish(tabId, e);
   }
+  // Last, and unconditionally: the channel is told on every pass, and it drops
+  // the ones that say nothing new. Anything floating over the content area
+  // hears about a browser tab from here.
+  setNativeSurface(claimedBy);
   watch(anyWanted);
 }
 
@@ -596,24 +626,32 @@ export function forgetBrowserView(tabId: string) {
  *  A reading, not a recalculation: whoever is checking this layer has to be
  *  able to compare what the host thinks against what the DOM says, and it can
  *  only do that if the host's belief is legible from outside. */
-provideViewSnapshots((): ViewSnapshot[] =>
-  [...views.entries()].map(([tabId, e]) => {
+provideViewSnapshots((): ViewSnapshot[] => {
+  const zoom = currentZoom();
+  const viewport = { width: window.innerWidth, height: window.innerHeight };
+  return [...views.entries()].map(([tabId, e]) => {
     const host = e.host();
+    const hostRect = host ? host.getBoundingClientRect() : null;
+    // Measured here rather than read from the last pass. A reader that asks
+    // between passes — the companion polls on its own timer — would otherwise
+    // be told about a layout that has already changed, and `e.bounds` is stale
+    // by design once a view stops being wanted (nothing recomputes it).
     return {
       tabId,
       wanted: e.wanted,
+      claiming: claimsSpace(e.wanted, hostRect ? webviewBounds(hostRect, viewport, zoom) : null),
       shown: e.shown,
       bounds: e.bounds,
       host,
-      hostRect: host ? host.getBoundingClientRect() : null,
-      zoom: currentZoom(),
+      hostRect,
+      zoom,
       hasFrame: !!e.frame,
       lastCaptureOkAt: e.lastCaptureOkAt,
       loading: e.loading,
       lastNavAt: e.lastNavAt,
     };
-  }),
-);
+  });
+});
 
 /** The page navigated, or an agent acted on it, so any frame in hand is of a
  *  page that no longer exists. */
@@ -820,6 +858,7 @@ export function useBrowserEngine(): BrowserEngine | null {
 export function resetBrowserHost() {
   views.clear();
   suppressed = 0;
+  setNativeSurface(null);
   if (scheduled) window.clearTimeout(scheduled);
   scheduled = 0;
   watch(false);
