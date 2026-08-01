@@ -3,8 +3,12 @@
 // is the only place its outcome survives: the one-line job_done summary, the URL
 // it produced, the files it touched, and the tail of what actually scrolled past.
 //
-// Search, filter, paginate. Kept deliberately plain — the reason to open this is
-// to find one run and read it, not to admire the list.
+// Search, filter, paginate. Still not a dashboard — the reason to open this is
+// to find one run and read it — but a row now gets two lines instead of one, so
+// the summary (the whole payload) isn't crushed into whatever gap is left
+// between the title and the clock. The list sits in a fixed reading column for
+// the same reason: full-bleed on a wide window put the title at one edge and its
+// duration at the other, and nothing lined up with anything.
 import { useEffect, useMemo, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -21,12 +25,26 @@ import {
   type TaskRunStatus,
 } from "../taskHistory";
 import { AGENT_CLIS } from "../projects";
-import { AgentsIcon, PlayIcon, TrashIcon } from "./icons";
-import { Button } from "./ui";
+import {
+  AgentIcon,
+  AgentsIcon,
+  DocumentIcon,
+  GlobeIcon,
+  PlayIcon,
+  StopwatchIcon,
+  TasksIcon,
+  TrashIcon,
+} from "./icons";
+import { Button, Segmented, Switch, TextInput } from "./ui";
 
 const PER_PAGE = 25;
 
-const FILTERS: { id: TaskRunStatus | "all"; label: string }[] = [
+/** The three ways a run can have ended. `running` is a `TaskRunStatus` too, but
+ *  a run still going has no place in a list of completed ones — so it is not a
+ *  filter you can pick, and not a counter the header keeps. */
+type Outcome = Exclude<TaskRunStatus, "running">;
+
+const FILTERS: { id: Outcome | "all"; label: string }[] = [
   { id: "all", label: "All" },
   { id: "done", label: "Done" },
   { id: "blocked", label: "Blocked" },
@@ -43,14 +61,44 @@ function ago(ms: number): string {
   return new Date(ms).toLocaleDateString();
 }
 
-/** How long the agent took. Undefined end (a run that never reported) reads as
- *  a dash rather than a wrong duration. */
-function took(run: TaskRun): string {
-  if (!run.endedAt) return "—";
-  const s = Math.max(0, Math.round((run.endedAt - run.startedAt) / 1000));
+/** A span of milliseconds as work time — seconds matter on a one-liner, so the
+ *  short end keeps them and the long end drops them. */
+function dur(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
   return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+/** The same span for a running total, where the seconds are noise. */
+function durTotal(ms: number): string {
+  const m = Math.round(ms / 60000);
+  if (m < 1) return `${Math.max(0, Math.round(ms / 1000))}s`;
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+/** How long the agent took. Undefined end (a run that never reported) reads as
+ *  a dash rather than a wrong duration. */
+function took(run: TaskRun): string {
+  return run.endedAt ? dur(run.endedAt - run.startedAt) : "—";
+}
+
+/** When a run landed — the key the list is ordered by, so it's also the one the
+ *  row shows and the one the day headings are cut on. */
+const landed = (run: TaskRun): number => run.endedAt ?? run.startedAt;
+
+const DAY = 86_400_000;
+
+/** Which day heading a run falls under. Calendar days, not rolling 24h windows:
+ *  "yesterday" has to mean yesterday at 11pm too. */
+function dayGroup(ms: number): string {
+  const now = new Date();
+  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  if (ms >= midnight) return "Today";
+  if (ms >= midnight - DAY) return "Yesterday";
+  if (ms >= midnight - 6 * DAY) return "Earlier this week";
+  if (ms >= midnight - 29 * DAY) return "Earlier this month";
+  return "Older";
 }
 
 interface TaskHistoryViewProps {
@@ -84,7 +132,7 @@ export function TaskHistoryView({
   const [everywhere, setEverywhere] = useState(false);
   const [runs, setRuns] = useState<TaskRun[]>(() => completedTaskRuns(projectId));
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<TaskRunStatus | "all">("all");
+  const [filter, setFilter] = useState<Outcome | "all">("all");
   const [page, setPage] = useState(0);
   const [open, setOpen] = useState<string | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
@@ -116,6 +164,20 @@ export function TaskHistoryView({
     window.addEventListener(TASK_HISTORY_EVENT, refresh);
     return () => window.removeEventListener(TASK_HISTORY_EVENT, refresh);
   }, [everywhere, projectId]);
+
+  // What the header states and what the filter tabs count. Over the whole
+  // scope, not the current filter — a count that moves when you click it is a
+  // count you can't use to decide whether to click it.
+  const tally = useMemo(() => {
+    const t = { all: runs.length, done: 0, blocked: 0, stopped: 0, ms: 0 };
+    for (const r of runs) {
+      if (r.status === "done") t.done++;
+      else if (r.status === "blocked") t.blocked++;
+      else if (r.status === "stopped") t.stopped++;
+      if (r.endedAt) t.ms += Math.max(0, r.endedAt - r.startedAt);
+    }
+    return t;
+  }, [runs]);
 
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -149,282 +211,446 @@ export function TaskHistoryView({
   const current = Math.min(page, pages - 1);
   const shown = matches.slice(current * PER_PAGE, current * PER_PAGE + PER_PAGE);
 
+  // Cut the page into days. The list is already ordered by when a run landed,
+  // so this is a single pass and the headings can never interleave.
+  const days: { day: string; runs: TaskRun[] }[] = [];
+  for (const run of shown) {
+    const day = dayGroup(landed(run));
+    const last = days[days.length - 1];
+    if (last && last.day === day) last.runs.push(run);
+    else days.push({ day, runs: [run] });
+  }
+
   const agentName = (id: string) => AGENT_CLIS.find((c) => c.id === id)?.name ?? id;
+  const narrowed = query.trim() !== "" || filter !== "all";
 
   return (
     <div className="task-history">
       <div className="task-history-head">
-        <span className="task-history-title">Completed tasks</span>
-        <span className="badge">{runs.length}</span>
-        <span className="status-spacer" />
-        {confirmClear ? (
-          <>
-            <span className="task-history-note">Delete all {runs.length}?</span>
-            <Button onClick={() => setConfirmClear(false)}>
-              Cancel
-            </Button>
-            <Button variant="danger"
-              onClick={() => {
-                clearTaskHistory();
-                setRuns([]);
-                setConfirmClear(false);
-              }}>
-              Clear history
-            </Button>
-          </>
-        ) : (
-          <Button
-            disabled={runs.length === 0}
-            onClick={() => setConfirmClear(true)}>
-            Clear history
-          </Button>
-        )}
+        <div className="task-history-col">
+          <div className="task-history-head-row">
+            <h2 className="task-history-title">Completed tasks</h2>
+            <span className="task-history-count">{runs.length}</span>
+            <span className="status-spacer" />
+            {confirmClear ? (
+              <>
+                <span className="task-history-note">Delete all {runs.length}?</span>
+                <Button size="sm" onClick={() => setConfirmClear(false)}>
+                  Cancel
+                </Button>
+                <Button size="sm" variant="danger"
+                  onClick={() => {
+                    clearTaskHistory();
+                    setRuns([]);
+                    setConfirmClear(false);
+                  }}>
+                  Delete them
+                </Button>
+              </>
+            ) : (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={runs.length === 0}
+                onClick={() => setConfirmClear(true)}>
+                <TrashIcon size={12} /> Clear history
+              </Button>
+            )}
+          </div>
+
+          {/* The shape of the log in one line: how it went, how much agent time
+              it cost, and whose work it is. Same numbers as the filter tabs
+              below, said as a sentence rather than as four counters. */}
+          <div className="task-history-stats">
+            {runs.length === 0 ? (
+              <span>Nothing has finished here yet.</span>
+            ) : (
+              <>
+                <span className="task-history-stat">
+                  <i className="task-history-dot st-done" />
+                  {tally.done} done
+                </span>
+                {tally.blocked > 0 && (
+                  <span className="task-history-stat">
+                    <i className="task-history-dot st-blocked" />
+                    {tally.blocked} blocked
+                  </span>
+                )}
+                {tally.stopped > 0 && (
+                  <span className="task-history-stat">
+                    <i className="task-history-dot st-stopped" />
+                    {tally.stopped} stopped
+                  </span>
+                )}
+                <span className="task-history-stat">
+                  <StopwatchIcon size={11} />
+                  {durTotal(tally.ms)} of agent time
+                </span>
+                <span className="task-history-stat task-history-scope-note">
+                  {everywhere ? "across every project" : `in ${projectName}`}
+                </span>
+              </>
+            )}
+          </div>
+        </div>
       </div>
 
       <div className="task-history-filters">
-        <input
-          className="agent-query-input"
-          placeholder="Search summaries, briefs and output…"
-          value={query}
-          onChange={(e) => {
-            setQuery(e.target.value);
-            setPage(0);
-          }}
-        />
-        {FILTERS.map((f) => (
-          <button
-            key={f.id}
-            className={`task-history-chip ${filter === f.id ? "task-history-chip-on" : ""}`}
-            onClick={() => {
-              setFilter(f.id);
+        <div className="task-history-col task-history-filters-row">
+          <TextInput
+            search
+            width="lg"
+            aria-label="Search completed tasks"
+            placeholder="Search summaries, briefs and output…"
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
               setPage(0);
             }}
+          />
+          <Segmented
+            aria-label="Filter by outcome"
+            value={filter}
+            onChange={(id) => {
+              setFilter(id);
+              setPage(0);
+            }}
+            options={FILTERS.map((f) => ({
+              id: f.id,
+              label: (
+                <>
+                  {f.label}
+                  <span className="ctl-seg-count">{tally[f.id]}</span>
+                </>
+              ),
+            }))}
+          />
+          <span className="status-spacer" />
+          <span
+            className="task-history-scope"
+            title={
+              everywhere
+                ? `Showing tasks from every project — switch off for ${projectName} only`
+                : "Tasks run in your other projects too"
+            }
           >
-            {f.label}
-          </button>
-        ))}
-        <span className="status-spacer" />
-        <button
-          className={`task-history-chip ${everywhere ? "task-history-chip-on" : ""}`}
-          title={
-            everywhere
-              ? `Showing tasks from every project — click for ${projectName} only`
-              : "Tasks run in your other projects too"
-          }
-          onClick={() => {
-            setEverywhere((v) => !v);
-            setPage(0);
-          }}
-        >
-          All projects
-        </button>
+            <Switch
+              checked={everywhere}
+              aria-label="Show tasks from every project"
+              onChange={(on) => {
+                setEverywhere(on);
+                setPage(0);
+              }}
+            />
+            All projects
+          </span>
+        </div>
       </div>
 
       {shown.length === 0 ? (
-        <div className="tree-empty">
-          {runs.length === 0
-            ? "Nothing here yet. One-shot tasks land here when they finish — with what the agent reported and the tail of its terminal, which is otherwise gone the moment the tab closes itself."
-            : "No task matches that."}
+        <div className="task-history-empty">
+          <span className="task-history-empty-mark">
+            <TasksIcon size={24} />
+          </span>
+          <span className="task-history-empty-title">
+            {runs.length === 0 ? "No finished tasks yet" : "No task matches that"}
+          </span>
+          <span className="task-history-empty-note">
+            {runs.length === 0
+              ? "One-shot tasks land here when they finish — with what the agent reported and the tail of its terminal, which is otherwise gone the moment the tab closes itself."
+              : "Nothing in this scope answers to that search and filter. Widen one of them, or turn on all projects."}
+          </span>
         </div>
       ) : (
-        <div className="task-history-list">
-          {shown.map((run) => {
-            const expanded = open === run.id;
-            return (
-              <div
-                className={`task-history-row ${expanded ? "is-open" : ""}`}
-                key={run.id}
-                data-run-id={run.id}
-              >
-                <div
-                  className="task-history-summary"
-                  onClick={() => setOpen(expanded ? null : run.id)}
-                >
-                  <span className={`task-history-dot st-${run.status}`} title={run.status} />
-                  <span className="task-icon">{runIcon(run) || "◆"}</span>
-                  {/* What the agent called it, if it got as far as saying —
-                      with the launcher's own name kept in the tooltip, since
-                      that is the one that says which surface it was run from. */}
-                  <span
-                    className="task-history-label"
-                    title={run.title ? `Launched as “${run.label}”` : undefined}
-                  >
-                    {runTitle(run)}
-                  </span>
-                  {run.tags?.map((t) => (
-                    <span className="task-tag" key={t}>
-                      {t}
-                    </span>
-                  ))}
-                  {/* Only in the everywhere view — in the scoped one every row
-                      is this project and the chip would be noise on all of them. */}
-                  {everywhere && (
-                    <span className="task-history-project" title={run.cwd}>
-                      {run.projectName ?? run.cwd.split("/").filter(Boolean).pop()}
-                    </span>
-                  )}
-                  <span className="task-history-said">{run.summary ?? "No summary reported."}</span>
-                  <span className="task-history-when" title={new Date(run.startedAt).toLocaleString()}>
-                    {ago(run.startedAt)}
-                  </span>
-                  <span className="task-history-took">{took(run)}</span>
-                </div>
+        <div className="task-history-scroll">
+          <div className="task-history-col task-history-list">
+            {days.map(({ day, runs: dayRuns }) => (
+              <section className="task-history-day" key={day}>
+                <h3 className="task-history-day-head">
+                  {day}
+                  <span className="task-history-day-count">{dayRuns.length}</span>
+                </h3>
 
-                {expanded && (
-                  <div className="task-history-detail">
-                    <div className="task-history-meta">
-                      <span>{agentName(run.agent)}</span>
-                      <span className="task-history-path" title={run.cwd}>
-                        {run.cwd}
-                      </span>
-                      {run.url && (
-                        <a
-                          href={run.url}
-                          onClick={(e) => {
-                            e.preventDefault();
-                            void openUrl(run.url as string);
-                          }}
-                        >
-                          {run.url}
-                        </a>
-                      )}
-                      <span className="status-spacer" />
-                      {/* Only for this project's runs: re-running fires the
-                          brief into `run.cwd`, and a run from elsewhere would
-                          land in another project's tree while being recorded
-                          against this one. */}
-                      {/* The one-shot's exit door: the agent's transcript
-                          outlives its terminal, so the conversation can be
-                          picked up as an ordinary session rather than started
-                          again from nothing. Offered only where it can actually
-                          work — a run whose worktree was torn down has no
-                          directory left to resume in. */}
-                      {onContinueSession &&
-                        canResumeRun(run) &&
-                        run.projectId === projectId && (
-                          <Button
-                            title="Open this run's conversation as a normal agent session, with everything it worked out still in context"
-                            onClick={() => onContinueSession(run)}
-                          >
-                            <AgentsIcon size={12} /> Continue as a session
-                          </Button>
-                        )}
-                      {onRunAgain && run.projectId === projectId && (
-                        <Button
-                          title="Run this task again, in the same directory"
-                          onClick={() => onRunAgain(run)}>
-                          <PlayIcon size={12} /> Run again
-                        </Button>
-                      )}
-                      <Button icon
-                        title="Forget this run"
-                        onClick={() => {
-                          removeTaskRun(run.id);
-                          setRuns(completedTaskRuns());
-                        }}>
-                        <TrashIcon size={12} />
-                      </Button>
-                    </div>
+                {dayRuns.map((run) => {
+                  const expanded = open === run.id;
+                  return (
+                    <div
+                      className={`task-history-row ${expanded ? "is-open" : ""}`}
+                      key={run.id}
+                      data-run-id={run.id}
+                    >
+                      <button
+                        type="button"
+                        className="task-history-summary"
+                        aria-expanded={expanded}
+                        onClick={() => setOpen(expanded ? null : run.id)}
+                      >
+                        {/* Outcome and kind in one mark: the glyph the agent
+                            picked for the run, in the colour of how it ended.
+                            Two separate dots said the same thing twice. */}
+                        <span className={`task-history-mark st-${run.status}`} title={run.status}>
+                          {runIcon(run) || "◆"}
+                        </span>
 
-                    {/* Three different things, and until now they arrived as
-                        one undifferentiated column of grey text: what you asked
-                        for, what the agent answered, and what scrolled past
-                        while it worked. The answer is the reason you opened the
-                        row, so it is the one that gets a mark of its own. */}
-                    <div className="task-history-section">
-                      <div className="task-history-section-head">You asked</div>
-                      {/* The agent's own reading of the ask, above the brief it
-                          read. A brief is several hundred words of launcher
-                          prose and protocol, and recalling what a run was about
-                          should not mean reading past all of it — and where the
-                          two disagree, that is the most useful line on the
-                          page: it is the misunderstanding, in writing, right
-                          above the answer it produced. */}
-                      {run.asked && (
-                        <div className="task-history-asked">{run.asked}</div>
-                      )}
-                      <div className="task-history-brief">{run.brief}</div>
-                    </div>
-
-                    <div className="task-history-section is-report">
-                      <div className="task-history-section-head">
-                        <AgentsIcon size={11} /> The agent reported
-                      </div>
-                      {/* The row truncates this to one line — it is the row's
-                          job to be scannable. The full text has to live
-                          somewhere, and this is the somewhere. */}
-                      <div className="task-history-report">
-                        {run.summary ?? "It finished without reporting a summary."}
-                      </div>
-                    </div>
-
-                    {run.files && run.files.length > 0 && (
-                      <div className="task-history-section">
-                        <div className="task-history-section-head">Files it touched</div>
-                        <div className="task-history-files">
-                          {run.files.map((f) => {
-                            // The recorded path may point into a worktree that
-                            // no longer exists; the committed file does.
-                            const at = resolveTaskFile(f, run.cwd);
-                            return (
-                              <button
-                                key={f}
-                                className="task-history-file"
-                                title={at}
-                                onClick={() => onOpenFile?.(at)}
-                              >
-                                {at.split("/").pop()}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
-
-                    {run.output ? (
-                      /* Shut by default. The answer above is what you opened
-                         the row for; the tail is the evidence behind it, and
-                         only sometimes what you want. Left open it pushed every
-                         other run off the screen. */
-                      <details className="task-history-section task-history-tail">
-                        <summary className="task-history-section-head">
-                          <span className="task-history-tail-caret">›</span>
-                          Terminal tail
-                          <span className="task-history-tail-size">
-                            {tidyOutput(run.output).split("\n").length} lines
+                        <span className="task-history-body">
+                          <span className="task-history-line">
+                            {/* What the agent called it, if it got as far as
+                                saying — with the launcher's own name kept in
+                                the tooltip, since that is the one that says
+                                which surface it was run from. */}
+                            <span
+                              className="task-history-label"
+                              title={run.title ? `Launched as “${run.label}”` : undefined}
+                            >
+                              {runTitle(run)}
+                            </span>
+                            {/* Only the endings that aren't the happy one get
+                                named. "Done" on nine rows out of twelve is a
+                                word the eye has to skip past every time. */}
+                            {run.status !== "done" && (
+                              <span className={`task-history-state st-${run.status}`}>
+                                {run.status}
+                              </span>
+                            )}
+                            {run.tags?.map((t) => (
+                              <span className="task-tag" key={t}>
+                                {t}
+                              </span>
+                            ))}
+                            {/* Only in the everywhere view — in the scoped one
+                                every row is this project and the chip would be
+                                noise on all of them. */}
+                            {everywhere && (
+                              <span className="task-history-project" title={run.cwd}>
+                                {run.projectName ?? run.cwd.split("/").filter(Boolean).pop()}
+                              </span>
+                            )}
                           </span>
-                        </summary>
-                        <pre className="task-history-output">
-                          {tidyOutput(run.output)}
-                        </pre>
-                      </details>
-                    ) : (
-                      <div className="task-history-note">
-                        The terminal output for this run is no longer kept — only the
-                        most recent runs hold on to theirs.
-                      </div>
-                    )}
-                  </div>
-                )}
+                          {/* A line of its own. It used to share one with the
+                              title and the tags and the clock, which left the
+                              row's actual payload three words wide. */}
+                          <span
+                            className={`task-history-said ${run.summary ? "" : "is-silent"}`}
+                          >
+                            {run.summary ?? "No summary reported."}
+                          </span>
+                        </span>
+
+                        <span className="task-history-times">
+                          <span
+                            className="task-history-when"
+                            title={`Finished ${new Date(landed(run)).toLocaleString()}`}
+                          >
+                            {ago(landed(run))}
+                          </span>
+                          <span className="task-history-took" title="How long the agent worked">
+                            <StopwatchIcon size={10} />
+                            {took(run)}
+                          </span>
+                        </span>
+                      </button>
+
+                      {expanded && (
+                        <div className="task-history-detail">
+                          <div className="task-history-meta">
+                            <span className="task-history-chiplet">
+                              <AgentIcon id={run.agent} size={12} />
+                              {agentName(run.agent)}
+                            </span>
+                            <span
+                              className="task-history-chiplet task-history-path"
+                              title={run.cwd}
+                            >
+                              {run.cwd}
+                            </span>
+                            {run.url && (
+                              <a
+                                className="task-history-chiplet task-history-link"
+                                href={run.url}
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  void openUrl(run.url as string);
+                                }}
+                              >
+                                <GlobeIcon size={12} />
+                                {run.url}
+                              </a>
+                            )}
+                            <span className="status-spacer" />
+                            {/* Only for this project's runs: re-running fires the
+                                brief into `run.cwd`, and a run from elsewhere would
+                                land in another project's tree while being recorded
+                                against this one. */}
+                            {/* The one-shot's exit door: the agent's transcript
+                                outlives its terminal, so the conversation can be
+                                picked up as an ordinary session rather than started
+                                again from nothing. Offered only where it can actually
+                                work — a run whose worktree was torn down has no
+                                directory left to resume in. */}
+                            {onContinueSession &&
+                              canResumeRun(run) &&
+                              run.projectId === projectId && (
+                                <Button
+                                  size="sm"
+                                  title="Open this run's conversation as a normal agent session, with everything it worked out still in context"
+                                  onClick={() => onContinueSession(run)}
+                                >
+                                  <AgentsIcon size={12} /> Continue as a session
+                                </Button>
+                              )}
+                            {onRunAgain && run.projectId === projectId && (
+                              <Button
+                                size="sm"
+                                title="Run this task again, in the same directory"
+                                onClick={() => onRunAgain(run)}>
+                                <PlayIcon size={12} /> Run again
+                              </Button>
+                            )}
+                            <Button icon size="sm"
+                              title="Forget this run"
+                              onClick={() => {
+                                removeTaskRun(run.id);
+                                setRuns(completedTaskRuns());
+                              }}>
+                              <TrashIcon size={12} />
+                            </Button>
+                          </div>
+
+                          {/* Three different things, and until now they arrived as
+                              one undifferentiated column of grey text: what you asked
+                              for, what the agent answered, and what scrolled past
+                              while it worked. The answer is the reason you opened the
+                              row, so it is the one that gets a mark of its own. */}
+                          <div className="task-history-section">
+                            <div className="task-history-section-head">You asked</div>
+                            {/* The agent's own reading of the ask, above the brief it
+                                read. A brief is several hundred words of launcher
+                                prose and protocol, and recalling what a run was about
+                                should not mean reading past all of it — and where the
+                                two disagree, that is the most useful line on the
+                                page: it is the misunderstanding, in writing, right
+                                above the answer it produced. So where the agent left
+                                a reading, that is what shows and the brief folds up
+                                behind it; where it didn't, the brief is all there is
+                                and it stays open. */}
+                            {run.asked ? (
+                              <>
+                                <div className="task-history-asked">{run.asked}</div>
+                                <details className="task-history-fold">
+                                  <summary>
+                                    <span className="task-history-caret">›</span>
+                                    The brief it was given
+                                  </summary>
+                                  <div className="task-history-brief">{run.brief}</div>
+                                </details>
+                              </>
+                            ) : (
+                              <div className="task-history-brief">{run.brief}</div>
+                            )}
+                          </div>
+
+                          <div className="task-history-section is-report">
+                            <div className="task-history-section-head">
+                              <AgentsIcon size={11} /> The agent reported
+                            </div>
+                            {/* The row truncates this to one line — it is the row's
+                                job to be scannable. The full text has to live
+                                somewhere, and this is the somewhere. */}
+                            <div className="task-history-report">
+                              {run.summary ?? "It finished without reporting a summary."}
+                            </div>
+                          </div>
+
+                          {run.files && run.files.length > 0 && (
+                            <div className="task-history-section">
+                              <div className="task-history-section-head">
+                                Files it touched
+                                <span className="task-history-section-count">
+                                  {run.files.length}
+                                </span>
+                              </div>
+                              <div className="task-history-files">
+                                {run.files.map((f) => {
+                                  // The recorded path may point into a worktree that
+                                  // no longer exists; the committed file does.
+                                  const at = resolveTaskFile(f, run.cwd);
+                                  return (
+                                    <button
+                                      key={f}
+                                      type="button"
+                                      className="task-history-file"
+                                      title={at}
+                                      onClick={() => onOpenFile?.(at)}
+                                    >
+                                      <DocumentIcon size={11} />
+                                      {at.split("/").pop()}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+
+                          {run.output ? (
+                            /* Shut by default. The answer above is what you opened
+                               the row for; the tail is the evidence behind it, and
+                               only sometimes what you want. Left open it pushed every
+                               other run off the screen. */
+                            <details className="task-history-section task-history-fold task-history-tail">
+                              <summary className="task-history-section-head">
+                                <span className="task-history-caret">›</span>
+                                Terminal tail
+                                <span className="task-history-section-count">
+                                  {tidyOutput(run.output).split("\n").length} lines
+                                </span>
+                              </summary>
+                              <pre className="task-history-output">
+                                {tidyOutput(run.output)}
+                              </pre>
+                            </details>
+                          ) : (
+                            <div className="task-history-note">
+                              The terminal output for this run is no longer kept — only the
+                              most recent runs hold on to theirs.
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </section>
+            ))}
+
+            {/* A list that just stops halfway down a tall window looks like it
+                failed to load the rest. One hairline says it didn't. */}
+            {pages === 1 && (
+              <div className="task-history-end">
+                {narrowed
+                  ? `${matches.length} of ${runs.length} runs`
+                  : `All ${runs.length} runs`}
               </div>
-            );
-          })}
+            )}
+          </div>
         </div>
       )}
 
       {pages > 1 && (
         <div className="task-history-pager">
-          <Button disabled={current === 0} onClick={() => setPage(current - 1)}>
-            ‹ Newer
-          </Button>
-          <span className="task-history-note">
-            {current * PER_PAGE + 1}–{current * PER_PAGE + shown.length} of {matches.length}
-          </span>
-          <Button
-            disabled={current >= pages - 1}
-            onClick={() => setPage(current + 1)}>
-            Older ›
-          </Button>
+          <div className="task-history-col task-history-pager-row">
+            <Button size="sm" disabled={current === 0} onClick={() => setPage(current - 1)}>
+              ‹ Newer
+            </Button>
+            <span className="task-history-note">
+              {current * PER_PAGE + 1}–{current * PER_PAGE + shown.length} of {matches.length}
+            </span>
+            <Button
+              size="sm"
+              disabled={current >= pages - 1}
+              onClick={() => setPage(current + 1)}>
+              Older ›
+            </Button>
+          </div>
         </div>
       )}
     </div>
