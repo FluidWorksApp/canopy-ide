@@ -33,6 +33,7 @@ import {
 } from "../taskMenu";
 import { Button } from "./ui";
 import { format, matches } from "../shortcuts";
+import { PROVENANCE_EVENT } from "../provenance";
 
 const fmtCost = (n: number) =>
   n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`;
@@ -58,6 +59,9 @@ interface AgentWorkspaceViewProps {
     commit: { hash: string; short: string; subject: string },
   ) => void;
   onOpenPr: (repo: string, pr: ipc.PrInfo) => void;
+  /** Open a PR this session raised, by number — it may be merged or closed, so
+   *  there is no `PrInfo` in hand to pass to `onOpenPr`. */
+  onOpenPrNumber?: (repo: string, number: number, url: string) => void;
   onOpenTerminal: (cwd: string, label: string) => void;
   onNotice: Notify;
   /** Deliver a message to the agent that owns this workspace — typed into its
@@ -386,6 +390,7 @@ export function AgentWorkspaceView({
   digest,
   onOpenCommit,
   onOpenPr,
+  onOpenPrNumber,
   onOpenTerminal,
   onNotice,
   onMessageAgent,
@@ -602,6 +607,37 @@ export function AgentWorkspaceView({
       live = false;
     };
   }, [repo]);
+
+  // Every PR this session actually produced, from Canopy's own record
+  // (provenance.rs) rather than from a branch match.
+  //
+  // The branch lookup below is a live view and stays, because it is what
+  // carries checks and review state. But it can only ever answer for the branch
+  // the session is on *now*, and only while the PR is open — so it goes blank
+  // the moment the work merges, the session moves on, or the worktree is
+  // detached (which every PR worktree is, by construction). This list does not:
+  // it was written when the PR was raised and needs no network to read.
+  const [raised, setRaised] = useState<ipc.ProvenanceEdge[]>([]);
+  useEffect(() => {
+    let live = true;
+    setRaised([]);
+    if (!sessionId) return;
+    void ipc
+      .provenanceForSession(sessionId)
+      .then((rows) => live && setRaised(rows))
+      .catch(() => {});
+    const reread = () => {
+      void ipc
+        .provenanceForSession(sessionId)
+        .then((rows) => live && setRaised(rows))
+        .catch(() => {});
+    };
+    window.addEventListener(PROVENANCE_EVENT, reread);
+    return () => {
+      live = false;
+      window.removeEventListener(PROVENANCE_EVENT, reread);
+    };
+  }, [sessionId]);
 
   // PR raised from the agent's branch. `gh pr list` only reports open PRs, so
   // a merged/closed one simply drops off — the card says so.
@@ -1306,6 +1342,36 @@ export function AgentWorkspaceView({
         <div className="tree-empty">
           Working directly on {ws.base} — no branch of its own, showing
           uncommitted changes only.
+        </div>
+      )}
+
+      {/* PRs this session is on record as having raised. Rendered whatever the
+          worktree's state — a detached PR worktree and a merged branch both
+          defeat the live lookup below, and those are exactly the sessions whose
+          output you most want to find again. The one already shown as the live
+          card is skipped rather than repeated. */}
+      {repo && raised.length > 0 && (
+        <div className="aw-raised">
+          {raised
+            .filter((e) => e.pr_number !== pr?.number)
+            .map((e) => (
+              <button
+                key={`${e.pr_number}-${e.session_id}`}
+                className="aw-raised-row"
+                title={`Raised from ${e.branch}${
+                  e.confidence === "declared"
+                    ? ""
+                    : ` — ${e.confidence} attribution`
+                }`}
+                onClick={() =>
+                  onOpenPrNumber?.(repo, e.pr_number, e.pr_url)
+                }
+              >
+                <span className="aw-pr-num">#{e.pr_number}</span>
+                <span className="aw-raised-branch">{e.branch}</span>
+                <span className="loose-chip">raised by this session</span>
+              </button>
+            ))}
         </div>
       )}
 

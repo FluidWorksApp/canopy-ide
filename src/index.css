@@ -12813,6 +12813,44 @@ textarea,
   font-weight: 600;
 }
 
+/* PRs this session is on record as having raised (provenance.rs), as opposed
+   to the live card above, which can only answer for the branch it is on now
+   and only while that PR is open. Quieter than the card: this is history, and
+   the live one is the thing to act on. */
+.aw-raised {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 14px 0;
+}
+.aw-raised-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 10px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.aw-raised-row:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.aw-raised-branch {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, monospace;
+}
+
 .aw-pr-title {
   flex: 1;
   min-width: 0;

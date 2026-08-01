@@ -6672,6 +6672,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             digest={tab.digest}
             onOpenCommit={openCommit}
             onOpenPr={openPr}
+            onOpenPrNumber={(r, n, u) => void openPrByNumber(r, n, u)}
             onOpenTerminal={(cwd, label) => addTerminal(cwd, undefined, label)}
             onNotice={onNotice}
             onMessageAgent={(text) =>
