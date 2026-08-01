@@ -56,6 +56,7 @@
   /* ---- motion ---- */
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   --dur-fast: 120ms; /* hover, press */
+  --dur-press: 90ms; /* the give under a click — always faster than the hover */
   --dur-med: 200ms; /* panel reveal, sliding indicators */
   --dur-pop: 260ms; /* overlays: palette, toast (rise 6px + scale .98) */
 
@@ -4210,9 +4211,34 @@ body.resizing-side * {
   line-height: 1;
   white-space: nowrap;
   cursor: pointer;
+  /* Everything that changes state, not just the two that used to. `color` and
+     `box-shadow` were being set on hover and focus without being listed here,
+     so a ghost button's label snapped to full brightness in one frame while
+     its background faded in over 120ms — the two halves of one gesture
+     arriving at different times. */
   transition:
     border-color var(--dur-fast) var(--ease-out),
-    background var(--dur-fast) var(--ease-out);
+    background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+/* The press. A button whose only feedback is a border colour reads as a
+   picture of a button: the click lands, the pointer is already still, and
+   nothing moves — so the moment of pressing has no moment. This is the give.
+   It's a transform, so it costs no layout and no repaint, and it goes down
+   faster than it comes back up: `--dur-press` on the way in, the button's own
+   `--dur-fast` easing it back out, which is what makes a release feel sprung
+   rather than merely undone. */
+.btn:active:not(:disabled),
+.btn-icon:active:not(:disabled) {
+  transform: scale(0.97);
+  transition-duration: var(--dur-press);
+}
+.btn-icon:active:not(:disabled) {
+  /* Smaller box, so the same proportional give needs a deeper scale to read. */
+  transform: scale(0.92);
 }
 
 .btn-sm {
@@ -4237,6 +4263,23 @@ body.resizing-side * {
   color: var(--on-accent);
   border-color: var(--accent);
   font-weight: 600;
+}
+
+/* The accent button had no hover of its own. The shared `.btn:hover` sets the
+   border to `--accent`, which on a button already bordered in `--accent` is
+   nothing at all — so the one control a view is built around was the only one
+   that didn't answer the pointer. It lifts off the surface instead: the fill
+   brightens a step and a soft halo in its own colour spreads underneath. */
+.btn-accent:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 88%, var(--text));
+  border-color: color-mix(in srgb, var(--accent) 88%, var(--text));
+  box-shadow: 0 2px 12px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+.btn-accent:active:not(:disabled) {
+  /* Pressed, the halo collapses — the button is going *into* the page, and a
+     glow that stayed put would read as it hovering above what it's sinking
+     through. */
+  box-shadow: 0 0 0 color-mix(in srgb, var(--accent) 0%, transparent);
 }
 
 /* Quiet until you reach for it. Toolbars and headers hold four or five
@@ -4280,7 +4323,9 @@ body.resizing-side * {
   cursor: pointer;
   transition:
     background var(--dur-fast) var(--ease-out),
-    color var(--dur-fast) var(--ease-out);
+    color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
 }
 
 .btn-icon-sm {
@@ -4314,6 +4359,112 @@ body.resizing-side * {
   color: var(--danger);
   border-color: var(--danger);
   background: color-mix(in srgb, var(--danger) 18%, var(--bg-raised));
+}
+
+/* The give is the one part of a button's motion that is actual movement, so
+   it's the one part that goes. Colour and shadow still ease — those aren't
+   what "reduced motion" is asking about, and losing them would leave the
+   controls flicking between states. */
+@media (prefers-reduced-motion: reduce) {
+  .btn:active:not(:disabled),
+  .btn-icon:active:not(:disabled) {
+    transform: none;
+  }
+}
+
+/* ---------- loading placeholders ---------- */
+
+/* Bars that stand in for content that hasn't arrived. See Skeleton.tsx for
+   when to reach for them; the short version is that they hold the space the
+   real thing will take, so arrival fills a frame instead of rebuilding one.
+   Built from `--text-faint` over `--bg-raised` rather than a fixed grey, so
+   the same bar works on all three themes including the light one. */
+.cnp-skel {
+  display: block;
+  position: relative;
+  overflow: hidden;
+  height: 11px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  background: color-mix(in srgb, var(--text-faint) 28%, var(--bg-raised));
+}
+.cnp-skel.is-round {
+  border-radius: 999px;
+}
+
+/* The sweep. A highlight travelling left to right, on a pseudo-element so it
+   composites as a transform rather than repainting the bar's background. */
+.cnp-skel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--text) 13%, transparent),
+    transparent
+  );
+  transform: translateX(-100%);
+  animation: cnp-skel-sweep 1.5s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+@keyframes cnp-skel-sweep {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.cnp-skel-text {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+/* Staggered, so the block reads as one wave crossing a paragraph rather than
+   five bars flashing in unison — which is the tell that turns a placeholder
+   into a strobe. */
+.cnp-skel-text .cnp-skel:nth-child(2)::after {
+  animation-delay: 90ms;
+}
+.cnp-skel-text .cnp-skel:nth-child(3)::after {
+  animation-delay: 180ms;
+}
+.cnp-skel-text .cnp-skel:nth-child(4)::after {
+  animation-delay: 270ms;
+}
+.cnp-skel-text .cnp-skel:nth-child(5)::after {
+  animation-delay: 360ms;
+}
+.cnp-skel-text .cnp-skel:nth-child(n + 6)::after {
+  animation-delay: 450ms;
+}
+
+/* A row of placeholders — a stat line, a toolbar, a file header. */
+.cnp-skel-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* The sweep is travel, so it goes. Something still has to say "in flight",
+     though — a placeholder that has stopped moving entirely is indistinguish-
+     able from content that loaded blank — so the bar breathes in place
+     instead: slow, shallow, and going nowhere. */
+  .cnp-skel::after {
+    animation: none;
+  }
+  .cnp-skel {
+    animation: cnp-skel-breathe 2.4s ease-in-out infinite;
+  }
+}
+@keyframes cnp-skel-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
 }
 
 /* ---------- sidebar ---------- */
@@ -11509,6 +11660,135 @@ input[type="radio"]:disabled {
 }
 .pr-file-note a {
   color: var(--accent);
+}
+
+/* The description placeholder wears .pr-description and nothing else: it needs
+   no rule of its own, because taking the real card's border, radius, padding
+   and margin *unaltered* is the entire point — a placeholder padded 2px
+   differently is a card that resizes the moment the text lands. */
+
+/* Nothing in a skeletonised diff is clickable, and .pr-file-head's pointer
+   cursor invites a click that does nothing. */
+.pr-diff-skel .pr-file-head {
+  cursor: default;
+}
+
+/* ---------- linked issues and the stack ---------- */
+
+.pr-link-group + .pr-link-group {
+  margin-top: 8px;
+}
+.pr-link-group-title {
+  font-size: 10px;
+  color: var(--text-faint);
+  margin-bottom: 3px;
+}
+
+/* A row is a link, so it's a button: keyboard-reachable, and it can't be
+   confused with the static text around it. Laid out as number / title / state
+   with the title taking the slack, because the number is what you scan for and
+   the state is what you check. */
+.pr-link-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 4px;
+  margin-left: -4px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+.pr-link-row:hover {
+  background: var(--bg-raised);
+  border-color: var(--border);
+}
+.pr-link-row:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+.pr-link-row:active {
+  transform: scale(0.985);
+  transition-duration: var(--dur-press);
+}
+
+.pr-link-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+.pr-link-dot.is-open {
+  background: var(--ok);
+}
+.pr-link-dot.is-draft {
+  background: var(--text-dim);
+}
+.pr-link-dot.is-merged {
+  background: var(--accent);
+}
+.pr-link-dot.is-closed {
+  background: var(--danger);
+}
+/* A closed issue is work that finished, not work that failed. */
+.pr-link-dot.is-done {
+  background: var(--ok);
+  opacity: 0.55;
+}
+
+.pr-link-num {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+.pr-link-repo {
+  /* The owner is almost never the interesting half of owner/name, but dropping
+     it would make two repos called "api" the same link. Dimmed, not cut. */
+  color: var(--text-faint);
+}
+.pr-link-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pr-link-state {
+  flex: 0 0 auto;
+  font-size: 9.5px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.pr-link-state.is-open {
+  color: var(--ok);
+}
+.pr-link-state.is-merged {
+  color: var(--accent);
+}
+.pr-link-state.is-closed {
+  color: var(--danger);
+}
+.pr-link-state.is-done {
+  color: var(--text-dim);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pr-link-row:active {
+    transform: none;
+  }
 }
 
 .pr-loading,

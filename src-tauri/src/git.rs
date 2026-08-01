@@ -2457,6 +2457,195 @@ pub async fn gh_pr_conversation(
     parse_conversation(&data, number)
 }
 
+/// One thing this PR is attached to: an issue it will close, a PR stacked
+/// either side of it, or something that merely refers to it.
+#[derive(Serialize, Clone, Default)]
+pub struct PrLink {
+    /// "issue" or "pr" — decides the glyph, and whether MERGED is a state it
+    /// can be in.
+    pub kind: String,
+    pub number: u32,
+    pub title: String,
+    pub url: String,
+    /// OPEN / CLOSED / MERGED.
+    pub state: String,
+    pub draft: bool,
+    /// "owner/name", set only when it *isn't* this repo. A cross-repo link has
+    /// to say where it lives, or "#12" points at the wrong #12.
+    pub repo: String,
+    /// The branch this one merges into. Only carried for stacked PRs, where it
+    /// is the thing that makes them stacked.
+    pub base: String,
+}
+
+/// What a PR is attached to, in the four groups that mean different things.
+///
+/// These are deliberately not one list. "closes #12" is a promise about what
+/// merging does; a PR stacked on this one is a queue that merging unblocks;
+/// and a mention is neither — it's context. Flattening them would leave the
+/// reader to work out which of the three each row is, from the title.
+#[derive(Serialize, Clone, Default)]
+pub struct PrLinks {
+    /// Issues this PR closes when it lands. GitHub's own linked issues: the
+    /// closing keywords in the body, plus anything attached by hand in the
+    /// Development panel.
+    pub closes: Vec<PrLink>,
+    /// Open PRs branching off *this* PR's head — the stack sitting on top of
+    /// it. This is the group that makes merging this one a decision about more
+    /// than this one.
+    pub children: Vec<PrLink>,
+    /// The open PR this one branches off, when its base is another PR's head
+    /// rather than a plain branch. Usually empty; never empty when it matters.
+    pub parents: Vec<PrLink>,
+    /// Issues and PRs that reference this one without closing it.
+    pub mentions: Vec<PrLink>,
+}
+
+/// Everything this PR is attached to, in one document.
+///
+/// `head` and `base` come in from the caller rather than being read out of the
+/// PR here, because a GraphQL variable can't be filled from that same query's
+/// own result — resolving them server-side would mean a second round trip for
+/// two strings the tab has had since it opened.
+const PR_LINKS_QUERY: &str = r#"
+query($owner:String!,$name:String!,$number:Int!,$head:String!,$base:String!){
+  repository(owner:$owner,name:$name){
+    pullRequest(number:$number){
+      closingIssuesReferences(first:20){nodes{
+        number title url state repository{nameWithOwner}
+      }}
+      timelineItems(first:100,itemTypes:[CROSS_REFERENCED_EVENT]){nodes{
+        ... on CrossReferencedEvent{ source{
+          __typename
+          ... on Issue{ number title url state repository{nameWithOwner} }
+          ... on PullRequest{ number title url state isDraft repository{nameWithOwner} }
+        }}
+      }}
+    }
+    children: pullRequests(baseRefName:$head,states:[OPEN],first:20){nodes{
+      number title url state isDraft baseRefName
+    }}
+    parents: pullRequests(headRefName:$base,states:[OPEN],first:5){nodes{
+      number title url state isDraft baseRefName
+    }}
+  }
+}"#;
+
+fn parse_link(v: &Value, kind: &str, this_repo: &str) -> PrLink {
+    let repo = s(&v["repository"]["nameWithOwner"]);
+    PrLink {
+        kind: kind.to_string(),
+        number: v["number"].as_u64().unwrap_or(0) as u32,
+        title: s(&v["title"]),
+        url: s(&v["url"]),
+        state: s(&v["state"]),
+        draft: v["isDraft"].as_bool().unwrap_or(false),
+        // Same repo is the overwhelming case, and prefixing every row with the
+        // name of the repo you are already looking at is noise that hides the
+        // handful of rows where the prefix is load-bearing.
+        repo: if repo.is_empty() || repo == this_repo {
+            String::new()
+        } else {
+            repo
+        },
+        base: s(&v["baseRefName"]),
+    }
+}
+
+fn parse_links(data: &Value, number: u32, this_repo: &str) -> PrLinks {
+    let repo = &data["repository"];
+    let pr = &repo["pullRequest"];
+
+    let closes: Vec<PrLink> = nodes(pr, "closingIssuesReferences")
+        .iter()
+        .map(|n| parse_link(n, "issue", this_repo))
+        .collect();
+    let children: Vec<PrLink> = nodes(repo, "children")
+        .iter()
+        .map(|n| parse_link(n, "pr", this_repo))
+        .collect();
+    let parents: Vec<PrLink> = nodes(repo, "parents")
+        .iter()
+        .map(|n| parse_link(n, "pr", this_repo))
+        .collect();
+
+    // A URL identifies an issue or PR across every repo, which a number can't:
+    // the stack, the closed issues and the mentions can all name the same
+    // thing, and it should appear once, in the most specific group it earned.
+    let mut seen: std::collections::HashSet<String> = closes
+        .iter()
+        .chain(&children)
+        .chain(&parents)
+        .map(|l| l.url.clone())
+        .collect();
+
+    let mut mentions = Vec::new();
+    for n in nodes(pr, "timelineItems") {
+        let src = &n["source"];
+        let kind = match src["__typename"].as_str() {
+            Some("Issue") => "issue",
+            Some("PullRequest") => "pr",
+            // A cross-reference from something that is neither — or an empty
+            // node, which is what a reference to a repo you can't read comes
+            // back as. Nothing to show and nothing to link to.
+            _ => continue,
+        };
+        let link = parse_link(src, kind, this_repo);
+        if link.url.is_empty() {
+            continue;
+        }
+        // A PR referring to itself is not a related PR.
+        if link.kind == "pr" && link.number == number && link.repo.is_empty() {
+            continue;
+        }
+        if seen.insert(link.url.clone()) {
+            mentions.push(link);
+        }
+    }
+
+    PrLinks {
+        closes,
+        children,
+        parents,
+        mentions,
+    }
+}
+
+/// The issues and pull requests this one is attached to — what it closes, what
+/// is stacked on it, and what refers to it.
+///
+/// Split out of `gh_pr_conversation` rather than folded into it: the
+/// conversation is what the tab can't render without, and this is context
+/// beside it. On its own call it can't slow the comments down, and the rail
+/// can show it arriving separately.
+#[tauri::command]
+pub async fn gh_pr_links(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    number: u32,
+    head: String,
+    base: String,
+) -> Result<PrLinks, String> {
+    let top = repo_path(&state, &repo)?;
+    let (owner, name) = gh_nwo(&top)?;
+    let this_repo = format!("{owner}/{name}");
+    // Sent as real JSON rather than through `-F`: `-F` retypes anything that
+    // looks like a number, so a branch literally named "42" would reach a
+    // String! argument as an Int and the whole query would be rejected.
+    let data = gh_graphql_json(
+        &top,
+        PR_LINKS_QUERY,
+        serde_json::json!({
+            "owner": owner,
+            "name": name,
+            "number": number,
+            "head": head,
+            "base": base,
+        }),
+    )?;
+    Ok(parse_links(&data, number, &this_repo))
+}
+
 /// The query's `data` shaped into what the tab renders. Split from the command
 /// so the parsing — the part that breaks when GitHub renames a field — is
 /// testable without a network round trip.
@@ -5549,5 +5738,108 @@ index 333..444 100644
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A links response with one of everything, plus the three shapes that have
+    /// to be dropped: the PR referring to itself, a duplicate of something
+    /// already grouped, and a cross-reference to something unreadable.
+    fn links_fixture() -> Value {
+        json!({"repository": {
+            "pullRequest": {
+                "closingIssuesReferences": {"nodes": [
+                    {"number": 12, "title": "Secrets leak on push", "url": "https://gh/o/r/issues/12",
+                     "state": "OPEN", "repository": {"nameWithOwner": "o/r"}}
+                ]},
+                "timelineItems": {"nodes": [
+                    // Already in `closes` — must not be repeated as a mention.
+                    {"source": {"__typename": "Issue", "number": 12, "title": "Secrets leak on push",
+                                "url": "https://gh/o/r/issues/12", "state": "OPEN",
+                                "repository": {"nameWithOwner": "o/r"}}},
+                    // A genuine mention, from another repo.
+                    {"source": {"__typename": "Issue", "number": 4, "title": "Roll out the scanner",
+                                "url": "https://gh/other/repo/issues/4", "state": "CLOSED",
+                                "repository": {"nameWithOwner": "other/repo"}}},
+                    // This PR, cross-referencing itself.
+                    {"source": {"__typename": "PullRequest", "number": 302, "title": "This one",
+                                "url": "https://gh/o/r/pull/302", "state": "OPEN",
+                                "repository": {"nameWithOwner": "o/r"}}},
+                    // A reference to something the token can't read.
+                    {"source": {}}
+                ]}
+            },
+            "children": {"nodes": [
+                {"number": 303, "title": "Scan the whole tree", "url": "https://gh/o/r/pull/303",
+                 "state": "OPEN", "isDraft": true, "baseRefName": "chore/secret-scan-gate"}
+            ]},
+            "parents": {"nodes": [
+                {"number": 300, "title": "Add the hook runner", "url": "https://gh/o/r/pull/300",
+                 "state": "OPEN", "isDraft": false, "baseRefName": "main"}
+            ]}
+        }})
+    }
+
+    #[test]
+    fn parse_links_groups_closes_children_and_parents() {
+        let l = parse_links(&links_fixture(), 302, "o/r");
+
+        assert_eq!(l.closes.len(), 1);
+        assert_eq!(l.closes[0].number, 12);
+        assert_eq!(l.closes[0].kind, "issue");
+        // Same repo as the PR, so the row carries no prefix to disambiguate.
+        assert_eq!(l.closes[0].repo, "");
+
+        assert_eq!(l.children.len(), 1);
+        assert_eq!(l.children[0].number, 303);
+        assert_eq!(l.children[0].kind, "pr");
+        assert!(l.children[0].draft);
+        assert_eq!(l.children[0].base, "chore/secret-scan-gate");
+
+        assert_eq!(l.parents.len(), 1);
+        assert_eq!(l.parents[0].number, 300);
+        assert!(!l.parents[0].draft);
+    }
+
+    #[test]
+    fn parse_links_drops_duplicates_self_and_unreadable_refs() {
+        let l = parse_links(&links_fixture(), 302, "o/r");
+
+        // #12 is already a closing reference; #302 is this PR; the empty source
+        // is a reference to something we can't see. One mention survives.
+        let urls: Vec<&str> = l.mentions.iter().map(|m| m.url.as_str()).collect();
+        assert_eq!(urls, vec!["https://gh/other/repo/issues/4"]);
+        assert_eq!(l.mentions[0].state, "CLOSED");
+    }
+
+    #[test]
+    fn parse_links_keeps_the_repo_prefix_only_when_it_changes_the_meaning() {
+        let l = parse_links(&links_fixture(), 302, "o/r");
+        // "#4" alone would point at this repo's #4, which is a different issue.
+        assert_eq!(l.mentions[0].repo, "other/repo");
+        assert_eq!(l.mentions[0].number, 4);
+    }
+
+    #[test]
+    fn parse_links_survives_a_pr_with_nothing_attached() {
+        // Every group absent rather than empty — what the query returns for a
+        // PR that closes nothing and that nothing has referenced.
+        let l = parse_links(&json!({"repository": {"pullRequest": {}}}), 1, "o/r");
+        assert!(l.closes.is_empty());
+        assert!(l.children.is_empty());
+        assert!(l.parents.is_empty());
+        assert!(l.mentions.is_empty());
+    }
+
+    #[test]
+    fn parse_links_does_not_mistake_another_repos_pr_number_for_this_one() {
+        // Same number as the PR being viewed, different repo: a real mention.
+        let data = json!({"repository": {"pullRequest": {"timelineItems": {"nodes": [
+            {"source": {"__typename": "PullRequest", "number": 302, "title": "Elsewhere",
+                        "url": "https://gh/other/repo/pull/302", "state": "MERGED",
+                        "repository": {"nameWithOwner": "other/repo"}}}
+        ]}}}});
+        let l = parse_links(&data, 302, "o/r");
+        assert_eq!(l.mentions.len(), 1);
+        assert_eq!(l.mentions[0].repo, "other/repo");
+        assert_eq!(l.mentions[0].state, "MERGED");
     }
 }

@@ -31,6 +31,7 @@ import type { Notify, RelayHandle } from "../types";
 import { agentMenuItems } from "../agentMenu";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import { AgentsIcon, ChevronIcon, TeamIcon } from "./icons";
+import { Skeleton, SkeletonBox, SkeletonText } from "./Skeleton";
 import { TaskProgress } from "./TaskProgress";
 import type { AgentTarget } from "./TicketsPanel";
 import {
@@ -325,6 +326,15 @@ export function PrView({
   /** People who could be asked to review — loaded only when that's the move. */
   const [candidates, setCandidates] = useState<string[] | null>(null);
   const [map, setMap] = useState<string | null>(null);
+  /** Whether the artifact read has *finished*, as opposed to having found
+   *  nothing. `map` alone can't tell the two apart, and the difference decides
+   *  whether the idle "Review this for me" button is allowed on screen: shown
+   *  during the read it appears for a beat and is then shoved down the page by
+   *  the map landing above it. */
+  const [mapRead, setMapRead] = useState(false);
+  /** What this PR is attached to. Its own request beside the conversation's —
+   *  it's context, and context must never hold up the comments. */
+  const [links, setLinks] = useState<ipc.PrLinks | null>(null);
   const [deltaOn, setDeltaOn] = useState(false);
   const [deltaPatch, setDeltaPatch] = useState<string | null>(null);
   const [loop, setLoop] = useState<PrLoop>(() => loadLoop(repo, pr.number));
@@ -493,6 +503,8 @@ export function PrView({
     setDrafts([]);
     setDeltaOn(false);
     setDeltaPatch(null);
+    setMapRead(false);
+    setLinks(null);
     stagedKeys.current = new Set();
     setLoop(loadLoop(repo, pr.number));
     void ipc
@@ -505,12 +517,24 @@ export function PrView({
     void ipc
       .fsReadText(prArtifactPath(repo, pr.number))
       .then((t) => live && setMap(t.trim() || null))
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => live && setMapRead(true));
+    // Linked issues and the stack around it. Failure is silent on purpose:
+    // this is the one part of the tab that is pure context, and a red error
+    // where "nothing is linked" belongs would read as something being broken.
+    void ipc
+      .ghPrLinks(repo, pr.number, pr.branch, pr.base)
+      .then((l) => live && setLinks(l))
+      .catch(
+        () =>
+          live &&
+          setLinks({ closes: [], children: [], parents: [], mentions: [] }),
+      );
     void stageFindings();
     return () => {
       live = false;
     };
-  }, [repo, pr.number, refreshConv, stageFindings]);
+  }, [repo, pr.number, pr.branch, pr.base, refreshConv, stageFindings]);
 
   useEffect(() => {
     // The log is written by the launcher and by job_done; the event covers
@@ -1257,6 +1281,12 @@ export function PrView({
   // and raw HTML in the webview reaches every Tauri command, and this tab
   // re-renders on every keystroke in the review composer.
   const bodyText = conv?.body?.trim() ? conv.body : bodyFallback;
+  /** Still in flight, as opposed to genuinely empty. A PR with no description
+   *  is a real thing, so "no text yet" can't be the test — this waits for one
+   *  of the two sources to have answered. On `convError` the fallback read is
+   *  already running and the error is shown in the rail, so the placeholder
+   *  stands down rather than shimmering forever over a request that failed. */
+  const descLoading = !conv && !convError && !bodyFallback.trim();
 
   const byPath = useMemo(
     () => threadsByPath(conv?.threads ?? []),
@@ -1896,8 +1926,20 @@ export function PrView({
       <div className="pr-body">
         <div className="pr-overview">
           <div className="pr-overview-main">
-            {bodyText.trim() && (
-              <Markdown className="pr-description" text={bodyText} />
+            {descLoading ? (
+              /* Wearing .pr-description itself, so the card that arrives is
+                 the card that was already there — same border, same padding,
+                 same place on the page. Only the words inside it change. */
+              <SkeletonBox
+                label="Loading the description"
+                className="pr-description"
+              >
+                <SkeletonText lines={5} />
+              </SkeletonBox>
+            ) : (
+              bodyText.trim() && (
+                <Markdown className="pr-description" text={bodyText} />
+              )
             )}
             {map && (
               <div className="pr-description pr-map is-agent-made">
@@ -1939,7 +1981,11 @@ export function PrView({
                 )}
               </div>
             )}
-            {!map && !reviewBusy && !settling && onMicroTask && (
+            {/* `mapRead` gates this for the same reason `settling` does: an
+                offer to review appearing for one frame and then being pushed
+                down the page by the review that was already on disk reads as
+                the tab not knowing what it has. */}
+            {mapRead && !map && !reviewBusy && !settling && onMicroTask && (
               <div className="pr-map-cta">
                 {/* The one thing this empty state exists to offer, so it wears
                     the primary tier. As a btn-mini it sat at the same weight as
@@ -1957,8 +2003,35 @@ export function PrView({
 
           <aside className="pr-rail">
             {convError && <div className="pr-error">{convError}</div>}
+            {/* The rail's own frame, standing in for itself. The three sections
+                below are unconditional once the conversation lands, and their
+                titles are known before anything is fetched — so they render for
+                real and only their contents are stubbed. The rail is then the
+                same three cards, the same width, in the same order, before and
+                after; what arrives fills them in rather than replacing a line
+                of text with a column of boxes. */}
             {!conv && !convError && (
-              <div className="pr-loading">Loading conversation…</div>
+              <>
+                <div className="pr-rail-section">
+                  <div className="pr-rail-title">Conversation</div>
+                  <SkeletonBox label="Loading the conversation">
+                    <SkeletonText lines={2} />
+                  </SkeletonBox>
+                </div>
+                <div className="pr-rail-section">
+                  <div className="pr-rail-title">Agent rounds</div>
+                  <SkeletonBox label="Loading agent rounds">
+                    <SkeletonText lines={2} />
+                  </SkeletonBox>
+                </div>
+                <div className="pr-rail-section">
+                  <div className="pr-rail-title">Checks</div>
+                  <SkeletonBox label="Loading checks" className="cnp-skel-row">
+                    <Skeleton w={46} h={14} />
+                    <Skeleton w={86} />
+                  </SkeletonBox>
+                </div>
+              </>
             )}
 
             {conv && (
@@ -2174,12 +2247,47 @@ export function PrView({
                 </div>
               </>
             )}
+
+            {/* What this PR is attached to. Last in the rail, and absent
+                entirely when there is nothing to say — which is why it needs no
+                placeholder of its own. Arriving at the bottom of a column
+                displaces nothing above it, so the one card that can't know its
+                own size in advance is also the one card whose growth nobody
+                feels. */}
+            <PrLinkRail links={links} />
           </aside>
         </div>
 
         {error && <div className="pr-error">{error}</div>}
+        {/* The summary bar and a few collapsed file headers — which is exactly
+            what a large PR settles into, since those open collapsed anyway. The
+            count is a guess and deliberately a small one: three rows that grow
+            into ten push the page down once, where ten rows that shrink to
+            three would yank it up, and a diff you are already reading must
+            never move. */}
         {!activePatch && !error && (
-          <div className="pr-loading">Loading diff…</div>
+          <SkeletonBox label="Loading the diff" className="pr-diff-skel">
+            <div className="pr-files-bar">
+              <Skeleton w={132} />
+              <span className="git-spacer" />
+              <Skeleton w={58} h={22} />
+              <Skeleton w={78} h={22} />
+            </div>
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="pr-file">
+                <div className="pr-file-head">
+                  <Skeleton w={9} h={9} />
+                  {/* 13px, not the default 11: the real head is sized by a
+                      line of 11px monospace, and a row that grows 2px per file
+                      as the diff lands is the shift this is here to prevent. */}
+                  <Skeleton w={`${[52, 38, 61][i]}%`} h={13} />
+                  <span className="git-spacer" />
+                  <Skeleton w={26} h={9} />
+                  <Skeleton w={26} h={9} />
+                </div>
+              </div>
+            ))}
+          </SkeletonBox>
         )}
 
         {files.length > 0 && (
@@ -2595,6 +2703,113 @@ function LineComposer({
           Add
         </Button>
       </div>
+    </div>
+  );
+}
+
+/** The groups, in the order they earn attention, each with the words that say
+ *  what the group *means* rather than what it is.
+ *
+ *  "Closes" is a promise about what merging does. "Stacked" is a queue —
+ *  merging this unblocks the ones behind it, and the one in front has to land
+ *  first. "Mentions" is neither; it's context. A single flat list of linked
+ *  issues would leave the reader to work all of that out from the titles. */
+const LINK_GROUPS: readonly {
+  key: keyof ipc.PrLinks;
+  title: string;
+  hint: string;
+}[] = [
+  {
+    key: "parents",
+    title: "Waiting on",
+    hint: "This branches off that PR — it has to land first.",
+  },
+  {
+    key: "closes",
+    title: "Closes when merged",
+    hint: "GitHub will close these the moment this lands.",
+  },
+  {
+    key: "children",
+    title: "Stacked on this",
+    hint: "These branch off this PR and are waiting on it.",
+  },
+  {
+    key: "mentions",
+    title: "Related",
+    hint: "Refers to this, or is referred to by it.",
+  },
+];
+
+/** OPEN / CLOSED / MERGED onto the tints the rest of the tab already uses.
+ *
+ *  Closed splits in two, because the word means opposite things either side of
+ *  it: a closed *issue* is the work finished — often by this very PR — and a
+ *  closed *PR* is work abandoned. Painting both in `--danger` would file every
+ *  issue this PR successfully closed under the colour of something going
+ *  wrong. */
+function linkStateClass(l: ipc.PrLink): string {
+  if (l.state === "MERGED") return "is-merged";
+  if (l.state === "CLOSED") return l.kind === "issue" ? "is-done" : "is-closed";
+  return l.draft ? "is-draft" : "is-open";
+}
+
+function linkStateLabel(l: ipc.PrLink): string {
+  if (l.state === "MERGED") return "merged";
+  if (l.state === "CLOSED") return "closed";
+  return l.draft ? "draft" : "open";
+}
+
+/** Everything this PR is attached to — issues it closes, the stack around it,
+ *  and whatever else points at it.
+ *
+ *  Rows open on github.com rather than in a tab here: an issue has no view in
+ *  this app, and a linked PR belongs to whichever project owns it, which may
+ *  not be one that's open. Sending you somewhere that can actually show the
+ *  thing beats a tab that can't. */
+function PrLinkRail({ links }: { links: ipc.PrLinks | null }) {
+  const groups = links
+    ? LINK_GROUPS.map((g) => ({ ...g, rows: links[g.key] })).filter(
+        (g) => g.rows.length > 0,
+      )
+    : [];
+  if (groups.length === 0) return null;
+  return (
+    <div className="pr-rail-section">
+      <div className="pr-rail-title">Linked</div>
+      {groups.map((g) => (
+        <div key={g.key} className="pr-link-group">
+          <div className="pr-link-group-title" title={g.hint}>
+            {g.title}
+          </div>
+          {g.rows.map((l) => (
+            <button
+              key={l.url}
+              className="pr-link-row"
+              title={`${l.repo || ""}#${l.number} ${l.title} — open on GitHub`}
+              onClick={() =>
+                void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
+                  openUrl(l.url),
+                )
+              }
+            >
+              <span className={`pr-link-dot ${linkStateClass(l)}`} />
+              {/* A bare "#12" in a cross-repo row points at this repo's #12,
+                  which is a different issue with a different meaning. The
+                  prefix is only carried when it changes what the number
+                  refers to. */}
+              <span className="pr-link-num">
+                {l.repo && <span className="pr-link-repo">{l.repo}</span>}#
+                {l.number}
+              </span>
+              <span className="pr-link-title">{l.title}</span>
+              <span className={`pr-link-state ${linkStateClass(l)}`}>
+                {linkStateLabel(l)}
+              </span>
+            </button>
+          ))}
+        </div>
+      ))}
     </div>
   );
 }

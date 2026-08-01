@@ -2340,9 +2340,45 @@ export interface DraftThread {
   body: string;
 }
 
+/** One thing a PR is attached to — an issue it closes, a PR stacked either
+ *  side of it, or something that merely refers to it. */
+export interface PrLink {
+  /** "issue" or "pr". */
+  kind: string;
+  number: number;
+  title: string;
+  url: string;
+  /** OPEN / CLOSED / MERGED. */
+  state: string;
+  draft: boolean;
+  /** "owner/name", set only when the link leaves this repo. */
+  repo: string;
+  /** The branch it merges into — carried for stacked PRs only. */
+  base: string;
+}
+
+/** What a PR is attached to, in four groups that mean different things:
+ *  what merging it closes, what is queued behind it, what it is queued behind,
+ *  and what merely mentions it. */
+export interface PrLinks {
+  closes: PrLink[];
+  children: PrLink[];
+  parents: PrLink[];
+  mentions: PrLink[];
+}
+
 /** Everything the PR tab needs about the conversation, in one GraphQL call. */
 export const ghPrConversation = (repo: string, number: number) =>
   invoke<PrConversation>("gh_pr_conversation", { repo, number });
+/** The issues and PRs this one is attached to. `head`/`base` are the PR's own
+ *  branches — the stack lookups are branch queries, and the tab already knows
+ *  them, so asking GitHub for them again would be a round trip for nothing. */
+export const ghPrLinks = (
+  repo: string,
+  number: number,
+  head: string,
+  base: string,
+) => invoke<PrLinks>("gh_pr_links", { repo, number, head, base });
 export const ghPrThreadReply = (repo: string, threadId: string, body: string) =>
   invoke<string>("gh_pr_thread_reply", { repo, threadId, body });
 export const ghPrThreadResolved = (
