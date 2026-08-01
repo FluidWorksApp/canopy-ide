@@ -86,6 +86,7 @@ import { format, formatChord, modifierOnly, resolve } from "../shortcuts";
 export type SettingsTab =
   | "appearance"
   | "agents"
+  | "mascot"
   | "editor"
   | "terminal"
   | "spotsearch"
@@ -103,14 +104,19 @@ interface SettingsDialogProps {
 }
 
 /** Ordered, and grouped by what you came here to change: how it looks, what
- *  the agents do, what reaches out of this machine. Eleven flat entries was a
+ *  the agents do, what reaches out of this machine. A dozen flat entries was a
  *  list you had to read end to end; three headings turn it into three short
- *  ones you can skip. */
+ *  ones you can skip.
+ *
+ *  Mascot sits in Agents, not Look: the face is only half of it — the other
+ *  half turns that face into a companion that runs a CLI, which is a question
+ *  about agents rather than about colours. */
 const TABS: { id: SettingsTab; label: string; group: string }[] = [
   { id: "appearance", label: "Appearance", group: "Look" },
   { id: "editor", label: "Editor", group: "Look" },
   { id: "terminal", label: "Terminal", group: "Look" },
   { id: "agents", label: "Agents", group: "Agents" },
+  { id: "mascot", label: "Mascot", group: "Agents" },
   { id: "dictation", label: "Dictation", group: "Agents" },
   { id: "spotsearch", label: "SpotSearch", group: "Agents" },
   { id: "clipboard", label: "Clipboard", group: "Agents" },
@@ -183,10 +189,10 @@ const SKIN_PREVIEWS: Record<
  * characters belong on a row (see Field/Row); the authority choice is a
  * segmented control rather than three labelled radios for the same reason.
  *
- * Lives under the mascot picker rather than in Agents, because the question it
+ * Lives under the mascot picker, in the Mascot section, because the question it
  * answers is "what is that face doing on my screen" — and the CLI it runs on is
- * a detail of *this* choice, not another entry in the list of agents that write
- * code.
+ * a detail of *this* choice, not another entry in the Agents list of CLIs that
+ * write code.
  */
 function CompanionSettings({
   s,
@@ -1249,6 +1255,40 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   </div>
                 </Item>
                 <Item
+                  name="Side panel"
+                  desc="How the rail's panels open and close."
+                >
+                  <div className="set-checks">
+                    <Checkbox
+                      checked={s.sidebarHover}
+                      onChange={(v) => patch({ sidebarHover: v })}
+                      label="Hover to view"
+                      hint="Rest on a rail icon to open its panel."
+                    />
+                    <Checkbox
+                      checked={s.sidebarClickOutsideCloses}
+                      onChange={(v) => patch({ sidebarClickOutsideCloses: v })}
+                      label="Click outside to close"
+                      hint="A click in the editor puts the panel away."
+                    />
+                    <Checkbox
+                      checked={s.sidebarOverlay}
+                      onChange={(v) => patch({ sidebarOverlay: v })}
+                      label="Sidebar as overlay"
+                      hint="Floats over your work instead of docking beside it."
+                    />
+                  </div>
+                </Item>
+              </>
+            )}
+
+            {/* Its own section rather than a tail on Appearance: the face and
+                the companion it becomes are one subject, and stacked under the
+                skins they read as decoration and pushed Side panel off the
+                page. */}
+            {tab === "mascot" && (
+              <>
+                <Item
                   name="Mascot"
                   tag="Applies immediately"
                   desc="The face Canopy shows in agents, notifications and empty screens."
@@ -1282,31 +1322,6 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   </div>
                 </Item>
                 <CompanionSettings s={s} patch={patch} />
-                <Item
-                  name="Side panel"
-                  desc="How the rail's panels open and close."
-                >
-                  <div className="set-checks">
-                    <Checkbox
-                      checked={s.sidebarHover}
-                      onChange={(v) => patch({ sidebarHover: v })}
-                      label="Hover to view"
-                      hint="Rest on a rail icon to open its panel."
-                    />
-                    <Checkbox
-                      checked={s.sidebarClickOutsideCloses}
-                      onChange={(v) => patch({ sidebarClickOutsideCloses: v })}
-                      label="Click outside to close"
-                      hint="A click in the editor puts the panel away."
-                    />
-                    <Checkbox
-                      checked={s.sidebarOverlay}
-                      onChange={(v) => patch({ sidebarOverlay: v })}
-                      label="Sidebar as overlay"
-                      hint="Floats over your work instead of docking beside it."
-                    />
-                  </div>
-                </Item>
               </>
             )}
 
