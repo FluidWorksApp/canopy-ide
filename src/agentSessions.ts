@@ -9,27 +9,14 @@
 // Deliberately not here: auto-hibernation. That acts on the machine rather than
 // describing it, and two mounted surfaces running it would pick victims twice.
 // It stays in AgentsPanel, which is always mounted.
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import * as ipc from "./ipc";
 import { identifyAgent, observeForLearning, type AgentIdentity } from "./agentIdentity";
-import { POLICY } from "../shared/agentLife";
-import type { LifeState } from "../shared/agentLife";
+import { POLICY, agentLife } from "../shared/agentLife";
+import type { Life } from "../shared/agentLife";
+import { ptyEvidenceFor, useFirstSeen } from "./agentLifeStore";
+import { DIGEST_FALLBACK_MS, subscribeSessionDigests } from "./sessionDigests";
 import { forgetSessions, restorableFrom } from "./restorable";
-
-/** Colour + label for the lifecycle dot on a running-agent row. `working` is
- *  the only state that pulses — a moving dot in a column of still ones is
- *  where the eye lands first. `unknown` is what every other state decays into
- *  when nothing corroborates it: pointedly not `idle`, because a session that
- *  stopped telling us anything has not told us it finished, and `idle` is what
- *  hibernation reclaims. */
-export const STATE_META: Record<LifeState, { cls: string; label: string }> = {
-  starting: { cls: "st-starting", label: "starting up" },
-  working: { cls: "st-working", label: "working" },
-  waiting: { cls: "st-waiting", label: "waiting on you" },
-  idle: { cls: "st-idle", label: "idle — finished a turn" },
-  ended: { cls: "st-ended", label: "session ended" },
-  unknown: { cls: "st-unknown", label: "no signal — may have stopped" },
-};
 
 /** Last thing the *human* typed. Hooks also record injected payloads
     (`<task-notification>…`, shared-context blocks) as prompts; an XML-ish
@@ -90,6 +77,12 @@ export interface AgentSessions {
   /** Drop a restorable row and everything it stands for: tombstone, backend
    *  delete, and the local list. */
   forget: (rows: ipc.SessionDigest[]) => void;
+  /** The lifecycle verdict for one row, with the full evidence set — digest,
+   *  pty stats, and the first-seen grace. One assembly here, so a panel and a
+   *  page cannot feed the ladder different halves of the same evidence (the
+   *  page used to omit `firstSeen`, which made `starting` unreachable there:
+   *  a booting CLI read as `unknown` instead). */
+  lifeOf: (row: SessionRow) => Life;
 }
 
 /**
@@ -132,8 +125,15 @@ export function useAgentSessions(opts: {
         .then((d) => setDigests(d.filter(inProject)))
         .catch(() => setDigests([]));
     load();
-    const t = setInterval(load, 4000);
-    return () => clearInterval(t);
+    // Event-driven, not polled: the change channel says when a digest moved.
+    // The slow interval only covers store-only CLIs, whose digests change
+    // with no hook event for the bridge to pulse on.
+    const un = subscribeSessionDigests(load);
+    const t = setInterval(load, DIGEST_FALLBACK_MS);
+    return () => {
+      un();
+      clearInterval(t);
+    };
   }, [rootsKey, visible]);
 
   // Claims other agents hold in this checkout, refreshed when one changes.
@@ -202,6 +202,17 @@ export function useAgentSessions(opts: {
       setLearnedTick((n) => n + 1);
   }, [sessions]);
 
+  const firstSeen = useFirstSeen(stats.map((s) => s.id));
+  const lifeOf = useCallback(
+    (row: SessionRow): Life =>
+      agentLife({
+        digest: (row.digest ?? null) as never,
+        pty: ptyEvidenceFor(row.session, firstSeen.get(row.session.id)),
+        now: Date.now() / 1000,
+      }),
+    [firstSeen],
+  );
+
   const forget = (rows: ipc.SessionDigest[]) => {
     // Tombstone first: sessions read from a CLI's own on-disk store (omp)
     // aren't in ~/.canopy/sessions, so deleting that file can't stop them — the
@@ -222,5 +233,6 @@ export function useAgentSessions(opts: {
     shared,
     claims,
     forget,
+    lifeOf,
   };
 }

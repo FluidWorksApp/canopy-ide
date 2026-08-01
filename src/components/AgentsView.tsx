@@ -15,11 +15,11 @@ import { useEffect, useMemo, useState } from "react";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
 import { agentDisplayName, type TabName } from "../agentDisplayName";
-import { NO_ATTENTION, agentLife, bucketFor, reclaimable, silenceLabel } from "../../shared/agentLife";
+import { LIFE_META, NO_ATTENTION, bucketFor, reclaimable, silenceLabel } from "../../shared/agentLife";
 import type { LifeState } from "../../shared/agentLife";
 import { ashFor } from "../ash";
 import { markRestored } from "../restorable";
-import { STATE_META, lastHumanPrompt, useAgentSessions, type SessionRow } from "../agentSessions";
+import { lastHumanPrompt, useAgentSessions, type SessionRow } from "../agentSessions";
 import { IntegrationsList, useIntegrations } from "./AgentIntegrations";
 import { PendingCard } from "./PendingCard";
 import { Mascot } from "./Mascot";
@@ -173,7 +173,7 @@ export function AgentsView({
   onRestore,
   onOpenInstructions,
 }: AgentsViewProps) {
-  const { agentSessions, termSessions, restorable, shared, claims, forget } =
+  const { agentSessions, termSessions, restorable, shared, claims, forget, lifeOf } =
     useAgentSessions({ visible: active, roots, stats, liveSessionIds });
   const integrations = useIntegrations(active);
   const settings = getSettings();
@@ -194,19 +194,6 @@ export function AgentsView({
   );
 
   const now = Date.now() / 1000;
-  const lifeOf = (row: SessionRow) =>
-    agentLife({
-      digest: row.digest as never,
-      pty: {
-        kind: "live",
-        hint: row.session.agent_hint,
-        cpu: row.session.total_cpu,
-        quietForMs: row.session.quiet_ms ?? undefined,
-        sinceInputMs: row.session.since_input_ms ?? undefined,
-      },
-      now,
-    });
-
   const cards = useMemo(() => {
     return agentSessions
       .map((row) => ({ row, life: lifeOf(row) }))
@@ -215,7 +202,7 @@ export function AgentsView({
           RANK[a.life.state] - RANK[b.life.state] ||
           (b.row.digest?.updated ?? 0) - (a.row.digest?.updated ?? 0),
       );
-  }, [agentSessions]);
+  }, [agentSessions, lifeOf]);
 
   const working = cards.filter((c) => c.life.state === "working").length;
   const blocked = cards.filter(
@@ -248,7 +235,7 @@ export function AgentsView({
     const runaway =
       s.total_cpu > settings.runawayCpuPercent ||
       s.total_mem_bytes > settings.runawayMemBytes;
-    const st = STATE_META[life.state];
+    const st = LIFE_META[life.state];
     const look = ashFor(life.state);
     const stTitle =
       life.state === "unknown"

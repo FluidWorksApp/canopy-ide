@@ -7,15 +7,15 @@ import { getSettings } from "../settings";
 import { AGENT_CLIS } from "../projects";
 import { agentDisplayName, type TabName } from "../agentDisplayName";
 import {
+  LIFE_META,
   NO_ATTENTION,
-  agentLife,
   bucketFor,
   reclaimable,
   silenceLabel,
 } from "../../shared/agentLife";
 import { ashFor } from "../ash";
 import { markRestored } from "../restorable";
-import { STATE_META, lastHumanPrompt, useAgentSessions } from "../agentSessions";
+import { lastHumanPrompt, useAgentSessions } from "../agentSessions";
 import { AGENT_LABELS, IntegrationsList, useIntegrations } from "./AgentIntegrations";
 import { PendingCard } from "./PendingCard";
 import { Mascot } from "./Mascot";
@@ -331,7 +331,7 @@ export function AgentsPanel({
   // read the agents page makes. An agent session and a plain shell answer
   // different questions ("what is it working on?" vs "what's running in it?"),
   // so they get separate heads; every session appears under exactly one.
-  const { sessions, agentSessions, termSessions, restorable, shared, claims, forget } =
+  const { sessions, agentSessions, termSessions, restorable, shared, claims, forget, lifeOf } =
     useAgentSessions({ visible, roots, stats, liveSessionIds });
 
   // Agents are running but not one of them has a digest — nothing is streaming
@@ -405,24 +405,8 @@ export function AgentsPanel({
     const cap = Math.max(1, settings.maxLiveAgents);
     const live = agentSessions.filter((x) => !hibernatedRef.current.has(x.session.id));
     if (live.length <= cap) return;
-    const now = Date.now() / 1000;
     const spare = live
-      .filter((x) =>
-        reclaimable(
-          agentLife({
-            digest: x.digest as never,
-            pty: {
-              kind: "live",
-              hint: x.session.agent_hint,
-              cpu: x.session.total_cpu,
-              quietForMs: x.session.quiet_ms ?? undefined,
-              sinceInputMs: x.session.since_input_ms ?? undefined,
-            },
-            now,
-          }),
-          NO_ATTENTION,
-        ),
-      )
+      .filter((x) => reclaimable(lifeOf(x), NO_ATTENTION))
       .sort((a, b) => (a.digest?.updated ?? 0) - (b.digest?.updated ?? 0));
     const victims = spare.slice(0, live.length - cap);
     for (const v of victims) {
@@ -444,26 +428,17 @@ export function AgentsPanel({
     }
   }, [agentSessions, settings.autoHibernate, settings.maxLiveAgents, onNotice]);
 
-  const sessionRow = ({ session: s, agent, dir, digest }: (typeof sessions)[number]) => {
+  const sessionRow = (row: (typeof sessions)[number]) => {
+    const { session: s, agent, dir, digest } = row;
     const runaway =
       s.total_cpu > settings.runawayCpuPercent ||
       s.total_mem_bytes > settings.runawayMemBytes;
     // Lifecycle dot: only for agent rows the hook stream has spoken for, and
     // only believed as far as the session's own activity backs it up — a CLI
     // that stops without a Stop event leaves "working" behind forever.
-    const life = agentLife({
-      digest: digest as never,
-      pty: {
-        kind: "live",
-        hint: s.agent_hint,
-        cpu: s.total_cpu,
-        quietForMs: s.quiet_ms ?? undefined,
-        sinceInputMs: s.since_input_ms ?? undefined,
-      },
-      now: Date.now() / 1000,
-    });
+    const life = lifeOf(row);
     const shown = life.state;
-    const st = agent ? STATE_META[shown] : undefined;
+    const st = agent ? LIFE_META[shown] : undefined;
     const stTitle =
       shown === "unknown"
         ? `${life.note} (silent for ${silenceLabel(digest?.updated, Date.now() / 1000)})`

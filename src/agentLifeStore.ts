@@ -95,10 +95,15 @@ function sameAttention(a: Attention, b: Attention): boolean {
 
 /** The attention memory for a set of terminals. Held in a ref rather than in
  *  state: a reducer fed by three event sources at three cadences would
- *  otherwise re-render on every input rather than on every change. */
+ *  otherwise re-render on every input rather than on every change.
+ *
+ *  `version` counts the changes. It exists because the map is mutated in
+ *  place — its identity never changes — so a memo that derives from it must
+ *  depend on the version, not the map, or an attention-only change leaves the
+ *  memo reading the world as it was. */
 export function useAttentionMemory() {
   const memory = useRef(new Map<number, Attention>());
-  const [, bump] = useState(0);
+  const [version, bump] = useState(0);
 
   const push = useCallback(
     (ptyId: number, input: AttentionInput, cli: string | null) => {
@@ -120,7 +125,7 @@ export function useAttentionMemory() {
     [],
   );
 
-  return { push, forget, get, memory };
+  return { push, forget, get, memory, version };
 }
 
 /** Stable views for a set of terminals.

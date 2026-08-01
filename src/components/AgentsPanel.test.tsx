@@ -13,6 +13,7 @@ vi.mock("../ipc", () => ({
   sessionDigests: () => Promise.resolve([]),
   contextClaims: () => Promise.resolve([]),
   onAgentClaims: () => Promise.resolve(() => {}),
+  onStoreChange: () => Promise.resolve(() => {}),
   onIntegrationHealth: () => Promise.resolve(() => {}),
   agentIntegrationHealth: () => Promise.resolve([]),
   agentHooksInstalled: () => Promise.resolve(true),
