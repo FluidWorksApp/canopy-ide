@@ -37,9 +37,9 @@ const TOKENS = [
   "--on-danger",
 ];
 
-/** Default has no file of its own: its palette IS the `:root` contract that
- *  every other block overrides. */
-const CSS_LESS = new Set(["default"]);
+/** The base skin has no file of its own: its palette IS the `:root` contract
+ *  that every other block overrides. */
+const CSS_LESS = new Set(["gotham"]);
 
 describe("the skin roster", () => {
   it("has a unique id and label for every skin", () => {
@@ -77,8 +77,18 @@ describe("the skin roster", () => {
     }
   });
 
-  it("resolves an unknown id to Default rather than throwing", () => {
-    expect(skinDef("no-such-skin").id).toBe("default");
+  it("resolves an unknown id to the base skin rather than throwing", () => {
+    expect(skinDef("no-such-skin").id).toBe("gotham");
+  });
+
+  // Retiring a skin is meant to need no migration code: whatever anyone has
+  // stored simply stops matching and the base skin answers. If this goes red,
+  // someone has made a removed id throw or resolve somewhere else.
+  it("answers for a retired id with the base skin", () => {
+    expect(skinDef("default").id).toBe("gotham");
+    expect(terminalTheme("default" as never).background).toBe(
+      skinDef("gotham").term.background,
+    );
   });
 });
 

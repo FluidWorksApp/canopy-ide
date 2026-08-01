@@ -16,7 +16,7 @@ describe("getSettings / updateSettings", () => {
   it("returns defaults when nothing is stored", () => {
     const s = getSettings();
     expect(s.scrollback).toBe(10_000);
-    expect(s.theme).toBe("default");
+    expect(s.theme).toBe("gotham");
     expect(s.trackerKeys).toEqual({});
   });
 

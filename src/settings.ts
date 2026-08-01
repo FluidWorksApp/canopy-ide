@@ -22,18 +22,23 @@ import {
 } from "./shortcuts";
 
 /** Every skin in the roster, plus the two ids that aren't skins: "auto"
- *  resolves to one of them, "custom" is Default with the user's accent written
- *  in at runtime. Adding a skin to src/skins/registry.ts adds it here. */
+ *  resolves to one of them, "custom" is the base skin with the user's accent
+ *  written in at runtime. Adding a skin to src/skins/registry.ts adds it here.
+ *
+ *  Retiring one is just as cheap and needs no migration: a stored id that has
+ *  left the roster stops matching any CSS block, so the app falls through to
+ *  the `:root` contract, and skinDef() answers with the base skin for the
+ *  terminal and Monaco. */
 export type Theme = "auto" | SkinId | "custom";
 
-/** What "auto" means right now: Default when macOS is in dark mode, Daylight
+/** What "auto" means right now: Gotham when macOS is in dark mode, Daylight
  *  in light mode. Every consumer of the skin (CSS data-theme, terminal
  *  palettes, Monaco) works off the resolved value — "auto" itself never
  *  reaches them. */
 export function resolveTheme(theme: Theme): Exclude<Theme, "auto"> {
   if (theme !== "auto") return theme;
   return window.matchMedia("(prefers-color-scheme: dark)").matches
-    ? "default"
+    ? "gotham"
     : "daylight";
 }
 
@@ -546,7 +551,7 @@ export const DEFAULTS: Settings = {
   customMicroTasks: [],
   disabledTools: [],
   trackerKeys: {},
-  theme: "default",
+  theme: "gotham",
   customAccent: "",
   companionEnabled: true,
   companionName: "",

@@ -49,17 +49,18 @@ export const monacoReady: Promise<void> = (async () => {
       const stored = JSON.parse(localStorage.getItem("canopy.settings") ?? "{}") as {
         theme?: string;
       };
-      // "auto" resolves the same way it does everywhere else; "custom" is
-      // Default's surface, which is what skinDef() falls back to.
+      // "auto" resolves the same way it does everywhere else.
       const id =
         stored.theme === "auto" || !stored.theme
           ? window.matchMedia("(prefers-color-scheme: dark)").matches
-            ? "default"
+            ? "gotham"
             : "daylight"
           : stored.theme;
+      // skinDef() resolves anything unknown to the base skin, which is what
+      // "custom" and any retired id land on.
       return `canopy-${skinDef(id).id}`;
     } catch {
-      return "canopy-default";
+      return "canopy-gotham";
     }
   };
   monaco.editor.setTheme(monacoThemeForSkin());

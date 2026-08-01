@@ -28,7 +28,6 @@
     "@codingame/monaco-vscode-standalone-languages": "~25.1.2",
     "@fontsource-variable/archivo": "^5.3.0",
     "@fontsource-variable/jetbrains-mono": "^5.3.0",
-    "@fontsource/press-start-2p": "^5.3.0",
     "@fontsource/vt323": "^5.3.0",
     "@git-diff-view/react": "0.1.7",
     "@tauri-apps/api": "^2.11.1",
