@@ -15169,16 +15169,34 @@ a.btn-sm {
 
 /* ---------- notification centre ---------- */
 
+/* The bell, and what it is counting.
+ *
+ * The count used to be a badge pinned to the glyph's top-right corner, which is
+ * a shape that only works while the number is one digit wide: at ten it covered
+ * the bell's own outline and the corner of the titlebar became one grey smudge
+ * with neither the icon nor the number readable. It also sat on a shrinkable
+ * flex item, so a full titlebar squeezed the button and pulled the badge
+ * further over the glyph.
+ *
+ * So the count moved beside the bell instead of on top of it. The button is a
+ * pill while there is something to say and a plain icon button when there is
+ * not; nothing overlaps at any count, and the urgency is carried by the pill's
+ * own colour rather than by a second shape. */
 .notif-bell {
   position: relative;
-  display: grid;
-  place-items: center;
-  width: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  /* Never squeezed: as a shrinkable flex item in a full titlebar this
+     collapsed to roughly half its width. */
+  flex: none;
   height: 22px;
+  padding: 0 6px;
   margin-right: 4px;
   background: transparent;
   border: 0;
-  border-radius: var(--r-sm);
+  border-radius: 999px;
   color: var(--text-dim);
   cursor: pointer;
 }
@@ -15192,31 +15210,34 @@ a.btn-sm {
   color: var(--text);
 }
 
-.notif-bell-badge {
-  position: absolute;
-  top: -1px;
-  right: -1px;
-  min-width: 13px;
-  height: 13px;
-  padding: 0 3px;
-  display: grid;
-  place-items: center;
-  border-radius: 999px;
-  font-size: 9px;
-  font-weight: 700;
+/* With a count, the button is a filled pill — the number is text in it, not a
+   badge over it. Tabular figures so 1 → 10 doesn't shuffle the glyph sideways
+   by a hair on every arrival. */
+.notif-bell-count {
+  font-size: 10.5px;
+  font-weight: 650;
   line-height: 1;
-  color: var(--on-accent);
-  background: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.notif-bell-counted {
+  padding-right: 8px;
+  background: var(--bg-raised);
 }
 
 /* The one urgency model, wearing its colours. High means something is waiting
-   on you; low is a count of things that merely arrived. */
-.notif-bell-high {
-  background: var(--warn);
+   on you, and it is the only state that colours the whole control; low is a
+   count of things that merely arrived, and stays furniture. */
+.notif-bell-counted.notif-bell-high {
+  background: color-mix(in srgb, var(--warn) 22%, var(--bg-raised));
+  color: var(--warn);
 }
 
-.notif-bell-low {
-  background: var(--border-strong);
+.notif-bell-counted.notif-bell-high:hover {
+  background: color-mix(in srgb, var(--warn) 32%, var(--bg-raised));
+}
+
+.notif-bell-counted.notif-bell-low {
   color: var(--text);
 }
 

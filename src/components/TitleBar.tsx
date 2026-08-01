@@ -216,7 +216,9 @@ function TitleBarImpl({
           because the queue is the workspace's: the whole point is to see that
           a project you are NOT looking at is waiting on you. */}
       <button
-        className={`notif-bell${notifCount > 0 ? " notif-bell-lit" : ""}`}
+        className={`notif-bell${
+          notifCount > 0 ? ` notif-bell-lit notif-bell-counted notif-bell-${notifUrgency}` : ""
+        }`}
         title={
           notifCount > 0
             ? `${notifCount} ${notifUrgency === "high" ? "waiting on you" : "unread"}`
@@ -226,10 +228,10 @@ function TitleBarImpl({
         onClick={onOpenNotifications}
       >
         <BellIcon size={15} />
+        {/* Beside the bell, not on it: a two-digit count pinned to the glyph's
+            corner covered the glyph. */}
         {notifCount > 0 && (
-          <span className={`notif-bell-badge notif-bell-${notifUrgency}`}>
-            {Math.min(notifCount, 99)}
-          </span>
+          <span className="notif-bell-count">{notifCount > 99 ? "99+" : notifCount}</span>
         )}
       </button>
       <Button className="project-manage-btn"
