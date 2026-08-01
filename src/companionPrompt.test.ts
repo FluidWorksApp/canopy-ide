@@ -50,6 +50,20 @@ describe("the brief", () => {
     expect(p).not.toContain("canopy_workspace_search");
   });
 
+  it("routes a PR change back to its author only when it holds the tool", () => {
+    // The same rule as above, for the one hand-off tool: a session in
+    // ANSWER-ONLY mode is not handed canopy_message_agent, and a brief that
+    // still names it turns "change this PR" into a tool call that never lands.
+    const without = buildCompanionPrompt(base);
+    expect(without).not.toContain("canopy_message_agent");
+    const withIt = buildCompanionPrompt({
+      ...base,
+      tools: [...base.tools, "canopy_message_agent"],
+    });
+    expect(withIt).toContain("canopy_message_agent");
+    expect(withIt).toContain("the number or url");
+  });
+
   it("drops the memory section when neither memory tool is present", () => {
     const p = buildCompanionPrompt({ ...base, tools: ["canopy_workspace"] });
     expect(p).not.toContain("## Memory");
