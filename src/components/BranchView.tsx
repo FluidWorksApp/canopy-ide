@@ -2,6 +2,7 @@
 // Uncommitted work first (it exists nowhere else), then the commits it has
 // that the base branch doesn't, then the cumulative diff. Each commit row
 // opens the commit tab — the same one History opens, not a second renderer.
+import { useDiffData } from "../diffData";
 import { useCallback, useEffect, useState } from "react";
 import { DiffView, DiffModeEnum } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
@@ -44,6 +45,8 @@ export function BranchView({
   relay,
   onMicroTask,
 }: BranchViewProps) {
+  // Stable diff `data` identities; see diffData.ts.
+  const dataFor = useDiffData();
   const [commits, setCommits] = useState<ipc.CommitInfo[] | null>(null);
   // Which patch is on screen. Defaults to uncommitted work when there is any,
   // because that's the part that exists nowhere else.
@@ -362,11 +365,7 @@ export function BranchView({
             <div key={f.path} className="pr-file">
               <div className="pr-file-name">{f.path}</div>
               <DiffView
-                data={{
-                  hunks: [f.patch],
-                  oldFile: { fileName: f.path },
-                  newFile: { fileName: f.path },
-                }}
+                data={dataFor(f)}
                 diffViewMode={split ? DiffModeEnum.Split : DiffModeEnum.Unified}
                 diffViewHighlight
                 diffViewTheme="dark"

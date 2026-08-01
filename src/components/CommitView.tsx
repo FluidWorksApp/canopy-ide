@@ -1,6 +1,7 @@
 // A commit opened as a tab: message, metadata, and the patch it introduced.
 // Same renderer as the PR view — a commit's patch is the same shape as a
 // PR's, so it gets the same treatment rather than a second diff widget.
+import { useDiffData } from "../diffData";
 import { useEffect, useState } from "react";
 import { DiffView, DiffModeEnum } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
@@ -34,6 +35,8 @@ function linkify(text: string) {
 }
 
 export function CommitView({ repo, hash, onNotice }: CommitViewProps) {
+  // Stable diff `data` identities; see diffData.ts.
+  const dataFor = useDiffData();
   const [detail, setDetail] = useState<ipc.CommitDetail | null>(null);
   const [remote, setRemote] = useState("");
   const [patch, setPatch] = useState<ipc.CommitPatch | null>(null);
@@ -152,11 +155,7 @@ export function CommitView({ repo, hash, onNotice }: CommitViewProps) {
             <div key={f.path} className="pr-file">
               <div className="pr-file-name">{f.path}</div>
               <DiffView
-                data={{
-                  hunks: [f.patch],
-                  oldFile: { fileName: f.path },
-                  newFile: { fileName: f.path },
-                }}
+                data={dataFor(f)}
                 diffViewMode={split ? DiffModeEnum.Split : DiffModeEnum.Unified}
                 diffViewHighlight
                 diffViewTheme="dark"

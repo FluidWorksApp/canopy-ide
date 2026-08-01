@@ -1370,7 +1370,11 @@ pub struct Due {
 /// panels; a scratchpad is hundreds of notes, not millions, and a separate
 /// index would be a second source of truth for the one field whose whole job is
 /// to be right.
-#[tauri::command]
+/// `async` is load-bearing: Tauri runs a non-async command on the **main
+/// thread**, and this sweeps every note's meta.json in every project every 30
+/// seconds. That was hundreds of file reads and JSON parses blocking the UI
+/// event loop, twice a minute, whether or not any reminder existed.
+#[tauri::command(async)]
 pub fn notes_due(store: State<'_, NotesStore>, before: i64) -> Result<Vec<Due>, String> {
     let _guard = store.0.lock().unwrap();
     due_impl(before)

@@ -83,6 +83,13 @@ fn create(conn: &Connection) -> Result<(), String> {
 
 fn open_db() -> Result<Connection, String> {
     let conn = Connection::open(db_path()?).map_err(|e| e.to_string())?;
+    // Without these, every bare `execute` is its own implicit transaction —
+    // journal write, fsync, journal delete, per row. An ingest inserts one row
+    // per transcript line and up to a few thousand file bodies, so a palette
+    // open was thousands of fsyncs. WAL plus NORMAL is the standard pairing for
+    // a cache: a crash can lose the last commits, and this index is rebuilt
+    // from files on disk anyway, which is what SCHEMA_VERSION already assumes.
+    let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap_or(0);
@@ -156,6 +163,28 @@ fn strip_ansi(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+/// A change stamp for a scrollback ring.
+///
+/// The obvious stamp — the tail's length — is wrong for exactly the terminals
+/// that matter: the ring is capped, so once a busy session fills it the length
+/// is pinned at the cap and never moves again, and the old skip check then
+/// matched forever and froze that terminal's index at the moment it saturated.
+/// Mixing in an FNV-1a hash of the last few KB makes a full-but-moving ring
+/// look different every time it moves, while staying O(1) rather than hashing
+/// a quarter of a megabyte per terminal per ingest.
+fn tail_stamp(tail: &[u8]) -> i64 {
+    const WINDOW: usize = 4096;
+    let start = tail.len().saturating_sub(WINDOW);
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in &tail[start..] {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    // Length still carries most of the signal for a ring that has not filled;
+    // the hash only has to break the tie once it has.
+    ((tail.len() as i64) << 20) ^ ((hash & 0xf_ffff) as i64)
 }
 
 /// User input as an FTS5 MATCH expression: each word a quoted prefix term, so
@@ -310,6 +339,11 @@ pub async fn spot_ingest(
     let files = stores::source_files(&roots, &wanted);
 
     with_db(&state, |conn| {
+        // One transaction for the whole ingest. Every bare `execute` below
+        // would otherwise commit on its own — an fsync per inserted row, and an
+        // ingest inserts one row per transcript line plus up to a few thousand
+        // file bodies. Committing once turns thousands of fsyncs into one.
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
         let mut messages = 0usize;
         let mut terminals = 0usize;
         let mut pruned = 0usize;
@@ -580,7 +614,13 @@ pub async fn spot_ingest(
                         r.get(0)
                     })
                     .unwrap_or(-1);
-                if seen == tail.len() as i64 {
+                // Length alone is not a change stamp. The ring is capped at
+                // MAX_SCROLLBACK, so a busy terminal's tail is exactly that
+                // length forever once it saturates — and its index froze at the
+                // moment it filled, which is precisely the terminal worth
+                // searching. Fold in a hash of the tail's end so a ring that is
+                // full but moving still re-indexes.
+                if seen == tail_stamp(&tail) {
                     continue;
                 }
                 let body: String = strip_ansi(&tail).chars().take(MAX_SCROLLBACK).collect();
@@ -599,7 +639,7 @@ pub async fn spot_ingest(
                     "INSERT INTO sources (path, agent, offset, stamp)
                      VALUES (?1, 'terminal', ?2, 0)
                      ON CONFLICT(path) DO UPDATE SET agent = 'terminal', offset = ?2",
-                    rusqlite::params![key, tail.len() as i64],
+                    rusqlite::params![key, tail_stamp(&tail)],
                 )
                 .map_err(|e| e.to_string())?;
                 terminals += 1;
@@ -668,7 +708,7 @@ pub async fn spot_ingest(
         }
         let notes = note_docs.len();
 
-        Ok(SpotIngestReport {
+        let report = SpotIngestReport {
             more,
             pending,
             messages,
@@ -676,7 +716,9 @@ pub async fn spot_ingest(
             research,
             notes,
             pruned,
-        })
+        };
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(report)
     })
 }
 
@@ -913,6 +955,36 @@ fn free_path(dir: &std::path::Path, stamp: i64, prefix: &str, ext: &str) -> Path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bug this replaced: the skip check compared the tail's *length*, and
+    /// the ring is capped — so once a busy terminal filled it, the length was
+    /// pinned at the cap and every later ingest skipped it. Its index froze at
+    /// the moment it saturated, which is exactly the terminal worth searching.
+    #[test]
+    fn a_full_ring_that_keeps_moving_still_looks_different() {
+        let full_a = vec![b'a'; MAX_SCROLLBACK];
+        let mut full_b = vec![b'a'; MAX_SCROLLBACK];
+        // The ring slid: same length, new content at the end.
+        let n = full_b.len();
+        full_b[n - 1] = b'z';
+        assert_eq!(
+            full_a.len(),
+            full_b.len(),
+            "the length cannot tell these apart"
+        );
+        assert_ne!(tail_stamp(&full_a), tail_stamp(&full_b));
+    }
+
+    #[test]
+    fn an_unchanged_ring_stamps_the_same_every_time() {
+        let tail = vec![b'x'; 4096];
+        assert_eq!(tail_stamp(&tail), tail_stamp(&tail));
+    }
+
+    #[test]
+    fn a_growing_ring_below_the_cap_still_moves() {
+        assert_ne!(tail_stamp(b"hello"), tail_stamp(b"hello world"));
+    }
 
     #[test]
     fn free_path_never_reuses_a_name_within_the_same_second() {

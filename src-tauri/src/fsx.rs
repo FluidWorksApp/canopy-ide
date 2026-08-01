@@ -374,44 +374,51 @@ pub async fn git_status(
     path: String,
 ) -> Result<GitStatus, String> {
     let dir = check_scope(&state, Path::new(&path))?;
-    let top = match git_ro(&dir).args(["rev-parse", "--show-toplevel"]).output() {
-        Ok(out) if out.status.success() => {
-            PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    // Three subprocesses. Without this they park a tokio worker each for the
+    // whole life of the child -- ahead of PTY writes and MCP stdio pumps -- and
+    // this is the most-called git path in the app: FileTree and StatusBar both
+    // run it on every `git:change`. `blocking::io` is what git.rs already uses
+    // ~15 times for exactly this; fsx.rs had none.
+    crate::blocking::io(move || {
+        let top = match git_ro(&dir).args(["rev-parse", "--show-toplevel"]).output() {
+            Ok(out) if out.status.success() => {
+                PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            }
+            _ => return Ok(GitStatus::default()),
+        };
+        let branch = git_ro(&dir)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+        let out = git_ro(&dir)
+            .args(["status", "--porcelain", "-z", "--ignored"])
+            .output()
+            .map_err(|e| e.to_string())?;
+        let raw = String::from_utf8_lossy(&out.stdout);
+        let mut entries = Vec::new();
+        let mut parts = raw.split('\0').peekable();
+        while let Some(part) = parts.next() {
+            if part.len() < 4 {
+                continue;
+            }
+            let status = part[..2].to_string();
+            let rel = &part[3..];
+            // rename/copy entries carry a second NUL-separated origin path
+            if status.starts_with('R') || status.starts_with('C') {
+                parts.next();
+            }
+            entries.push(GitEntry {
+                status,
+                path: top.join(rel).to_string_lossy().to_string(),
+            });
         }
-        _ => return Ok(GitStatus::default()),
-    };
-    let branch = git_ro(&dir)
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-    let out = git_ro(&dir)
-        .args(["status", "--porcelain", "-z", "--ignored"])
-        .output()
-        .map_err(|e| e.to_string())?;
-    let raw = String::from_utf8_lossy(&out.stdout);
-    let mut entries = Vec::new();
-    let mut parts = raw.split('\0').peekable();
-    while let Some(part) = parts.next() {
-        if part.len() < 4 {
-            continue;
-        }
-        let status = part[..2].to_string();
-        let rel = &part[3..];
-        // rename/copy entries carry a second NUL-separated origin path
-        if status.starts_with('R') || status.starts_with('C') {
-            parts.next();
-        }
-        entries.push(GitEntry {
-            status,
-            path: top.join(rel).to_string_lossy().to_string(),
-        });
-    }
-    Ok(GitStatus {
-        is_repo: true,
-        branch,
-        entries,
+        Ok(GitStatus {
+            is_repo: true,
+            branch,
+            entries,
+        })
     })
 }
 

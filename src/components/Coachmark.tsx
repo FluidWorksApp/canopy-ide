@@ -24,7 +24,20 @@ export function Coachmark({ targetSelector, title, body, onDismiss }: CoachmarkP
 
   const measure = useCallback(() => {
     const el = document.querySelector(targetSelector);
-    setRect(el ? el.getBoundingClientRect() : null);
+    const next = el ? el.getBoundingClientRect() : null;
+    // getBoundingClientRect returns a fresh DOMRect every call, so setting it
+    // unconditionally never bailed out: this re-rendered the coachmark and the
+    // app-wide dim layer with it, 2.5 times a second, for its whole life.
+    setRect((prev) => {
+      if (prev === next) return prev;
+      if (!prev || !next) return next;
+      const same =
+        prev.top === next.top &&
+        prev.left === next.left &&
+        prev.width === next.width &&
+        prev.height === next.height;
+      return same ? prev : next;
+    });
   }, [targetSelector]);
 
   useLayoutEffect(() => {
