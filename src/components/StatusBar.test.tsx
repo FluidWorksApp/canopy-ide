@@ -321,6 +321,35 @@ describe("the tray's branch chip", () => {
     expect(ipc.gitCheckout).toHaveBeenCalledWith("/repo", "feat/x", false);
   });
 
+  it("keeps a short list plain — no box to read past on a small repo", async () => {
+    inProvider(<StatusBar {...base} events={[]} modelSwitch={null} />);
+    fireEvent.click(await screen.findByText(/⎇ main/));
+    expect(screen.queryByPlaceholderText("Search branches…")).toBeNull();
+  });
+
+  // The tray used to offer twelve branches and then a dim row reading "140 more
+  // in the Git panel" — a count of what it was refusing to show, and a panel to
+  // go open instead. Every branch is in the menu now, behind a search box.
+  it("reaches a branch far past the preview, without leaving the tray", async () => {
+    vi.mocked(ipc.gitBranches).mockResolvedValue([
+      { name: "main", current: true, remote_only: false } as never,
+      ...Array.from(
+        { length: 152 },
+        (_, i) => ({ name: `fix/thing-${i}`, current: false, remote_only: false }) as never,
+      ),
+    ]);
+    inProvider(<StatusBar {...base} events={[]} modelSwitch={null} />);
+    fireEvent.click(await screen.findByText(/⎇ main/));
+    // Not a wall of 152 rows: the shortcut is still the shortcut.
+    expect(screen.queryByText("fix/thing-140")).toBeNull();
+    expect(screen.getByText("140 more branches — type to search")).toBeTruthy();
+    fireEvent.change(screen.getByPlaceholderText("Search branches…"), {
+      target: { value: "thing-140" },
+    });
+    fireEvent.click(screen.getByText("fix/thing-140"));
+    expect(ipc.gitCheckout).toHaveBeenCalledWith("/repo", "fix/thing-140", false);
+  });
+
   it("says what it means without a git noun", async () => {
     render(<StatusBar {...base} events={[]} modelSwitch={null} />);
     const chip = await screen.findByText(/⎇ main/);

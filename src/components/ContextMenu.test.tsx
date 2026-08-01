@@ -141,6 +141,93 @@ describe("ContextMenu", () => {
     expect(screen.getByRole("button", { name: /New agent/ })).toBeTruthy();
   });
 
+  // A menu long enough to truncate used to end in a dim row counting what it
+  // wouldn't show and naming a panel to go open instead — a dead end wearing a
+  // row's clothes. The rows are all here now; the box is how you reach them.
+  describe("searching a long menu", () => {
+    const many = (n: number, onClick = vi.fn()) =>
+      Array.from({ length: n }, (_, i) => ({ label: `branch/${i}`, onClick }));
+
+    const withSearch = (items: MenuItem[], filter = {}, onClose = vi.fn()) => {
+      render(
+        <ContextMenu
+          x={10}
+          y={10}
+          items={items}
+          filter={{ placeholder: "Search branches…", preview: 3, noun: "branches", ...filter }}
+          onClose={onClose}
+        />,
+      );
+      return onClose;
+    };
+
+    it("shows only the preview until something is typed, and says what it's holding", () => {
+      withSearch(many(10));
+      expect(screen.getByRole("button", { name: "branch/2" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "branch/7" })).toBeNull();
+      expect(screen.getByText("7 more branches — type to search")).toBeInTheDocument();
+    });
+
+    it("reaches a row the preview never showed", async () => {
+      const onClick = vi.fn();
+      const onClose = withSearch(many(200, onClick));
+      await userEvent.type(screen.getByPlaceholderText("Search branches…"), "branch/173");
+      await userEvent.click(screen.getByRole("button", { name: "branch/173" }));
+      expect(onClick).toHaveBeenCalledOnce();
+      expect(onClose).toHaveBeenCalledOnce();
+    });
+
+    it("stops counting once the box is doing the work", async () => {
+      withSearch(many(10));
+      await userEvent.type(screen.getByPlaceholderText("Search branches…"), "1");
+      expect(screen.queryByText(/type to search/)).toBeNull();
+    });
+
+    it("takes the top match on Enter", async () => {
+      const hit = vi.fn();
+      const onClose = withSearch([
+        { label: "release/v0.3.0", onClick: vi.fn() },
+        { label: "fix/agent-life", onClick: hit },
+        { label: "fix/icon-parity-sweep", onClick: vi.fn() },
+      ]);
+      await userEvent.type(screen.getByPlaceholderText("Search branches…"), "agent{Enter}");
+      expect(hit).toHaveBeenCalledOnce();
+      expect(onClose).toHaveBeenCalledOnce();
+    });
+
+    it("walks the rows with the arrows", async () => {
+      const second = vi.fn();
+      withSearch([
+        { label: "main", onClick: vi.fn() },
+        { label: "next", onClick: second },
+      ]);
+      await userEvent.keyboard("{ArrowDown}{Enter}");
+      expect(second).toHaveBeenCalledOnce();
+    });
+
+    it("ranks a tight match above a scattered one", async () => {
+      withSearch([
+        { label: "worktree-fix-companion-hides-for-browser", onClick: vi.fn() },
+        { label: "fix/companion-scope", onClick: vi.fn() },
+      ]);
+      await userEvent.type(screen.getByPlaceholderText("Search branches…"), "companion");
+      const rows = screen.getAllByRole("button").map((b) => b.textContent);
+      expect(rows[0]).toBe("fix/companion-scope");
+    });
+
+    it("says so rather than showing an empty panel when nothing matches", async () => {
+      withSearch(many(10), { empty: "No branch by that name" });
+      await userEvent.type(screen.getByPlaceholderText("Search branches…"), "zzz");
+      expect(screen.getByText("No branch by that name")).toBeInTheDocument();
+    });
+
+    it("leaves a menu without a filter exactly as it was", () => {
+      at(many(30));
+      expect(screen.queryByRole("textbox")).toBeNull();
+      expect(screen.getByRole("button", { name: "branch/29" })).toBeInTheDocument();
+    });
+  });
+
   it("runs a leaf three levels down and closes the whole menu", async () => {
     const deep = vi.fn();
     const onClose = at([

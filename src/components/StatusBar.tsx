@@ -31,17 +31,25 @@ import {
 import { Mascot } from "./Mascot";
 import { StatsPanel } from "./StatsPanel";
 import { CleanupDialog } from "./CleanupDialog";
-import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
+import {
+  ContextMenu,
+  useContextMenu,
+  type MenuFilter,
+  type MenuItem,
+} from "./ContextMenu";
 import { Dialog } from "./Dialog";
 import { BroomIcon, HeartIcon, StatsIcon } from "./icons";
 import type { AgentEventEntry } from "../types";
 import { modelCommandLine, type ModelSwitch } from "../agentModels";
 import { useBranchSwitch } from "../useBranchSwitch";
 
-/** How many branches the tray's menu offers. It is a shortcut to the handful
- *  you are actually moving between — `for-each-ref` hands them back newest
- *  first, so this is "the ones you touched recently", not an arbitrary slice. */
-const BRANCH_MENU_LIMIT = 12;
+/** How many branches the tray's menu shows before you type. It is a shortcut to
+ *  the handful you are actually moving between — `for-each-ref` hands them back
+ *  newest first, so this is "the ones you touched recently", not an arbitrary
+ *  slice. Past this the menu grows a search box rather than a cap: on a repo
+ *  with a hundred and fifty branches the rest used to be a dim row counting
+ *  what it wouldn't show you and naming a panel to go open instead. */
+const BRANCH_MENU_PREVIEW = 12;
 
 const fmtMem = (bytes: number) =>
   bytes >= 1024 * 1024 * 1024
@@ -551,19 +559,29 @@ export const StatusBar = memo(function StatusBar({
       items.push({ label: "Nowhere else to go yet", disabled: true });
       return items;
     }
-    for (const b of rest.slice(0, BRANCH_MENU_LIMIT))
+    // All of them. The menu shows the first handful and searches the rest —
+    // which branch you want is a thing you know the name of, not a thing you
+    // find by scrolling.
+    for (const b of rest)
       items.push({
         label: b.name,
         hint: b.remote_only ? "on the remote" : undefined,
         onClick: () => void switchTo(repo, { kind: "branch", branch: b.name }),
       });
-    if (rest.length > BRANCH_MENU_LIMIT)
-      items.push({
-        label: `${rest.length - BRANCH_MENU_LIMIT} more in the Git panel`,
-        disabled: true,
-      });
     return items;
   };
+
+  /** The box is worth its own line only once the list outgrows what the menu
+   *  would have shown anyway — on a repo with four branches it is furniture. */
+  const branchFilter = (): MenuFilter | undefined =>
+    branches.filter((b) => !b.current).length > BRANCH_MENU_PREVIEW
+      ? {
+          placeholder: "Search branches…",
+          preview: BRANCH_MENU_PREVIEW,
+          noun: "branches",
+          empty: "No branch by that name",
+        }
+      : undefined;
 
   return (
     <div className="status-bar">
@@ -578,7 +596,7 @@ export const StatusBar = memo(function StatusBar({
             }
             // The tray sits on the bottom edge, so the menu grows upward from
             // the chip rather than off the end of the window.
-            onClick={(e) => branchMenu.openAbove(e, branchItems())}
+            onClick={(e) => branchMenu.openAbove(e, branchItems(), branchFilter())}
           >
             {detached ? "⚠ snapshot" : `⎇ ${branch}`}
             {dirty > 0 && <span className="status-dirty"> ±{dirty}</span>}
