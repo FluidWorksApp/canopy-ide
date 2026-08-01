@@ -10,6 +10,7 @@
 // the poll interval on the Rust side. Focus and visibility are window-global
 // facts, not a component's business.
 import * as ipc from "./ipc";
+import { createChannel } from "./channel";
 import { allRows, applySnapshot } from "./prInbox";
 import { adoptOnce } from "./provenance";
 
@@ -41,16 +42,14 @@ const empty: PrWatchState = {
   busy: false,
 };
 
-let state: PrWatchState = empty;
-const listeners = new Set<() => void>();
+const board = createChannel<PrWatchState>(empty);
 let started = false;
 /** The repo set we last told Rust about, so identical calls are free. */
 let declared = "";
 let focused = true;
 
 function emit(next: Partial<PrWatchState>) {
-  state = { ...state, ...next };
-  for (const l of listeners) l();
+  board.set({ ...board.get(), ...next });
 }
 
 /** Register the window-global listeners once. Idempotent: every consumer calls
@@ -60,11 +59,11 @@ function start() {
   started = true;
 
   void ipc.onPrSnapshot((snap) => {
-    const byRepo = applySnapshot(state.byRepo, snap);
+    const byRepo = applySnapshot(board.get().byRepo, snap);
     emit({
       byRepo,
       rows: allRows(byRepo),
-      viewer: snap.viewer || state.viewer,
+      viewer: snap.viewer || board.get().viewer,
       fetchedMs: snap.fetched_ms,
     });
     // First sight of a repo is when to adopt whatever history is already on
@@ -125,20 +124,18 @@ export function refresh(): void {
 
 export function subscribe(fn: () => void): () => void {
   start();
-  listeners.add(fn);
-  return () => listeners.delete(fn);
+  return board.subscribe(fn);
 }
 
-export const getSnapshot = (): PrWatchState => state;
+export const getSnapshot = board.get;
 
 /** Rows for one repo, for a PR tab that only cares about its own. */
 export const rowFor = (repo: string, number: number): ipc.PrRow | undefined =>
-  state.byRepo.get(repo)?.find((r) => r.number === number);
+  board.get().byRepo.get(repo)?.find((r) => r.number === number);
 
 /** Test seam: drop everything, including the once-only listener flag. */
 export function __reset(): void {
-  state = empty;
-  listeners.clear();
+  board.reset();
   started = false;
   declared = "";
   focused = true;

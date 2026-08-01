@@ -8,6 +8,8 @@
 //
 // Selections are capped: an agent needs the highlighted expression, not a
 // pasted copy of the file.
+import { createChannel } from "./channel";
+
 const MAX_SELECTION = 2000;
 
 export interface EditorCaret {
@@ -20,34 +22,25 @@ export interface EditorCaret {
   selectionEndLine?: number;
 }
 
-let caret: EditorCaret | null = null;
-const listeners = new Set<() => void>();
+const board = createChannel<EditorCaret | null>(null, {
+  same: (a, b) =>
+    a?.path === b?.path &&
+    a?.line === b?.line &&
+    a?.column === b?.column &&
+    a?.selection === b?.selection,
+});
 
-export function setCaret(next: EditorCaret | null) {
-  const same =
-    caret?.path === next?.path &&
-    caret?.line === next?.line &&
-    caret?.column === next?.column &&
-    caret?.selection === next?.selection;
-  if (same) return;
-  caret = next;
-  for (const l of listeners) l();
-}
+export const setCaret = board.set;
 
-export function getCaret(): EditorCaret | null {
-  return caret;
-}
+export const getCaret = board.get;
 
 /** Forget a file's caret when its tab closes, so a closed file never reads as
  *  "what the user is looking at". */
 export function clearCaret(path: string) {
-  if (caret?.path === path) setCaret(null);
+  if (board.get()?.path === path) board.set(null);
 }
 
-export function subscribeCaret(listener: () => void): () => void {
-  listeners.add(listener);
-  return () => listeners.delete(listener);
-}
+export const subscribeCaret = board.subscribe;
 
 export function truncateSelection(text: string): string {
   return text.length > MAX_SELECTION ? `${text.slice(0, MAX_SELECTION)}…` : text;

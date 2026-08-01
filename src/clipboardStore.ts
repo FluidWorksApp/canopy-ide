@@ -11,33 +11,25 @@
 // text, and it is made on Enter — the text of everything you have copied today
 // does not belong in a module-level cache in the webview.
 import * as ipc from "./ipc";
+import { createChannel } from "./channel";
 import { getSettings, SETTINGS_CHANGE_EVENT } from "./settings";
 
-let clips: ipc.Clip[] = [];
+const board = createChannel<ipc.Clip[]>([]);
 let started = false;
 /** The rules we last told Rust about, so identical calls are free. */
 let declared = "";
 /** Project id from the last `sync`, so a settings change can re-declare
  *  without the caller having to hand it over again. */
 let project = "";
-const listeners = new Set<() => void>();
-
-function emit() {
-  for (const l of listeners) l();
-}
 
 function reload() {
   void ipc
     .clipboardRecent()
-    .then((rows) => {
-      clips = rows;
-      emit();
-    })
+    .then((rows) => board.set(rows))
     .catch(() => {
       // A store that can't be opened (a newer Canopy wrote it, no home dir)
       // costs rows and nothing else — the palette's other sources are fine.
-      clips = [];
-      emit();
+      board.set([]);
     });
 }
 
@@ -51,8 +43,7 @@ function start() {
     // coming. Reflect that in the setting rather than leaving a switch on that
     // does nothing.
     declared = "";
-    clips = [];
-    emit();
+    board.set([]);
   });
   // Settings own the rules, so the store watches for them itself rather than
   // making every caller remember to re-declare. Switching the feature on in
@@ -86,8 +77,7 @@ export function sync(projectId: string): void {
       else {
         // Switched off: drop what's on screen now rather than leaving a stale
         // list that looks like it is still filling up.
-        clips = [];
-        emit();
+        board.set([]);
       }
     },
     () => {},
@@ -95,12 +85,11 @@ export function sync(projectId: string): void {
 }
 
 /** The clips, newest first. Empty until `sync` has run with the feature on. */
-export const getSnapshot = (): ipc.Clip[] => clips;
+export const getSnapshot = board.get;
 
 export function subscribe(fn: () => void): () => void {
   start();
-  listeners.add(fn);
-  return () => listeners.delete(fn);
+  return board.subscribe(fn);
 }
 
 /** Drop one clip, from a row's own action. */
@@ -118,8 +107,7 @@ export const refresh = reload;
 
 /** Test seam: drop everything, including the once-only listener flag. */
 export function __reset(): void {
-  clips = [];
-  listeners.clear();
+  board.reset();
   started = false;
   declared = "";
 }

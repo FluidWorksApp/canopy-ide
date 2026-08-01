@@ -27,7 +27,7 @@
 // Nothing reads this to make a decision the channel itself depends on. It is a
 // notice board, not a participant.
 
-import { useSyncExternalStore } from "react";
+import { createChannel, useChannel, useChannelSelect } from "./channel";
 import type { SubTab } from "./components/ProjectView/helpers";
 
 /** The tab kinds the app has, taken from the tab model rather than restated —
@@ -65,33 +65,19 @@ const EMPTY: ActiveView = {
   nativeTabId: null,
 };
 
-let current: ActiveView = EMPTY;
-const listeners = new Set<() => void>();
-
 /** Cached identity matters: useSyncExternalStore re-renders whenever the
- *  snapshot is a new object, so the state is only replaced on a real change. */
-function publish(next: ActiveView) {
-  if (
-    next.projectId === current.projectId &&
-    next.tabId === current.tabId &&
-    next.kind === current.kind &&
-    next.nativeTabId === current.nativeTabId
-  ) {
-    return;
-  }
-  current = next;
-  for (const l of listeners) {
-    try {
-      l();
-    } catch {
-      // A subscriber's bug is the subscriber's problem — it must not stop the
-      // next one hearing about a tab change.
-    }
-  }
-}
+ *  snapshot is a new object, so `same` keeps the state from being replaced on
+ *  anything but a real change. */
+const board = createChannel<ActiveView>(EMPTY, {
+  same: (a, b) =>
+    a.projectId === b.projectId &&
+    a.tabId === b.tabId &&
+    a.kind === b.kind &&
+    a.nativeTabId === b.nativeTabId,
+});
 
 export function activeView(): ActiveView {
-  return current;
+  return board.get();
 }
 
 /** The tab in front, pushed by the visible ProjectView. */
@@ -100,7 +86,7 @@ export function setActiveTab(
   tabId: string | null,
   kind: ActiveTabKind | null,
 ) {
-  publish({ ...current, projectId, tabId, kind });
+  board.set({ ...board.get(), projectId, tabId, kind });
 }
 
 /** A project's pane went away. Only clears if that project is still the one on
@@ -108,8 +94,8 @@ export function setActiveTab(
  *  publishes, so a hidden one tearing down must not wipe the entry the project
  *  that replaced it just wrote. Same shape as clearCaret in editorState. */
 export function clearActiveTab(projectId: string) {
-  if (current.projectId !== projectId) return;
-  publish({ ...current, projectId: null, tabId: null, kind: null });
+  if (board.get().projectId !== projectId) return;
+  board.set({ ...board.get(), projectId: null, tabId: null, kind: null });
 }
 
 /** A browser tab is claiming a rectangle to draw a page in, or no longer is.
@@ -118,16 +104,13 @@ export function clearActiveTab(projectId: string) {
  *  is a reader — routing a second writer through here would put the channel
  *  back to having several sources that can disagree. */
 export function setNativeSurface(tabId: string | null) {
-  publish({ ...current, nativeTabId: tabId });
+  board.set({ ...board.get(), nativeTabId: tabId });
 }
 
-export function subscribeActiveView(listener: () => void): () => void {
-  listeners.add(listener);
-  return () => listeners.delete(listener);
-}
+export const subscribeActiveView = board.subscribe;
 
 export function useActiveView(): ActiveView {
-  return useSyncExternalStore(subscribeActiveView, activeView, activeView);
+  return useChannel(board);
 }
 
 /** The one question everything that floats over the content area has to ask.
@@ -137,15 +120,10 @@ export function useActiveView(): ActiveView {
  *  get out of the way does not re-render on every tab switch that doesn't
  *  change the answer. */
 export function useNativeSurface(): boolean {
-  return useSyncExternalStore(
-    subscribeActiveView,
-    () => current.nativeTabId !== null,
-    () => false,
-  );
+  return useChannelSelect(board, (v) => v.nativeTabId !== null);
 }
 
 /** Test seam: drop the board between cases. */
 export function resetActiveView() {
-  current = EMPTY;
-  listeners.clear();
+  board.reset();
 }

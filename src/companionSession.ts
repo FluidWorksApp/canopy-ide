@@ -113,8 +113,6 @@ let attempt: { cliId: string; resumed: boolean; ready: boolean } | null = null;
  *  cannot itself trigger another retry. */
 let healing = false;
 
-export const COMPANION_EVENT = "canopy:companion";
-
 const listeners = new Set<() => void>();
 
 export function subscribeCompanion(cb: () => void): () => void {
