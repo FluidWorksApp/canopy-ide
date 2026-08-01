@@ -12020,6 +12020,65 @@ input[type="radio"]:disabled {
   background: var(--border);
 }
 
+/* A menu that searches itself (ContextMenu's `filter`). Wider than a plain
+   menu because what it lists are names — branches — and a name clipped to the
+   width of "Rename" is not a name you can pick from. */
+.ctx-menu-search {
+  min-width: 280px;
+  max-width: 380px;
+}
+
+.ctx-search {
+  margin: 2px 2px 4px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.ctx-search:focus {
+  border-color: var(--accent);
+}
+
+/* The rows scroll, the box doesn't: a search you have to scroll back up to
+   reach is a search you gave up on. */
+.ctx-rows {
+  display: flex;
+  flex-direction: column;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+/* One long branch name must not set the width of the whole menu. min-width:0
+   is what lets a flex child shrink far enough for its own ellipsis to appear. */
+.ctx-menu-search .ctx-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Where Enter would land. The same fill as hover, because it is the same
+   thing said with the keyboard. */
+.ctx-item-active:not(:disabled) {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.ctx-item-active:not(:disabled) .ctx-hint {
+  color: var(--on-accent);
+}
+
+.ctx-more {
+  padding: 5px 10px 2px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
 /* Selection: this is an app, not a document.
    Dragging across the file tree or double-clicking a component name used to
    select the label text like a web page — noise no IDE has. Chrome is
